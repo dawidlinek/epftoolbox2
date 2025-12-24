@@ -193,10 +193,10 @@ class EntsoeSource(DataSource):
 
         self._validate_config()
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
+    def __del__(self):
+        """Cleanup session on object destruction"""
+        if hasattr(self, "session") and self.session:
             self.session.close()
-        return False
 
     def _validate_config(self):
         if not self.api_key:

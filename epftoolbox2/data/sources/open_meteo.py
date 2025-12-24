@@ -93,10 +93,10 @@ class OpenMeteoSource(DataSource):
 
         self._validate_config()
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
+    def __del__(self):
+        """Cleanup session on object destruction"""
+        if hasattr(self, "session") and self.session:
             self.session.close()
-        return False
 
     def _validate_config(self) -> bool:
         """Validate the configuration parameters"""
@@ -263,6 +263,8 @@ class OpenMeteoSource(DataSource):
                                 tmp[f"{column}_d+{i}"] = value
 
                 timestamp = pd.Timestamp(timestamp_str, tz="UTC")
+                # Filter out forecasts beyond now+13h to prevent data leakage in backtesting
+                # This ensures we only use forecasts that were actually available at that time
                 if timestamp > (pd.Timestamp.now(tz="UTC").floor("h") + DateOffset(hours=13)):
                     continue
 
