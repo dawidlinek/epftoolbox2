@@ -79,3 +79,51 @@ def sample_xml_generation():
         </Period>
     </TimeSeries>
 </Publication_MarketDocument>"""
+
+
+@pytest.fixture
+def sample_xml_load_none():
+    """Fixture that returns None to simulate no data available"""
+    return None
+
+
+@pytest.fixture
+def sample_xml_with_daily_resolution():
+    """Sample XML response with daily (1D) resolution"""
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<Publication_MarketDocument>
+    <TimeSeries>
+        <Period>
+            <timeInterval>
+                <start>2024-01-01T00:00Z</start>
+                <end>2024-01-02T00:00Z</end>
+            </timeInterval>
+            <resolution>P1D</resolution>
+            <Point>
+                <position>1</position>
+                <quantity>24000</quantity>
+            </Point>
+        </Period>
+    </TimeSeries>
+</Publication_MarketDocument>"""
+
+
+@pytest.fixture
+def sample_xml_with_weekly_resolution():
+    """Sample XML response with weekly (7D) resolution"""
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<Publication_MarketDocument>
+    <TimeSeries>
+        <Period>
+            <timeInterval>
+                <start>2024-01-01T00:00Z</start>
+                <end>2024-01-08T00:00Z</end>
+            </timeInterval>
+            <resolution>P7D</resolution>
+            <Point>
+                <position>1</position>
+                <quantity>168000</quantity>
+            </Point>
+        </Period>
+    </TimeSeries>
+</Publication_MarketDocument>"""
