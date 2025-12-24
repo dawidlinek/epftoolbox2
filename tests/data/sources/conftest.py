@@ -127,3 +127,35 @@ def sample_xml_with_weekly_resolution():
         </Period>
     </TimeSeries>
 </Publication_MarketDocument>"""
+
+
+@pytest.fixture
+def sample_weather_response():
+    """Sample JSON response from Open-Meteo API"""
+    return {
+        "hourly": {
+            "time": [
+                "2024-01-01T00:00",
+                "2024-01-01T01:00",
+                "2024-01-01T02:00",
+            ],
+            # Need at least x + (horizon * 24) data points for each timestamp
+            # For 3 timestamps with horizon=2: need at least 3 + (2*24) = 51 items
+            "temperature_2m_previous_day1": [10.0] * 60,
+            "temperature_2m_previous_day2": [11.0] * 60,
+            "rain_previous_day1": [0.0] * 60,
+            "rain_previous_day2": [0.5] * 60,
+        }
+    }
+
+
+@pytest.fixture
+def sample_weather_response_incomplete():
+    """Sample JSON response with incomplete/missing data"""
+    return {
+        "hourly": {
+            "time": ["2024-01-01T00:00", "2024-01-01T01:00"],
+            "temperature_2m_previous_day1": [10.0],
+            "temperature_2m_previous_day2": [11.0],
+        }
+    }
