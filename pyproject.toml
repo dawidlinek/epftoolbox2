@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "epftoolbox2"
 version = "2.0.0"
 description = "Energy Price Forecasting Toolbox 2"
+keywords = ["energy", "forecasting", "toolbox", "machine learning", "deep learning"]
 requires-python = ">=3.10"
 dependencies = [
     "pandas>=2.0.0",
