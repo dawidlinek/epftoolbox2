@@ -139,7 +139,7 @@ PSRTYPE_MAPPINGS = {
     "B06": "Fossil Oil",
     "B09": "Geothermal",
     "B10": "Hydro Pumped Storage",
-    "B11": "Hydro Run-of-river and poundage",
+    "B11": "Hydro Run-of-river and pondage",
     "B12": "Hydro Water Reservoir",
     "B13": "Marine",
     "B14": "Nuclear",
@@ -187,10 +187,16 @@ class EntsoeSource(DataSource):
 
         self.console = Console()
         self.logger = logging.getLogger(__name__)
-        self.logger.addHandler(RichHandler(console=self.console, rich_tracebacks=True))
-        self.logger.setLevel(logging.INFO)
+        if not self.logger.handlers:
+            self.logger.addHandler(RichHandler(console=self.console, rich_tracebacks=True))
+            self.logger.setLevel(logging.INFO)
 
         self._validate_config()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            self.session.close()
+        return False
 
     def _validate_config(self):
         if not self.api_key:
@@ -203,9 +209,14 @@ class EntsoeSource(DataSource):
             if t not in valid_types:
                 raise ValueError(f"Invalid type '{t}'. Must be one of: {valid_types}")
 
+        return True
+
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, pd.DataFrame]:
         start = start.tz_convert("UTC") if start.tzinfo else start.tz_localize("UTC")
         end = end.tz_convert("UTC") if end.tzinfo else end.tz_localize("UTC")
+
+        if end <= start:
+            raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
 
         start_time = time.time()
 
@@ -232,7 +243,7 @@ class EntsoeSource(DataSource):
                 date_range = f"{chunk_start.date()} to {chunk_end.date()}"
                 progress.update(task, description=f"[cyan]ENTSOE [{self.area_name}]: {date_range}")
 
-                chunk_data = self._fetch_chunk(chunk_start, chunk_end, date_range)
+                chunk_data = self._fetch_chunk(chunk_start, chunk_end)
 
                 for dtype in self.types:
                     if dtype in chunk_data:
@@ -251,6 +262,9 @@ class EntsoeSource(DataSource):
         return result
 
     def _generate_chunks(self, start: pd.Timestamp, end: pd.Timestamp, months: int = 3) -> list:
+        if months <= 0:
+            raise ValueError(f"months parameter must be positive, got {months}")
+
         chunks = []
         current = start
 
@@ -262,7 +276,7 @@ class EntsoeSource(DataSource):
 
         return chunks
 
-    def _fetch_chunk(self, start: pd.Timestamp, end: pd.Timestamp, date_range: str = None) -> Dict[str, pd.DataFrame]:
+    def _fetch_chunk(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, pd.DataFrame]:
         result = {}
 
         if "load" in self.types:
@@ -313,9 +327,6 @@ class EntsoeSource(DataSource):
         )
         dfs.append(self._parse_loads(xml, "A31"))
 
-        if not dfs:
-            raise NoMatchingDataError("No load data available for the specified period")
-
         result = pd.concat(dfs, axis=1)
         return result.truncate(before=start, after=end)
 
@@ -331,8 +342,7 @@ class EntsoeSource(DataSource):
             start,
             end,
         )
-        df_gen = self._parse_generation(xml)
-        dfs.append(df_gen.add_prefix("generation_"))
+        dfs.append(self._parse_generation(xml).add_prefix("generation_"))
 
         xml = self._api_request(
             {
@@ -343,11 +353,18 @@ class EntsoeSource(DataSource):
             start,
             end,
         )
-        df_forecast = self._parse_generation(xml)
-        dfs.append(df_forecast.add_prefix("generation_").add_suffix("_forecast"))
+        dfs.append(self._parse_generation(xml).add_prefix("generation_"))
 
-        if not dfs:
-            raise NoMatchingDataError("No generation data available for the specified period")
+        xml = self._api_request(
+            {
+                "documentType": "A69",
+                "processType": "A01",
+                "in_Domain": self.area_code,
+            },
+            start,
+            end,
+        )
+        dfs.append(self._parse_generation(xml).add_prefix("generation_").add_suffix("_forecast"))
 
         result = pd.concat(dfs, axis=1)
         return result.truncate(before=start, after=end)
@@ -397,6 +414,8 @@ class EntsoeSource(DataSource):
         return response.text
 
     def _parse_loads(self, xml_text: str, process_type: str) -> pd.DataFrame:
+        if xml_text is None:
+            return pd.DataFrame()
         if process_type in ["A01", "A16"]:
             series = []
             for soup in self._extract_timeseries(xml_text):
@@ -427,6 +446,8 @@ class EntsoeSource(DataSource):
             )
 
     def _parse_generation(self, xml_text: str) -> pd.DataFrame:
+        if xml_text is None:
+            return pd.DataFrame()
         all_series = {}
         for soup in self._extract_timeseries(xml_text):
             series = self._parse_timeseries_generic(soup, merge=True)
@@ -456,6 +477,8 @@ class EntsoeSource(DataSource):
 
     def _parse_prices(self, xml_text: str) -> Dict[str, pd.Series]:
         series = {"15min": [], "30min": [], "60min": []}
+        if xml_text is None:
+            return series
 
         for soup in self._extract_timeseries(xml_text):
             soup_series = self._parse_timeseries_generic(soup, label="price.amount")
@@ -471,28 +494,41 @@ class EntsoeSource(DataSource):
         return series
 
     def _parse_timeseries_generic(self, soup, label="quantity", merge=False):
-        series = {"15min": [], "30min": [], "60min": []}
+        series = {"15min": [], "30min": [], "60min": [], "1D": [], "7D": []}
 
         for period in soup.find_all("period"):
             data = {}
-            start = pd.Timestamp(period.find("start").text)
-            delta_text = self._resolution_to_timedelta(period.find("resolution").text)
+
+            start_elem = period.find("start")
+            resolution_elem = period.find("resolution")
+
+            if start_elem is None or resolution_elem is None:
+                continue
+
+            start = pd.Timestamp(start_elem.text)
+            delta_text = self._resolution_to_timedelta(resolution_elem.text)
             delta = pd.Timedelta(delta_text)
 
             for point in period.find_all("point"):
-                value = point.find(label).text.replace(",", "")
-                position = int(point.find("position").text)
+                value_elem = point.find(label)
+                position_elem = point.find("position")
+
+                if value_elem is None or position_elem is None:
+                    continue
+
+                value = value_elem.text.replace(",", "")
+                position = int(position_elem.text)
                 data[start + (position - 1) * delta] = value
 
-            S = pd.Series(data).sort_index()
+            time_series = pd.Series(data).sort_index()
 
             if delta_text not in series:
                 series[delta_text] = []
-            series[delta_text].append(S)
+            series[delta_text].append(time_series)
 
-        for freq, S in series.items():
-            if len(S) > 0:
-                series[freq] = pd.concat(S).sort_index().astype(float)
+        for freq, freq_series in series.items():
+            if len(freq_series) > 0:
+                series[freq] = pd.concat(freq_series).sort_index().astype(float)
             else:
                 series[freq] = None
 

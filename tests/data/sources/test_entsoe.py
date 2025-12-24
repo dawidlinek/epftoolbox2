@@ -17,7 +17,7 @@ class TestAreaLookup:
         assert name == "PL"
         assert code == "10YPL-AREA-----S"
 
-    def test_lookup_case_insensitive(self):
+    def test_lookup_is_case_insensitive(self):
         """Test that lookup is case insensitive"""
         name1, code1 = lookup_area("pl")
         name2, code2 = lookup_area("PL")
@@ -76,6 +76,21 @@ class TestEntsoeSourceInit:
         with pytest.raises(ValueError, match="Invalid type"):
             EntsoeSource("PL", "test-key", type=["invalid_type"])
 
+    def test_validate_config_returns_true(self):
+        """Test that _validate_config returns True on success"""
+        source = EntsoeSource("PL", "test-api-key", type=["load"])
+        result = source._validate_config()
+        assert result is True
+
+    def test_fetch_validates_timestamps(self):
+        """Test that fetch validates end > start"""
+        source = EntsoeSource("PL", "test-key", type=["load"])
+        start = pd.Timestamp("2024-01-02", tz="UTC")
+        end = pd.Timestamp("2024-01-01", tz="UTC")
+
+        with pytest.raises(ValueError, match="End timestamp.*must be after start timestamp"):
+            source.fetch(start, end)
+
 
 class TestEntsoeSourceChunking:
     """Test date range chunking"""
@@ -110,6 +125,18 @@ class TestEntsoeSourceChunking:
 
         chunks = source._generate_chunks(start, end, months=3)
         assert len(chunks) == 1
+
+    def test_generate_chunks_validates_months_parameter(self):
+        """Test that _generate_chunks validates months parameter"""
+        source = EntsoeSource("PL", "test-key", type=["load"])
+        start = pd.Timestamp("2024-01-01", tz="UTC")
+        end = pd.Timestamp("2024-07-01", tz="UTC")
+
+        with pytest.raises(ValueError, match="months parameter must be positive"):
+            source._generate_chunks(start, end, months=0)
+
+        with pytest.raises(ValueError, match="months parameter must be positive"):
+            source._generate_chunks(start, end, months=-1)
 
 
 class TestEntsoeSourceAPIRequests:
@@ -190,6 +217,49 @@ class TestEntsoeSourceParsing:
         assert isinstance(result, dict)
         assert "60min" in result
         assert "15min" in result
+
+    def test_resolution_to_timedelta_daily(self):
+        """Test resolution conversion for daily (1D) resolution"""
+        source = EntsoeSource("PL", "test-key", type=["load"])
+        result = source._resolution_to_timedelta("P1D")
+        assert result == "1D"
+
+    def test_resolution_to_timedelta_weekly(self):
+        """Test resolution conversion for weekly (7D) resolution"""
+        source = EntsoeSource("PL", "test-key", type=["load"])
+        result = source._resolution_to_timedelta("P7D")
+        assert result == "7D"
+
+    def test_parse_loads_with_none_xml(self, sample_xml_load_none):
+        """Test that parse_loads handles None XML gracefully"""
+        source = EntsoeSource("PL", "test-key", type=["load"])
+        df = source._parse_loads(sample_xml_load_none, "A16")
+        # Should return empty dataframe when no timeseries found
+        assert isinstance(df, pd.DataFrame)
+
+    def test_parse_timeseries_with_daily_resolution(self, sample_xml_with_daily_resolution):
+        """Test parsing with daily (1D) resolution"""
+        from bs4 import BeautifulSoup
+
+        source = EntsoeSource("PL", "test-key", type=["load"])
+        soup = BeautifulSoup(sample_xml_with_daily_resolution, "html.parser")
+        timeseries = soup.find("timeseries")
+
+        result = source._parse_timeseries_generic(timeseries, merge=True)
+        assert isinstance(result, pd.Series)
+        assert len(result) > 0
+
+    def test_parse_timeseries_with_weekly_resolution(self, sample_xml_with_weekly_resolution):
+        """Test parsing with weekly (7D) resolution"""
+        from bs4 import BeautifulSoup
+
+        source = EntsoeSource("PL", "test-key", type=["load"])
+        soup = BeautifulSoup(sample_xml_with_weekly_resolution, "html.parser")
+        timeseries = soup.find("timeseries")
+
+        result = source._parse_timeseries_generic(timeseries, merge=True)
+        assert isinstance(result, pd.Series)
+        assert len(result) > 0
 
 
 @pytest.mark.integration
