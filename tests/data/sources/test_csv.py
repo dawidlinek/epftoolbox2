@@ -3,7 +3,7 @@ import pandas as pd
 import tempfile
 import os
 from pathlib import Path
-from epftoolbox2.data.sources.csv_source import CsvSource
+from epftoolbox2.data.sources.csv import CsvSource
 
 
 @pytest.fixture

@@ -18,7 +18,7 @@ epftoolbox/
 │   │   ├── entsoe.py
 │   │   ├── open_meteo.py
 │   │   ├── calendar.py
-│   │   └── csv_source.py
+│   │   └── csv.py
 │   └── cache/
 │       └── file_cache.py
 │
