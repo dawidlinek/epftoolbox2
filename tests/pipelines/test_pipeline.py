@@ -1,6 +1,5 @@
 import pytest
 import pandas as pd
-from unittest.mock import Mock, MagicMock
 
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
