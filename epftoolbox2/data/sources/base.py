@@ -7,7 +7,7 @@ class DataSource(ABC):
     """Abstract base class for all data sources"""
 
     @abstractmethod
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, pd.DataFrame]:
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """
         Fetch data for the specified time period
 

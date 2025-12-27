@@ -48,10 +48,10 @@ class CsvSource(DataSource):
         self.datetime_format = datetime_format
         self.separator = separator
 
-        console = Console()
+        self.console = Console()
         self.logger = logging.getLogger(__name__)
         if not self.logger.handlers:
-            self.logger.addHandler(RichHandler(console=console, rich_tracebacks=True))
+            self.logger.addHandler(RichHandler(console=self.console, rich_tracebacks=True))
             self.logger.setLevel(logging.INFO)
 
         self._validate_config()
@@ -87,10 +87,13 @@ class CsvSource(DataSource):
         else:
             df[self.datetime_column] = pd.to_datetime(df[self.datetime_column])
 
-        df[self.datetime_column] = df[self.datetime_column].dt.tz_localize("UTC")
+        if df[self.datetime_column].dt.tz is None:
+            df[self.datetime_column] = df[self.datetime_column].dt.tz_localize("UTC")
+        else:
+            df[self.datetime_column] = df[self.datetime_column].dt.tz_convert("UTC")
 
-        df.set_index(self.datetime_column, inplace=True)
-        df.sort_index(inplace=True)
+        df = df.set_index(self.datetime_column)
+        df = df.sort_index()
 
         if self.columns:
             missing_cols = set(self.columns) - set(df.columns)
@@ -111,7 +114,7 @@ class CsvSource(DataSource):
             end: End timestamp
 
         Returns:
-            DataFrame with the requested data
+            DataFrame with the requested data for the given time period
         """
         start = start.tz_convert("UTC") if start.tzinfo else start.tz_localize("UTC")
         end = end.tz_convert("UTC") if end.tzinfo else end.tz_localize("UTC")

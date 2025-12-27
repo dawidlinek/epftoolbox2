@@ -170,11 +170,9 @@ class EntsoeSource(DataSource):
 
     Example:
         >>> source = EntsoeSource('PL', api_key='your-api-key', type=['load', 'generation', 'price'])
-        >>> data = source.fetch(start=pd.Timestamp('2024-01-01', tz='Europe/Warsaw'),
-        ...                     end=pd.Timestamp('2024-01-07', tz='Europe/Warsaw'))
-        >>> load_df = data['load']
-        >>> gen_df = data['generation']
-        >>> price_df = data['price']
+        >>> df = source.fetch(start=pd.Timestamp('2024-01-01', tz='Europe/Warsaw'),
+        ...                   end=pd.Timestamp('2024-01-07', tz='Europe/Warsaw'))
+        >>> # df contains all columns: load_actual, load_forecast, generation_*, price, etc.
     """
 
     API_URL = "https://web-api.tp.entsoe.eu/api"
@@ -211,7 +209,7 @@ class EntsoeSource(DataSource):
 
         return True
 
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, pd.DataFrame]:
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         start = start.tz_convert("UTC") if start.tzinfo else start.tz_localize("UTC")
         end = end.tz_convert("UTC") if end.tzinfo else end.tz_localize("UTC")
 
@@ -250,16 +248,19 @@ class EntsoeSource(DataSource):
                         all_results[dtype].append(chunk_data[dtype])
                 progress.advance(task)
 
-        result = {}
+        dataframes = []
         for dtype in self.types:
             if all_results[dtype]:
-                result[dtype] = pd.concat(all_results[dtype]).sort_index()
-                result[dtype] = result[dtype][~result[dtype].index.duplicated(keep="first")]
+                df = pd.concat(all_results[dtype]).sort_index()
+                df = df[~df.index.duplicated(keep="first")]
+                dataframes.append(df)
 
         elapsed = time.time() - start_time
         self._log_success(elapsed)
 
-        return result
+        if dataframes:
+            return pd.concat(dataframes, axis=1)
+        return pd.DataFrame()
 
     def _generate_chunks(self, start: pd.Timestamp, end: pd.Timestamp, months: int = 3) -> list:
         if months <= 0:

@@ -272,12 +272,12 @@ class TestEntsoeSourceIntegration:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-03", tz="UTC")
 
-        data = source.fetch(start, end)
+        df = source.fetch(start, end)
 
-        assert "load" in data
-        assert isinstance(data["load"], pd.DataFrame)
-        assert len(data["load"]) > 0
-        assert data["load"].index.tz is not None
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) > 0
+        assert "load_actual" in df.columns or "load_forecast" in df.columns
+        assert df.index.tz is not None
 
     def test_fetch_price_data_germany(self, entsoe_api_key):
         """Test fetching price data for Germany"""
@@ -285,11 +285,10 @@ class TestEntsoeSourceIntegration:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-02", tz="UTC")
 
-        data = source.fetch(start, end)
+        df = source.fetch(start, end)
 
-        assert "price" in data
-        assert isinstance(data["price"], pd.DataFrame)
-        assert "price" in data["price"].columns
+        assert isinstance(df, pd.DataFrame)
+        assert "price" in df.columns
 
     def test_fetch_generation_data_france(self, entsoe_api_key):
         """Test fetching generation data for France"""
@@ -297,11 +296,12 @@ class TestEntsoeSourceIntegration:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-02", tz="UTC")
 
-        data = source.fetch(start, end)
+        df = source.fetch(start, end)
 
-        assert "generation" in data
-        assert isinstance(data["generation"], pd.DataFrame)
-        assert len(data["generation"].columns) > 0
+        assert isinstance(df, pd.DataFrame)
+        assert len(df.columns) > 0
+        # Generation columns should start with "generation_"
+        assert any(col.startswith("generation_") for col in df.columns)
 
     def test_fetch_all_types(self, entsoe_api_key):
         """Test fetching all data types together"""
@@ -309,9 +309,12 @@ class TestEntsoeSourceIntegration:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-02", tz="UTC")
 
-        data = source.fetch(start, end)
+        df = source.fetch(start, end)
 
-        assert "load" in data
-        assert "generation" in data
-        assert "price" in data
-        assert all(isinstance(df, pd.DataFrame) for df in data.values())
+        assert isinstance(df, pd.DataFrame)
+        # Should have load columns
+        assert any("load" in col for col in df.columns)
+        # Should have generation columns
+        assert any(col.startswith("generation_") for col in df.columns)
+        # Should have price column
+        assert "price" in df.columns

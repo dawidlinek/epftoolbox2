@@ -1,6 +1,6 @@
 import pandas as pd
 from pandas.tseries.offsets import DateOffset
-from typing import Dict, List
+from typing import List
 import requests
 from rich.console import Console
 from rich.progress import (
@@ -31,11 +31,11 @@ class OpenMeteoSource(DataSource):
         ...     horizon=7,
         ...     model="jma_seamless"
         ... )
-        >>> data = source.fetch(
+        >>> df = source.fetch(
         ...     start=pd.Timestamp('2024-01-01', tz='UTC'),
         ...     end=pd.Timestamp('2024-01-07', tz='UTC')
         ... )
-        >>> weather_df = data['weather']
+        >>> # df contains all weather forecast columns
     """
 
     API_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
@@ -114,7 +114,7 @@ class OpenMeteoSource(DataSource):
 
         return True
 
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, pd.DataFrame]:
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """
         Fetch weather forecast data for the specified time period
 
@@ -123,7 +123,7 @@ class OpenMeteoSource(DataSource):
             end: End timestamp
 
         Returns:
-            Dictionary with 'weather' key containing a DataFrame with weather forecasts
+            DataFrame with weather forecasts
         """
         start = start.tz_convert("UTC") if start.tzinfo else start.tz_localize("UTC")
         end = end.tz_convert("UTC") if end.tzinfo else end.tz_localize("UTC")
@@ -176,7 +176,7 @@ class OpenMeteoSource(DataSource):
         elapsed = time.time() - start_time
         self.logger.info(f"Open-Meteo [{self.latitude}, {self.longitude}]: Download completed successfully in {elapsed:.2f} sec")
 
-        return {"weather": result_df}
+        return result_df
 
     def _generate_chunks(self, start: pd.Timestamp, end: pd.Timestamp, months: int = 3) -> list:
         if months <= 0:
