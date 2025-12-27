@@ -137,7 +137,7 @@ class OpenMeteoSource(DataSource):
 
         chunks = self._generate_chunks(start, extended_end, months=3)
 
-        self.logger.info(f"Open-Meteo [{self.latitude}, {self.longitude}]: Start downloading weather data (horizon: {self.horizon} days)")
+        self.logger.info(f"Open-Meteo [{self.latitude}, {self.longitude}]: Start downloading weather data")
 
         all_results = []
 
