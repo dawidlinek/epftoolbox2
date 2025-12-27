@@ -333,8 +333,8 @@ class TestOpenMeteoSourceFetch:
     """Test full fetch workflow"""
 
     @patch("epftoolbox2.data.sources.open_meteo.requests.Session")
-    def test_fetch_returns_dict_with_weather_key(self, mock_session, sample_weather_response):
-        """Test that fetch returns dict with 'weather' key"""
+    def test_fetch_returns_dataframe(self, mock_session, sample_weather_response):
+        """Test that fetch returns a DataFrame"""
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = sample_weather_response
@@ -348,9 +348,7 @@ class TestOpenMeteoSourceFetch:
             pd.Timestamp("2024-01-02", tz="UTC"),
         )
 
-        assert isinstance(result, dict)
-        assert "weather" in result
-        assert isinstance(result["weather"], pd.DataFrame)
+        assert isinstance(result, pd.DataFrame)
 
     @patch("epftoolbox2.data.sources.open_meteo.requests.Session")
     def test_fetch_applies_prefix(self, mock_session, sample_weather_response):
@@ -369,12 +367,11 @@ class TestOpenMeteoSourceFetch:
         )
         source.session = mock_session.return_value
 
-        result = source.fetch(
+        df = source.fetch(
             pd.Timestamp("2024-01-01", tz="UTC"),
             pd.Timestamp("2024-01-02", tz="UTC"),
         )
 
-        df = result["weather"]
         assert all(col.startswith("test_") for col in df.columns)
 
     @patch("epftoolbox2.data.sources.open_meteo.requests.Session")
@@ -388,12 +385,11 @@ class TestOpenMeteoSourceFetch:
         source = OpenMeteoSource(latitude=52.23, longitude=21.01, horizon=2)
         source.session = mock_session.return_value
 
-        result = source.fetch(
+        df = source.fetch(
             pd.Timestamp("2024-01-01", tz="UTC"),
             pd.Timestamp("2024-01-02", tz="UTC"),
         )
 
-        df = result["weather"]
         assert not df.index.duplicated().any()
 
     @patch("epftoolbox2.data.sources.open_meteo.requests.Session")
@@ -407,13 +403,13 @@ class TestOpenMeteoSourceFetch:
         source = OpenMeteoSource(latitude=52.23, longitude=21.01)
         source.session = mock_session.return_value
 
-        result = source.fetch(
+        df = source.fetch(
             pd.Timestamp("2024-01-01", tz="UTC"),
             pd.Timestamp("2024-01-02", tz="UTC"),
         )
 
-        assert isinstance(result["weather"], pd.DataFrame)
-        assert len(result["weather"]) == 0
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 0
 
 
 @pytest.mark.integration
@@ -430,12 +426,11 @@ class TestOpenMeteoSourceIntegration:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-02", tz="UTC")
 
-        data = source.fetch(start, end)
+        df = source.fetch(start, end)
 
-        assert "weather" in data
-        assert isinstance(data["weather"], pd.DataFrame)
-        assert len(data["weather"]) > 0
-        assert data["weather"].index.tz is not None
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) > 0
+        assert df.index.tz is not None
 
     def test_fetch_weather_data_limited_columns(self):
         """Test fetching with limited columns"""
@@ -448,10 +443,7 @@ class TestOpenMeteoSourceIntegration:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-02", tz="UTC")
 
-        data = source.fetch(start, end)
-
-        assert "weather" in data
-        df = data["weather"]
+        df = source.fetch(start, end)
 
         temp_cols = [col for col in df.columns if "temperature_2m" in col]
         wind_cols = [col for col in df.columns if "wind_speed_10m" in col]
@@ -471,9 +463,8 @@ class TestOpenMeteoSourceIntegration:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-02", tz="UTC")
 
-        data = source.fetch(start, end)
+        df = source.fetch(start, end)
 
-        df = data["weather"]
         assert all(col.startswith("weather_") for col in df.columns)
 
     def test_fetch_long_period(self):
@@ -487,8 +478,7 @@ class TestOpenMeteoSourceIntegration:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-06-01", tz="UTC")
 
-        data = source.fetch(start, end)
+        df = source.fetch(start, end)
 
-        assert "weather" in data
-        assert isinstance(data["weather"], pd.DataFrame)
-        assert len(data["weather"]) > 1000
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) > 1000
