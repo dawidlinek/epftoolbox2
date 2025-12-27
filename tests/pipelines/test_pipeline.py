@@ -280,7 +280,7 @@ class TestDataPipelineRun:
 
         start = pd.Timestamp("2024-01-01")  # Naive
         end = pd.Timestamp("2024-01-02")  # Naive
-        result = pipeline.run(start, end)
+        pipeline.run(start, end)
 
         assert source.fetch_called
         # Check that the source received UTC timestamps
