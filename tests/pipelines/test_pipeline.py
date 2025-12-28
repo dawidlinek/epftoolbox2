@@ -358,3 +358,126 @@ class TestDataPipelineCache:
             assert source.fetch_called
         finally:
             shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+class TestDataPipelineSerialization:
+    """Test pipeline serialization (save/load)"""
+
+    def test_to_dict_empty_pipeline(self):
+        """Test serializing empty pipeline to dict"""
+        pipeline = DataPipeline()
+        config = pipeline.to_dict()
+
+        assert config == {"sources": [], "transformers": [], "validators": []}
+
+    def test_to_dict_with_source(self):
+        """Test serializing pipeline with source to dict"""
+        from epftoolbox2.data.sources import CalendarSource
+
+        pipeline = DataPipeline().add_source(CalendarSource(country="PL"))
+        config = pipeline.to_dict()
+
+        assert len(config["sources"]) == 1
+        assert config["sources"][0]["class"] == "CalendarSource"
+        assert config["sources"][0]["params"]["country"] == "PL"
+
+    def test_to_dict_with_transformer(self):
+        """Test serializing pipeline with transformer to dict"""
+        pipeline = DataPipeline().add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+        config = pipeline.to_dict()
+
+        assert len(config["transformers"]) == 1
+        assert config["transformers"][0]["class"] == "TimezoneTransformer"
+        assert config["transformers"][0]["params"]["target_tz"] == "Europe/Warsaw"
+
+    def test_to_dict_with_validator(self):
+        """Test serializing pipeline with validator to dict"""
+        from epftoolbox2.data.validators import NullCheckValidator
+
+        pipeline = DataPipeline().add_validator(NullCheckValidator(columns=["test"]))
+        config = pipeline.to_dict()
+
+        assert len(config["validators"]) == 1
+        assert config["validators"][0]["class"] == "NullCheckValidator"
+        assert config["validators"][0]["params"]["columns"] == ["test"]
+
+    def test_save_and_load(self, tmp_path):
+        """Test saving and loading pipeline from YAML"""
+        from epftoolbox2.data.sources import CalendarSource
+        from epftoolbox2.data.validators import ContinuityValidator
+
+        pipeline = DataPipeline().add_source(CalendarSource(country="PL", holidays="binary", weekday="number")).add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw")).add_validator(ContinuityValidator(freq="1h"))
+
+        yaml_path = tmp_path / "pipeline.yaml"
+        pipeline.save(yaml_path)
+
+        assert yaml_path.exists()
+
+        loaded = DataPipeline.load(yaml_path)
+
+        assert len(loaded.sources) == 1
+        assert len(loaded.transformers) == 1
+        assert len(loaded.validators) == 1
+        assert type(loaded.sources[0]).__name__ == "CalendarSource"
+        assert type(loaded.transformers[0]).__name__ == "TimezoneTransformer"
+        assert type(loaded.validators[0]).__name__ == "ContinuityValidator"
+
+    def test_loaded_pipeline_runs(self, tmp_path):
+        """Test that loaded pipeline can run successfully"""
+        from epftoolbox2.data.sources import CalendarSource
+
+        pipeline = DataPipeline().add_source(CalendarSource(country="PL", holidays="binary", weekday=False))
+
+        yaml_path = tmp_path / "pipeline.yaml"
+        pipeline.save(yaml_path)
+
+        loaded = DataPipeline.load(yaml_path)
+        result = loaded.run(start="2024-01-01", end="2024-01-02")
+
+        assert not result.empty
+        assert "is_holiday" in result.columns
+
+    def test_save_creates_valid_yaml(self, tmp_path):
+        """Test that saved file is valid YAML"""
+        import yaml
+
+        pipeline = DataPipeline().add_transformer(TimezoneTransformer(target_tz="UTC"))
+
+        yaml_path = tmp_path / "pipeline.yaml"
+        pipeline.save(yaml_path)
+
+        with open(yaml_path) as f:
+            config = yaml.safe_load(f)
+
+        assert "sources" in config
+        assert "transformers" in config
+        assert "validators" in config
+
+    def test_load_unknown_component_raises_error(self, tmp_path):
+        """Test that loading unknown component raises error"""
+        import yaml
+
+        yaml_path = tmp_path / "invalid.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump({"sources": [{"class": "UnknownSource", "params": {}}], "transformers": [], "validators": []}, f)
+
+        with pytest.raises(ValueError, match="Unknown"):
+            DataPipeline.load(yaml_path)
+
+    def test_round_trip_preserves_params(self, tmp_path):
+        """Test that save/load preserves all parameters"""
+        from epftoolbox2.data.sources import CalendarSource
+        from epftoolbox2.data.transformers import ResampleTransformer
+
+        pipeline = DataPipeline().add_source(CalendarSource(country="DE", holidays="onehot", weekday="name", month="number")).add_transformer(ResampleTransformer(freq="1h", method="ffill"))
+
+        yaml_path = tmp_path / "pipeline.yaml"
+        pipeline.save(yaml_path)
+        loaded = DataPipeline.load(yaml_path)
+
+        assert loaded.sources[0].country == "DE"
+        assert loaded.sources[0].holidays == "onehot"
+        assert loaded.sources[0].weekday == "name"
+        assert loaded.sources[0].month == "number"
+        assert loaded.transformers[0].freq == "1h"
+        assert loaded.transformers[0].method == "ffill"

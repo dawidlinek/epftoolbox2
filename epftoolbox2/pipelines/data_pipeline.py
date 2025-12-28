@@ -180,9 +180,10 @@ class DataPipeline:
     def _serialize_component(self, component: Any) -> Dict[str, Any]:
         class_name = type(component).__name__
         params = {}
+        excluded = {"session", "console", "logger", "lat", "lon"}
         if hasattr(component, "__dict__"):
             for key, value in component.__dict__.items():
-                if not key.startswith("_") and key not in ("session", "console", "logger"):
+                if not key.startswith("_") and key not in excluded:
                     if isinstance(value, (str, int, float, bool, list, dict, type(None))):
                         params[key] = value
         return {"class": class_name, "params": params}
