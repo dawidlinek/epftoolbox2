@@ -12,6 +12,7 @@ def get_logger(name: str) -> logging.Logger:
     if name not in _configured_loggers:
         logger.addHandler(RichHandler(console=_console, rich_tracebacks=True))
         logger.setLevel(logging.INFO)
+        logger.propagate = False
         _configured_loggers.add(name)
 
     return logger

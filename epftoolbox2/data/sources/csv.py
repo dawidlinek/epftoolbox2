@@ -127,5 +127,5 @@ class CsvSource(DataSource):
 
         return result_df
 
-    def get_cache_config(self) -> dict:
+    def get_cache_config(self) -> Optional[dict]:
         return None

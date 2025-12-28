@@ -179,5 +179,5 @@ class CalendarSource(DataSource):
         df[f"{self.prefix}daylight_hours"] = daylight_hours
         return df
 
-    def get_cache_config(self) -> dict:
+    def get_cache_config(self) -> Optional[dict]:
         return None

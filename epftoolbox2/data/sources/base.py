@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, Optional
 import pandas as pd
 
 
@@ -34,7 +34,7 @@ class DataSource(ABC):
         pass
 
     @abstractmethod
-    def get_cache_config(self) -> Dict:
+    def get_cache_config(self) -> Optional[Dict]:
         """
         Get configuration parameters for cache key generation.
 
