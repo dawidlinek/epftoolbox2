@@ -14,8 +14,7 @@ from rich.progress import (
     TaskProgressColumn,
     TimeRemainingColumn,
 )
-from rich.logging import RichHandler
-import logging
+from epftoolbox2.logging import get_logger
 from .base import DataSource
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -184,10 +183,7 @@ class EntsoeSource(DataSource):
         self.session = requests.Session()
 
         self.console = Console()
-        self.logger = logging.getLogger(__name__)
-        if not self.logger.handlers:
-            self.logger.addHandler(RichHandler(console=self.console, rich_tracebacks=True))
-            self.logger.setLevel(logging.INFO)
+        self.logger = get_logger(__name__)
 
         self._validate_config()
 

@@ -3,20 +3,14 @@ import json
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import pandas as pd
-from rich.console import Console
-from rich.logging import RichHandler
-import logging
+from epftoolbox2.logging import get_logger
 
 
 class CacheManager:
     def __init__(self, cache_dir: str = ".cache/sources"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.console = Console()
-        self.logger = logging.getLogger(__name__)
-        if not self.logger.handlers:
-            self.logger.addHandler(RichHandler(console=self.console, rich_tracebacks=True))
-            self.logger.setLevel(logging.INFO)
+        self.logger = get_logger(__name__)
 
     def get_cache_key(self, source_config: Dict) -> str:
         config_str = json.dumps(source_config, sort_keys=True)

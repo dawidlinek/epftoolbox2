@@ -1,13 +1,13 @@
 from typing import List, Optional, Union
 import pandas as pd
 from pathlib import Path
-from rich.console import Console
-from rich.logging import RichHandler
-import logging
 
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
 from epftoolbox2.data.cache_manager import CacheManager
+from epftoolbox2.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class DataPipeline:
@@ -38,12 +38,6 @@ class DataPipeline:
         self.sources: List[DataSource] = sources or []
         self.transformers: List[Transformer] = transformers or []
 
-        self.console = Console()
-        self.logger = logging.getLogger(__name__)
-        if not self.logger.handlers:
-            self.logger.addHandler(RichHandler(console=self.console, rich_tracebacks=True))
-            self.logger.setLevel(logging.INFO)
-
     def add_source(self, source: DataSource) -> "DataPipeline":
         if not isinstance(source, DataSource):
             raise TypeError("source must be a DataSource instance")
@@ -66,13 +60,13 @@ class DataPipeline:
         source_type = source_config.get("source_type", "unknown")
 
         if not missing_ranges:
-            self.logger.info(f"Cache: Full hit for {source_type} source")
+            logger.info(f"Cache: Full hit for {source_type} source")
             return cache_manager.read_cached_data(cache_key, start, end)
 
         if len(missing_ranges) == 1 and missing_ranges[0] == (start, end):
-            self.logger.info(f"Cache: Miss for {source_type} source")
+            logger.info(f"Cache: Miss for {source_type} source")
         else:
-            self.logger.info(f"Cache: Partial hit for {source_type} source")
+            logger.info(f"Cache: Partial hit for {source_type} source")
 
         for missing_start, missing_end in missing_ranges:
             fresh_df = source.fetch(missing_start, missing_end)
@@ -102,13 +96,13 @@ class DataPipeline:
         if isinstance(cache, str):
             cache_file = Path(cache)
             if cache_file.exists():
-                self.logger.info(f"Cache: Loading from {cache}")
+                logger.info(f"Cache: Loading from {cache}")
                 df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
                 if df.index.tzinfo is None:
                     df.index = df.index.tz_localize("UTC")
                 return df
 
-        self.logger.info(f"Pipeline: Fetching data from {len(self.sources)} source(s)")
+        logger.info(f"Pipeline: Fetching data from {len(self.sources)} source(s)")
 
         cache_manager = CacheManager() if cache is True else None
         dataframes = []
@@ -119,19 +113,17 @@ class DataPipeline:
                 dataframes.append(df)
 
         if not dataframes:
-            self.logger.warning("Pipeline: No data returned from any source")
+            logger.warning("Pipeline: No data returned from any source")
             return pd.DataFrame()
 
-        result = dataframes[0]
-        for df in dataframes[1:]:
-            result = result.join(df, how="outer")
+        result = pd.concat(dataframes, axis=1)
 
         for transformer in self.transformers:
             result = transformer.transform(result)
 
         if isinstance(cache, str):
             result.to_csv(cache)
-            self.logger.info(f"Cache: Saved to {cache}")
+            logger.info(f"Cache: Saved to {cache}")
 
-        self.logger.info(f"Pipeline: Completed with {len(result)} rows")
+        logger.info(f"Pipeline: Completed with {len(result)} rows")
         return result
