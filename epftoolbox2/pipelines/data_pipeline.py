@@ -1,6 +1,8 @@
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict, Any
 import pandas as pd
 from pathlib import Path
+import yaml
+import importlib
 
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
@@ -9,6 +11,24 @@ from epftoolbox2.data.cache_manager import CacheManager
 from epftoolbox2.logging import get_logger
 
 logger = get_logger(__name__)
+
+COMPONENT_REGISTRY = {
+    "sources": {
+        "EntsoeSource": "epftoolbox2.data.sources.entsoe",
+        "OpenMeteoSource": "epftoolbox2.data.sources.open_meteo",
+        "CsvSource": "epftoolbox2.data.sources.csv",
+        "CalendarSource": "epftoolbox2.data.sources.calendar",
+    },
+    "transformers": {
+        "TimezoneTransformer": "epftoolbox2.data.transformers.timezone",
+        "ResampleTransformer": "epftoolbox2.data.transformers.resample",
+    },
+    "validators": {
+        "ContinuityValidator": "epftoolbox2.data.validators.continuity",
+        "NullCheckValidator": "epftoolbox2.data.validators.null_check",
+        "EdaValidator": "epftoolbox2.data.validators.eda",
+    },
+}
 
 
 class DataPipeline:
@@ -27,7 +47,7 @@ class DataPipeline:
         ...     .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load"]))
         ...     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
         ...     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
-        ...     .add_validator(NullCheckValidator(required_columns=["load_actual"]))
+        ...     .add_validator(NullCheckValidator(columns=["load_actual"]))
         ... )
         >>> df = pipeline.run(start, end)
     """
@@ -112,8 +132,22 @@ class DataPipeline:
                     df.index = df.index.tz_localize("UTC")
                 return df
 
-        logger.info(f"Pipeline: Fetching data from {len(self.sources)} source(s)")
+        result = self._run_sources(start, end, cache)
+        if result.empty:
+            return result
 
+        result = self._run_transformers(result)
+        self._run_validators(result)
+
+        if isinstance(cache, str):
+            result.to_csv(cache)
+            logger.info(f"Cache: Saved to {cache}")
+
+        logger.info(f"Pipeline: Completed with {len(result)} rows")
+        return result
+
+    def _run_sources(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]) -> pd.DataFrame:
+        logger.info(f"Pipeline: Fetching data from {len(self.sources)} source(s)")
         cache_manager = CacheManager() if cache is True else None
         dataframes = []
 
@@ -126,13 +160,16 @@ class DataPipeline:
             logger.warning("Pipeline: No data returned from any source")
             return pd.DataFrame()
 
-        result = pd.concat(dataframes, axis=1)
+        return pd.concat(dataframes, axis=1)
 
+    def _run_transformers(self, df: pd.DataFrame) -> pd.DataFrame:
         for transformer in self.transformers:
-            result = transformer.transform(result)
+            df = transformer.transform(df)
+        return df
 
+    def _run_validators(self, df: pd.DataFrame) -> None:
         for validator in self.validators:
-            validation_result = validator.validate(result)
+            validation_result = validator.validate(df)
             validator_name = type(validator).__name__
             if not validation_result.is_valid:
                 for error in validation_result.errors:
@@ -140,9 +177,59 @@ class DataPipeline:
             for warning in validation_result.warnings:
                 logger.info(f"Validation [{validator_name}]: {warning}")
 
-        if isinstance(cache, str):
-            result.to_csv(cache)
-            logger.info(f"Cache: Saved to {cache}")
+    def _serialize_component(self, component: Any) -> Dict[str, Any]:
+        class_name = type(component).__name__
+        params = {}
+        if hasattr(component, "__dict__"):
+            for key, value in component.__dict__.items():
+                if not key.startswith("_") and key not in ("session", "console", "logger"):
+                    if isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                        params[key] = value
+        return {"class": class_name, "params": params}
 
-        logger.info(f"Pipeline: Completed with {len(result)} rows")
-        return result
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "sources": [self._serialize_component(s) for s in self.sources],
+            "transformers": [self._serialize_component(t) for t in self.transformers],
+            "validators": [self._serialize_component(v) for v in self.validators],
+        }
+
+    def save(self, path: Union[str, Path]) -> None:
+        path = Path(path)
+        config = self.to_dict()
+        with open(path, "w") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        logger.info(f"Pipeline: Saved configuration to {path}")
+
+    @classmethod
+    def _load_component(cls, component_type: str, config: Dict[str, Any]) -> Any:
+        class_name = config["class"]
+        params = config.get("params", {})
+
+        if class_name not in COMPONENT_REGISTRY[component_type]:
+            raise ValueError(f"Unknown {component_type[:-1]}: {class_name}")
+
+        module_path = COMPONENT_REGISTRY[component_type][class_name]
+        module = importlib.import_module(module_path)
+        component_class = getattr(module, class_name)
+        return component_class(**params)
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "DataPipeline":
+        path = Path(path)
+        with open(path, "r") as f:
+            config = yaml.safe_load(f)
+
+        pipeline = cls()
+
+        for source_config in config.get("sources", []):
+            pipeline.add_source(cls._load_component("sources", source_config))
+
+        for transformer_config in config.get("transformers", []):
+            pipeline.add_transformer(cls._load_component("transformers", transformer_config))
+
+        for validator_config in config.get("validators", []):
+            pipeline.add_validator(cls._load_component("validators", validator_config))
+
+        logger.info(f"Pipeline: Loaded configuration from {path}")
+        return pipeline
