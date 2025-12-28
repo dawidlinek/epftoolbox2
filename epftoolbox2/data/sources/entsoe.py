@@ -560,3 +560,10 @@ class EntsoeSource(DataSource):
 
     def _log_success(self, elapsed: float):
         self.logger.info(f"ENTSOE [{self.area_name}]: Download completed successfully in {elapsed:.2f} sec")
+
+    def get_cache_config(self) -> dict:
+        return {
+            "source_type": "entsoe",
+            "area_code": self.area_code,
+            "types": sorted(self.types),
+        }

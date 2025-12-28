@@ -132,3 +132,6 @@ class CsvSource(DataSource):
         self.logger.info(f"CSV Source: Fetched {len(result_df)} rows from {start} to {end}")
 
         return result_df
+
+    def get_cache_config(self) -> dict:
+        return None

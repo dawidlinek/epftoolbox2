@@ -282,3 +282,14 @@ class OpenMeteoSource(DataSource):
         df.index = pd.to_datetime(df.index).tz_localize("UTC")
 
         return df
+
+    def get_cache_config(self) -> dict:
+        return {
+            "source_type": "open_meteo",
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "horizon": self.horizon,
+            "model": self.model,
+            "columns": sorted(self.columns),
+            "prefix": self.prefix,
+        }

@@ -147,3 +147,6 @@ Thumbs.db
 *.csv
 *.xlsx
 
+
+# Cache directory for data sources
+.cache/
