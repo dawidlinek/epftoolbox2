@@ -150,3 +150,5 @@ Thumbs.db
 
 # Cache directory for data sources
 .cache/
+
+main.py
