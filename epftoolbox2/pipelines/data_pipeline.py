@@ -6,6 +6,7 @@ import logging
 
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
+from epftoolbox2.data.cache_manager import CacheManager
 
 
 class DataPipeline:
@@ -54,7 +55,33 @@ class DataPipeline:
         self.transformers.append(transformer)
         return self
 
-    def run(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    def _fetch_with_cache(self, source: DataSource, start: pd.Timestamp, end: pd.Timestamp, cache_manager: CacheManager) -> pd.DataFrame:
+        source_config = source.get_cache_config()
+        if source_config is None:
+            return source.fetch(start, end)
+
+        cache_key = cache_manager.get_cache_key(source_config)
+        missing_ranges = cache_manager.find_missing_ranges(cache_key, start, end)
+        source_type = source_config.get("source_type", "unknown")
+
+        if not missing_ranges:
+            self.logger.info(f"Cache: Full hit for {source_type} source")
+            return cache_manager.read_cached_data(cache_key, start, end)
+
+        if len(missing_ranges) == 1 and missing_ranges[0] == (start, end):
+            self.logger.info(f"Cache: Miss for {source_type} source")
+        else:
+            self.logger.info(f"Cache: Partial hit for {source_type} source")
+
+        for missing_start, missing_end in missing_ranges:
+            fresh_df = source.fetch(missing_start, missing_end)
+            if fresh_df is not None and not fresh_df.empty:
+                cache_manager.write_cache(cache_key, fresh_df, missing_start, missing_end, source_config)
+
+        df = cache_manager.read_cached_data(cache_key, start, end)
+        return df if df is not None else pd.DataFrame()
+
+    def run(self, start: pd.Timestamp, end: pd.Timestamp, cache: bool = False) -> pd.DataFrame:
         if not self.sources:
             raise ValueError("At least one data source is required")
 
@@ -66,9 +93,11 @@ class DataPipeline:
 
         self.logger.info(f"Pipeline: Fetching data from {len(self.sources)} source(s)")
 
+        cache_manager = CacheManager() if cache else None
         dataframes = []
+
         for source in self.sources:
-            df = source.fetch(start, end)
+            df = self._fetch_with_cache(source, start, end, cache_manager) if cache else source.fetch(start, end)
             if df is not None and not df.empty:
                 dataframes.append(df)
 

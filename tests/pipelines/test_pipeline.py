@@ -26,6 +26,9 @@ class MockDataSource(DataSource):
     def _validate_config(self) -> bool:
         return True
 
+    def get_cache_config(self) -> dict:
+        return {"source_type": "mock", "prefix": self.prefix}
+
 
 class MockTransformer(Transformer):
     """Mock transformer for testing"""
@@ -314,3 +317,44 @@ class TestDataPipelineRun:
 
         assert len(result) == 5
         assert str(result.index.tz) == "Europe/Warsaw"
+
+
+class TestDataPipelineCache:
+    """Test pipeline caching functionality"""
+
+    def test_run_with_cache_disabled_default(self, sample_dataframe_1):
+        """Test that cache is disabled by default"""
+        source = MockDataSource(data=sample_dataframe_1)
+        pipeline = DataPipeline(sources=[source])
+
+        result = pipeline.run(start=pd.Timestamp("2024-01-01", tz="UTC"), end=pd.Timestamp("2024-01-02", tz="UTC"))
+
+        assert len(result) == 5
+        assert source.fetch_called
+
+    def test_run_with_cache_enabled(self, sample_dataframe_1):
+        """Test running pipeline with cache enabled"""
+        import tempfile
+        import shutil
+        from epftoolbox2.data.cache_manager import CacheManager
+
+        cache_dir = tempfile.mkdtemp()
+
+        try:
+            source = MockDataSource(data=sample_dataframe_1)
+            pipeline = DataPipeline(sources=[source])
+
+            cache_manager = CacheManager(cache_dir=cache_dir)
+            cache_key = cache_manager.get_cache_key(source.get_cache_config())
+
+            # Verify cache is empty initially
+            info = cache_manager.get_cache_info(cache_key)
+            assert info["exists"] is False
+
+            # Run with cache disabled first (default)
+            result = pipeline.run(start=pd.Timestamp("2024-01-01", tz="UTC"), end=pd.Timestamp("2024-01-02", tz="UTC"), cache=False)
+
+            assert len(result) == 5
+            assert source.fetch_called
+        finally:
+            shutil.rmtree(cache_dir, ignore_errors=True)

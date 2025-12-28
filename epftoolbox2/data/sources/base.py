@@ -32,3 +32,14 @@ class DataSource(ABC):
             ValueError: If configuration is invalid
         """
         pass
+
+    @abstractmethod
+    def get_cache_config(self) -> Dict:
+        """
+        Get configuration parameters for cache key generation.
+
+        Returns:
+            Dictionary of configuration parameters that uniquely identify this source.
+            Changes to these parameters should invalidate the cache.
+        """
+        pass
