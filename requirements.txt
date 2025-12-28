@@ -4,3 +4,6 @@ beautifulsoup4>=4.12.0
 lxml>=4.9.0
 pytz>=2023.3
 rich>=13.0.0
+pyyaml>=6.0.0
+holidays>=0.40
+astral>=3.2
