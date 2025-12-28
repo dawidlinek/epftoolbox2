@@ -14,6 +14,9 @@ dependencies = [
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
     "rich>=13.0.0",
+    "pyyaml>=6.0.0",
+    "holidays>=0.40",
+    "astral>=3.2",
 ]
 
 [project.optional-dependencies]
