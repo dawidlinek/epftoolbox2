@@ -12,7 +12,7 @@ class TestContinuityValidator:
         index = pd.date_range("2024-01-01", periods=24, freq="1h", tz="UTC")
         df = pd.DataFrame({"value": range(24)}, index=index)
 
-        validator = ContinuityValidator(expected_freq="1h")
+        validator = ContinuityValidator(freq="1h")
         result = validator.validate(df)
 
         assert result.is_valid
@@ -22,7 +22,7 @@ class TestContinuityValidator:
         index = pd.to_datetime(["2024-01-01 00:00", "2024-01-01 01:00", "2024-01-01 05:00"]).tz_localize("UTC")
         df = pd.DataFrame({"value": [1, 2, 3]}, index=index)
 
-        validator = ContinuityValidator(expected_freq="1h")
+        validator = ContinuityValidator(freq="1h")
         result = validator.validate(df)
 
         assert not result.is_valid
@@ -51,7 +51,7 @@ class TestNullCheckValidator:
     def test_valid_no_nulls(self):
         df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
 
-        validator = NullCheckValidator(required_columns=["a", "b"])
+        validator = NullCheckValidator(columns=["a", "b"])
         result = validator.validate(df)
 
         assert result.is_valid
@@ -59,7 +59,7 @@ class TestNullCheckValidator:
     def test_missing_columns(self):
         df = pd.DataFrame({"a": [1, 2, 3]})
 
-        validator = NullCheckValidator(required_columns=["a", "b", "c"])
+        validator = NullCheckValidator(columns=["a", "b", "c"])
         result = validator.validate(df)
 
         assert not result.is_valid
