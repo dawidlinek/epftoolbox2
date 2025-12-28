@@ -82,12 +82,19 @@ class DataPipeline:
         df = cache_manager.read_cached_data(cache_key, start, end)
         return df if df is not None else pd.DataFrame()
 
-    def run(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str] = False) -> pd.DataFrame:
+    def _parse_timestamp(self, ts: Union[str, pd.Timestamp]) -> pd.Timestamp:
+        if ts == "today":
+            return pd.Timestamp("today", tz="UTC").normalize()
+        if isinstance(ts, str):
+            return pd.Timestamp(ts, tz="UTC")
+        return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
+
+    def run(self, start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp], cache: Union[bool, str] = False) -> pd.DataFrame:
         if not self.sources:
             raise ValueError("At least one data source is required")
 
-        start = start.tz_convert("UTC") if start.tzinfo else start.tz_localize("UTC")
-        end = end.tz_convert("UTC") if end.tzinfo else end.tz_localize("UTC")
+        start = self._parse_timestamp(start)
+        end = self._parse_timestamp(end)
 
         if end <= start:
             raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
