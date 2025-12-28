@@ -4,6 +4,7 @@ from pathlib import Path
 
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
+from epftoolbox2.data.validators.base import Validator
 from epftoolbox2.data.cache_manager import CacheManager
 from epftoolbox2.logging import get_logger
 
@@ -26,6 +27,7 @@ class DataPipeline:
         ...     .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load"]))
         ...     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
         ...     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+        ...     .add_validator(NullCheckValidator(required_columns=["load_actual"]))
         ... )
         >>> df = pipeline.run(start, end)
     """
@@ -34,9 +36,11 @@ class DataPipeline:
         self,
         sources: Optional[List[DataSource]] = None,
         transformers: Optional[List[Transformer]] = None,
+        validators: Optional[List[Validator]] = None,
     ):
         self.sources: List[DataSource] = sources or []
         self.transformers: List[Transformer] = transformers or []
+        self.validators: List[Validator] = validators or []
 
     def add_source(self, source: DataSource) -> "DataPipeline":
         if not isinstance(source, DataSource):
@@ -48,6 +52,12 @@ class DataPipeline:
         if not isinstance(transformer, Transformer):
             raise TypeError("transformer must be a Transformer instance")
         self.transformers.append(transformer)
+        return self
+
+    def add_validator(self, validator: Validator) -> "DataPipeline":
+        if not isinstance(validator, Validator):
+            raise TypeError("validator must be a Validator instance")
+        self.validators.append(validator)
         return self
 
     def _fetch_with_cache(self, source: DataSource, start: pd.Timestamp, end: pd.Timestamp, cache_manager: CacheManager) -> pd.DataFrame:
@@ -120,6 +130,15 @@ class DataPipeline:
 
         for transformer in self.transformers:
             result = transformer.transform(result)
+
+        for validator in self.validators:
+            validation_result = validator.validate(result)
+            validator_name = type(validator).__name__
+            if not validation_result.is_valid:
+                for error in validation_result.errors:
+                    logger.warning(f"Validation [{validator_name}]: {error}")
+            for warning in validation_result.warnings:
+                logger.info(f"Validation [{validator_name}]: {warning}")
 
         if isinstance(cache, str):
             result.to_csv(cache)
