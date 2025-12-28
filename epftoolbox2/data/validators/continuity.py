@@ -29,8 +29,9 @@ class ContinuityValidator(Validator):
             for gap_end, delta in gaps.items():
                 gap_start = gap_end - delta
                 gap_info.append({"start": gap_start, "end": gap_end, "duration": delta})
-                result.errors.append(f"Gap detected: {gap_start} to {gap_end} ({delta})")
+                result.errors.append(f"Gap detected (expected {self.freq} frequency): {gap_start} to {gap_end} ({delta})")
             result.info["gaps"] = gap_info
             result.info["gap_count"] = len(gaps)
+            result.info["expected_freq"] = self.freq
 
         return result

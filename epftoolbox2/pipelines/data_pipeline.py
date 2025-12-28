@@ -123,31 +123,32 @@ class DataPipeline:
         if end <= start:
             raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
 
-        if isinstance(cache, str):
-            cache_file = Path(cache)
-            if cache_file.exists():
-                logger.info(f"Cache: Loading from {cache}")
-                df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
-                if df.index.tzinfo is None:
-                    df.index = df.index.tz_localize("UTC")
-                return df
-
-        result = self._run_sources(start, end, cache)
+        result = self._load_or_fetch_sources(start, end, cache)
         if result.empty:
             return result
 
         result = self._run_transformers(result)
         self._run_validators(result)
 
-        if isinstance(cache, str):
-            result.to_csv(cache)
-            logger.info(f"Cache: Saved to {cache}")
-
         logger.info(f"Pipeline: Completed with {len(result)} rows")
         return result
 
+    def _load_or_fetch_sources(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]) -> pd.DataFrame:
+        if isinstance(cache, str):
+            cache_file = Path(cache)
+            if cache_file.exists():
+                logger.info(f"Cache: Loading source data from {cache}")
+                result = pd.read_csv(cache_file, index_col=0)
+                result.index = pd.to_datetime(result.index, utc=True)
+                return result
+            result = self._run_sources(start, end, cache)
+            if not result.empty:
+                result.to_csv(cache)
+                logger.info(f"Cache: Saved source data to {cache}")
+            return result
+        return self._run_sources(start, end, cache)
+
     def _run_sources(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]) -> pd.DataFrame:
-        logger.info(f"Pipeline: Fetching data from {len(self.sources)} source(s)")
         cache_manager = CacheManager() if cache is True else None
         dataframes = []
 

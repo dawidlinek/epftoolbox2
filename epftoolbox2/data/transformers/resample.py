@@ -26,4 +26,6 @@ class ResampleTransformer(Transformer):
         elif self.method == "bfill":
             result = result.bfill()
 
+        result = result.round(3)
+
         return result
