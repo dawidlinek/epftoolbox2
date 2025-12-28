@@ -1,10 +1,8 @@
 import pandas as pd
 from typing import List, Optional
 from pathlib import Path
-from rich.console import Console
-from rich.logging import RichHandler
-import logging
 from .base import DataSource
+from epftoolbox2.logging import get_logger
 
 
 class CsvSource(DataSource):
@@ -48,11 +46,7 @@ class CsvSource(DataSource):
         self.datetime_format = datetime_format
         self.separator = separator
 
-        self.console = Console()
-        self.logger = logging.getLogger(__name__)
-        if not self.logger.handlers:
-            self.logger.addHandler(RichHandler(console=self.console, rich_tracebacks=True))
-            self.logger.setLevel(logging.INFO)
+        self.logger = get_logger(__name__)
 
         self._validate_config()
 
