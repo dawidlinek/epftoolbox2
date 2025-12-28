@@ -1,8 +1,7 @@
 import pytest
 import pandas as pd
-from zoneinfo import ZoneInfo
 
-from epftoolbox2.data.transformers import Transformer, TimezoneTransformer
+from epftoolbox2.data.transformers import Transformer, TimezoneTransformer, ResampleTransformer
 
 
 class TestTimezoneTransformerInit:
@@ -118,4 +117,212 @@ class TestTransformerAbstract:
     def test_timezone_transformer_is_transformer(self):
         """Test that TimezoneTransformer is a Transformer subclass"""
         transformer = TimezoneTransformer(target_tz="UTC")
+        assert isinstance(transformer, Transformer)
+
+
+class TestResampleTransformerInit:
+    """Test ResampleTransformer initialization"""
+
+    def test_init_default_values(self):
+        """Test initialization with default values"""
+        transformer = ResampleTransformer()
+        assert transformer.freq == "1h"
+        assert transformer.method == "linear"
+
+    def test_init_custom_freq(self):
+        """Test initialization with custom frequency"""
+        transformer = ResampleTransformer(freq="15min")
+        assert transformer.freq == "15min"
+
+    def test_init_ffill_method(self):
+        """Test initialization with ffill method"""
+        transformer = ResampleTransformer(method="ffill")
+        assert transformer.method == "ffill"
+
+    def test_init_bfill_method(self):
+        """Test initialization with bfill method"""
+        transformer = ResampleTransformer(method="bfill")
+        assert transformer.method == "bfill"
+
+    def test_init_linear_method(self):
+        """Test initialization with linear method"""
+        transformer = ResampleTransformer(method="linear")
+        assert transformer.method == "linear"
+
+    def test_init_invalid_method(self):
+        """Test initialization with invalid method raises error"""
+        with pytest.raises(ValueError, match="Invalid method"):
+            ResampleTransformer(method="invalid")
+
+    def test_init_invalid_method_shows_valid_options(self):
+        """Test that invalid method error shows valid options"""
+        with pytest.raises(ValueError, match="linear|ffill|bfill"):
+            ResampleTransformer(method="cubic")
+
+
+class TestResampleTransformerTransform:
+    """Test ResampleTransformer transform method"""
+
+    @pytest.fixture
+    def sample_hourly_dataframe(self):
+        """Create a sample DataFrame with hourly index"""
+        dates = pd.date_range("2024-01-01", periods=5, freq="h")
+        return pd.DataFrame({"value": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=dates)
+
+    @pytest.fixture
+    def sample_daily_dataframe(self):
+        """Create a sample DataFrame with daily index"""
+        dates = pd.date_range("2024-01-01", periods=3, freq="D")
+        return pd.DataFrame({"value": [10.0, 20.0, 30.0]}, index=dates)
+
+    @pytest.fixture
+    def sample_tz_aware_dataframe(self):
+        """Create a sample DataFrame with timezone-aware index"""
+        dates = pd.date_range("2024-01-01", periods=5, freq="h", tz="Europe/Warsaw")
+        return pd.DataFrame({"value": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=dates)
+
+    def test_transform_upsample_to_30min(self, sample_hourly_dataframe):
+        """Test upsampling from hourly to 30-minute frequency"""
+        transformer = ResampleTransformer(freq="30min", method="linear")
+        result = transformer.transform(sample_hourly_dataframe)
+
+        assert len(result) == 9  # 5 hours -> 9 half-hour periods
+        assert result.index.freq == pd.Timedelta("30min")
+
+    def test_transform_downsample_to_2h(self, sample_hourly_dataframe):
+        """Test downsampling from hourly to 2-hour frequency"""
+        transformer = ResampleTransformer(freq="2h", method="linear")
+        result = transformer.transform(sample_hourly_dataframe)
+
+        assert len(result) == 3  # 5 hours -> 3 two-hour periods
+        assert result.index.freq == pd.Timedelta("2h")
+
+    def test_transform_daily_to_hourly_linear(self, sample_daily_dataframe):
+        """Test resampling daily to hourly with linear interpolation"""
+        transformer = ResampleTransformer(freq="1h", method="linear")
+        result = transformer.transform(sample_daily_dataframe)
+
+        # Check that interpolation fills values between 10 and 20
+        assert result.index.freq == pd.Timedelta("1h")
+        assert result["value"].iloc[0] == 10.0
+        # Linear interpolation should produce intermediate values
+        assert result["value"].iloc[12] == pytest.approx(15.0, rel=0.01)
+
+    def test_transform_ffill_method(self, sample_hourly_dataframe):
+        """Test forward fill interpolation method"""
+        transformer = ResampleTransformer(freq="30min", method="ffill")
+        result = transformer.transform(sample_hourly_dataframe)
+
+        # Forward fill should repeat previous values
+        assert result["value"].iloc[0] == 1.0
+        assert result["value"].iloc[1] == 1.0  # Filled forward from 1.0
+        assert result["value"].iloc[2] == 2.0
+
+    def test_transform_bfill_method(self, sample_hourly_dataframe):
+        """Test backward fill interpolation method"""
+        transformer = ResampleTransformer(freq="30min", method="bfill")
+        result = transformer.transform(sample_hourly_dataframe)
+
+        # Backward fill should use next values
+        assert result["value"].iloc[0] == 1.0
+        assert result["value"].iloc[1] == 2.0  # Filled backward from 2.0
+        assert result["value"].iloc[2] == 2.0
+
+    def test_transform_preserves_timezone(self, sample_tz_aware_dataframe):
+        """Test that transform preserves timezone information"""
+        transformer = ResampleTransformer(freq="30min", method="linear")
+        result = transformer.transform(sample_tz_aware_dataframe)
+
+        assert str(result.index.tz) == "Europe/Warsaw"
+
+    def test_transform_preserves_column_names(self):
+        """Test that transform preserves column names"""
+        dates = pd.date_range("2024-01-01", periods=3, freq="h")
+        df = pd.DataFrame(
+            {"price": [10.0, 20.0, 30.0], "load": [100.0, 200.0, 300.0]},
+            index=dates,
+        )
+
+        transformer = ResampleTransformer(freq="30min", method="linear")
+        result = transformer.transform(df)
+
+        assert list(result.columns) == ["price", "load"]
+
+    def test_transform_multiple_columns_linear(self):
+        """Test linear interpolation with multiple columns"""
+        dates = pd.date_range("2024-01-01", periods=3, freq="h")
+        df = pd.DataFrame(
+            {"price": [10.0, 20.0, 30.0], "load": [100.0, 200.0, 300.0]},
+            index=dates,
+        )
+
+        transformer = ResampleTransformer(freq="30min", method="linear")
+        result = transformer.transform(df)
+
+        # Check both columns are interpolated
+        assert result["price"].iloc[1] == pytest.approx(15.0, rel=0.01)
+        assert result["load"].iloc[1] == pytest.approx(150.0, rel=0.01)
+
+    def test_transform_does_not_modify_original(self, sample_hourly_dataframe):
+        """Test that transform returns a copy, not modifying original"""
+        original_len = len(sample_hourly_dataframe)
+        transformer = ResampleTransformer(freq="30min", method="linear")
+        transformer.transform(sample_hourly_dataframe)
+
+        assert len(sample_hourly_dataframe) == original_len
+
+    def test_transform_invalid_index_type(self):
+        """Test that non-DatetimeIndex raises error"""
+        df = pd.DataFrame({"value": [1, 2, 3]}, index=[0, 1, 2])
+        transformer = ResampleTransformer(freq="1h", method="linear")
+
+        with pytest.raises(ValueError, match="DatetimeIndex"):
+            transformer.transform(df)
+
+    def test_transform_empty_dataframe(self):
+        """Test transform with empty dataframe"""
+        dates = pd.DatetimeIndex([], dtype="datetime64[ns]")
+        df = pd.DataFrame({"value": []}, index=dates)
+        transformer = ResampleTransformer(freq="1h", method="linear")
+
+        result = transformer.transform(df)
+        assert len(result) == 0
+
+    def test_transform_single_row(self):
+        """Test transform with single row dataframe"""
+        dates = pd.date_range("2024-01-01", periods=1, freq="h")
+        df = pd.DataFrame({"value": [1.0]}, index=dates)
+        transformer = ResampleTransformer(freq="30min", method="linear")
+
+        result = transformer.transform(df)
+        assert len(result) == 1
+        assert result["value"].iloc[0] == 1.0
+
+    def test_transform_values_are_rounded(self, sample_hourly_dataframe):
+        """Test that transformed values are rounded to 3 decimal places"""
+        transformer = ResampleTransformer(freq="30min", method="linear")
+        result = transformer.transform(sample_hourly_dataframe)
+
+        # All values should be rounded to 3 decimal places
+        for value in result["value"]:
+            rounded = round(value, 3)
+            assert value == rounded
+
+    def test_transform_various_frequencies(self, sample_hourly_dataframe):
+        """Test transform with various frequency strings"""
+        frequencies = ["15min", "30min", "1h", "2h"]
+
+        for freq in frequencies:
+            transformer = ResampleTransformer(freq=freq, method="linear")
+            result = transformer.transform(sample_hourly_dataframe)
+            assert isinstance(result, pd.DataFrame)
+            assert len(result) > 0
+
+
+class TestResampleTransformerIsTransformer:
+    """Test ResampleTransformer inheritance"""
+
+    def test_resample_transformer_is_transformer(self):
+        """Test that ResampleTransformer is a Transformer subclass"""
+        transformer = ResampleTransformer()
         assert isinstance(transformer, Transformer)

@@ -5,12 +5,11 @@ from rich.table import Table
 from .base import Validator
 from .result import ValidationResult
 
-console = Console()
-
 
 class EdaValidator(Validator):
     def __init__(self, columns: Optional[List[str]] = None):
         self.columns = columns
+        self.console = Console()
 
     def validate(self, df: pd.DataFrame) -> ValidationResult:
         result = ValidationResult()
@@ -81,4 +80,4 @@ class EdaValidator(Validator):
                 f"{row['std']:.2f}" if pd.notna(row["std"]) else "-",
             )
 
-        console.print(table)
+        self.console.print(table)
