@@ -1,7 +1,11 @@
 from typing import Optional, List
 import pandas as pd
+from rich.console import Console
+from rich.table import Table
 from .base import Validator
 from .result import ValidationResult
+
+console = Console()
 
 
 class EdaValidator(Validator):
@@ -48,4 +52,33 @@ class EdaValidator(Validator):
 
         result.stats = pd.DataFrame(stats_data)
         result.info["columns_analyzed"] = len(stats_data)
+
+        self._print_table(stats_data)
         return result
+
+    def _print_table(self, stats_data: List[dict]) -> None:
+        table = Table(title="EDA Statistics", show_lines=True)
+        table.add_column("Column", style="cyan", no_wrap=True)
+        table.add_column("Type", style="dim")
+        table.add_column("Count", justify="right")
+        table.add_column("Nulls", justify="right")
+        table.add_column("Null%", justify="right")
+        table.add_column("Min", justify="right")
+        table.add_column("Max", justify="right")
+        table.add_column("Mean", justify="right")
+        table.add_column("Std", justify="right")
+
+        for row in stats_data:
+            table.add_row(
+                row["column"][:30],
+                row["dtype"],
+                str(row["count"]),
+                str(row["null_count"]),
+                f"{row['null_pct']:.1f}%",
+                f"{row['min']:.2f}" if pd.notna(row["min"]) else "-",
+                f"{row['max']:.2f}" if pd.notna(row["max"]) else "-",
+                f"{row['mean']:.2f}" if pd.notna(row["mean"]) else "-",
+                f"{row['std']:.2f}" if pd.notna(row["std"]) else "-",
+            )
+
+        console.print(table)
