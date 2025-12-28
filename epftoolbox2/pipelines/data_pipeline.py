@@ -1,5 +1,6 @@
-from typing import List, Optional
+from typing import List, Optional, Union
 import pandas as pd
+from pathlib import Path
 from rich.console import Console
 from rich.logging import RichHandler
 import logging
@@ -81,7 +82,7 @@ class DataPipeline:
         df = cache_manager.read_cached_data(cache_key, start, end)
         return df if df is not None else pd.DataFrame()
 
-    def run(self, start: pd.Timestamp, end: pd.Timestamp, cache: bool = False) -> pd.DataFrame:
+    def run(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str] = False) -> pd.DataFrame:
         if not self.sources:
             raise ValueError("At least one data source is required")
 
@@ -91,13 +92,22 @@ class DataPipeline:
         if end <= start:
             raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
 
+        if isinstance(cache, str):
+            cache_file = Path(cache)
+            if cache_file.exists():
+                self.logger.info(f"Cache: Loading from {cache}")
+                df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+                if df.index.tzinfo is None:
+                    df.index = df.index.tz_localize("UTC")
+                return df
+
         self.logger.info(f"Pipeline: Fetching data from {len(self.sources)} source(s)")
 
-        cache_manager = CacheManager() if cache else None
+        cache_manager = CacheManager() if cache is True else None
         dataframes = []
 
         for source in self.sources:
-            df = self._fetch_with_cache(source, start, end, cache_manager) if cache else source.fetch(start, end)
+            df = self._fetch_with_cache(source, start, end, cache_manager) if cache is True else source.fetch(start, end)
             if df is not None and not df.empty:
                 dataframes.append(df)
 
@@ -111,6 +121,10 @@ class DataPipeline:
 
         for transformer in self.transformers:
             result = transformer.transform(result)
+
+        if isinstance(cache, str):
+            result.to_csv(cache)
+            self.logger.info(f"Cache: Saved to {cache}")
 
         self.logger.info(f"Pipeline: Completed with {len(result)} rows")
         return result
