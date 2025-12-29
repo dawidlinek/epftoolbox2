@@ -31,7 +31,7 @@ class StandardScaler:
 
     def _is_scalable(self, series: pd.Series) -> bool:
         unique = series.dropna().unique()
-        if len(unique) <= 2 and set(unique).issubset({0, 1, 0.0, 1.0}):
+        if len(unique) <= 2 and set(unique).issubset({0, 1}):
             return False
         if series.dtype.name == "category":
             return False
