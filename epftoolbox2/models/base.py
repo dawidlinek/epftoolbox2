@@ -54,8 +54,6 @@ class BaseModel(ABC):
             print(f"All {len(all_tasks)} tasks completed")
             return store.load_all()
 
-        print(f"Running {len(tasks)}/{len(all_tasks)} tasks")
-
         n_jobs = int(os.environ.get("MAX_THREADS", os.cpu_count() or 1))
         results = [] if not save_to else None
 
