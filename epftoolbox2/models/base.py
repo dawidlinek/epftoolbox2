@@ -7,8 +7,6 @@ import numpy as np
 import pandas as pd
 from rich.progress import Progress
 
-os.environ["MAX_THREADS"] = "16"
-
 from ..scalers.standard import StandardScaler
 from ..results.store import ResultStore
 
