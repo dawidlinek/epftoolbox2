@@ -54,13 +54,16 @@ class BaseModel(ABC):
             print(f"All {len(all_tasks)} tasks completed")
             return store.load_all()
 
+        # print(f"Running {len(tasks)}/{len(all_tasks)} tasks")
+
         n_jobs = int(os.environ.get("MAX_THREADS", os.cpu_count() or 1))
         results = [] if not save_to else None
 
         with ThreadPoolExecutor(max_workers=n_jobs) as pool:
             futures = {pool.submit(self._fit_one, *task): task for task in tasks}
             with Progress() as progress:
-                task_id = progress.add_task(f"[cyan]{self.name}", total=len(tasks))
+                completed = len(all_tasks) - len(tasks)
+                task_id = progress.add_task(f"[cyan]{self.name}", total=len(all_tasks), completed=completed)
                 for future in as_completed(futures):
                     result = future.result()
                     if store:
