@@ -58,7 +58,7 @@ class BaseModel(ABC):
 
         print(f"Running {len(tasks)}/{len(all_tasks)} tasks")
 
-        n_jobs = int(os.environ.get("MAX_THREADS", os.cpu_count()))
+        n_jobs = int(os.environ.get("MAX_THREADS", os.cpu_count() or 1))
         results = [] if not save_to else None
 
         with ThreadPoolExecutor(max_workers=n_jobs) as pool:
