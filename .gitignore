@@ -152,4 +152,4 @@ Thumbs.db
 .cache/
 
 main.py
-results/
+results/*.jsonl
