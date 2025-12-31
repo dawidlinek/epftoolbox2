@@ -53,7 +53,7 @@ class LagTransformer(Transformer):
             unit = "s"
 
         sign = "-" if lag >= 0 else "+"
-        return f"{column}_{sign}{value}{unit}"
+        return f"{column}_{unit}{sign}{value}"
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         lagged_data = {}
@@ -62,7 +62,7 @@ class LagTransformer(Transformer):
             for lag in self.lags:
                 name = self._format_lag_name(column, lag)
                 timedelta = self._get_timedelta(lag)
-                shifted_index = df.index - timedelta
+                shifted_index = df.index + timedelta
                 shifted_series = pd.Series(series.values, index=shifted_index)
                 lagged_data[name] = shifted_series.reindex(df.index)
 
