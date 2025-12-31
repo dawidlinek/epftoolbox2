@@ -200,13 +200,12 @@ class OpenMeteoSource(DataSource):
             "end_date": end.strftime("%Y-%m-%d"),
         }
 
-        max_retries = 3
+        max_retries = 5
         retry_count = 0
 
         while retry_count < max_retries:
             try:
                 response = self.session.get(self.API_URL, params=params, timeout=30)
-                response.raise_for_status()
                 data = response.json()
 
                 if "error" in data and data["error"]:
@@ -226,6 +225,7 @@ class OpenMeteoSource(DataSource):
                     else:
                         raise ValueError(f"Open-Meteo API error: {reason}")
 
+                response.raise_for_status()
                 return self._parse_weather_data(data)
 
             except requests.RequestException as e:
