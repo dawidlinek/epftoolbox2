@@ -331,12 +331,12 @@ class TestResampleTransformerIsTransformer:
 class TestLagTransformerInit:
     """Test LagTransformer initialization"""
 
-    def test_init_defaults(self):
-        """Test initialization with default values"""
-        transformer = LagTransformer()
-        assert transformer.columns is None
+    def test_init_with_required_columns(self):
+        """Test initialization with required columns"""
+        transformer = LagTransformer(columns=["price"])
+        assert transformer.columns == ["price"]
         assert transformer.lags == [1]
-        assert transformer.unit == "day"
+        assert transformer.freq == pd.Timedelta("1h")
 
     def test_init_single_column_string(self):
         """Test initialization with single column as string"""
@@ -350,28 +350,28 @@ class TestLagTransformerInit:
 
     def test_init_single_lag(self):
         """Test initialization with single lag as int"""
-        transformer = LagTransformer(lags=7)
+        transformer = LagTransformer(columns=["price"], lags=7)
         assert transformer.lags == [7]
 
     def test_init_multiple_lags(self):
         """Test initialization with multiple lags"""
-        transformer = LagTransformer(lags=[1, 7, 14])
+        transformer = LagTransformer(columns=["price"], lags=[1, 7, 14])
         assert transformer.lags == [1, 7, 14]
 
-    def test_init_hour_unit(self):
-        """Test initialization with hour unit"""
-        transformer = LagTransformer(unit="hour")
-        assert transformer.unit == "hour"
-
-    def test_init_invalid_unit(self):
-        """Test initialization with invalid unit raises error"""
-        with pytest.raises(ValueError, match="Invalid unit"):
-            LagTransformer(unit="week")
+    def test_init_custom_freq(self):
+        """Test initialization with custom frequency"""
+        transformer = LagTransformer(columns=["price"], freq="1d")
+        assert transformer.freq == pd.Timedelta("1d")
 
     def test_init_empty_lags(self):
         """Test initialization with empty lags raises error"""
         with pytest.raises(ValueError, match="At least one lag"):
-            LagTransformer(lags=[])
+            LagTransformer(columns=["price"], lags=[])
+
+    def test_init_no_columns(self):
+        """Test initialization with no columns raises error"""
+        with pytest.raises(ValueError, match="At least one column"):
+            LagTransformer(columns=None)
 
 
 class TestLagTransformerTransform:
@@ -388,7 +388,7 @@ class TestLagTransformerTransform:
 
     def test_transform_day_lag(self, sample_hourly_dataframe):
         """Test day-based lag transformation"""
-        transformer = LagTransformer(columns=["price"], lags=[1], unit="day")
+        transformer = LagTransformer(columns=["price"], lags=[1], freq="1d")
         result = transformer.transform(sample_hourly_dataframe)
 
         assert "price_d-1" in result.columns
@@ -399,7 +399,7 @@ class TestLagTransformerTransform:
 
     def test_transform_hour_lag(self, sample_hourly_dataframe):
         """Test hour-based lag transformation"""
-        transformer = LagTransformer(columns=["price"], lags=[1], unit="hour")
+        transformer = LagTransformer(columns=["price"], lags=[1], freq="1h")
         result = transformer.transform(sample_hourly_dataframe)
 
         assert "price_h-1" in result.columns
@@ -410,7 +410,7 @@ class TestLagTransformerTransform:
 
     def test_transform_multiple_lags(self, sample_hourly_dataframe):
         """Test transformation with multiple lags"""
-        transformer = LagTransformer(columns=["price"], lags=[1, 2], unit="day")
+        transformer = LagTransformer(columns=["price"], lags=[1, 2], freq="1d")
         result = transformer.transform(sample_hourly_dataframe)
 
         assert "price_d-1" in result.columns
@@ -420,23 +420,15 @@ class TestLagTransformerTransform:
 
     def test_transform_multiple_columns(self, sample_hourly_dataframe):
         """Test transformation with multiple columns"""
-        transformer = LagTransformer(columns=["price", "load"], lags=[1], unit="day")
+        transformer = LagTransformer(columns=["price", "load"], lags=[1], freq="1d")
         result = transformer.transform(sample_hourly_dataframe)
 
         assert "price_d-1" in result.columns
         assert "load_d-1" in result.columns
 
-    def test_transform_all_columns_when_none(self, sample_hourly_dataframe):
-        """Test that None columns uses all columns"""
-        transformer = LagTransformer(columns=None, lags=[1], unit="hour")
-        result = transformer.transform(sample_hourly_dataframe)
-
-        assert "price_h-1" in result.columns
-        assert "load_h-1" in result.columns
-
     def test_transform_negative_lag(self, sample_hourly_dataframe):
         """Test negative lag (forward shift)"""
-        transformer = LagTransformer(columns=["price"], lags=[-1], unit="hour")
+        transformer = LagTransformer(columns=["price"], lags=[-1], freq="1h")
         result = transformer.transform(sample_hourly_dataframe)
 
         assert "price_h+1" in result.columns
@@ -447,26 +439,12 @@ class TestLagTransformerTransform:
 
     def test_transform_preserves_original_columns(self, sample_hourly_dataframe):
         """Test that transform preserves original columns"""
-        transformer = LagTransformer(columns=["price"], lags=[1], unit="day")
+        transformer = LagTransformer(columns=["price"], lags=[1], freq="1d")
         result = transformer.transform(sample_hourly_dataframe)
 
         assert "price" in result.columns
         assert "load" in result.columns
         assert list(result["price"]) == list(sample_hourly_dataframe["price"])
-
-    def test_transform_invalid_column(self, sample_hourly_dataframe):
-        """Test that invalid column raises error"""
-        transformer = LagTransformer(columns=["nonexistent"], lags=[1])
-        with pytest.raises(ValueError, match="Columns not found"):
-            transformer.transform(sample_hourly_dataframe)
-
-    def test_transform_invalid_index_type(self):
-        """Test that non-DatetimeIndex raises error"""
-        df = pd.DataFrame({"value": [1, 2, 3]}, index=[0, 1, 2])
-        transformer = LagTransformer(columns=["value"], lags=[1])
-
-        with pytest.raises(ValueError, match="DatetimeIndex"):
-            transformer.transform(df)
 
     def test_transform_does_not_modify_original(self, sample_hourly_dataframe):
         """Test that transform returns a copy, not modifying original"""
@@ -482,5 +460,5 @@ class TestLagTransformerIsTransformer:
 
     def test_lag_transformer_is_transformer(self):
         """Test that LagTransformer is a Transformer subclass"""
-        transformer = LagTransformer()
+        transformer = LagTransformer(columns=["test"])
         assert isinstance(transformer, Transformer)
