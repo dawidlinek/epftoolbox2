@@ -258,7 +258,7 @@ class TestOpenMeteoSourceAPIRequests:
                     pd.Timestamp("2024-01-02", tz="UTC"),
                 )
 
-        assert mock_session.return_value.get.call_count == 3
+        assert mock_session.return_value.get.call_count == 5
 
 
 class TestOpenMeteoSourceParsing:
