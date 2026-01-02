@@ -108,14 +108,13 @@ class BaseModel(ABC):
         run_date = test.index[0]
         target_date = run_date + pd.Timedelta(days=horizon)
 
-        scaler = StandardScaler()
-        train, test = scaler.fit_transform(train, test, predictors, target_col)
+        train_x = train[predictors].values
+        train_y = train[target_col].values
+        test_x = test[predictors].values
 
-        pred, coefs = self._fit_predict(
-            train[predictors],
-            train[target_col],
-            test[predictors],
-        )
+        scaler = StandardScaler()
+        train_x, train_y, test_x = scaler.fit_transform(train_x, train_y, test_x)
+        pred, coefs = self._fit_predict(train_x, train_y, test_x)
 
         return {
             "run_date": run_date.strftime("%Y-%m-%d"),
@@ -140,5 +139,5 @@ class BaseModel(ABC):
         return result
 
     @abstractmethod
-    def _fit_predict(self, train_x: pd.DataFrame, train_y: pd.Series, test_x: pd.DataFrame) -> Tuple[float, list]:
+    def _fit_predict(self, train_x: np.ndarray, train_y: np.ndarray, test_x: np.ndarray) -> Tuple[float, list]:
         pass
