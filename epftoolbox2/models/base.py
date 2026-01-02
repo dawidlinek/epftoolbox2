@@ -23,7 +23,8 @@ class BaseModel(ABC):
         self.name = name
 
         self._data: pd.DataFrame = None
-        self._groups = None
+        self._hour_data: Dict[int, pd.DataFrame] = {}
+        self._hour_days: Dict[int, np.ndarray] = {}
         self._offset: int = 0
         self._target: str = ""
         self._run_date: str = ""
@@ -41,7 +42,10 @@ class BaseModel(ABC):
         self._run_date = date.today().isoformat()
 
         self._data = self._preprocess(data, horizon, target)
-        self._groups = self._data.groupby(["hour", "day"])
+        for hour in range(24):
+            hour_df = self._data[self._data["hour"] == hour].copy()
+            self._hour_data[hour] = hour_df
+            self._hour_days[hour] = hour_df["day"].values
         self._offset = int(self._data.loc[test_start, "day"].iloc[0])
         test_end_day = int(self._data.loc[test_end, "day"].iloc[0])
 
@@ -87,18 +91,17 @@ class BaseModel(ABC):
         return data
 
     def _get_slice(self, hour: int, day: int, horizon: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        chunks = []
-        for d in range(day - self.training_window - horizon, day + 1):
-            if (hour, d) in self._groups.groups:
-                chunks.append(self._groups.get_group((hour, d)))
-        filtered = pd.concat(chunks)
+        hour_df = self._hour_data[hour]
+        days = self._hour_days[hour]
+        day_min = day - self.training_window - horizon
+        mask = (days >= day_min) & (days <= day)
+        filtered = hour_df.iloc[mask]
         return filtered.iloc[: -1 - horizon], filtered.iloc[-1:]
 
     def _fit_one(self, hour: int, horizon: int, day_in_test: int) -> Dict:
         day = self._offset + day_in_test
         target_col = f"{self._target}_d+{horizon}"
         predictors = self._expand_predictors(horizon)
-
         train, test = self._get_slice(hour, day, horizon)
         actual = float(test[target_col].iloc[0])
 
