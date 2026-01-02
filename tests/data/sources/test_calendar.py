@@ -104,7 +104,7 @@ class TestWeekdayFeatures:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-08", tz="UTC")
         df = source.fetch(start, end)
-        weekday_cols = [c for c in df.columns if c.startswith("weekday_")]
+        weekday_cols = [c for c in df.columns if c.startswith("is_") and any(day in c for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"])]
         assert len(weekday_cols) == 7
 
 
@@ -121,7 +121,7 @@ class TestHourFeatures:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-02", tz="UTC")
         df = source.fetch(start, end)
-        hour_cols = [c for c in df.columns if c.startswith("hour_")]
+        hour_cols = [c for c in df.columns if c.startswith("is_") and c[3:].isdigit()]
         assert len(hour_cols) == 24
 
 
@@ -147,7 +147,8 @@ class TestMonthFeatures:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-12-31", tz="UTC")
         df = source.fetch(start, end)
-        month_cols = [c for c in df.columns if c.startswith("month_")]
+        month_names = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
+        month_cols = [c for c in df.columns if c.startswith("is_") and any(m in c for m in month_names)]
         assert len(month_cols) == 12
 
 
