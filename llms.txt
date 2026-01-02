@@ -1,0 +1,836 @@
+# epftoolbox2
+
+> A Python library for electricity price forecasting with modular data pipelines and model evaluation.
+
+## Overview
+
+epftoolbox2 provides a complete toolkit for downloading electricity market data, processing it with transformers, validating quality, training forecasting models, and evaluating results. It uses a fluent builder pattern for pipeline construction.
+
+## Installation
+
+```bash
+pip install epftoolbox2
+# or
+uv add epftoolbox2
+```
+
+## Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐
+│  DataPipeline   │     │  ModelPipeline  │
+├─────────────────┤     ├─────────────────┤
+│ • Sources       │────►│ • Models        │
+│ • Transformers  │     │ • Evaluators    │
+│ • Validators    │     │ • Exporters     │
+└─────────────────┘     └─────────────────┘
+        ▼                       ▼
+   pd.DataFrame          EvaluationReport
+```
+
+## Core Concepts
+
+### DataPipeline
+Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame with DatetimeIndex (UTC).
+
+### ModelPipeline  
+Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport.
+
+### Fluent API
+All pipelines use method chaining:
+- `.add_source()` - Add data source
+- `.add_transformer()` - Add data transformer
+- `.add_validator()` - Add data validator  
+- `.add_model()` - Add forecasting model
+- `.add_evaluator()` - Add evaluation metric
+- `.add_exporter()` - Add results exporter
+
+---
+
+# DATA SOURCES
+
+All sources implement `DataSource` base class with:
+- `fetch(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame`
+- `get_cache_config() -> Optional[Dict]` (returns None if not cacheable)
+
+## EntsoeSource
+
+Downloads electricity data from ENTSOE Transparency Platform.
+
+```python
+from epftoolbox2.data.sources import EntsoeSource
+
+source = EntsoeSource(
+    country_code="PL",           # Required. Country code (see SUPPORTED_COUNTRIES)
+    api_key="YOUR_API_KEY",      # Required. ENTSOE API key
+    type=["load", "price"],      # Required. Options: "load", "price", "generation"
+)
+```
+
+**Parameters:**
+- `country_code` (str): ISO country code. See SUPPORTED_COUNTRIES section.
+- `api_key` (str): ENTSOE API key from https://transparency.entsoe.eu/
+- `type` (List[str]): Data types to fetch. Options: `"load"`, `"price"`, `"generation"`
+
+**Output columns by type:**
+- `type=["load"]`: `load_actual`, `load_forecast`, `load_forecast_daily_min`, `load_forecast_daily_max`
+- `type=["price"]`: `price` (EUR/MWh)
+- `type=["generation"]`: `generation_biomass`, `generation_fossil_gas`, `generation_nuclear`, `generation_solar`, `generation_wind_onshore`, etc.
+
+**Caching:** Returns cache config based on area_code and types. Cached to `.cache/sources/`.
+
+---
+
+## OpenMeteoSource
+
+Downloads weather forecast data from Open-Meteo API. No API key required.
+
+```python
+from epftoolbox2.data.sources import OpenMeteoSource
+
+source = OpenMeteoSource(
+    latitude=52.2297,            # Required. Location latitude (-90 to 90)
+    longitude=21.0122,           # Required. Location longitude (-180 to 180)
+    horizon=7,                   # Optional. Days ahead for forecasts (default: 7)
+    model="jma_seamless",        # Optional. Weather model (default: "jma_seamless")
+    columns=None,                # Optional. Weather variables (default: DEFAULT_COLUMNS)
+    prefix="warsaw",             # Optional. Prefix for column names (default: "")
+)
+```
+
+**Default columns:** `temperature_2m`, `rain`, `showers`, `snowfall`, `relative_humidity_2m`, `dew_point_2m`, `apparent_temperature`, `precipitation`, `weather_code`, `surface_pressure`, `pressure_msl`, `cloud_cover`, `wind_speed_10m`, `wind_direction_10m`
+
+**Output column naming:** `{prefix}_{variable}_d+{horizon}`
+- Example: `warsaw_temperature_2m_d+1`, `warsaw_temperature_2m_d+2`, ..., `warsaw_temperature_2m_d+7`
+
+**Caching:** Returns cache config based on location, horizon, model, columns.
+
+---
+
+## CalendarSource
+
+Generates calendar features (holidays, weekday, hour, month, daylight).
+
+```python
+from epftoolbox2.data.sources import CalendarSource
+
+source = CalendarSource(
+    country="PL",                # Required. Country code for holidays
+    timezone=None,               # Optional. Override default timezone
+    holidays="binary",           # Optional. False | "binary" | "onehot" | "name"
+    weekday="number",            # Optional. False | "number" | "onehot" | "name"
+    hour=False,                  # Optional. False | "number" | "onehot"
+    month=False,                 # Optional. False | "number" | "onehot" | "name"
+    daylight=False,              # Optional. Add sunrise/sunset/daylight_hours
+    prefix="",                   # Optional. Prefix for column names
+)
+```
+
+**Output columns by parameter:**
+| Parameter | Value | Output Columns |
+|-----------|-------|----------------|
+| `holidays` | `"binary"` | `is_holiday` (0/1) |
+| `holidays` | `"name"` | `holiday_name` (string or None) |
+| `holidays` | `"onehot"` | `is_holiday` + `holiday_{name}` columns |
+| `weekday` | `"number"` | `weekday` (0=Monday, 6=Sunday) |
+| `weekday` | `"name"` | `weekday_name` ("monday", "tuesday", ...) |
+| `weekday` | `"onehot"` | `is_monday`, `is_tuesday`, ... |
+| `hour` | `"number"` | `hour` (0-23) |
+| `hour` | `"onehot"` | `is_0`, `is_1`, ..., `is_23` |
+| `month` | `"number"` | `month` (1-12) |
+| `month` | `"name"` | `month_name` ("january", ...) |
+| `daylight` | `True` | `sunrise`, `sunset`, `daylight_hours` |
+
+**Caching:** Returns None (not cached - deterministic generation).
+
+---
+
+## CsvSource
+
+Loads time-series data from CSV files.
+
+```python
+from epftoolbox2.data.sources import CsvSource
+
+source = CsvSource(
+    file_path="data/prices.csv",     # Required. Path to CSV file
+    datetime_column="datetime",       # Optional. Name of datetime column (default: "datetime")
+    columns=None,                     # Optional. Columns to include (None = all)
+    prefix="",                        # Optional. Prefix for column names
+    datetime_format=None,             # Optional. strftime format (None = auto-detect)
+    separator=",",                    # Optional. CSV separator (default: ",")
+)
+```
+
+**Requirements:**
+- File must have `.csv` extension
+- Must contain the specified datetime column
+- Datetime column is parsed and set as index
+- All timestamps are converted to UTC
+
+**Caching:** Returns None (not cached).
+
+---
+
+# TRANSFORMERS
+
+All transformers implement `Transformer` base class with:
+- `transform(df: pd.DataFrame) -> pd.DataFrame`
+
+## ResampleTransformer
+
+Resamples data to specified frequency with interpolation.
+
+```python
+from epftoolbox2.data.transformers import ResampleTransformer
+
+transformer = ResampleTransformer(
+    freq="1h",          # Required. Pandas frequency string ("1h", "15min", "1D")
+    method="linear",    # Optional. Interpolation: "linear" | "ffill" | "bfill"
+)
+```
+
+**Behavior:**
+- Resamples to regular frequency using `asfreq()`
+- Fills gaps using specified method
+- Rounds values to 3 decimal places
+
+---
+
+## LagTransformer
+
+Creates lagged features for time series.
+
+```python
+from epftoolbox2.data.transformers import LagTransformer
+
+transformer = LagTransformer(
+    columns=["load_actual", "price"],  # Required. Column(s) to lag
+    lags=[1, 2, 7],                    # Required. Lag periods (positive = look back)
+    freq="day",                        # Required. Unit for lags
+)
+```
+
+**Frequency options:**
+- `"day"`, `"days"`, `"d"`, `"1D"` → 1 day
+- `"hour"`, `"hours"`, `"h"`, `"1h"` → 1 hour
+- `"minute"`, `"minutes"`, `"min"`, `"1min"` → 1 minute
+- `"second"`, `"seconds"`, `"s"`, `"1s"` → 1 second
+
+**Output column naming:** `{column}_{unit}-{lag}`
+- Example with `freq="day"`: `load_actual_d-1`, `load_actual_d-2`, `load_actual_d-7`
+- Example with `freq="hour"`: `price_h-24`, `price_h-168`
+
+---
+
+## TimezoneTransformer
+
+Converts DataFrame index timezone.
+
+```python
+from epftoolbox2.data.transformers import TimezoneTransformer
+
+transformer = TimezoneTransformer(
+    target_tz="Europe/Warsaw",    # Required. Target timezone
+)
+```
+
+**Behavior:**
+- If index is timezone-naive, localizes to UTC first, then converts
+- If index has timezone, converts directly
+
+---
+
+# VALIDATORS
+
+All validators implement `Validator` base class with:
+- `validate(df: pd.DataFrame) -> ValidationResult`
+
+## ValidationResult
+
+Dataclass returned by all validators:
+
+```python
+@dataclass
+class ValidationResult:
+    is_valid: bool = True           # Overall validity
+    errors: List[str] = []          # Critical errors
+    warnings: List[str] = []        # Non-critical warnings
+    info: Dict[str, Any] = {}       # Additional metadata
+    stats: pd.DataFrame = None      # Statistics (EdaValidator only)
+```
+
+## NullCheckValidator
+
+Checks for null values in specified columns.
+
+```python
+from epftoolbox2.data.validators import NullCheckValidator
+
+validator = NullCheckValidator(
+    columns=["load_actual", "price"],  # Optional. Columns to check (None = all)
+    allow_nulls=False,                 # Optional. If True, only checks column existence
+)
+```
+
+**Errors:**
+- Missing required columns
+- Columns containing null values (if `allow_nulls=False`)
+
+---
+
+## ContinuityValidator
+
+Checks for gaps in datetime index.
+
+```python
+from epftoolbox2.data.validators import ContinuityValidator
+
+validator = ContinuityValidator(
+    freq="1h",    # Optional. Expected frequency (default: "1h")
+)
+```
+
+**Errors:**
+- Non-DatetimeIndex
+- Gaps larger than expected frequency
+
+**Info:** `gaps` (list of gap details), `gap_count`, `expected_freq`
+
+---
+
+## EdaValidator
+
+Generates exploratory data analysis statistics.
+
+```python
+from epftoolbox2.data.validators import EdaValidator
+
+validator = EdaValidator(
+    columns=None,    # Optional. Columns to analyze (None = all numeric)
+)
+```
+
+**Prints rich table with:** column, dtype, count, null_count, null%, min, max, mean, std
+
+**Stats DataFrame:** Contains all statistics for programmatic access.
+
+---
+
+# MODELS
+
+All models extend `BaseModel` base class.
+
+## Predictor Specification
+
+Predictors can be specified three ways:
+
+```python
+predictors = [
+    # 1. Static column name
+    "load_actual",
+    "weekday",
+    
+    # 2. Template with {horizon} placeholder
+    "warsaw_temperature_2m_d+{horizon}",
+    
+    # 3. Lambda function receiving horizon (1-7)
+    lambda h: f"weather_d+{h}",
+]
+```
+
+## OLSModel
+
+Ordinary Least Squares linear regression (sklearn LinearRegression).
+
+```python
+from epftoolbox2.models import OLSModel
+
+model = OLSModel(
+    predictors=predictors,       # Required. List of predictor specifications
+    training_window=365,         # Optional. Days of training data (default: 365)
+    name="OLS Baseline",         # Optional. Model display name
+)
+```
+
+---
+
+## LassoCVModel
+
+Lasso regression with cross-validated regularization (sklearn LassoCV).
+
+```python
+from epftoolbox2.models import LassoCVModel
+
+model = LassoCVModel(
+    predictors=predictors,       # Required. List of predictor specifications
+    training_window=365,         # Optional. Days of training data (default: 365)
+    cv=5,                        # Optional. Cross-validation folds (default: 5)
+    max_iter=10000,              # Optional. Max iterations (default: 10000)
+    name="Lasso CV",             # Optional. Model display name
+)
+```
+
+---
+
+## Model Training Process
+
+For each (hour, horizon, day) combination:
+1. Extract training data (rolling window)
+2. Scale features with StandardScaler (auto-skips binary features)
+3. Fit model on scaled data
+4. Predict and inverse-scale prediction
+5. Store result with metadata
+
+**Result record structure:**
+```python
+{
+    "run_date": "2024-01-01",      # Date when prediction was made
+    "target_date": "2024-01-08",   # Date being predicted
+    "hour": 14,                     # Hour of day (0-23)
+    "horizon": 7,                   # Days ahead (1-7)
+    "day_in_test": 0,              # Day index in test period
+    "prediction": 85.5,            # Predicted value
+    "actual": 82.3,                # Actual value
+    "coefficients": [...],         # Model coefficients
+}
+```
+
+---
+
+# EVALUATORS
+
+All evaluators implement `Evaluator` base class with:
+- `name: str` - Display name for reports
+- `compute(df: pd.DataFrame) -> float` - Compute metric from prediction/actual columns
+
+## MAEEvaluator
+
+Mean Absolute Error.
+
+```python
+from epftoolbox2.evaluators import MAEEvaluator
+
+evaluator = MAEEvaluator()
+# evaluator.name = "MAE"
+# evaluator.compute(df) = (df["prediction"] - df["actual"]).abs().mean()
+```
+
+---
+
+# EXPORTERS
+
+All exporters implement `Exporter` base class with:
+- `export(report: EvaluationReport) -> None`
+
+## TerminalExporter
+
+Prints results to console with rich formatting.
+
+```python
+from epftoolbox2.exporters import TerminalExporter
+
+exporter = TerminalExporter(
+    show=["summary", "horizon"],  # Optional. Tables to display
+)
+```
+
+**Show options:** `"summary"`, `"hour"`, `"horizon"`, `"hour_horizon"`, `"year"`, `"year_horizon"`
+
+---
+
+## ExcelExporter
+
+Exports results to Excel with conditional formatting (green-yellow-red color scale).
+
+```python
+from epftoolbox2.exporters import ExcelExporter
+
+exporter = ExcelExporter(
+    path="results.xlsx",                                    # Required. Output path
+    sheets=["summary", "hour", "horizon", "hour_horizon"],  # Optional. Sheets to include
+)
+```
+
+**Sheet options:** `"summary"`, `"hour"`, `"horizon"`, `"hour_horizon"`, `"year"`, `"year_horizon"`
+
+---
+
+# EVALUATION REPORT
+
+Returned by `ModelPipeline.run()`.
+
+```python
+report = pipeline.run(...)
+
+# Available methods:
+report.summary()           # DataFrame: model × metrics
+report.by_hour()           # DataFrame: model × hour × metrics  
+report.by_horizon()        # DataFrame: model × horizon × metrics
+report.by_hour_horizon()   # DataFrame: model × hour × horizon × metrics
+report.by_year()           # DataFrame: model × year × metrics
+report.by_year_horizon()   # DataFrame: model × year × horizon × metrics
+```
+
+---
+
+# CACHING
+
+## Source Caching (DataPipeline)
+
+```python
+# Enable automatic caching (stored in .cache/sources/)
+df = pipeline.run(start, end, cache=True)
+
+# Custom cache file (single CSV file)
+df = pipeline.run(start, end, cache="custom_cache.csv")
+
+# No caching
+df = pipeline.run(start, end, cache=False)
+```
+
+**Cache behavior:**
+- Each source gets unique cache key based on its configuration
+- Only fetches missing date ranges from API
+- Merges cached and fresh data automatically
+
+## Result Caching (ModelPipeline)
+
+```python
+# Enable incremental training (resumable)
+report = pipeline.run(..., save_dir="results")
+
+# Results stored as JSONL files: results/{model_name}.jsonl
+# On re-run, only missing (hour, horizon, day) combinations are computed
+```
+
+---
+
+# COMPLETE EXAMPLES
+
+## Example 1: Data Pipeline Only
+
+```python
+import os
+from epftoolbox2.pipelines import DataPipeline
+from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
+from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
+from epftoolbox2.data.validators import NullCheckValidator
+
+ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
+
+pipeline = (
+    DataPipeline()
+    .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
+    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+    .add_source(CalendarSource(country="PL", holidays="binary", weekday="number", hour="number"))
+    .add_transformer(ResampleTransformer(freq="1h"))
+    .add_transformer(LagTransformer(columns=["load_actual"], lags=[1, 2, 7], freq="day"))
+    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+)
+
+df = pipeline.run(start="2023-01-01", end="2024-04-01", cache=True)
+df.to_csv("data.csv")
+```
+
+---
+
+## Example 2: Model Pipeline Only
+
+```python
+import os
+os.environ["MAX_THREADS"] = "16"
+
+import pandas as pd
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.models import OLSModel, LassoCVModel
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.exporters import ExcelExporter, TerminalExporter
+
+df = pd.read_csv("data.csv", index_col=0, parse_dates=True)
+
+predictors = [
+    "load_actual",
+    "weekday",
+    "hour",
+    "is_holiday",
+    "load_actual_d-1",
+    "load_actual_d-7",
+    "warsaw_temperature_2m_d+{horizon}",
+]
+
+pipeline = (
+    ModelPipeline()
+    .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS Baseline"))
+    .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=5, name="Lasso CV"))
+    .add_evaluator(MAEEvaluator())
+    .add_exporter(TerminalExporter())
+    .add_exporter(ExcelExporter("results.xlsx"))
+)
+
+report = pipeline.run(
+    data=df,
+    test_start="2024-02-01",
+    test_end="2024-03-01",
+    target="price",
+    horizon=7,
+    save_dir="results",
+)
+
+print(report.summary())
+print(report.by_horizon())
+```
+
+---
+
+## Example 3: Full Workflow
+
+```python
+import os
+os.environ["MAX_THREADS"] = "16"
+
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
+from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
+from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.models import OLSModel, LassoCVModel
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.exporters import ExcelExporter, TerminalExporter
+
+ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
+
+# Step 1: Data Pipeline
+data_pipeline = (
+    DataPipeline()
+    .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
+    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+    .add_source(CalendarSource(country="PL", holidays="binary"))
+    .add_transformer(ResampleTransformer(freq="1h"))
+    .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
+    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+)
+
+df = data_pipeline.run(start="2023-05-01", end="2024-07-01", cache=True)
+
+# Step 2: Model Pipeline
+predictors = [
+    "load_actual",
+    "is_holiday",
+    "load_actual_d-1",
+    "load_actual_d-2",
+    "price_d-1",
+    "price_d-2",
+    lambda h: f"warsaw_temperature_2m_d+{h}",
+]
+
+model_pipeline = (
+    ModelPipeline()
+    .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
+    .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=5, name="LassoCV"))
+    .add_evaluator(MAEEvaluator())
+    .add_exporter(TerminalExporter())
+    .add_exporter(ExcelExporter("results.xlsx"))
+)
+
+report = model_pipeline.run(
+    data=df,
+    test_start="2024-06-01",
+    test_end="2024-06-30",
+    target="price",
+    horizon=7,
+    save_dir="results",
+)
+
+print(report.summary())
+print(report.by_horizon())
+```
+
+---
+
+# API REFERENCE
+
+## DataPipeline
+
+```python
+class DataPipeline:
+    def __init__(
+        self,
+        sources: Optional[List[DataSource]] = None,
+        transformers: Optional[List[Transformer]] = None,
+        validators: Optional[List[Validator]] = None,
+    ): ...
+    
+    def add_source(self, source: DataSource) -> "DataPipeline": ...
+    def add_transformer(self, transformer: Transformer) -> "DataPipeline": ...
+    def add_validator(self, validator: Validator) -> "DataPipeline": ...
+    
+    def run(
+        self,
+        start: Union[str, pd.Timestamp],  # Start date ("YYYY-MM-DD" or Timestamp)
+        end: Union[str, pd.Timestamp],    # End date
+        cache: Union[bool, str] = False,  # True, False, or path string
+    ) -> pd.DataFrame: ...
+    
+    def save(self, path: Union[str, Path]) -> None: ...  # Save to YAML
+    
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "DataPipeline": ...  # Load from YAML
+```
+
+## ModelPipeline
+
+```python
+class ModelPipeline:
+    def __init__(self): ...
+    
+    def add_model(self, model: BaseModel) -> "ModelPipeline": ...
+    def add_evaluator(self, evaluator: Evaluator) -> "ModelPipeline": ...
+    def add_exporter(self, exporter: Exporter) -> "ModelPipeline": ...
+    
+    def run(
+        self,
+        data: pd.DataFrame,              # DataFrame with DatetimeIndex
+        test_start: str,                  # Test period start ("YYYY-MM-DD")
+        test_end: str,                    # Test period end
+        target: str = "price",            # Target column name
+        horizon: int = 7,                 # Max forecast horizon (days)
+        save_dir: Optional[str] = None,   # Directory for incremental results
+    ) -> EvaluationReport: ...
+```
+
+---
+
+# ENVIRONMENT VARIABLES
+
+```python
+os.environ["MAX_THREADS"] = "16"         # Parallel threads for model training (default: CPU count)
+os.environ["ENTSOE_API_KEY"] = "..."     # ENTSOE API key
+
+# For optimal multithreading performance (limit internal threading):
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
+# Python 3.13t+ free-threading:
+os.environ["PYTHON_GIL"] = "0"           # Or run with -Xgil=0
+```
+
+---
+
+# SUPPORTED COUNTRIES
+
+## ENTSOE Countries
+AL, AT, BA, BE, BG, BY, CH, CZ, DE, DE_50HZ, DE_AMPRION, DE_AT_LU, DE_LU, DE_TENNET, DE_TRANSNET, DK, DK_1, DK_2, EE, ES, FI, FR, GB, GB_ELECLINK, GB_IFA, GB_IFA2, GB_NIR, GE, GR, HR, HU, IE, IE_SEM, IS, IT, IT_* (many regions), LT, LU, LV, MD, ME, MK, MT, NL, NO, NO_1-5, PL, PT, RO, RS, RU, SE, SE_1-4, SI, SK, TR, UA, UK, XK
+
+## CalendarSource Countries (Holidays)
+AT, BE, BG, CH, CZ, DE, DK, ES, FI, FR, GB, GR, HU, IE, IT, NL, NO, PL, PT, RO, SE, SK
+
+---
+
+# COMMON PITFALLS
+
+## NaN Values in Predictors
+Models will fail with `ValueError: Input X contains NaN` if predictors have null values. Solutions:
+1. Ensure sufficient lag data exists (check training window)
+2. Use `.dropna()` before model training
+3. Choose predictors that exist for all rows
+
+## Timezone Handling
+- All internal processing uses UTC
+- Sources convert to UTC automatically  
+- Use TimezoneTransformer if you need local time features
+
+## Column Naming
+- Lag columns: `{column}_{unit}-{lag}` (e.g., `load_actual_d-1`)
+- Weather forecasts: `{prefix}_{variable}_d+{horizon}` (e.g., `warsaw_temperature_2m_d+1`)
+- Predictor templates use `{horizon}` placeholder, replaced with 1-7
+
+## Memory with Large Datasets
+- Use `cache=True` to avoid re-downloading
+- Use `save_dir` for incremental model training
+- Set `MAX_THREADS` appropriately for your system
+
+---
+
+# EXTENDING THE LIBRARY
+
+## Custom DataSource
+
+```python
+from epftoolbox2.data.sources.base import DataSource
+
+class MySource(DataSource):
+    def __init__(self, ...):
+        self._validate_config()
+    
+    def _validate_config(self) -> bool:
+        # Validate parameters, raise ValueError if invalid
+        return True
+    
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        # Return DataFrame with DatetimeIndex (UTC)
+        ...
+    
+    def get_cache_config(self) -> Optional[dict]:
+        # Return dict for caching, or None to disable
+        return {"source_type": "my_source", ...}
+```
+
+## Custom Transformer
+
+```python
+from epftoolbox2.data.transformers.base import Transformer
+
+class MyTransformer(Transformer):
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Return transformed DataFrame
+        ...
+```
+
+## Custom Validator
+
+```python
+from epftoolbox2.data.validators.base import Validator
+from epftoolbox2.data.validators.result import ValidationResult
+
+class MyValidator(Validator):
+    def validate(self, df: pd.DataFrame) -> ValidationResult:
+        result = ValidationResult()
+        # Add errors/warnings to result
+        return result
+```
+
+## Custom Model
+
+```python
+from epftoolbox2.models.base import BaseModel
+
+class MyModel(BaseModel):
+    def _fit_predict(self, train_x, train_y, test_x) -> Tuple[float, list]:
+        # Fit model, return (prediction, coefficients)
+        ...
+```
+
+## Custom Evaluator
+
+```python
+from epftoolbox2.evaluators.base import Evaluator
+
+class MyEvaluator(Evaluator):
+    name = "MyMetric"
+    
+    def compute(self, df: pd.DataFrame) -> float:
+        # df has "prediction" and "actual" columns
+        return ...
+```
+
+## Custom Exporter
+
+```python
+from epftoolbox2.exporters.base import Exporter
+
+class MyExporter(Exporter):
+    def export(self, report: EvaluationReport) -> None:
+        # Export report data
+        ...
+```
