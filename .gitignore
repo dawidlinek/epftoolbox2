@@ -151,5 +151,5 @@ Thumbs.db
 # Cache directory for data sources
 .cache/
 
-main.py
-results/*.jsonl
+main[1-9]*.py
+*.jsonl
