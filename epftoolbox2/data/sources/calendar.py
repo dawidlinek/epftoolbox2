@@ -127,7 +127,7 @@ class CalendarSource(DataSource):
             df[f"{self.prefix}weekday_name"] = weekday_series.map(lambda x: WEEKDAY_NAMES[x])
         elif self.weekday == "onehot":
             weekday_names = weekday_series.map(lambda x: WEEKDAY_NAMES[x])
-            dummies = pd.get_dummies(weekday_names, prefix=f"{self.prefix}weekday", dtype=int)
+            dummies = pd.get_dummies(weekday_names, prefix=f"{self.prefix}is", dtype=int)
             df = pd.concat([df, dummies], axis=1)
         return df
 
@@ -137,7 +137,7 @@ class CalendarSource(DataSource):
         if self.hour == "number":
             df[f"{self.prefix}hour"] = hour_series
         elif self.hour == "onehot":
-            dummies = pd.get_dummies(hour_series, prefix=f"{self.prefix}hour", dtype=int)
+            dummies = pd.get_dummies(hour_series, prefix=f"{self.prefix}is", dtype=int)
             df = pd.concat([df, dummies], axis=1)
         return df
 
@@ -150,7 +150,7 @@ class CalendarSource(DataSource):
             df[f"{self.prefix}month_name"] = month_series.map(lambda x: MONTH_NAMES[x - 1])
         elif self.month == "onehot":
             month_names = month_series.map(lambda x: MONTH_NAMES[x - 1])
-            dummies = pd.get_dummies(month_names, prefix=f"{self.prefix}month", dtype=int)
+            dummies = pd.get_dummies(month_names, prefix=f"{self.prefix}is", dtype=int)
             df = pd.concat([df, dummies], axis=1)
         return df
 
