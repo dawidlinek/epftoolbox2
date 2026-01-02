@@ -1,5 +1,4 @@
 import pytest
-import pandas as pd
 import numpy as np
 from epftoolbox2.scalers import StandardScaler
 
@@ -8,91 +7,90 @@ class TestStandardScaler:
     @pytest.fixture
     def sample_data(self):
         np.random.seed(42)
-        train = pd.DataFrame(
-            {
-                "price": np.random.randn(100) * 10 + 50,
-                "load": np.random.randn(100) * 1000 + 5000,
-                "temperature": np.random.randn(100) * 5 + 15,
-                "is_holiday": np.random.choice([0, 1], 100),
-                "hour": np.tile(np.arange(24), 5)[:100],
-            }
+        train_x = np.column_stack(
+            [
+                np.random.randn(100) * 1000 + 5000,  # load
+                np.random.randn(100) * 5 + 15,  # temperature
+                np.random.choice([0, 1], 100),  # is_holiday (binary)
+            ]
         )
-        test = pd.DataFrame(
-            {
-                "price": [55.0],
-                "load": [5500.0],
-                "temperature": [18.0],
-                "is_holiday": [1],
-                "hour": [12],
-            }
-        )
-        return train, test
+        train_y = np.random.randn(100) * 10 + 50  # price
+        test_x = np.array([[5500.0, 18.0, 1]])
+        return train_x, train_y, test_x
 
     def test_fit_transform_scales_continuous(self, sample_data):
-        train, test = sample_data
+        train_x, train_y, test_x = sample_data
         scaler = StandardScaler()
 
-        train_scaled, test_scaled = scaler.fit_transform(train, test, ["load", "temperature"], "price")
+        train_x_scaled, train_y_scaled, test_x_scaled = scaler.fit_transform(train_x, train_y, test_x)
 
-        assert abs(train_scaled["load"].mean()) < 0.1
-        assert abs(train_scaled["load"].std() - 1.0) < 0.1
-        assert abs(train_scaled["temperature"].mean()) < 0.1
+        # load column (index 0) should be scaled
+        assert abs(train_x_scaled[:, 0].mean()) < 0.1
+        assert abs(train_x_scaled[:, 0].std() - 1.0) < 0.1
+        # temperature column (index 1) should be scaled
+        assert abs(train_x_scaled[:, 1].mean()) < 0.1
 
     def test_fit_transform_skips_binary(self, sample_data):
-        train, test = sample_data
+        train_x, train_y, test_x = sample_data
         scaler = StandardScaler()
 
-        train_scaled, test_scaled = scaler.fit_transform(train, test, ["load", "is_holiday"], "price")
+        train_x_scaled, _, _ = scaler.fit_transform(train_x, train_y, test_x)
 
-        assert set(train_scaled["is_holiday"].unique()).issubset({0, 1})
-        assert train_scaled["is_holiday"].mean() == train["is_holiday"].mean()
+        # is_holiday column (index 2) should NOT be scaled - values should remain 0/1
+        unique = np.unique(train_x_scaled[:, 2])
+        assert set(unique).issubset({0, 1})
+        assert train_x_scaled[:, 2].mean() == train_x[:, 2].mean()
 
     def test_inverse_restores_target(self, sample_data):
-        train, test = sample_data
+        train_x, train_y, test_x = sample_data
         scaler = StandardScaler()
 
-        train_scaled, _ = scaler.fit_transform(train, test, ["load"], "price")
+        scaler.fit_transform(train_x, train_y, test_x)
 
-        original_mean = train["price"].mean()
+        original_mean = train_y.mean()
         restored = scaler.inverse(0.0)
 
         assert abs(restored - original_mean) < 0.01
 
     def test_handles_zero_std(self):
-        train = pd.DataFrame({"x": [5.0] * 10, "y": [1.0] * 10})
-        test = pd.DataFrame({"x": [5.0], "y": [1.0]})
+        train_x = np.array([[5.0]] * 10)
+        train_y = np.array([1.0] * 10)
+        test_x = np.array([[5.0]])
 
         scaler = StandardScaler()
-        train_scaled, test_scaled = scaler.fit_transform(train, test, ["x"], "y")
+        train_x_scaled, _, _ = scaler.fit_transform(train_x, train_y, test_x)
 
-        assert not train_scaled["x"].isna().any()
-
-    def test_categorical_dtype_not_scaled(self):
-        train = pd.DataFrame(
-            {
-                "category": pd.Categorical(["A", "B", "A", "C"]),
-                "value": [1.0, 2.0, 3.0, 4.0],
-            }
-        )
-        test = pd.DataFrame(
-            {
-                "category": pd.Categorical(["B"]),
-                "value": [2.5],
-            }
-        )
-
-        scaler = StandardScaler()
-        train_scaled, test_scaled = scaler.fit_transform(train, test, ["category"], "value")
-
-        assert train_scaled["category"].equals(train["category"])
+        assert not np.isnan(train_x_scaled).any()
 
     def test_does_not_modify_original(self, sample_data):
-        train, test = sample_data
-        train_orig = train.copy()
-        test_orig = test.copy()
+        train_x, train_y, test_x = sample_data
+        train_x_orig = train_x.copy()
+        train_y_orig = train_y.copy()
+        test_x_orig = test_x.copy()
 
         scaler = StandardScaler()
-        scaler.fit_transform(train, test, ["load"], "price")
+        scaler.fit_transform(train_x, train_y, test_x)
 
-        pd.testing.assert_frame_equal(train, train_orig)
-        pd.testing.assert_frame_equal(test, test_orig)
+        np.testing.assert_array_equal(train_x, train_x_orig)
+        np.testing.assert_array_equal(train_y, train_y_orig)
+        np.testing.assert_array_equal(test_x, test_x_orig)
+
+    def test_get_scalable_mask(self):
+        # Mix of continuous and binary columns
+        arr = np.column_stack(
+            [
+                np.random.randn(100),  # continuous - should be True
+                np.random.choice([0, 1], 100),  # binary - should be False
+                np.array([0.0] * 100),  # constant 0 - should be False
+                np.array([1.0] * 100),  # constant 1 - should be False
+                np.arange(100, dtype=float),  # continuous - should be True
+            ]
+        )
+
+        mask = StandardScaler.get_scalable_mask(arr)
+
+        assert mask[0] == True  # continuous
+        assert mask[1] == False  # binary
+        assert mask[2] == False  # constant 0
+        assert mask[3] == False  # constant 1
+        assert mask[4] == True  # continuous

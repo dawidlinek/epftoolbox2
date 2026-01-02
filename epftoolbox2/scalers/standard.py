@@ -1,5 +1,5 @@
-import pandas as pd
-from typing import List, Tuple
+import numpy as np
+from typing import Tuple
 
 
 class StandardScaler:
@@ -9,33 +9,43 @@ class StandardScaler:
 
     def fit_transform(
         self,
-        train: pd.DataFrame,
-        test: pd.DataFrame,
-        predictors: List[str],
-        target: str,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        train, test = train.copy(), test.copy()
+        train_x: np.ndarray,
+        train_y: np.ndarray,
+        test_x: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        train_x = train_x.astype(np.float64, copy=True)
+        test_x = test_x.astype(np.float64, copy=True)
 
-        for col in predictors:
-            if self._is_scalable(train[col]):
-                mean = train[col].mean()
-                std = train[col].std() or 1
-                train[col] = (train[col] - mean) / std
-                test[col] = (test[col] - mean) / std
+        scalable_mask = self.get_scalable_mask(train_x)
 
-        self._target_mean = train[target].mean()
-        self._target_std = train[target].std() or 1
-        train[target] = (train[target] - self._target_mean) / self._target_std
+        for i in range(train_x.shape[1]):
+            if not scalable_mask[i]:
+                continue
+            col = train_x[:, i]
+            mean = np.nanmean(col)
+            std = np.nanstd(col, ddof=1)
+            if std == 0 or np.isnan(std):
+                std = 1.0
+            train_x[:, i] = (col - mean) / std
+            test_x[:, i] = (test_x[:, i] - mean) / std
 
-        return train, test
+        self._target_mean = np.nanmean(train_y)
+        self._target_std = np.nanstd(train_y, ddof=1)
+        if self._target_std == 0 or np.isnan(self._target_std):
+            self._target_std = 1.0
+        train_y_scaled = (train_y - self._target_mean) / self._target_std
 
-    def _is_scalable(self, series: pd.Series) -> bool:
-        unique = series.dropna().unique()
-        if len(unique) <= 2 and set(unique).issubset({0, 1}):
-            return False
-        if series.dtype.name == "category":
-            return False
-        return True
+        return train_x, train_y_scaled, test_x
+
+    @staticmethod
+    def get_scalable_mask(arr: np.ndarray) -> np.ndarray:
+        mask = np.ones(arr.shape[1], dtype=bool)
+        for i in range(arr.shape[1]):
+            col = arr[:, i]
+            unique = np.unique(col[~np.isnan(col)])
+            if len(unique) <= 2 and np.all((unique == 0) | (unique == 1)):
+                mask[i] = False
+        return mask
 
     def inverse(self, value: float) -> float:
         return value * self._target_std + self._target_mean
