@@ -65,7 +65,11 @@ class BaseModel(ABC):
                 completed = len(all_tasks) - len(tasks)
                 task_id = progress.add_task(f"[cyan]{self.name}", total=len(all_tasks), completed=completed)
                 for future in as_completed(futures):
-                    result = future.result()
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        print(f"Error running task {futures[future]}: {e}")
+                        continue
                     if store:
                         store.save(result)
                     else:
