@@ -7,12 +7,28 @@ class LagTransformer(Transformer):
     Args:
         columns: Column name(s) to create lags for. If None, uses all columns.
         lags: Positive values look back, negative values look forward.
-        freq: Pandas frequency string (e.g., "1h", "15min", "1D"). Default is "1h".
+        freq: Frequency string. Accepts intuitive names ("day", "hour", "minute", "second")
+              or pandas frequency strings (e.g., "1h", "15min", "1D"). Default is "1h".
 
     Example:
-        >>> transformer = LagTransformer(columns=["price"], lags=[1, 24], freq="1h")
+        >>> transformer = LagTransformer(columns=["price"], lags=[1, 24], freq="hour")
         >>> result = transformer.transform(df)
     """
+
+    _FREQ_MAPPING = {
+        "day": "1D",
+        "days": "1D",
+        "d": "1D",
+        "hour": "1h",
+        "hours": "1h",
+        "h": "1h",
+        "minute": "1min",
+        "minutes": "1min",
+        "min": "1min",
+        "second": "1s",
+        "seconds": "1s",
+        "s": "1s",
+    }
 
     def __init__(
         self,
@@ -22,7 +38,8 @@ class LagTransformer(Transformer):
     ):
         self.columns = [columns] if isinstance(columns, str) else columns
         self.lags = [lags] if isinstance(lags, int) else lags
-        self.freq = pd.Timedelta(freq)
+        freq_normalized = self._FREQ_MAPPING.get(freq.lower(), freq)
+        self.freq = pd.Timedelta(freq_normalized)
         self._validate()
 
     def _validate(self) -> None:
