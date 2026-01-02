@@ -72,7 +72,7 @@ class BaseModel(ABC):
                     try:
                         result = future.result()
                     except Exception as e:
-                        print(f"Error running task {futures[future]}: {e}")
+                        print(f"Error running task (hour={futures[future][0]}, horizon={futures[future][1]}, day={futures[future][2]}): {e}")
                         continue
                     if store:
                         store.save(result)
