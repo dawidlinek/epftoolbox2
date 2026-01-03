@@ -98,7 +98,7 @@ For parallel model training on multi-core systems, use Python 3.14t (free-thread
    ```python
    import os
 
-   # Disable GIL (Python 3.14t only)
+   # Disable GIL (Python 3.13t+ only)
    os.environ["PYTHON_GIL"] = "0"
 
    # Set number of parallel threads (adjust to your CPU cores)
