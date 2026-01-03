@@ -24,10 +24,10 @@ from epftoolbox2.exporters import ExcelExporter, TerminalExporter
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_API_KEY_HERE")
 
 DATA_START = "2023-05-01"
-DATA_END = "2024-07-01"
+DATA_END = "2024-08-01"
 
 TEST_START = "2024-06-01"
-TEST_END = "2024-06-01"
+TEST_END = "2024-07-01"
 
 data_pipeline = (
     DataPipeline()
