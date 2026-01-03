@@ -1,0 +1,134 @@
+---
+title: Installation
+description: How to install epftoolbox2
+---
+
+import { Steps, Tabs, TabItem, Aside, Badge, Code } from '@astrojs/starlight/components';
+
+# Installation
+
+<Steps>
+
+1. **Install the package**
+
+   <Tabs>
+     <TabItem label="pip">
+       ```bash
+       pip install epftoolbox2
+       ```
+     </TabItem>
+     <TabItem label="uv">
+       ```bash
+       uv add epftoolbox2
+       ```
+     </TabItem>
+     <TabItem label="From source">
+       ```bash
+       git clone https://github.com/dawidlinek/epftoolbox2.git
+       cd epftoolbox2
+       pip install -e .
+       ```
+     </TabItem>
+   </Tabs>
+
+2. **Verify installation**
+
+   ```python
+   import epftoolbox2
+   from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+
+   print("epftoolbox2 installed successfully!")
+   ```
+
+3. **Configure for parallel processing** (optional but recommended)
+
+   See the section below for GIL-free Python setup.
+
+</Steps>
+
+---
+
+## Requirements
+
+- Python 3.10+ (Python 3.14t recommended for parallel processing)
+- pandas, numpy, scikit-learn
+- requests (for API sources)
+- openpyxl (for Excel export)
+- rich (for terminal output)
+
+---
+
+## GIL-Free Python & Multithreading <Badge text="Python 3.13t+" variant="tip" />
+
+For parallel model training on multi-core systems, use Python 3.14t (free-threading build) which removes the Global Interpreter Lock (GIL).
+
+<Aside>
+  Multithreading in epftoolbox2 requires GIL-free Python. Standard Python builds will run training sequentially.
+</Aside>
+
+### Installing Python 3.14t
+
+<Tabs>
+  <TabItem label="uv (recommended)">
+    ```bash
+    uv python install 3.14t
+    uv venv --python 3.14t
+    ```
+  </TabItem>
+  <TabItem label="pyenv (Windows)">
+    ```bash
+    pyenv install 3.14.0t
+    pyenv local 3.14.0t
+    ```
+  </TabItem>
+  <TabItem label="pyenv (Linux/macOS)">
+    ```bash
+    pyenv install 3.14.0t
+    pyenv local 3.14.0t
+    ```
+  </TabItem>
+</Tabs>
+
+### Complete Setup
+
+<Steps>
+
+1. **Disable GIL and configure threading**
+
+   ```python
+   import os
+
+   # Disable GIL (Python 3.14t only)
+   os.environ["PYTHON_GIL"] = "0"
+
+   # Set number of parallel threads (adjust to your CPU cores)
+   os.environ["MAX_THREADS"] = "16"
+
+   # Prevent nested threading from NumPy/BLAS libraries
+   os.environ["OMP_NUM_THREADS"] = "1"
+   os.environ["MKL_NUM_THREADS"] = "1"
+   os.environ["OPENBLAS_NUM_THREADS"] = "1"
+   ```
+
+2. **Import the library**
+
+   ```python
+   from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+   from epftoolbox2.models import OLSModel, LassoCVModel
+   ```
+
+</Steps>
+
+<Aside type="caution">
+  Environment variables **must be set before** importing libraries that depend on them.
+</Aside>
+
+### Alternative: Command Line
+
+```bash
+python -Xgil=0 your_script.py
+```
+
+<Aside type="tip">
+  With GIL-free Python, model training is **much faster** on multi-core systems.
+</Aside>

@@ -1,0 +1,18 @@
+
+export default new Map([
+["src/content/docs/data-pipeline/caching.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fdata-pipeline%2Fcaching.mdx&astroContentModuleFlag=true")],
+["src/content/docs/data-pipeline/overview.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fdata-pipeline%2Foverview.mdx&astroContentModuleFlag=true")],
+["src/content/docs/data-sources/calendar.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fdata-sources%2Fcalendar.mdx&astroContentModuleFlag=true")],
+["src/content/docs/data-sources/openmeteo.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fdata-sources%2Fopenmeteo.mdx&astroContentModuleFlag=true")],
+["src/content/docs/data-sources/entsoe.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fdata-sources%2Fentsoe.mdx&astroContentModuleFlag=true")],
+["src/content/docs/model-pipeline/caching.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fmodel-pipeline%2Fcaching.mdx&astroContentModuleFlag=true")],
+["src/content/docs/model-pipeline/overview.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fmodel-pipeline%2Foverview.mdx&astroContentModuleFlag=true")],
+["src/content/docs/models/lasso.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fmodels%2Flasso.mdx&astroContentModuleFlag=true")],
+["src/content/docs/models/ols.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fmodels%2Fols.mdx&astroContentModuleFlag=true")],
+["src/content/docs/getting-started/installation.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fgetting-started%2Finstallation.mdx&astroContentModuleFlag=true")],
+["src/content/docs/getting-started/introduction.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fgetting-started%2Fintroduction.mdx&astroContentModuleFlag=true")],
+["src/content/docs/transformers/lag.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Ftransformers%2Flag.mdx&astroContentModuleFlag=true")],
+["src/content/docs/getting-started/quickstart.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Fgetting-started%2Fquickstart.mdx&astroContentModuleFlag=true")],
+["src/content/docs/transformers/resample.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Ftransformers%2Fresample.mdx&astroContentModuleFlag=true")],
+["src/content/docs/transformers/timezone.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fdocs%2Ftransformers%2Ftimezone.mdx&astroContentModuleFlag=true")]]);
+		

@@ -1,6 +1,8 @@
 # epftoolbox2
 
-A Python library for electricity price forecasting with modular data pipelines and model evaluation.
+A modern Python library for electricity price forecasting with modular data pipelines and model evaluation. Built as a complete rewrite of the original [epftoolbox](https://github.com/jeslago/epftoolbox), this library provides a flexible, extensible framework for downloading energy market data, building forecasting models, and evaluating their performance.
+
+📖 **[Documentation](https://dawidlinek.github.io/epftoolbox2)** 
 
 ## Installation
 

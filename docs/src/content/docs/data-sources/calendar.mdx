@@ -1,0 +1,104 @@
+---
+title: CalendarSource
+description: Generate calendar features (holidays, weekday, hour, month)
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# CalendarSource
+
+Generates calendar features including holidays, weekday, hour of day, and month.
+
+<Aside>
+  CalendarSource uses the [holidays](https://pypi.org/project/holidays/) Python package for holiday detection. See their documentation for the [complete list of supported countries](https://python-holidays.readthedocs.io/en/latest/index.html#available-countries).
+</Aside>
+
+## Basic Usage
+
+```python
+import pandas as pd
+from epftoolbox2.data.sources import CalendarSource
+
+source = CalendarSource(
+    country="PL",
+    holidays="binary",
+    weekday="number",
+    hour="number",
+)
+
+df = source.fetch(
+    start=pd.Timestamp("2024-01-01", tz="UTC"),
+    end=pd.Timestamp("2024-12-31", tz="UTC"),
+)
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `country` | str | Required | Country code for holidays |
+| `timezone` | str | Auto | Override default timezone |
+| `holidays` | str/bool | `"binary"` | Holiday output format |
+| `weekday` | str/bool | `"number"` | Weekday output format |
+| `hour` | str/bool | `False` | Hour output format |
+| `month` | str/bool | `False` | Month output format |
+| `prefix` | str | `""` | Column name prefix |
+
+<Aside type="tip">
+  The timezone is automatically extracted from the country code. It should match your `TimezoneTransformer` target if you're using one.
+</Aside>
+
+---
+
+## Output Formats
+
+### Holidays
+
+| Value | Columns | Example |
+|-------|---------|---------|
+| `False` | None | - |
+| `"binary"` | `is_holiday` | 0 or 1 |
+| `"name"` | `holiday_name` | "Christmas Day" or None |
+| `"onehot"` | `is_holiday`, `holiday_{name}` | Multiple columns |
+
+### Weekday
+
+| Value | Columns | Example |
+|-------|---------|---------|
+| `False` | None | - |
+| `"number"` | `weekday` | 0 (Monday) to 6 (Sunday) |
+| `"name"` | `weekday_name` | "monday", "tuesday", ... |
+| `"onehot"` | `is_monday`, `is_tuesday`, ... | 7 columns |
+
+### Hour
+
+| Value | Columns | Example |
+|-------|---------|---------|
+| `False` | None | - |
+| `"number"` | `hour` | 0 to 23 |
+| `"onehot"` | `is_0`, `is_1`, ..., `is_23` | 24 columns |
+
+### Month
+
+| Value | Columns | Example |
+|-------|---------|---------|
+| `False` | None | - |
+| `"number"` | `month` | 1 to 12 |
+| `"name"` | `month_name` | "january", "february", ... |
+| `"onehot"` | `is_january`, `is_february`, ... | 12 columns |
+
+---
+
+## Example: Full Features
+
+```python
+source = CalendarSource(
+    country="DE",
+    holidays="binary",
+    weekday="number",
+    hour="number",
+    month="number",
+)
+
+# Output columns: is_holiday, weekday, hour, month
+```

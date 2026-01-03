@@ -1,0 +1,68 @@
+---
+title: LassoCVModel
+description: Lasso regression with cross-validated regularization
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# LassoCVModel
+
+Lasso regression with cross-validated regularization using scikit-learn's [`LassoCV`](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LassoCV.html).
+
+## Basic Usage
+
+```python
+from epftoolbox2.models import LassoCVModel
+
+model = LassoCVModel(
+    predictors=["load_actual", "weekday", "is_holiday"],
+    training_window=365,
+    cv=5,
+    name="LassoCV",
+)
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `predictors` | List | Required | Predictor specifications |
+| `training_window` | int | `365` | Days of training data |
+| `cv` | int | `5` | Cross-validation folds |
+| `max_iter` | int | `10000` | Max optimization iterations |
+| `name` | str | `"Model"` | Display name for reports |
+
+## When to Use
+
+- **Many predictors**: Lasso performs automatic feature selection
+- **Correlated features**: Regularization handles multicollinearity
+- **Preventing overfitting**: L1 penalty shrinks coefficients
+
+## Example
+
+```python
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.models import LassoCVModel
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.exporters import TerminalExporter
+
+predictors = [
+    "load_actual",
+    "weekday",
+    "hour",
+    *[f"load_actual_h-{i}" for i in range(1, 169)],
+]
+
+pipeline = (
+    ModelPipeline()
+    .add_model(LassoCVModel(predictors=predictors, cv=5, name="LassoCV"))
+    .add_evaluator(MAEEvaluator())
+    .add_exporter(TerminalExporter())
+)
+
+report = pipeline.run(data=df, test_start="2024-02-01", test_end="2024-03-01")
+```
+
+<Aside>
+  Lasso can set coefficients to exactly zero, effectively removing unimportant features.
+</Aside>

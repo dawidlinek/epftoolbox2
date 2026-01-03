@@ -1,0 +1,19 @@
+{
+    "name": "epftoolbox2-docs",
+    "type": "module",
+    "version": "0.0.1",
+    "scripts": {
+        "dev": "astro dev",
+        "start": "astro dev",
+        "build": "astro build",
+        "preview": "astro preview",
+        "astro": "astro"
+    },
+    "dependencies": {
+        "@astrojs/starlight": "^0.31.0",
+        "astro": "^5.0.0",
+        "playwright": "^1.57.0",
+        "remark-mermaidjs": "^7.0.0",
+        "sharp": "^0.33.0"
+    }
+}
