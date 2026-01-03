@@ -1,0 +1,60 @@
+---
+title: OLSModel
+description: Ordinary Least Squares regression model
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# OLSModel
+
+Ordinary Least Squares linear regression using scikit-learn's [`LinearRegression`](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LinearRegression.html).
+
+## Basic Usage
+
+```python
+from epftoolbox2.models import OLSModel
+
+model = OLSModel(
+    predictors=["load_actual", "weekday", "is_holiday"],
+    training_window=365,
+    name="OLS",
+)
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `predictors` | List | Required | Predictor specifications |
+| `training_window` | int | `365` | Days of training data |
+| `name` | str | `"Model"` | Display name for reports |
+
+## Example
+
+```python
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.models import OLSModel
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.exporters import TerminalExporter
+
+predictors = [
+    "load_actual",
+    "weekday",
+    "hour",
+    "is_holiday",
+    *[f"load_actual_d-{i}" for i in [1, 7]],
+]
+
+pipeline = (
+    ModelPipeline()
+    .add_model(OLSModel(predictors=predictors, name="OLS"))
+    .add_evaluator(MAEEvaluator())
+    .add_exporter(TerminalExporter())
+)
+
+report = pipeline.run(data=df, test_start="2024-02-01", test_end="2024-03-01")
+```
+
+<Aside>
+  See [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/) for predictor specification options.
+</Aside>

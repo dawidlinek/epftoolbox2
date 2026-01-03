@@ -1,0 +1,123 @@
+---
+title: OpenMeteoSource
+description: Download weather forecast data from Open-Meteo API
+---
+
+import { Tabs, TabItem, Aside, Badge } from '@astrojs/starlight/components';
+
+# OpenMeteoSource
+
+Downloads weather forecast data from [Open-Meteo Previous Runs API](https://open-meteo.com/en/docs/previous-runs-api). **No API key required.**
+
+<Aside type="note">
+  This source uses the **Previous Runs API** to get historical weather forecasts as they were available at the time, which is essential for realistic backtesting.
+</Aside>
+
+## Basic Usage
+
+```python
+import pandas as pd
+from epftoolbox2.data.sources import OpenMeteoSource
+
+source = OpenMeteoSource(
+    latitude=52.2297,   # Warsaw
+    longitude=21.0122,
+    horizon=7,
+    prefix="warsaw",
+)
+
+df = source.fetch(
+    start=pd.Timestamp("2024-01-01", tz="UTC"),
+    end=pd.Timestamp("2024-06-01", tz="UTC"),
+)
+```
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `latitude` | float | Yes | - | Location latitude (-90 to 90) |
+| `longitude` | float | Yes | - | Location longitude (-180 to 180) |
+| `horizon` | int | No | 7 | Days ahead for forecasts |
+| `model` | str | No | `"jma_seamless"` | Weather model |
+| `columns` | List[str] | No | DEFAULT_COLUMNS | Weather variables |
+| `prefix` | str | No | `""` | Prefix for column names |
+
+## Rate Limiting
+
+<Aside type="caution">
+  Open-Meteo has API rate limits. When the limit is reached, the source automatically waits (e.g., 60 seconds) before retrying.
+</Aside>
+
+---
+
+## Output Column Naming
+
+Columns are named: `{prefix}_{variable}_d+{horizon}`
+
+```python
+# Example output columns:
+# warsaw_temperature_2m_d+1
+# warsaw_temperature_2m_d+2
+# ...
+# warsaw_temperature_2m_d+7
+```
+
+---
+
+## Default Weather Variables
+
+| Variable | Description |
+|----------|-------------|
+| `temperature_2m` | Temperature at 2m (°C) |
+| `rain` | Rain amount (mm) |
+| `showers` | Shower amount (mm) |
+| `snowfall` | Snowfall amount (cm) |
+| `relative_humidity_2m` | Relative humidity (%) |
+| `dew_point_2m` | Dew point (°C) |
+| `apparent_temperature` | Feels-like temperature (°C) |
+| `precipitation` | Total precipitation (mm) |
+| `weather_code` | WMO weather code |
+| `surface_pressure` | Surface pressure (hPa) |
+| `pressure_msl` | Sea-level pressure (hPa) |
+| `cloud_cover` | Cloud cover (%) |
+| `wind_speed_10m` | Wind speed at 10m (km/h) |
+| `wind_direction_10m` | Wind direction at 10m (°) |
+
+---
+
+## Example: Multiple Locations
+
+```python
+from epftoolbox2.pipelines import DataPipeline
+from epftoolbox2.data.sources import OpenMeteoSource
+
+# Polish voivodeship capitals
+cities = {
+    "warsaw": (52.2297, 21.0122),
+    "krakow": (50.0647, 19.9450),
+    "gdansk": (54.3520, 18.6466),
+}
+
+pipeline = DataPipeline()
+for name, (lat, lon) in cities.items():
+    pipeline.add_source(OpenMeteoSource(
+        latitude=lat,
+        longitude=lon,
+        horizon=7,
+        prefix=name,
+    ))
+
+df = pipeline.run(start="2024-01-01", end="2024-06-01", cache=True)
+```
+
+---
+
+## Output
+
+Data is returned with a **UTC DatetimeIndex**:
+
+```python
+print(df.columns[:5].tolist())
+# ['warsaw_temperature_2m_d+1', 'warsaw_temperature_2m_d+2', ...]
+```

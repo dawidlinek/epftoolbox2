@@ -1,0 +1,20 @@
+:root {
+  --sl-color-accent-low: #8B6A1F;
+  --sl-color-accent: #F2B751;
+  --sl-color-accent-high: #FBE5B3;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #FBE5B3;
+  --sl-color-accent: #D9A23D;
+  --sl-color-accent-high: #8B6A1F;
+}
+
+/* Mermaid diagrams - invert in dark mode */
+:root[data-theme='dark'] .mermaid svg {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+:root[data-theme='dark'] .mermaid {
+  background: transparent;
+}

@@ -1,0 +1,78 @@
+---
+title: ResampleTransformer
+description: Resample data to a regular frequency
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# ResampleTransformer
+
+Resamples data to a specified frequency with interpolation to fill gaps.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import ResampleTransformer
+
+transformer = ResampleTransformer(freq="1h")
+df = transformer.transform(df)
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `freq` | str | `"1h"` | Pandas frequency string |
+| `method` | str | `"linear"` | Interpolation method |
+
+## Frequency Strings
+
+| String | Meaning |
+|--------|---------|
+| `"1h"` | 1 hour |
+| `"30min"` | 30 minutes |
+| `"15min"` | 15 minutes |
+| `"1D"` | 1 day |
+
+## Interpolation Methods
+
+| Method | Description |
+|--------|-------------|
+| `"linear"` | Linear interpolation between points |
+| `"ffill"` | Forward fill (use last known value) |
+| `"bfill"` | Backward fill (use next known value) |
+
+---
+
+## Example: Handling DST Gaps
+
+When converting to a local timezone with daylight saving time, a gap can occur (e.g., 2:00 AM doesn't exist during spring-forward). Use `ResampleTransformer` to fill these gaps:
+
+```python
+from epftoolbox2.pipelines import DataPipeline
+from epftoolbox2.data.sources import EntsoeSource
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer
+
+pipeline = (
+    DataPipeline()
+    .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load"]))
+    # First convert to local timezone (creates DST gap)
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+    # Then resample to fill the gap
+    .add_transformer(ResampleTransformer(freq="1h", method="linear"))
+)
+
+df = pipeline.run(start="2024-03-30", end="2024-04-01")
+# The missing 2:00 AM hour during DST transition is now filled
+```
+
+<Aside type="tip">
+  Apply `ResampleTransformer` after `TimezoneTransformer` to handle DST gaps properly.
+</Aside>
+
+---
+
+## Notes
+
+- Input DataFrame must have a DatetimeIndex
+- Output values are rounded to 3 decimal places

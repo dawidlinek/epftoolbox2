@@ -1,0 +1,101 @@
+---
+title: LagTransformer
+description: Create lagged features for time series
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# LagTransformer
+
+Creates lagged features for time series analysis. Supports both positive lags (past values) and negative lags (future values).
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import LagTransformer
+
+transformer = LagTransformer(
+    columns=["load_actual", "price"],
+    lags=[1, 2, 7],
+    freq="day",
+)
+df = transformer.transform(df)
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `columns` | List[str] | Yes | Column names to create lags for |
+| `lags` | List[int] | Yes | Lag periods (positive=past, negative=future) |
+| `freq` | str | Yes | Time unit for lags |
+
+## Frequency Options
+
+| Input | Aliases | Time Delta |
+|-------|---------|------------|
+| `"day"` | `"days"`, `"d"` | 24 hours |
+| `"hour"` | `"hours"`, `"h"` | 1 hour |
+| `"minute"` | `"minutes"`, `"min"` | 1 minute |
+
+---
+
+## Output Column Naming
+
+| Lag | Output Column |
+|-----|---------------|
+| Positive (1) | `load_actual_d-1` (yesterday) |
+| Positive (7) | `load_actual_d-7` (week ago) |
+| Negative (-1) | `is_holiday_d+1` (tomorrow) |
+
+---
+
+## Example: Positive Lags (Historical Data)
+
+```python
+# Create lags for yesterday, 2 days ago, and 1 week ago
+transformer = LagTransformer(
+    columns=["load_actual"],
+    lags=[1, 2, 7],
+    freq="day",
+)
+
+df = transformer.transform(df)
+# New columns: load_actual_d-1, load_actual_d-2, load_actual_d-7
+```
+
+---
+
+## Example: Negative Lags (Future Features)
+
+Use negative lags for features that are known in advance, like holidays:
+
+```python
+# Tomorrow is a holiday - we know this today
+transformer = LagTransformer(
+    columns=["is_holiday"],
+    lags=[-1, -2, -3],  # Negative = future
+    freq="day",
+)
+
+df = transformer.transform(df)
+# New columns: is_holiday_d+1, is_holiday_d+2, is_holiday_d+3
+```
+
+<Aside type="tip">
+  Use negative lags for calendar features (holidays, weekends) that are known in advance. This allows your model to anticipate demand changes.
+</Aside>
+
+---
+
+## Example: Loop Generation
+
+```python
+# Create hourly lags from 1 to 168 hours (1 week)
+transformer = LagTransformer(
+    columns=["load_actual"],
+    lags=list(range(1, 169)),
+    freq="hour",
+)
+# Creates 168 columns: load_actual_h-1, ..., load_actual_h-168
+```

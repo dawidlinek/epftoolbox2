@@ -1,0 +1,115 @@
+---
+title: Data Pipeline Overview
+description: Using DataPipeline to download and process data
+---
+
+import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+# Data Pipeline
+
+The `DataPipeline` class combines data sources, transformers, and validators into a cohesive data processing workflow.
+
+## Components
+
+The pipeline consists of three types of components:
+
+- **Sources** fetch raw data from external APIs or files
+- **Transformers** modify the DataFrame (resample, create lags, convert timezone)
+- **Validators** check data quality without modifying the DataFrame
+
+## Basic Usage
+
+```python
+from epftoolbox2.pipelines import DataPipeline
+from epftoolbox2.data.sources import EntsoeSource, CalendarSource
+from epftoolbox2.data.transformers import ResampleTransformer, TimezoneTransformer
+from epftoolbox2.data.validators import NullCheckValidator
+
+pipeline = (
+    DataPipeline()
+    .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load", "price"]))
+    .add_source(CalendarSource(country="PL", holidays="binary"))
+    .add_transformer(ResampleTransformer(freq="1h"))
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+)
+
+df = pipeline.run(start="2024-01-01", end="2024-06-01", cache=True)
+```
+
+## Date Format Options
+
+The `start` and `end` parameters accept multiple formats:
+
+<Tabs>
+  <TabItem label="String dates">
+    ```python
+    df = pipeline.run(start="2024-01-01", end="2024-06-01")
+    ```
+  </TabItem>
+  <TabItem label="pd.Timestamp">
+    ```python
+    import pandas as pd
+    
+    df = pipeline.run(
+        start=pd.Timestamp("2024-01-01", tz="UTC"),
+        end=pd.Timestamp("2024-06-01", tz="UTC"),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Keywords">
+    ```python
+    df = pipeline.run(start="today", end="today")
+    df = pipeline.run(start="2024-01-01", end="today")
+    ```
+  </TabItem>
+</Tabs>
+
+## Data Flow
+
+<Steps>
+
+1. **Sources fetch data in UTC**
+
+   All data sources output DataFrames with UTC DatetimeIndex.
+
+2. **Transformers modify the data**
+
+   Apply resampling, create lags, then convert timezone.
+
+3. **Validators check quality**
+
+   Verify data integrity without modifying the DataFrame.
+
+</Steps>
+
+<Aside type="tip">
+  Sources always output UTC. Use `TimezoneTransformer` at the end of your pipeline to convert to local time.
+</Aside>
+
+## Pipeline Components
+
+### Data Sources
+
+<CardGrid>
+  <LinkCard title="EntsoeSource" description="ENTSOE Transparency Platform" href="/epftoolbox2/data-sources/entsoe/" />
+  <LinkCard title="OpenMeteoSource" description="Weather forecasts" href="/epftoolbox2/data-sources/openmeteo/" />
+  <LinkCard title="CalendarSource" description="Holidays & calendar" href="/epftoolbox2/data-sources/calendar/" />
+  <LinkCard title="CsvSource" description="CSV files" href="/epftoolbox2/data-sources/csv/" />
+</CardGrid>
+
+### Transformers
+
+<CardGrid>
+  <LinkCard title="ResampleTransformer" description="Regular frequency" href="/epftoolbox2/transformers/resample/" />
+  <LinkCard title="LagTransformer" description="Lagged features" href="/epftoolbox2/transformers/lag/" />
+  <LinkCard title="TimezoneTransformer" description="Convert timezone" href="/epftoolbox2/transformers/timezone/" />
+</CardGrid>
+
+### Validators
+
+<CardGrid>
+  <LinkCard title="NullCheckValidator" description="Check for nulls" href="/epftoolbox2/validators/null-check/" />
+  <LinkCard title="ContinuityValidator" description="Check for gaps" href="/epftoolbox2/validators/continuity/" />
+  <LinkCard title="EdaValidator" description="EDA statistics" href="/epftoolbox2/validators/eda/" />
+</CardGrid>

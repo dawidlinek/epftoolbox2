@@ -1,0 +1,148 @@
+---
+title: Quick Start
+description: Get started with epftoolbox2 in 5 minutes
+---
+
+import { Steps, Tabs, TabItem, Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+# Quick Start
+
+This guide shows you how to download electricity data and run a simple forecast in just a few steps.
+
+<Steps>
+
+1. **Set up environment**
+
+   ```python
+   import os
+
+   # Set your ENTSOE API key
+   os.environ["ENTSOE_API_KEY"] = "your-api-key-here"
+
+   # Optional: Configure multithreading (requires Python 3.13t+)
+   os.environ["PYTHON_GIL"] = "0"
+   os.environ["MAX_THREADS"] = "16"
+   ```
+
+2. **Download data with DataPipeline**
+
+   ```python
+   from epftoolbox2.pipelines import DataPipeline
+   from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
+   from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
+   from epftoolbox2.data.validators import NullCheckValidator
+
+   pipeline = (
+       DataPipeline()
+       .add_source(EntsoeSource(
+           country_code="PL",
+           api_key=os.environ["ENTSOE_API_KEY"],
+           type=["load", "price"]
+       ))
+       .add_source(OpenMeteoSource(
+           latitude=52.2297,
+           longitude=21.0122,
+           horizon=7,
+           prefix="warsaw"
+       ))
+       .add_source(CalendarSource(
+           country="PL",
+           holidays="binary",
+           weekday="number",
+           hour="number"
+       ))
+       .add_transformer(ResampleTransformer(freq="1h"))
+       .add_transformer(LagTransformer(
+           columns=["load_actual"],
+           lags=[1, 2, 7],
+           freq="day"
+       ))
+       .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+   )
+
+   df = pipeline.run(start="2023-01-01", end="2024-04-01", cache=True)
+   print(f"Downloaded {len(df)} rows with {len(df.columns)} columns")
+   ```
+
+3. **Train models with ModelPipeline**
+
+   ```python
+   from epftoolbox2.pipelines import ModelPipeline
+   from epftoolbox2.models import OLSModel, LassoCVModel
+   from epftoolbox2.evaluators import MAEEvaluator
+   from epftoolbox2.exporters import ExcelExporter, TerminalExporter
+
+   predictors = [
+       "load_actual",
+       "weekday",
+       "hour",
+       "is_holiday",
+       "load_actual_d-1",
+       "load_actual_d-7",
+       "warsaw_temperature_2m_d+{horizon}",
+   ]
+
+   pipeline = (
+       ModelPipeline()
+       .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
+       .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=5, name="LassoCV"))
+       .add_evaluator(MAEEvaluator())
+       .add_exporter(TerminalExporter())
+       .add_exporter(ExcelExporter("results.xlsx"))
+   )
+
+   report = pipeline.run(
+       data=df,
+       test_start="2024-02-01",
+       test_end="2024-03-01",
+       target="price",
+       horizon=7,
+       save_dir="results",
+   )
+   ```
+
+4. **Analyze results**
+
+   ```python
+   # Overall summary
+   print(report.summary())
+
+   # By forecast horizon
+   print(report.by_horizon())
+
+   # By hour of day
+   print(report.by_hour())
+   ```
+
+</Steps>
+
+## Expected Output
+
+```
+Summary
+┏━━━━━━━━━━┳━━━━━━━━━┓
+┃ model    ┃ MAE     ┃
+┡━━━━━━━━━━╇━━━━━━━━━┩
+│ OLS      │ 26.0199 │
+│ LassoCV  │ 28.1098 │
+└──────────┴─────────┘
+```
+
+<Aside type="tip">
+  The first run downloads data from APIs. Subsequent runs with `cache=True` load from disk instantly.
+</Aside>
+
+## What's Next?
+
+<CardGrid>
+  <LinkCard
+    title="Data Pipeline Overview"
+    description="Learn about sources, transformers, and validators"
+    href="/epftoolbox2/data-pipeline/overview/"
+  />
+  <LinkCard
+    title="Model Pipeline Overview"
+    description="Configure models, evaluators, and exporters"
+    href="/epftoolbox2/model-pipeline/overview/"
+  />
+</CardGrid>

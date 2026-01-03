@@ -1,0 +1,83 @@
+---
+title: TimezoneTransformer
+description: Convert DataFrame index timezone
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# TimezoneTransformer
+
+Converts the DataFrame index from UTC to a target timezone.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import TimezoneTransformer
+
+transformer = TimezoneTransformer(target_tz="Europe/Warsaw")
+df = transformer.transform(df)
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target_tz` | str | Yes | Target timezone name |
+
+---
+
+## Pipeline Order
+
+<Aside type="caution">
+  The order of transformers matters! Apply `TimezoneTransformer` at the right stage:
+  
+  1. **Before LagTransformer**: Lags are calculated in local time
+  2. **After LagTransformer**: Lags are calculated in UTC
+</Aside>
+
+### Recommended Pipeline Order
+
+It is recommended to add `ResampleTransformer` **after** `TimezoneTransformer` to fill gaps created by daylight saving time transitions:
+
+```python
+pipeline = (
+    DataPipeline()
+    .add_source(EntsoeSource(...))  # Output: UTC
+    .add_transformer(LagTransformer(...))  # Lags in UTC
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))  # Creates DST gaps
+    .add_transformer(ResampleTransformer(freq="1h"))  # Fills DST gaps
+)
+```
+
+<Aside type="tip">
+  During DST spring-forward, one hour is skipped (e.g., 2:00 AM). `ResampleTransformer` will interpolate to fill this gap.
+</Aside>
+
+---
+
+## Timezone List
+
+For a complete list of valid timezone names, see: [List of tz database time zones](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
+
+### Common Timezones
+
+| Timezone | Description |
+|----------|-------------|
+| `"Europe/Warsaw"` | Poland (CET/CEST) |
+| `"Europe/Berlin"` | Germany (CET/CEST) |
+| `"Europe/Paris"` | France (CET/CEST) |
+| `"Europe/London"` | UK (GMT/BST) |
+| `"America/New_York"` | US Eastern |
+| `"UTC"` | Coordinated Universal Time |
+
+---
+
+## Behavior
+
+- **Naive index**: Localized to UTC, then converted
+- **Timezone-aware index**: Directly converted
+
+```python
+# Input: 2024-01-01 00:00:00+00:00 (UTC)
+# Output: 2024-01-01 01:00:00+01:00 (Warsaw = CET)
+```

@@ -153,3 +153,4 @@ Thumbs.db
 
 main[1-9]*.py
 *.jsonl
+docs/node_modules/

@@ -1,0 +1,161 @@
+---
+title: Model Pipeline Overview
+description: Using ModelPipeline to train and evaluate forecasting models
+---
+
+import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+# Model Pipeline
+
+The `ModelPipeline` class trains and evaluates forecasting models with rolling-window validation.
+
+## Basic Usage
+
+```python
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.models import OLSModel, LassoCVModel
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.exporters import ExcelExporter, TerminalExporter
+
+pipeline = (
+    ModelPipeline()
+    .add_model(OLSModel(predictors=predictors, name="OLS"))
+    .add_model(LassoCVModel(predictors=predictors, name="LassoCV"))
+    .add_evaluator(MAEEvaluator())
+    .add_exporter(TerminalExporter())
+    .add_exporter(ExcelExporter("results.xlsx"))
+)
+
+report = pipeline.run(
+    data=df,
+    test_start="2024-02-01",
+    test_end="2024-03-01",
+    target="price",
+    horizon=7,
+    save_dir="results",
+)
+```
+
+## Pipeline Components
+
+### Models
+
+<CardGrid>
+  <LinkCard title="OLSModel" description="Ordinary Least Squares" href="/epftoolbox2/models/ols/" />
+  <LinkCard title="LassoCVModel" description="Lasso with cross-validation" href="/epftoolbox2/models/lasso/" />
+</CardGrid>
+
+### Evaluators
+
+<CardGrid>
+  <LinkCard title="MAEEvaluator" description="Mean Absolute Error" href="/epftoolbox2/evaluators/mae/" />
+</CardGrid>
+
+### Exporters
+
+<CardGrid>
+  <LinkCard title="TerminalExporter" description="Console output" href="/epftoolbox2/exporters/terminal/" />
+  <LinkCard title="ExcelExporter" description="Excel file" href="/epftoolbox2/exporters/excel/" />
+</CardGrid>
+
+---
+
+## Predictor Specification
+
+Predictors can be specified in four ways:
+
+<Tabs>
+  <TabItem label="Static Columns">
+    ```python
+    predictors = [
+        "load_actual",
+        "weekday",
+        "hour",
+        "is_holiday",
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Templates">
+    Use `{horizon}` placeholder for horizon-dependent features:
+    
+    ```python
+    predictors = [
+        "load_actual",
+        "warsaw_temperature_2m_d+{horizon}",
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Lambda Functions">
+    For complex patterns:
+    
+    ```python
+    predictors = [
+        "load_actual",
+        lambda h: f"weather_d+{h}",
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Loop Generation">
+    Use list comprehensions for many features:
+    
+    ```python
+    predictors = [
+        "load_actual",
+        *[f"load_actual_h-{i}" for i in range(1, 169)],
+        *[f"price_d-{i}" for i in range(1, 8)],
+    ]
+    ```
+  </TabItem>
+</Tabs>
+
+---
+
+## Feature Scaling
+
+Models automatically apply `StandardScaler`:
+
+<Steps>
+
+1. **Numeric features** are standardized (mean=0, std=1)
+
+2. **Binary features (0/1)** are auto-detected and skipped
+
+3. **Target variable** is scaled, predictions are inverse-scaled
+
+</Steps>
+
+---
+
+## Run Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `data` | DataFrame | Required | Input data with DatetimeIndex |
+| `test_start` | str | Required | Test period start |
+| `test_end` | str | Required | Test period end |
+| `target` | str | `"price"` | Target column name |
+| `horizon` | int | `7` | Max forecast horizon (days) |
+| `save_dir` | str | `None` | Directory for incremental results |
+
+---
+
+## EvaluationReport
+
+The pipeline returns an `EvaluationReport`:
+
+```python
+report.summary()           # Overall metrics
+report.by_hour()           # Breakdown by hour
+report.by_horizon()        # Breakdown by horizon
+report.by_hour_horizon()   # Combined breakdown
+```
+
+---
+
+## Learn More
+
+<CardGrid>
+  <LinkCard title="Examples" description="Complete pipeline examples" href="/epftoolbox2/model-pipeline/examples/" />
+  <LinkCard title="Results" description="Working with evaluation results" href="/epftoolbox2/model-pipeline/results/" />
+  <LinkCard title="Caching" description="Incremental training" href="/epftoolbox2/model-pipeline/caching/" />
+</CardGrid>

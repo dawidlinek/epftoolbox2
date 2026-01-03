@@ -1,0 +1,159 @@
+---
+title: EntsoeSource
+description: Download electricity data from ENTSOE Transparency Platform
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# EntsoeSource
+
+Downloads electricity data from the ENTSOE Transparency Platform including load, price, and generation data.
+
+## Setup
+
+You need an ENTSOE API key:
+1. Register at [ENTSOE Transparency Platform](https://transparency.entsoe.eu/)
+2. Request an API key from your account settings
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.sources import EntsoeSource
+import os
+
+source = EntsoeSource(
+    country_code="PL",
+    api_key=os.environ.get("ENTSOE_API_KEY"),
+    type=["load", "price"],
+)
+
+df = source.fetch(
+    start=pd.Timestamp("2024-01-01", tz="UTC"),
+    end=pd.Timestamp("2024-06-01", tz="UTC"),
+)
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `country_code` | str | Yes | Country/zone code (see table below) |
+| `api_key` | str | Yes | ENTSOE API key |
+| `type` | List[str] | Yes | Data types: `load`, `price`, `generation` |
+
+---
+
+## Data Types
+
+### Load Data (`type=["load"]`)
+
+| Column | Description |
+|--------|-------------|
+| `load_actual` | Actual electricity load (MW) |
+| `load_forecast` | Day-ahead load forecast (MW) |
+
+### Price Data (`type=["price"]`)
+
+| Column | Description |
+|--------|-------------|
+| `price` | Day-ahead electricity price (EUR/MWh) |
+
+### Generation Data (`type=["generation"]`)
+
+All supported generation types:
+
+| Column | Description |
+|--------|-------------|
+| `generation_biomass` | Biomass generation (MW) |
+| `generation_fossil_brown_coal_lignite` | Lignite generation (MW) |
+| `generation_fossil_coal_derived_gas` | Coal-derived gas (MW) |
+| `generation_fossil_gas` | Natural gas generation (MW) |
+| `generation_fossil_hard_coal` | Hard coal generation (MW) |
+| `generation_fossil_oil` | Oil generation (MW) |
+| `generation_fossil_oil_shale` | Oil shale generation (MW) |
+| `generation_fossil_peat` | Peat generation (MW) |
+| `generation_geothermal` | Geothermal generation (MW) |
+| `generation_hydro_pumped_storage` | Pumped hydro storage (MW) |
+| `generation_hydro_run_of_river` | Run-of-river hydro (MW) |
+| `generation_hydro_water_reservoir` | Reservoir hydro (MW) |
+| `generation_marine` | Marine/tidal generation (MW) |
+| `generation_nuclear` | Nuclear generation (MW) |
+| `generation_other` | Other generation (MW) |
+| `generation_other_renewable` | Other renewable (MW) |
+| `generation_solar` | Solar generation (MW) |
+| `generation_waste` | Waste generation (MW) |
+| `generation_wind_offshore` | Offshore wind (MW) |
+| `generation_wind_onshore` | Onshore wind (MW) |
+
+---
+
+## Supported Countries & Area Codes
+
+<div class="countries-grid">
+
+| Code | Country | Area Code |
+|------|---------|-----------|
+| AT | Austria | 10YAT-APG------L |
+| BE | Belgium | 10YBE----------2 |
+| BG | Bulgaria | 10YCA-BULGARIA-R |
+| CH | Switzerland | 10YCH-SWISSGRIDZ |
+| CZ | Czechia | 10YCZ-CEPS-----N |
+| DE | Germany | 10Y1001A1001A83F |
+| DK | Denmark | 10Y1001A1001A65H |
+| EE | Estonia | 10Y1001A1001A39I |
+| ES | Spain | 10YES-REE------0 |
+| FI | Finland | 10YFI-1--------U |
+| FR | France | 10YFR-RTE------C |
+| GB | Great Britain | 10YGB----------A |
+| GR | Greece | 10YGR-HTSO-----Y |
+| HR | Croatia | 10YHR-HEP------M |
+| HU | Hungary | 10YHU-MAVIR----U |
+| IE | Ireland | 10Y1001A1001A59C |
+| IT | Italy | 10YIT-GRTN-----B |
+| LT | Lithuania | 10YLT-1001A0008Q |
+| LU | Luxembourg | 10YLU-CEGEDEL-NQ |
+| LV | Latvia | 10YLV-1001A00074 |
+| NL | Netherlands | 10YNL----------L |
+| NO | Norway | 10YNO-0--------C |
+| PL | Poland | 10YPL-AREA-----S |
+| PT | Portugal | 10YPT-REN------W |
+| RO | Romania | 10YRO-TEL------P |
+| RS | Serbia | 10YCS-SERBIATSOV |
+| SE | Sweden | 10YSE-1--------K |
+| SI | Slovenia | 10YSI-ELES-----O |
+| SK | Slovakia | 10YSK-SEPS-----K |
+| UA | Ukraine | 10Y1001C--00003F |
+
+</div>
+
+<style>{`
+  .countries-grid table {
+    width: 100%;
+  }
+  @media (min-width: 768px) {
+    .countries-grid {
+      column-count: 2;
+      column-gap: 2rem;
+    }
+    .countries-grid table {
+      break-inside: avoid;
+    }
+  }
+`}</style>
+
+<Aside type="tip">
+  Use the country code (e.g., `"PL"`) in your source configuration. The area code is used internally for API requests.
+</Aside>
+
+---
+
+## Output
+
+Data is returned with a **UTC DatetimeIndex**:
+
+```python
+print(df.head())
+#                            load_actual  price
+# 2024-01-01 00:00:00+00:00     12508.71   5.75
+# 2024-01-01 01:00:00+00:00     11845.20   5.27
+```
