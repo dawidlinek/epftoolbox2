@@ -222,6 +222,11 @@ class OpenMeteoSource(DataSource):
                         time.sleep(10)
                         retry_count += 1
                         continue
+                    elif "Hourly API request limit exceeded" in reason:
+                        self.logger.info("Hourly API request limit exceeded. Waiting 1 hour...")
+                        time.sleep(60 * 60)
+                        retry_count += 1
+                        continue
                     else:
                         raise ValueError(f"Open-Meteo API error: {reason}")
 
