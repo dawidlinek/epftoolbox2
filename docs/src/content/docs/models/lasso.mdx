@@ -15,7 +15,18 @@ Lasso regression with cross-validated regularization using scikit-learn's [`Lass
 from epftoolbox2.models import LassoCVModel
 
 model = LassoCVModel(
-    predictors=["load_actual", "weekday", "is_holiday"],
+    predictors=[
+        "load_actual",
+        "is_monday_d+{horizon}",
+        "is_tuesday_d+{horizon}",
+        "is_wednesday_d+{horizon}",
+        "is_thursday_d+{horizon}",
+        "is_friday_d+{horizon}",
+        "is_saturday_d+{horizon}",
+        "is_sunday_d+{horizon}",
+        "is_holiday_d+{horizon}",
+        "daylight_hours_d+{horizon}",
+    ],
     training_window=365,
     cv=5,
     name="LassoCV",
@@ -48,8 +59,15 @@ from epftoolbox2.exporters import TerminalExporter
 
 predictors = [
     "load_actual",
-    "weekday",
-    "hour",
+    "is_monday_d+{horizon}",
+    "is_tuesday_d+{horizon}",
+    "is_wednesday_d+{horizon}",
+    "is_thursday_d+{horizon}",
+    "is_friday_d+{horizon}",
+    "is_saturday_d+{horizon}",
+    "is_sunday_d+{horizon}",
+    "is_holiday_d+{horizon}",
+    "daylight_hours_d+{horizon}",
     *[f"load_actual_h-{i}" for i in range(1, 169)],
 ]
 

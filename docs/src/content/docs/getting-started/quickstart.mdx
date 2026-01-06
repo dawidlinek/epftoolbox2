@@ -48,8 +48,8 @@ This guide shows you how to download electricity data and run a simple forecast 
        .add_source(CalendarSource(
            country="PL",
            holidays="binary",
-           weekday="number",
-           hour="number"
+           weekday="onehot",
+           daylight_hours=True
        ))
        .add_transformer(ResampleTransformer(freq="1h"))
        .add_transformer(LagTransformer(
@@ -74,9 +74,15 @@ This guide shows you how to download electricity data and run a simple forecast 
 
    predictors = [
        "load_actual",
-       "weekday",
-       "hour",
-       "is_holiday",
+       "is_monday_d+{horizon}",
+       "is_tuesday_d+{horizon}",
+       "is_wednesday_d+{horizon}",
+       "is_thursday_d+{horizon}",
+       "is_friday_d+{horizon}",
+       "is_saturday_d+{horizon}",
+       "is_sunday_d+{horizon}",
+       "is_holiday_d+{horizon}",
+       "daylight_hours_d+{horizon}",
        "load_actual_d-1",
        "load_actual_d-7",
        "warsaw_temperature_2m_d+{horizon}",

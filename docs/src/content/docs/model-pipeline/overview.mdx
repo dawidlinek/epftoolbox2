@@ -69,9 +69,15 @@ Predictors can be specified in four ways:
     ```python
     predictors = [
         "load_actual",
-        "weekday",
-        "hour",
-        "is_holiday",
+        "is_monday_d+{horizon}",
+        "is_tuesday_d+{horizon}",
+        "is_wednesday_d+{horizon}",
+        "is_thursday_d+{horizon}",
+        "is_friday_d+{horizon}",
+        "is_saturday_d+{horizon}",
+        "is_sunday_d+{horizon}",
+        "is_holiday_d+{horizon}",
+        "daylight_hours_d+{horizon}",
     ]
     ```
   </TabItem>
