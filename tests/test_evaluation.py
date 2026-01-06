@@ -232,16 +232,16 @@ class TestExcelExporter:
     def sample_report(self):
         results = {
             "model_a": [
-                {"prediction": 10, "actual": 12, "hour": 0, "horizon": 1, "target_date": "2024-01-01"},
-                {"prediction": 20, "actual": 18, "hour": 1, "horizon": 1, "target_date": "2024-01-01"},
-                {"prediction": 30, "actual": 33, "hour": 0, "horizon": 2, "target_date": "2024-01-02"},
-                {"prediction": 40, "actual": 38, "hour": 1, "horizon": 2, "target_date": "2024-01-02"},
+                {"prediction": 10, "actual": 12, "hour": 0, "horizon": 1, "target_date": "2024-01-01", "run_date": "2023-12-31", "day_in_test": 0},
+                {"prediction": 20, "actual": 18, "hour": 1, "horizon": 1, "target_date": "2024-01-01", "run_date": "2023-12-31", "day_in_test": 0},
+                {"prediction": 30, "actual": 33, "hour": 0, "horizon": 2, "target_date": "2024-01-02", "run_date": "2024-01-01", "day_in_test": 1},
+                {"prediction": 40, "actual": 38, "hour": 1, "horizon": 2, "target_date": "2024-01-02", "run_date": "2024-01-01", "day_in_test": 1},
             ],
             "model_b": [
-                {"prediction": 11, "actual": 12, "hour": 0, "horizon": 1, "target_date": "2024-01-01"},
-                {"prediction": 19, "actual": 18, "hour": 1, "horizon": 1, "target_date": "2024-01-01"},
-                {"prediction": 32, "actual": 33, "hour": 0, "horizon": 2, "target_date": "2024-01-02"},
-                {"prediction": 39, "actual": 38, "hour": 1, "horizon": 2, "target_date": "2024-01-02"},
+                {"prediction": 11, "actual": 12, "hour": 0, "horizon": 1, "target_date": "2024-01-01", "run_date": "2023-12-31", "day_in_test": 0},
+                {"prediction": 19, "actual": 18, "hour": 1, "horizon": 1, "target_date": "2024-01-01", "run_date": "2023-12-31", "day_in_test": 0},
+                {"prediction": 32, "actual": 33, "hour": 0, "horizon": 2, "target_date": "2024-01-02", "run_date": "2024-01-01", "day_in_test": 1},
+                {"prediction": 39, "actual": 38, "hour": 1, "horizon": 2, "target_date": "2024-01-02", "run_date": "2024-01-01", "day_in_test": 1},
             ],
         }
         return EvaluationReport(results, [MAEEvaluator()])
@@ -250,7 +250,7 @@ class TestExcelExporter:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "test.xlsx")
             exporter = ExcelExporter(path)
-            assert exporter.sheets == ["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon"]
+            assert exporter.sheets == ["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon", "details"]
 
     def test_init_custom_sheets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
