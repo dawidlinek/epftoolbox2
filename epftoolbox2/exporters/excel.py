@@ -52,7 +52,9 @@ class ExcelExporter(Exporter):
 
             sheet_name = f"{sheet_prefix}_{metric}"[:31]
             pivot.to_excel(writer, sheet_name=sheet_name)
-            self._apply_color_scale(writer, sheet_name, 2, 2, len(pivot), len(pivot.columns))
+
+            per_column = col_col == "horizon"
+            self._apply_color_scale(writer, sheet_name, 2, 2, len(pivot), len(pivot.columns), per_column=per_column)
 
     def _write_matrix_sheet(self, writer: pd.ExcelWriter, report: EvaluationReport, sheet_prefix: str, data: pd.DataFrame, row_col: str, col_col: str) -> None:
         metrics = [ev.name for ev in report.evaluators]
@@ -77,16 +79,22 @@ class ExcelExporter(Exporter):
                 self._apply_color_scale(writer, sheet_name, 3, col_offset + 1, len(pivot), len(pivot.columns))
                 col_offset += len(pivot.columns) + 2
 
-    def _apply_color_scale(self, writer: pd.ExcelWriter, sheet_name: str, start_row: int, start_col: int, num_rows: int, num_cols: int) -> None:
+    def _apply_color_scale(
+        self,
+        writer: pd.ExcelWriter,
+        sheet_name: str,
+        start_row: int,
+        start_col: int,
+        num_rows: int,
+        num_cols: int,
+        per_column: bool = False,
+    ) -> None:
         ws = writer.sheets[sheet_name]
         end_row = start_row + num_rows - 1
         end_col = start_col + num_cols - 1
 
         if num_rows <= 0 or num_cols <= 0:
             return
-
-        start_cell = f"{get_column_letter(start_col)}{start_row}"
-        end_cell = f"{get_column_letter(end_col)}{end_row}"
 
         rule = ColorScaleRule(
             start_type="min",
@@ -97,4 +105,13 @@ class ExcelExporter(Exporter):
             end_type="max",
             end_color="F8696B",
         )
-        ws.conditional_formatting.add(f"{start_cell}:{end_cell}", rule)
+
+        if per_column:
+            for col in range(start_col, end_col + 1):
+                start_cell = f"{get_column_letter(col)}{start_row}"
+                end_cell = f"{get_column_letter(col)}{end_row}"
+                ws.conditional_formatting.add(f"{start_cell}:{end_cell}", rule)
+        else:
+            start_cell = f"{get_column_letter(start_col)}{start_row}"
+            end_cell = f"{get_column_letter(end_col)}{end_row}"
+            ws.conditional_formatting.add(f"{start_cell}:{end_cell}", rule)
