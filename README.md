@@ -64,7 +64,19 @@ df = validator.run(df)
 ```python
 from epftoolbox2.models import OLSModel
 
-model = OLSModel(predictors=["load_actual", "weekday"], name="OLS")
+seasonal_indicators = [
+    "is_monday_d+{horizon}",
+    "is_tuesday_d+{horizon}",
+    "is_wednesday_d+{horizon}",
+    "is_thursday_d+{horizon}",
+    "is_friday_d+{horizon}",
+    "is_saturday_d+{horizon}",
+    "is_sunday_d+{horizon}",
+    "is_holiday_d+{horizon}",
+    "daylight_hours_d+{horizon}",
+]
+
+model = OLSModel(predictors=["load_actual", *seasonal_indicators], name="OLS")
 report = model.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
 ```
 
@@ -120,8 +132,8 @@ from epftoolbox2.exporters import ExcelExporter
 
 pipeline = (
     ModelPipeline()
-    .add_model(OLSModel(predictors=["load_actual", "weekday"], name="OLS"))
-    .add_model(LassoCVModel(predictors=["load_actual", "weekday"], name="Lasso"))
+    .add_model(OLSModel(predictors=["load_actual", *seasonal_indicators], name="OLS"))
+    .add_model(LassoCVModel(predictors=["load_actual", *seasonal_indicators], name="Lasso"))
     .add_evaluator(MAEEvaluator())
     .add_exporter(ExcelExporter("results.xlsx"))
 )

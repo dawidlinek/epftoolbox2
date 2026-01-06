@@ -15,7 +15,18 @@ Ordinary Least Squares linear regression using scikit-learn's [`LinearRegression
 from epftoolbox2.models import OLSModel
 
 model = OLSModel(
-    predictors=["load_actual", "weekday", "is_holiday"],
+    predictors=[
+        "load_actual",
+        "is_monday_d+{horizon}",
+        "is_tuesday_d+{horizon}",
+        "is_wednesday_d+{horizon}",
+        "is_thursday_d+{horizon}",
+        "is_friday_d+{horizon}",
+        "is_saturday_d+{horizon}",
+        "is_sunday_d+{horizon}",
+        "is_holiday_d+{horizon}",
+        "daylight_hours_d+{horizon}",
+    ],
     training_window=365,
     name="OLS",
 )
@@ -39,9 +50,15 @@ from epftoolbox2.exporters import TerminalExporter
 
 predictors = [
     "load_actual",
-    "weekday",
-    "hour",
-    "is_holiday",
+    "is_monday_d+{horizon}",
+    "is_tuesday_d+{horizon}",
+    "is_wednesday_d+{horizon}",
+    "is_thursday_d+{horizon}",
+    "is_friday_d+{horizon}",
+    "is_saturday_d+{horizon}",
+    "is_sunday_d+{horizon}",
+    "is_holiday_d+{horizon}",
+    "daylight_hours_d+{horizon}",
     *[f"load_actual_d-{i}" for i in [1, 7]],
 ]
 

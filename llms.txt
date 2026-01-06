@@ -329,10 +329,10 @@ Predictors can be specified three ways:
 predictors = [
     # 1. Static column name
     "load_actual",
-    "weekday",
     
     # 2. Template with {horizon} placeholder
     "warsaw_temperature_2m_d+{horizon}",
+    "is_monday_d+{horizon}",
     
     # 3. Lambda function receiving horizon (1-7)
     lambda h: f"weather_d+{h}",
@@ -523,7 +523,7 @@ pipeline = (
     DataPipeline()
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
     .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
-    .add_source(CalendarSource(country="PL", holidays="binary", weekday="number", hour="number"))
+    .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight_hours=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual"], lags=[1, 2, 7], freq="day"))
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
@@ -549,11 +549,21 @@ from epftoolbox2.exporters import ExcelExporter, TerminalExporter
 
 df = pd.read_csv("data.csv", index_col=0, parse_dates=True)
 
+seasonal_indicators = [
+    "is_monday_d+{horizon}",
+    "is_tuesday_d+{horizon}",
+    "is_wednesday_d+{horizon}",
+    "is_thursday_d+{horizon}",
+    "is_friday_d+{horizon}",
+    "is_saturday_d+{horizon}",
+    "is_sunday_d+{horizon}",
+    "is_holiday_d+{horizon}",
+    "daylight_hours_d+{horizon}",
+]
+
 predictors = [
     "load_actual",
-    "weekday",
-    "hour",
-    "is_holiday",
+    *seasonal_indicators,
     "load_actual_d-1",
     "load_actual_d-7",
     "warsaw_temperature_2m_d+{horizon}",
@@ -604,7 +614,7 @@ data_pipeline = (
     DataPipeline()
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
     .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
-    .add_source(CalendarSource(country="PL", holidays="binary"))
+    .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight_hours=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
@@ -613,9 +623,21 @@ data_pipeline = (
 df = data_pipeline.run(start="2023-05-01", end="2024-07-01", cache=True)
 
 # Step 2: Model Pipeline
+seasonal_indicators = [
+    "is_monday_d+{horizon}",
+    "is_tuesday_d+{horizon}",
+    "is_wednesday_d+{horizon}",
+    "is_thursday_d+{horizon}",
+    "is_friday_d+{horizon}",
+    "is_saturday_d+{horizon}",
+    "is_sunday_d+{horizon}",
+    "is_holiday_d+{horizon}",
+    "daylight_hours_d+{horizon}",
+]
+
 predictors = [
     "load_actual",
-    "is_holiday",
+    *seasonal_indicators,
     "load_actual_d-1",
     "load_actual_d-2",
     "price_d-1",
