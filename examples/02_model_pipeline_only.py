@@ -22,11 +22,21 @@ df = pd.read_csv("data_output.csv", index_col=0, parse_dates=True)
 
 print(f"Loaded {len(df)} rows")
 
+seasonal_indicators = [
+    "is_monday_d+{horizon}",
+    "is_tuesday_d+{horizon}",
+    "is_wednesday_d+{horizon}",
+    "is_thursday_d+{horizon}",
+    "is_friday_d+{horizon}",
+    "is_saturday_d+{horizon}",
+    "is_sunday_d+{horizon}",
+    "is_holiday_d+{horizon}",
+    "daylight_hours_d+{horizon}",
+]
+
 predictors = [
     "load_actual",
-    "weekday",
-    "hour",
-    "is_holiday",
+    *seasonal_indicators,
     "load_actual_d-1",
     "load_actual_d-7",
     "warsaw_temperature_2m_d+{horizon}",
