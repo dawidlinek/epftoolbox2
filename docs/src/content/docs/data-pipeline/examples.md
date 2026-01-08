@@ -3,8 +3,6 @@ title: Pipeline Examples
 description: Complete DataPipeline examples
 ---
 
-import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
-
 # Pipeline Examples
 
 ## Basic Example: Polish Electricity Data

@@ -30,6 +30,7 @@ exporter = ExcelExporter("results.xlsx")
 - `"hour_horizon"` - Hour × Horizon matrix
 - `"year"` - Breakdown by year
 - `"year_horizon"` - Year × Horizon matrix
+- `"details"` - Details of each prediction
 
 ## Example
 
@@ -43,10 +44,10 @@ exporter = ExcelExporter("results.xlsx", sheets=["summary", "horizon"])
 
 ## Conditional Formatting
 
-The Excel file includes color-coded metrics:
-- 🟢 Green: Low error (good)
+The Excel file includes color-coded metrics in each horizon context separate:
+- 🟢 Green: Low error
 - 🟡 Yellow: Medium error
-- 🔴 Red: High error (needs improvement)
+- 🔴 Red: High error
 
 ## In Pipeline
 
