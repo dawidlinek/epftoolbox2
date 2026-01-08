@@ -24,6 +24,7 @@ df = transformer.transform(df)
 |-----------|------|---------|-------------|
 | `freq` | str | `"1h"` | Pandas frequency string |
 | `method` | str | `"linear"` | Interpolation method |
+| `columns` | list[str] \| str \| None | `None` | Columns to interpolate. If None, all columns are interpolated. |
 
 ## Frequency Strings
 
@@ -41,6 +42,16 @@ df = transformer.transform(df)
 | `"linear"` | Linear interpolation between points |
 | `"ffill"` | Forward fill (use last known value) |
 | `"bfill"` | Backward fill (use next known value) |
+
+## Selecting Columns
+
+By default, interpolation is applied to all columns. You can restrict interpolation to specific columns using the `columns` parameter. Other columns will be resampled (introducing NaNs) but not interpolated.
+
+```python
+# Interpolate only 'price', leave 'load' with NaNs where gaps occur
+transformer = ResampleTransformer(freq="15min", columns=["price"])
+df = transformer.transform(df)
+```
 
 ---
 

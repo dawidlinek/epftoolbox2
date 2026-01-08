@@ -31,10 +31,9 @@ report = pipeline.run(
 <FileTree>
 
 - results/
-  - OLS/
-    - results.jsonl
-  - LassoCV/
-    - results.jsonl
+    - ols.jsonl
+    - lasso.jsonl
+    - model_name.jsonl
 
 </FileTree>
 
@@ -43,8 +42,8 @@ report = pipeline.run(
 Each line in `results.jsonl` is a JSON object:
 
 ```json
-{"date": "2024-01-01", "hour": 0, "horizon": 1, "prediction": 45.23, "actual": 48.50}
-{"date": "2024-01-01", "hour": 0, "horizon": 2, "prediction": 46.12, "actual": 49.20}
+{"run_date": "2024-02-01", "target_date": "2024-02-02", "hour": 1, "horizon": 1, "day_in_test": 0, "prediction": 92.08884109589042, "actual": 58.0, "coefficients": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+{"run_date": "2024-02-01", "target_date": "2024-02-02", "hour": 0, "horizon": 1, "day_in_test": 0, "prediction": 92.33908219178082, "actual": 58.62, "coefficients": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
 ```
 
 <Aside type="tip">
