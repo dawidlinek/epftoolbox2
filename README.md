@@ -16,7 +16,15 @@ or with uv
 uv add epftoolbox2
 ```
 
+## Verify Installation
 
+After installation, you can verify your setup and check system information:
+
+```python
+import epftoolbox2
+
+epftoolbox2.verify()
+```
 ## Key Features
 
 - **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (weather forecasts), Calendar (holidays, weekday)
