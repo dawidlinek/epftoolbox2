@@ -159,6 +159,16 @@ class TestResampleTransformerInit:
         with pytest.raises(ValueError, match="linear|ffill|bfill"):
             ResampleTransformer(method="cubic")
 
+    def test_init_with_columns(self):
+        """Test initialization with columns"""
+        transformer = ResampleTransformer(columns=["price"])
+        assert transformer.columns == ["price"]
+
+    def test_init_with_single_column_string(self):
+        """Test initialization with single column string"""
+        transformer = ResampleTransformer(columns="price")
+        assert transformer.columns == ["price"]
+
 
 class TestResampleTransformerTransform:
     """Test ResampleTransformer transform method"""
@@ -317,6 +327,29 @@ class TestResampleTransformerTransform:
             result = transformer.transform(sample_hourly_dataframe)
             assert isinstance(result, pd.DataFrame)
             assert len(result) > 0
+
+    def test_transform_specific_columns(self):
+        """Test that interpolation is applied only to specified columns"""
+        dates = pd.date_range("2024-01-01", periods=3, freq="D")
+        df = pd.DataFrame({"price": [10.0, 20.0, 30.0], "load": [100.0, 200.0, 300.0]}, index=dates)
+
+        # Resample to 12h, so we get one intermediate row
+        transformer = ResampleTransformer(freq="12h", method="linear", columns=["price"])
+        result = transformer.transform(df)
+
+        assert len(result) == 5
+        # Price should be interpolated (linear)
+        # 10, nan, 20, nan, 30 -> 10, 15, 20, 25, 30
+        assert result["price"].iloc[1] == 15.0
+
+        # Load should NOT be interpolated (remain NaN)
+        assert pd.isna(result["load"].iloc[1])
+
+    def test_transform_columns_validation(self, sample_hourly_dataframe):
+        """Test validation of columns existence"""
+        transformer = ResampleTransformer(columns=["non_existent"])
+        with pytest.raises(ValueError, match="Columns not found"):
+            transformer.transform(sample_hourly_dataframe)
 
 
 class TestResampleTransformerIsTransformer:
