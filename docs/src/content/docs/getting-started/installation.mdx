@@ -35,11 +35,9 @@ import { Steps, Tabs, TabItem, Aside, Badge, Code } from '@astrojs/starlight/com
 
    ```python
    import epftoolbox2
-   from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 
-   print("epftoolbox2 installed successfully!")
+   epftoolbox2.verify()
    ```
-
 3. **Configure for parallel processing** (optional but recommended)
 
    See the section below for GIL-free Python setup.
@@ -85,15 +83,40 @@ For parallel model training on multi-core systems, use Python 3.14t (free-thread
 
 ### Complete Setup
 
+<Aside type="caution">
+  For GIL disabling to work, environment variables must be set before running Python.
+</Aside>
+
 <Steps>
 
-1. **Disable GIL and configure threading**
+1. **Set environment variables before running Python**
+    <Tabs>
+      <TabItem label="PowerShell">
+        ```powershell
+        $env:PYTHON_GIL=0; python your_script.py
+        ```
+      </TabItem>
+      <TabItem label="CMD">
+        ```cmd
+        set PYTHON_GIL=0 && python your_script.py
+        ```
+      </TabItem>
+      <TabItem label="Linux/Mac">
+        ```bash
+        PYTHON_GIL=0 python your_script.py
+        ```
+      </TabItem>
+      <TabItem label="X flag">
+        ```bash
+        python -Xgil=0 your_script.py
+        ```
+      </TabItem>
+    </Tabs>
+
+2. **Configure threading in your script** (optional)
 
    ```python
    import os
-
-   # Disable GIL (Python 3.13t+ only)
-   os.environ["PYTHON_GIL"] = "0"
 
    # Set number of parallel threads (adjust to your CPU cores)
    os.environ["MAX_THREADS"] = "16"
@@ -104,7 +127,7 @@ For parallel model training on multi-core systems, use Python 3.14t (free-thread
    os.environ["OPENBLAS_NUM_THREADS"] = "1"
    ```
 
-2. **Import the library**
+3. **Import the library**
 
    ```python
    from epftoolbox2.pipelines import DataPipeline, ModelPipeline
@@ -113,15 +136,7 @@ For parallel model training on multi-core systems, use Python 3.14t (free-thread
 
 </Steps>
 
-<Aside type="caution">
-  Environment variables **must be set before** importing libraries that depend on them.
-</Aside>
 
-### Alternative: Command Line
-
-```bash
-python -Xgil=0 your_script.py
-```
 
 <Aside type="tip">
   With GIL-free Python, model training is **much faster** on multi-core systems.
