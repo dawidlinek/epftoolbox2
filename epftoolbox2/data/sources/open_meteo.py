@@ -64,6 +64,7 @@ class OpenMeteoSource(DataSource):
         model: str = "jma_seamless",
         columns: List[str] = None,
         prefix: str = "",
+        proxy_url: str = None,
     ):
         """
         Initialize Open-Meteo data source
@@ -75,6 +76,7 @@ class OpenMeteoSource(DataSource):
             model: Weather model to use (default: "jma_seamless")
             columns: List of weather variables to fetch (default: DEFAULT_COLUMNS)
             prefix: Prefix to add to column names (default: "")
+            proxy_url: Proxy URL (e.g., 'http://proxy.example.com:8080')
         """
         self.latitude = latitude
         self.longitude = longitude
@@ -82,7 +84,10 @@ class OpenMeteoSource(DataSource):
         self.model = model
         self.columns = columns if columns else self.DEFAULT_COLUMNS
         self.prefix = prefix
+        self.proxy_url = proxy_url
+        
         self.session = requests.Session()
+        self._configure_proxy()
 
         self.console = Console()
         self.logger = get_logger(__name__)
@@ -109,6 +114,13 @@ class OpenMeteoSource(DataSource):
             raise ValueError("At least one weather column must be specified")
 
         return True
+
+    def _configure_proxy(self):
+        if self.proxy_url:
+            self.session.proxies = {
+                'http': self.proxy_url,
+                'https': self.proxy_url
+            }
 
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """
@@ -285,7 +297,7 @@ class OpenMeteoSource(DataSource):
         return df
 
     def get_cache_config(self) -> dict:
-        return {
+        config = {
             "source_type": "open_meteo",
             "latitude": self.latitude,
             "longitude": self.longitude,
@@ -294,3 +306,8 @@ class OpenMeteoSource(DataSource):
             "columns": sorted(self.columns),
             "prefix": self.prefix,
         }
+        
+        if self.proxy_url:
+            config["proxy_url"] = self.proxy_url
+            
+        return config
