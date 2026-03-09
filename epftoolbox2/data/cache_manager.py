@@ -100,8 +100,7 @@ class CacheManager:
         df.to_csv(cache_path / filename)
 
         metadata = self._read_metadata(cache_key)
-        if "source_config" not in metadata:
-            metadata["source_config"] = source_config
+        metadata["source_config"] = source_config
 
         new_range = {"start": start.isoformat(), "end": end.isoformat(), "filename": filename}
 
