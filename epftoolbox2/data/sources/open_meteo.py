@@ -85,7 +85,7 @@ class OpenMeteoSource(DataSource):
         self.columns = columns if columns else self.DEFAULT_COLUMNS
         self.prefix = prefix
         self.proxy_url = proxy_url
-        
+
         self.session = requests.Session()
         self._configure_proxy()
 
@@ -117,10 +117,7 @@ class OpenMeteoSource(DataSource):
 
     def _configure_proxy(self):
         if self.proxy_url:
-            self.session.proxies = {
-                'http': self.proxy_url,
-                'https': self.proxy_url
-            }
+            self.session.proxies = {"http": self.proxy_url, "https": self.proxy_url}
 
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """
@@ -141,7 +138,7 @@ class OpenMeteoSource(DataSource):
 
         start_time = time.time()
 
-        extended_end = end + DateOffset(days=self.horizon - 1)
+        extended_end = end + DateOffset(days=self.horizon)
 
         chunks = self._generate_chunks(start, extended_end, months=3)
 
@@ -173,8 +170,8 @@ class OpenMeteoSource(DataSource):
                 progress.advance(task)
 
         if all_results:
-            result_df = pd.concat(all_results).sort_index()
-            result_df = result_df[~result_df.index.duplicated(keep="first")]
+            result_df = pd.concat(all_results)
+            result_df = result_df[~result_df.index.duplicated(keep="last")].sort_index()
 
             if self.prefix:
                 result_df.columns = [f"{self.prefix}_{col}" for col in result_df.columns]
@@ -306,8 +303,8 @@ class OpenMeteoSource(DataSource):
             "columns": sorted(self.columns),
             "prefix": self.prefix,
         }
-        
+
         if self.proxy_url:
             config["proxy_url"] = self.proxy_url
-            
+
         return config
