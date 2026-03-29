@@ -17,29 +17,36 @@ class ExcelExporter(Exporter):
                     "hour_horizon", "year", "year_horizon", "details". Defaults to all.
         """
         self.path = Path(path)
-        self.sheets = sheets or ["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon", "details"]
+        self.sheets = sheets or ["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon", "run_weekday_horizon", "target_weekday_horizon", "details"]
 
     def export(self, report: EvaluationReport) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
+        agg_sheets = {"summary", "hour", "horizon", "hour_horizon", "year", "year_horizon", "run_weekday_horizon", "target_weekday_horizon"}
+        needs_agg = bool(set(self.sheets) & agg_sheets)
+        agg = report.compute_all() if needs_agg else {}
+
         with pd.ExcelWriter(self.path, engine="openpyxl") as writer:
             if "summary" in self.sheets:
-                self._write_summary(writer, report)
+                self._write_summary(writer, report, agg["summary"])
             if "hour" in self.sheets:
-                self._write_pivot_sheet(writer, report, "hour", report.by_hour(), "hour")
+                self._write_pivot_sheet(writer, report, "hour", agg["hour"], "hour")
             if "horizon" in self.sheets:
-                self._write_pivot_sheet(writer, report, "horizon", report.by_horizon(), "horizon")
+                self._write_pivot_sheet(writer, report, "horizon", agg["horizon"], "horizon")
             if "hour_horizon" in self.sheets:
-                self._write_matrix_sheet(writer, report, "HourHorizon", report.by_hour_horizon(), "hour", "horizon")
+                self._write_matrix_sheet(writer, report, "HourHorizon", agg["hour_horizon"], "hour", "horizon")
             if "year" in self.sheets:
-                self._write_pivot_sheet(writer, report, "year", report.by_year(), "year")
+                self._write_pivot_sheet(writer, report, "year", agg["year"], "year")
             if "year_horizon" in self.sheets:
-                self._write_matrix_sheet(writer, report, "YearHorizon", report.by_year_horizon(), "year", "horizon")
+                self._write_matrix_sheet(writer, report, "YearHorizon", agg["year_horizon"], "year", "horizon")
+            if "run_weekday_horizon" in self.sheets and "run_weekday_horizon" in agg and not agg["run_weekday_horizon"].empty:
+                self._write_weekday_horizon_sheet(writer, report, agg["run_weekday_horizon"], "run_weekday", "RunWeekdayHorizon")
+            if "target_weekday_horizon" in self.sheets and "target_weekday_horizon" in agg and not agg["target_weekday_horizon"].empty:
+                self._write_weekday_horizon_sheet(writer, report, agg["target_weekday_horizon"], "target_weekday", "TgtWeekdayHorizon")
             if "details" in self.sheets:
                 self._write_details(writer, report)
 
-    def _write_summary(self, writer: pd.ExcelWriter, report: EvaluationReport) -> None:
-        summary = report.summary()
+    def _write_summary(self, writer: pd.ExcelWriter, report: EvaluationReport, summary: pd.DataFrame) -> None:
         sheet_name = "Summary"
         summary.to_excel(writer, sheet_name=sheet_name, index=False)
         self._apply_color_scale(writer, sheet_name, 2, 2, len(summary), len(summary.columns) - 1)
@@ -118,21 +125,58 @@ class ExcelExporter(Exporter):
             end_cell = f"{get_column_letter(end_col)}{end_row}"
             ws.conditional_formatting.add(f"{start_cell}:{end_cell}", rule)
 
+    # Standard pandas dayofweek labels: Mon=0 … Sun=6
+    _WEEKDAY_LABELS = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+
+    def _write_weekday_horizon_sheet(
+        self,
+        writer: pd.ExcelWriter,
+        report: EvaluationReport,
+        data: pd.DataFrame,
+        weekday_col: str,
+        sheet_prefix: str,
+    ) -> None:
+        metrics = [ev.name for ev in report.evaluators]
+        models = list(data["model"].unique())
+
+        for metric in metrics:
+            sheet_name = f"{sheet_prefix}_{metric}"[:31]
+            ws = writer.book.create_sheet(sheet_name)
+
+            col_offset = 1
+            for model in models:
+                model_df = data[data["model"] == model]
+                pivot = model_df.pivot(index=weekday_col, columns="horizon", values=metric)
+                pivot = pivot.sort_index()
+                ws.cell(row=1, column=col_offset, value=model)
+                for c_idx, col_val in enumerate(pivot.columns, start=1):
+                    ws.cell(row=2, column=col_offset + c_idx, value=f"h+{col_val}")
+                for r_idx, row_val in enumerate(pivot.index, start=1):
+                    label = self._WEEKDAY_LABELS.get(row_val, str(row_val))
+                    ws.cell(row=2 + r_idx, column=col_offset, value=label)
+                    for c_idx, col_val in enumerate(pivot.columns, start=1):
+                        ws.cell(row=2 + r_idx, column=col_offset + c_idx, value=pivot.loc[row_val, col_val])
+
+                self._apply_color_scale(writer, sheet_name, 3, col_offset + 1, len(pivot), len(pivot.columns))
+                col_offset += len(pivot.columns) + 2
+
     def _write_details(self, writer: pd.ExcelWriter, report: EvaluationReport) -> None:
-        if not report.results:
+        if not report.refs:
             return
 
-        model_names = list(report.results.keys())
-        base_df = report.results[model_names[0]].copy()
-
         base_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual"]
-        details_df = base_df[base_cols].copy()
+        details_df = None
 
-        for model_name in model_names:
-            model_df = report.results[model_name]
+        for model_name, model_df in report.iter_details():
+            if details_df is None:
+                details_df = model_df[base_cols].copy()
             details_df[f"prediction_{model_name}"] = model_df["prediction"].values
+            del model_df
 
-        details_df = details_df.sort_values(by=["target_date", "hour", "horizon"]).reset_index(drop=True)
+        if details_df is None:
+            return
 
-        sheet_name = "Details"
-        details_df.to_excel(writer, sheet_name=sheet_name, index=False)
+        details_df = details_df.sort_values(
+            by=["target_date", "hour", "horizon"]
+        ).reset_index(drop=True)
+        details_df.to_excel(writer, sheet_name="Details", index=False)
