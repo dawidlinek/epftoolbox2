@@ -8,6 +8,10 @@ class LassoCVModel(BaseModel):
         self.cv = cv
         self.max_iter = max_iter
 
+    @property
+    def _model_kwargs(self):
+        return {"cv": self.cv, "max_iter": self.max_iter}
+
     def _fit_predict(self, train_x, train_y, test_x):
         model = LassoCV(cv=self.cv, max_iter=self.max_iter, n_jobs=1)
         model.fit(train_x, train_y)

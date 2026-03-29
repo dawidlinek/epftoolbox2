@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from itertools import islice
-from threading import Lock
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Dict, Callable, Union, Tuple, Optional
 from datetime import date
 import gc
+import inspect
+import multiprocessing
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -14,13 +15,7 @@ from rich.progress import Progress
 from ..scalers.standard import StandardScaler
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef
-
-
-def _batched(iterable, n: int):
-    it = iter(iterable)
-    while batch := list(islice(it, n)):
-        yield batch
-
+from ._worker import _worker_init, _run_day
 
 class BaseModel(ABC):
     def __init__(
@@ -39,9 +34,11 @@ class BaseModel(ABC):
         self._offset: int = 0
         self._target: str = ""
         self._run_date: str = ""
-
         self._scalable_mask: Optional[np.ndarray] = None
-        self._mask_lock = Lock()
+
+    @property
+    def _model_kwargs(self) -> Dict:
+        return {}
 
     def run(
         self,
@@ -64,7 +61,6 @@ class BaseModel(ABC):
 
         self._offset = int(self._data.loc[test_start, "day"].iloc[0])
         test_end_day = int(self._data.loc[test_end, "day"].iloc[0])
-
         self._data = None
 
         all_tasks = [
@@ -76,7 +72,6 @@ class BaseModel(ABC):
 
         store = ResultStore(save_to) if save_to else None
         tasks = store.get_missing(all_tasks) if store else all_tasks
-        n_completed = len(all_tasks) - len(tasks)
 
         if not tasks:
             print(f"All {len(all_tasks)} tasks completed")
@@ -92,33 +87,77 @@ class BaseModel(ABC):
                 horizon=horizon,
             )
 
-        n_jobs = int(os.environ.get("MAX_THREADS", os.cpu_count() or 1))
-        batch_size = max(n_jobs * 8, 256)
+        if self._scalable_mask is None:
+            self._scalable_mask = self._compute_scalable_mask(horizon)
+
+        hour_arrays = self._build_hour_arrays(horizon)
+        expanded_preds = self._precompute_expanded_predictors(horizon)
+
+        tasks_by_day: Dict[int, list] = {}
+        for t in tasks:
+            tasks_by_day.setdefault(t[2], []).append(t)
+
+        threads_per_process = int(
+            os.environ.get("THREADS_PER_PROCESS", os.environ.get("MAX_THREADS", "16"))
+        )
+        n_processes = int(
+            os.environ.get(
+                "MAX_PROCESSES",
+                max(1, (os.cpu_count() or 1) // threads_per_process),
+            )
+        )
+
+        config = {
+            "offset":              self._offset,
+            "training_window":     self.training_window,
+            "scalable_mask":       self._scalable_mask,
+            "threads_per_process": threads_per_process,
+        }
 
         in_memory: Optional[List[Dict]] = None if save_to else []
 
-        with ThreadPoolExecutor(max_workers=n_jobs) as pool:
+        _mp_context = (
+            multiprocessing.get_context("fork")
+            if sys.platform != "win32"
+            else multiprocessing.get_context("spawn")
+        )
+
+        with ProcessPoolExecutor(
+            max_workers=n_processes,
+            mp_context=_mp_context,
+            initializer=_worker_init,
+            initargs=(
+                hour_arrays,
+                expanded_preds,
+                config,
+                type(self),
+                self._model_kwargs,
+            ),
+        ) as pool:
+            futures = {
+                pool.submit(_run_day, day_tasks): day
+                for day, day_tasks in tasks_by_day.items()
+            }
+            n_days_total = test_end_day - self._offset + 1
+            n_days_done = n_days_total - len(tasks_by_day)
             with Progress() as progress:
                 task_id = progress.add_task(
-                    f"[cyan]{self.name}", total=len(all_tasks), completed=n_completed
+                    f"[cyan]{self.name}",
+                    total=n_days_total,
+                    completed=n_days_done,
                 )
-                for batch in _batched(tasks, batch_size):
-                    futures = {pool.submit(self._fit_one, *task): task for task in batch}
-                    for future in as_completed(futures):
-                        try:
-                            result = future.result()
-                        except Exception as e:
-                            t = futures[future]
-                            print(
-                                f"Error running task "
-                                f"(hour={t[0]}, horizon={t[1]}, day={t[2]}): {e}"
-                            )
-                            continue
+                for future in as_completed(futures):
+                    try:
+                        day_results = future.result()
+                    except Exception as e:
+                        print(f"Error running day {futures[future]}: {e}")
+                        continue
+                    for result in day_results:
                         if store:
                             store.save(result)
                         else:
                             in_memory.append(result)
-                        progress.advance(task_id)
+                    progress.advance(task_id)
 
         if store:
             store.flush()
@@ -150,56 +189,61 @@ class BaseModel(ABC):
         new_cols["hour"] = pd.Series(data.index.hour, index=data.index)
         return pd.concat([data, pd.DataFrame(new_cols, index=data.index)], axis=1)
 
-    def _get_slice(self, hour: int, day: int, horizon: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        hour_df = self._hour_data[hour]
-        days = self._hour_days[hour]
-        day_min = day - self.training_window - horizon
+    def _build_hour_arrays(self, horizon: int) -> Dict[int, Dict]:
+        target_cols = [f"{self._target}_d+{h}" for h in range(1, horizon + 1)]
+        hour_arrays = {}
+        for hour in range(24):
+            hour_df = self._hour_data[hour]
+            feature_cols = [
+                c for c in hour_df.columns
+                if c not in target_cols + ["day", "hour"]
+            ]
+            hour_arrays[hour] = {
+                "x":         hour_df[feature_cols].to_numpy(dtype=np.float64, copy=True),
+                "y":         hour_df[target_cols].to_numpy(dtype=np.float64, copy=True),
+                "days":      self._hour_days[hour].copy(),
+                "timestamps": hour_df.index.values.copy(),
+                "col_index": {c: i for i, c in enumerate(feature_cols)},
+            }
+        return hour_arrays
+
+    def _compute_scalable_mask(self, horizon: int) -> np.ndarray:
+        """Compute scalable mask from the first available training slice."""
+        days = self._hour_days[0]
+        day = self._offset
+        day_min = day - self.training_window - 1
         mask = (days >= day_min) & (days <= day)
-        filtered = hour_df[mask]
-        return filtered.iloc[: -1 - horizon], filtered.iloc[-1:]
-
-    def _fit_one(self, hour: int, horizon: int, day_in_test: int) -> Dict:
-        day = self._offset + day_in_test
-        target_col = f"{self._target}_d+{horizon}"
-        predictors = self._expand_predictors(horizon)
-        train, test = self._get_slice(hour, day, horizon)
-        actual = float(test[target_col].iloc[0])
-
-        run_date = test.index[0]
-        target_date = run_date + pd.Timedelta(days=horizon)
-
-        train_x = train[predictors].values
-        train_y = train[target_col].values
-        test_x = test[predictors].values
-
-        if self._scalable_mask is None:
-            with self._mask_lock:
-                if self._scalable_mask is None:
-                    self._scalable_mask = StandardScaler.get_scalable_mask(train_x)
-
-        scaler = StandardScaler()
-        train_x, train_y, test_x = scaler.fit_transform(
-            train_x, train_y, test_x, scalable_mask=self._scalable_mask
+        sample_preds = self._expand_predictors(1, hour=0)
+        sample_x = (
+            self._hour_data[0][mask][sample_preds]
+            .to_numpy(dtype=np.float64)[: -(1 + 1)]
         )
-        pred, coefs = self._fit_predict(train_x, train_y, test_x)
+        return StandardScaler.get_scalable_mask(sample_x)
 
+    def _precompute_expanded_predictors(
+        self, horizon: int
+    ) -> Dict[Tuple[int, int], List[str]]:
+        """Resolve all (hour, hz) predictor combinations to plain string lists."""
         return {
-            "run_date": run_date.strftime("%Y-%m-%d"),
-            "target_date": target_date.strftime("%Y-%m-%d"),
-            "run_weekday": run_date.dayofweek,
-            "hour": hour,
-            "horizon": horizon,
-            "day_in_test": day_in_test,
-            "prediction": scaler.inverse(float(pred)),
-            "actual": actual,
-            "coefficients": coefs,
+            (hour, hz): self._expand_predictors(hz, hour=hour)
+            for hour in range(24)
+            for hz in range(1, horizon + 1)
         }
 
-    def _expand_predictors(self, horizon: int) -> List[str]:
+    def _expand_predictors(self, horizon: int, hour: int = 0) -> List[str]:
+        """Expand predictor list for a given (horizon, hour) combination.
+
+        Callables receive (horizon, hour) if they accept two parameters,
+        or just (horizon) if they accept one — detected via inspect.signature.
+        """
         result = []
         for col in self.predictors:
             if callable(col):
-                result.append(col(horizon))
+                try:
+                    n_params = len(inspect.signature(col).parameters)
+                except (ValueError, TypeError):
+                    n_params = 1
+                result.append(col(horizon, hour) if n_params >= 2 else col(horizon))
             elif "{horizon}" in str(col):
                 result.append(str(col).replace("{horizon}", str(horizon)))
             else:
