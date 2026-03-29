@@ -87,8 +87,7 @@ class BaseModel(ABC):
                 horizon=horizon,
             )
 
-        if self._scalable_mask is None:
-            self._scalable_mask = self._compute_scalable_mask(horizon)
+        self._scalable_mask = self._compute_scalable_mask(horizon)
 
         hour_arrays = self._build_hour_arrays(horizon)
         expanded_preds = self._precompute_expanded_predictors(horizon)
@@ -97,15 +96,7 @@ class BaseModel(ABC):
         for t in tasks:
             tasks_by_day.setdefault(t[2], []).append(t)
 
-        threads_per_process = int(
-            os.environ.get("THREADS_PER_PROCESS", os.environ.get("MAX_THREADS", "16"))
-        )
-        n_processes = int(
-            os.environ.get(
-                "MAX_PROCESSES",
-                max(1, (os.cpu_count() or 1) // threads_per_process),
-            )
-        )
+        threads_per_process, n_processes = self._executor_config()
 
         config = {
             "offset":              self._offset,
@@ -114,17 +105,12 @@ class BaseModel(ABC):
             "threads_per_process": threads_per_process,
         }
 
-        in_memory: Optional[List[Dict]] = None if save_to else []
-
-        _mp_context = (
-            multiprocessing.get_context("fork")
-            if sys.platform != "win32"
-            else multiprocessing.get_context("spawn")
-        )
+        in_memory = None if save_to else []
+        mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
 
         with ProcessPoolExecutor(
             max_workers=n_processes,
-            mp_context=_mp_context,
+            mp_context=mp_context,
             initializer=_worker_init,
             initargs=(
                 hour_arrays,
@@ -174,6 +160,11 @@ class BaseModel(ABC):
             _results=in_memory,
         )
 
+    def _executor_config(self) -> tuple:
+        threads = int(os.environ.get("THREADS_PER_PROCESS", os.environ.get("MAX_THREADS", "16")))
+        processes = int(os.environ.get("MAX_PROCESSES", max(1, (os.cpu_count() or 1) // threads)))
+        return threads, processes
+
     def _cleanup(self) -> None:
         self._data = None
         self._hour_data.clear()
@@ -182,12 +173,10 @@ class BaseModel(ABC):
         gc.collect()
 
     def _preprocess(self, data: pd.DataFrame, horizon: int, target: str) -> pd.DataFrame:
-        new_cols: Dict[str, pd.Series] = {}
-        for h in range(1, horizon + 1):
-            new_cols[f"{target}_d+{h}"] = data[target].shift(-24 * h)
+        new_cols = {f"{target}_d+{h}": data[target].shift(-24 * h) for h in range(1, horizon + 1)}
         new_cols["day"] = pd.Series(np.arange(len(data)) // 24, index=data.index)
         new_cols["hour"] = pd.Series(data.index.hour, index=data.index)
-        return pd.concat([data, pd.DataFrame(new_cols, index=data.index)], axis=1)
+        return pd.concat([data, pd.DataFrame(new_cols)], axis=1)
 
     def _build_hour_arrays(self, horizon: int) -> Dict[int, Dict]:
         target_cols = [f"{self._target}_d+{h}" for h in range(1, horizon + 1)]
@@ -208,7 +197,6 @@ class BaseModel(ABC):
         return hour_arrays
 
     def _compute_scalable_mask(self, horizon: int) -> np.ndarray:
-        """Compute scalable mask from the first available training slice."""
         days = self._hour_days[0]
         day = self._offset
         day_min = day - self.training_window - 1
@@ -223,7 +211,6 @@ class BaseModel(ABC):
     def _precompute_expanded_predictors(
         self, horizon: int
     ) -> Dict[Tuple[int, int], List[str]]:
-        """Resolve all (hour, hz) predictor combinations to plain string lists."""
         return {
             (hour, hz): self._expand_predictors(hz, hour=hour)
             for hour in range(24)
@@ -231,11 +218,6 @@ class BaseModel(ABC):
         }
 
     def _expand_predictors(self, horizon: int, hour: int = 0) -> List[str]:
-        """Expand predictor list for a given (horizon, hour) combination.
-
-        Callables receive (horizon, hour) if they accept two parameters,
-        or just (horizon) if they accept one — detected via inspect.signature.
-        """
         result = []
         for col in self.predictors:
             if callable(col):

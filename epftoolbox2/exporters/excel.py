@@ -105,28 +105,23 @@ class ExcelExporter(Exporter):
         if num_rows <= 0 or num_cols <= 0:
             return
 
-        rule = ColorScaleRule(
-            start_type="min",
-            start_color="63BE7B",
-            mid_type="percentile",
-            mid_value=50,
-            mid_color="FFEB84",
-            end_type="max",
-            end_color="F8696B",
-        )
-
         if per_column:
             for col in range(start_col, end_col + 1):
                 start_cell = f"{get_column_letter(col)}{start_row}"
                 end_cell = f"{get_column_letter(col)}{end_row}"
-                ws.conditional_formatting.add(f"{start_cell}:{end_cell}", rule)
+                ws.conditional_formatting.add(f"{start_cell}:{end_cell}", self._COLOR_SCALE_RULE)
         else:
             start_cell = f"{get_column_letter(start_col)}{start_row}"
             end_cell = f"{get_column_letter(end_col)}{end_row}"
-            ws.conditional_formatting.add(f"{start_cell}:{end_cell}", rule)
+            ws.conditional_formatting.add(f"{start_cell}:{end_cell}", self._COLOR_SCALE_RULE)
 
-    # Standard pandas dayofweek labels: Mon=0 … Sun=6
     _WEEKDAY_LABELS = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+
+    _COLOR_SCALE_RULE = ColorScaleRule(
+        start_type="min", start_color="63BE7B",
+        mid_type="percentile", mid_value=50, mid_color="FFEB84",
+        end_type="max", end_color="F8696B",
+    )
 
     def _write_weekday_horizon_sheet(
         self,

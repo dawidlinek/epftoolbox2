@@ -7,11 +7,11 @@ from threading import Lock
 
 
 class ResultStore:
-    _SENTINEL = object()  # signals the writer thread to stop
+    _SENTINEL = object()
 
     def __init__(self, path: str, batch_size: int = 500):
         self.path = Path(path)
-        self._lock = Lock()                        # guards _completed only
+        self._lock = Lock()
         self._completed: Set[tuple] = set()
         self._batch_size = batch_size
 
@@ -27,7 +27,7 @@ class ResultStore:
         key = (result["hour"], result["horizon"], result["day_in_test"])
         with self._lock:
             self._completed.add(key)
-        self._write_queue.put(result)   # non-blocking; no lock needed
+        self._write_queue.put(result)
 
     def flush(self) -> None:
         self._write_queue.put(self._SENTINEL)
@@ -40,12 +40,7 @@ class ResultStore:
         return [t for t in all_tasks if not self.is_done(t[0], t[1], t[2])]
 
     def load_all(self) -> List[Dict]:
-        results = []
-        if self.path.exists():
-            for line in self.path.read_text().splitlines():
-                if line.strip():
-                    results.append(json.loads(line))
-        return results
+        return list(self.iter_lines())
 
     def iter_lines(self, cols: Optional[List[str]] = None) -> Iterator[Dict]:
         if not self.path.exists():
@@ -59,14 +54,10 @@ class ResultStore:
 
 
     def _load_existing(self) -> None:
-        if self.path.exists():
-            for line in self.path.read_text().splitlines():
-                if line.strip():
-                    r = json.loads(line)
-                    self._completed.add((r["hour"], r["horizon"], r["day_in_test"]))
+        for r in self.iter_lines(cols=["hour", "horizon", "day_in_test"]):
+            self._completed.add((r["hour"], r["horizon"], r["day_in_test"]))
 
     def _writer_loop(self) -> None:
-        """Background thread: drains the queue and writes batches to disk."""
         buf: List[Dict] = []
 
         while True:

@@ -3,10 +3,6 @@ from .base import BaseModel
 
 
 class OLSModel(BaseModel):
-    @property
-    def _model_kwargs(self):
-        return {}
-
     def _fit_predict(self, train_x, train_y, test_x):
         model = LinearRegression(fit_intercept=False)
         model.fit(train_x, train_y)
