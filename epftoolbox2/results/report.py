@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Dict, Iterator, List, Tuple, Union
 
 import pandas as pd
@@ -31,10 +30,6 @@ class EvaluationReport:
                     horizon=0,
                     _results=v,
                 )
-
-    @property
-    def results(self) -> Dict[str, ModelResultRef]:
-        return self.refs
 
     def summary(self) -> pd.DataFrame:
         rows = []
@@ -84,7 +79,6 @@ class EvaluationReport:
         return {ev.name: ev.compute(df) for ev in self.evaluators}
 
     def _iter_ref(self, ref: ModelResultRef, cols: List[str] = None) -> Iterator[Dict]:
-        """Unified iterator that handles both disk-backed and in-memory refs."""
         if ref.path is not None:
             from .store import ResultStore
             yield from ResultStore(ref.path).iter_lines(cols=cols)

@@ -14,7 +14,6 @@ _W_FIT_PREDICT = None
 
 
 def _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
-    """Called once per worker process by ProcessPoolExecutor's initializer."""
     global _W_HOUR_ARRAYS, _W_EXPANDED_PREDS, _W_CONFIG, _W_FIT_PREDICT
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -26,7 +25,6 @@ def _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
 
 
 def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Dict:
-    """Core compute unit. Pure numpy — no pandas in the hot path."""
     arrays = _W_HOUR_ARRAYS[hour]
     cfg = _W_CONFIG
     day = cfg["offset"] + day_in_test
