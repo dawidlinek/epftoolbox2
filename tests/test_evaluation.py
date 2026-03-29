@@ -7,6 +7,7 @@ import os
 
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.results.report import EvaluationReport
+from epftoolbox2.results.ref import ModelResultRef
 from epftoolbox2.pipelines.model_pipeline import ModelPipeline
 from epftoolbox2.exporters.terminal import TerminalExporter
 from epftoolbox2.exporters.excel import ExcelExporter
@@ -101,10 +102,18 @@ class TestModelPipeline:
     def mock_model(self):
         model = MagicMock()
         model.name = "MockModel"
-        model.run.return_value = [
-            {"prediction": 10, "actual": 12, "hour": 0, "horizon": 1, "target_date": "2024-01-01"},
-            {"prediction": 20, "actual": 18, "hour": 1, "horizon": 1, "target_date": "2024-01-01"},
-        ]
+        model.run.return_value = ModelResultRef(
+            name="MockModel",
+            path=None,
+            count=2,
+            test_start="2024-01-05",
+            test_end="2024-01-10",
+            horizon=1,
+            _results=[
+                {"prediction": 10, "actual": 12, "hour": 0, "horizon": 1, "target_date": "2024-01-01"},
+                {"prediction": 20, "actual": 18, "hour": 1, "horizon": 1, "target_date": "2024-01-01"},
+            ],
+        )
         return model
 
     def test_init(self):
@@ -163,13 +172,21 @@ class TestModelPipeline:
     def test_run_multiple_models(self, sample_data, mock_model):
         model2 = MagicMock()
         model2.name = "MockModel2"
-        model2.run.return_value = [
-            {"prediction": 11, "actual": 12, "hour": 0, "horizon": 1, "target_date": "2024-01-01"},
-        ]
+        model2.run.return_value = ModelResultRef(
+            name="MockModel2",
+            path=None,
+            count=1,
+            test_start="2024-01-05",
+            test_end="2024-01-10",
+            horizon=1,
+            _results=[
+                {"prediction": 11, "actual": 12, "hour": 0, "horizon": 1, "target_date": "2024-01-01"},
+            ],
+        )
         pipeline = ModelPipeline().add_model(mock_model).add_model(model2).add_evaluator(MAEEvaluator())
         report = pipeline.run(sample_data, "2024-01-05", "2024-01-10")
-        assert "MockModel" in report.results
-        assert "MockModel2" in report.results
+        assert "MockModel" in report.refs
+        assert "MockModel2" in report.refs
 
 
 class TestTerminalExporter:
@@ -250,7 +267,7 @@ class TestExcelExporter:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "test.xlsx")
             exporter = ExcelExporter(path)
-            assert exporter.sheets == ["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon", "details"]
+            assert exporter.sheets == ["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon", "run_weekday_horizon", "target_weekday_horizon", "details"]
 
     def test_init_custom_sheets(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -5,6 +5,7 @@ from ..models.base import BaseModel
 from ..evaluators.base import Evaluator
 from ..exporters.base import Exporter
 from ..results.report import EvaluationReport
+from ..results.ref import ModelResultRef
 
 
 class ModelPipeline:
@@ -37,10 +38,14 @@ class ModelPipeline:
         if not self.models:
             raise ValueError("At least one model is required")
 
-        all_results = {}
+        refs: dict[str, ModelResultRef] = {}
         for model in self.models:
-            save_to = f"{save_dir}/{model.name.lower().replace(' ', '_')}.jsonl" if save_dir else None
-            results = model.run(
+            save_to = (
+                f"{save_dir}/{model.name.lower().replace(' ', '_')}.jsonl"
+                if save_dir
+                else None
+            )
+            ref = model.run(
                 data=data,
                 test_start=test_start,
                 test_end=test_end,
@@ -48,9 +53,8 @@ class ModelPipeline:
                 horizon=horizon,
                 save_to=save_to,
             )
-            all_results[model.name] = results
-
-        report = EvaluationReport(all_results, self.evaluators)
+            refs[model.name] = ref
+        report = EvaluationReport(refs, self.evaluators)
 
         for exporter in self.exporters:
             exporter.export(report)
