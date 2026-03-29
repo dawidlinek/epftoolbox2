@@ -45,10 +45,10 @@ class TestModels:
             horizon=1,
         )
 
-        assert len(results) > 0
-        assert "prediction" in results[0]
-        assert "actual" in results[0]
-        assert "coefficients" in results[0]
+        assert results.count > 0
+        assert "prediction" in results._results[0]
+        assert "actual" in results._results[0]
+        assert "coefficients" in results._results[0]
 
     def test_lasso_model_runs(self, sample_data):
         model = LassoCVModel(
@@ -66,7 +66,7 @@ class TestModels:
             horizon=1,
         )
 
-        assert len(results) > 0
+        assert results.count > 0
 
     def test_lambda_predictors(self, sample_data):
         model = OLSModel(
@@ -85,7 +85,7 @@ class TestModels:
             horizon=2,
         )
 
-        assert len(results) > 0
+        assert results.count > 0
 
     def test_template_predictors(self, sample_data):
         sample_data["price_lag_1"] = sample_data["price"].shift(1)
@@ -104,7 +104,7 @@ class TestModels:
             horizon=1,
         )
 
-        assert len(results) > 0
+        assert results.count > 0
 
     def test_result_fields(self, sample_data):
         model = OLSModel(
@@ -120,7 +120,7 @@ class TestModels:
             horizon=1,
         )
 
-        result = results[0]
+        result = results._results[0]
         assert "run_date" in result
         assert "target_date" in result
         assert "hour" in result
@@ -158,7 +158,7 @@ class TestModels:
                 save_to=temp_path,
             )
 
-            assert len(results1) == len(results2)
+            assert results1.count == results2.count
         finally:
             Path(temp_path).unlink(missing_ok=True)
 
@@ -176,5 +176,5 @@ class TestModels:
             horizon=3,
         )
 
-        horizons = set(r["horizon"] for r in results)
+        horizons = set(r["horizon"] for r in results._results)
         assert horizons == {1, 2, 3}

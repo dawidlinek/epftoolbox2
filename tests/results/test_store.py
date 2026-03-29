@@ -23,6 +23,7 @@ class TestResultStore:
             "actual": 46.0,
         }
         store.save(result)
+        store.flush()
 
         loaded = store.load_all()
         assert len(loaded) == 1
@@ -72,6 +73,7 @@ class TestResultStore:
 
         store.save({"target_date": "2024-01-15", "hour": 0, "horizon": 1, "day_in_test": 1})
         store.save({"target_date": "2024-01-15", "hour": 1, "horizon": 1, "day_in_test": 1})
+        store.flush()
 
         lines = Path(temp_file).read_text().strip().split("\n")
         assert len(lines) == 2
