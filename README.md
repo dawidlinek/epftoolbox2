@@ -35,7 +35,7 @@ epftoolbox2.verify()
 - **Exporters**: Excel with conditional formatting, Terminal output
 - **Caching**: Built-in data caching to avoid redundant API calls
 - **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files
-- **Multithreading**: Multithreading with free GIL support in python 3.13t and above
+- **Multiprocessing**: Process-based parallelism with inner thread pools
 - **Extensibility**: Extensible base classes for data sources, transformers, validators, models, evaluators, and exporters
 
 ## Quick Start

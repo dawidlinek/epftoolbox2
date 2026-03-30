@@ -56,13 +56,19 @@ import { Steps, Tabs, TabItem, Aside, Badge, Code } from '@astrojs/starlight/com
 
 ---
 
-## GIL-Free Python & Multithreading <Badge text="Python 3.13t+" variant="tip" />
+## Parallel Model Training <Badge text="Python 3.13t+" variant="tip" />
 
-For parallel model training on multi-core systems, use Python 3.14t (free-threading build) which removes the Global Interpreter Lock (GIL).
+Models run in parallel using a **process pool with inner thread pools** - one worker process per group of cores, each using multiple threads internally. This avoids GIL contention and BLAS oversubscription regardless of how many cores you have.
 
-<Aside>
-  Multithreading in epftoolbox2 requires GIL-free Python. Standard Python builds will run training sequentially.
-</Aside>
+```
+┌─ Process 1 ─────────────┐  ┌─ Process 2 ─────────────┐
+│  16 threads             │  │  16 threads             │
+│  processes days 0..N    │  │  processes days N..M    │
+│  BLAS threads = 1       │  │  BLAS threads = 1       │
+└─────────────────────────┘  └─────────────────────────┘
+```
+
+For best results use Python 3.14t (free-threading build), which removes the GIL and allows true parallel numpy execution within each process.
 
 ### Installing Python 3.14t
 
@@ -81,63 +87,60 @@ For parallel model training on multi-core systems, use Python 3.14t (free-thread
   </TabItem>
 </Tabs>
 
-### Complete Setup
+### Script Setup
 
 <Aside type="caution">
-  For GIL disabling to work, environment variables must be set before running Python.
+  Environment variables must be set **before any imports** — especially before numpy, sklearn, or epftoolbox2. BLAS thread pools are initialized at import time and ignore later changes.
 </Aside>
 
-<Steps>
+Place this block at the very top of your script:
 
-1. **Set environment variables before running Python**
-    <Tabs>
-      <TabItem label="PowerShell">
-        ```powershell
-        $env:PYTHON_GIL=0; python your_script.py
-        ```
-      </TabItem>
-      <TabItem label="CMD">
-        ```cmd
-        set PYTHON_GIL=0 && python your_script.py
-        ```
-      </TabItem>
-      <TabItem label="Linux/Mac">
-        ```bash
-        PYTHON_GIL=0 python your_script.py
-        ```
-      </TabItem>
-      <TabItem label="X flag">
-        ```bash
-        python -Xgil=0 your_script.py
-        ```
-      </TabItem>
-    </Tabs>
+```python
+import os
 
-2. **Configure threading in your script** (optional)
+# Enable free-threading (Python 3.13t+)
+os.environ["PYTHON_GIL"] = "0"
 
-   ```python
-   import os
+# Pin BLAS to 1 thread per process — prevents oversubscription
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
-   # Set number of parallel threads (adjust to your CPU cores)
-   os.environ["MAX_THREADS"] = "16"
+# Parallelism configuration
+# MAX_PROCESSES × THREADS_PER_PROCESS should equal your physical core count
+os.environ["MAX_PROCESSES"] = "4"         # worker processes
+os.environ["THREADS_PER_PROCESS"] = "16"  # threads per process
 
-   # Prevent nested threading from NumPy/BLAS libraries
-   os.environ["OMP_NUM_THREADS"] = "1"
-   os.environ["MKL_NUM_THREADS"] = "1"
-   os.environ["OPENBLAS_NUM_THREADS"] = "1"
-   ```
+# Then import everything else
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+from epftoolbox2.models import OLSModel, LassoCVModel
+```
 
-3. **Import the library**
+### Environment Variables
 
-   ```python
-   from epftoolbox2.pipelines import DataPipeline, ModelPipeline
-   from epftoolbox2.models import OLSModel, LassoCVModel
-   ```
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_PROCESSES` | `cpu_count // THREADS_PER_PROCESS` | Number of worker processes |
+| `THREADS_PER_PROCESS` | `16` | Threads per worker process (also accepts `MAX_THREADS`) |
+| `OMP_NUM_THREADS` | system default | OpenMP threads per process — set to `1` |
+| `MKL_NUM_THREADS` | system default | MKL threads per process — set to `1` |
+| `OPENBLAS_NUM_THREADS` | system default | OpenBLAS threads per process — set to `1` |
 
-</Steps>
+### Platform Notes
 
-
+<Tabs>
+  <TabItem label="Linux / Mac">
+    Uses `fork` — worker processes inherit the parent's memory directly. No `if __name__ == '__main__':` guard needed in your scripts.
+  </TabItem>
+  <TabItem label="Windows">
+    Uses `spawn` — worker processes start fresh Python interpreters. Scripts that call `model.run()` at top level **must** be wrapped:
+    ```python
+    if __name__ == '__main__':
+        report = model.run(...)
+    ```
+  </TabItem>
+</Tabs>
 
 <Aside type="tip">
-  With GIL-free Python, model training is **much faster** on multi-core systems.
+  Leave at least one `THREADS_PER_PROCESS` block of cores free for the OS and main process. On a 128-core machine a good starting point is `MAX_PROCESSES=6`, `THREADS_PER_PROCESS=16` (96 cores used).
 </Aside>

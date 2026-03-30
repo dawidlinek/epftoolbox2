@@ -37,11 +37,13 @@ model = LassoCVModel(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `predictors` | List | Required | Predictor specifications |
+| `predictors` | List | Required | Predictor specifications (strings, `{horizon}` templates, or callables) |
 | `training_window` | int | `365` | Days of training data |
 | `cv` | int | `5` | Cross-validation folds |
 | `max_iter` | int | `10000` | Max optimization iterations |
 | `name` | str | `"Model"` | Display name for reports |
+
+Callable predictors accept `(horizon)` or `(horizon, hour)` — see [OLSModel](/epftoolbox2/models/ols/#parameters) for details.
 
 ## When to Use
 

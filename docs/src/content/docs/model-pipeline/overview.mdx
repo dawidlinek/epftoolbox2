@@ -83,7 +83,7 @@ Predictors can be specified in four ways:
   </TabItem>
   <TabItem label="Templates">
     Use `{horizon}` placeholder for horizon-dependent features:
-    
+
     ```python
     predictors = [
         "load_actual",
@@ -91,19 +91,28 @@ Predictors can be specified in four ways:
     ]
     ```
   </TabItem>
-  <TabItem label="Lambda Functions">
-    For complex patterns:
-    
+  <TabItem label="Callables">
+    Callables receive `horizon` (1 param) or `(horizon, hour)` (2 params):
+
     ```python
+    # horizon-only
     predictors = [
-        "load_actual",
-        lambda h: f"weather_d+{h}",
+        lambda horizon: f"weather_d+{horizon}",
+    ]
+
+    # horizon + hour — different feature per hour of day
+    predictors = [
+        lambda horizon, hour: f"load_h{hour:02d}_d+{horizon}",
     ]
     ```
+
+    <Aside>
+      Callables are evaluated in the main process before any worker is spawned, so lambdas and closures work without restriction.
+    </Aside>
   </TabItem>
   <TabItem label="Loop Generation">
     Use list comprehensions for many features:
-    
+
     ```python
     predictors = [
         "load_actual",
@@ -113,6 +122,31 @@ Predictors can be specified in four ways:
     ```
   </TabItem>
 </Tabs>
+
+---
+
+## Parallelism
+
+Models use a **process pool with inner thread pools**. Each worker process handles one forecast day (24 hours × horizon), keeping results consistent and progress tracking stable.
+
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_PROCESSES` | `cpu_count // THREADS_PER_PROCESS` | Worker processes |
+| `THREADS_PER_PROCESS` | `16` | Threads per process |
+
+```python
+import os
+
+os.environ["MAX_PROCESSES"] = "4"
+os.environ["THREADS_PER_PROCESS"] = "16"  # → 4 × 16 = 64 cores
+
+# Must be set before any imports
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+```
+
+See [Installation](/epftoolbox2/getting-started/installation/#parallel-model-training) for full setup including platform notes.
 
 ---
 
