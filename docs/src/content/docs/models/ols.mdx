@@ -36,9 +36,19 @@ model = OLSModel(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `predictors` | List | Required | Predictor specifications |
+| `predictors` | List | Required | Predictor specifications (strings, `{horizon}` templates, or callables) |
 | `training_window` | int | `365` | Days of training data |
 | `name` | str | `"Model"` | Display name for reports |
+
+Callable predictors accept `(horizon)` or `(horizon, hour)` — the two-parameter form enables features that differ by hour of day:
+
+```python
+# horizon-only
+lambda horizon: f"price_lag_d-{horizon-7}"
+
+# horizon + hour of day
+lambda horizon, hour: f"load_h{hour:02d}_d+{horizon}"
+```
 
 ## Example
 
