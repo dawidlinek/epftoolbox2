@@ -98,7 +98,7 @@ class ExcelExporter(Exporter):
         num_cols: int,
         per_column: bool = False,
     ) -> None:
-        ws = writer.sheets[sheet_name]
+        ws = writer.book[sheet_name]
         end_row = start_row + num_rows - 1
         end_col = start_col + num_cols - 1
 
@@ -160,9 +160,11 @@ class ExcelExporter(Exporter):
             return
 
         base_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual"]
+        sort_keys = ["run_date", "target_date", "hour", "horizon"]
         details_df = None
 
         for model_name, model_df in report.iter_details():
+            model_df = model_df.sort_values(by=sort_keys).reset_index(drop=True)
             if details_df is None:
                 details_df = model_df[base_cols].copy()
             details_df[f"prediction_{model_name}"] = model_df["prediction"].values

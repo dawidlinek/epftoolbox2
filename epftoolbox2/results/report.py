@@ -80,8 +80,16 @@ class EvaluationReport:
 
     def _iter_ref(self, ref: ModelResultRef, cols: List[str] = None) -> Iterator[Dict]:
         if ref.path is not None:
-            from .store import ResultStore
-            yield from ResultStore(ref.path).iter_lines(cols=cols)
+            import json
+            from pathlib import Path
+            p = Path(ref.path)
+            if p.exists():
+                with open(p) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            r = json.loads(line)
+                            yield {k: r[k] for k in cols if k in r} if cols else r
         else:
             for r in (ref._results or []):
                 yield {k: r[k] for k in cols if k in r} if cols else r
