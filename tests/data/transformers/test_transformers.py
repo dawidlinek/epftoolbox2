@@ -369,7 +369,7 @@ class TestLagTransformerInit:
         transformer = LagTransformer(columns=["price"])
         assert transformer.columns == ["price"]
         assert transformer.lags == [1]
-        assert transformer.freq == pd.Timedelta("1h")
+        assert transformer.freq == "1h"
 
     def test_init_single_column_string(self):
         """Test initialization with single column as string"""
@@ -394,7 +394,7 @@ class TestLagTransformerInit:
     def test_init_custom_freq(self):
         """Test initialization with custom frequency"""
         transformer = LagTransformer(columns=["price"], freq="1d")
-        assert transformer.freq == pd.Timedelta("1d")
+        assert transformer.freq == "1d"
 
     def test_init_empty_lags(self):
         """Test initialization with empty lags raises error"""

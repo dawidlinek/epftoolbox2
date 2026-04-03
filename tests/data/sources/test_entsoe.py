@@ -43,18 +43,18 @@ class TestEntsoeSourceInit:
     def test_init_valid_params(self):
         """Test initialization with valid parameters"""
         source = EntsoeSource("PL", "test-api-key", type=["load"])
-        assert source.area_name == "PL"
-        assert source.area_code == "10YPL-AREA-----S"
+        assert source._area_name == "PL"
+        assert source._area_code == "10YPL-AREA-----S"
         assert source.api_key == "test-api-key"
-        assert source.types == ["load"]
+        assert source.type == ["load"]
 
     def test_init_multiple_types(self):
         """Test initialization with multiple data types"""
         source = EntsoeSource("DE", "test-key", type=["load", "generation", "price"])
-        assert len(source.types) == 3
-        assert "load" in source.types
-        assert "generation" in source.types
-        assert "price" in source.types
+        assert len(source.type) == 3
+        assert "load" in source.type
+        assert "generation" in source.type
+        assert "price" in source.type
 
     def test_init_invalid_country(self):
         """Test initialization with invalid country code"""

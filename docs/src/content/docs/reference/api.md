@@ -81,6 +81,7 @@ class Workflow:
         max_processes: Optional[int] = None,                  # Worker process count
         threads_per_process: Optional[int] = None,            # Threads per process
         cache_path: Optional[str] = None,                     # Cache directory (overrides data_cache)
+        model_index: Optional[int] = None,                    # Run only models[model_index]; all models if None
     ): ...
 
     def run(self) -> EvaluationReport: ...
