@@ -22,6 +22,7 @@ COMPONENT_REGISTRY = {
     "transformers": {
         "TimezoneTransformer": "epftoolbox2.data.transformers.timezone",
         "ResampleTransformer": "epftoolbox2.data.transformers.resample",
+        "LagTransformer": "epftoolbox2.data.transformers.lag",
     },
     "validators": {
         "ContinuityValidator": "epftoolbox2.data.validators.continuity",
@@ -185,7 +186,9 @@ class DataPipeline:
         if hasattr(component, "__dict__"):
             for key, value in component.__dict__.items():
                 if not key.startswith("_") and key not in excluded:
-                    if isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                    if isinstance(value, Path):
+                        params[key] = str(value)
+                    elif isinstance(value, (str, int, float, bool, list, dict, type(None))):
                         params[key] = value
         return {"class": class_name, "params": params}
 

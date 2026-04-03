@@ -177,9 +177,10 @@ class EntsoeSource(DataSource):
     API_URL = "https://web-api.tp.entsoe.eu/api"
 
     def __init__(self, country_code: str, api_key: str, type: List[str]):
-        self.area_name, self.area_code = lookup_area(country_code)
+        self.country_code = country_code
         self.api_key = api_key
-        self.types = type
+        self.type = type
+        self._area_name, self._area_code = lookup_area(country_code)
         self.session = requests.Session()
 
         self.console = Console()
@@ -195,11 +196,11 @@ class EntsoeSource(DataSource):
     def _validate_config(self):
         if not self.api_key:
             raise ValueError("API key cannot be empty")
-        if not self.types:
+        if not self.type:
             raise ValueError("At least one data type must be specified")
 
         valid_types = {"load", "generation", "price"}
-        for t in self.types:
+        for t in self.type:
             if t not in valid_types:
                 raise ValueError(f"Invalid type '{t}'. Must be one of: {valid_types}")
 
@@ -216,9 +217,9 @@ class EntsoeSource(DataSource):
 
         chunks = self._generate_chunks(start, end, months=3)
 
-        self.logger.info(f"ENTSOE [{self.area_name}]: Start downloading {', '.join(self.types)} data")
+        self.logger.info(f"ENTSOE [{self._area_name}]: Start downloading {', '.join(self.type)} data")
 
-        all_results = {dtype: [] for dtype in self.types}
+        all_results = {dtype: [] for dtype in self.type}
 
         with Progress(
             SpinnerColumn(),
@@ -229,23 +230,23 @@ class EntsoeSource(DataSource):
             console=self.console,
         ) as progress:
             task = progress.add_task(
-                f"[cyan]ENTSOE [{self.area_name}]: Downloading {', '.join(self.types)}...",
+                f"[cyan]ENTSOE [{self._area_name}]: Downloading {', '.join(self.type)}...",
                 total=len(chunks),
             )
 
             for chunk_start, chunk_end in chunks:
                 date_range = f"{chunk_start.date()} to {chunk_end.date()}"
-                progress.update(task, description=f"[cyan]ENTSOE [{self.area_name}]: {date_range}")
+                progress.update(task, description=f"[cyan]ENTSOE [{self._area_name}]: {date_range}")
 
                 chunk_data = self._fetch_chunk(chunk_start, chunk_end)
 
-                for dtype in self.types:
+                for dtype in self.type:
                     if dtype in chunk_data:
                         all_results[dtype].append(chunk_data[dtype])
                 progress.advance(task)
 
         dataframes = []
-        for dtype in self.types:
+        for dtype in self.type:
             if all_results[dtype]:
                 df = pd.concat(all_results[dtype]).sort_index()
                 df = df[~df.index.duplicated(keep="first")]
@@ -276,13 +277,13 @@ class EntsoeSource(DataSource):
     def _fetch_chunk(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, pd.DataFrame]:
         result = {}
 
-        if "load" in self.types:
+        if "load" in self.type:
             result["load"] = self._fetch_load(start, end)
 
-        if "generation" in self.types:
+        if "generation" in self.type:
             result["generation"] = self._fetch_generation(start, end)
 
-        if "price" in self.types:
+        if "price" in self.type:
             result["price"] = self._fetch_price(start, end)
 
         return result
@@ -294,8 +295,8 @@ class EntsoeSource(DataSource):
             {
                 "documentType": "A65",
                 "processType": "A16",
-                "outBiddingZone_Domain": self.area_code,
-                "out_Domain": self.area_code,
+                "outBiddingZone_Domain": self._area_code,
+                "out_Domain": self._area_code,
             },
             start,
             end,
@@ -306,7 +307,7 @@ class EntsoeSource(DataSource):
             {
                 "documentType": "A65",
                 "processType": "A01",
-                "outBiddingZone_Domain": self.area_code,
+                "outBiddingZone_Domain": self._area_code,
             },
             start,
             end,
@@ -317,7 +318,7 @@ class EntsoeSource(DataSource):
             {
                 "documentType": "A65",
                 "processType": "A31",
-                "outBiddingZone_Domain": self.area_code,
+                "outBiddingZone_Domain": self._area_code,
             },
             start,
             end,
@@ -334,7 +335,7 @@ class EntsoeSource(DataSource):
             {
                 "documentType": "A75",
                 "processType": "A16",
-                "in_Domain": self.area_code,
+                "in_Domain": self._area_code,
             },
             start,
             end,
@@ -345,7 +346,7 @@ class EntsoeSource(DataSource):
             {
                 "documentType": "A69",
                 "processType": "A01",
-                "in_Domain": self.area_code,
+                "in_Domain": self._area_code,
             },
             start,
             end,
@@ -356,7 +357,7 @@ class EntsoeSource(DataSource):
             {
                 "documentType": "A69",
                 "processType": "A01",
-                "in_Domain": self.area_code,
+                "in_Domain": self._area_code,
             },
             start,
             end,
@@ -370,8 +371,8 @@ class EntsoeSource(DataSource):
         xml = self._api_request(
             {
                 "documentType": "A44",
-                "in_Domain": self.area_code,
-                "out_Domain": self.area_code,
+                "in_Domain": self._area_code,
+                "out_Domain": self._area_code,
             },
             start,
             end,
@@ -555,11 +556,11 @@ class EntsoeSource(DataSource):
         return delta
 
     def _log_success(self, elapsed: float):
-        self.logger.info(f"ENTSOE [{self.area_name}]: Download completed successfully in {elapsed:.2f} sec")
+        self.logger.info(f"ENTSOE [{self._area_name}]: Download completed successfully in {elapsed:.2f} sec")
 
     def get_cache_config(self) -> dict:
         return {
             "source_type": "entsoe",
-            "area_code": self.area_code,
-            "types": sorted(self.types),
+            "area_code": self._area_code,
+            "types": sorted(self.type),
         }
