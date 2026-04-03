@@ -34,7 +34,6 @@ class BaseModel(ABC):
         self._offset: int = 0
         self._target: str = ""
         self._run_date: str = ""
-        self._scalable_mask: Optional[np.ndarray] = None
 
     @property
     def _model_kwargs(self) -> Dict:
@@ -87,10 +86,9 @@ class BaseModel(ABC):
                 horizon=horizon,
             )
 
-        self._scalable_mask = self._compute_scalable_mask(horizon)
-
         hour_arrays = self._build_hour_arrays(horizon)
         expanded_preds = self._precompute_expanded_predictors(horizon)
+        scalable_masks = self._precompute_scalable_masks(horizon)
 
         tasks_by_day: Dict[int, list] = {}
         for t in tasks:
@@ -101,7 +99,7 @@ class BaseModel(ABC):
         config = {
             "offset":              self._offset,
             "training_window":     self.training_window,
-            "scalable_mask":       self._scalable_mask,
+            "scalable_masks":      scalable_masks,
             "threads_per_process": threads_per_process,
         }
 
@@ -169,7 +167,6 @@ class BaseModel(ABC):
         self._data = None
         self._hour_data.clear()
         self._hour_days.clear()
-        self._scalable_mask = None
         gc.collect()
 
     def _preprocess(self, data: pd.DataFrame, horizon: int, target: str) -> pd.DataFrame:
@@ -196,17 +193,24 @@ class BaseModel(ABC):
             }
         return hour_arrays
 
-    def _compute_scalable_mask(self, horizon: int) -> np.ndarray:
-        days = self._hour_days[0]
-        day = self._offset
-        day_min = day - self.training_window - 1
-        mask = (days >= day_min) & (days <= day)
-        sample_preds = self._expand_predictors(1, hour=0)
-        sample_x = (
-            self._hour_data[0][mask][sample_preds]
-            .to_numpy(dtype=np.float64)[: -(1 + 1)]
-        )
-        return StandardScaler.get_scalable_mask(sample_x)
+    def _precompute_scalable_masks(
+        self, horizon: int
+    ) -> Dict[Tuple[int, int], np.ndarray]:
+        masks = {}
+        for hour in range(24):
+            days = self._hour_days[hour]
+            day = self._offset
+            day_min = day - self.training_window - 1
+            mask = (days >= day_min) & (days <= day)
+            hour_df = self._hour_data[hour]
+            for hz in range(1, horizon + 1):
+                preds = self._expand_predictors(hz, hour=hour)
+                sample_x = (
+                    hour_df[mask][preds]
+                    .to_numpy(dtype=np.float64)[: -(1 + hz)]
+                )
+                masks[(hour, hz)] = StandardScaler.get_scalable_mask(sample_x)
+        return masks
 
     def _precompute_expanded_predictors(
         self, horizon: int

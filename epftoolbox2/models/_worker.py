@@ -49,7 +49,7 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Dict:
     scaler = StandardScaler()
     train_x, train_y, test_x = scaler.fit_transform(
         train_x.copy(), train_y.copy(), test_x.copy(),
-        scalable_mask=cfg["scalable_mask"],
+        scalable_mask=cfg["scalable_masks"][(hour, hz)],
     )
     pred, coefs = _W_FIT_PREDICT(train_x, train_y, test_x)
 
