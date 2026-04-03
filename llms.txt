@@ -4,7 +4,7 @@
 
 ## Overview
 
-epftoolbox2 provides a complete toolkit for downloading electricity market data, processing it with transformers, validating quality, training forecasting models, and evaluating results. It uses a fluent builder pattern for pipeline construction.
+epftoolbox2 provides a complete toolkit for downloading electricity market data, processing it with transformers, validating quality, training forecasting models, and evaluating results. It uses a fluent builder pattern for pipeline construction. Both `DataPipeline` and `ModelPipeline` support YAML serialization. A `Workflow` class ties everything together for cluster/supercomputer usage.
 
 ## Installation
 
@@ -26,21 +26,32 @@ uv add epftoolbox2
 └─────────────────┘     └─────────────────┘
         ▼                       ▼
    pd.DataFrame          EvaluationReport
+
+          ┌──────────────────────┐
+          │       Workflow       │
+          ├──────────────────────┤
+          │ data_pipeline.yaml   │
+          │ model_pipeline.yaml  │
+          │ run params + env     │
+          └──────────────────────┘
 ```
 
 ## Core Concepts
 
 ### DataPipeline
-Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame with DatetimeIndex (UTC).
+Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame with DatetimeIndex (UTC). Can be saved/loaded as YAML.
 
-### ModelPipeline  
-Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport.
+### ModelPipeline
+Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport. Can be saved/loaded as YAML.
+
+### Workflow
+Orchestrates DataPipeline + ModelPipeline from a single YAML file. Sets environment variables (`OMP_NUM_THREADS`, `PYTHON_GIL`, `MAX_PROCESSES`, `THREADS_PER_PROCESS`). Supports inline component overrides on top of referenced pipeline files.
 
 ### Fluent API
 All pipelines use method chaining:
 - `.add_source()` - Add data source
 - `.add_transformer()` - Add data transformer
-- `.add_validator()` - Add data validator  
+- `.add_validator()` - Add data validator
 - `.add_model()` - Add forecasting model
 - `.add_evaluator()` - Add evaluation metric
 - `.add_exporter()` - Add results exporter
@@ -199,14 +210,14 @@ transformer = ResampleTransformer(
 
 ## LagTransformer
 
-Creates lagged features for time series.
+Creates lagged features for time series. Positive lags look back (past), negative lags look forward (future forecasts).
 
 ```python
 from epftoolbox2.data.transformers import LagTransformer
 
 transformer = LagTransformer(
     columns=["load_actual", "price"],  # Required. Column(s) to lag
-    lags=[1, 2, 7],                    # Required. Lag periods (positive = look back)
+    lags=[1, 2, 7],                    # Required. Lag periods. Accepts list, range, or single int
     freq="day",                        # Required. Unit for lags
 )
 ```
@@ -218,8 +229,11 @@ transformer = LagTransformer(
 - `"second"`, `"seconds"`, `"s"`, `"1s"` → 1 second
 
 **Output column naming:** `{column}_{unit}-{lag}`
-- Example with `freq="day"`: `load_actual_d-1`, `load_actual_d-2`, `load_actual_d-7`
+- Example with `freq="day"`, lag=1: `load_actual_d-1`
+- Example with `freq="day"`, lag=-7: `load_actual_d+7` (forward look)
 - Example with `freq="hour"`: `price_h-24`, `price_h-168`
+
+**Note:** `range(-7, 1)` is accepted and serialized correctly to YAML (converted to list internally).
 
 ---
 
@@ -323,21 +337,26 @@ All models extend `BaseModel` base class.
 
 ## Predictor Specification
 
-Predictors can be specified three ways:
+Predictors can be specified in four ways:
 
 ```python
 predictors = [
     # 1. Static column name
     "load_actual",
-    
-    # 2. Template with {horizon} placeholder
+
+    # 2. Template with {horizon} placeholder (replaced with 1, 2, ..., horizon)
     "warsaw_temperature_2m_d+{horizon}",
     "is_monday_d+{horizon}",
-    
-    # 3. Lambda function receiving horizon (1-7)
+
+    # 3. Callable receiving horizon (int 1-7)
     lambda h: f"weather_d+{h}",
+
+    # 4. Callable receiving (horizon, hour) — different feature per hour of day
+    lambda h, hour: f"load_h{hour:02d}_d+{h}",
 ]
 ```
+
+**YAML serialization constraint:** Callables cannot be serialized to YAML. Use string templates (`"col_d+{horizon}"`) for pipelines intended to be saved with `ModelPipeline.save()` or `Workflow`.
 
 ## OLSModel
 
@@ -374,6 +393,8 @@ model = LassoCVModel(
 ---
 
 ## Model Training Process
+
+Uses `ProcessPoolExecutor` (one process per forecast day) + inner `ThreadPoolExecutor` per worker process. Worker state is module-level in `_worker.py`, populated once via pool initializer.
 
 For each (hour, horizon, day) combination:
 1. Extract training data (rolling window)
@@ -465,12 +486,179 @@ report = pipeline.run(...)
 
 # Available methods:
 report.summary()           # DataFrame: model × metrics
-report.by_hour()           # DataFrame: model × hour × metrics  
+report.by_hour()           # DataFrame: model × hour × metrics
 report.by_horizon()        # DataFrame: model × horizon × metrics
 report.by_hour_horizon()   # DataFrame: model × hour × horizon × metrics
 report.by_year()           # DataFrame: model × year × metrics
 report.by_year_horizon()   # DataFrame: model × year × horizon × metrics
 ```
+
+---
+
+# YAML SERIALIZATION
+
+Both pipelines support `save(path)` / `load(path)`. Components are registered in `COMPONENT_REGISTRY` dicts.
+
+## DataPipeline YAML
+
+```python
+pipeline.save("data_pipeline.yaml")
+pipeline = DataPipeline.load("data_pipeline.yaml")
+```
+
+```yaml
+sources:
+- class: EntsoeSource
+  params:
+    country_code: PL
+    api_key: YOUR_KEY
+    type: [load, price]
+- class: CalendarSource
+  params:
+    country: PL
+    holidays: binary
+    weekday: onehot
+    daylight: true
+transformers:
+- class: LagTransformer
+  params:
+    columns: [load_actual, price]
+    lags: [1, 2, 7]
+    freq: day
+validators:
+- class: NullCheckValidator
+  params:
+    columns: [load_actual, price]
+```
+
+## ModelPipeline YAML
+
+```python
+pipeline.save("model_pipeline.yaml")
+pipeline = ModelPipeline.load("model_pipeline.yaml")
+```
+
+```yaml
+models:
+- class: OLSModel
+  params:
+    predictors: [load_actual, "is_monday_d+{horizon}", "price_d-1"]
+    training_window: 365
+    name: OLS
+- class: LassoCVModel
+  params:
+    predictors: *id001   # YAML alias if same list object — valid, loads correctly
+    training_window: 365
+    cv: 5
+    name: LassoCV
+evaluators:
+- class: MAEEvaluator
+  params: {}
+exporters:
+- class: TerminalExporter
+  params:
+    show: [summary, horizon]
+- class: ExcelExporter
+  params:
+    path: results.xlsx
+```
+
+**Serialization rules:**
+- Only primitive attributes are serialized: `str`, `int`, `float`, `bool`, `list`, `dict`, `None`, `Path` (→ str)
+- Non-serializable public attributes excluded: `session`, `console`, `logger`, `lat`, `lon`
+- Private attributes (prefixed `_`) are always excluded
+- `range` lags are converted to `list` at construction time — serialize correctly
+- Callable predictors raise `ValueError` at `save()` time — use `"{horizon}"` string templates instead
+
+---
+
+# WORKFLOW
+
+`Workflow` orchestrates both pipelines from a single YAML file. Designed for cluster/supercomputer environments where experiment config, environment setup, and pipeline paths all live in one file.
+
+```python
+from epftoolbox2.pipelines import Workflow
+
+# Build and save (once, on your laptop)
+Workflow(
+    data_pipeline="data_pipeline.yaml",
+    model_pipeline="model_pipeline.yaml",
+    data_start="2023-05-01",
+    data_end="2024-08-01",
+    data_cache=True,
+    model_test_start="2024-06-01",
+    model_test_end="2024-07-01",
+    model_target="price",
+    model_horizon=7,
+    max_processes=32,
+    threads_per_process=8,
+    cache_path="/tmp/scratch/$SLURM_JOB_ID/cache",
+).save("experiment.yaml")
+
+# Load and run (cluster job)
+report = Workflow.load("experiment.yaml").run()
+```
+
+## Workflow YAML Format
+
+```yaml
+environment:
+  max_processes: 32
+  threads_per_process: 8
+  cache_path: /tmp/scratch/$SLURM_JOB_ID/cache   # $VAR expanded at runtime
+  model_index: $SLURM_ARRAY_TASK_ID              # optional; runs all models if omitted
+
+data_pipeline:
+  path: data_pipeline.yaml          # relative to this file's directory
+  start: "2023-05-01"
+  end: "2024-08-01"
+  cache: true
+
+model_pipeline:
+  path: model_pipeline.yaml
+  test_start: "2024-06-01"
+  test_end: "2024-07-01"
+  target: price
+  horizon: 7
+```
+
+## Inline Component Overrides
+
+Pipeline sections (`sources`, `transformers`, `validators`, `models`, `evaluators`, `exporters`) can be specified inline in the workflow YAML, overriding the corresponding section from the referenced `path`. If no `path` is given, the pipeline is built entirely from inline sections.
+
+```yaml
+data_pipeline:
+  path: data_pipeline.yaml
+  start: "2023-05-01"
+  end: "2024-08-01"
+  cache: true
+  transformers:                    # overrides transformers from data_pipeline.yaml
+    - class: LagTransformer
+      params:
+        columns: [load_actual, price]
+        lags: [-7, -6, -5, -4, -3, -2, -1, 0]
+        freq: day
+
+model_pipeline:
+  path: model_pipeline.yaml
+  test_start: "2024-06-01"
+  test_end: "2024-07-01"
+  models:                          # overrides models from model_pipeline.yaml
+    - class: OLSModel
+      params:
+        predictors: [load_actual, price_d-1]
+        training_window: 180
+        name: OLS_short
+```
+
+## Environment Behavior
+
+`Workflow.run()` always sets before spawning any workers:
+- `OMP_NUM_THREADS=1` (prevents BLAS oversubscription)
+- `PYTHON_GIL=0` (enables free-threading on Python 3.13t+)
+- `MAX_PROCESSES` and `THREADS_PER_PROCESS` from config (if provided)
+
+Pipeline paths in the workflow YAML are resolved relative to the workflow YAML's directory. `$VAR` in paths is expanded at runtime via `os.path.expandvars()`.
 
 ---
 
@@ -523,7 +711,7 @@ pipeline = (
     DataPipeline()
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
     .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
-    .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight_hours=True))
+    .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual"], lags=[1, 2, 7], freq="day"))
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
@@ -539,7 +727,9 @@ df.to_csv("data.csv")
 
 ```python
 import os
-os.environ["MAX_THREADS"] = "16"
+os.environ["THREADS_PER_PROCESS"] = "16"
+os.environ["MAX_PROCESSES"] = "4"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 import pandas as pd
 from epftoolbox2.pipelines import ModelPipeline
@@ -593,11 +783,14 @@ print(report.by_horizon())
 
 ---
 
-## Example 3: Full Workflow
+## Example 3: Full Workflow (Code)
 
 ```python
 import os
-os.environ["MAX_THREADS"] = "16"
+os.environ["PYTHON_GIL"] = "0"
+os.environ["THREADS_PER_PROCESS"] = "16"
+os.environ["MAX_PROCESSES"] = "4"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
@@ -609,12 +802,11 @@ from epftoolbox2.exporters import ExcelExporter, TerminalExporter
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 
-# Step 1: Data Pipeline
 data_pipeline = (
     DataPipeline()
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
     .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
-    .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight_hours=True))
+    .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
@@ -622,7 +814,6 @@ data_pipeline = (
 
 df = data_pipeline.run(start="2023-05-01", end="2024-07-01", cache=True)
 
-# Step 2: Model Pipeline
 seasonal_indicators = [
     "is_monday_d+{horizon}",
     "is_tuesday_d+{horizon}",
@@ -669,6 +860,77 @@ print(report.by_horizon())
 
 ---
 
+## Example 4: Workflow (YAML-based)
+
+```python
+import os
+os.environ["PYTHON_GIL"] = "0"
+
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
+from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
+from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
+from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.models import OLSModel, LassoCVModel
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.exporters import ExcelExporter, TerminalExporter
+
+ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
+
+# Phase 1: build and save config (run once)
+predictors = [
+    "load_actual",
+    "is_monday_d+{horizon}", "is_tuesday_d+{horizon}", "is_wednesday_d+{horizon}",
+    "is_thursday_d+{horizon}", "is_friday_d+{horizon}", "is_saturday_d+{horizon}",
+    "is_sunday_d+{horizon}", "is_holiday_d+{horizon}", "daylight_hours_d+{horizon}",
+    "load_actual_d-1", "load_actual_d-2", "price_d-1", "price_d-2",
+    "warsaw_temperature_2m_d+{horizon}",
+]
+
+(
+    DataPipeline()
+    .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
+    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+    .add_source(CalendarSource(country="PL", holidays="binary", daylight=True, weekday="onehot"))
+    .add_transformer(ResampleTransformer(freq="1h"))
+    .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
+    .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "daylight_hours", "load_forecast", "is_holiday"]))
+    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    .save("data_pipeline.yaml")
+)
+
+(
+    ModelPipeline()
+    .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
+    .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=5, name="LassoCV"))
+    .add_evaluator(MAEEvaluator())
+    .add_exporter(TerminalExporter())
+    .add_exporter(ExcelExporter("workflow_results.xlsx"))
+    .save("model_pipeline.yaml")
+)
+
+Workflow(
+    data_pipeline="data_pipeline.yaml",
+    model_pipeline="model_pipeline.yaml",
+    data_start="2023-05-01",
+    data_end="2024-08-01",
+    data_cache=True,
+    model_test_start="2024-06-01",
+    model_test_end="2024-07-01",
+    model_target="price",
+    model_horizon=7,
+    max_processes=4,
+    threads_per_process=8,
+).save("experiment.yaml")
+
+# Phase 2: load and run (cluster job — only this line needed)
+if __name__ == "__main__":
+    report = Workflow.load("experiment.yaml").run()
+    print(report.summary())
+    print(report.by_horizon())
+```
+
+---
+
 # API REFERENCE
 
 ## DataPipeline
@@ -681,20 +943,20 @@ class DataPipeline:
         transformers: Optional[List[Transformer]] = None,
         validators: Optional[List[Validator]] = None,
     ): ...
-    
+
     def add_source(self, source: DataSource) -> "DataPipeline": ...
     def add_transformer(self, transformer: Transformer) -> "DataPipeline": ...
     def add_validator(self, validator: Validator) -> "DataPipeline": ...
-    
+
     def run(
         self,
         start: Union[str, pd.Timestamp],  # Start date ("YYYY-MM-DD" or Timestamp)
         end: Union[str, pd.Timestamp],    # End date
         cache: Union[bool, str] = False,  # True, False, or path string
     ) -> pd.DataFrame: ...
-    
-    def save(self, path: Union[str, Path]) -> None: ...  # Save to YAML
-    
+
+    def save(self, path: Union[str, Path]) -> None: ...   # Save to YAML
+
     @classmethod
     def load(cls, path: Union[str, Path]) -> "DataPipeline": ...  # Load from YAML
 ```
@@ -704,11 +966,11 @@ class DataPipeline:
 ```python
 class ModelPipeline:
     def __init__(self): ...
-    
+
     def add_model(self, model: BaseModel) -> "ModelPipeline": ...
     def add_evaluator(self, evaluator: Evaluator) -> "ModelPipeline": ...
     def add_exporter(self, exporter: Exporter) -> "ModelPipeline": ...
-    
+
     def run(
         self,
         data: pd.DataFrame,              # DataFrame with DatetimeIndex
@@ -718,24 +980,71 @@ class ModelPipeline:
         horizon: int = 7,                 # Max forecast horizon (days)
         save_dir: Optional[str] = None,   # Directory for incremental results
     ) -> EvaluationReport: ...
+
+    def save(self, path: Union[str, Path]) -> None: ...   # Save to YAML
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "ModelPipeline": ...  # Load from YAML
+```
+
+## Workflow
+
+```python
+class Workflow:
+    def __init__(
+        self,
+        data_start: str,
+        data_end: str,
+        model_test_start: str,
+        model_test_end: str,
+        data_pipeline: Optional[Union[str, Path]] = None,   # Path to data_pipeline.yaml
+        model_pipeline: Optional[Union[str, Path]] = None,  # Path to model_pipeline.yaml
+        data_cache: Union[bool, str] = False,
+        model_target: str = "price",
+        model_horizon: int = 7,
+        max_processes: Optional[int] = None,
+        threads_per_process: Optional[int] = None,
+        cache_path: Optional[str] = None,                   # Overrides data_cache if set
+        model_index: Optional[int] = None,                  # Run only models[model_index]; all models if None
+    ): ...
+
+    def run(self) -> EvaluationReport: ...
+
+    def save(self, path: Union[str, Path]) -> None: ...
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "Workflow": ...
+```
+
+---
+
+## EvaluationReport
+
+```python
+class EvaluationReport:
+    def summary(self) -> pd.DataFrame: ...
+    def by_hour(self) -> pd.DataFrame: ...
+    def by_horizon(self) -> pd.DataFrame: ...
+    def by_hour_horizon(self) -> pd.DataFrame: ...
+    def by_year(self) -> pd.DataFrame: ...
+    def by_year_horizon(self) -> pd.DataFrame: ...
 ```
 
 ---
 
 # ENVIRONMENT VARIABLES
 
+Must be set **before** any library imports (especially before numpy/sklearn are imported).
+
 ```python
-os.environ["MAX_THREADS"] = "16"         # Parallel threads for model training (default: CPU count)
-os.environ["ENTSOE_API_KEY"] = "..."     # ENTSOE API key
-
-# For optimal multithreading performance (limit internal threading):
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-
-# Python 3.13t+ free-threading:
-os.environ["PYTHON_GIL"] = "0"           # Or run with -Xgil=0
+import os
+os.environ["PYTHON_GIL"] = "0"            # Enable free-threading (Python 3.13t+, or -Xgil=0)
+os.environ["MAX_PROCESSES"] = "4"         # Worker processes (default: cpu_count // THREADS_PER_PROCESS)
+os.environ["THREADS_PER_PROCESS"] = "16"  # Threads per worker process (alias: MAX_THREADS)
+os.environ["OMP_NUM_THREADS"] = "1"       # Prevent BLAS oversubscription (always recommended)
 ```
+
+`Workflow.run()` always sets `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `BLAS_NUM_THREADS=1`, and `PYTHON_GIL=0` automatically, and applies `MAX_PROCESSES`/`THREADS_PER_PROCESS` from its config. `model_index` is expanded from env vars at `load()` time (e.g. `$SLURM_ARRAY_TASK_ID`) and selects a single model by index — all models run if omitted. For code-only usage (no Workflow), set thread vars manually before imports.
 
 ---
 
@@ -754,23 +1063,34 @@ AT, BE, BG, CH, CZ, DE, DK, ES, FI, FR, GB, GR, HU, IE, IT, NL, NO, PL, PT, RO, 
 ## NaN Values in Predictors
 Models will fail with `ValueError: Input X contains NaN` if predictors have null values. Solutions:
 1. Ensure sufficient lag data exists (check training window)
-2. Use `.dropna()` before model training
-3. Choose predictors that exist for all rows
+2. Choose predictors that exist for all rows
+3. Use `NullCheckValidator` to catch issues early
+
+## Callable Predictors and YAML
+Callable predictors cannot be serialized to YAML. Use `"{horizon}"` string templates instead:
+```python
+# Instead of: lambda h: f"warsaw_temperature_2m_d+{h}"
+# Use:        "warsaw_temperature_2m_d+{horizon}"
+```
 
 ## Timezone Handling
 - All internal processing uses UTC
-- Sources convert to UTC automatically  
+- Sources convert to UTC automatically
 - Use TimezoneTransformer if you need local time features
 
 ## Column Naming
 - Lag columns: `{column}_{unit}-{lag}` (e.g., `load_actual_d-1`)
+- Forward lags (negative): `{column}_{unit}+{abs(lag)}` (e.g., `load_actual_d+7`)
 - Weather forecasts: `{prefix}_{variable}_d+{horizon}` (e.g., `warsaw_temperature_2m_d+1`)
-- Predictor templates use `{horizon}` placeholder, replaced with 1-7
+- Predictor templates use `{horizon}` placeholder, replaced with 1, 2, ..., horizon
+
+## Windows Multiprocessing
+Windows uses `spawn` context (not `fork`). Scripts must use `if __name__ == '__main__':` guard.
 
 ## Memory with Large Datasets
 - Use `cache=True` to avoid re-downloading
 - Use `save_dir` for incremental model training
-- Set `MAX_THREADS` appropriately for your system
+- Set `THREADS_PER_PROCESS` and `MAX_PROCESSES` appropriately for your system
 
 ---
 
@@ -782,21 +1102,22 @@ Models will fail with `ValueError: Input X contains NaN` if predictors have null
 from epftoolbox2.data.sources.base import DataSource
 
 class MySource(DataSource):
-    def __init__(self, ...):
+    def __init__(self, my_param: str):
+        self.my_param = my_param  # Store constructor params as-is (no derived public attrs)
         self._validate_config()
-    
+
     def _validate_config(self) -> bool:
-        # Validate parameters, raise ValueError if invalid
         return True
-    
+
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         # Return DataFrame with DatetimeIndex (UTC)
         ...
-    
+
     def get_cache_config(self) -> Optional[dict]:
-        # Return dict for caching, or None to disable
-        return {"source_type": "my_source", ...}
+        return {"source_type": "my_source", "param": self.my_param}
 ```
+
+Register in `COMPONENT_REGISTRY["sources"]` in `data_pipeline.py` for YAML support.
 
 ## Custom Transformer
 
@@ -805,9 +1126,10 @@ from epftoolbox2.data.transformers.base import Transformer
 
 class MyTransformer(Transformer):
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        # Return transformed DataFrame
         ...
 ```
+
+Register in `COMPONENT_REGISTRY["transformers"]` in `data_pipeline.py`.
 
 ## Custom Validator
 
@@ -818,9 +1140,10 @@ from epftoolbox2.data.validators.result import ValidationResult
 class MyValidator(Validator):
     def validate(self, df: pd.DataFrame) -> ValidationResult:
         result = ValidationResult()
-        # Add errors/warnings to result
         return result
 ```
+
+Register in `COMPONENT_REGISTRY["validators"]` in `data_pipeline.py`.
 
 ## Custom Model
 
@@ -833,6 +1156,8 @@ class MyModel(BaseModel):
         ...
 ```
 
+Register in `COMPONENT_REGISTRY["models"]` in `model_pipeline.py`.
+
 ## Custom Evaluator
 
 ```python
@@ -840,11 +1165,12 @@ from epftoolbox2.evaluators.base import Evaluator
 
 class MyEvaluator(Evaluator):
     name = "MyMetric"
-    
+
     def compute(self, df: pd.DataFrame) -> float:
-        # df has "prediction" and "actual" columns
         return ...
 ```
+
+Register in `COMPONENT_REGISTRY["evaluators"]` in `model_pipeline.py`.
 
 ## Custom Exporter
 
@@ -853,6 +1179,7 @@ from epftoolbox2.exporters.base import Exporter
 
 class MyExporter(Exporter):
     def export(self, report: EvaluationReport) -> None:
-        # Export report data
         ...
 ```
+
+Register in `COMPONENT_REGISTRY["exporters"]` in `model_pipeline.py`.

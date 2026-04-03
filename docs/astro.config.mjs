@@ -61,6 +61,13 @@ export default defineConfig({
                         { label: 'Examples', link: '/model-pipeline/examples/' },
                         { label: 'Results', link: '/model-pipeline/results/' },
                         { label: 'Caching', link: '/model-pipeline/caching/' },
+                        { label: 'Serialization', link: '/model-pipeline/serialization/' },
+                    ],
+                },
+                {
+                    label: 'Workflow',
+                    items: [
+                        { label: 'Overview', link: '/workflow/overview/' },
                     ],
                 },
                 {
