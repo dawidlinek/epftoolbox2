@@ -24,8 +24,7 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.exporters import ExcelExporter, TerminalExporter
 
-ENTSOE_API_KEY = "fade2e5f-6d62-4354-9f95-e8629acec0e9"
-
+ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_ENTSOE_API_KEY")
 # ---------------------------------------------------------------------------
 # Phase 1: Build pipelines and save to YAML (run once)
 # ---------------------------------------------------------------------------
