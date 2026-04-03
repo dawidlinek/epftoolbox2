@@ -170,6 +170,7 @@ class BaseModel(ABC):
         gc.collect()
 
     def _preprocess(self, data: pd.DataFrame, horizon: int, target: str) -> pd.DataFrame:
+        data = data.drop(columns=["hour", "day"], errors="ignore")
         new_cols = {f"{target}_d+{h}": data[target].shift(-24 * h) for h in range(1, horizon + 1)}
         new_cols["day"] = pd.Series(np.arange(len(data)) // 24, index=data.index)
         new_cols["hour"] = pd.Series(data.index.hour, index=data.index)
