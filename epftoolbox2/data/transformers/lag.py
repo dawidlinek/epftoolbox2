@@ -37,9 +37,10 @@ class LagTransformer(Transformer):
         freq: str = "1h",
     ):
         self.columns = [columns] if isinstance(columns, str) else columns
-        self.lags = [lags] if isinstance(lags, int) else lags
+        self.lags = [lags] if isinstance(lags, int) else list(lags)
+        self.freq = freq
         freq_normalized = self._FREQ_MAPPING.get(freq.lower(), freq)
-        self.freq = pd.Timedelta(freq_normalized)
+        self._freq = pd.Timedelta(freq_normalized)
         self._validate()
 
     def _validate(self) -> None:
@@ -50,10 +51,10 @@ class LagTransformer(Transformer):
             raise ValueError("At least one column must be provided")
 
     def _get_timedelta(self, lag: int) -> pd.Timedelta:
-        return self.freq * lag
+        return self._freq * lag
 
     def _format_lag_name(self, column: str, lag: int) -> str:
-        total_td = self.freq * abs(lag)
+        total_td = self._freq * abs(lag)
         total_seconds = int(total_td.total_seconds())
 
         if total_seconds % 86400 == 0:
