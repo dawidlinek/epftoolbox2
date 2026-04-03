@@ -69,27 +69,26 @@ Predictors can be specified in four ways:
     ```python
     predictors = [
         "load_actual",
-        "is_monday_d+{horizon}",
-        "is_tuesday_d+{horizon}",
-        "is_wednesday_d+{horizon}",
-        "is_thursday_d+{horizon}",
-        "is_friday_d+{horizon}",
-        "is_saturday_d+{horizon}",
-        "is_sunday_d+{horizon}",
-        "is_holiday_d+{horizon}",
-        "daylight_hours_d+{horizon}",
+        "load_actual_d-1",
+        "price_d-1",
     ]
     ```
   </TabItem>
   <TabItem label="Templates">
-    Use `{horizon}` placeholder for horizon-dependent features:
+    Use `{horizon}` placeholder — replaced with 1, 2, ..., horizon at runtime:
 
     ```python
     predictors = [
-        "load_actual",
         "warsaw_temperature_2m_d+{horizon}",
+        "is_monday_d+{horizon}",
+        "is_holiday_d+{horizon}",
+        "daylight_hours_d+{horizon}",
     ]
     ```
+
+    <Aside type="tip">
+      String templates are the only form compatible with YAML serialization. Use them instead of lambdas when saving pipelines with `save()` or `Workflow`.
+    </Aside>
   </TabItem>
   <TabItem label="Callables">
     Callables receive `horizon` (1 param) or `(horizon, hour)` (2 params):
@@ -106,8 +105,8 @@ Predictors can be specified in four ways:
     ]
     ```
 
-    <Aside>
-      Callables are evaluated in the main process before any worker is spawned, so lambdas and closures work without restriction.
+    <Aside type="caution">
+      Callables cannot be serialized to YAML. If you need to save the pipeline with `save()` or use `Workflow`, replace callables with `"{horizon}"` string templates.
     </Aside>
   </TabItem>
   <TabItem label="Loop Generation">
@@ -132,18 +131,16 @@ Models use a **process pool with inner thread pools**. Each worker process handl
 | Variable | Default | Description |
 |---|---|---|
 | `MAX_PROCESSES` | `cpu_count // THREADS_PER_PROCESS` | Worker processes |
-| `THREADS_PER_PROCESS` | `16` | Threads per process |
+| `THREADS_PER_PROCESS` | `16` | Threads per process (alias: `MAX_THREADS`) |
 
 ```python
 import os
 
+# Must be set before any imports
+os.environ["PYTHON_GIL"] = "0"            # Enable free-threading (Python 3.13t+)
 os.environ["MAX_PROCESSES"] = "4"
 os.environ["THREADS_PER_PROCESS"] = "16"  # → 4 × 16 = 64 cores
-
-# Must be set before any imports
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"       # Prevent BLAS oversubscription
 ```
 
 See [Installation](/epftoolbox2/getting-started/installation/#parallel-model-training) for full setup including platform notes.
@@ -192,10 +189,24 @@ report.by_hour_horizon()   # Combined breakdown
 
 ---
 
+## YAML Serialization
+
+Save and reload a complete pipeline configuration:
+
+```python
+pipeline.save("model_pipeline.yaml")
+pipeline = ModelPipeline.load("model_pipeline.yaml")
+```
+
+See [ModelPipeline Serialization](/epftoolbox2/model-pipeline/serialization/) for the full YAML format and serialization rules.
+
+---
+
 ## Learn More
 
 <CardGrid>
   <LinkCard title="Examples" description="Complete pipeline examples" href="/epftoolbox2/model-pipeline/examples/" />
   <LinkCard title="Results" description="Working with evaluation results" href="/epftoolbox2/model-pipeline/results/" />
   <LinkCard title="Caching" description="Incremental training" href="/epftoolbox2/model-pipeline/caching/" />
+  <LinkCard title="Workflow" description="YAML-based experiment orchestration" href="/epftoolbox2/workflow/overview/" />
 </CardGrid>

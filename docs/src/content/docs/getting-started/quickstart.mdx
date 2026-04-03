@@ -21,7 +21,7 @@ This guide shows you how to download electricity data and run a simple forecast 
 
    # Optional: Configure multithreading (requires Python 3.13t+)
    os.environ["PYTHON_GIL"] = "0"
-   os.environ["MAX_THREADS"] = "16"
+   os.environ["THREADS_PER_PROCESS"] = "16"
    ```
 
 2. **Download data with DataPipeline**
@@ -49,7 +49,7 @@ This guide shows you how to download electricity data and run a simple forecast 
            country="PL",
            holidays="binary",
            weekday="onehot",
-           daylight_hours=True
+           daylight=True
        ))
        .add_transformer(ResampleTransformer(freq="1h"))
        .add_transformer(LagTransformer(
@@ -150,5 +150,10 @@ Summary
     title="Model Pipeline Overview"
     description="Configure models, evaluators, and exporters"
     href="/epftoolbox2/model-pipeline/overview/"
+  />
+  <LinkCard
+    title="Workflow"
+    description="Save full experiments as YAML for cluster runs"
+    href="/epftoolbox2/workflow/overview/"
   />
 </CardGrid>

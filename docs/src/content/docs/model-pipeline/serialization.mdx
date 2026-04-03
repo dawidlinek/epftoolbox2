@@ -1,0 +1,108 @@
+---
+title: Serialization
+description: Save and load ModelPipeline configurations as YAML
+---
+
+# ModelPipeline Serialization
+
+Save and load pipeline configurations for reproducibility and version control.
+
+## Save
+
+```python
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.models import OLSModel, LassoCVModel
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.exporters import TerminalExporter, ExcelExporter
+
+predictors = [
+    "load_actual",
+    "is_monday_d+{horizon}",
+    "price_d-1",
+    "warsaw_temperature_2m_d+{horizon}",
+]
+
+pipeline = (
+    ModelPipeline()
+    .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
+    .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=5, name="LassoCV"))
+    .add_evaluator(MAEEvaluator())
+    .add_exporter(TerminalExporter())
+    .add_exporter(ExcelExporter("results.xlsx"))
+)
+
+pipeline.save("model_pipeline.yaml")
+```
+
+## Load
+
+```python
+pipeline = ModelPipeline.load("model_pipeline.yaml")
+report = pipeline.run(data=df, test_start="2024-04-01", test_end="2024-06-01")
+```
+
+## YAML Format
+
+```yaml
+models:
+- class: OLSModel
+  params:
+    predictors:
+    - load_actual
+    - is_monday_d+{horizon}
+    - price_d-1
+    - warsaw_temperature_2m_d+{horizon}
+    training_window: 365
+    name: OLS
+- class: LassoCVModel
+  params:
+    predictors: *id001
+    training_window: 365
+    cv: 5
+    name: LassoCV
+evaluators:
+- class: MAEEvaluator
+  params: {}
+exporters:
+- class: TerminalExporter
+  params:
+    show: [summary, horizon]
+- class: ExcelExporter
+  params:
+    path: results.xlsx
+```
+
+## Serialization Rules
+
+| Type | Behavior |
+|------|----------|
+| `str`, `int`, `float`, `bool`, `list`, `dict`, `None` | Serialized as-is |
+| `Path` | Converted to `str` |
+| Callable predictors | **Raises `ValueError`** — use `"{horizon}"` string templates instead |
+| Private attrs (`_name`) | Excluded |
+
+## Callable Predictors
+
+Callable predictors cannot be serialized to YAML. Replace them with `"{horizon}"` string templates before saving:
+
+```python
+# Instead of:
+lambda h: f"warsaw_temperature_2m_d+{h}"
+
+# Use:
+"warsaw_temperature_2m_d+{horizon}"
+```
+
+## YAML Aliases
+
+If the same predictor list object is passed to multiple models, PyYAML emits a YAML anchor (`&id001`) and alias (`*id001`). This is valid YAML — the aliased list is reconstructed independently for each model on load.
+
+## Registering Custom Models/Evaluators/Exporters
+
+Add to `COMPONENT_REGISTRY` in `model_pipeline.py`:
+
+```python
+COMPONENT_REGISTRY["models"]["MyModel"] = "mypackage.models.my_model"
+COMPONENT_REGISTRY["evaluators"]["MyEvaluator"] = "mypackage.evaluators.my_evaluator"
+COMPONENT_REGISTRY["exporters"]["MyExporter"] = "mypackage.exporters.my_exporter"
+```

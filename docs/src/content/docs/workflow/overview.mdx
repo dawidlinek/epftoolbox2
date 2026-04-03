@@ -1,0 +1,281 @@
+---
+title: Workflow
+description: YAML-based experiment orchestration for reproducible forecasting runs
+---
+
+import { Steps, Tabs, TabItem, Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+# Workflow
+
+`Workflow` ties a `DataPipeline` YAML, a `ModelPipeline` YAML, and all run parameters together into a single experiment file.
+
+## Quick Example
+
+```python
+from epftoolbox2.pipelines import Workflow
+
+# Phase 1: save config (once, on your laptop)
+Workflow(
+    data_pipeline="data_pipeline.yaml",
+    model_pipeline="model_pipeline.yaml",
+    data_start="2023-05-01",
+    data_end="2024-08-01",
+    data_cache=True,
+    model_test_start="2024-06-01",
+    model_test_end="2024-07-01",
+    model_target="price",
+    model_horizon=7,
+    max_processes=32,
+    threads_per_process=8,
+    cache_path="/tmp/scratch/$SLURM_JOB_ID/cache",
+).save("experiment.yaml")
+
+# Phase 2: run (cluster job)
+report = Workflow.load("experiment.yaml").run()
+print(report.summary())
+```
+
+---
+
+## YAML Format
+
+```yaml
+environment:
+  max_processes: 32
+  threads_per_process: 8
+  cache_path: /tmp/scratch/$SLURM_JOB_ID/cache   # $VAR expanded at runtime
+
+data_pipeline:
+  path: data_pipeline.yaml    # relative to this file's directory
+  start: "2023-05-01"
+  end: "2024-08-01"
+  cache: true
+
+model_pipeline:
+  path: model_pipeline.yaml
+  test_start: "2024-06-01"
+  test_end: "2024-07-01"
+  target: price
+  horizon: 7
+```
+
+<Aside type="tip">
+  All paths in the YAML are resolved relative to the workflow YAML's own directory. Move the whole experiment folder and nothing breaks.
+</Aside>
+
+---
+
+## Constructor Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `data_start` | str | Required | Data fetch start date |
+| `data_end` | str | Required | Data fetch end date |
+| `model_test_start` | str | Required | Test period start |
+| `model_test_end` | str | Required | Test period end |
+| `data_pipeline` | str \| Path | `None` | Path to `data_pipeline.yaml` |
+| `model_pipeline` | str \| Path | `None` | Path to `model_pipeline.yaml` |
+| `data_cache` | bool \| str | `False` | Data caching (True, False, or path) |
+| `model_target` | str | `"price"` | Target column name |
+| `model_horizon` | int | `7` | Max forecast horizon (days) |
+| `max_processes` | int | `None` | Worker process count |
+| `threads_per_process` | int | `None` | Threads per process |
+| `cache_path` | str | `None` | Cache directory (overrides `data_cache` if set) |
+| `model_index` | int | `None` | Run only `models[model_index]` — all models run if omitted |
+
+---
+
+## Environment Variables
+
+`Workflow.run()` always sets these before spawning any worker processes:
+
+| Variable | Value | Why |
+|----------|-------|-----|
+| `OMP_NUM_THREADS` | `1` | Prevents BLAS oversubscription with multiple processes |
+| `MKL_NUM_THREADS` | `1` | Pins Intel MKL threads |
+| `OPENBLAS_NUM_THREADS` | `1` | Pins OpenBLAS threads |
+| `BLAS_NUM_THREADS` | `1` | Generic BLAS thread pin |
+| `PYTHON_GIL` | `0` | Enables free-threading on Python 3.13t+ |
+| `MAX_PROCESSES` | from config | Applied if `max_processes` is set |
+| `THREADS_PER_PROCESS` | from config | Applied if `threads_per_process` is set |
+
+<Aside type="caution">
+  `PYTHON_GIL=0` affects worker processes spawned by the workflow. For the main process on Python 3.13t+, set it before any imports or pass `-Xgil=0` to the interpreter.
+</Aside>
+
+---
+
+## Inline Component Overrides
+
+Pipeline sections can be specified directly in the workflow YAML, overriding the corresponding section from the referenced `path`. If no `path` is given, the pipeline is built entirely from inline sections.
+
+<Tabs>
+  <TabItem label="Override transformers">
+    ```yaml
+    data_pipeline:
+      path: data_pipeline.yaml
+      start: "2023-05-01"
+      end: "2024-08-01"
+      cache: true
+      transformers:                    # replaces transformers from data_pipeline.yaml
+        - class: LagTransformer
+          params:
+            columns: [load_actual, price]
+            lags: [-7, -6, -5, -4, -3, -2, -1, 0]
+            freq: day
+    ```
+  </TabItem>
+  <TabItem label="Override models">
+    ```yaml
+    model_pipeline:
+      path: model_pipeline.yaml
+      test_start: "2024-06-01"
+      test_end: "2024-07-01"
+      models:                          # replaces models from model_pipeline.yaml
+        - class: OLSModel
+          params:
+            predictors: [load_actual, price_d-1]
+            training_window: 180
+            name: OLS_short
+    ```
+  </TabItem>
+  <TabItem label="Inline only (no path)">
+    ```yaml
+    data_pipeline:
+      start: "2023-05-01"
+      end: "2024-08-01"
+      cache: true
+      sources:
+        - class: EntsoeSource
+          params:
+            country_code: PL
+            api_key: YOUR_KEY
+            type: [load, price]
+      transformers:
+        - class: ResampleTransformer
+          params: {freq: 1h}
+      validators:
+        - class: NullCheckValidator
+          params:
+            columns: [load_actual, price]
+    ```
+  </TabItem>
+</Tabs>
+
+**Override semantics:** inline sections **replace** the entire corresponding section from the loaded file — not merge. Sources + validators from `path` are kept unless also overridden.
+
+---
+
+## Full Workflow Setup
+
+<Steps>
+
+1. **Build and save pipeline configs**
+
+   ```python
+   import os
+   os.environ["PYTHON_GIL"] = "0"
+
+   from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+   from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
+   from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
+   from epftoolbox2.data.validators import NullCheckValidator
+   from epftoolbox2.models import OLSModel, LassoCVModel
+   from epftoolbox2.evaluators import MAEEvaluator
+   from epftoolbox2.exporters import ExcelExporter, TerminalExporter
+
+   predictors = [
+       "load_actual",
+       "is_monday_d+{horizon}", "is_tuesday_d+{horizon}",
+       "is_wednesday_d+{horizon}", "is_thursday_d+{horizon}",
+       "is_friday_d+{horizon}", "is_saturday_d+{horizon}",
+       "is_sunday_d+{horizon}", "is_holiday_d+{horizon}",
+       "daylight_hours_d+{horizon}",
+       "load_actual_d-1", "load_actual_d-2",
+       "price_d-1", "price_d-2",
+       "warsaw_temperature_2m_d+{horizon}",
+   ]
+
+   (
+       DataPipeline()
+       .add_source(EntsoeSource(country_code="PL", api_key=os.environ["ENTSOE_API_KEY"], type=["load", "price"]))
+       .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+       .add_source(CalendarSource(country="PL", holidays="binary", daylight=True, weekday="onehot"))
+       .add_transformer(ResampleTransformer(freq="1h"))
+       .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
+       .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "daylight_hours", "load_forecast", "is_holiday"]))
+       .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+       .save("data_pipeline.yaml")
+   )
+
+   (
+       ModelPipeline()
+       .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
+       .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=5, name="LassoCV"))
+       .add_evaluator(MAEEvaluator())
+       .add_exporter(TerminalExporter())
+       .add_exporter(ExcelExporter("results.xlsx"))
+       .save("model_pipeline.yaml")
+   )
+   ```
+
+2. **Save workflow config**
+
+   ```python
+   from epftoolbox2.pipelines import Workflow
+
+   Workflow(
+       data_pipeline="data_pipeline.yaml",
+       model_pipeline="model_pipeline.yaml",
+       data_start="2023-05-01",
+       data_end="2024-08-01",
+       data_cache=True,
+       model_test_start="2024-06-01",
+       model_test_end="2024-07-01",
+       model_target="price",
+       model_horizon=7,
+       max_processes=32,
+       threads_per_process=8,
+       cache_path="/tmp/cache",
+   ).save("experiment.yaml")
+   ```
+
+3. **Run job**
+
+   ```python
+   import os
+   os.environ["PYTHON_GIL"] = "0"
+
+   from epftoolbox2.pipelines import Workflow
+
+   if __name__ == "__main__":
+       report = Workflow.load("experiment.yaml").run()
+       print(report.summary())
+   ```
+
+</Steps>
+
+---
+
+## Run only one model
+
+`model_index` selects a single model by its 0-based position in the model list. When omitted, all models run. This enables submitting one job per model that allows further pararelization.
+
+**Workflow YAML for example SLURM cluster:**
+
+```yaml
+environment:
+  max_processes: 8
+  threads_per_process: 8
+  cache_path: /tmp/scratch/$SLURM_JOB_ID/cache
+  model_index: $SLURM_ARRAY_TASK_ID   # 0-based, expanded at load() time
+```
+
+## Learn More
+
+<CardGrid>
+  <LinkCard title="DataPipeline Serialization" description="YAML format for DataPipeline" href="/epftoolbox2/data-pipeline/serialization/" />
+  <LinkCard title="ModelPipeline Serialization" description="YAML format for ModelPipeline" href="/epftoolbox2/model-pipeline/serialization/" />
+  <LinkCard title="Model Pipeline" description="Models, evaluators, and exporters" href="/epftoolbox2/model-pipeline/overview/" />
+  <LinkCard title="Data Pipeline" description="Sources, transformers, and validators" href="/epftoolbox2/data-pipeline/overview/" />
+</CardGrid>

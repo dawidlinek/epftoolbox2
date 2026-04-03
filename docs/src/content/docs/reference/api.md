@@ -15,22 +15,22 @@ class DataPipeline:
         transformers: Optional[List[Transformer]] = None,
         validators: Optional[List[Validator]] = None,
     ): ...
-    
+
     def add_source(self, source: DataSource) -> "DataPipeline": ...
     def add_transformer(self, transformer: Transformer) -> "DataPipeline": ...
     def add_validator(self, validator: Validator) -> "DataPipeline": ...
-    
+
     def run(
         self,
         start: Union[str, pd.Timestamp],  # Start date
         end: Union[str, pd.Timestamp],    # End date
         cache: Union[bool, str] = False,  # Caching option
     ) -> pd.DataFrame: ...
-    
-    def save(self, path: Union[str, Path]) -> None: ...
-    
+
+    def save(self, path: Union[str, Path]) -> None: ...       # Save to YAML
+
     @classmethod
-    def load(cls, path: Union[str, Path]) -> "DataPipeline": ...
+    def load(cls, path: Union[str, Path]) -> "DataPipeline": ...  # Load from YAML
 ```
 
 ---
@@ -40,11 +40,11 @@ class DataPipeline:
 ```python
 class ModelPipeline:
     def __init__(self): ...
-    
+
     def add_model(self, model: BaseModel) -> "ModelPipeline": ...
     def add_evaluator(self, evaluator: Evaluator) -> "ModelPipeline": ...
     def add_exporter(self, exporter: Exporter) -> "ModelPipeline": ...
-    
+
     def run(
         self,
         data: pd.DataFrame,              # Input DataFrame
@@ -54,7 +54,45 @@ class ModelPipeline:
         horizon: int = 7,                 # Max horizon
         save_dir: Optional[str] = None,   # Result cache directory
     ) -> EvaluationReport: ...
+
+    def save(self, path: Union[str, Path]) -> None: ...       # Save to YAML
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "ModelPipeline": ...  # Load from YAML
 ```
+
+---
+
+## Workflow
+
+```python
+class Workflow:
+    def __init__(
+        self,
+        data_start: str,                                      # Data fetch start date
+        data_end: str,                                        # Data fetch end date
+        model_test_start: str,                                # Test period start
+        model_test_end: str,                                  # Test period end
+        data_pipeline: Optional[Union[str, Path]] = None,    # Path to data_pipeline.yaml
+        model_pipeline: Optional[Union[str, Path]] = None,   # Path to model_pipeline.yaml
+        data_cache: Union[bool, str] = False,                 # Data caching option
+        model_target: str = "price",                          # Target column
+        model_horizon: int = 7,                               # Max forecast horizon
+        max_processes: Optional[int] = None,                  # Worker process count
+        threads_per_process: Optional[int] = None,            # Threads per process
+        cache_path: Optional[str] = None,                     # Cache directory (overrides data_cache)
+    ): ...
+
+    def run(self) -> EvaluationReport: ...
+
+    def save(self, path: Union[str, Path]) -> None: ...
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "Workflow": ...
+```
+
+`Workflow.run()` always sets `OMP_NUM_THREADS=1` and `PYTHON_GIL=0` before spawning workers.
+Pipeline paths are resolved relative to the workflow YAML's directory. `$VAR` in paths is expanded at runtime.
 
 ---
 
@@ -111,7 +149,12 @@ class ResampleTransformer(Transformer):
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 
 class LagTransformer(Transformer):
-    def __init__(self, columns: List[str], lags: List[int], freq: str): ...
+    def __init__(
+        self,
+        columns: Union[str, List[str], None] = None,
+        lags: Union[int, List[int], range] = 1,  # range and lists both accepted
+        freq: str = "1h",
+    ): ...
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 
 class TimezoneTransformer(Transformer):
