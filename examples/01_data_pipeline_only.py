@@ -9,7 +9,7 @@ calendar features - without running any models.
 import os
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
-from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
+from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer, TimezoneTransformer
 from epftoolbox2.data.validators import NullCheckValidator, ContinuityValidator
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_API_KEY_HERE")
@@ -35,10 +35,11 @@ pipeline = (
         CalendarSource(
             country="PL",
             holidays="binary",  # 1 if holiday, 0 otherwise
-            weekday="number",  # 0=Monday, 6=Sunday
-            hour="number",  # Hour of day (0-23)
+            weekday="onehot",  # One-hot encode weekdays (is_monday, is_tuesday, etc.)
+            daylight=True,  # Add daylight hours feature
         )
     )
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(
         LagTransformer(
@@ -47,6 +48,7 @@ pipeline = (
             freq="day",
         )
     )
+    .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "is_tuesday", "daylight_hours", "is_wednesday", "is_thursday", "is_friday", "is_saturday", "is_sunday", "load_forecast", "is_holiday"]))
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
     .add_validator(ContinuityValidator())
 )
