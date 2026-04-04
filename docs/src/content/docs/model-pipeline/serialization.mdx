@@ -47,7 +47,7 @@ report = pipeline.run(data=df, test_start="2024-04-01", test_end="2024-06-01")
 models:
 - class: OLSModel
   params:
-    predictors:
+    predictors: &id001
     - load_actual
     - is_monday_d+{horizon}
     - price_d-1

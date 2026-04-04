@@ -25,7 +25,7 @@ from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSour
 from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, LagTransformer
 from epftoolbox2.models import OLSModel, LassoCVModel
 
-ENTSOE_API_KEY = "fade2e5f-6d62-4354-9f95-e8629acec0e9"
+ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_ENTSOE_API_KEY")
 
 if __name__ == "__main__":
 
