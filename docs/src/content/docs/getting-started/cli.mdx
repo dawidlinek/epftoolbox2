@@ -72,7 +72,7 @@ epf run experiment.yaml
 
 | Flag | Description |
 |------|-------------|
-| `--model-index N` | Run only `models[N]` — useful for SLURM array jobs |
+| `--model-index N` | Run only `models[N]` |
 | `--processes N` | Override `max_processes` |
 | `--threads N` | Override `threads_per_process` |
 | `--dry-run` | Build both pipelines without executing — validates config |
@@ -83,8 +83,7 @@ epf run experiment.yaml
 # Basic run
 epf run experiment.yaml
 
-# SLURM array — one model per task
-epf run experiment.yaml --model-index $SLURM_ARRAY_TASK_ID
+epf run experiment.yaml --model-index 2
 
 # Validate config without running
 epf run experiment.yaml --dry-run
@@ -178,55 +177,3 @@ Create `experiment.yaml`, `data_pipeline.yaml`, and `model_pipeline.yaml` with p
 epf init
 epf init --force   # overwrite existing files
 ```
-
----
-
-## Typical workflows
-
-<Tabs>
-  <TabItem label="Experiment from YAML">
-    ```bash
-    # 1. Scaffold templates
-    epf init
-
-    # 2. Edit the YAML files to suit your experiment
-    # 3. Validate before running
-    epf validate experiment.yaml
-
-    # 4. Run
-    epf run experiment.yaml
-    ```
-  </TabItem>
-  <TabItem label="Split data / model runs">
-    ```bash
-    # Fetch and cache data once
-    epf data data_pipeline.yaml \
-        --start 2020-01-01 --end 2024-01-01 \
-        --output data.csv
-
-    # Iterate on model config without re-fetching
-    epf model model_pipeline.yaml \
-        --data data.csv \
-        --test-start 2023-01-01 --test-end 2024-01-01
-    ```
-  </TabItem>
-  <TabItem label="Interactive first run">
-    ```bash
-    # Build everything interactively, save YAMLs, run
-    epf
-
-    # Re-run saved YAMLs without the wizard
-    epf run experiment.yaml
-    ```
-  </TabItem>
-  <TabItem label="SLURM array">
-    ```bash
-    # experiment.yaml contains:
-    # environment:
-    #   model_index: $SLURM_ARRAY_TASK_ID
-
-    sbatch --array=0-3 job.sh
-    # job.sh runs: epf run experiment.yaml
-    ```
-  </TabItem>
-</Tabs>
