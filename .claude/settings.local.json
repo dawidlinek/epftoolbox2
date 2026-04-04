@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m pytest tests/test_forecast_only.py tests/pipelines/test_pipeline.py -q)"
+      "Bash(python -m pytest tests/test_forecast_only.py tests/pipelines/test_pipeline.py -q)",
+      "Bash(python -c \"from epftoolbox2.models import MLPModel, MLPCommittee; print\\('OK'\\)\")"
     ]
   }
 }

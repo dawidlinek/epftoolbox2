@@ -1,0 +1,232 @@
+---
+title: CLI Reference
+description: Run experiments, pipelines, and interactive wizards from the command line
+---
+
+import { Tabs, TabItem, Aside, Steps } from '@astrojs/starlight/components';
+
+# CLI Reference
+
+After installing epftoolbox2, an `epf` command is available on your PATH.
+
+```bash
+pip install epftoolbox2
+epf --help
+```
+
+---
+
+## Interactive Mode
+
+Running `epf` with no arguments launches a wizard-style interactive terminal where you can build and run pipelines without writing any YAML.
+
+```bash
+epf
+```
+
+You'll see a menu with arrow-key navigation:
+
+```
+  Run experiment from YAML
+  Run data pipeline from YAML → CSV
+  Run model pipeline from YAML
+  ──────────────────────────────────
+  Build & run data pipeline interactively
+  Build & run model pipeline interactively
+  ──────────────────────────────────
+  Exit
+```
+
+**Build & run data pipeline interactively** walks you through:
+1. Adding sources (EntsoeSource, OpenMeteoSource, CsvSource, CalendarSource) with prompted config
+2. Adding transformers (optional)
+3. Adding validators (optional)
+4. Setting date range and caching
+5. Choosing an output CSV path
+6. Saving a reusable `data_pipeline.yaml`
+7. Running immediately
+
+**Build & run model pipeline interactively** walks you through:
+1. Loading an input CSV (from a previous data run)
+2. Adding models — available columns are shown as a checkbox list for predictor selection
+3. Adding evaluators and exporters
+4. Setting the test period, target column, and horizon
+5. Saving a reusable `model_pipeline.yaml`
+6. Running immediately
+
+<Aside type="tip">
+  Both wizards offer to save a YAML at the end. Run that YAML later with `epf run` or `epf data` / `epf model` without going through the wizard again.
+</Aside>
+
+---
+
+## `epf run` — Full workflow
+
+Run a complete experiment from a [Workflow YAML](/epftoolbox2/workflow/overview/).
+
+```bash
+epf run experiment.yaml
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--model-index N` | Run only `models[N]` — useful for SLURM array jobs |
+| `--processes N` | Override `max_processes` |
+| `--threads N` | Override `threads_per_process` |
+| `--dry-run` | Build both pipelines without executing — validates config |
+
+**Examples:**
+
+```bash
+# Basic run
+epf run experiment.yaml
+
+# SLURM array — one model per task
+epf run experiment.yaml --model-index $SLURM_ARRAY_TASK_ID
+
+# Validate config without running
+epf run experiment.yaml --dry-run
+```
+
+---
+
+## `epf data` — Data pipeline only
+
+Run a DataPipeline YAML and save the result as a CSV.
+
+```bash
+epf data data_pipeline.yaml --start 2022-01-01 --end 2024-01-01 --output data.csv
+```
+
+**Required flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--start DATE` | Fetch start date (`YYYY-MM-DD`) |
+| `--end DATE` | Fetch end date (`YYYY-MM-DD`) |
+| `--output FILE` | Output CSV path |
+
+**Optional flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--cache PATH` | Cache directory or CSV file for source data |
+
+**Example:**
+
+```bash
+epf data data_pipeline.yaml \
+    --start 2020-01-01 \
+    --end 2024-01-01 \
+    --output data.csv \
+    --cache .cache/
+```
+
+---
+
+## `epf model` — Model pipeline only
+
+Run a ModelPipeline YAML on an existing CSV dataset (e.g. produced by `epf data`).
+
+```bash
+epf model model_pipeline.yaml \
+    --data data.csv \
+    --test-start 2023-01-01 \
+    --test-end 2024-01-01
+```
+
+**Required flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--data FILE` | Input CSV file |
+| `--test-start DATE` | Test period start |
+| `--test-end DATE` | Test period end |
+
+**Optional flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--target COL` | Target column name (default: `price`) |
+| `--horizon N` | Forecast horizon in days (default: `7`) |
+| `--save-dir DIR` | Save per-model prediction JSONL files to this directory |
+| `--forecast-only` | Skip evaluators and exporters |
+
+---
+
+## `epf validate` — Validate any pipeline YAML
+
+Load and parse a YAML file, instantiate all components, and report errors — without running anything.
+
+```bash
+epf validate data_pipeline.yaml
+epf validate model_pipeline.yaml
+epf validate experiment.yaml
+```
+
+The file type is auto-detected from its top-level keys. Exits with code 1 if validation fails.
+
+---
+
+## `epf init` — Scaffold template files
+
+Create `experiment.yaml`, `data_pipeline.yaml`, and `model_pipeline.yaml` with placeholder values in the current directory.
+
+```bash
+epf init
+epf init --force   # overwrite existing files
+```
+
+---
+
+## Typical workflows
+
+<Tabs>
+  <TabItem label="Experiment from YAML">
+    ```bash
+    # 1. Scaffold templates
+    epf init
+
+    # 2. Edit the YAML files to suit your experiment
+    # 3. Validate before running
+    epf validate experiment.yaml
+
+    # 4. Run
+    epf run experiment.yaml
+    ```
+  </TabItem>
+  <TabItem label="Split data / model runs">
+    ```bash
+    # Fetch and cache data once
+    epf data data_pipeline.yaml \
+        --start 2020-01-01 --end 2024-01-01 \
+        --output data.csv
+
+    # Iterate on model config without re-fetching
+    epf model model_pipeline.yaml \
+        --data data.csv \
+        --test-start 2023-01-01 --test-end 2024-01-01
+    ```
+  </TabItem>
+  <TabItem label="Interactive first run">
+    ```bash
+    # Build everything interactively, save YAMLs, run
+    epf
+
+    # Re-run saved YAMLs without the wizard
+    epf run experiment.yaml
+    ```
+  </TabItem>
+  <TabItem label="SLURM array">
+    ```bash
+    # experiment.yaml contains:
+    # environment:
+    #   model_index: $SLURM_ARRAY_TASK_ID
+
+    sbatch --array=0-3 job.sh
+    # job.sh runs: epf run experiment.yaml
+    ```
+  </TabItem>
+</Tabs>

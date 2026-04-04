@@ -1281,3 +1281,88 @@ class MyExporter(Exporter):
 ```
 
 Register in `COMPONENT_REGISTRY["exporters"]` in `model_pipeline.py`.
+
+---
+
+# CLI
+
+Installed automatically with the package. Available as `epf` on PATH after `pip install epftoolbox2`.
+
+## Commands
+
+### `epf` (no arguments)
+Launches an interactive wizard. Arrow-key menus + text prompts — no YAML required.
+
+**Main menu options:**
+- Run experiment / data pipeline / model pipeline from an existing YAML
+- Build & run data pipeline interactively (sources → transformers → validators → dates → output CSV → save YAML → run)
+- Build & run model pipeline interactively (CSV input + column detection → models → evaluators → exporters → test period → save YAML → run)
+
+### `epf run <experiment.yaml>`
+Run a full Workflow YAML.
+
+```bash
+epf run experiment.yaml
+epf run experiment.yaml --model-index $SLURM_ARRAY_TASK_ID   # SLURM array
+epf run experiment.yaml --processes 4 --threads 8
+epf run experiment.yaml --dry-run   # validate config only
+```
+
+Flags: `--model-index N`, `--processes N`, `--threads N`, `--dry-run`
+
+### `epf data <data_pipeline.yaml>`
+Run a DataPipeline and save result to CSV.
+
+```bash
+epf data data_pipeline.yaml --start 2022-01-01 --end 2024-01-01 --output data.csv
+epf data data_pipeline.yaml --start 2022-01-01 --end 2024-01-01 --output data.csv --cache .cache/
+```
+
+Required flags: `--start DATE`, `--end DATE`, `--output FILE`
+Optional flags: `--cache PATH`
+
+### `epf model <model_pipeline.yaml>`
+Run a ModelPipeline on an existing CSV.
+
+```bash
+epf model model_pipeline.yaml \
+    --data data.csv \
+    --test-start 2023-01-01 \
+    --test-end 2024-01-01 \
+    --target price \
+    --horizon 7 \
+    --save-dir results/ \
+    --forecast-only
+```
+
+Required flags: `--data FILE`, `--test-start DATE`, `--test-end DATE`
+Optional flags: `--target COL` (default: price), `--horizon N` (default: 7), `--save-dir DIR`, `--forecast-only`
+
+### `epf validate <file.yaml>`
+Auto-detect YAML type (Workflow / DataPipeline / ModelPipeline), load, and instantiate all components. Exits 1 on error.
+
+```bash
+epf validate data_pipeline.yaml
+epf validate experiment.yaml
+```
+
+### `epf init`
+Scaffold template `experiment.yaml`, `data_pipeline.yaml`, `model_pipeline.yaml` in the current directory.
+
+```bash
+epf init
+epf init --force   # overwrite existing files
+```
+
+## Typical split workflow
+
+```bash
+# Step 1: fetch data once, cache it
+epf data data_pipeline.yaml --start 2020-01-01 --end 2024-01-01 --output data.csv
+
+# Step 2: iterate on model config
+epf model model_pipeline.yaml \
+    --data data.csv \
+    --test-start 2023-01-01 \
+    --test-end 2024-01-01
+```
