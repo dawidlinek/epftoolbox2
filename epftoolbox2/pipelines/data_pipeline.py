@@ -110,9 +110,7 @@ class DataPipeline:
 
     def _parse_timestamp(self, ts: Union[str, pd.Timestamp]) -> pd.Timestamp:
         if isinstance(ts, str):
-            ts = resolve_date(ts)
-        if ts == "today":
-            return pd.Timestamp("today", tz="UTC").normalize()
+            ts = resolve_date(ts)  # "today"/"now_d±N" → local ISO date string
         if isinstance(ts, str):
             return pd.Timestamp(ts, tz="UTC")
         return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")

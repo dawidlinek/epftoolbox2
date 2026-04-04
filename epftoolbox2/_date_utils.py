@@ -1,10 +1,11 @@
 import re
 from datetime import date, timedelta
+from typing import Any
 
 _DATE_PATTERN = re.compile(r"^(today|now)(?:_d([+-]\d+))?$", re.IGNORECASE)
 
 
-def resolve_date(s: str) -> str:
+def resolve_date(s: Any) -> Any:
     """Resolve relative date keywords to ISO date strings.
 
     Supported patterns:
