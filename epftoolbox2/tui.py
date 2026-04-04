@@ -73,9 +73,9 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
          "choices": ["linear", "ffill", "bfill"]},
     ],
     "LagTransformer": [
-        {"name": "columns", "description": "Columns to lag (comma-separated, or leave blank for all)", "required": False, "default": "", "kind": "column_select"},
-        {"name": "lags", "description": "Lag values, comma-separated (e.g. 1,2,24)", "required": False, "default": "1", "kind": "text"},
-        {"name": "freq", "description": "Frequency (e.g. 1h)", "required": False, "default": "1h", "kind": "text"},
+        {"name": "columns", "description": "Columns to lag", "required": True, "default": None, "kind": "column_select"},
+        {"name": "lags", "description": "Lag values, comma-separated integers (e.g. 1,2,24 or -7,-1)", "required": False, "default": "1", "kind": "lag_list"},
+        {"name": "freq", "description": "Frequency (e.g. 1h, day)", "required": False, "default": "1h", "kind": "text"},
     ],
     "ContinuityValidator": [
         {"name": "freq", "description": "Expected frequency (e.g. 1h)", "required": False, "default": "1h", "kind": "text"},
@@ -145,9 +145,25 @@ def _ask_field(field: dict, available_columns: Optional[list[str]] = None) -> An
             _abort()
         return val if val else None
 
-    if kind in ("column_select",):
+    if kind == "lag_list":
+        while True:
+            raw = questionary.text(label, default=str(default) if default is not None else "1").ask()
+            if raw is None:
+                _abort()
+            raw = raw.strip()
+            if not raw:
+                raw = str(default)
+            try:
+                result = [int(x.strip()) for x in raw.split(",") if x.strip()]
+                if not result:
+                    raise ValueError
+                return result
+            except ValueError:
+                console.print("[red]Please enter comma-separated integers, e.g. 1,2,7 or -7,-1,0[/red]")
+
+    if kind == "column_select":
         if available_columns:
-            # Required fields (predictors) must pick at least one
+            # Required fields (predictors/columns) must pick at least one
             val = questionary.checkbox(label, choices=available_columns).ask()
             if val is None:
                 _abort()
@@ -162,6 +178,9 @@ def _ask_field(field: dict, available_columns: Optional[list[str]] = None) -> An
                 _abort()
             val = val.strip()
             if not val:
+                if required:
+                    console.print("[red]At least one column is required.[/red]")
+                    return _ask_field(field, available_columns)
                 return None
             return [c.strip() for c in val.split(",") if c.strip()]
 
@@ -308,9 +327,14 @@ def build_data_pipeline_interactive():  # noqa: ANN201
 
     # Output
     console.print("\n[bold]Step 5/6: Output[/bold]")
-    output = questionary.text("  Output CSV path").ask()
-    if output is None:
-        _abort()
+    while True:
+        output = questionary.text("  Output CSV path").ask()
+        if output is None:
+            _abort()
+        output = output.strip()
+        if output:
+            break
+        console.print("  [red]Output path is required.[/red]")
 
     dp = DataPipeline(sources=sources, transformers=transformers, validators=validators)
 
