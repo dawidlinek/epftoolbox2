@@ -9,6 +9,7 @@ from epftoolbox2.data.transformers.base import Transformer
 from epftoolbox2.data.validators.base import Validator
 from epftoolbox2.data.cache_manager import CacheManager
 from epftoolbox2.logging import get_logger
+from epftoolbox2._date_utils import resolve_date
 
 logger = get_logger(__name__)
 
@@ -108,6 +109,8 @@ class DataPipeline:
         return df if df is not None else pd.DataFrame()
 
     def _parse_timestamp(self, ts: Union[str, pd.Timestamp]) -> pd.Timestamp:
+        if isinstance(ts, str):
+            ts = resolve_date(ts)
         if ts == "today":
             return pd.Timestamp("today", tz="UTC").normalize()
         if isinstance(ts, str):
