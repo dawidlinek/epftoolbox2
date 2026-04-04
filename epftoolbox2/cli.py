@@ -12,18 +12,16 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 def cmd_run(args: argparse.Namespace) -> None:
-    import os
-
-    # Env vars must be set before numpy/sklearn are imported in worker processes
-    if args.processes is not None:
-        os.environ["MAX_PROCESSES"] = str(args.processes)
-    if args.threads is not None:
-        os.environ["THREADS_PER_PROCESS"] = str(args.threads)
-
     from .pipelines.workflow import Workflow
 
     wf = Workflow.load(args.yaml)
 
+    # CLI flags override YAML values; set on the Workflow object so _apply_environment()
+    # picks them up (rather than setting env vars here and having them overwritten).
+    if args.processes is not None:
+        wf.max_processes = args.processes
+    if args.threads is not None:
+        wf.threads_per_process = args.threads
     if args.model_index is not None:
         wf.model_index = args.model_index
 
@@ -42,7 +40,8 @@ def cmd_data(args: argparse.Namespace) -> None:
 
     dp = DataPipeline.load(args.yaml)
 
-    cache = args.cache or False
+    # args.cache is: None (not given) → False, True (--cache alone) → True, str (--cache path) → str
+    cache = args.cache if args.cache is not None else False
     df = dp.run(start=args.start, end=args.end, cache=cache)
 
     if df.empty:
@@ -138,29 +137,36 @@ model_pipeline:
 
 _DATA_PIPELINE_TEMPLATE = """\
 sources:
-  - type: CsvSource
-    path: data/prices.csv
-    columns:
-      price: price
+  - class: CsvSource
+    params:
+      file_path: data/prices.csv
 
 transformers:
-  - type: TimezoneTransformer
-    target_tz: Europe/Warsaw
+  - class: TimezoneTransformer
+    params:
+      target_tz: Europe/Warsaw
 
 validators:
-  - type: NullCheckValidator
-    columns: [price]
+  - class: NullCheckValidator
+    params:
+      columns: [price]
 """
 
 _MODEL_PIPELINE_TEMPLATE = """\
 models:
-  - type: OLSModel
+  - class: OLSModel
+    params:
+      predictors: [price_d-1]
+      training_window: 365
+      name: OLS
 
 evaluators:
-  - type: MAEEvaluator
+  - class: MAEEvaluator
+    params: {}
 
 exporters:
-  - type: TerminalExporter
+  - class: TerminalExporter
+    params: {}
 """
 
 
@@ -204,7 +210,11 @@ def main() -> None:
     data_p.add_argument("--start", required=True, metavar="DATE", help="Fetch start date (e.g. 2022-01-01)")
     data_p.add_argument("--end", required=True, metavar="DATE", help="Fetch end date (e.g. 2024-01-01)")
     data_p.add_argument("--output", required=True, metavar="FILE", help="Output CSV path (e.g. data.csv)")
-    data_p.add_argument("--cache", metavar="PATH", help="Cache directory or CSV path for source data")
+    data_p.add_argument(
+        "--cache", nargs="?", const=True, metavar="PATH",
+        help="Enable caching. Without a value uses automatic per-source cache (.cache/sources/). "
+             "With a value (--cache my.csv) caches all merged sources to that CSV file.",
+    )
 
     # -- model --
     model_p = sub.add_parser("model", help="Run a model pipeline on an existing CSV dataset")
