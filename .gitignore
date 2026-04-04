@@ -146,7 +146,7 @@ Thumbs.db
 # Project specific
 *.csv
 *.xlsx
-
+docs/.astro/
 
 # Cache directory for data sources
 .cache/

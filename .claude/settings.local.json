@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_forecast_only.py tests/pipelines/test_pipeline.py -q)"
+    ]
+  }
+}
