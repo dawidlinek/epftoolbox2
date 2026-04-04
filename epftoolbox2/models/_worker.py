@@ -41,10 +41,10 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Dict:
     test_x  = x_full[-1:]
     actual  = float(arrays["y"][mask][-1, hz - 1])
 
-    ts = arrays["timestamps"][mask][-1]
-    run_date_str    = str(ts.astype("datetime64[D]"))
-    target_date_str = str((ts + np.timedelta64(hz, "D")).astype("datetime64[D]"))
-    run_weekday     = datetime.date.fromisoformat(run_date_str).weekday()
+    run_date        = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
+    run_date_str    = run_date.isoformat()
+    target_date_str = (run_date + datetime.timedelta(days=hz)).isoformat()
+    run_weekday     = run_date.weekday()
 
     scaler = StandardScaler()
     train_x, train_y, test_x = scaler.fit_transform(

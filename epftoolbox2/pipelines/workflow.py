@@ -47,13 +47,14 @@ class Workflow:
         self,
         data_start: str,
         data_end: str,
-        model_test_start: str,
-        model_test_end: str,
+        model_test_start: Optional[str] = None,
+        model_test_end: Optional[str] = None,
         data_pipeline: Optional[Union[str, Path]] = None,
         model_pipeline: Optional[Union[str, Path]] = None,
         data_cache: Union[bool, str] = False,
         model_target: str = "price",
         model_horizon: int = 7,
+        model_forecast_only: bool = False,
         max_processes: Optional[int] = None,
         threads_per_process: Optional[int] = None,
         cache_path: Optional[str] = None,
@@ -68,6 +69,7 @@ class Workflow:
         self.model_test_end = model_test_end
         self.model_target = model_target
         self.model_horizon = model_horizon
+        self.model_forecast_only = model_forecast_only
         self.max_processes = max_processes
         self.threads_per_process = threads_per_process
         self.cache_path = cache_path
@@ -136,6 +138,7 @@ class Workflow:
             test_end=self.model_test_end,
             target=self.model_target,
             horizon=self.model_horizon,
+            forecast_only=self.model_forecast_only,
         )
 
         return report
@@ -161,7 +164,11 @@ class Workflow:
         dp.update(self._dp_inline)
         config["data_pipeline"] = dp
 
-        mp: dict = {"test_start": self.model_test_start, "test_end": self.model_test_end, "target": self.model_target, "horizon": self.model_horizon}
+        mp: dict = {"target": self.model_target, "horizon": self.model_horizon, "forecast_only": self.model_forecast_only}
+        if self.model_test_start is not None:
+            mp["test_start"] = self.model_test_start
+        if self.model_test_end is not None:
+            mp["test_end"] = self.model_test_end
         if self.model_pipeline is not None:
             mp["path"] = self.model_pipeline
         mp.update(self._mp_inline)
@@ -194,10 +201,11 @@ class Workflow:
             data_start=dp["start"],
             data_end=dp["end"],
             data_cache=dp.get("cache", False),
-            model_test_start=mp["test_start"],
-            model_test_end=mp["test_end"],
+            model_test_start=mp.get("test_start"),
+            model_test_end=mp.get("test_end"),
             model_target=mp.get("target", "price"),
             model_horizon=mp.get("horizon", 7),
+            model_forecast_only=mp.get("forecast_only", False),
             max_processes=env.get("max_processes"),
             threads_per_process=env.get("threads_per_process"),
             cache_path=env.get("cache_path"),

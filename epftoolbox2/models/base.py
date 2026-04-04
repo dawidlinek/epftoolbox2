@@ -16,6 +16,7 @@ from ..scalers.standard import StandardScaler
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef
 from ._worker import _worker_init, _run_day
+from .._date_utils import resolve_date
 
 class BaseModel(ABC):
     def __init__(
@@ -39,15 +40,34 @@ class BaseModel(ABC):
     def _model_kwargs(self) -> Dict:
         return {}
 
+    def _resolve_day(self, date_str: str, label: str) -> int:
+        if date_str not in self._data.index:
+            last = self._data.index[-1].date()
+            raise ValueError(
+                f"'{label}' date '{date_str}' is not in the data "
+                f"(data ends at {last}). Fetch data through at least '{date_str}'."
+            )
+        return int(self._data.loc[date_str, "day"].iloc[0])
+
     def run(
         self,
         data: pd.DataFrame,
-        test_start: str,
-        test_end: str,
+        test_start: str = None,
+        test_end: str = None,
         target: str = "price",
         horizon: int = 7,
         save_to: str = None,
+        forecast_only: bool = False,
     ) -> ModelResultRef:
+        if forecast_only:
+            test_start = resolve_date(test_start or "today")
+            test_end   = resolve_date(test_end   or "today")
+        else:
+            if test_start is None or test_end is None:
+                raise ValueError("test_start and test_end are required unless forecast_only=True")
+            test_start = resolve_date(test_start)
+            test_end   = resolve_date(test_end)
+
         self._target = target
         self._run_date = date.today().isoformat()
 
@@ -58,8 +78,8 @@ class BaseModel(ABC):
             self._hour_data[hour] = hour_df
             self._hour_days[hour] = hour_df["day"].values
 
-        self._offset = int(self._data.loc[test_start, "day"].iloc[0])
-        test_end_day = int(self._data.loc[test_end, "day"].iloc[0])
+        self._offset = self._resolve_day(test_start, "test_start")
+        test_end_day = self._resolve_day(test_end, "test_end")
         self._data = None
 
         all_tasks = [
@@ -98,6 +118,7 @@ class BaseModel(ABC):
 
         config = {
             "offset":              self._offset,
+            "test_start":          test_start,
             "training_window":     self.training_window,
             "scalable_masks":      scalable_masks,
             "threads_per_process": threads_per_process,

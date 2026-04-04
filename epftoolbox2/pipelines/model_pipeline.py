@@ -50,11 +50,12 @@ class ModelPipeline:
     def run(
         self,
         data: pd.DataFrame,
-        test_start: str,
-        test_end: str,
+        test_start: str = None,
+        test_end: str = None,
         target: str = "price",
         horizon: int = 7,
         save_dir: Optional[str] = None,
+        forecast_only: bool = False,
     ) -> EvaluationReport:
         if not self.models:
             raise ValueError("At least one model is required")
@@ -73,12 +74,16 @@ class ModelPipeline:
                 target=target,
                 horizon=horizon,
                 save_to=save_to,
+                forecast_only=forecast_only,
             )
             refs[model.name] = ref
-        report = EvaluationReport(refs, self.evaluators)
 
-        for exporter in self.exporters:
-            exporter.export(report)
+        evaluators = [] if forecast_only else self.evaluators
+        report = EvaluationReport(refs, evaluators)
+
+        if not forecast_only:
+            for exporter in self.exporters:
+                exporter.export(report)
 
         return report
 

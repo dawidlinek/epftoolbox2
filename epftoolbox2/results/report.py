@@ -64,6 +64,20 @@ class EvaluationReport:
     def by_target_weekday_horizon(self) -> pd.DataFrame:
         return self._compute_grouped(["target_weekday", "horizon"])
 
+    def predictions(self) -> pd.DataFrame:
+        """Return a tidy DataFrame of predictions only (no actuals required)."""
+        cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "prediction"]
+        rows = []
+        for model_name, ref in self.refs.items():
+            for r in self._iter_ref(ref, cols=cols):
+                row = {k: r[k] for k in cols if k in r}
+                row["model"] = model_name
+                rows.append(row)
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        return df.sort_values(["model", "horizon", "hour"]).reset_index(drop=True)
+
     def iter_details(self) -> Iterator[Tuple[str, pd.DataFrame]]:
         detail_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual", "prediction"]
         for name, ref in self.refs.items():
