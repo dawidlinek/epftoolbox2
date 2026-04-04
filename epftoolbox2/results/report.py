@@ -66,7 +66,7 @@ class EvaluationReport:
 
     def predictions(self) -> pd.DataFrame:
         """Return a tidy DataFrame of predictions only (no actuals required)."""
-        cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "prediction"]
+        cols = ["run_date", "target_date", "hour", "horizon", "prediction"]
         rows = []
         for model_name, ref in self.refs.items():
             for r in self._iter_ref(ref, cols=cols):

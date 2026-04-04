@@ -39,11 +39,8 @@ if __name__ == "__main__":
 
     report = (
         ModelPipeline()
-        .add_model(OLSModel(predictors=["price_d-1", "price_d-2", "price_d-7",
-                                         "warsaw_temperature_2m_d+{horizon}"],
-                            training_window=365))
+        .add_model(OLSModel(predictors=["price_d-1", "price_d-2", "price_d-7","warsaw_temperature_2m_d+{horizon}"], training_window=365))
         .run(data=df, target="price", horizon=7, forecast_only=True)
-        # test_start and test_end default to "today" when forecast_only=True
     )
 
     forecast = report.predictions()
@@ -52,12 +49,12 @@ if __name__ == "__main__":
 
 **Output** — 168 rows per model (24 hours × 7 horizons):
 
-| run_date   | target_date | hour | horizon | day_in_test | prediction | model |
-|------------|-------------|------|---------|-------------|------------|-------|
-| 2026-04-03 | 2026-04-04  | 0    | 1       | 0           | 312.4      | OLS   |
-| 2026-04-03 | 2026-04-04  | 1    | 1       | 0           | 287.1      | OLS   |
-| ...        | ...         | ...  | ...     | ...         | ...        | ...   |
-| 2026-04-03 | 2026-04-10  | 23   | 7       | 0           | 341.8      | OLS   |
+| run_date (today) | target_date | hour | horizon | prediction | model |
+|------------------|-------------|------|---------|------------|-------|
+| 2026-04-03       | 2026-04-04  | 0    | 1       | 312.4      | OLS   |
+| 2026-04-03       | 2026-04-04  | 1    | 1       | 287.1      | OLS   |
+| ...              | ...         | ...  | ...     | ...        | ...   |
+| 2026-04-03       | 2026-04-10  | 23   | 7       | 341.8      | OLS   |
 
 ---
 
