@@ -37,6 +37,7 @@ dependencies = [
     "astral>=3.2",
     "scikit-learn>=1.3.0",
     "openpyxl>=3.1.0",
+    "questionary>=2.0.0",
 ]
 
 [project.urls]
@@ -51,6 +52,9 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
 ]
+
+[project.scripts]
+epf = "epftoolbox2.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["epftoolbox2"]
