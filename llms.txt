@@ -620,6 +620,22 @@ model_pipeline:
   test_end: "2024-07-01"
   target: price
   horizon: 7
+  forecast_only: false              # optional; default false
+```
+
+**Forecast-only workflow (runs daily without changing dates):**
+```yaml
+data_pipeline:
+  start: now_d-730      # 2 years of history; adjust to match largest training_window
+  end: today_d+7        # fetch weather/calendar forecast window too
+  cache: true
+
+model_pipeline:
+  test_start: today
+  test_end: today
+  target: price
+  horizon: 7
+  forecast_only: true
 ```
 
 ## Inline Component Overrides
@@ -931,6 +947,71 @@ if __name__ == "__main__":
 
 ---
 
+## Example 5: Forecast-Only (Operational Daily Forecast)
+
+```python
+import os
+os.environ["THREADS_PER_PROCESS"] = "8"
+os.environ["MAX_PROCESSES"] = "2"
+
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, LagTransformer
+from epftoolbox2.models import OLSModel, LassoCVModel
+
+ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
+
+if __name__ == "__main__":
+    # Date keywords resolve at runtime — run this script every day without changing anything.
+    # "now_d-730" → 2 years ago; "today_d+7" → 7 days from now.
+    # Adjust the -N offset to cover your largest model's training_window.
+    df = (
+        DataPipeline()
+        .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
+        .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+        .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
+        .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+        .add_transformer(ResampleTransformer(freq="1h"))
+        .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
+        .add_transformer(LagTransformer(
+            lags=range(-7, 1), freq="day",
+            columns=["is_monday", "is_tuesday", "is_wednesday", "is_thursday",
+                     "is_friday", "is_saturday", "is_sunday", "is_holiday",
+                     "daylight_hours", "load_forecast"],
+        ))
+        .run(start="now_d-730", end="today_d+7", cache=True)
+    )
+
+    predictors = [
+        "load_actual",
+        "is_monday_d+{horizon}", "is_tuesday_d+{horizon}", "is_wednesday_d+{horizon}",
+        "is_thursday_d+{horizon}", "is_friday_d+{horizon}", "is_saturday_d+{horizon}",
+        "is_sunday_d+{horizon}", "is_holiday_d+{horizon}", "daylight_hours_d+{horizon}",
+        "load_actual_d-1", "load_actual_d-2", "price_d-1", "price_d-2",
+        "warsaw_temperature_2m_d+{horizon}",
+    ]
+
+    report = (
+        ModelPipeline()
+        .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
+        .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=7, name="LassoCV"))
+        .run(
+            data=df,
+            test_start="today",   # resolve_date("today") → today's ISO date at runtime
+            test_end="today",
+            target="price",
+            horizon=7,
+            forecast_only=True,   # skips evaluators and exporters
+        )
+    )
+
+    # 168 rows per model (24h × 7 horizons), sorted by model → horizon → hour
+    forecast = report.predictions()
+    print(forecast)
+```
+
+---
+
 # API REFERENCE
 
 ## DataPipeline
@@ -950,8 +1031,8 @@ class DataPipeline:
 
     def run(
         self,
-        start: Union[str, pd.Timestamp],  # Start date ("YYYY-MM-DD" or Timestamp)
-        end: Union[str, pd.Timestamp],    # End date
+        start: Union[str, pd.Timestamp],  # "YYYY-MM-DD", Timestamp, or keyword: "today", "now_d-730"
+        end: Union[str, pd.Timestamp],    # Same. Use "today_d+7" to include weather forecast window.
         cache: Union[bool, str] = False,  # True, False, or path string
     ) -> pd.DataFrame: ...
 
@@ -974,11 +1055,12 @@ class ModelPipeline:
     def run(
         self,
         data: pd.DataFrame,              # DataFrame with DatetimeIndex
-        test_start: str,                  # Test period start ("YYYY-MM-DD")
+        test_start: str,                  # Test period start ("YYYY-MM-DD" or "today", "now_d-7")
         test_end: str,                    # Test period end
         target: str = "price",            # Target column name
         horizon: int = 7,                 # Max forecast horizon (days)
         save_dir: Optional[str] = None,   # Directory for incremental results
+        forecast_only: bool = False,      # Skip evaluators and exporters; use report.predictions()
     ) -> EvaluationReport: ...
 
     def save(self, path: Union[str, Path]) -> None: ...   # Save to YAML
@@ -1002,6 +1084,7 @@ class Workflow:
         data_cache: Union[bool, str] = False,
         model_target: str = "price",
         model_horizon: int = 7,
+        model_forecast_only: bool = False,                  # Skip evaluators/exporters; use report.predictions()
         max_processes: Optional[int] = None,
         threads_per_process: Optional[int] = None,
         cache_path: Optional[str] = None,                   # Overrides data_cache if set
@@ -1028,6 +1111,11 @@ class EvaluationReport:
     def by_hour_horizon(self) -> pd.DataFrame: ...
     def by_year(self) -> pd.DataFrame: ...
     def by_year_horizon(self) -> pd.DataFrame: ...
+    def predictions(self) -> pd.DataFrame: ...
+    # Returns tidy DataFrame sorted by model→horizon→hour.
+    # Columns: run_date, target_date, hour, horizon, day_in_test, prediction, model
+    # No "actual" column — use for forecast_only=True runs.
+    def iter_details(self) -> Iterator[Tuple[str, pd.DataFrame]]: ...
 ```
 
 ---
@@ -1083,6 +1171,16 @@ Callable predictors cannot be serialized to YAML. Use `"{horizon}"` string templ
 - Forward lags (negative): `{column}_{unit}+{abs(lag)}` (e.g., `load_actual_d+7`)
 - Weather forecasts: `{prefix}_{variable}_d+{horizon}` (e.g., `warsaw_temperature_2m_d+1`)
 - Predictor templates use `{horizon}` placeholder, replaced with 1, 2, ..., horizon
+
+## Date Keywords
+`DataPipeline.run()`, `ModelPipeline.run()`, `BaseModel.run()`, and `Workflow` all accept date keywords:
+- `"today"` / `"now"` → today's local date (`datetime.date.today()`)
+- `"today_d+7"` / `"now_d+7"` → today + 7 days
+- `"now_d-730"` → today − 730 days
+- The offset `N` in `_d±N` is any integer — use any value to match your training window.
+- Normal ISO date strings (`"2024-01-01"`) pass through unchanged.
+
+Implemented in `epftoolbox2/_date_utils.py:resolve_date()`.
 
 ## Windows Multiprocessing
 Windows uses `spawn` context (not `fork`). Scripts must use `if __name__ == '__main__':` guard.

@@ -59,6 +59,22 @@ model_pipeline:
   horizon: 7
 ```
 
+**Forecast-only variant** — add `forecast_only: true` and use date keywords so the file runs daily without editing:
+
+```yaml
+data_pipeline:
+  path: data_pipeline.yaml
+  start: "now_d-735"       # ~2 years of history, relative to today
+  end: "today_d+7"         # fetch weather/calendar through the forecast window
+  cache: true
+
+model_pipeline:
+  path: model_pipeline.yaml
+  target: price
+  horizon: 7
+  forecast_only: true      # test_start/test_end default to "today"; skips evaluators and exporters
+```
+
 <Aside type="tip">
   All paths in the YAML are resolved relative to the workflow YAML's own directory. Move the whole experiment folder and nothing breaks.
 </Aside>
@@ -82,6 +98,7 @@ model_pipeline:
 | `threads_per_process` | int | `None` | Threads per process |
 | `cache_path` | str | `None` | Cache directory (overrides `data_cache` if set) |
 | `model_index` | int | `None` | Run only `models[model_index]` — all models run if omitted |
+| `model_forecast_only` | bool | `False` | Skip evaluators/exporters; `test_start`/`test_end` default to `"today"` if omitted |
 
 ---
 

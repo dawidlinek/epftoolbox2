@@ -1,0 +1,131 @@
+---
+title: Forecast-Only Mode
+description: Produce operational next-7-days forecasts without back-testing or evaluation
+---
+
+import { Steps, Tabs, TabItem, Aside, Code } from '@astrojs/starlight/components';
+
+# Forecast-Only Mode
+
+`forecast_only=True` runs models in operational mode: trains on all available history and predicts the next `horizon` days from today. No evaluators run, no exporters fire, and `report.predictions()` returns a clean DataFrame with no "actual" column.
+
+---
+
+## Minimum Example
+
+```python
+import os
+os.environ["THREADS_PER_PROCESS"] = "8"
+os.environ["MAX_PROCESSES"] = "2"
+
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, LagTransformer
+from epftoolbox2.models import OLSModel
+
+ENTSOE_API_KEY = os.environ["ENTSOE_API_KEY"]
+
+if __name__ == "__main__":
+    df = (
+        DataPipeline()
+        .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
+        .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+        .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
+        .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+        .add_transformer(ResampleTransformer(freq="1h"))
+        .add_transformer(LagTransformer(columns=["price"], lags=[1, 2, 7], freq="day"))
+        .run(start="now_d-730", end="today_d+7", cache=True)
+    )
+
+    report = (
+        ModelPipeline()
+        .add_model(OLSModel(predictors=["price_d-1", "price_d-2", "price_d-7",
+                                         "warsaw_temperature_2m_d+{horizon}"],
+                            training_window=365))
+        .run(data=df, target="price", horizon=7, forecast_only=True)
+        # test_start and test_end default to "today" when forecast_only=True
+    )
+
+    forecast = report.predictions()
+    print(forecast)
+```
+
+**Output** — 168 rows per model (24 hours × 7 horizons):
+
+| run_date   | target_date | hour | horizon | day_in_test | prediction | model |
+|------------|-------------|------|---------|-------------|------------|-------|
+| 2026-04-03 | 2026-04-04  | 0    | 1       | 0           | 312.4      | OLS   |
+| 2026-04-03 | 2026-04-04  | 1    | 1       | 0           | 287.1      | OLS   |
+| ...        | ...         | ...  | ...     | ...         | ...        | ...   |
+| 2026-04-03 | 2026-04-10  | 23   | 7       | 0           | 341.8      | OLS   |
+
+---
+
+## Date Keywords
+
+Both pipelines accept runtime date keywords so the script runs correctly every day without editing dates:
+
+| Keyword | Resolves to |
+|---------|-------------|
+| `"today"` / `"now"` | Today's local date |
+| `"today_d+7"` / `"now_d+7"` | Today + 7 days |
+| `"now_d-735"` | Today − 735 days |
+| `"2024-01-01"` | Passed through unchanged |
+
+The offset `N` in `_d±N` accepts **any integer**, so it can match any model's `training_window`.
+
+<Aside type="tip">
+  Set `end="today_d+7"` in `DataPipeline` so that `OpenMeteoSource` and `CalendarSource` fetch forecast data for the full prediction window. ENTSOE columns will be `NaN` beyond today, but lag features (price/load from past days) remain valid and are what models use as predictors.
+</Aside>
+
+<Aside type="caution">
+  If `test_start` is not in the fetched data, `BaseModel.run()` raises `ValueError` with a message like:
+  `'test_start' date '2026-04-03' is not in the data (data ends at 2026-04-02). Fetch data through at least '2026-04-03'.`
+  
+  Increase `end` in `DataPipeline` (e.g. `"today_d+7"`) to ensure today's rows exist after all transformers.
+</Aside>
+
+---
+
+## Horizon Mechanics
+
+With `test_start = test_end = "today"` and `horizon=7`, the model runs **once from today** and produces predictions for:
+
+- today + 1 day (horizon 1) — all 24 hours
+- today + 2 days (horizon 2) — all 24 hours
+- ...
+- today + 7 days (horizon 7) — all 24 hours
+
+Total: **24 × 7 = 168 prediction rows** per model.
+
+---
+
+## YAML Workflow (Daily Automation)
+
+Save once and schedule via cron — no date changes needed:
+
+```yaml
+data_pipeline:
+  start: now_d-730    # adjust to cover largest training_window + horizon
+  end: today_d+7      # include forecast window for weather/calendar features
+  cache: true
+
+model_pipeline:
+  target: price
+  horizon: 7
+  forecast_only: true   # test_start/test_end default to today
+```
+
+```python
+from epftoolbox2.pipelines import Workflow
+
+report = Workflow.load("forecast_workflow.yaml").run()
+forecast = report.predictions()
+```
+
+
+## See Also
+
+- [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/) — full `run()` parameter reference
+- [Workflow](/epftoolbox2/workflow/overview/) — YAML-based orchestration
+- [examples/05_forecast_only.py](https://github.com/dawidlinek/epftoolbox2/blob/main/examples/05_forecast_only.py)

@@ -173,6 +173,7 @@ Models automatically apply `StandardScaler`:
 | `target` | str | `"price"` | Target column name |
 | `horizon` | int | `7` | Max forecast horizon (days) |
 | `save_dir` | str | `None` | Directory for incremental results |
+| `forecast_only` | bool | `False` | Skip evaluators/exporters; `test_start`/`test_end` default to `"today"` if omitted |
 
 ---
 
@@ -209,4 +210,5 @@ See [ModelPipeline Serialization](/epftoolbox2/model-pipeline/serialization/) fo
   <LinkCard title="Results" description="Working with evaluation results" href="/epftoolbox2/model-pipeline/results/" />
   <LinkCard title="Caching" description="Incremental training" href="/epftoolbox2/model-pipeline/caching/" />
   <LinkCard title="Workflow" description="YAML-based experiment orchestration" href="/epftoolbox2/workflow/overview/" />
+  <LinkCard title="Forecasting" description="Forecast-only mode and date keywords" href="/epftoolbox2/model-pipeline/forecasting/" />
 </CardGrid>
