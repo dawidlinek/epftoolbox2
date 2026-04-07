@@ -79,6 +79,3 @@ if __name__ == "__main__":
         horizon=7,
         save_dir="results",
     )
-
-    # print(report.summary())
-    # print(report.by_horizon())
