@@ -189,7 +189,7 @@ class BaseModel(ABC):
 
     def _preprocess(self, data: pd.DataFrame, horizon: int, target: str) -> pd.DataFrame:
         data = data.drop(columns=["hour", "day"], errors="ignore")
-        # Remove duplicate timestamps caused by DST transitions (e.g., clock-back hour)
+
         data = data[~data.index.duplicated(keep="first")]
         new_cols = {}
         for h in range(1, horizon + 1):
