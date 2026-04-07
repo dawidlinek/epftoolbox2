@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Dict, Callable, Union, Tuple, Optional
-from datetime import date
+
 import gc
 import inspect
 import multiprocessing
@@ -34,7 +34,6 @@ class BaseModel(ABC):
         self._hour_days: Dict[int, np.ndarray] = {}
         self._offset: int = 0
         self._target: str = ""
-        self._run_date: str = ""
 
     @property
     def _model_kwargs(self) -> Dict:
@@ -69,7 +68,6 @@ class BaseModel(ABC):
             test_end   = resolve_date(test_end)
 
         self._target = target
-        self._run_date = date.today().isoformat()
 
         self._data = self._preprocess(data, horizon, target)
 
@@ -126,7 +124,6 @@ class BaseModel(ABC):
 
         in_memory = None if save_to else []
         mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
-
         with ProcessPoolExecutor(
             max_workers=n_processes,
             mp_context=mp_context,
@@ -192,8 +189,16 @@ class BaseModel(ABC):
 
     def _preprocess(self, data: pd.DataFrame, horizon: int, target: str) -> pd.DataFrame:
         data = data.drop(columns=["hour", "day"], errors="ignore")
-        new_cols = {f"{target}_d+{h}": data[target].shift(-24 * h) for h in range(1, horizon + 1)}
-        new_cols["day"] = pd.Series(np.arange(len(data)) // 24, index=data.index)
+        # Remove duplicate timestamps caused by DST transitions (e.g., clock-back hour)
+        data = data[~data.index.duplicated(keep="first")]
+        new_cols = {}
+        for h in range(1, horizon + 1):
+            future_idx = data.index + pd.Timedelta(hours=24 * h)
+            aligned = data[target].reindex(future_idx)
+            aligned.index = data.index
+            new_cols[f"{target}_d+{h}"] = aligned
+        midnight = data.index.normalize()
+        new_cols["day"] = pd.Series((midnight - midnight[0]).days, index=data.index)
         new_cols["hour"] = pd.Series(data.index.hour, index=data.index)
         return pd.concat([data, pd.DataFrame(new_cols)], axis=1)
 
@@ -222,10 +227,10 @@ class BaseModel(ABC):
         for hour in range(24):
             days = self._hour_days[hour]
             day = self._offset
-            day_min = day - self.training_window - 1
-            mask = (days >= day_min) & (days <= day)
             hour_df = self._hour_data[hour]
             for hz in range(1, horizon + 1):
+                day_min = day - self.training_window - hz
+                mask = (days >= day_min) & (days <= day)
                 preds = self._expand_predictors(hz, hour=hour)
                 sample_x = (
                     hour_df[mask][preds]

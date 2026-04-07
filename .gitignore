@@ -155,3 +155,5 @@ main[1-9]*.py
 *.jsonl
 docs/node_modules/
 tinkering
+
+examples/raw_02_example_reproduction.py

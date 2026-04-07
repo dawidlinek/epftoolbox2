@@ -21,11 +21,11 @@ from epftoolbox2.exporters import ExcelExporter, TerminalExporter
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_API_KEY_HERE")
 
-DATA_START = "2023-05-01"
-DATA_END = "2024-08-01"
+DATA_START = "2023-01-01"
+DATA_END = "2024-04-01"
 
-TEST_START = "2024-06-01"
-TEST_END = "2024-07-01"
+TEST_START = "2024-02-01"
+TEST_END = "2024-03-01"
 if __name__ == "__main__":
 
     df = (
@@ -40,8 +40,6 @@ if __name__ == "__main__":
         .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
         .run(start=DATA_START, end=DATA_END, cache=True)
     )
-
-
     seasonal_indicators = [
         "is_monday_d+{horizon}",
         "is_tuesday_d+{horizon}",
@@ -58,9 +56,9 @@ if __name__ == "__main__":
         "load_actual",
         *seasonal_indicators,
         "load_actual_d-1",
-        "load_actual_d-2",
+        "load_actual_d-7",
         "price_d-1",
-        "price_d-2",
+        "price_d-7",
         lambda h: f"warsaw_temperature_2m_d+{h}",
     ]
 
@@ -82,5 +80,5 @@ if __name__ == "__main__":
         save_dir="results",
     )
 
-    print(report.summary())
-    print(report.by_horizon())
+    # print(report.summary())
+    # print(report.by_horizon())

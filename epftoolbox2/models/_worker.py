@@ -44,7 +44,6 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Dict:
     run_date        = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
     run_date_str    = run_date.isoformat()
     target_date_str = (run_date + datetime.timedelta(days=hz)).isoformat()
-    run_weekday     = run_date.weekday()
 
     scaler = StandardScaler()
     train_x, train_y, test_x = scaler.fit_transform(
@@ -56,7 +55,7 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Dict:
     return {
         "run_date":     run_date_str,
         "target_date":  target_date_str,
-        "run_weekday":  run_weekday,
+        "run_weekday":  run_date.weekday(),
         "hour":         hour,
         "horizon":      hz,
         "day_in_test":  day_in_test,
