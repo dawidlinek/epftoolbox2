@@ -13,8 +13,10 @@ class EvaluationReport:
         self,
         results_or_refs: Dict[str, Union[ModelResultRef, List[Dict]]],
         evaluators: List[Evaluator],
+        source_data: pd.DataFrame = None,
     ):
         self.evaluators = evaluators
+        self.source_data = source_data
         self.refs: Dict[str, ModelResultRef] = {}
 
         for name, v in results_or_refs.items():

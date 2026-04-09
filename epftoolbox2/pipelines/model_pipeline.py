@@ -25,6 +25,7 @@ COMPONENT_REGISTRY = {
         "rMAEEvaluator": "epftoolbox2.evaluators.rmae",
     },
     "exporters": {
+        "CsvExporter": "epftoolbox2.exporters.csv",
         "ExcelExporter": "epftoolbox2.exporters.excel",
         "TerminalExporter": "epftoolbox2.exporters.terminal",
     },
@@ -81,7 +82,7 @@ class ModelPipeline:
             refs[model.name] = ref
 
         evaluators = [] if forecast_only else self.evaluators
-        report = EvaluationReport(refs, evaluators)
+        report = EvaluationReport(refs, evaluators, source_data=data)
 
         if not forecast_only:
             for exporter in self.exporters:
