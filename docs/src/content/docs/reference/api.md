@@ -200,9 +200,19 @@ class LassoCVModel(BaseModel):
 ## Evaluators
 
 ```python
+class Evaluator(ABC):
+    name: str
+    def compute(self, df: pd.DataFrame, **kwargs) -> float: ...
+
 class MAEEvaluator(Evaluator):
     name = "MAE"
-    def compute(self, df: pd.DataFrame) -> float: ...
+
+class RMSEEvaluator(Evaluator):
+    name = "RMSE"
+
+class rMAEEvaluator(Evaluator):
+    name = "rMAE"
+    def __init__(self, base_model: str): ...  # Name of the benchmark model
 ```
 
 ---
@@ -216,5 +226,9 @@ class TerminalExporter(Exporter):
 
 class ExcelExporter(Exporter):
     def __init__(self, path: str, sheets: List[str] = None): ...
+    def export(self, report: EvaluationReport) -> None: ...
+
+class CsvExporter(Exporter):
+    def __init__(self, path: str, extra_columns: List[str] = None): ...
     def export(self, report: EvaluationReport) -> None: ...
 ```

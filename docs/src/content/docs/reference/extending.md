@@ -130,42 +130,44 @@ from epftoolbox2.evaluators.base import Evaluator
 import pandas as pd
 import numpy as np
 
-class RMSEEvaluator(Evaluator):
-    name = "RMSE"
-    
-    def compute(self, df: pd.DataFrame) -> float:
-        return np.sqrt(((df["prediction"] - df["actual"]) ** 2).mean())
-
-
 class MAPEEvaluator(Evaluator):
     name = "MAPE"
     
-    def compute(self, df: pd.DataFrame) -> float:
+    def compute(self, df: pd.DataFrame, **kwargs) -> float:
         return ((df["prediction"] - df["actual"]).abs() / df["actual"].abs()).mean() * 100
 
 
 class sMAPEEvaluator(Evaluator):
     name = "sMAPE"
     
-    def compute(self, df: pd.DataFrame) -> float:
+    def compute(self, df: pd.DataFrame, **kwargs) -> float:
         numerator = (df["prediction"] - df["actual"]).abs()
         denominator = (df["prediction"].abs() + df["actual"].abs()) / 2
         return (numerator / denominator).mean() * 100
 ```
+
+### Evaluator Interface
+
+Every evaluator must implement:
+
+- **`name`** — class attribute used as the column header in reports
+- **`compute(self, df, **kwargs) -> float`** — aggregate metric over a DataFrame with `prediction` and `actual` columns
+
+The `**kwargs` may include `model_dfs` — a dict of all model DataFrames for the current data slice, used by cross-model evaluators like `rMAEEvaluator`.
 
 ### Using Custom Evaluators
 
 ```python
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.models import OLSModel
-from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator
 from epftoolbox2.exporters import TerminalExporter
 
 pipeline = (
     ModelPipeline()
     .add_model(OLSModel(predictors=predictors, name="OLS"))
     .add_evaluator(MAEEvaluator())
-    .add_evaluator(RMSEEvaluator())   # Custom
+    .add_evaluator(RMSEEvaluator())
     .add_evaluator(MAPEEvaluator())   # Custom
     .add_exporter(TerminalExporter())
 )

@@ -27,7 +27,6 @@ class CsvExporter(Exporter):
 
         sort_keys = ["target_date", "hour", "horizon"]
         base_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual"]
-        detail_cols = base_cols + ["prediction"]
 
         base_df: Optional[pd.DataFrame] = None
         model_names: List[str] = []
