@@ -45,6 +45,8 @@ print(report.summary())
 # 0    OLS  26.0199
 ```
 
-## Creating Custom Evaluators
+## See Also
 
-See [Extending](/epftoolbox2/reference/extending/) for how to create custom evaluators like RMSE or MAPE.
+- [RMSEEvaluator](/epftoolbox2/evaluators/rmse/) — Root Mean Squared Error
+- [rMAEEvaluator](/epftoolbox2/evaluators/rmae/) — Relative MAE (benchmark comparison)
+- [Extending](/epftoolbox2/reference/extending/) — Creating custom evaluators

@@ -422,20 +422,52 @@ For each (hour, horizon, day) combination:
 # EVALUATORS
 
 All evaluators implement `Evaluator` base class with:
-- `name: str` - Display name for reports
-- `compute(df: pd.DataFrame) -> float` - Compute metric from prediction/actual columns
+- `name: str` — Display name for reports
+- `compute(df: pd.DataFrame, **kwargs) -> float` — Compute aggregate metric from prediction/actual columns
+
+The `**kwargs` may include `model_dfs` — a dict of all model DataFrames for the current data slice, used by cross-model evaluators like `rMAEEvaluator`.
 
 ## MAEEvaluator
 
-Mean Absolute Error.
+Mean Absolute Error: (1/n) × Σ|yᵢ - ŷᵢ|
 
 ```python
 from epftoolbox2.evaluators import MAEEvaluator
 
 evaluator = MAEEvaluator()
 # evaluator.name = "MAE"
-# evaluator.compute(df) = (df["prediction"] - df["actual"]).abs().mean()
 ```
+
+## RMSEEvaluator
+
+Root Mean Squared Error: √((1/n) × Σ(yᵢ - ŷᵢ)²). Penalizes larger errors more heavily than MAE.
+
+```python
+from epftoolbox2.evaluators import RMSEEvaluator
+
+evaluator = RMSEEvaluator()
+# evaluator.name = "RMSE"
+```
+
+## rMAEEvaluator
+
+Relative MAE: MAE(model) / MAE(base_model). Standard benchmark metric in EPF literature (Lago et al., 2021).
+
+- rMAE < 1 → model outperforms the base
+- rMAE = 1 → equal performance
+- rMAE > 1 → model underperforms the base
+
+The `base_model` name must match a model's `name` parameter in the pipeline. Computed per data slice, so grouped views (by_hour, by_horizon, etc.) each show relative performance for that specific group.
+
+```python
+from epftoolbox2.evaluators import rMAEEvaluator
+
+evaluator = rMAEEvaluator(base_model="OLS")
+# evaluator.name = "rMAE"
+```
+
+**Parameters:**
+- `base_model` (str): Required. Name of the benchmark model.
 
 ---
 
@@ -473,7 +505,38 @@ exporter = ExcelExporter(
 )
 ```
 
-**Sheet options:** `"summary"`, `"hour"`, `"horizon"`, `"hour_horizon"`, `"year"`, `"year_horizon"`
+**Sheet options:** `"summary"`, `"hour"`, `"horizon"`, `"hour_horizon"`, `"year"`, `"year_horizon"`, `"run_weekday_horizon"`, `"target_weekday_horizon"`, `"details"`
+
+## CsvExporter
+
+Exports detailed prediction results to a wide-format CSV. Each row is a single forecast point, with per-model prediction and error columns.
+
+```python
+from epftoolbox2.exporters import CsvExporter
+
+exporter = CsvExporter(
+    path="results.csv",                                   # Required. Output path
+    extra_columns=["is_holiday", "load_forecast"],         # Optional. Columns from source dataset
+)
+```
+
+**Parameters:**
+- `path` (str): Required. Output CSV file path.
+- `extra_columns` (List[str]): Optional. Column names from the source dataset to include (e.g., calendar features, weather data). Joined by target_date + hour from the source dataset's DatetimeIndex. Missing columns are silently skipped.
+
+**Output columns:**
+
+| Column | Description |
+|--------|-------------|
+| `run_date` | Date the forecast was made |
+| `target_date` | Date being forecasted |
+| `hour` | Hour of day (0-23) |
+| `horizon` | Forecast horizon (1 to max) |
+| `day_in_test` | Day index in the test period |
+| `actual` | Actual observed value |
+| `{model}_prediction` | Model's prediction |
+| `{model}_error` | Residual: prediction - actual |
+| Extra columns | From source dataset (if `extra_columns` specified) |
 
 ---
 
@@ -750,8 +813,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 import pandas as pd
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.models import OLSModel, LassoCVModel
-from epftoolbox2.evaluators import MAEEvaluator
-from epftoolbox2.exporters import ExcelExporter, TerminalExporter
+from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
+from epftoolbox2.exporters import ExcelExporter, TerminalExporter, CsvExporter
 
 df = pd.read_csv("data.csv", index_col=0, parse_dates=True)
 
@@ -780,8 +843,11 @@ pipeline = (
     .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS Baseline"))
     .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=5, name="Lasso CV"))
     .add_evaluator(MAEEvaluator())
+    .add_evaluator(RMSEEvaluator())
+    .add_evaluator(rMAEEvaluator(base_model="OLS Baseline"))
     .add_exporter(TerminalExporter())
     .add_exporter(ExcelExporter("results.xlsx"))
+    .add_exporter(CsvExporter("results.csv", extra_columns=["is_holiday"]))
 )
 
 report = pipeline.run(
@@ -1264,9 +1330,11 @@ from epftoolbox2.evaluators.base import Evaluator
 class MyEvaluator(Evaluator):
     name = "MyMetric"
 
-    def compute(self, df: pd.DataFrame) -> float:
+    def compute(self, df: pd.DataFrame, **kwargs) -> float:
         return ...
 ```
+
+The `**kwargs` may include `model_dfs` (Dict[str, DataFrame]) — all model DataFrames for the current data slice, enabling cross-model metrics like rMAE.
 
 Register in `COMPONENT_REGISTRY["evaluators"]` in `model_pipeline.py`.
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Iterator, List, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -13,8 +13,10 @@ class EvaluationReport:
         self,
         results_or_refs: Dict[str, Union[ModelResultRef, List[Dict]]],
         evaluators: List[Evaluator],
+        source_data: Optional[pd.DataFrame] = None,
     ):
         self.evaluators = evaluators
+        self.source_data = source_data
         self.refs: Dict[str, ModelResultRef] = {}
 
         for name, v in results_or_refs.items():
@@ -32,15 +34,18 @@ class EvaluationReport:
                 )
 
     def summary(self) -> pd.DataFrame:
-        rows = []
+        model_dfs: Dict[str, pd.DataFrame] = {}
         for name, ref in self.refs.items():
             preds, actuals = [], []
             for r in self._iter_ref(ref, cols=["prediction", "actual"]):
                 preds.append(r["prediction"])
                 actuals.append(r["actual"])
-            group_df = pd.DataFrame({"prediction": preds, "actual": actuals})
-            rows.append({"model": name, **self._apply_evaluators(group_df)})
-            del group_df, preds, actuals
+            model_dfs[name] = pd.DataFrame({"prediction": preds, "actual": actuals})
+            del preds, actuals
+
+        rows = []
+        for name, df in model_dfs.items():
+            rows.append({"model": name, **self._apply_evaluators(df, model_dfs=model_dfs)})
         return pd.DataFrame(rows)
 
     def by_hour(self) -> pd.DataFrame:
@@ -89,8 +94,8 @@ class EvaluationReport:
             yield name, df
             del df, rows
 
-    def _apply_evaluators(self, df: pd.DataFrame) -> Dict[str, float]:
-        return {ev.name: ev.compute(df) for ev in self.evaluators}
+    def _apply_evaluators(self, df: pd.DataFrame, **kwargs) -> Dict[str, float]:
+        return {ev.name: ev.compute(df, **kwargs) for ev in self.evaluators}
 
     def _iter_ref(self, ref: ModelResultRef, cols: List[str] = None) -> Iterator[Dict]:
         if ref.path is not None:
@@ -119,15 +124,17 @@ class EvaluationReport:
             ("target_weekday_horizon", ["target_weekday", "horizon"]),
         ]
 
-        rows_summary: List[Dict] = []
-        rows_by_config: Dict[str, List[Dict]] = {name: [] for name, _ in group_configs}
+        summary_dfs: Dict[str, pd.DataFrame] = {}
+        # config_name -> model_name -> {group_key -> {prediction: [], actual: []}}
+        all_buckets: Dict[str, Dict[str, Dict[tuple, Dict[str, list]]]] = {
+            name: {} for name, _ in group_configs
+        }
 
         for model_name, ref in self.refs.items():
             summary_preds: List[float] = []
             summary_actuals: List[float] = []
-            model_buckets: Dict[str, Dict[tuple, Dict[str, list]]] = {
-                name: {} for name, _ in group_configs
-            }
+            for config_name, _ in group_configs:
+                all_buckets[config_name][model_name] = {}
 
             cols_to_read = ["hour", "horizon", "run_date", "target_date", "prediction", "actual"]
             for r in self._iter_ref(ref, cols=cols_to_read):
@@ -148,26 +155,39 @@ class EvaluationReport:
                         )
                     except KeyError:
                         continue
-                    bucket = model_buckets[config_name]
+                    bucket = all_buckets[config_name][model_name]
                     if key not in bucket:
                         bucket[key] = {"prediction": [], "actual": []}
                     bucket[key]["prediction"].append(pred)
                     bucket[key]["actual"].append(actual)
 
-            group_df = pd.DataFrame({"prediction": summary_preds, "actual": summary_actuals})
-            rows_summary.append({"model": model_name, **self._apply_evaluators(group_df)})
-            del group_df, summary_preds, summary_actuals
+            summary_dfs[model_name] = pd.DataFrame(
+                {"prediction": summary_preds, "actual": summary_actuals}
+            )
+            del summary_preds, summary_actuals
 
-            for config_name, group_keys in group_configs:
-                for key, data in model_buckets[config_name].items():
-                    group_df = pd.DataFrame(data)
-                    row: Dict = {"model": model_name}
+        rows_summary = []
+        for model_name, df in summary_dfs.items():
+            rows_summary.append(
+                {"model": model_name, **self._apply_evaluators(df, model_dfs=summary_dfs)}
+            )
+
+        rows_by_config: Dict[str, List[Dict]] = {name: [] for name, _ in group_configs}
+        for config_name, group_keys in group_configs:
+            model_buckets = all_buckets[config_name]
+            all_keys = sorted({k for b in model_buckets.values() for k in b})
+            for key in all_keys:
+                model_dfs = {
+                    name: pd.DataFrame(model_buckets[name][key])
+                    for name in model_buckets
+                    if key in model_buckets[name]
+                }
+                for name, df in model_dfs.items():
+                    row: Dict = {"model": name}
                     for k, v in zip(group_keys, key):
                         row[k] = v
-                    row.update(self._apply_evaluators(group_df))
+                    row.update(self._apply_evaluators(df, model_dfs=model_dfs))
                     rows_by_config[config_name].append(row)
-                    del group_df
-                del model_buckets[config_name]
 
         result: Dict[str, pd.DataFrame] = {"summary": pd.DataFrame(rows_summary)}
         for config_name, _ in group_configs:
@@ -185,10 +205,9 @@ class EvaluationReport:
             read_keys.append("run_date")
         cols_to_read = list(dict.fromkeys(read_keys + ["prediction", "actual"]))
 
-        rows = []
+        all_buckets: Dict[str, Dict[tuple, Dict[str, list]]] = {}
         for name, ref in self.refs.items():
             buckets: Dict[tuple, Dict[str, list]] = {}
-
             for r in self._iter_ref(ref, cols=cols_to_read):
                 if needs_year:
                     r["year"] = int(r["target_date"][:4])
@@ -204,16 +223,21 @@ class EvaluationReport:
                     buckets[key] = {"prediction": [], "actual": []}
                 buckets[key]["prediction"].append(r["prediction"])
                 buckets[key]["actual"].append(r["actual"])
+            all_buckets[name] = buckets
 
-            for key, data in buckets.items():
-                group_df = pd.DataFrame(data)
+        rows = []
+        all_keys = sorted({k for b in all_buckets.values() for k in b})
+        for key in all_keys:
+            model_dfs = {
+                name: pd.DataFrame(all_buckets[name][key])
+                for name in all_buckets
+                if key in all_buckets[name]
+            }
+            for name, df in model_dfs.items():
                 row = {"model": name}
                 for k, v in zip(group_keys, key):
                     row[k] = v
-                row.update(self._apply_evaluators(group_df))
+                row.update(self._apply_evaluators(df, model_dfs=model_dfs))
                 rows.append(row)
-                del group_df
-
-            del buckets
 
         return pd.DataFrame(rows)

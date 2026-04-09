@@ -6,5 +6,5 @@ class Evaluator(ABC):
     name: str
 
     @abstractmethod
-    def compute(self, df: pd.DataFrame) -> float:
+    def compute(self, df: pd.DataFrame, **kwargs) -> float:
         pass
