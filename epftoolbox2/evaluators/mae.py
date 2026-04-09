@@ -5,5 +5,5 @@ from .base import Evaluator
 class MAEEvaluator(Evaluator):
     name = "MAE"
 
-    def compute(self, df: pd.DataFrame) -> float:
+    def compute(self, df: pd.DataFrame, **kwargs) -> float:
         return (df["prediction"] - df["actual"]).abs().mean()

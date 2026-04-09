@@ -22,6 +22,7 @@ COMPONENT_REGISTRY = {
     "evaluators": {
         "MAEEvaluator": "epftoolbox2.evaluators.mae",
         "RMSEEvaluator": "epftoolbox2.evaluators.rmse",
+        "rMAEEvaluator": "epftoolbox2.evaluators.rmae",
     },
     "exporters": {
         "ExcelExporter": "epftoolbox2.exporters.excel",
