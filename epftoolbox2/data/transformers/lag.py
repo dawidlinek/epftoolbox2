@@ -1,6 +1,8 @@
 import pandas as pd
 from .base import Transformer
 
+_UNIT_THRESHOLDS = [(86400, "d"), (3600, "h"), (60, "min"), (1, "s")]
+
 
 class LagTransformer(Transformer):
     """Transform columns by shifting them to create lagged features.
@@ -15,20 +17,15 @@ class LagTransformer(Transformer):
         >>> result = transformer.transform(df)
     """
 
-    _FREQ_MAPPING = {
-        "day": "1D",
-        "days": "1D",
-        "d": "1D",
-        "hour": "1h",
-        "hours": "1h",
-        "h": "1h",
-        "minute": "1min",
-        "minutes": "1min",
-        "min": "1min",
-        "second": "1s",
-        "seconds": "1s",
-        "s": "1s",
-    }
+    _FREQ_MAPPING: dict[str, tuple[str, str]] = {}
+    for _aliases, _td, _unit in [
+        (("day", "days", "d", "1d"), "1D", "d"),
+        (("hour", "hours", "h", "1h"), "1h", "h"),
+        (("minute", "minutes", "min", "1min"), "1min", "min"),
+        (("second", "seconds", "s", "1s"), "1s", "s"),
+    ]:
+        for _alias in _aliases:
+            _FREQ_MAPPING[_alias] = (_td, _unit)
 
     def __init__(
         self,
@@ -39,37 +36,29 @@ class LagTransformer(Transformer):
         self.columns = [columns] if isinstance(columns, str) else columns
         self.lags = [lags] if isinstance(lags, int) else list(lags)
         self.freq = freq
-        freq_normalized = self._FREQ_MAPPING.get(freq.lower(), freq)
-        self._freq = pd.Timedelta(freq_normalized)
-        self._validate()
 
-    def _validate(self) -> None:
         if not self.lags:
             raise ValueError("At least one lag value must be provided")
-
         if not self.columns:
             raise ValueError("At least one column must be provided")
 
-    def _get_timedelta(self, lag: int) -> pd.Timedelta:
-        return self._freq * lag
+        mapping = self._FREQ_MAPPING.get(freq.lower())
+        if mapping:
+            freq_normalized, self._freq_unit = mapping
+        else:
+            freq_normalized, self._freq_unit = freq, None
+        self._freq = pd.Timedelta(freq_normalized)
 
     def _format_lag_name(self, column: str, lag: int) -> str:
-        total_td = self._freq * abs(lag)
-        total_seconds = int(total_td.total_seconds())
-
-        if total_seconds % 86400 == 0:
-            value = total_seconds // 86400
-            unit = "d"
-        elif total_seconds % 3600 == 0:
-            value = total_seconds // 3600
-            unit = "h"
-        elif total_seconds % 60 == 0:
-            value = total_seconds // 60
-            unit = "min"
+        if self._freq_unit:
+            unit, value = self._freq_unit, abs(lag)
         else:
-            value = total_seconds
-            unit = "s"
-
+            total_seconds = int((self._freq * abs(lag)).total_seconds())
+            value, unit = next(
+                (total_seconds // d, u)
+                for d, u in _UNIT_THRESHOLDS
+                if total_seconds % d == 0
+            )
         sign = "-" if lag >= 0 else "+"
         return f"{column}_{unit}{sign}{value}"
 
@@ -79,9 +68,7 @@ class LagTransformer(Transformer):
             series = df[column]
             for lag in self.lags:
                 name = self._format_lag_name(column, lag)
-                timedelta = self._get_timedelta(lag)
-                shifted_index = df.index + timedelta
-                shifted_series = pd.Series(series.values, index=shifted_index)
-                lagged_data[name] = shifted_series.reindex(df.index)
+                shifted = pd.Series(series.values, index=df.index + self._freq * lag)
+                lagged_data[name] = shifted.reindex(df.index)
 
         return pd.concat([df, pd.DataFrame(lagged_data, index=df.index)], axis=1)
