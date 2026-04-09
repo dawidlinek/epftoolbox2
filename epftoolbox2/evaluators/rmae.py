@@ -1,3 +1,4 @@
+import math
 from typing import Dict
 
 import pandas as pd
@@ -12,12 +13,15 @@ class rMAEEvaluator(Evaluator):
 
     def compute(self, df: pd.DataFrame, **kwargs) -> float:
         model_dfs: Dict[str, pd.DataFrame] = kwargs.get("model_dfs", {})
-        if self.base_model not in model_dfs:
+        if not model_dfs:
             raise ValueError(
-                f"rMAE base model '{self.base_model}' not found in pipeline models. "
-                f"Available: {list(model_dfs)}"
+                f"rMAE base model '{self.base_model}' not found in pipeline models."
             )
+        if self.base_model not in model_dfs:
+            return math.nan
         base_df = model_dfs[self.base_model]
+        if base_df.empty:
+            return math.nan
         base_mae = (base_df["prediction"] - base_df["actual"]).abs().mean()
         if base_mae == 0:
             return float("inf")

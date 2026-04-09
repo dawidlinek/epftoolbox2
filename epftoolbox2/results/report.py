@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Iterator, List, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -13,7 +13,7 @@ class EvaluationReport:
         self,
         results_or_refs: Dict[str, Union[ModelResultRef, List[Dict]]],
         evaluators: List[Evaluator],
-        source_data: pd.DataFrame = None,
+        source_data: Optional[pd.DataFrame] = None,
     ):
         self.evaluators = evaluators
         self.source_data = source_data

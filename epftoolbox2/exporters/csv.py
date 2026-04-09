@@ -6,6 +6,8 @@ import pandas as pd
 from .base import Exporter
 from ..results.report import EvaluationReport
 
+_MERGE_KEYS = ["run_date", "target_date", "hour", "horizon"]
+
 
 class CsvExporter(Exporter):
     def __init__(self, path: str, extra_columns: Optional[List[str]] = None):
@@ -25,21 +27,25 @@ class CsvExporter(Exporter):
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        sort_keys = ["target_date", "hour", "horizon"]
         base_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual"]
-
         base_df: Optional[pd.DataFrame] = None
-        model_names: List[str] = []
 
         for model_name, model_df in report.iter_details():
-            model_df = model_df.sort_values(by=sort_keys).reset_index(drop=True)
-            if base_df is None:
-                base_df = model_df[base_cols].copy()
-            base_df[f"{model_name}_prediction"] = model_df["prediction"].values
-            base_df[f"{model_name}_error"] = (
-                model_df["prediction"].values - base_df["actual"].values
+            model_df = model_df.rename(columns={
+                "prediction": f"{model_name}_prediction",
+            })
+            model_df[f"{model_name}_error"] = (
+                model_df[f"{model_name}_prediction"] - model_df["actual"]
             )
-            model_names.append(model_name)
+            keep = _MERGE_KEYS + [f"{model_name}_prediction", f"{model_name}_error"]
+            if base_df is None:
+                base_df = model_df[base_cols + [f"{model_name}_prediction", f"{model_name}_error"]].copy()
+            else:
+                base_df = base_df.merge(
+                    model_df[keep],
+                    on=_MERGE_KEYS,
+                    how="outer",
+                )
             del model_df
 
         if base_df is None:
@@ -48,6 +54,7 @@ class CsvExporter(Exporter):
         if self.extra_columns and report.source_data is not None:
             base_df = self._join_extra_columns(base_df, report.source_data)
 
+        sort_keys = ["target_date", "hour", "horizon"]
         base_df = base_df.sort_values(by=sort_keys).reset_index(drop=True)
         base_df.to_csv(self.path, index=False)
 
