@@ -304,7 +304,4 @@ class OpenMeteoSource(DataSource):
             "prefix": self.prefix,
         }
 
-        if self.proxy_url:
-            config["proxy_url"] = self.proxy_url
-
         return config
