@@ -241,16 +241,19 @@ class EntsoeSource(DataSource):
                 chunk_data = self._fetch_chunk(chunk_start, chunk_end)
 
                 for dtype in self.type:
-                    if dtype in chunk_data:
-                        all_results[dtype].append(chunk_data[dtype])
+                    chunk_df = chunk_data.get(dtype)
+                    if chunk_df is not None and not chunk_df.empty:
+                        all_results[dtype].append(chunk_df)
                 progress.advance(task)
 
         dataframes = []
         for dtype in self.type:
             if all_results[dtype]:
                 df = pd.concat(all_results[dtype]).sort_index()
-                df = df[~df.index.duplicated(keep="first")]
-                dataframes.append(df)
+                if df.index.has_duplicates:
+                    df = df.groupby(level=0).first()
+                if not df.empty:
+                    dataframes.append(df)
 
         elapsed = time.time() - start_time
         self._log_success(elapsed)
@@ -301,7 +304,9 @@ class EntsoeSource(DataSource):
             start,
             end,
         )
-        dfs.append(self._parse_loads(xml, "A16"))
+        df_actual = self._parse_loads(xml, "A16")
+        if not df_actual.empty:
+            dfs.append(df_actual)
 
         xml = self._api_request(
             {
@@ -312,7 +317,9 @@ class EntsoeSource(DataSource):
             start,
             end,
         )
-        dfs.append(self._parse_loads(xml, "A01"))
+        df_forecast = self._parse_loads(xml, "A01")
+        if not df_forecast.empty:
+            dfs.append(df_forecast)
 
         xml = self._api_request(
             {
@@ -323,10 +330,17 @@ class EntsoeSource(DataSource):
             start,
             end,
         )
-        dfs.append(self._parse_loads(xml, "A31"))
+        df_week = self._parse_loads(xml, "A31")
+        if not df_week.empty:
+            dfs.append(df_week)
+        elif xml is not None:
+            self.logger.warning(f"ENTSOE [{self._area_name}]: A31 (week-ahead forecast) data available but no min/max values found")
+
+        if not dfs:
+            return pd.DataFrame()
 
         result = pd.concat(dfs, axis=1)
-        return result.truncate(before=start, after=end)
+        return result.truncate(before=start - pd.Timedelta(days=1), after=end)
 
     def _fetch_generation(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         dfs = []
@@ -335,17 +349,6 @@ class EntsoeSource(DataSource):
             {
                 "documentType": "A75",
                 "processType": "A16",
-                "in_Domain": self._area_code,
-            },
-            start,
-            end,
-        )
-        dfs.append(self._parse_generation(xml).add_prefix("generation_"))
-
-        xml = self._api_request(
-            {
-                "documentType": "A69",
-                "processType": "A01",
                 "in_Domain": self._area_code,
             },
             start,
@@ -381,10 +384,12 @@ class EntsoeSource(DataSource):
         price_dict = self._parse_prices(xml)
 
         series = pd.Series()
-        if price_dict["60min"] is not None and len(price_dict["60min"]) > 0:
-            series = price_dict["60min"]
-        elif price_dict["15min"] is not None and len(price_dict["15min"]) > 0:
+        if price_dict["15min"] is not None and len(price_dict["15min"]) > 0:
             series = price_dict["15min"]
+        elif price_dict["30min"] is not None and len(price_dict["30min"]) > 0:
+            series = price_dict["30min"]
+        elif price_dict["60min"] is not None and len(price_dict["60min"]) > 0:
+            series = price_dict["60min"]
 
         series = series.truncate(before=start, after=end)
 
@@ -433,15 +438,15 @@ class EntsoeSource(DataSource):
                 elif bsn_type and bsn_type.text == "A61":
                     series_max_list.append(t)
 
-            series_min = pd.concat(series_min_list) if series_min_list else pd.Series(dtype=float)
-            series_max = pd.concat(series_max_list) if series_max_list else pd.Series(dtype=float)
+            result_dict = {}
+            if series_min_list:
+                series_min = pd.concat(series_min_list).sort_index()
+                result_dict["load_forecast_daily_min"] = series_min
+            if series_max_list:
+                series_max = pd.concat(series_max_list).sort_index()
+                result_dict["load_forecast_daily_max"] = series_max
 
-            return pd.DataFrame(
-                {
-                    "load_forecast_daily_min": series_min,
-                    "load_forecast_daily_max": series_max,
-                }
-            )
+            return pd.DataFrame(result_dict) if result_dict else pd.DataFrame()
 
     def _parse_generation(self, xml_text: str) -> pd.DataFrame:
         if xml_text is None:
