@@ -250,6 +250,12 @@ class BaseModel(ABC):
 
     def _expand_predictors(self, horizon: int, hour: int = 0) -> List[str]:
         result = []
+        if callable(self.predictors):
+            try:
+                n_params = len(inspect.signature(self.predictors).parameters)
+            except (ValueError, TypeError):
+                n_params = 1
+            self.predictors = self.predictors(horizon, hour) if n_params >= 2 else self.predictors(horizon)
         for col in self.predictors:
             if callable(col):
                 try:
