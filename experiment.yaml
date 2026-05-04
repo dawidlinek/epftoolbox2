@@ -1,0 +1,15 @@
+environment:
+  max_processes: 4
+  threads_per_process: 8
+data_pipeline:
+  start: '2023-05-01'
+  end: '2024-08-01'
+  cache: true
+  path: data_pipeline.yaml
+model_pipeline:
+  target: price
+  horizon: 7
+  forecast_only: false
+  test_start: '2024-06-01'
+  test_end: '2024-07-01'
+  path: model_pipeline.yaml
