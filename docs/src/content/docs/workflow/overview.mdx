@@ -57,6 +57,7 @@ model_pipeline:
   test_end: "2024-07-01"
   target: price
   horizon: 7
+  freq: 1h
 ```
 
 **Forecast-only variant** — add `forecast_only: true` and use date keywords so the file runs daily without editing:
@@ -72,6 +73,7 @@ model_pipeline:
   path: model_pipeline.yaml
   target: price
   horizon: 7
+  freq: 1h                 # set to 15min for 15-minute forecasting
   forecast_only: true      # test_start/test_end default to "today"; skips evaluators and exporters
 ```
 
@@ -94,6 +96,7 @@ model_pipeline:
 | `data_cache` | bool \| str | `False` | Data caching (True, False, or path) |
 | `model_target` | str | `"price"` | Target column name |
 | `model_horizon` | int | `7` | Max forecast horizon (days) |
+| `model_freq` | str | `"1h"` | Forecasting frequency (e.g., `"15min"`) |
 | `max_processes` | int | `None` | Worker process count |
 | `threads_per_process` | int | `None` | Threads per process |
 | `cache_path` | str | `None` | Cache directory (overrides `data_cache` if set) |
