@@ -56,6 +56,9 @@ class OpenMeteoSource(DataSource):
         "wind_direction_10m",
     ]
 
+    VALID_TEMPORAL_RESOLUTIONS = {None, "native", "hourly_3", "hourly_6"}
+    _POINTS_PER_DAY = {None: 24, "hourly_3": 8, "hourly_6": 4}
+
     def __init__(
         self,
         latitude: float,
@@ -65,6 +68,7 @@ class OpenMeteoSource(DataSource):
         columns: List[str] = None,
         prefix: str = "",
         proxy_url: str = None,
+        temporal_resolution: str = None,
     ):
         """
         Initialize Open-Meteo data source
@@ -77,6 +81,10 @@ class OpenMeteoSource(DataSource):
             columns: List of weather variables to fetch (default: DEFAULT_COLUMNS)
             prefix: Prefix to add to column names (default: "")
             proxy_url: Proxy URL (e.g., 'http://proxy.example.com:8080')
+            temporal_resolution: Temporal resolution of the data. One of:
+                None (default) — hourly (1 h), no parameter sent to API;
+                "hourly_3" — 3-hourly; "hourly_6" — 6-hourly;
+                "native" — model-native resolution (inferred from response).
         """
         self.latitude = latitude
         self.longitude = longitude
@@ -85,6 +93,7 @@ class OpenMeteoSource(DataSource):
         self.columns = columns if columns else self.DEFAULT_COLUMNS
         self.prefix = prefix
         self.proxy_url = proxy_url
+        self.temporal_resolution = temporal_resolution
 
         self.session = requests.Session()
         self._configure_proxy()
@@ -112,6 +121,12 @@ class OpenMeteoSource(DataSource):
 
         if not self.columns:
             raise ValueError("At least one weather column must be specified")
+
+        if self.temporal_resolution not in self.VALID_TEMPORAL_RESOLUTIONS:
+            raise ValueError(
+                f"temporal_resolution must be one of {self.VALID_TEMPORAL_RESOLUTIONS}, "
+                f"got {self.temporal_resolution!r}"
+            )
 
         return True
 
@@ -208,6 +223,8 @@ class OpenMeteoSource(DataSource):
             "start_date": start.strftime("%Y-%m-%d"),
             "end_date": end.strftime("%Y-%m-%d"),
         }
+        if self.temporal_resolution is not None:
+            params["temporal_resolution"] = self.temporal_resolution
 
         max_retries = 5
         retry_count = 0
@@ -252,6 +269,14 @@ class OpenMeteoSource(DataSource):
 
         raise RuntimeError(f"Failed to fetch data after {max_retries} retries")
 
+    def _points_per_day(self, times: list) -> int:
+        if self.temporal_resolution == "native":
+            if len(times) >= 2:
+                delta_hours = (pd.Timestamp(times[1]) - pd.Timestamp(times[0])).total_seconds() / 3600
+                return max(1, int(round(24 / delta_hours)))
+            return 24
+        return self._POINTS_PER_DAY.get(self.temporal_resolution, 24)
+
     def _parse_weather_data(self, response_data: dict) -> pd.DataFrame:
         if "hourly" not in response_data or "time" not in response_data["hourly"]:
             return pd.DataFrame()
@@ -259,6 +284,7 @@ class OpenMeteoSource(DataSource):
         weather = {}
         hourly_data = response_data["hourly"]
         times = hourly_data["time"]
+        points_per_day = self._points_per_day(times)
 
         for x, timestamp_str in enumerate(times):
             try:
@@ -267,7 +293,7 @@ class OpenMeteoSource(DataSource):
                     for column in self.columns:
                         column_key = f"{column}_previous_day{i}"
                         if column_key in hourly_data:
-                            forecast_idx = x + (i * 24)
+                            forecast_idx = x + (i * points_per_day)
                             if forecast_idx < len(hourly_data[column_key]):
                                 value = hourly_data[column_key][forecast_idx]
                                 tmp[f"{column}_d+{i}"] = value
@@ -302,6 +328,7 @@ class OpenMeteoSource(DataSource):
             "model": self.model,
             "columns": sorted(self.columns),
             "prefix": self.prefix,
+            "temporal_resolution": self.temporal_resolution,
         }
 
         return config
