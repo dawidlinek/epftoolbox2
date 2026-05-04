@@ -176,10 +176,17 @@ class EntsoeSource(DataSource):
 
     API_URL = "https://web-api.tp.entsoe.eu/api"
 
-    def __init__(self, country_code: str, api_key: str, type: List[str]):
+    def __init__(
+        self,
+        country_code: str,
+        api_key: str,
+        type: List[str],
+        prefer_15min: bool = False,
+    ):
         self.country_code = country_code
         self.api_key = api_key
         self.type = type
+        self.prefer_15min = prefer_15min
         self._area_name, self._area_code = lookup_area(country_code)
         self.session = requests.Session()
 
@@ -384,12 +391,15 @@ class EntsoeSource(DataSource):
         price_dict = self._parse_prices(xml)
 
         series = pd.Series()
-        if price_dict["15min"] is not None and len(price_dict["15min"]) > 0:
-            series = price_dict["15min"]
-        elif price_dict["30min"] is not None and len(price_dict["30min"]) > 0:
-            series = price_dict["30min"]
-        elif price_dict["60min"] is not None and len(price_dict["60min"]) > 0:
-            series = price_dict["60min"]
+        order = (
+            ("15min", "30min", "60min")
+            if self.prefer_15min
+            else ("60min", "30min", "15min")
+        )
+        for res in order:
+            if price_dict.get(res) is not None and len(price_dict[res]) > 0:
+                series = price_dict[res]
+                break
 
         series = series.truncate(before=start, after=end)
 

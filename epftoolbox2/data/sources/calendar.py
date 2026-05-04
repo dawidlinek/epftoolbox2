@@ -45,6 +45,7 @@ class CalendarSource(DataSource):
         month: Union[str, bool] = False,
         daylight: bool = False,
         prefix: str = "",
+        freq: str = "1h",
     ):
         self.country = country.upper()
         self._validate_country()
@@ -60,6 +61,7 @@ class CalendarSource(DataSource):
         self.month = month
         self.daylight = daylight
         self.prefix = prefix
+        self.freq = freq
 
         self._validate_config()
 
@@ -86,7 +88,7 @@ class CalendarSource(DataSource):
         start = start.tz_convert("UTC") if start.tzinfo else start.tz_localize("UTC")
         end = end.tz_convert("UTC") if end.tzinfo else end.tz_localize("UTC")
 
-        index = pd.date_range(start, end, freq="1h", tz="UTC")
+        index = pd.date_range(start, end, freq=self.freq, tz="UTC")
         local_index = index.tz_convert(self.timezone)
 
         df = pd.DataFrame(index=index)
@@ -132,7 +134,11 @@ class CalendarSource(DataSource):
         return df
 
     def _add_hour(self, df: pd.DataFrame, local_index: pd.DatetimeIndex) -> pd.DataFrame:
-        hour_series = pd.Series(local_index.hour, index=df.index)
+        if self.freq == "15min":
+            values = local_index.hour * 4 + local_index.minute // 15
+        else:
+            values = local_index.hour
+        hour_series = pd.Series(values, index=df.index)
 
         if self.hour == "number":
             df[f"{self.prefix}hour"] = hour_series
