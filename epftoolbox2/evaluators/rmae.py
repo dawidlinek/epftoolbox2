@@ -15,7 +15,7 @@ class rMAEEvaluator(Evaluator):
         model_dfs: Dict[str, pd.DataFrame] = kwargs.get("model_dfs", {})
         if not model_dfs:
             raise ValueError(
-                f"rMAE base model '{self.base_model}' not found in pipeline models."
+                "rMAEEvaluator requires 'model_dfs' kwarg containing all model DataFrames."
             )
         if self.base_model not in model_dfs:
             return math.nan

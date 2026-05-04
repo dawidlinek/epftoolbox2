@@ -159,20 +159,29 @@ class ExcelExporter(Exporter):
         if not report.refs:
             return
 
-        base_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual"]
         sort_keys = ["run_date", "target_date", "hour", "horizon"]
         details_df = None
 
         for model_name, model_df in report.iter_details():
-            model_df = model_df.sort_values(by=sort_keys).reset_index(drop=True)
+            preds = model_df[sort_keys + ["prediction", "actual", "day_in_test"]].copy()
+            preds = preds.rename(columns={"prediction": f"prediction_{model_name}"})
+            
             if details_df is None:
-                details_df = model_df[base_cols].copy()
-            details_df[f"prediction_{model_name}"] = model_df["prediction"].values
-            del model_df
+                details_df = preds
+            else:
+                details_df = pd.merge(details_df, preds, on=sort_keys, how="outer", suffixes=("", "_drop"))
+                if "actual_drop" in details_df.columns:
+                    details_df["actual"] = details_df["actual"].fillna(details_df["actual_drop"])
+                    details_df["day_in_test"] = details_df["day_in_test"].fillna(details_df["day_in_test_drop"])
+                    details_df = details_df.drop(columns=["actual_drop", "day_in_test_drop"])
 
         if details_df is None:
             return
 
+        pred_cols = [f"prediction_{name}" for name, _ in report.iter_details()]
+        final_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual"] + pred_cols
+
+        details_df = details_df[final_cols]
         details_df = details_df.sort_values(
             by=["target_date", "hour", "horizon"]
         ).reset_index(drop=True)
