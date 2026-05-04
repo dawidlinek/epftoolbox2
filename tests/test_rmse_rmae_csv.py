@@ -106,7 +106,7 @@ class TestRMAEEvaluator:
         """Should raise when model_dfs is completely empty (no pipeline context)."""
         df = pd.DataFrame({"prediction": [1], "actual": [2]})
         ev = rMAEEvaluator(base_model="Missing")
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(ValueError, match="requires 'model_dfs'"):
             ev.compute(df, model_dfs={})
 
     def test_nan_when_base_missing_from_slice(self):

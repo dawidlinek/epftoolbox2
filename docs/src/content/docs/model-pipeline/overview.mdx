@@ -32,6 +32,7 @@ report = pipeline.run(
     test_end="2024-03-01",
     target="price",
     horizon=7,
+    freq="1h",                   # Optional. Allows sub-hourly testing like "15min"
     save_dir="results",
 )
 ```
@@ -172,6 +173,7 @@ Models automatically apply `StandardScaler`:
 | `test_end` | str | Required | Test period end |
 | `target` | str | `"price"` | Target column name |
 | `horizon` | int | `7` | Max forecast horizon (days) |
+| `freq` | str | `"1h"` | Forecasting frequency (e.g., `"15min"`) |
 | `save_dir` | str | `None` | Directory for incremental results |
 | `forecast_only` | bool | `False` | Skip evaluators/exporters; `test_start`/`test_end` default to `"today"` if omitted |
 

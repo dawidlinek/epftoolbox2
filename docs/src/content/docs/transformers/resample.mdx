@@ -7,7 +7,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 # ResampleTransformer
 
-Resamples data to a specified frequency with interpolation to fill gaps.
+Resamples data to a specified frequency, applying aggregation (when downsampling) or interpolation (when upsampling).
 
 ## Basic Usage
 
@@ -23,7 +23,7 @@ df = transformer.transform(df)
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `freq` | str | `"1h"` | Pandas frequency string |
-| `method` | str | `"linear"` | Interpolation method |
+| `method` | str | `"linear"` | Method specifying aggregation and interpolation behavior |
 | `columns` | list[str] \| str \| None | `None` | Columns to interpolate. If None, all columns are interpolated. |
 
 ## Frequency Strings
@@ -35,17 +35,24 @@ df = transformer.transform(df)
 | `"15min"` | 15 minutes |
 | `"1D"` | 1 day |
 
-## Interpolation Methods
+## Methods
 
-| Method | Description |
-|--------|-------------|
-| `"linear"` | Linear interpolation between points |
-| `"ffill"` | Forward fill (use last known value) |
-| `"bfill"` | Backward fill (use next known value) |
+The `method` parameter controls behavior for **both** directions:
+- **Downsampling** (e.g. 15 min → 1 h) – selects the aggregation function.
+- **Upsampling** (e.g. 1 h → 15 min) – selects how NaN gaps are filled.
+
+| Method | Aggregation (↓) | Fill Method (↑) |
+|--------|----------------|-----------------|
+| `"linear"` | `mean` | Linear interpolation |
+| `"ffill"` | `first` | Forward-fill |
+| `"bfill"` | `last` | Backward-fill |
+| `"sum"` | `sum` | Forward-fill |
+| `"first"` | `first` | Forward-fill |
+| `"last"` | `last` | Backward-fill |
 
 ## Selecting Columns
 
-By default, interpolation is applied to all columns. You can restrict interpolation to specific columns using the `columns` parameter. Other columns will be resampled (introducing NaNs) but not interpolated.
+By default, the resampling method is applied to all columns. You can restrict it to specific columns using the `columns` parameter. Other columns will be resampled (introducing NaNs/dropping points) but not processed by the specified method.
 
 ```python
 # Interpolate only 'price', leave 'load' with NaNs where gaps occur

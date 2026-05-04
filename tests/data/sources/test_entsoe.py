@@ -281,7 +281,7 @@ class TestEntsoeSourceIntegration:
 
     def test_fetch_price_data_germany(self, entsoe_api_key):
         """Test fetching price data for Germany"""
-        source = EntsoeSource("DE", entsoe_api_key, type=["price"])
+        source = EntsoeSource("DE_LU", entsoe_api_key, type=["price"])
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-02", tz="UTC")
 

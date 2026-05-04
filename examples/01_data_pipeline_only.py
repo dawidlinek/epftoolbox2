@@ -20,7 +20,7 @@ pipeline = (
         EntsoeSource(
             country_code="PL",
             api_key=ENTSOE_API_KEY,
-            type=["load", "price"],
+            type=["load"],
         )
     )
     .add_source(
@@ -40,24 +40,25 @@ pipeline = (
         )
     )
     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
-    .add_transformer(ResampleTransformer(freq="1h", columns=["load_forecast_daily_min","load_forecast_daily_max"], method="ffill"))
+    .add_transformer(ResampleTransformer(freq="1h", columns=["load_forecast_daily_min", "load_forecast_daily_max"], method="ffill"))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(
         LagTransformer(
             columns=["load_actual"],
-            lags=[1, 2, 7],
+            lags=range(1,8),
             freq="day",
         )
     )
-    .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "is_tuesday", "daylight_hours", "is_wednesday", "is_thursday", "is_friday", "is_saturday", "is_sunday", "load_forecast", "is_holiday"]))
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    .add_transformer(LagTransformer(lags=range(-10, 1), freq="day", columns=["is_monday", "is_tuesday", "daylight_hours", "is_wednesday", "is_thursday", "is_friday", "is_saturday", "is_sunday", "load_forecast_daily_min", "load_forecast_daily_max", "is_holiday"]))
+    .add_transformer(LagTransformer(lags=range(-1, 0), freq="day", columns=["load_forecast"]))
+    .add_validator(NullCheckValidator(columns=["load_actual"]))
     .add_validator(ContinuityValidator())
 )
 
 df = pipeline.run(
-    start="2023-01-01",
-    end="2024-04-01",
-    cache=True,
+    start="2021-01-01",
+    end="2026-05-01",
+    cache=False,
 )
 
 print(f"\nDownloaded {len(df)} rows")
@@ -65,5 +66,5 @@ print(f"Columns: {list(df.columns)}")
 print(f"\nFirst few rows:")
 print(df.head())
 
-output_path = "data_output.csv"
+output_path = "data_output_PL.csv"
 df.to_csv(output_path)

@@ -8,11 +8,11 @@ class TimezoneTransformer(Transformer):
     """Transformer that converts DataFrame index timezone.
 
     Optionally snaps sparse daily columns to local midnight after conversion.
-    When daily values (e.g. load_forecast_daily_min) are stamped at UTC 00:00,
-    tz conversion shifts them to 01:00/02:00 local time. A subsequent ffill
-    resample would then cover 00:00 of that local day with the *previous*
-    day's value. Passing such columns via ``daily_columns`` moves each
-    non-null value back to 00:00 of the same local calendar day.
+    ENTSOE week-ahead (A31) data uses a fixed UTC+2 anchor for period starts,
+    so in winter (UTC+1 zones like CET) daily values land at 23:00 local time
+    instead of midnight. This transformer rounds each non-null value to the
+    *nearest* local midnight (either current or next day) so that a subsequent
+    ffill correctly covers each calendar day with its own daily value.
 
     Example:
         >>> transformer = TimezoneTransformer(
@@ -22,15 +22,18 @@ class TimezoneTransformer(Transformer):
         >>> df = transformer.transform(df)
     """
 
-    def __init__(self, target_tz: str, daily_columns: list[str] = ["load_forecast_daily_min", "load_forecast_daily_max"]):
+    def __init__(self, target_tz: str, daily_columns: list[str] | None = None):
         """
         Args:
             target_tz: Target timezone name (e.g., "Europe/Warsaw", "America/New_York")
             daily_columns: Columns holding one value per day that should be
                 re-snapped to local midnight after tz conversion.
+                Defaults to ["load_forecast_daily_min", "load_forecast_daily_max"].
         """
         self.target_tz = target_tz
-        self.daily_columns = daily_columns
+        self.daily_columns = daily_columns if daily_columns is not None else [
+            "load_forecast_daily_min", "load_forecast_daily_max"
+        ]
         self._validate_timezone()
 
     def _validate_timezone(self) -> None:
@@ -59,7 +62,11 @@ class TimezoneTransformer(Transformer):
             if non_null.empty:
                 continue
 
-            midnight_index = non_null.index.normalize()
+            # Add 1h before normalizing so that 23:xx snaps to the *next*
+            # midnight while 00:xx/01:xx/02:xx still snap to the current one.
+            # This handles ENTSOE's UTC+2-anchored period starts, which land at
+            # 23:00 local time in UTC+1 (winter) zones instead of at midnight.
+            midnight_index = (non_null.index + pd.Timedelta('1h')).normalize()
             needs_shift = non_null.index != midnight_index
             if not needs_shift.any():
                 continue

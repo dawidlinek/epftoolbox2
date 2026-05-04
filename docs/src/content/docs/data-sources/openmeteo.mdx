@@ -42,6 +42,35 @@ df = source.fetch(
 | `model` | str | No | `"jma_seamless"` | Weather model |
 | `columns` | List[str] | No | DEFAULT_COLUMNS | Weather variables |
 | `prefix` | str | No | `""` | Prefix for column names |
+| `temporal_resolution` | str \| None | No | `None` | Time step of returned data — see below |
+
+### Temporal Resolution
+
+| Value | Time step | Notes |
+|-------|-----------|-------|
+| `None` *(default)* | 1 h | Standard hourly data; no extra API parameter sent |
+| `"hourly_3"` | 3 h | 8 data points per day |
+| `"hourly_6"` | 6 h | 4 data points per day |
+| `"native"` | model-dependent | Uses the weather model's native resolution; step is inferred automatically from the response |
+
+```python
+# 3-hourly data — useful for coarser feature sets or faster pipelines
+source = OpenMeteoSource(
+    latitude=52.2297,
+    longitude=21.0122,
+    horizon=7,
+    prefix="warsaw",
+    temporal_resolution="hourly_3",
+)
+
+# Model-native resolution
+source = OpenMeteoSource(
+    latitude=52.2297,
+    longitude=21.0122,
+    model="icon_seamless",
+    temporal_resolution="native",
+)
+```
 
 ## Rate Limiting
 

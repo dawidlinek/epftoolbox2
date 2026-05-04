@@ -75,6 +75,7 @@ source = EntsoeSource(
     country_code="PL",           # Required. Country code (see SUPPORTED_COUNTRIES)
     api_key="YOUR_API_KEY",      # Required. ENTSOE API key
     type=["load", "price"],      # Required. Options: "load", "price", "generation"
+    prefer_15min=False,          # Optional. If True, fetches 15-min price data when available.
 )
 ```
 
@@ -82,11 +83,14 @@ source = EntsoeSource(
 - `country_code` (str): ISO country code. See SUPPORTED_COUNTRIES section.
 - `api_key` (str): ENTSOE API key from https://transparency.entsoe.eu/
 - `type` (List[str]): Data types to fetch. Options: `"load"`, `"price"`, `"generation"`
+- `prefer_15min` (bool): Defaults to False. If True, prioritizes fetching 15-minute resolution data (particularly relevant for prices).
 
 **Output columns by type:**
 - `type=["load"]`: `load_actual`, `load_forecast`, `load_forecast_daily_min`, `load_forecast_daily_max`
 - `type=["price"]`: `price` (EUR/MWh)
 - `type=["generation"]`: `generation_biomass`, `generation_fossil_gas`, `generation_nuclear`, `generation_solar`, `generation_wind_onshore`, etc.
+
+> **Note on Germany Price Data:** ENTSOE publishes price data by bidding zone. Since the split in 2018, the correct bidding zone code for German energy prices is `"DE_LU"` (Germany/Luxembourg). Using `"DE"` will return an empty DataFrame for prices.
 
 **Caching:** Returns cache config based on area_code and types. Cached to `.cache/sources/`.
 
@@ -106,15 +110,22 @@ source = OpenMeteoSource(
     model="jma_seamless",        # Optional. Weather model (default: "jma_seamless")
     columns=None,                # Optional. Weather variables (default: DEFAULT_COLUMNS)
     prefix="warsaw",             # Optional. Prefix for column names (default: "")
+    temporal_resolution=None,    # Optional. None|"hourly_3"|"hourly_6"|"native" (default: None = 1 h)
 )
 ```
 
 **Default columns:** `temperature_2m`, `rain`, `showers`, `snowfall`, `relative_humidity_2m`, `dew_point_2m`, `apparent_temperature`, `precipitation`, `weather_code`, `surface_pressure`, `pressure_msl`, `cloud_cover`, `wind_speed_10m`, `wind_direction_10m`
 
+**temporal_resolution values:**
+- `None` (default) — 1-hourly; no extra API parameter sent
+- `"hourly_3"` — 3-hourly (8 points/day)
+- `"hourly_6"` — 6-hourly (4 points/day)
+- `"native"` — model-native resolution; time step inferred from the API response
+
 **Output column naming:** `{prefix}_{variable}_d+{horizon}`
 - Example: `warsaw_temperature_2m_d+1`, `warsaw_temperature_2m_d+2`, ..., `warsaw_temperature_2m_d+7`
 
-**Caching:** Returns cache config based on location, horizon, model, columns.
+**Caching:** Returns cache config based on location, horizon, model, columns, temporal_resolution.
 
 ---
 
@@ -133,6 +144,7 @@ source = CalendarSource(
     hour=False,                  # Optional. False | "number" | "onehot"
     month=False,                 # Optional. False | "number" | "onehot" | "name"
     daylight=False,              # Optional. Add sunrise/sunset/daylight_hours
+    freq="1h",                   # Optional. Specifies the generation frequency (e.g., "15min")
     prefix="",                   # Optional. Prefix for column names
 )
 ```
@@ -190,21 +202,21 @@ All transformers implement `Transformer` base class with:
 
 ## ResampleTransformer
 
-Resamples data to specified frequency with interpolation.
+Resamples data to specified frequency with interpolation or aggregation.
 
 ```python
 from epftoolbox2.data.transformers import ResampleTransformer
 
 transformer = ResampleTransformer(
     freq="1h",          # Required. Pandas frequency string ("1h", "15min", "1D")
-    method="linear",    # Optional. Interpolation: "linear" | "ffill" | "bfill"
+    method="linear",    # Optional. Method: "linear" | "ffill" | "bfill" | "sum" | "first" | "last"
 )
 ```
 
 **Behavior:**
-- Resamples to regular frequency using `asfreq()`
-- Fills gaps using specified method
-- Rounds values to 3 decimal places
+- **Downsampling** (e.g. 15min → 1h): Applies an aggregation function (e.g., `mean` for linear, `sum`, `first`, `last`).
+- **Upsampling** (e.g. 1h → 15min): Fills gaps using the specified method (e.g., linear interpolation, forward-fill, backward-fill).
+- Rounds final values to 3 decimal places.
 
 ---
 
@@ -545,7 +557,15 @@ exporter = CsvExporter(
 Returned by `ModelPipeline.run()`.
 
 ```python
-report = pipeline.run(...)
+report = pipeline.run(
+    data=df,
+    test_start="2024-02-01",
+    test_end="2024-03-01",
+    target="price",
+    horizon=7,
+    freq="1h",                   # Optional. Allows sub-hourly testing like "15min" (96 runs/day instead of 24)
+    save_dir="results",
+)
 
 # Available methods:
 report.summary()           # DataFrame: model × metrics
@@ -683,6 +703,7 @@ model_pipeline:
   test_end: "2024-07-01"
   target: price
   horizon: 7
+  freq: 1h                          # optional; defaults to 1h. Set to 15min for 15-min forecasting
   forecast_only: false              # optional; default false
 ```
 

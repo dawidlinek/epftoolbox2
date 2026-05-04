@@ -13,8 +13,8 @@ os.environ["MAX_PROCESSES"] = "2"
 import pandas as pd
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.models import OLSModel, LassoCVModel
-from epftoolbox2.evaluators import MAEEvaluator
-from epftoolbox2.exporters import ExcelExporter, TerminalExporter
+from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
+from epftoolbox2.exporters import ExcelExporter, TerminalExporter, CsvExporter
 
 if __name__ == "__main__":
     df = pd.read_csv("data_output.csv", index_col=0)
@@ -61,8 +61,11 @@ if __name__ == "__main__":
             )
         )
         .add_evaluator(MAEEvaluator())
+        .add_evaluator(RMSEEvaluator())
+        .add_evaluator(rMAEEvaluator(base_model="OLS Baseline"))
         .add_exporter(TerminalExporter(['horizon']))
         .add_exporter(ExcelExporter("model_results.xlsx"))
+        .add_exporter(CsvExporter("model_results.csv"))
     )
 
     report = pipeline.run(

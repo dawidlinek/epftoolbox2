@@ -18,6 +18,9 @@ from ..results.ref import ModelResultRef
 from ._worker import _worker_init, _run_day
 from .._date_utils import resolve_date
 
+_FREQ_TO_PERIODS: Dict[str, int] = {"1h": 24, "15min": 96}
+
+
 class BaseModel(ABC):
     def __init__(
         self,
@@ -25,7 +28,12 @@ class BaseModel(ABC):
         training_window: int = 365,
         name: str = "Model",
     ):
-        self.predictors = predictors
+        if callable(predictors):
+            self._predictors_fn = predictors
+            self.predictors = []
+        else:
+            self._predictors_fn = None
+            self.predictors = predictors
         self.training_window = training_window
         self.name = name
 
@@ -34,6 +42,8 @@ class BaseModel(ABC):
         self._hour_days: Dict[int, np.ndarray] = {}
         self._offset: int = 0
         self._target: str = ""
+        self._freq: str = "1h"
+        self._periods_per_day: int = 24
 
     @property
     def _model_kwargs(self) -> Dict:
@@ -55,9 +65,17 @@ class BaseModel(ABC):
         test_end: str = None,
         target: str = "price",
         horizon: int = 7,
+        freq: str = "1h",
         save_to: str = None,
         forecast_only: bool = False,
     ) -> ModelResultRef:
+        if freq not in _FREQ_TO_PERIODS:
+            raise ValueError(
+                f"Unsupported freq '{freq}'. Supported: {list(_FREQ_TO_PERIODS)}"
+            )
+        self._freq = freq
+        self._periods_per_day = _FREQ_TO_PERIODS[freq]
+
         if forecast_only:
             test_start = resolve_date(test_start or "today")
             test_end   = resolve_date(test_end   or "today")
@@ -71,7 +89,7 @@ class BaseModel(ABC):
 
         self._data = self._preprocess(data, horizon, target)
 
-        for hour in range(24):
+        for hour in range(self._periods_per_day):
             hour_df = self._data[self._data["hour"] == hour].copy()
             self._hour_data[hour] = hour_df
             self._hour_days[hour] = hour_df["day"].values
@@ -84,7 +102,7 @@ class BaseModel(ABC):
             (hour, h, d)
             for d in range(test_end_day - self._offset + 1)
             for h in range(1, horizon + 1)
-            for hour in range(24)
+            for hour in range(self._periods_per_day)
         ]
 
         store = ResultStore(save_to) if save_to else None
@@ -102,6 +120,7 @@ class BaseModel(ABC):
                 test_start=test_start,
                 test_end=test_end,
                 horizon=horizon,
+                freq=self._freq,
             )
 
         hour_arrays = self._build_hour_arrays(horizon)
@@ -120,6 +139,7 @@ class BaseModel(ABC):
             "training_window":     self.training_window,
             "scalable_masks":      scalable_masks,
             "threads_per_process": threads_per_process,
+            "freq":                self._freq,
         }
 
         in_memory = None if save_to else []
@@ -173,6 +193,7 @@ class BaseModel(ABC):
             test_start=test_start,
             test_end=test_end,
             horizon=horizon,
+            freq=self._freq,
             _results=in_memory,
         )
 
@@ -193,19 +214,50 @@ class BaseModel(ABC):
         data = data[~data.index.duplicated(keep="first")]
         new_cols = {}
         for h in range(1, horizon + 1):
-            future_idx = data.index + pd.Timedelta(hours=24 * h)
+            # Use calendar-day shifts (not elapsed 24h) to keep local wall-clock alignment across DST.
+            future_idx = self._shift_index_by_calendar_days(data.index, h)
             aligned = data[target].reindex(future_idx)
             aligned.index = data.index
             new_cols[f"{target}_d+{h}"] = aligned
-        midnight = data.index.normalize()
-        new_cols["day"] = pd.Series((midnight - midnight[0]).days, index=data.index)
-        new_cols["hour"] = pd.Series(data.index.hour, index=data.index)
+
+        # Build day ids from local calendar dates to avoid DST-induced day duplication.
+        local_dates = pd.Series(data.index.date, index=data.index)
+        base_ordinal = local_dates.iloc[0].toordinal()
+        day_ids = local_dates.map(lambda d: d.toordinal() - base_ordinal).astype(np.int64)
+        new_cols["day"] = day_ids
+
+        new_cols["hour"] = pd.Series(
+            self._compute_period_index(data.index), index=data.index
+        )
         return pd.concat([data, pd.DataFrame(new_cols)], axis=1)
+
+    def _shift_index_by_calendar_days(
+        self, index: pd.DatetimeIndex, days: int
+    ) -> pd.DatetimeIndex:
+        if index.tz is None:
+            return index + pd.Timedelta(days=days)
+
+        shifted_local_naive = index.tz_localize(None) + pd.Timedelta(days=days)
+        try:
+            return shifted_local_naive.tz_localize(
+                index.tz, ambiguous="infer", nonexistent="NaT"
+            )
+        except Exception:
+            return shifted_local_naive.tz_localize(
+                index.tz, ambiguous="NaT", nonexistent="NaT"
+            )
+
+    def _compute_period_index(self, index: pd.DatetimeIndex) -> np.ndarray:
+        if self._freq == "1h":
+            return index.hour.to_numpy()
+        if self._freq == "15min":
+            return (index.hour * 4 + index.minute // 15).to_numpy()
+        raise ValueError(f"Unsupported freq '{self._freq}'")
 
     def _build_hour_arrays(self, horizon: int) -> Dict[int, Dict]:
         target_cols = [f"{self._target}_d+{h}" for h in range(1, horizon + 1)]
         hour_arrays = {}
-        for hour in range(24):
+        for hour in range(self._periods_per_day):
             hour_df = self._hour_data[hour]
             feature_cols = [
                 c for c in hour_df.columns
@@ -224,7 +276,7 @@ class BaseModel(ABC):
         self, horizon: int
     ) -> Dict[Tuple[int, int], np.ndarray]:
         masks = {}
-        for hour in range(24):
+        for hour in range(self._periods_per_day):
             days = self._hour_days[hour]
             day = self._offset
             hour_df = self._hour_data[hour]
@@ -244,19 +296,21 @@ class BaseModel(ABC):
     ) -> Dict[Tuple[int, int], List[str]]:
         return {
             (hour, hz): self._expand_predictors(hz, hour=hour)
-            for hour in range(24)
+            for hour in range(self._periods_per_day)
             for hz in range(1, horizon + 1)
         }
 
     def _expand_predictors(self, horizon: int, hour: int = 0) -> List[str]:
         result = []
-        if callable(self.predictors):
+        if self._predictors_fn is not None:
             try:
-                n_params = len(inspect.signature(self.predictors).parameters)
+                n_params = len(inspect.signature(self._predictors_fn).parameters)
             except (ValueError, TypeError):
                 n_params = 1
-            self.predictors = self.predictors(horizon, hour) if n_params >= 2 else self.predictors(horizon)
-        for col in self.predictors:
+            predictors = self._predictors_fn(horizon, hour) if n_params >= 2 else self._predictors_fn(horizon)
+        else:
+            predictors = self.predictors
+        for col in predictors:
             if callable(col):
                 try:
                     n_params = len(inspect.signature(col).parameters)

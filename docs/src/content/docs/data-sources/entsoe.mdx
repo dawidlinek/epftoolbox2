@@ -25,6 +25,7 @@ source = EntsoeSource(
     country_code="PL",
     api_key=os.environ.get("ENTSOE_API_KEY"),
     type=["load", "price"],
+    prefer_15min=False,
 )
 
 df = source.fetch(
@@ -40,6 +41,7 @@ df = source.fetch(
 | `country_code` | str | Yes | Country/zone code (see table below) |
 | `api_key` | str | Yes | ENTSOE API key |
 | `type` | List[str] | Yes | Data types: `load`, `price`, `generation` |
+| `prefer_15min` | bool | No | Defaults to `False`. If `True`, prioritizes fetching 15-minute resolution data (particularly relevant for prices). |
 
 ---
 
@@ -57,6 +59,10 @@ df = source.fetch(
 | Column | Description |
 |--------|-------------|
 | `price` | Day-ahead electricity price (EUR/MWh) |
+
+<Aside type="caution">
+  **Germany Price Data:** ENTSOE publishes prices by bidding zone. Since the 2018 split, use the country code `"DE_LU"` (Germany/Luxembourg) to fetch German electricity prices. Using `"DE"` will return an empty list of prices.
+</Aside>
 
 ### Generation Data (`type=["generation"]`)
 

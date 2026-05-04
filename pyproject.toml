@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "epftoolbox2"
-version = "2.1.0"
+version = "2.2.1"
 description = "Energy Price Forecasting Toolbox 2"
 readme = "README.md"
 license = {text = "GPL-3.0"}
