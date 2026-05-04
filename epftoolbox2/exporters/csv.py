@@ -68,7 +68,7 @@ class CsvExporter(Exporter):
         src = source_data[available].copy()
         idx = src.index
         if hasattr(idx, "tz") and idx.tz is not None:
-            idx = idx.tz_convert(None)
+            idx = idx.tz_localize(None)
         src["_target_date"] = idx.date.astype(str)
         src["_hour"] = idx.hour
         src = src.reset_index(drop=True)
