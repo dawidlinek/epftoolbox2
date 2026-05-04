@@ -57,6 +57,7 @@ class ModelPipeline:
         test_end: str = None,
         target: str = "price",
         horizon: int = 7,
+        freq: str = "1h",
         save_dir: Optional[str] = None,
         forecast_only: bool = False,
     ) -> EvaluationReport:
@@ -76,6 +77,7 @@ class ModelPipeline:
                 test_end=test_end,
                 target=target,
                 horizon=horizon,
+                freq=freq,
                 save_to=save_to,
                 forecast_only=forecast_only,
             )

@@ -11,4 +11,5 @@ class ModelResultRef:
     test_start: str
     test_end: str
     horizon: int
+    freq: str = "1h"
     _results: Optional[List[Dict]] = field(default=None, repr=False)
