@@ -16,8 +16,8 @@ from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSour
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer, TimezoneTransformer
 from epftoolbox2.data.validators import NullCheckValidator
 from epftoolbox2.models import OLSModel, LassoCVModel
-from epftoolbox2.evaluators import MAEEvaluator
-from epftoolbox2.exporters import ExcelExporter, TerminalExporter
+from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator
+from epftoolbox2.exporters import ExcelExporter, TerminalExporter, CsvExporter
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_API_KEY_HERE")
 
@@ -67,8 +67,10 @@ if __name__ == "__main__":
         .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS",))
         .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=7, name="LassoCV"))
         .add_evaluator(MAEEvaluator())
+        .add_evaluator(RMSEEvaluator())
         .add_exporter(TerminalExporter())
         .add_exporter(ExcelExporter("full_workflow_results.xlsx"))
+        .add_exporter(CsvExporter("full_workflow_results.csv"))
     )
 
     report = model_pipeline.run(

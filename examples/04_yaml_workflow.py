@@ -18,10 +18,10 @@ os.environ["PYTHON_GIL"] = "0"
 
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
-from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
+from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer, TimezoneTransformer
 from epftoolbox2.data.validators import NullCheckValidator
 from epftoolbox2.models import OLSModel, LassoCVModel
-from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator
 from epftoolbox2.exporters import ExcelExporter, TerminalExporter
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_ENTSOE_API_KEY")
@@ -56,6 +56,7 @@ predictors = [
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
     .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary",daylight=True, weekday="onehot"))
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
     .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "is_tuesday", "daylight_hours", "is_wednesday", "is_thursday", "is_friday", "is_saturday", "is_sunday", "load_forecast", "is_holiday"]))
@@ -68,6 +69,7 @@ predictors = [
     .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
     .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=5, name="LassoCV"))
     .add_evaluator(MAEEvaluator())
+    .add_evaluator(RMSEEvaluator())
     .add_exporter(TerminalExporter())
     .add_exporter(ExcelExporter("workflow_results.xlsx"))
     .save("model_pipeline.yaml")
