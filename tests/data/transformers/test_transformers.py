@@ -106,6 +106,83 @@ class TestTimezoneTransformerTransform:
         assert list(result["load"]) == [100, 200, 300]
 
 
+class TestTimezoneTransformerDailySnap:
+    """Test daily_columns midnight-snapping for winter and summer cases."""
+
+    def _make_df(self, hourly_utc_start: str, periods: int, daily_utc_ts: str, daily_value: float):
+        """Build a DataFrame with hourly rows and one sparse daily column."""
+        idx = pd.date_range(hourly_utc_start, periods=periods, freq="h", tz="UTC")
+        df = pd.DataFrame({"load": range(periods)}, index=idx)
+        df["daily_min"] = float("nan")
+        if daily_utc_ts in df.index:
+            df.loc[daily_utc_ts, "daily_min"] = daily_value
+        else:
+            # Insert the daily row even if it's outside the hourly grid
+            extra = pd.DataFrame(
+                {"load": float("nan"), "daily_min": daily_value},
+                index=pd.DatetimeIndex([pd.Timestamp(daily_utc_ts, tz="UTC")]),
+            )
+            df = pd.concat([df, extra]).sort_index()
+        return df
+
+    def test_winter_snap_23xx_to_next_midnight(self):
+        """CET winter: ENTSOE UTC+2 anchor puts daily value at 23:00+01:00.
+        Should snap to 00:00+01:00 of the *next* local day (Wednesday), not Tuesday."""
+        # 2025-11-18 22:00 UTC = 2025-11-18 23:00+01:00 CET (1h before Wed midnight)
+        df = self._make_df("2025-11-17 00:00", periods=72, daily_utc_ts="2025-11-18 22:00", daily_value=99.0)
+        transformer = TimezoneTransformer(target_tz="Europe/Madrid", daily_columns=["daily_min"])
+        result = transformer.transform(df)
+
+        # Value must land at Wednesday midnight (2025-11-19 00:00+01:00)
+        wednesday_midnight = pd.Timestamp("2025-11-19 00:00", tz="Europe/Madrid")
+        assert result.loc[wednesday_midnight, "daily_min"] == 99.0
+
+        # Tuesday midnight must NOT have the value
+        tuesday_midnight = pd.Timestamp("2025-11-18 00:00", tz="Europe/Madrid")
+        assert pd.isna(result.loc[tuesday_midnight, "daily_min"])
+
+    def test_summer_snap_00xx_already_midnight(self):
+        """CEST summer: ENTSOE UTC+2 anchor puts daily value at 00:00+02:00.
+        Already at midnight — no shift should occur."""
+        # 2025-07-15 22:00 UTC = 2025-07-16 00:00+02:00 CEST (midnight)
+        df = self._make_df("2025-07-15 00:00", periods=72, daily_utc_ts="2025-07-15 22:00", daily_value=55.0)
+        transformer = TimezoneTransformer(target_tz="Europe/Madrid", daily_columns=["daily_min"])
+        result = transformer.transform(df)
+
+        wednesday_midnight = pd.Timestamp("2025-07-16 00:00", tz="Europe/Madrid")
+        assert result.loc[wednesday_midnight, "daily_min"] == 55.0
+
+    def test_winter_snap_01xx_to_current_midnight(self):
+        """UTC+2 period-start (00:00 UTC) converted to UTC+1: lands at 01:00+01:00.
+        Should snap to 00:00+01:00 of the *same* local day."""
+        # 2025-11-19 00:00 UTC = 2025-11-19 01:00+01:00 CET
+        df = self._make_df("2025-11-18 00:00", periods=72, daily_utc_ts="2025-11-19 00:00", daily_value=77.0)
+        transformer = TimezoneTransformer(target_tz="Europe/Madrid", daily_columns=["daily_min"])
+        result = transformer.transform(df)
+
+        target_midnight = pd.Timestamp("2025-11-19 00:00", tz="Europe/Madrid")
+        assert result.loc[target_midnight, "daily_min"] == 77.0
+
+    def test_already_at_midnight_no_shift(self):
+        """Value already at local midnight: needs_shift must be False, no movement."""
+        # 2025-11-18 23:00 UTC = 2025-11-19 00:00+01:00 CET (exactly midnight)
+        df = self._make_df("2025-11-18 00:00", periods=72, daily_utc_ts="2025-11-18 23:00", daily_value=42.0)
+        transformer = TimezoneTransformer(target_tz="Europe/Madrid", daily_columns=["daily_min"])
+        result = transformer.transform(df)
+
+        midnight = pd.Timestamp("2025-11-19 00:00", tz="Europe/Madrid")
+        assert result.loc[midnight, "daily_min"] == 42.0
+
+    def test_non_daily_columns_unaffected(self):
+        """Columns not in daily_columns must not be moved."""
+        idx = pd.date_range("2025-11-18 00:00", periods=48, freq="h", tz="UTC")
+        df = pd.DataFrame({"load": range(48), "price": range(48)}, index=idx)
+        transformer = TimezoneTransformer(target_tz="Europe/Madrid", daily_columns=["daily_min"])
+        result = transformer.transform(df)
+        # price column should be untouched (no snapping)
+        assert list(result["price"]) == list(range(48))
+
+
 class TestTransformerAbstract:
     """Test Transformer abstract base class"""
 

@@ -178,3 +178,103 @@ class TestModels:
 
         horizons = set(r["horizon"] for r in results._results)
         assert horizons == {1, 2, 3}
+
+    def test_day_ids_follow_calendar_days_across_dst(self):
+        index = pd.date_range(
+            "2024-03-28 00:00",
+            "2024-04-03 23:00",
+            freq="h",
+            tz="Europe/Warsaw",
+        )
+        data = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
+
+        model = OLSModel(predictors=["load_actual"], training_window=5)
+        model._freq = "1h"
+        processed = model._preprocess(data, horizon=1, target="load_actual")
+
+        day_ids_by_date = processed.groupby(processed.index.date)["day"].first().to_numpy()
+        expected = np.arange(len(day_ids_by_date))
+        assert np.array_equal(day_ids_by_date, expected)
+
+    def test_results_align_actual_with_target_date_after_dst(self, monkeypatch):
+        monkeypatch.setenv("MAX_PROCESSES", "1")
+        monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+
+        index = pd.date_range(
+            "2024-01-01 00:00",
+            "2024-04-05 23:00",
+            freq="h",
+            tz="Europe/Warsaw",
+        )
+        ordinals = np.array([ts.date().toordinal() for ts in index], dtype=float)
+        load_actual = ordinals * 100.0 + index.hour.to_numpy(dtype=float)
+
+        data = pd.DataFrame(
+            {
+                "load_actual": load_actual,
+                "feature": np.sin(np.arange(len(index)) / 24.0),
+            },
+            index=index,
+        )
+
+        model = OLSModel(predictors=["feature"], training_window=30)
+        results = model.run(
+            data=data,
+            test_start="2024-03-01",
+            test_end="2024-04-01",
+            target="load_actual",
+            horizon=1,
+        )
+
+        rows = [
+            r
+            for r in (results._results or [])
+            if r["run_date"] == "2024-03-31" and r["hour"] == 18 and r["horizon"] == 1
+        ]
+        assert rows, "Expected a row for run_date=2024-03-31, hour=18, horizon=1"
+
+        row = rows[0]
+        expected_ts = pd.Timestamp("2024-04-01 18:00:00", tz="Europe/Warsaw")
+        expected_actual = float(data.loc[expected_ts, "load_actual"])
+
+        assert row["target_date"] == "2024-04-01"
+        assert row["actual"] == pytest.approx(expected_actual)
+
+        run_dates = {r["run_date"] for r in (results._results or [])}
+        assert "2024-04-01" in run_dates
+
+    def test_multi_horizon_run_across_dst_completes(self, monkeypatch):
+        monkeypatch.setenv("MAX_PROCESSES", "1")
+        monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+
+        index = pd.date_range(
+            "2023-12-01 00:00",
+            "2024-04-10 23:00",
+            freq="h",
+            tz="Europe/Warsaw",
+        )
+        ordinals = np.array([ts.date().toordinal() for ts in index], dtype=float)
+        data = pd.DataFrame(
+            {
+                "load_actual": ordinals * 100.0 + index.hour.to_numpy(dtype=float),
+                "feature": np.cos(np.arange(len(index)) / 12.0),
+            },
+            index=index,
+        )
+
+        model = OLSModel(predictors=["feature"], training_window=30)
+        results = model.run(
+            data=data,
+            test_start="2024-03-28",
+            test_end="2024-04-01",
+            target="load_actual",
+            horizon=7,
+        )
+
+        rows = results._results or []
+        assert rows
+        assert all(np.isfinite(r["prediction"]) for r in rows)
+
+        horizons = {r["horizon"] for r in rows}
+        assert 1 in horizons
+        assert 7 in horizons
