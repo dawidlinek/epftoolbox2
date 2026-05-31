@@ -44,6 +44,8 @@ class CalendarSource(DataSource):
         hour: Union[str, bool] = False,
         month: Union[str, bool] = False,
         daylight: bool = False,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
         prefix: str = "",
         freq: str = "1h",
     ):
@@ -52,8 +54,8 @@ class CalendarSource(DataSource):
 
         country_info = COUNTRY_DATA[self.country]
         self.timezone = timezone or country_info["timezone"]
-        self.lat = country_info["lat"]
-        self.lon = country_info["lon"]
+        self.lat = lat if lat is not None else country_info["lat"]
+        self.lon = lon if lon is not None else country_info["lon"]
 
         self.holidays = holidays
         self.weekday = weekday

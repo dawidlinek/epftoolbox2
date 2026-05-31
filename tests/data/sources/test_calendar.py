@@ -21,6 +21,21 @@ class TestCalendarSourceInit:
         source = CalendarSource(country="PL", timezone="UTC")
         assert source.timezone == "UTC"
 
+    def test_init_default_coordinates(self):
+        source = CalendarSource(country="PL")
+        assert source.lat == COUNTRY_DATA["PL"]["lat"]
+        assert source.lon == COUNTRY_DATA["PL"]["lon"]
+
+    def test_init_override_coordinates(self):
+        source = CalendarSource(country="PL", lat=54.3520, lon=18.6466)
+        assert source.lat == 54.3520
+        assert source.lon == 18.6466
+
+    def test_init_override_lat_only(self):
+        source = CalendarSource(country="PL", lat=54.3520)
+        assert source.lat == 54.3520
+        assert source.lon == COUNTRY_DATA["PL"]["lon"]
+
     def test_init_invalid_holidays_value(self):
         with pytest.raises(ValueError, match="Invalid holidays value"):
             CalendarSource(country="PL", holidays="invalid")
@@ -167,6 +182,18 @@ class TestDaylightFeatures:
         summer = source.fetch(pd.Timestamp("2024-06-21", tz="UTC"), pd.Timestamp("2024-06-22", tz="UTC"))
         winter = source.fetch(pd.Timestamp("2024-12-21", tz="UTC"), pd.Timestamp("2024-12-22", tz="UTC"))
         assert summer["daylight_hours"].iloc[0] > winter["daylight_hours"].iloc[0]
+
+    def test_daylight_respects_coordinate_override(self):
+        # A more northern latitude has longer daylight at the summer solstice.
+        warsaw = CalendarSource(country="PL", holidays=False, weekday=False, daylight=True)
+        northern = CalendarSource(
+            country="PL", holidays=False, weekday=False, daylight=True, lat=59.3293, lon=18.0686
+        )
+        start = pd.Timestamp("2024-06-21", tz="UTC")
+        end = pd.Timestamp("2024-06-22", tz="UTC")
+        warsaw_df = warsaw.fetch(start, end)
+        northern_df = northern.fetch(start, end)
+        assert northern_df["daylight_hours"].iloc[0] > warsaw_df["daylight_hours"].iloc[0]
 
 
 class TestPrefix:
