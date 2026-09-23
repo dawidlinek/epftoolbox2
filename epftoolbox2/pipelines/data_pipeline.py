@@ -12,6 +12,7 @@ import importlib
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
 from epftoolbox2.data.validators.base import Validator
+from epftoolbox2.data.validators.result import ValidationResult
 from epftoolbox2.data.cache_manager import (
     CACHE_FORMAT_VERSION,
     CacheManager,
@@ -52,6 +53,10 @@ COMPONENT_REGISTRY = {
 }
 
 
+class DataValidationError(ValueError):
+    """Raised by ``DataPipeline.run`` when a validator fails and ``on_invalid="raise"``."""
+
+
 class DataPipeline:
     """Data pipeline that combines multiple sources and applies transformers.
 
@@ -60,10 +65,14 @@ class DataPipeline:
             producing the same column name raise ``ValueError`` (give one a prefix).
         transformers: Applied in order to the joined source output.
         validators: Run on the final frame (after the transformers).
+        source_validators: Run on the joined source output before any transformer, e.g. to catch gaps that
+            resampling would interpolate over.
         timezone: Market time zone (e.g. ``"Europe/Warsaw"``). If set, date strings passed to ``run`` are local
             calendar days: ``start`` begins at local midnight and ``end`` covers its whole local day; naive
             timestamps are local times. If ``None`` (default), date strings are midnight UTC, ``end`` is exclusive
             and naive timestamps are UTC (unchanged from before ``timezone`` existed).
+        on_invalid: ``"warn"`` (default) logs failed validations and continues; ``"raise"`` raises
+            ``DataValidationError`` after the failing validation stage. Results are kept in ``validation_results``.
 
     Example:
         >>> pipeline = DataPipeline(
@@ -84,17 +93,24 @@ class DataPipeline:
         >>> df = pipeline.run(start, end)
     """
 
+    ON_INVALID = ("warn", "raise")
+
     def __init__(
         self,
         sources: Optional[List[DataSource]] = None,
         transformers: Optional[List[Transformer]] = None,
         validators: Optional[List[Validator]] = None,
+        source_validators: Optional[List[Validator]] = None,
         timezone: Optional[str] = None,
+        on_invalid: str = "warn",
     ):
         self.sources: List[DataSource] = sources or []
         self.transformers: List[Transformer] = transformers or []
         self.validators: List[Validator] = validators or []
+        self.source_validators: List[Validator] = source_validators or []
         self.timezone = timezone
+        self.on_invalid = on_invalid
+        self.validation_results: Dict[str, ValidationResult] = {}
         self._validate_settings()
 
     def _validate_settings(self) -> None:
@@ -103,6 +119,8 @@ class DataPipeline:
                 ZoneInfo(self.timezone)
             except (ZoneInfoNotFoundError, ValueError, TypeError):
                 raise ValueError(f"Invalid timezone: {self.timezone!r} (use an IANA name such as 'Europe/Warsaw')")
+        if self.on_invalid not in self.ON_INVALID:
+            raise ValueError(f"on_invalid must be one of {self.ON_INVALID}, got {self.on_invalid!r}")
 
     def add_source(self, source: DataSource) -> "DataPipeline":
         if not isinstance(source, DataSource):
@@ -120,6 +138,13 @@ class DataPipeline:
         if not isinstance(validator, Validator):
             raise TypeError("validator must be a Validator instance")
         self.validators.append(validator)
+        return self
+
+    def add_source_validator(self, validator: Validator) -> "DataPipeline":
+        """Add a validator that runs on the joined source output, before the transformers."""
+        if not isinstance(validator, Validator):
+            raise TypeError("validator must be a Validator instance")
+        self.source_validators.append(validator)
         return self
 
     def _fetch_with_cache(
@@ -193,13 +218,15 @@ class DataPipeline:
             raise ValueError("At least one data source is required")
 
         start, end = self.resolve_range(start, end)
+        self.validation_results = {}
 
         result = self._load_or_fetch_sources(start, end, cache)
         if result.empty:
             return result
 
+        self._run_validators(result, self.source_validators, "source_validators")
         result = self._run_transformers(result)
-        self._run_validators(result)
+        self._run_validators(result, self.validators, "validators")
 
         logger.info(f"Pipeline: Completed with {len(result)} rows")
         return result
@@ -300,15 +327,29 @@ class DataPipeline:
             df = transformer.transform(df)
         return df
 
-    def _run_validators(self, df: pd.DataFrame) -> None:
-        for validator in self.validators:
-            validation_result = validator.validate(df)
-            validator_name = type(validator).__name__
-            if not validation_result.is_valid:
-                for error in validation_result.errors:
-                    logger.warning(f"Validation [{validator_name}]: {error}")
-            for warning in validation_result.warnings:
-                logger.info(f"Validation [{validator_name}]: {warning}")
+    def _run_validators(self, df: pd.DataFrame, validators: List[Validator], stage: str) -> None:
+        """Run one validation stage, store each result in ``validation_results`` and apply ``on_invalid``."""
+        failed = []
+        for validator in validators:
+            label = type(validator).__name__
+            name, n = f"{stage}.{label}", 2
+            while name in self.validation_results:
+                name, n = f"{stage}.{label}#{n}", n + 1
+            result = validator.validate(df)
+            self.validation_results[name] = result
+            if not result.is_valid:
+                failed.append(name)
+                for error in result.errors:
+                    logger.warning(f"Validation [{label}]: {error}")
+            for warning in result.warnings:
+                logger.info(f"Validation [{label}]: {warning}")
+
+        if not failed:
+            return
+        summary = "; ".join(_summarize(name, self.validation_results[name]) for name in failed)
+        if self.on_invalid == "raise":
+            raise DataValidationError(f"Validation failed: {summary}")
+        logger.warning(f"Validation: {len(failed)} validator(s) failed, continuing (on_invalid='warn'): {summary}")
 
     def _serialize_component(self, component: Any) -> Dict[str, Any]:
         class_name = type(component).__name__
@@ -412,6 +453,11 @@ def _check_unique_columns(labelled: List[Tuple[str, pd.DataFrame]]) -> None:
     if clashes:
         shown = "; ".join(clashes[:10]) + ("; ..." if len(clashes) > 10 else "")
         raise ValueError(f"Sources produce the same column names ({shown}). Give the sources distinct prefixes.")
+
+
+def _summarize(name: str, result: ValidationResult) -> str:
+    errors = result.errors[:3] + ([f"... {len(result.errors) - 3} more"] if len(result.errors) > 3 else [])
+    return f"{name}: {', '.join(errors) or 'invalid'}"
 
 
 def _qualified_name(obj: Any) -> str:

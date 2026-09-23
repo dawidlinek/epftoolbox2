@@ -10,7 +10,10 @@ from epftoolbox2.data import cache_manager as cache_manager_module
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
 from epftoolbox2.data.transformers import TimezoneTransformer
+from epftoolbox2.data.validators.base import Validator
+from epftoolbox2.data.validators.result import ValidationResult
 from epftoolbox2.pipelines import DataPipeline
+from epftoolbox2.pipelines.data_pipeline import DataValidationError
 
 
 class MockDataSource(DataSource):
@@ -808,6 +811,94 @@ class TestColumnCollisions:
         pipe = DataPipeline([RangeSource("a", columns=["price"]), RangeSource("b", columns=["price", "load"])])
         with pytest.raises(ValueError, match=r"price.*RangeSource #1.*RangeSource #2"):
             pipe.run("2024-01-01", "2024-01-02", cache=True)
+
+
+# ---------------------------------------------------------------------------
+# Validators
+# ---------------------------------------------------------------------------
+
+
+class RecordingValidator(Validator):
+    def __init__(self, fail: bool = False):
+        self.fail = fail
+        self.seen_columns = None
+
+    def validate(self, df):
+        self.seen_columns = list(df.columns)
+        result = ValidationResult()
+        if self.fail:
+            result.is_valid = False
+            result.errors.append("something is wrong")
+        return result
+
+
+class TestValidation:
+    def _pipe(self, **kw):
+        return DataPipeline(sources=[RangeSource(columns=["price"])], transformers=[MockTransformer("_t")], **kw)
+
+    def test_default_warns_and_keeps_results(self):
+        validator = RecordingValidator(fail=True)
+        pipe = self._pipe(validators=[validator])
+        assert pipe.on_invalid == "warn"
+        df = pipe.run("2024-01-01", "2024-01-02")
+        assert not df.empty
+        ((name, result),) = pipe.validation_results.items()
+        assert name == "validators.RecordingValidator"
+        assert result.is_valid is False
+
+    def test_raise_stops_the_pipeline(self):
+        pipe = self._pipe(validators=[RecordingValidator(fail=True)], on_invalid="raise")
+        with pytest.raises(DataValidationError, match="RecordingValidator.*something is wrong"):
+            pipe.run("2024-01-01", "2024-01-02")
+
+    def test_passing_validators_do_not_raise(self):
+        pipe = self._pipe(validators=[RecordingValidator()], on_invalid="raise")
+        assert not pipe.run("2024-01-01", "2024-01-02").empty
+
+    def test_source_validators_see_raw_source_output(self):
+        source_check, output_check = RecordingValidator(), RecordingValidator()
+        pipe = self._pipe(source_validators=[source_check], validators=[output_check])
+        pipe.run("2024-01-01", "2024-01-02")
+        assert source_check.seen_columns == ["price"]
+        assert output_check.seen_columns == ["price_t"]
+        assert list(pipe.validation_results) == [
+            "source_validators.RecordingValidator",
+            "validators.RecordingValidator",
+        ]
+
+    def test_failing_source_validator_raises_before_transformers(self):
+        transformer = MockTransformer()
+        pipe = DataPipeline(
+            sources=[RangeSource()],
+            transformers=[transformer],
+            source_validators=[RecordingValidator(fail=True)],
+            on_invalid="raise",
+        )
+        with pytest.raises(DataValidationError):
+            pipe.run("2024-01-01", "2024-01-02")
+        assert not transformer.transform_called
+
+    def test_add_source_validator_builder(self):
+        pipe = DataPipeline().add_source_validator(RecordingValidator())
+        assert len(pipe.source_validators) == 1
+        with pytest.raises(TypeError, match="Validator"):
+            pipe.add_source_validator("not a validator")
+
+    def test_repeated_validator_classes_get_distinct_names(self):
+        pipe = self._pipe(validators=[RecordingValidator(), RecordingValidator()])
+        pipe.run("2024-01-01", "2024-01-02")
+        assert list(pipe.validation_results) == ["validators.RecordingValidator", "validators.RecordingValidator#2"]
+
+    def test_results_are_reset_on_each_run(self):
+        pipe = self._pipe(validators=[RecordingValidator()])
+        pipe.run("2024-01-01", "2024-01-02")
+        pipe.validators = []
+        pipe.run("2024-01-01", "2024-01-02")
+        assert pipe.validation_results == {}
+
+    def test_invalid_on_invalid_value_raises(self):
+        with pytest.raises(ValueError, match="on_invalid"):
+            DataPipeline(on_invalid="ignore")
 
 
 class TestDataPipelineSerialization:
