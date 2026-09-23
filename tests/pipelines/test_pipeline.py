@@ -1,6 +1,12 @@
+import multiprocessing
+import os
+import time
+
+import numpy as np
 import pytest
 import pandas as pd
 
+from epftoolbox2.data import cache_manager as cache_manager_module
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
 from epftoolbox2.data.transformers import TimezoneTransformer
@@ -338,34 +344,232 @@ class TestDataPipelineCache:
         assert len(result) == 5
         assert source.fetch_called
 
-    def test_run_with_cache_enabled(self, sample_dataframe_1):
-        """Test running pipeline with cache enabled"""
-        import tempfile
-        import shutil
-        from epftoolbox2.data.cache_manager import CacheManager
+    def test_run_with_cache_enabled(self, tmp_path, monkeypatch):
+        """cache=True stores the source output and serves the second run without calling the source."""
+        monkeypatch.chdir(tmp_path)
+        dates = pd.date_range("2024-01-01", periods=24, freq="h", tz="UTC")
+        source = MockDataSource(data=pd.DataFrame({"price": range(24)}, index=dates))
+        pipeline = DataPipeline(sources=[source])
+        start, end = pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC")
 
-        cache_dir = tempfile.mkdtemp()
+        first = pipeline.run(start=start, end=end, cache=True)
+        assert source.fetch_called
+        assert list((tmp_path / ".cache" / "sources").glob("*/data_*.parquet"))
 
-        try:
-            source = MockDataSource(data=sample_dataframe_1)
-            pipeline = DataPipeline(sources=[source])
+        source.fetch_called = False
+        second = pipeline.run(start=start, end=end, cache=True)
 
-            cache_manager = CacheManager(cache_dir=cache_dir)
-            cache_key = cache_manager.get_cache_key(source.get_cache_config())
+        assert not source.fetch_called
+        pd.testing.assert_frame_equal(first, second, check_freq=False)
+        assert len(second) == 24
 
-            # Verify cache is empty initially
-            info = cache_manager.get_cache_info(cache_key)
-            assert info["exists"] is False
+    def test_range_the_source_did_not_return_is_fetched_again(self, sample_dataframe_1, tmp_path, monkeypatch):
+        """The source returned 00:00-04:00 for a whole-day request: only that part counts as cached."""
+        monkeypatch.chdir(tmp_path)
+        source = MockDataSource(data=sample_dataframe_1)
+        pipeline = DataPipeline(sources=[source])
+        start, end = pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC")
 
-            # Run with cache disabled first (default)
-            result = pipeline.run(
-                start=pd.Timestamp("2024-01-01", tz="UTC"), end=pd.Timestamp("2024-01-02", tz="UTC"), cache=False
+        pipeline.run(start=start, end=end, cache=True)
+        again = pipeline.run(start=start, end=end, cache=True)
+
+        assert source.fetch_args == (pd.Timestamp("2024-01-01 05:00", tz="UTC"), end)
+        assert len(again) == 5
+
+
+# ---------------------------------------------------------------------------
+# Source cache (cache=True) — regression tests for the review findings
+# ---------------------------------------------------------------------------
+
+_FULL = pd.date_range("2023-12-01", "2024-08-01", freq="1h", tz="UTC")
+_RNG = np.random.default_rng(7)
+_SERIES = pd.DataFrame(
+    {"price": _RNG.normal(90, 10, len(_FULL)), "load": _RNG.normal(16000, 500, len(_FULL))}, index=_FULL
+)
+
+
+class RangeSource(DataSource):
+    """Deterministic source over a fixed series.
+
+    Like the real sources it may return rows outside [start, end] (ENTSO-E load starts one day early, Open-Meteo
+    runs to end + horizon) and nothing after `now` (data that is not published yet).
+    """
+
+    def __init__(self, name="range", before="0h", after="0h", now=None, columns=("price", "load")):
+        self.name = name
+        self.before = pd.Timedelta(before)
+        self.after = pd.Timedelta(after)
+        self.now = now
+        self.columns = list(columns)
+        self.calls = []
+
+    def fetch(self, start, end):
+        self.calls.append((start, end))
+        hi = end + self.after
+        if self.now is not None:
+            hi = min(hi, self.now)
+        return _SERIES.loc[start - self.before : hi, self.columns].copy()
+
+    def _validate_config(self):
+        return True
+
+    def get_cache_config(self):
+        return {"source_type": self.name, "columns": self.columns}
+
+
+class EntsoeLikeSource(DataSource):
+    """Mimics EntsoeSource(type=["load", "price"]): load from start - 1 day, price from start, both to end
+    inclusive, and a daily minimum stamped at local midnight."""
+
+    def fetch(self, start, end):
+        daily = _SERIES["load"].tz_convert("Europe/Warsaw").resample("D").min().tz_convert("UTC")
+        load = pd.DataFrame({"load_actual": _SERIES["load"], "load_forecast_daily_min": daily})
+        load = load.truncate(before=start - pd.Timedelta(days=1), after=end)
+        price = _SERIES[["price"]].truncate(before=start, after=end)
+        return pd.concat([load, price], axis=1)
+
+    def _validate_config(self):
+        return True
+
+    def get_cache_config(self):
+        return {"source_type": "entsoe_like"}
+
+
+def _utc(s):
+    return pd.Timestamp(s, tz="UTC")
+
+
+@pytest.fixture
+def in_tmp(tmp_path, monkeypatch):
+    """Run in an empty directory so `.cache/sources` starts cold; freeze the cache's clock far in the future."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cache_manager_module, "_now", lambda: _utc("2100-01-01"))
+    return tmp_path
+
+
+class TestSourceCache:
+    def test_cache_true_equals_cache_false(self, in_tmp):
+        """pipelines M2 / empirical F5c: both paths return exactly the requested half-open range."""
+        start, end = "2024-01-01", "2024-02-01"
+
+        def pipe():
+            return DataPipeline().add_source(RangeSource(before="1D", after="2D"))
+
+        fresh = pipe().run(start, end, cache=False)
+        miss = pipe().run(start, end, cache=True)
+        hit = pipe().run(start, end, cache=True)
+
+        assert fresh.index.min() == _utc(start)
+        assert fresh.index.max() == _utc(end) - pd.Timedelta("1h")
+        pd.testing.assert_frame_equal(fresh, miss, check_freq=False)
+        pd.testing.assert_frame_equal(fresh, hit, check_freq=False)
+
+    def test_uncached_source_is_clipped_too(self, in_tmp):
+        """Sources without a cache config (CalendarSource, CsvSource) are clipped to [start, end) as well."""
+        src = RangeSource(before="1D", after="2D")
+        src.get_cache_config = lambda: None
+        df = DataPipeline().add_source(src).run("2024-01-01", "2024-01-03", cache=True)
+        assert df.index.min() == _utc("2024-01-01")
+        assert df.index.max() == _utc("2024-01-02 23:00")
+        assert not (in_tmp / ".cache" / "sources").exists() or not list((in_tmp / ".cache" / "sources").iterdir())
+
+    def test_cached_split_run_equals_fresh_run(self, in_tmp):
+        """entsoe H3 / empirical F5b: no half-empty rows at the seam between two cached ranges."""
+        DataPipeline().add_source(EntsoeLikeSource()).run("2024-01-01", "2024-01-03", cache=True)
+        cached = DataPipeline().add_source(EntsoeLikeSource()).run("2024-01-01", "2024-01-05", cache=True)
+        fresh = DataPipeline().add_source(EntsoeLikeSource()).run("2024-01-01", "2024-01-05", cache=False)
+
+        pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
+        assert cached.loc[_utc("2024-01-02 23:00")].notna().all()
+        assert cached.loc[_utc("2024-01-03 00:00"), ["load_actual", "price"]].notna().all()
+
+    def test_split_run_in_three_pieces_equals_fresh_run(self, in_tmp):
+        for s, e in [("2024-01-10", "2024-01-12"), ("2024-01-01", "2024-01-03")]:
+            DataPipeline().add_source(EntsoeLikeSource()).run(s, e, cache=True)
+        cached = DataPipeline().add_source(EntsoeLikeSource()).run("2024-01-01", "2024-01-20", cache=True)
+        fresh = DataPipeline().add_source(EntsoeLikeSource()).run("2024-01-01", "2024-01-20", cache=False)
+        pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
+
+    def test_unpublished_tail_is_fetched_again_next_day(self, in_tmp, monkeypatch):
+        """pipelines H3 / entsoe H4 / empirical F5d: the daily forecast-only recipe with cache=True."""
+        src = RangeSource(name="live", columns=["load"])
+        pipe = DataPipeline().add_source(src)
+
+        for day, (start, end) in enumerate([("2024-05-01", "2024-06-18"), ("2024-05-02", "2024-06-19")]):
+            now = _utc("2024-06-10 09:00") + pd.Timedelta(days=day)
+            src.now = now
+            monkeypatch.setattr(cache_manager_module, "_now", lambda now=now: now)
+            cached = pipe.run(start, end, cache=True)
+
+        fresh = pipe.run("2024-05-02", "2024-06-19", cache=False)
+        pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
+        assert cached["load"].last_valid_index() == _utc("2024-06-11 09:00")
+
+    def test_deleted_cache_file_is_refetched(self, in_tmp):
+        """entsoe M4: a deleted data file must not silently drop the source's columns."""
+
+        def pipe():
+            return DataPipeline(
+                [RangeSource("price_src", columns=["price"]), RangeSource("load_src", columns=["load"])]
             )
 
-            assert len(result) == 5
-            assert source.fetch_called
-        finally:
-            shutil.rmtree(cache_dir, ignore_errors=True)
+        first = pipe().run("2024-01-01", "2024-01-03", cache=True)
+        files = sorted((in_tmp / ".cache" / "sources").glob("*/data_*.parquet"))
+        assert len(files) == 2
+        files[0].unlink()
+
+        again = pipe().run("2024-01-01", "2024-01-03", cache=True)
+        pd.testing.assert_frame_equal(first, again, check_freq=False)
+
+    def test_concurrent_runs_fetch_once_and_agree(self, in_tmp):
+        """pipelines H1 / entsoe H5: SLURM array tasks starting together on a cold shared cache."""
+        results, fetches = _run_concurrently(in_tmp, cache=True)
+        assert len(set(results)) == 1, results
+        assert results[0][0] == len(pd.date_range("2024-01-01", "2024-07-01", freq="h", inclusive="left"))
+        assert fetches == 1
+
+
+class SlowLoggingSource(DataSource):
+    """Slow source that appends one line per fetch to a log file (counts API calls across processes)."""
+
+    def __init__(self, log_path):
+        self.log_path = log_path
+
+    def fetch(self, start, end):
+        with open(self.log_path, "a") as f:
+            f.write(f"{start} {end}\n")
+        time.sleep(1.0)
+        return _SERIES.loc[start:end].copy()
+
+    def _validate_config(self):
+        return True
+
+    def get_cache_config(self):
+        return {"source_type": "slow_logging"}
+
+
+def _pipeline_task(workdir, cache, queue):
+    os.chdir(workdir)
+    try:
+        df = DataPipeline([SlowLoggingSource(os.path.join(workdir, "fetch.log"))]).run(
+            "2024-01-01", "2024-07-01", cache=cache
+        )
+        queue.put((len(df), round(float(df.sum().sum()), 6)))
+    except Exception as e:  # noqa: BLE001 - report any failure to the parent
+        queue.put((type(e).__name__, str(e)[:200]))
+
+
+def _run_concurrently(workdir, cache, n=3):
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    procs = [ctx.Process(target=_pipeline_task, args=(str(workdir), cache, queue)) for _ in range(n)]
+    for p in procs:
+        p.start()
+    results = [queue.get(timeout=180) for _ in procs]
+    for p in procs:
+        p.join(timeout=60)
+    fetches = len((workdir / "fetch.log").read_text().splitlines())
+    return results, fetches
 
 
 class TestDataPipelineSerialization:

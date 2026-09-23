@@ -7,7 +7,7 @@ import importlib
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
 from epftoolbox2.data.validators.base import Validator
-from epftoolbox2.data.cache_manager import CacheManager
+from epftoolbox2.data.cache_manager import CacheManager, clip_to_range
 from epftoolbox2.logging import get_logger
 from epftoolbox2._date_utils import resolve_date
 
@@ -89,26 +89,40 @@ class DataPipeline:
         if source_config is None:
             return source.fetch(start, end)
 
-        cache_key = cache_manager.get_cache_key(source_config)
-        missing_ranges = cache_manager.find_missing_ranges(cache_key, start, end)
-        source_type = source_config.get("source_type", "unknown")
+        source_class = _qualified_name(source)
+        cache_key = cache_manager.get_cache_key(source_config, source_class)
+        source_type = source_config.get("source_type", type(source).__name__)
 
-        if not missing_ranges:
-            logger.info(f"Cache: Full hit for {source_type} source")
-            return cache_manager.read_cached_data(cache_key, start, end)
+        # Held across the fetch: parallel processes wait for the one fetching this source, then read its result.
+        with cache_manager.lock(cache_key):
+            cached = cache_manager.read_cached_data(cache_key, start, end)
+            missing_ranges = cache_manager.find_missing_ranges(cache_key, start, end)
 
-        if len(missing_ranges) == 1 and missing_ranges[0] == (start, end):
-            logger.info(f"Cache: Miss for {source_type} source")
-        else:
-            logger.info(f"Cache: Partial hit for {source_type} source")
+            if not missing_ranges:
+                logger.info(f"Cache: Full hit for {source_type} source")
+                return cached if cached is not None else pd.DataFrame()
 
-        for missing_start, missing_end in missing_ranges:
-            fresh_df = source.fetch(missing_start, missing_end)
-            if fresh_df is not None and not fresh_df.empty:
-                cache_manager.write_cache(cache_key, fresh_df, missing_start, missing_end, source_config)
+            if len(missing_ranges) == 1 and missing_ranges[0] == (start, end):
+                logger.info(f"Cache: Miss for {source_type} source")
+            else:
+                logger.info(f"Cache: Partial hit for {source_type} source")
 
-        df = cache_manager.read_cached_data(cache_key, start, end)
-        return df if df is not None else pd.DataFrame()
+            parts = [] if cached is None else [cached]
+            for missing_start, missing_end in missing_ranges:
+                fresh_df = source.fetch(missing_start, missing_end)
+                if fresh_df is None or fresh_df.empty:
+                    continue
+                fresh_df = clip_to_range(fresh_df, missing_start, missing_end)
+                # Records only the part the source actually returned and that is settled; the rest is still
+                # returned now and fetched again next time.
+                cache_manager.write_cache(cache_key, fresh_df, missing_start, missing_end, source_config, source_class)
+                parts.append(fresh_df)
+
+        parts = [p for p in parts if not p.empty]
+        if not parts:
+            return pd.DataFrame()
+        # Cached and missing ranges are disjoint, so there are no duplicate timestamps to resolve.
+        return pd.concat(parts).sort_index(kind="stable")
 
     def _parse_timestamp(self, ts: Union[str, pd.Timestamp]) -> pd.Timestamp:
         if isinstance(ts, str):
@@ -159,10 +173,16 @@ class DataPipeline:
         dataframes = []
 
         for source in self.sources:
-            df = (
-                self._fetch_with_cache(source, start, end, cache_manager) if cache is True else source.fetch(start, end)
-            )
-            if df is not None and not df.empty:
+            if cache_manager is not None:
+                df = self._fetch_with_cache(source, start, end, cache_manager)
+            else:
+                df = source.fetch(start, end)
+            if df is None or df.empty:
+                continue
+            # Sources may return rows outside the request (ENTSO-E load from start - 1 day, Open-Meteo up to
+            # end + horizon); every path returns exactly [start, end) so cached and uncached runs agree.
+            df = clip_to_range(df, start, end)
+            if not df.empty:
                 dataframes.append(df)
 
         if not dataframes:
@@ -245,3 +265,8 @@ class DataPipeline:
 
         logger.info(f"Pipeline: Loaded configuration from {path}")
         return pipeline
+
+
+def _qualified_name(obj: Any) -> str:
+    cls = type(obj)
+    return f"{cls.__module__}.{cls.__qualname__}"
