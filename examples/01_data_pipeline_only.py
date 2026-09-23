@@ -40,9 +40,7 @@ pipeline = (
         )
     )
     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
-    .add_transformer(
-        ResampleTransformer(freq="1h", columns=["load_forecast_daily_min", "load_forecast_daily_max"], method="ffill")
-    )
+    # Averages 15-min series, spreads the daily min/max over their local day, leaves real gaps as NaN
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(
         LagTransformer(
