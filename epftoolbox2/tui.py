@@ -48,7 +48,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "required": True,
             "default": None,
             "kind": "multiselect",
-            "choices": ["load", "generation", "price"],
+            "choices": ["load", "generation", "price", "transfer_capacity", "installed_capacity"],
         },
         {
             "name": "prefer_15min",
@@ -56,6 +56,20 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "required": False,
             "default": False,
             "kind": "confirm",
+        },
+        {
+            "name": "neighbours",
+            "description": "Neighbouring bidding zones for transfer_capacity, comma-separated (e.g. DE_LU,CZ)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
         },
     ],
     "OpenMeteoSource": [
