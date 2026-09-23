@@ -35,7 +35,8 @@ epftoolbox2.verify()
 - **Exporters**: Excel with conditional formatting, Terminal output
 - **Caching**: Built-in data caching to avoid redundant API calls
 - **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files
-- **Multiprocessing**: Process-based parallelism with inner thread pools
+- **Multiprocessing**: Process-based parallelism with inner thread pools; SLURM array mode (one model per task) with `epf report` to merge the results
+- **Safeguards**: The model's input (resolution, time stamps, column names, predictors) is checked before any fit, and forecasts that could not be made are counted per model (`report.forecast_counts()`)
 - **Extensibility**: Extensible base classes for data sources, transformers, validators, models, evaluators, and exporters
 
 ## Quick Start

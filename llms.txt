@@ -415,6 +415,16 @@ For each (hour, horizon, day) combination:
 4. Predict and inverse-scale prediction
 5. Store result with metadata
 
+**Checks before any fit** (ValueError): rows `freq` apart with one row per local day and period (only the
+repeated fall-back DST hour may repeat), no duplicate timestamps, no data columns named `hour`/`day` or
+`{target}_d+1..{target}_d+{horizon}`, every expanded predictor present, numeric and not a target. Only the target
+and the predictors are used, so unused text columns are fine. Model names must be unique.
+
+**Tasks without a forecast** are counted per reason on the `ModelResultRef` (`produced`, `skipped`) and in
+`report.forecast_counts()`: `missing_test_predictors`, `missing_test_row` (gap on the issue day), `too_few_rows`,
+`no_finite_training_rows`, `fit_error` (ValueError from the model). A shortfall is logged; a model that produces
+nothing raises; any other exception in a task stops the run.
+
 **Result record structure:**
 ```python
 {
@@ -568,7 +578,8 @@ report = pipeline.run(
 )
 
 # Available methods:
-report.summary()           # DataFrame: model × metrics
+report.summary()           # DataFrame: model, forecasts (count), one column per metric
+report.forecast_counts()   # DataFrame: model, planned, produced, missing, one column per skip reason
 report.by_hour()           # DataFrame: model × hour × metrics
 report.by_horizon()        # DataFrame: model × horizon × metrics
 report.by_hour_horizon()   # DataFrame: model × hour × horizon × metrics
@@ -689,7 +700,7 @@ environment:
   max_processes: 32
   threads_per_process: 8
   cache_path: /tmp/scratch/$SLURM_JOB_ID/cache   # $VAR expanded at runtime
-  model_index: $SLURM_ARRAY_TASK_ID              # optional; runs all models if omitted
+  model_index: $SLURM_ARRAY_TASK_ID              # optional; runs all models if omitted. Needs save_dir
 
 data_pipeline:
   path: data_pipeline.yaml          # relative to this file's directory
@@ -705,7 +716,14 @@ model_pipeline:
   horizon: 7
   freq: 1h                          # optional; defaults to 1h. Set to 15min for 15-min forecasting
   forecast_only: false              # optional; default false
+  save_dir: results                 # optional; one resumable JSONL per model, relative to this file
 ```
+
+**SLURM array (one model per task):** set `environment.model_index` and `model_pipeline.save_dir`. Each task
+writes its model's JSONL to `save_dir` and skips evaluators/exporters (rMAE and exporters need every model).
+After all tasks finish, `epf report experiment.yaml` (or `Workflow.load(path).report()`) merges the files and
+runs the evaluators and exporters once; it raises if a model has no results unless `allow_missing=True`
+(`--allow-missing`). A negative or out-of-range `model_index` raises.
 
 **Forecast-only workflow (runs daily without changing dates):**
 ```yaml
@@ -790,6 +808,9 @@ report = pipeline.run(..., save_dir="results")
 
 # Results stored as JSONL files: results/{model_name}.jsonl
 # On re-run, only missing (hour, horizon, day) combinations are computed
+
+# Report from saved results (e.g. after one run per model)
+report = pipeline.report("results", test_start="2024-02-01", test_end="2024-03-01", horizon=7, freq="1h")
 ```
 
 ---
@@ -837,7 +858,8 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
 from epftoolbox2.exporters import ExcelExporter, TerminalExporter, CsvExporter
 
-df = pd.read_csv("data.csv", index_col=0, parse_dates=True)
+df = pd.read_csv("data.csv", index_col=0)
+df.index = pd.to_datetime(df.index, utc=True).tz_convert("Europe/Warsaw")  # back to the local zone
 
 seasonal_indicators = [
     "is_monday_d+{horizon}",
@@ -1146,8 +1168,21 @@ class ModelPipeline:
         test_end: str,                    # Test period end
         target: str = "price",            # Target column name
         horizon: int = 7,                 # Max forecast horizon (days)
+        freq: str = "1h",                 # "1h" or "15min"; must match the data
         save_dir: Optional[str] = None,   # Directory for incremental results
         forecast_only: bool = False,      # Skip evaluators and exporters; use report.predictions()
+    ) -> EvaluationReport: ...
+
+    def report(                           # Report from the JSONL files in save_dir, runs evaluators/exporters
+        self,
+        save_dir: Union[str, Path],
+        test_start: Optional[str] = None,
+        test_end: Optional[str] = None,
+        horizon: int = 7,
+        freq: str = "1h",
+        forecast_only: bool = False,
+        data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns
+        allow_missing: bool = False,           # else FileNotFoundError when a model has no results
     ) -> EvaluationReport: ...
 
     def save(self, path: Union[str, Path]) -> None: ...   # Save to YAML
@@ -1176,9 +1211,11 @@ class Workflow:
         threads_per_process: Optional[int] = None,
         cache_path: Optional[str] = None,                   # Overrides data_cache if set
         model_index: Optional[int] = None,                  # Run only models[model_index]; all models if None
+        model_save_dir: Optional[str] = None,               # YAML model_pipeline.save_dir; required with model_index
     ): ...
 
     def run(self) -> EvaluationReport: ...
+    def report(self, allow_missing: bool = False) -> EvaluationReport: ...  # merge save_dir after an array job
 
     def save(self, path: Union[str, Path]) -> None: ...
 
@@ -1192,7 +1229,8 @@ class Workflow:
 
 ```python
 class EvaluationReport:
-    def summary(self) -> pd.DataFrame: ...
+    def summary(self) -> pd.DataFrame: ...          # model, forecasts, metrics
+    def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
     def by_hour_horizon(self) -> pd.DataFrame: ...
@@ -1397,7 +1435,12 @@ epf run experiment.yaml --processes 4 --threads 8
 epf run experiment.yaml --dry-run   # validate config only
 ```
 
-Flags: `--model-index N`, `--processes N`, `--threads N`, `--dry-run`
+Flags: `--model-index N` (needs `model_pipeline.save_dir`), `--processes N`, `--threads N`, `--dry-run`
+
+### `epf report <experiment.yaml>`
+Merge the per-model JSONL files in `model_pipeline.save_dir` (after a SLURM array) and run the evaluators and
+exporters once. Prints planned vs produced forecasts per model. `--allow-missing` reports the models that have
+results instead of failing.
 
 ### `epf data <data_pipeline.yaml>`
 Run a DataPipeline and save result to CSV.
@@ -1409,6 +1452,9 @@ epf data data_pipeline.yaml --start 2022-01-01 --end 2024-01-01 --output data.cs
 
 Required flags: `--start DATE`, `--end DATE`, `--output FILE`
 Optional flags: `--cache PATH`
+
+The CSV names its time zone in the index header (e.g. `datetime[Europe/Warsaw]`); `epf model` and the TUI read it
+back in that zone.
 
 ### `epf model <model_pipeline.yaml>`
 Run a ModelPipeline on an existing CSV.
@@ -1425,7 +1471,9 @@ epf model model_pipeline.yaml \
 ```
 
 Required flags: `--data FILE`, `--test-start DATE`, `--test-end DATE`
-Optional flags: `--target COL` (default: price), `--horizon N` (default: 7), `--save-dir DIR`, `--forecast-only`
+Optional flags: `--target COL` (default: price), `--horizon N` days (default: 7), `--freq {1h,15min}` (default: 1h),
+`--tz ZONE` (local zone of the data; needed for CSVs with UTC offsets but no zone in the header), `--save-dir DIR`,
+`--forecast-only`
 
 ### `epf validate <file.yaml>`
 Auto-detect YAML type (Workflow / DataPipeline / ModelPipeline), load, and instantiate all components. Exits 1 on error.

@@ -48,11 +48,25 @@ class ModelPipeline:
     def run(
         self,
         data: pd.DataFrame,              # Input DataFrame
-        test_start: str,                  # Test period start
-        test_end: str,                    # Test period end
+        test_start: str = None,           # Test period start
+        test_end: str = None,             # Test period end
         target: str = "price",            # Target column
         horizon: int = 7,                 # Max horizon
-        save_dir: Optional[str] = None,   # Result cache directory
+        freq: str = "1h",                 # "1h" or "15min"; must match the data
+        save_dir: Optional[str] = None,   # Result cache directory (one JSONL per model)
+        forecast_only: bool = False,      # Skip evaluators/exporters; dates default to today
+    ) -> EvaluationReport: ...
+
+    def report(                           # Report from the JSONL files a run wrote to save_dir
+        self,
+        save_dir: Union[str, Path],
+        test_start: Optional[str] = None,
+        test_end: Optional[str] = None,
+        horizon: int = 7,
+        freq: str = "1h",
+        forecast_only: bool = False,
+        data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns
+        allow_missing: bool = False,           # else FileNotFoundError when a model has no results
     ) -> EvaluationReport: ...
 
     def save(self, path: Union[str, Path]) -> None: ...       # Save to YAML
@@ -82,9 +96,11 @@ class Workflow:
         threads_per_process: Optional[int] = None,            # Threads per process
         cache_path: Optional[str] = None,                     # Cache directory (overrides data_cache)
         model_index: Optional[int] = None,                    # Run only models[model_index]; all models if None
+        model_save_dir: Optional[str] = None,                 # One JSONL per model; required with model_index
     ): ...
 
     def run(self) -> EvaluationReport: ...
+    def report(self, allow_missing: bool = False) -> EvaluationReport: ...  # Merge save_dir, run evaluators/exporters
 
     def save(self, path: Union[str, Path]) -> None: ...
 
@@ -101,7 +117,8 @@ Pipeline paths are resolved relative to the workflow YAML's directory. `$VAR` in
 
 ```python
 class EvaluationReport:
-    def summary(self) -> pd.DataFrame: ...
+    def summary(self) -> pd.DataFrame: ...          # model, forecasts, one column per evaluator
+    def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
     def by_hour_horizon(self) -> pd.DataFrame: ...
