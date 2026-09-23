@@ -783,6 +783,33 @@ class TestDateSemantics:
         assert dict(per_horizon) == {h: 24 for h in range(1, horizon + 1)}
 
 
+# ---------------------------------------------------------------------------
+# Column collisions
+# ---------------------------------------------------------------------------
+
+
+class TestColumnCollisions:
+    """pipelines M1: two sources producing the same column name used to be kept silently."""
+
+    def test_duplicate_column_across_sources_raises_naming_sources(self):
+        from epftoolbox2.data.sources import CalendarSource
+
+        pipe = DataPipeline([CalendarSource("PL"), CalendarSource("DE")])
+        with pytest.raises(ValueError, match=r"is_holiday.*CalendarSource #1.*CalendarSource #2"):
+            pipe.run("2024-01-01", "2024-01-02")
+
+    def test_prefix_resolves_the_collision(self):
+        from epftoolbox2.data.sources import CalendarSource
+
+        df = DataPipeline([CalendarSource("PL"), CalendarSource("DE", prefix="de_")]).run("2024-01-01", "2024-01-02")
+        assert {"is_holiday", "de_is_holiday"} <= set(df.columns)
+
+    def test_collision_is_detected_on_the_cached_path_too(self, in_tmp):
+        pipe = DataPipeline([RangeSource("a", columns=["price"]), RangeSource("b", columns=["price", "load"])])
+        with pytest.raises(ValueError, match=r"price.*RangeSource #1.*RangeSource #2"):
+            pipe.run("2024-01-01", "2024-01-02", cache=True)
+
+
 class TestDataPipelineSerialization:
     """Test pipeline serialization (save/load)"""
 

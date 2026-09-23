@@ -56,7 +56,8 @@ class DataPipeline:
     """Data pipeline that combines multiple sources and applies transformers.
 
     Args:
-        sources: Data sources; their outputs are clipped to ``[start, end)`` and joined column-wise.
+        sources: Data sources; their outputs are clipped to ``[start, end)`` and joined column-wise. Two sources
+            producing the same column name raise ``ValueError`` (give one a prefix).
         transformers: Applied in order to the joined source output.
         validators: Run on the final frame (after the transformers).
         timezone: Market time zone (e.g. ``"Europe/Warsaw"``). If set, date strings passed to ``run`` are local
@@ -272,9 +273,9 @@ class DataPipeline:
 
     def _run_sources(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]) -> pd.DataFrame:
         cache_manager = CacheManager() if cache is True else None
-        dataframes = []
+        labelled = []
 
-        for source in self.sources:
+        for number, source in enumerate(self.sources, start=1):
             if cache_manager is not None:
                 df = self._fetch_with_cache(source, start, end, cache_manager)
             else:
@@ -285,13 +286,14 @@ class DataPipeline:
             # end + horizon); every path returns exactly [start, end) so cached and uncached runs agree.
             df = clip_to_range(df, start, end)
             if not df.empty:
-                dataframes.append(df)
+                labelled.append((f"{type(source).__name__} #{number}", df))
 
-        if not dataframes:
+        if not labelled:
             logger.warning("Pipeline: No data returned from any source")
             return pd.DataFrame()
 
-        return pd.concat(dataframes, axis=1)
+        _check_unique_columns(labelled)
+        return pd.concat([df for _, df in labelled], axis=1)
 
     def _run_transformers(self, df: pd.DataFrame) -> pd.DataFrame:
         for transformer in self.transformers:
@@ -396,6 +398,20 @@ def _calendar_day(text: str, tz: Optional[str]) -> Optional[pd.Timestamp]:
     except ValueError:
         return None
     return ts if ts.tzinfo is None and ts == ts.normalize() else None
+
+
+def _check_unique_columns(labelled: List[Tuple[str, pd.DataFrame]]) -> None:
+    owners: Dict[Any, List[str]] = {}
+    for label, df in labelled:
+        duplicated = list(df.columns[df.columns.duplicated()].unique())
+        if duplicated:
+            raise ValueError(f"{label} returned duplicate column names {duplicated}")
+        for column in df.columns:
+            owners.setdefault(column, []).append(label)
+    clashes = [f"{column!r} from {' and '.join(labels)}" for column, labels in owners.items() if len(labels) > 1]
+    if clashes:
+        shown = "; ".join(clashes[:10]) + ("; ..." if len(clashes) > 10 else "")
+        raise ValueError(f"Sources produce the same column names ({shown}). Give the sources distinct prefixes.")
 
 
 def _qualified_name(obj: Any) -> str:
