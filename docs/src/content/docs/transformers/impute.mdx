@@ -1,0 +1,96 @@
+---
+title: ImputeTransformer
+description: Fill missing values with leak-safe methods only
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# ImputeTransformer
+
+Fills missing values with methods that only ever look backward: forward fill, or a seasonal-naive lookup
+at the same local wall-clock hour on the previous day or week. Interpolation, backward fill and any other
+method that could use a later value are refused by the constructor.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import ImputeTransformer
+
+transformer = ImputeTransformer(columns=["price"], method="previous_day", limit="2D")
+df = transformer.transform(df)
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `columns` | list[str] \| str | required | Column(s) to impute |
+| `method` | str | `"ffill"` | `"ffill"`, `"previous_day"` or `"previous_week"` |
+| `limit` | int \| str \| None | `"1D"` | How long a gap may be before it is left unfilled: a positive integer number of rows, a pandas duration string (`"6h"`, `"2D"`, ...), or `None` for no limit |
+| `flag` | bool | `True` | Add a `{column}_imputed` column (0/1) marking filled values |
+| `suffix` | str | `""` | Write the filled series to `{column}{suffix}` instead of overwriting `{column}` |
+
+## How it works
+
+**`"ffill"`** repeats the last valid value forward.
+
+**`"previous_day"` / `"previous_week"`** use the value at the same local wall-clock time one calendar day
+(or week) earlier. Local days are 23, 24 or 25 hours long on a DST switch (see `TimezoneTransformer`); the
+wall-clock hour is matched, not a fixed 24-hour offset, so a value at 10:00 always comes from another day's
+10:00. If that source day is itself missing in the *original* (unimputed) data, the search keeps going back
+one more day or week at a time until it finds a real value.
+
+**`limit`** bounds how long an outage may be before it is left unfilled, measured from the last real value
+seen before the gap started — not from how far back a seasonal source had to be searched. A gap longer than
+`limit` is only partially filled, starting from its first missing row.
+
+A value is only ever filled between two real observations of its own column: nothing is invented before the
+column's first observed value, and nothing after its last one, since later rows may simply not have
+happened yet.
+
+```python
+# Fill same-hour-yesterday, but give up after a 2-day outage
+ImputeTransformer(columns=["price"], method="previous_day", limit="2D")
+
+# Fill up to 3 consecutive missing rows, keep the original column and flag a copy instead
+ImputeTransformer(columns=["load"], limit=3, suffix="_filled")
+```
+
+<Aside type="caution">
+  Forward fill and the seasonal methods never look at a value dated after the row being filled, and never
+  fill past a column's own last observation. If you need a method that also looks forward (interpolation,
+  backward fill), it belongs after the forecast is made, not in a feature pipeline, because it would let a
+  model see the future.
+</Aside>
+
+## Flags and re-running
+
+With `flag=True` (the default) each imputed column gets a `{column}_imputed` companion of 0s and 1s. If a
+column with that name already exists — for example a second `ImputeTransformer` filling the remainder of a
+gap with a different method — the new flags are added to it (a logical OR) instead of replacing it, so a
+row stays flagged once it has ever been imputed.
+
+Every call logs, per column, how many values it imputed and how many are still missing.
+
+## Pipeline order
+
+```python
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, ImputeTransformer, LagTransformer
+
+pipeline = (
+    DataPipeline()
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+    .add_transformer(ResampleTransformer(freq="1h"))
+    .add_transformer(ImputeTransformer(columns=["price"], method="previous_day", suffix="_filled"))
+    .add_transformer(LagTransformer(columns=["price_filled"], lags=[1], freq="day"))
+)
+```
+
+Run `ImputeTransformer` after `TimezoneTransformer` and `ResampleTransformer`, so gaps sit on a regular
+local grid, and before `LagTransformer`. Impute into a copy (`suffix`) when you want features complete but
+the training target to keep its real gaps.
+
+## Notes
+
+- The input must have a `DatetimeIndex`, sorted and without duplicate timestamps; unlike `ResampleTransformer`, an unsorted index raises instead of being sorted for you.
+- Non-numeric columns work with `"ffill"`; the seasonal methods compare values with equality only when deduplicating ambiguous DST hours, so any dtype works.
