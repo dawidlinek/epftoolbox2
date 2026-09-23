@@ -1,0 +1,98 @@
+---
+title: EpftoolboxBenchmarkSource
+description: The five epftoolbox benchmark datasets (NP, PJM, FR, BE, DE) of Lago et al. (2021)
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# EpftoolboxBenchmarkSource
+
+Loads the open-access benchmark datasets of Lago, Marcjasz, De Schutter & Weron (2021), *Forecasting day-ahead electricity prices: A review of state-of-the-art algorithms, best practices and an open-access benchmark*, Applied Energy 293, 116983. Use it to compare epftoolbox2 models with results obtained on the original epftoolbox datasets.
+
+The files are downloaded on first use from [Zenodo record 4624805](https://zenodo.org/records/4624805), checked against the md5 checksum published in the record's metadata, and kept in a local cache directory.
+
+<Aside type="caution">
+  epftoolbox2 doesn't ship these data. The Zenodo record's licence is "other-open", and its authors state that they don't own the data: they collected it from public sources (ENTSO-E, Nord Pool, PJM, RTE, Elia, Amprion, 50Hertz, TenneT). Download it for your own research and don't commit the files to a repository.
+</Aside>
+
+## Basic Usage
+
+```python
+from epftoolbox2.pipelines import DataPipeline
+from epftoolbox2.data.sources import EpftoolboxBenchmarkSource
+from epftoolbox2.data.transformers import TimezoneTransformer, LagTransformer
+
+source = EpftoolboxBenchmarkSource("DE")
+
+pipeline = (
+    DataPipeline()
+    .add_source(source)
+    .add_transformer(TimezoneTransformer(target_tz=source.index_timezone))  # "Etc/GMT-1", not "Europe/Berlin"
+    .add_transformer(LagTransformer(columns=["price"], lags=[1, 2, 6], freq="day"))
+    .add_transformer(
+        LagTransformer(columns=["load_forecast_amprion", "wind_solar_forecast"], lags=[-1, 6], freq="day")
+    )
+)
+df = pipeline.run("2012-01-08", "2018-01-01")  # string dates are UTC; start a day early to keep the first local hour
+```
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `dataset` | str | Yes | - | `"NP"`, `"PJM"`, `"FR"`, `"BE"` or `"DE"` |
+| `cache_dir` | str \| None | No | `None` | Download directory. `None` = `$XDG_CACHE_HOME/epftoolbox2/epftoolbox-benchmark` (`~/.cache/...` when unset) |
+| `prefix` | str | No | `""` | Column prefix, `{prefix}_{column}` |
+
+Read-only properties: `index_timezone` (the fixed-offset zone of the dataset) and `test_period` (first and last delivery day of the paper's test period).
+
+## Datasets
+
+| Dataset | Market | Data | Exogenous columns | `index_timezone` | Test period (Table 1) |
+|---------|--------|------|-------------------|------------------|-----------------------|
+| `NP` | Nord Pool | 2013-01-01 – 2018-12-24 | `load_forecast` (grid load), `wind_forecast` (wind power) | `Etc/GMT-1` (CET) | 2016-12-27 – 2018-12-24 |
+| `PJM` | PJM, COMED zone | 2013-01-01 – 2018-12-24 | `load_forecast` (system load), `zonal_load_forecast` (COMED zonal load) | `Etc/GMT+5` (EST) | 2016-12-27 – 2018-12-24 |
+| `FR` | EPEX-FR | 2011-01-09 – 2016-12-31 | `load_forecast` (system load), `generation_forecast` (generation) | `Etc/GMT-1` (CET) | 2015-01-04 – 2016-12-31 |
+| `BE` | EPEX-BE | 2011-01-09 – 2016-12-31 | `load_forecast_fr`, `generation_forecast_fr` (**French** load and generation) | `Etc/GMT-1` (CET) | 2015-01-04 – 2016-12-31 |
+| `DE` | EPEX-DE | 2012-01-09 – 2017-12-31 | `load_forecast_amprion` (Amprion zone load), `wind_solar_forecast` (wind + solar) | `Etc/GMT-1` (CET) | 2016-01-04 – 2017-12-31 |
+
+Every dataset has `price` plus the two exogenous series. As in the paper, both exogenous series are **day-ahead forecasts**: the value at (day d, hour h) is the forecast for (d, h), available on d-1. The price column is the second column of the file, as in epftoolbox's `read_data`; the exogenous columns are recognised by a keyword in their header, so their order in the file doesn't matter.
+
+---
+
+## Time index
+
+The files use local time with **exactly 24 values per day**: the missing spring hour is interpolated, and the two autumn hours are averaged. The library's sources return UTC, and a DST zone can't hold 24 hours on every day. The source therefore reads the wall-clock times in the market's **fixed standard-time offset** (`index_timezone`: `Etc/GMT-1` = UTC+1 for the European markets, `Etc/GMT+5` = UTC-5 for PJM; the POSIX sign is inverted) and converts that to UTC.
+
+What this means:
+
+- Convert with `TimezoneTransformer(target_tz=source.index_timezone)`. You get the file's wall-clock labels back, 24 rows on every day.
+- On this index a day is always 24 hours, so `LagTransformer(freq="day")` and `ModelPipeline`'s calendar-day targets agree. The DST lag problem of real-time indices doesn't arise.
+- In summer, the UTC timestamps are one hour off the true instants: they are labels for the wall clock. Don't combine this source with sources on real time (`EntsoeSource`, `OpenMeteoSource`, `PseSource`); they would be misaligned by an hour for half of each year. `CalendarSource(..., timezone=source.index_timezone)` is fine for weekday and holiday features.
+- Don't convert to `Europe/Berlin` or another DST zone: summer hours would shift by one and some would move to the neighbouring day.
+- DST days hold synthetic values (the interpolated and the averaged hour), exactly as in the paper's evaluation.
+
+## Using it like the paper
+
+Row D of the data is the issue day in `ModelPipeline`; the paper forecasts day d = D+1 using information available on d-1 = D.
+
+| Paper input for delivery day d | Column on row D |
+|--------------------------------|-----------------|
+| Prices of d-1, d-2, d-3, d-7 (same hour) | `price`, `price_d-1`, `price_d-2`, `price_d-6` |
+| Exogenous forecasts for d, d-1, d-7 | `x_d+1`, `x`, `x_d-6` |
+
+- Use `horizon=1`. The exogenous series are day-ahead forecasts, so `x_d+2` and beyond would be forecasts published after the issue day, i.e. look-ahead.
+- The test period in the table lists delivery days. Issue days start one day earlier: for DE, `test_start="2016-01-03"`, `test_end="2017-12-30"`.
+- The paper's LEAR model uses all 24 hourly prices of each lagged day and averages several calibration windows. `ModelPipeline` fits one model per hour on same-hour inputs, so its numbers are comparable in setup but won't reproduce LEAR exactly.
+
+## Download and verification
+
+On the first `fetch`, the source reads the record metadata from `https://zenodo.org/api/records/4624805`, downloads `{dataset}.csv`, and compares its md5 with the published one. On a mismatch it raises and saves nothing. A verified file is stored as `{cache_dir}/{dataset}.csv` together with `{dataset}.csv.md5`; later runs check the file against that checksum and don't touch the network. A cached file that no longer matches is downloaded again.
+
+<Aside type="tip">
+  Machines without internet access (e.g. cluster compute nodes): run the source once elsewhere and copy both `{dataset}.csv` and `{dataset}.csv.md5` into `cache_dir`. A CSV without its `.md5` file is checked against the Zenodo metadata, which needs network access.
+</Aside>
+
+## Caching
+
+`get_cache_config()` returns `None`: the source keeps its own verified copy of the file, so the pipeline cache isn't used.
