@@ -1,9 +1,11 @@
+from datetime import date
 from typing import List, Optional, Union, Dict, Any
 from pathlib import Path
 import importlib
 import pandas as pd
 import yaml
 
+from .._date_utils import resolve_date
 from ..models.base import BaseModel
 from ..evaluators.base import Evaluator
 from ..exporters.base import Exporter
@@ -90,6 +92,65 @@ class ModelPipeline:
             for exporter in self.exporters:
                 exporter.export(report)
 
+        return report
+
+    def report(
+        self,
+        save_dir: Union[str, Path],
+        test_start: Optional[str] = None,
+        test_end: Optional[str] = None,
+        horizon: int = 7,
+        freq: str = "1h",
+        forecast_only: bool = False,
+        data: Optional[pd.DataFrame] = None,
+        allow_missing: bool = False,
+    ) -> EvaluationReport:
+        """Build one report from the per-model JSONL files in `save_dir`, then run evaluators and exporters.
+
+        This is the merge step after runs that each wrote one model's results (e.g. a SLURM array with
+        `Workflow(model_index=...)`). The test period, horizon and freq must be those of the runs; they give
+        each model's planned forecast count. Raises FileNotFoundError if a model has no results file, unless
+        `allow_missing` is set. `data` is only needed by exporters that join source columns.
+        """
+        if not self.models:
+            raise ValueError("At least one model is required")
+        self._check_model_names()
+        if forecast_only:
+            test_start, test_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
+        elif test_start is None or test_end is None:
+            raise ValueError("test_start and test_end are required unless forecast_only=True")
+        test_start, test_end = resolve_date(test_start), resolve_date(test_end)
+        n_days = (date.fromisoformat(test_end) - date.fromisoformat(test_start)).days + 1
+        planned = n_days * horizon * (96 if freq == "15min" else 24)
+
+        refs: Dict[str, ModelResultRef] = {}
+        missing = []
+        for model in self.models:
+            path = self.results_path(save_dir, model)
+            if not path.exists():
+                missing.append(f"{model.name} ({path})")
+                continue
+            with open(path) as f:
+                produced = sum(1 for line in f if line.strip())
+            refs[model.name] = ModelResultRef(
+                name=model.name,
+                path=path,
+                count=planned,
+                test_start=test_start,
+                test_end=test_end,
+                horizon=horizon,
+                freq=freq,
+                produced=produced,
+            )
+        if missing and not allow_missing:
+            raise FileNotFoundError(f"No results for model(s): {', '.join(missing)}. Run them first.")
+        for name in missing:
+            logger.warning(f"Report: no results for {name}; it is left out")
+
+        report = EvaluationReport(refs, [] if forecast_only else self.evaluators, source_data=data)
+        if not forecast_only:
+            for exporter in self.exporters:
+                exporter.export(report)
         return report
 
     @staticmethod

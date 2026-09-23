@@ -35,6 +35,15 @@ def cmd_run(args: argparse.Namespace) -> None:
     wf.run()
 
 
+def cmd_report(args: argparse.Namespace) -> None:
+    from .pipelines.workflow import Workflow
+
+    wf = Workflow.load(args.yaml)
+    report = wf.report(allow_missing=args.allow_missing)
+    counts = report.forecast_counts()
+    console.print(counts.to_string(index=False))
+
+
 def cmd_data(args: argparse.Namespace) -> None:
     from ._frame_csv import save_frame_csv
     from .pipelines.data_pipeline import DataPipeline
@@ -140,7 +149,7 @@ model_pipeline:
 # environment:
 #   max_processes: 4
 #   threads_per_process: 2
-#   model_index: 0
+#   model_index: 0   # SLURM array: one model per task; needs model_pipeline.save_dir, then `epf report`
 """
 
 _DATA_PIPELINE_TEMPLATE = """\
@@ -213,6 +222,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--threads", type=int, metavar="N", help="Override threads_per_process")
     run_p.add_argument("--dry-run", action="store_true", help="Build pipelines but skip execution")
 
+    # -- report --
+    report_p = sub.add_parser(
+        "report", help="Merge per-model results of a workflow (e.g. after a SLURM array) and run evaluators/exporters"
+    )
+    report_p.add_argument(
+        "yaml", metavar="experiment.yaml", help="Path to workflow YAML (with model_pipeline.save_dir)"
+    )
+    report_p.add_argument(
+        "--allow-missing", action="store_true", help="Report the models that have results instead of failing"
+    )
+
     # -- data --
     data_p = sub.add_parser("data", help="Run a data pipeline and save the result to CSV")
     data_p.add_argument("yaml", metavar="data_pipeline.yaml", help="Path to DataPipeline YAML")
@@ -272,6 +292,7 @@ def main() -> None:
 
     dispatch = {
         "run": cmd_run,
+        "report": cmd_report,
         "data": cmd_data,
         "model": cmd_model,
         "validate": cmd_validate,
