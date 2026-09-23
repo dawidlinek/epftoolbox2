@@ -28,11 +28,18 @@ from filelock import FileLock, SoftFileLock, Timeout
 from epftoolbox2.logging import get_logger
 
 # Bump when the on-disk layout or the meaning of cached ranges changes: every existing cache is then ignored.
-# 1: CSV files, whole requested range recorded. 2: Parquet, only returned and settled data recorded.
-CACHE_FORMAT_VERSION = 2
+# 1: CSV files, whole requested range recorded. 2: Parquet, only returned and settled data recorded. 3: gaps are
+# detected against the local resolution instead of one step for the whole response, and a response with fewer
+# than three timestamps no longer has a lone diff trusted as the step for it — see ``covered_ranges``.
+CACHE_FORMAT_VERSION = 3
 
 # Data newer than this (relative to now, floored to UTC midnight) is returned but never recorded as cached.
 UNSETTLED_PERIOD = pd.Timedelta(days=2)
+
+# Diffs looked at on either side of a point to estimate the expected step there (see ``covered_ranges``): local,
+# not one mode for the whole response, so a resolution change partway through a fetch does not make one side's
+# normal step look like a gap relative to the other side's.
+_STEP_WINDOW = 5
 
 logger = get_logger(__name__)
 
@@ -98,6 +105,24 @@ def clip_to_range(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> p
         df = df.copy()
         df.index = df.index.tz_localize("UTC")
     return df[(df.index >= start) & (df.index < end)]
+
+
+def _local_steps(diffs: List[pd.Timedelta], window: int = _STEP_WINDOW) -> List[pd.Timedelta]:
+    """For each diff, the most common diff among up to ``window`` neighbours on either side of it (the diff
+    itself is excluded, so a gap can't count as evidence for its own normality). Ties favor the smaller step,
+    same as the single response-wide mode this replaces. Used as the expected spacing at that point instead of
+    one step for the whole response, so a resolution change partway through a fetch (e.g. hourly data followed
+    by 15-minute data) only makes the diffs nearest the boundary look like a gap, not every diff on either side.
+    """
+    steps = []
+    for i in range(len(diffs)):
+        neighbours = diffs[max(0, i - window) : i] + diffs[i + 1 : i + 1 + window]
+        if not neighbours:
+            steps.append(diffs[i])
+            continue
+        counts = Counter(neighbours)
+        steps.append(min(counts, key=lambda d: (-counts[d], d)))
+    return steps
 
 
 class CacheManager:
@@ -240,12 +265,20 @@ class CacheManager:
         """Contiguous, disjoint sub-ranges of ``[start, end)`` that ``df`` (fetched for ``[start, end)``) may be
         recorded as covering, each capped at ``end`` and at the start of the unsettled period before now.
 
-        A gap between two consecutive returned timestamps wider than the data's usual step ends a run; the row
-        after the gap starts a new one. Only rows actually present are ever recorded as covered — a genuine hole
-        in an otherwise regular response (one missing hour out of a day of hourly data) is fetched again next
-        time instead of being silently treated as covered and then lost for good. A single returned timestamp has
-        no neighbour to compare against, so it cannot show a gap: it covers the whole range up to the cap (e.g. a
-        source that publishes one value per requested period, such as a weekly aggregate).
+        A gap between two consecutive returned timestamps ends a run if it is wider than the expected spacing at
+        that point in the response, estimated from a small window of neighbouring diffs (``_local_steps``)
+        rather than one step for the whole response — a fetch that changes resolution partway through (e.g.
+        hourly data followed by 15-minute data) must not make every diff on the finer side look like a gap
+        relative to the coarser side's step, or vice versa; at most the handful of diffs nearest the boundary
+        may be treated as a gap and refetched next time. Only rows actually present are ever recorded as covered
+        — a genuine hole in an otherwise regular response (one missing hour out of a day of hourly data) is
+        fetched again next time instead of being silently treated as covered and then lost for good.
+
+        Fewer than three returned timestamps give fewer than two diffs, so there is nothing to compare a lone
+        diff against — it could be the real step, or it could itself be hiding a gap — and no step is inferred:
+        a single timestamp still covers the whole range up to the cap (e.g. a source that returns exactly one
+        row for any requested range, such as a weekly aggregate); exactly two timestamps cover only themselves,
+        not the span between or beyond them.
         """
         index = clip_to_range(df, start, end).index.unique().sort_values()
         if len(index) == 0:
@@ -254,22 +287,23 @@ class CacheManager:
 
         if len(index) == 1:
             return [(start, cap)] if cap > start else []
+        if len(index) == 2:
+            return []
 
-        diffs = index[1:] - index[:-1]
-        counts = Counter(diffs)
-        step = min(counts, key=lambda d: (-counts[d], d))  # most common spacing; ties favor the smaller step
+        diffs = list(index[1:] - index[:-1])
+        steps = _local_steps(diffs)
 
         ranges = []
         run_start = start
         prev = index[0]
-        for cur, diff in zip(index[1:], diffs):
+        for cur, diff, step in zip(index[1:], diffs, steps):
             if diff > step:
                 run_end = min(prev + step, cap)
                 if run_end > run_start:
                     ranges.append((run_start, run_end))
                 run_start = cur
             prev = cur
-        run_end = min(prev + step, cap)
+        run_end = min(prev + steps[-1], cap)
         if run_end > run_start:
             ranges.append((run_start, run_end))
         return ranges

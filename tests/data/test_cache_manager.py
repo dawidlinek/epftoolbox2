@@ -268,6 +268,92 @@ class TestCoverageGaps:
         assert covered_end == ts("2024-06-10 09:30").floor("D") - cache_manager.unsettled_period
 
 
+class TestResolutionChangeGaps:
+    """entsoe-cache/pipelines review, finding 1: `covered_ranges` used to pick one "most common step" for the
+    whole response. A fetch that changes resolution partway through (e.g. the ENTSO-E 15-minute go-live) made
+    every diff on one side look like a gap relative to the other side's step, producing thousands of slivers and
+    covering only a small fraction of the span -- refetched in full on every run."""
+
+    def test_hourly_then_15min_does_not_cause_endless_refetch(self, cache_manager, sample_config, frozen_now):
+        key = cache_manager.get_cache_key(sample_config)
+        hourly_idx = pd.date_range("2024-01-01", periods=181 * 24, freq="h", tz="UTC")
+        switch = hourly_idx[-1] + pd.Timedelta(hours=1)
+        fine_idx = pd.date_range(switch, periods=46 * 96, freq="15min", tz="UTC")
+        idx = hourly_idx.append(fine_idx)
+        df = pd.DataFrame({"price": np.arange(len(idx), dtype=float)}, index=idx)
+        start, end = idx[0], fine_idx[-1] + pd.Timedelta(minutes=15)
+
+        cache_manager.write_cache(key, df, start, end, sample_config)
+        missing = cache_manager.find_missing_ranges(key, start, end)
+
+        total_span = end - start
+        missing_span = sum((e - s for s, e in missing), pd.Timedelta(0))
+        # A small boundary sliver refetched is acceptable and documented; the old bug refetched most of the span.
+        assert len(missing) < 10, missing
+        assert missing_span < pd.Timedelta(hours=6), missing_span
+        assert missing_span < total_span * 0.01
+
+    def test_internal_hour_gap_still_detected_across_a_long_hourly_run(self, cache_manager, sample_config, frozen_now):
+        """(b): an internal missing hour in hourly data is still a gap, even once local (not global) steps decide."""
+        key = cache_manager.get_cache_key(sample_config)
+        idx = pd.date_range("2024-01-01", periods=200, freq="h", tz="UTC").delete(150)
+        df = pd.DataFrame({"price": np.arange(len(idx), dtype=float)}, index=idx)
+        start, end = ts("2024-01-01"), idx[-1] + pd.Timedelta(hours=1)
+
+        cache_manager.write_cache(key, df, start, end, sample_config)
+        missing = cache_manager.find_missing_ranges(key, start, end)
+
+        gap = pd.date_range("2024-01-01", periods=200, freq="h", tz="UTC")[150]
+        assert missing == [(gap, gap + pd.Timedelta(hours=1))]
+
+    def test_internal_quarter_hour_gap_still_detected_in_15min_data(self, cache_manager, sample_config, frozen_now):
+        """(b): a missing quarter-hour in 15-minute data is still a gap."""
+        key = cache_manager.get_cache_key(sample_config)
+        full = pd.date_range("2024-01-01", periods=200, freq="15min", tz="UTC")
+        idx = full.delete(150)
+        df = pd.DataFrame({"price": np.arange(len(idx), dtype=float)}, index=idx)
+        start, end = full[0], full[-1] + pd.Timedelta(minutes=15)
+
+        cache_manager.write_cache(key, df, start, end, sample_config)
+        missing = cache_manager.find_missing_ranges(key, start, end)
+
+        gap = full[150]
+        assert missing == [(gap, gap + pd.Timedelta(minutes=15))]
+
+    def test_internal_week_gap_still_detected_in_weekly_data(self, cache_manager, sample_config, frozen_now):
+        """(c): a missing week in weekly data is still a gap."""
+        key = cache_manager.get_cache_key(sample_config)
+        full = pd.date_range("2024-01-01", periods=20, freq="7D", tz="UTC")
+        idx = full.delete(10)
+        df = pd.DataFrame({"price": np.arange(len(idx), dtype=float)}, index=idx)
+        start, end = full[0], full[-1] + pd.Timedelta(days=7)
+
+        cache_manager.write_cache(key, df, start, end, sample_config)
+        missing = cache_manager.find_missing_ranges(key, start, end)
+
+        gap = full[10]
+        assert missing == [(gap, gap + pd.Timedelta(days=7))]
+
+
+class TestFewPointsDontInferAStep:
+    """entsoe-cache/pipelines review, finding 2: with only one diff to go on, `covered_ranges` trusted it as the
+    real step and extended coverage across it and beyond the last point, hiding a genuine gap."""
+
+    def test_two_timestamps_cover_neither_the_gap_between_nor_beyond_them(
+        self, cache_manager, sample_config, frozen_now
+    ):
+        key = cache_manager.get_cache_key(sample_config)
+        idx = pd.DatetimeIndex([ts("2024-01-01"), ts("2024-01-15")])
+        df = pd.DataFrame({"price": [1.0, 2.0]}, index=idx)
+
+        covered_end = cache_manager.write_cache(key, df, ts("2024-01-01"), ts("2024-01-22"), sample_config)
+
+        assert covered_end is None
+        assert cache_manager.find_missing_ranges(key, ts("2024-01-01"), ts("2024-01-22")) == [
+            (ts("2024-01-01"), ts("2024-01-22"))
+        ]
+
+
 class TestSeams:
     """entsoe H3, empirical F5b: files overlapping at their edges must not produce half-empty rows."""
 
