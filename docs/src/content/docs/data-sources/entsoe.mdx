@@ -20,6 +20,7 @@ You need an ENTSOE API key:
 ```python
 from epftoolbox2.data.sources import EntsoeSource
 import os
+import pandas as pd
 
 source = EntsoeSource(
     country_code="PL",
@@ -38,10 +39,19 @@ df = source.fetch(
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `country_code` | str | Yes | Country/zone code (see table below) |
-| `api_key` | str | Yes | ENTSOE API key |
+| `country_code` | str | Yes | Area code (see table below). Prices need a bidding zone, e.g. `"DE_LU"` rather than `"DE"`. |
+| `api_key` | str | Yes | ENTSOE API key. It is sent in the `SECURITY_TOKEN` request header, never in the URL, and error messages never contain it. |
 | `type` | List[str] | Yes | Data types: `load`, `price`, `generation` |
-| `prefer_15min` | bool | No | Defaults to `False`. If `True`, prioritizes fetching 15-minute resolution data (particularly relevant for prices). |
+| `prefer_15min` | bool | No | Defaults to `False`. Selects the grid of the `price` column: `False` gives hourly prices, `True` gives 15-minute prices. See [Price resolution](#price-resolution). |
+
+## Returned range
+
+`fetch(start, end)` returns the half-open range `[start, end)` with a **UTC** index. Data is requested in 3-month
+chunks; a chunk that keeps failing raises an error instead of leaving a gap.
+
+Daily values (`load_forecast_daily_min/max`) are stamped at local midnight of the day they describe. When that
+midnight lies before `start` (for example a Warsaw day starts at 23:00 UTC the evening before), the value that
+covers `start` is reported at `start`, so the first day is not lost.
 
 ---
 
@@ -49,63 +59,136 @@ df = source.fetch(
 
 ### Load Data (`type=["load"]`)
 
-| Column | Description |
-|--------|-------------|
-| `load_actual` | Actual electricity load (MW) |
-| `load_forecast` | Day-ahead load forecast (MW) |
+| Column | Document | Description |
+|--------|----------|-------------|
+| `load_actual` | A65 / A16 | Actual total load (MW) |
+| `load_forecast` | A65 / A01 | Day-ahead total load forecast (MW) |
+| `load_forecast_daily_min` | A65 / A31 | Week-ahead forecast of the day's minimum load (MW), one value per local day |
+| `load_forecast_daily_max` | A65 / A31 | Week-ahead forecast of the day's maximum load (MW), one value per local day |
+
+Load keeps the resolution ENTSO-E publishes (15 minutes for PL and DE_LU in 2024–2025). The daily columns hold
+one value at local midnight and are empty in between; fill them with
+`ResampleTransformer(method="ffill", columns=[...])` after `TimezoneTransformer`.
 
 ### Price Data (`type=["price"]`)
 
-| Column | Description |
-|--------|-------------|
-| `price` | Day-ahead electricity price (EUR/MWh) |
+| Column | Document | Description |
+|--------|----------|-------------|
+| `price` | A44 | Day-ahead price of the single day-ahead coupling (SDAC) in the bidding zone (EUR/MWh) |
+
+#### Price resolution
+
+The day-ahead market moved from 60-minute to 15-minute products on 2025-10-01; before that date most zones publish
+hourly prices, after it 15-minute prices. `EntsoeSource` keeps every period and returns one uniform grid:
+
+| `prefer_15min` | Grid | Hourly periods | 15-minute periods |
+|---|---|---|---|
+| `False` (default) | 1 hour | as published | averaged into the hour (an hour with a missing quarter-hour is left empty) |
+| `True` | 15 minutes | step-filled: each quarter-hour gets its hour's price | as published |
+
+Where a zone publishes the same interval at two resolutions, the one matching the grid is used. 30-minute periods
+are treated the same way.
 
 <Aside type="caution">
-  **Germany Price Data:** ENTSOE publishes prices by bidding zone. Since the 2018 split, use the country code `"DE_LU"` (Germany/Luxembourg) to fetch German electricity prices. Using `"DE"` will return an empty list of prices.
+  **Only the SDAC price is returned.** For DE_LU and AT the API also publishes a second, 15-minute series
+  (`classificationSequence` 2, a separate auction) on the same timestamps. It differs from the coupling price by
+  up to several hundred EUR/MWh and is ignored. Before 2025-10-01, `prefer_15min=True` therefore gives the hourly
+  SDAC price step-filled to 15 minutes, not the 15-minute auction.
+</Aside>
+
+<Aside type="caution">
+  **Bidding zones:** prices are published per bidding zone. For Germany use `"DE_LU"` (since 2018-10-01;
+  `"DE_AT_LU"` before). Codes that are not bidding zones (`"DE"`, `"DK"`, `"NO"`, `"SE"`, `"IT"`, `"LU"`, the
+  German control areas, ...) raise a `ValueError` naming the zone to use when `type` includes `"price"`. They are
+  still accepted for load and generation.
 </Aside>
 
 ### Generation Data (`type=["generation"]`)
 
-All supported generation types:
+Actual generation per production type (A75) as `generation_<type>`, and the day-ahead wind and solar forecast (A69)
+as `generation_<type>_forecast`. Where a production type also consumes (pumped-storage pumping, and for some zones
+every type, mostly zeros), the consumption is a separate column `generation_<type>_consumption`; it is never mixed
+into the generation column.
 
-| Column | Description |
-|--------|-------------|
-| `generation_biomass` | Biomass generation (MW) |
-| `generation_fossil_brown_coal_lignite` | Lignite generation (MW) |
-| `generation_fossil_coal_derived_gas` | Coal-derived gas (MW) |
-| `generation_fossil_gas` | Natural gas generation (MW) |
-| `generation_fossil_hard_coal` | Hard coal generation (MW) |
-| `generation_fossil_oil` | Oil generation (MW) |
-| `generation_fossil_oil_shale` | Oil shale generation (MW) |
-| `generation_fossil_peat` | Peat generation (MW) |
-| `generation_geothermal` | Geothermal generation (MW) |
-| `generation_hydro_pumped_storage` | Pumped hydro storage (MW) |
-| `generation_hydro_run_of_river` | Run-of-river hydro (MW) |
-| `generation_hydro_water_reservoir` | Reservoir hydro (MW) |
-| `generation_marine` | Marine/tidal generation (MW) |
-| `generation_nuclear` | Nuclear generation (MW) |
-| `generation_other` | Other generation (MW) |
-| `generation_other_renewable` | Other renewable (MW) |
-| `generation_solar` | Solar generation (MW) |
-| `generation_waste` | Waste generation (MW) |
-| `generation_wind_offshore` | Offshore wind (MW) |
-| `generation_wind_onshore` | Onshore wind (MW) |
+| Column | PsrType | Description |
+|--------|---------|-------------|
+| `generation_biomass` | B01 | Biomass (MW) |
+| `generation_fossil_brown_coal_lignite` | B02 | Lignite (MW) |
+| `generation_fossil_coal_derived_gas` | B03 | Coal-derived gas (MW) |
+| `generation_fossil_gas` | B04 | Natural gas (MW) |
+| `generation_fossil_hard_coal` | B05 | Hard coal (MW) |
+| `generation_fossil_oil` | B06 | Oil (MW) |
+| `generation_fossil_oil_shale` | B07 | Oil shale (MW) |
+| `generation_fossil_peat` | B08 | Peat (MW) |
+| `generation_geothermal` | B09 | Geothermal (MW) |
+| `generation_hydro_pumped_storage` | B10 | Pumped-storage hydro, generating (MW) |
+| `generation_hydro_run_of_river_and_pondage` | B11 | Run-of-river hydro (MW) |
+| `generation_hydro_water_reservoir` | B12 | Reservoir hydro (MW) |
+| `generation_marine` | B13 | Marine/tidal (MW) |
+| `generation_nuclear` | B14 | Nuclear (MW) |
+| `generation_other_renewable` | B15 | Other renewable (MW) |
+| `generation_solar` | B16 | Solar (MW) |
+| `generation_waste` | B17 | Waste (MW) |
+| `generation_wind_offshore` | B18 | Offshore wind (MW) |
+| `generation_wind_onshore` | B19 | Onshore wind (MW) |
+| `generation_other` | B20 | Other (MW) |
+| `generation_energy_storage` | B25 | Energy storage (MW) |
+| `generation_<type>_consumption` | any | Consumption reported for that type, e.g. `generation_hydro_pumped_storage_consumption` (MW) |
+| `generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` | B16, B19, B18 | Day-ahead forecast (MW) |
+
+Column names are the snake_case of ENTSO-E's production type names; an unknown code becomes `generation_<code>`,
+e.g. `generation_b99`.
+
+---
+
+## Information available at forecast time
+
+A day-ahead forecast for delivery day D+1 is issued on day D before the market's gate closure at 12:00 CET. Commission
+Regulation (EU) No 543/2013 sets when each series must be published. Lags are relative to the row's local date D,
+as produced by `LagTransformer` (`x_d-1` is yesterday, `x_d+1` tomorrow):
+
+| Column | Publication deadline (543/2013) | Safe as a predictor for a forecast issued on D |
+|---|---|---|
+| `price` | No later than 1 hour after gate closure (Art. 12) | `price` (delivery D, cleared on D-1) and `_d-k`. `price_d+1` is the target |
+| `load_actual` | No later than 1 hour after the operating period (Art. 6) | `_d-1` and older only. Unlagged `load_actual` is look-ahead for the hours after the issue time |
+| `load_forecast` | 2 hours before gate closure (10:00 CET) on the day before delivery, updated when significant changes occur (Art. 6) | `load_forecast` and `_d+1` if the forecast is issued at or after 10:00. `_d+2` and later are published on D+1 or later: look-ahead |
+| `load_forecast_daily_min/max` | Fridays, 2 hours before gate closure, for Monday–Sunday of the following week; updated when significant changes occur (Art. 6) | `_d+0` to `_d+2` always; `_d+3` when issued at or after 10:00 (on Friday mornings only the week up to Sunday is known). Larger horizons leak on some weekdays |
+| `generation_*` (actual, incl. `_consumption`) | No later than 1 hour after the operational period (Art. 16) | `_d-1` and older only |
+| `generation_*_forecast` | 18:00 Brussels time on the day before delivery, updated during intraday trading with at least one update at 08:00 on the delivery day (Art. 14) | `_d+0` and older. `_d+1` is published after gate closure: not guaranteed at issue time |
+
+The API serves the latest revision of each series, not the version published at the deadline, so forecasts that
+are revised after the issue time (load forecasts, wind and solar forecasts) can still carry a small amount of
+look-ahead even within these limits.
+
+---
+
+## Errors and retries
+
+- "No matching data" for a chunk is logged as a warning and the chunk is skipped (for example future dates or
+  a document type the area does not publish). A warning is also logged when the data starts more than a day after
+  `start` (e.g. `DE_LU` before 2018-10-01).
+- HTTP 429 and 5xx responses and network errors are retried up to 5 times with exponential backoff, honouring the
+  `Retry-After` header. Other HTTP errors raise `EntsoeApiError` with ENTSO-E's reason text, e.g.
+  `HTTP 401: Authentication failed.`
 
 ---
 
 ## Supported Countries & Area Codes
 
+Any key of `epftoolbox2.data.sources.entsoe.AREAS` is accepted. Common bidding zones:
+
 <div class="countries-grid">
 
-| Code | Country | Area Code |
-|------|---------|-----------|
+| Code | Area | Area Code |
+|------|------|-----------|
 | AT | Austria | 10YAT-APG------L |
 | BE | Belgium | 10YBE----------2 |
 | BG | Bulgaria | 10YCA-BULGARIA-R |
 | CH | Switzerland | 10YCH-SWISSGRIDZ |
 | CZ | Czechia | 10YCZ-CEPS-----N |
-| DE | Germany | 10Y1001A1001A83F |
-| DK | Denmark | 10Y1001A1001A65H |
+| DE_LU | Germany-Luxembourg | 10Y1001A1001A82H |
+| DK_1 | Denmark West | 10YDK-1--------W |
+| DK_2 | Denmark East | 10YDK-2--------M |
 | EE | Estonia | 10Y1001A1001A39I |
 | ES | Spain | 10YES-REE------0 |
 | FI | Finland | 10YFI-1--------U |
@@ -114,23 +197,24 @@ All supported generation types:
 | GR | Greece | 10YGR-HTSO-----Y |
 | HR | Croatia | 10YHR-HEP------M |
 | HU | Hungary | 10YHU-MAVIR----U |
-| IE | Ireland | 10Y1001A1001A59C |
-| IT | Italy | 10YIT-GRTN-----B |
+| IE_SEM | Ireland (SEM) | 10Y1001A1001A59C |
+| IT_NORD | Italy North | 10Y1001A1001A73I |
 | LT | Lithuania | 10YLT-1001A0008Q |
-| LU | Luxembourg | 10YLU-CEGEDEL-NQ |
 | LV | Latvia | 10YLV-1001A00074 |
 | NL | Netherlands | 10YNL----------L |
-| NO | Norway | 10YNO-0--------C |
+| NO_1 … NO_5 | Norway zones | 10YNO-1--------2 … |
 | PL | Poland | 10YPL-AREA-----S |
 | PT | Portugal | 10YPT-REN------W |
 | RO | Romania | 10YRO-TEL------P |
 | RS | Serbia | 10YCS-SERBIATSOV |
-| SE | Sweden | 10YSE-1--------K |
+| SE_1 … SE_4 | Sweden zones | 10Y1001A1001A44P … |
 | SI | Slovenia | 10YSI-ELES-----O |
 | SK | Slovakia | 10YSK-SEPS-----K |
-| UA | Ukraine | 10Y1001C--00003F |
 
 </div>
+
+Country and control-area codes such as `DE` (10Y1001A1001A83F), `DK`, `NO`, `SE`, `IT`, `LU` and `IE` work for load
+and generation but have no day-ahead price.
 
 <style>{`
   .countries-grid table {
@@ -148,8 +232,16 @@ All supported generation types:
 `}</style>
 
 <Aside type="tip">
-  Use the country code (e.g., `"PL"`) in your source configuration. The area code is used internally for API requests.
+  Use the code (e.g., `"PL"`) in your source configuration. The area code is used internally for API requests.
 </Aside>
+
+---
+
+## Caching
+
+The cache key contains the area, the types, `prefer_15min` and a schema version of the parser. Changing any of
+them, or upgrading to a version whose parser output changed, uses a new cache directory; the old one under
+`.cache/sources/` is no longer read and can be deleted.
 
 ---
 
@@ -163,3 +255,6 @@ print(df.head())
 # 2024-01-01 00:00:00+00:00     12508.71   5.75
 # 2024-01-01 01:00:00+00:00     11845.20   5.27
 ```
+
+Load and generation have one row per published interval (often 15 minutes), so an hourly `price` column is empty on
+the `:15`, `:30` and `:45` rows until you resample, e.g. with `ResampleTransformer(freq="1h")`.
