@@ -66,9 +66,19 @@ def test_threaded_day_gives_the_same_results_as_sequential():
     tasks = [(0, hz, 3) for hz in (1, 2, 3)]
 
     init_worker(n_days=100, training_window=30, horizon=3, offset=60, threads=1)
-    sequential = sorted(_worker._run_day(tasks), key=lambda r: r["horizon"])
+    sequential, skipped_sequential = _worker._run_day(tasks)
     init_worker(n_days=100, training_window=30, horizon=3, offset=60, threads=4)
-    threaded = sorted(_worker._run_day(tasks), key=lambda r: r["horizon"])
+    threaded, skipped_threaded = _worker._run_day(tasks)
 
-    assert sequential == threaded
-    assert [r["horizon"] for r in threaded] == [1, 2, 3]
+    by_horizon = lambda results: sorted(results, key=lambda r: r["horizon"])  # noqa: E731
+    assert by_horizon(sequential) == by_horizon(threaded)
+    assert [r["horizon"] for r in by_horizon(threaded)] == [1, 2, 3]
+    assert skipped_sequential == skipped_threaded == []
+
+
+def test_skipped_tasks_report_their_reason():
+    init_worker(n_days=100, training_window=30, horizon=3, offset=60)
+    # Day 0 has no earlier rows: nothing to train on.
+    results, skipped = _worker._run_day([(0, 1, -60), (0, 1, 5)])
+    assert [r["day_in_test"] for r in results] == [5]
+    assert skipped == [((0, 1, -60), _worker.SKIP_TOO_FEW_ROWS)]

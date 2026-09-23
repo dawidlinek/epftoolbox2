@@ -1,7 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Optional
+from typing import Dict, List, Tuple, Union
 import datetime
 import os
+import traceback
 
 import numpy as np
 
@@ -11,6 +12,16 @@ _W_HOUR_ARRAYS: Dict = {}
 _W_EXPANDED_PREDS: Dict = {}
 _W_CONFIG: Dict = {}
 _W_FIT_PREDICT = None
+
+# Reasons a task produces no forecast without being an error. They are counted per model and reported.
+SKIP_TOO_FEW_ROWS = "too_few_rows"
+SKIP_NO_FINITE_TRAINING_ROWS = "no_finite_training_rows"
+SKIP_MISSING_TEST_PREDICTORS = "missing_test_predictors"
+SKIP_FIT_ERROR = "fit_error"
+
+
+class TaskFailed(RuntimeError):
+    """An unexpected exception inside a worker task; carries the task identity and the worker's traceback."""
 
 
 def _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
@@ -24,7 +35,12 @@ def _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
     _W_FIT_PREDICT = model_cls(predictors=[], **model_kwargs)._fit_predict
 
 
-def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Optional[Dict]:
+def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
+    """Fit and forecast one task.
+
+    Returns the result record, or a skip reason (one of the SKIP_* names, optionally followed by ": detail")
+    when no forecast is possible.
+    """
     arrays = _W_HOUR_ARRAYS[hour]
     cfg = _W_CONFIG
     day = cfg["offset"] + day_in_test
@@ -39,7 +55,7 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Optional[Dict]:
 
     # Not enough samples to build train/test slices for this (hour, horizon, day).
     if x_full.shape[0] <= (1 + hz):
-        return None
+        return SKIP_TOO_FEW_ROWS
 
     train_x = x_full[: -(1 + hz)]
     train_y = y_full[: -(1 + hz)]
@@ -54,11 +70,10 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Optional[Dict]:
     train_y = train_y[finite_rows]
 
     if train_x.shape[0] == 0:
-        return None
+        return SKIP_NO_FINITE_TRAINING_ROWS
 
-    # If the forecast point has missing predictors, skip this task quietly.
     if not np.isfinite(test_x).all():
-        return None
+        return SKIP_MISSING_TEST_PREDICTORS
 
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
     run_date_str = run_date.isoformat()
@@ -73,9 +88,9 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Optional[Dict]:
     )
     try:
         pred, coefs = _W_FIT_PREDICT(train_x, train_y, test_x)
-    except ValueError:
-        # Keep worker output clean for sparse DST boundary rows.
-        return None
+    except ValueError as exc:
+        # scikit-learn raises ValueError on degenerate input (e.g. fewer rows than CV folds); counted, not fatal.
+        return f"{SKIP_FIT_ERROR}: {exc}"
 
     return {
         "run_date": run_date_str,
@@ -91,25 +106,34 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Optional[Dict]:
     }
 
 
-def _run_day(tasks: list) -> list:
+def _run_task(task: tuple) -> Union[Dict, str]:
+    try:
+        return _fit_one_numpy(*task)
+    except Exception as exc:
+        hour, hz, day_in_test = task
+        raise TaskFailed(
+            f"task (period={hour}, horizon={hz}, day_in_test={day_in_test}) raised {exc!r}\n{traceback.format_exc()}"
+        ) from None
+
+
+def _run_day(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
+    """Run one test day's tasks. Returns (results, [(task, skip reason)]); unexpected errors raise TaskFailed."""
     threads = _W_CONFIG["threads_per_process"]
+    results, skipped = [], []
+
+    def collect(task, outcome):
+        if isinstance(outcome, str):
+            skipped.append((task, outcome))
+        else:
+            results.append(outcome)
+
     if len(tasks) <= 1 or threads == 1:
-        results = []
         for t in tasks:
-            result = _fit_one_numpy(*t)
-            if result is not None:
-                results.append(result)
-        return results
+            collect(t, _run_task(t))
+        return results, skipped
 
     with ThreadPoolExecutor(max_workers=threads) as pool:
-        futures = {pool.submit(_fit_one_numpy, *t): t for t in tasks}
-        results = []
+        futures = {pool.submit(_run_task, t): t for t in tasks}
         for future in as_completed(futures):
-            try:
-                result = future.result()
-                if result is not None:
-                    results.append(result)
-            except Exception as e:
-                t = futures[future]
-                print(f"Error on task (hour={t[0]}, hz={t[1]}, day={t[2]}): {e}")
-        return results
+            collect(futures[future], future.result())
+    return results, skipped

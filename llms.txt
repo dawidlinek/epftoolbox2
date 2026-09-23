@@ -42,7 +42,7 @@ uv add epftoolbox2
 Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame covering `[start, end)` with a DatetimeIndex (UTC from the sources; local time after `TimezoneTransformer`). Can be saved/loaded as YAML.
 
 ### ModelPipeline
-Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport. Can be saved/loaded as YAML.
+Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport. Can be saved/loaded as YAML. Optionally takes an `information_set` (or `issue_time`/`issue_timezone` shortcut) that checks every predictor is known at the forecast issue time before any fit — see INFORMATION SET below.
 
 ### Workflow
 Orchestrates DataPipeline + ModelPipeline from a single YAML file. Sets environment variables (`OMP_NUM_THREADS`, `PYTHON_GIL`, `MAX_PROCESSES`, `THREADS_PER_PROCESS`). Supports inline component overrides on top of referenced pipeline files.
@@ -415,6 +415,16 @@ For each (hour, horizon, day) combination:
 4. Predict and inverse-scale prediction
 5. Store result with metadata
 
+**Checks before any fit** (ValueError): rows `freq` apart with one row per local day and period (only the
+repeated fall-back DST hour may repeat), no duplicate timestamps, no data columns named `hour`/`day` or
+`{target}_d+1..{target}_d+{horizon}`, every expanded predictor present, numeric and not a target. Only the target
+and the predictors are used, so unused text columns are fine. Model names must be unique.
+
+**Tasks without a forecast** are counted per reason on the `ModelResultRef` (`produced`, `skipped`) and in
+`report.forecast_counts()`: `missing_test_predictors`, `missing_test_row` (gap on the issue day), `too_few_rows`,
+`no_finite_training_rows`, `fit_error` (ValueError from the model). A shortfall is logged; a model that produces
+nothing raises; any other exception in a task stops the run.
+
 **Result record structure:**
 ```python
 {
@@ -428,6 +438,83 @@ For each (hour, horizon, day) combination:
     "coefficients": [...],         # Model coefficients
 }
 ```
+
+---
+
+## Information Set
+
+`epftoolbox2.information_set` declares when each base column becomes known and checks every expanded predictor
+(and the newest training target, which must be known by D-1) against the forecast's issue time before any fit.
+
+```python
+from epftoolbox2.pipelines import ModelPipeline
+
+# Shortcut: builds InformationSet(issue_time, issue_timezone) with the built-in rules.
+pipeline = ModelPipeline(issue_time="11:30", issue_timezone="Europe/Brussels")
+```
+
+```python
+from epftoolbox2.information_set import Availability, InformationSet
+
+info = InformationSet(
+    issue_time="11:30",              # Optional. "HH:MM" (default: "11:30")
+    issue_timezone="Europe/Brussels", # Optional. Zone of issue_time (default: "Europe/Brussels")
+    rules=None,                       # Optional. {column name or glob: Availability}, overrides everything else
+    assumptions=None,                 # Optional. Names from ASSUMPTIONS accepted explicitly, e.g. ["entsoe_a69_by_10"]
+    unknown="raise",                  # Optional. "raise" | "warn" | "ignore" for columns with no rule
+    use_defaults=True,                # Optional. Include default_rules()
+)
+pipeline = ModelPipeline(information_set=info)  # equivalent to passing issue_time=/issue_timezone= above
+```
+
+**Built-in default rules** (`default_rules()`), all conservative (latest legally-required time):
+- `price` (A44): published ~13:00 Brussels on D-1
+- `load_actual` (A65/A16), `generation_*` (A75): known 1h after the delivery period ends
+- `load_forecast` (A65/A01): published 10:00 Brussels on D-1
+- `load_forecast_daily_min`/`_max` (A65/A31): published Friday 10:00 Brussels for the whole next week
+- `generation_*_forecast` (A69 wind/solar): published 18:00 Brussels on D-1 (legal deadline; accept the
+  `entsoe_a69_by_10` assumption to instead treat it as 10:00, like the load forecast)
+- Calendar columns (holiday/weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`): static, known in advance
+
+Weather columns have no default rule (a `*_temperature_2m`-style name alone doesn't mean "forecast timing" —
+it could be an observed value too): `source_rules(sources)` / `InformationSet.with_source_rules(sources)`
+(called automatically by `Workflow`) assigns one only to the columns an `OpenMeteoSource` actually emits, using
+`source.vintage` if set: `as_of(source.issue_time, source.timezone)` when `vintage == "issue_time"` (known as of
+a fixed time on the issue day, unaffected by a leading `_d+k`), else `weather_run(f"{source.publication_delay_h}h")`
+(default "6h").
+
+**Availability kinds** (`Availability.<kind>(...)`): `static()`, `realised(delay="1h")`,
+`published(time, days_before=1, timezone="Europe/Brussels")`, `daily_close(time)` (= `published(time, days_before=0)`),
+`weekly(weekday="friday", time="10:00")`, `weather_run(delay="6h")`,
+`as_of(time, timezone="Europe/Brussels")` (known at a fixed time on the issue day D; a leading `_d+k` doesn't
+change that).
+
+**Unknown columns:** a predictor whose base column has no rule anywhere raises by default (`unknown="raise"`);
+pass `"warn"` to log instead, or `"ignore"` to skip it silently once you've reviewed which columns that affects.
+
+**Leakage probe** — an empirical check against real data and a real model, for use in tests:
+```python
+from epftoolbox2.information_set import leakage_probe
+
+result = leakage_probe(model, data, run_day="2024-06-03", information_set=info, target="price", horizon=7)
+result.assert_ok()  # raises AssertionError listing forecasts that moved when unknown values were perturbed
+```
+It perturbs every value not known at issue time on `run_day` and checks that `model`'s forecasts for that day
+don't change between the original and perturbed data. `check_target_boundary=True` also perturbs the target
+from `run_day` onward regardless of its own rule (the model's own D-1 training boundary). `rebuild=<callable>`
+treats `data` as pre-transform source data instead: perturbation runs on it directly and `rebuild(frame)`
+reproduces the transformer pipeline before/after perturbation, catching a leak a transformer itself bakes in.
+
+**YAML:**
+```yaml
+model_pipeline:
+  information_set:
+    issue_time: "11:30"
+    issue_timezone: Europe/Brussels
+    assumptions: [entsoe_a69_by_10]
+```
+`epf model` also accepts `--issue-time HH:MM` and `--issue-timezone ZONE`, which override or add to the YAML's
+`information_set`.
 
 ---
 
@@ -568,7 +655,8 @@ report = pipeline.run(
 )
 
 # Available methods:
-report.summary()           # DataFrame: model × metrics
+report.summary()           # DataFrame: model, forecasts (count), one column per metric
+report.forecast_counts()   # DataFrame: model, planned, produced, missing, one column per skip reason
 report.by_hour()           # DataFrame: model × hour × metrics
 report.by_horizon()        # DataFrame: model × horizon × metrics
 report.by_hour_horizon()   # DataFrame: model × hour × horizon × metrics
@@ -630,6 +718,9 @@ pipeline = ModelPipeline.load("model_pipeline.yaml")
 ```
 
 ```yaml
+information_set:            # Optional. Present only if ModelPipeline(information_set=...) was set
+  issue_time: "11:30"
+  issue_timezone: Europe/Brussels
 models:
 - class: OLSModel
   params:
@@ -707,7 +798,7 @@ environment:
   max_processes: 32
   threads_per_process: 8
   cache_path: /tmp/scratch/$SLURM_JOB_ID/cache   # $VAR expanded at runtime
-  model_index: $SLURM_ARRAY_TASK_ID              # optional; runs all models if omitted
+  model_index: $SLURM_ARRAY_TASK_ID              # optional; runs all models if omitted. Needs save_dir
 
 data_pipeline:
   path: data_pipeline.yaml          # relative to this file's directory
@@ -723,7 +814,16 @@ model_pipeline:
   horizon: 7
   freq: 1h                          # optional; defaults to 1h. Set to 15min for 15-min forecasting
   forecast_only: false              # optional; default false
+  save_dir: results                 # optional; one resumable JSONL (+ manifest) per model, relative to this file
+  allow_manifest_mismatch: false    # optional; overwrite a disagreeing manifest and resume anyway
+  require_manifest: false           # optional; refuse save_dir results that have no manifest, instead of warning
 ```
+
+**SLURM array (one model per task):** set `environment.model_index` and `model_pipeline.save_dir`. Each task
+writes its model's JSONL to `save_dir` and skips evaluators/exporters (rMAE and exporters need every model).
+After all tasks finish, `epf report experiment.yaml` (or `Workflow.load(path).report()`) merges the files and
+runs the evaluators and exporters once; it raises if a model has no results unless `allow_missing=True`
+(`--allow-missing`). A negative or out-of-range `model_index` raises.
 
 **Forecast-only workflow (runs daily without changing dates):**
 ```yaml
@@ -816,9 +916,40 @@ df = pipeline.run(start, end, cache=False)
 # Enable incremental training (resumable)
 report = pipeline.run(..., save_dir="results")
 
-# Results stored as JSONL files: results/{model_name}.jsonl
-# On re-run, only missing (hour, horizon, day) combinations are computed
+# Results stored as JSONL files: results/{model_name}.jsonl, plus results/{model_name}.manifest.json
+# On re-run, only missing (hour, horizon, run_date) combinations are computed
+
+# Report from saved results (e.g. after one run per model)
+report = pipeline.report("results", test_start="2024-02-01", test_end="2024-03-01", horizon=7, freq="1h")
 ```
+
+**The manifest** (`epftoolbox2.results.manifest`) records what produced a results file — a hash of the
+predictors' ordered per-(period, horizon) layout (not just a set of names: order and per-task differences
+both matter), target, horizon, freq, training_window, model class and all hyperparameters (whatever the
+model's `_model_kwargs` returns), a content hash of the data columns used up to `test_end` (rows after
+`test_end` don't count, so appending them between runs isn't a mismatch), and the data's own time zone —
+and compares it before resuming. The information_set settings and provenance (package version, git SHA,
+timestamps) are recorded but not compared. A disagreement raises `ManifestMismatchError`:
+
+```python
+report = pipeline.run(..., save_dir="results")
+# ManifestMismatchError: OLS: the results in results were produced with a different configuration than this
+# run (ols.manifest.json):
+#   - predictor_layout_hash: '...' (existing results) vs '...' (this run)
+# ... pass allow_manifest_mismatch=True (`epf model --allow-manifest-mismatch`) to overwrite and resume anyway.
+
+report = pipeline.run(..., save_dir="results", allow_manifest_mismatch=True)   # overwrite and resume anyway
+report = pipeline.run(..., save_dir="results", require_manifest=True)          # refuse a directory with results
+                                                                                 # but no manifest, instead of
+                                                                                 # warning and continuing (the
+                                                                                 # default, for pre-existing
+                                                                                 # results directories)
+```
+
+Package version and git SHA are recorded for provenance but not compared, so a version bump or a new commit
+does not by itself invalidate a results directory. Extending `test_start`/`test_end` is not a mismatch either:
+the resume key is `(hour, horizon, run_date)` — the calendar date, not the `day_in_test` offset from
+`test_start` — so growing the test period is the normal way to extend a resumable run.
 
 ---
 
@@ -865,7 +996,8 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
 from epftoolbox2.exporters import ExcelExporter, TerminalExporter, CsvExporter
 
-df = pd.read_csv("data.csv", index_col=0, parse_dates=True)
+df = pd.read_csv("data.csv", index_col=0)
+df.index = pd.to_datetime(df.index, utc=True).tz_convert("Europe/Warsaw")  # back to the local zone
 
 seasonal_indicators = [
     "is_monday_d+{horizon}",
@@ -1200,8 +1332,21 @@ class ModelPipeline:
         test_end: str,                    # Test period end
         target: str = "price",            # Target column name
         horizon: int = 7,                 # Max forecast horizon (days)
+        freq: str = "1h",                 # "1h" or "15min"; must match the data
         save_dir: Optional[str] = None,   # Directory for incremental results
         forecast_only: bool = False,      # Skip evaluators and exporters; use report.predictions()
+    ) -> EvaluationReport: ...
+
+    def report(                           # Report from the JSONL files in save_dir, runs evaluators/exporters
+        self,
+        save_dir: Union[str, Path],
+        test_start: Optional[str] = None,
+        test_end: Optional[str] = None,
+        horizon: int = 7,
+        freq: str = "1h",
+        forecast_only: bool = False,
+        data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns
+        allow_missing: bool = False,           # else FileNotFoundError when a model has no results
     ) -> EvaluationReport: ...
 
     def save(self, path: Union[str, Path]) -> None: ...   # Save to YAML
@@ -1230,9 +1375,11 @@ class Workflow:
         threads_per_process: Optional[int] = None,
         cache_path: Optional[str] = None,                   # Overrides data_cache if set
         model_index: Optional[int] = None,                  # Run only models[model_index]; all models if None
+        model_save_dir: Optional[str] = None,               # YAML model_pipeline.save_dir; required with model_index
     ): ...
 
     def run(self) -> EvaluationReport: ...
+    def report(self, allow_missing: bool = False) -> EvaluationReport: ...  # merge save_dir after an array job
 
     def save(self, path: Union[str, Path]) -> None: ...
 
@@ -1246,7 +1393,8 @@ class Workflow:
 
 ```python
 class EvaluationReport:
-    def summary(self) -> pd.DataFrame: ...
+    def summary(self) -> pd.DataFrame: ...          # model, forecasts, metrics
+    def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
     def by_hour_horizon(self) -> pd.DataFrame: ...
@@ -1455,7 +1603,12 @@ epf run experiment.yaml --processes 4 --threads 8
 epf run experiment.yaml --dry-run   # validate config only
 ```
 
-Flags: `--model-index N`, `--processes N`, `--threads N`, `--dry-run`
+Flags: `--model-index N` (needs `model_pipeline.save_dir`), `--processes N`, `--threads N`, `--dry-run`
+
+### `epf report <experiment.yaml>`
+Merge the per-model JSONL files in `model_pipeline.save_dir` (after a SLURM array) and run the evaluators and
+exporters once. Prints planned vs produced forecasts per model. `--allow-missing` reports the models that have
+results instead of failing.
 
 ### `epf data <data_pipeline.yaml>`
 Run a DataPipeline and save result to CSV.
@@ -1467,6 +1620,9 @@ epf data data_pipeline.yaml --start 2022-01-01 --end 2024-01-01 --output data.cs
 
 Required flags: `--start DATE`, `--end DATE`, `--output FILE`
 Optional flags: `--cache PATH`
+
+The CSV names its time zone in the index header (e.g. `datetime[Europe/Warsaw]`); `epf model` and the TUI read it
+back in that zone.
 
 ### `epf model <model_pipeline.yaml>`
 Run a ModelPipeline on an existing CSV.
@@ -1483,7 +1639,11 @@ epf model model_pipeline.yaml \
 ```
 
 Required flags: `--data FILE`, `--test-start DATE`, `--test-end DATE`
-Optional flags: `--target COL` (default: price), `--horizon N` (default: 7), `--save-dir DIR`, `--forecast-only`
+Optional flags: `--target COL` (default: price), `--horizon N` days (default: 7), `--freq {1h,15min}` (default: 1h),
+`--tz ZONE` (local zone of the data; needed for CSVs with UTC offsets but no zone in the header), `--save-dir DIR`,
+`--forecast-only`, `--issue-time HH:MM` and `--issue-timezone ZONE` (information set; overrides the YAML),
+`--allow-manifest-mismatch` (resume even if `--save-dir`'s manifest disagrees with this run, overwriting it),
+`--require-manifest` (refuse to resume from a `--save-dir` with results but no manifest, instead of warning)
 
 ### `epf validate <file.yaml>`
 Auto-detect YAML type (Workflow / DataPipeline / ModelPipeline), load, and instantiate all components. Exits 1 on error.

@@ -45,7 +45,7 @@ class EvaluationReport:
 
         rows = []
         for name, df in model_dfs.items():
-            rows.append({"model": name, **self._apply_evaluators(df, model_dfs=model_dfs)})
+            rows.append({"model": name, "forecasts": len(df), **self._apply_evaluators(df, model_dfs=model_dfs)})
         return pd.DataFrame(rows)
 
     def by_hour(self) -> pd.DataFrame:
@@ -83,6 +83,24 @@ class EvaluationReport:
             return df
         return df.sort_values(["model", "horizon", "hour"]).reset_index(drop=True)
 
+    def forecast_counts(self) -> pd.DataFrame:
+        """Planned vs produced forecasts per model, with one column per skip reason.
+
+        Models are only comparable on the forecasts they all produced; check this table before comparing.
+        `planned` equals `produced` for results passed in as plain lists.
+        """
+        reasons = sorted({reason for ref in self.refs.values() for reason in ref.skipped})
+        rows = []
+        for name, ref in self.refs.items():
+            produced = ref.produced
+            if produced is None:
+                produced = sum(1 for _ in self._iter_ref(ref, cols=["hour"]))
+            planned = max(ref.count, produced)
+            row = {"model": name, "planned": planned, "produced": produced, "missing": planned - produced}
+            row.update({reason: ref.skipped.get(reason, 0) for reason in reasons})
+            rows.append(row)
+        return pd.DataFrame(rows, columns=["model", "planned", "produced", "missing", *reasons])
+
     def iter_details(self) -> Iterator[Tuple[str, pd.DataFrame]]:
         detail_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual", "prediction"]
         for name, ref in self.refs.items():
@@ -95,6 +113,15 @@ class EvaluationReport:
         return {ev.name: ev.compute(df, **kwargs) for ev in self.evaluators}
 
     def _iter_ref(self, ref: ModelResultRef, cols: List[str] = None) -> Iterator[Dict]:
+        # A resumed JSONL can hold rows from an earlier run with a wider or different test window (its
+        # rows are never deleted); filter to this ref's own window so a narrower resume isn't scored on
+        # forecasts outside it. Refs built from plain result lists have no window (test_start/test_end
+        # are "") and are read as given.
+        filter_dates = bool(ref.test_start and ref.test_end)
+
+        def in_window(r: Dict) -> bool:
+            return not filter_dates or ref.test_start <= r["run_date"] <= ref.test_end
+
         if ref.path is not None:
             import json
             from pathlib import Path
@@ -106,10 +133,12 @@ class EvaluationReport:
                         line = line.strip()
                         if line:
                             r = json.loads(line)
-                            yield {k: r[k] for k in cols if k in r} if cols else r
+                            if in_window(r):
+                                yield {k: r[k] for k in cols if k in r} if cols else r
         else:
             for r in ref._results or []:
-                yield {k: r[k] for k in cols if k in r} if cols else r
+                if in_window(r):
+                    yield {k: r[k] for k in cols if k in r} if cols else r
 
     def compute_all(self) -> Dict[str, pd.DataFrame]:
         group_configs = [
@@ -159,7 +188,9 @@ class EvaluationReport:
 
         rows_summary = []
         for model_name, df in summary_dfs.items():
-            rows_summary.append({"model": model_name, **self._apply_evaluators(df, model_dfs=summary_dfs)})
+            rows_summary.append(
+                {"model": model_name, "forecasts": len(df), **self._apply_evaluators(df, model_dfs=summary_dfs)}
+            )
 
         rows_by_config: Dict[str, List[Dict]] = {name: [] for name, _ in group_configs}
         for config_name, group_keys in group_configs:

@@ -19,10 +19,14 @@ from epftoolbox2.results.report import EvaluationReport
 
 @pytest.fixture
 def sample_data():
-    """400 days of hourly data with price + one predictor, no NaNs."""
+    """400 days of hourly data up to yesterday with price + one predictor, no NaNs.
+
+    It must reach yesterday: a forecast for today trains on the preceding `training_window` days.
+    """
     np.random.seed(0)
     n_days = 400
-    dates = pd.date_range("2023-01-01", periods=n_days * 24, freq="h")
+    today = pd.Timestamp(datetime.date.today())
+    dates = pd.date_range(end=today - pd.Timedelta(hours=1), periods=n_days * 24, freq="h")
     df = pd.DataFrame(
         {
             "price": np.random.randn(n_days * 24) * 10 + 50,
@@ -98,7 +102,8 @@ class TestForecastOnlyDefaults:
 
         model = OLSModel(predictors=["price_d-1", "price_d-2"], training_window=30)
         ref = model.run(data=data, target="price", horizon=1, forecast_only=True)
-        assert ref.count > 0
+        assert ref.test_start == ref.test_end == today
+        assert ref.produced == ref.count == 24
 
     def test_pipeline_runs_without_test_dates(self, sample_data):
         """ModelPipeline.run(forecast_only=True) should work without explicit dates."""
@@ -120,7 +125,7 @@ class TestForecastOnlyDefaults:
             .add_model(OLSModel(predictors=["price_d-1"], training_window=30, name="OLS"))
             .run(data=data, target="price", horizon=1, forecast_only=True)
         )
-        assert report is not None
+        assert len(report.predictions()) == 24
 
     def test_requires_test_dates_without_forecast_only(self, sample_data):
         """Without forecast_only, omitting test_start/test_end must raise ValueError."""

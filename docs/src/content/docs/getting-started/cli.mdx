@@ -47,10 +47,10 @@ You'll see a menu with arrow-key navigation:
 7. Running immediately
 
 **Build & run model pipeline interactively** walks you through:
-1. Loading an input CSV (from a previous data run)
+1. Loading an input CSV (from a previous data run; you are asked for the time zone if the file doesn't name it)
 2. Adding models — available columns are shown as a checkbox list for predictor selection
 3. Adding evaluators and exporters
-4. Setting the test period, target column, and horizon
+4. Setting the test period, target column, horizon and resolution (`1h` or `15min`)
 5. Saving a reusable `model_pipeline.yaml`
 6. Running immediately
 
@@ -72,7 +72,7 @@ epf run experiment.yaml
 
 | Flag | Description |
 |------|-------------|
-| `--model-index N` | Run only `models[N]` |
+| `--model-index N` | Run only `models[N]` (array mode: needs `model_pipeline.save_dir`, see [`epf report`](#epf-report--merge-array-results)) |
 | `--processes N` | Override `max_processes` |
 | `--threads N` | Override `threads_per_process` |
 | `--dry-run` | Build both pipelines without executing — validates config |
@@ -91,6 +91,19 @@ epf run experiment.yaml --dry-run
 
 ---
 
+## `epf report` — Merge array results
+
+After a SLURM array in which each task ran one model (`--model-index`), merge every model's JSONL from `model_pipeline.save_dir` and run the evaluators and exporters once. Prints planned vs produced forecasts per model.
+
+```bash
+epf report experiment.yaml
+epf report experiment.yaml --allow-missing   # report the models that have results
+```
+
+Without `--allow-missing` it fails if any model has no results file.
+
+---
+
 ## `epf data` — Data pipeline only
 
 Run a DataPipeline YAML and save the result as a CSV.
@@ -98,6 +111,8 @@ Run a DataPipeline YAML and save the result as a CSV.
 ```bash
 epf data data_pipeline.yaml --start 2022-01-01 --end 2024-01-01 --output data.csv
 ```
+
+The CSV keeps the local time zone: the index header names it (e.g. `datetime[Europe/Warsaw]`), and `epf model` and the interactive mode read the data back in that zone, so days and hours match an in-process run.
 
 **Required flags:**
 
@@ -127,7 +142,7 @@ epf data data_pipeline.yaml \
 
 ## `epf model` — Model pipeline only
 
-Run a ModelPipeline YAML on an existing CSV dataset (e.g. produced by `epf data`).
+Run a ModelPipeline YAML on an existing CSV dataset (e.g. produced by `epf data`). The model's days and hours are local, so the file must say which time zone it is in: files from `epf data` do; for other files with UTC offsets in the timestamps, pass `--tz`.
 
 ```bash
 epf model model_pipeline.yaml \
@@ -150,6 +165,8 @@ epf model model_pipeline.yaml \
 |------|-------------|
 | `--target COL` | Target column name (default: `price`) |
 | `--horizon N` | Forecast horizon in days (default: `7`) |
+| `--freq {1h,15min}` | Data resolution: one model per hour or per quarter-hour (default: `1h`). Must match the data |
+| `--tz ZONE` | Local time zone of the data (e.g. `Europe/Warsaw`); overrides the zone named in the file |
 | `--save-dir DIR` | Save per-model prediction JSONL files to this directory |
 | `--forecast-only` | Skip evaluators and exporters |
 

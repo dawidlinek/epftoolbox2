@@ -35,7 +35,10 @@ epftoolbox2.verify()
 - **Exporters**: Excel with conditional formatting, Terminal output
 - **Caching**: Built-in per-source Parquet cache that fetches only missing ranges, refetches not-yet-published data and is safe for parallel jobs
 - **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files; an optional market timezone makes dates mean local calendar days, duplicate column names across sources raise instead of colliding silently, and `api_key` is written to YAML as an `${ENV_VAR}` reference instead of plain text
-- **Multiprocessing**: Process-based parallelism with inner thread pools
+- **Multiprocessing**: Process-based parallelism with inner thread pools; SLURM array mode (one model per task) with `epf report` to merge the results
+- **Safeguards**: The model's input (resolution, time stamps, column names, predictors) is checked before any fit, and forecasts that could not be made are counted per model (`report.forecast_counts()`)
+- **Information Set**: Optional `issue_time` check that every predictor is known at the moment the forecast is issued, with built-in availability rules for the shipped sources and an empirical leakage probe (`epftoolbox2.information_set`)
+- **Result Manifests**: Resumable results (`save_dir`) are fingerprinted with the configuration that produced them (the predictors' ordered layout, data up to `test_end` and its time zone, model params, ...); resuming into results made with a different configuration raises instead of silently mixing them (`epftoolbox2.results.manifest`)
 - **Extensibility**: Extensible base classes for data sources, transformers, validators, models, evaluators, and exporters
 
 ## Quick Start
@@ -148,6 +151,12 @@ pipeline = (
 
 report = pipeline.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
 ```
+
+Pass `issue_time` (and optionally `issue_timezone`) to check every predictor against the time the forecast is
+actually issued, before any model is fitted — `ModelPipeline(issue_time="11:30", issue_timezone="Europe/Brussels")`
+raises `InformationSetError` if a predictor uses a value not known yet (e.g. same-day `load_actual`). Built-in
+availability rules cover the shipped sources; see `epftoolbox2.information_set` for custom rules, accepted
+assumptions, and `leakage_probe`, an empirical check that perturbs unknown values and asserts forecasts don't move.
 
 
 

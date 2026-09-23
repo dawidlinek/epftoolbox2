@@ -43,7 +43,13 @@ report = pipeline.run(data=df, test_start="2024-04-01", test_end="2024-06-01")
 
 ## YAML Format
 
+If the pipeline has an `information_set` (see [Information Set](/epftoolbox2/model-pipeline/information-set/)),
+it is saved as a top-level `information_set` key:
+
 ```yaml
+information_set:
+  issue_time: "11:30"
+  issue_timezone: Europe/Brussels
 models:
 - class: OLSModel
   params:
