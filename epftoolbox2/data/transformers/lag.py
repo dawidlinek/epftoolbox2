@@ -5,10 +5,10 @@ from collections.abc import Iterable
 import pandas as pd
 
 from .base import Transformer
+from ..._date_utils import is_utc_index as _is_utc
 from ..._date_utils import shift_calendar_days
 
 _ELAPSED_UNITS = [(3600, "h"), (60, "min"), (1, "s")]
-_UTC_NAMES = {"UTC", "ETC/UTC", "UNIVERSAL", "ETC/UNIVERSAL", "ZULU", "ETC/ZULU"}
 
 
 def _as_int_list(lags) -> list[int]:
@@ -17,10 +17,6 @@ def _as_int_list(lags) -> list[int]:
         if isinstance(lag, bool) or not isinstance(lag, numbers.Integral):
             raise TypeError(f"Lags must be integers, got {lag!r}")
     return [int(lag) for lag in items]
-
-
-def _is_utc(index: pd.DatetimeIndex) -> bool:
-    return index.tz is not None and str(index.tz).upper() in _UTC_NAMES
 
 
 class LagTransformer(Transformer):
@@ -35,7 +31,8 @@ class LagTransformer(Transformer):
     `price_d-1`.
 
     Args:
-        columns: Column name(s) to create lags for. If None, uses all columns of the input frame.
+        columns: Column name(s) to create lags for. If None, uses all columns of the input frame (backward
+              lags only: forward lags of every column would include realised series and the target).
         lags: Positive values look back, negative values look forward. Lag 0 is skipped, since it is
               the column itself.
         freq: Frequency string. Accepts intuitive names ("day", "hour", "minute", "second")
@@ -75,6 +72,11 @@ class LagTransformer(Transformer):
             raise ValueError("Only lag 0 was given; lag 0 is the column itself")
         if self.columns is not None and not self.columns:
             raise ValueError("At least one column must be provided (or None for all columns)")
+        if self.columns is None and any(lag < 0 for lag in self.lags):
+            raise ValueError(
+                "columns=None works with backward lags only: forward lags of every column would look up realised "
+                "future values and create columns named like the model's targets. List the columns explicitly."
+            )
 
         mapping = self._FREQ_MAPPING.get(freq.lower())
         if mapping:

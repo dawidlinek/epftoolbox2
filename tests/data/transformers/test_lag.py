@@ -207,3 +207,17 @@ def test_lag_zero_adds_no_duplicate_column(small_frame):
 def test_only_lag_zero_raises():
     with pytest.raises(ValueError, match="lag 0"):
         LagTransformer(columns="price", lags=[0])
+
+
+def test_all_columns_only_with_backward_lags():
+    # Forward lags of every column would include realised series and the target (price_d+1 would collide
+    # with the model's own target columns).
+    with pytest.raises(ValueError, match="columns=None"):
+        LagTransformer(columns=None, lags=[1, -1], freq="day")
+
+
+@pytest.mark.parametrize("tz", ["UTC", "Etc/UTC", "GMT", "Etc/GMT"])
+def test_utc_like_zones_warn(tz):
+    df = pd.DataFrame({"price": np.arange(72.0)}, index=pd.date_range("2024-01-01", periods=72, freq="1h", tz=tz))
+    with pytest.warns(UserWarning, match="UTC"):
+        LagTransformer(columns="price", lags=[1], freq="day").transform(df)

@@ -26,7 +26,7 @@ df = transformer.transform(df)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `columns` | str \| List[str] \| None | `None` | Column names to create lags for. `None` lags every column of the input frame |
+| `columns` | str \| List[str] \| None | `None` | Column names to create lags for. `None` lags every column of the input frame, and is allowed with backward (positive) lags only |
 | `lags` | int \| List[int] \| range | `1` | Lag periods (positive=past, negative=future). Any integer type, including numpy integers. Lag 0 is skipped: it is the column itself |
 | `freq` | str | `"1h"` | Time unit for lags |
 
@@ -60,6 +60,9 @@ On the switch days themselves:
 
 When both days repeat the hour (a 364-day lag between two autumn switch days), the first occurrence maps to the
 first and the second to the second.
+
+A NaN predictor makes the model skip that forecast, so a model using `price_d-1` and `price_d-2` produces no
+02:00 forecast on the two days after each spring switch.
 
 <Aside type="caution">
   Day lags need a local-time index, so add `LagTransformer` **after** `TimezoneTransformer`. On a UTC index

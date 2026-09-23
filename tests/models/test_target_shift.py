@@ -37,3 +37,9 @@ def test_repeated_hour_rows_look_ahead_to_the_next_days_hour():
     assert shifted[index.get_loc(first)] == pd.Timestamp("2024-10-28 02:00", tz=TZ)
     assert shifted[index.get_loc(second)] == pd.Timestamp("2024-10-28 02:00", tz=TZ)
     assert shifted[index.get_loc(pd.Timestamp("2024-10-26 02:00", tz=TZ))] is pd.NaT
+
+
+def test_utc_index_warns_that_days_are_utc_days():
+    index = pd.date_range("2024-03-30", periods=72, freq="1h", tz="UTC")
+    with pytest.warns(UserWarning, match="UTC"):
+        OLSModel([])._shift_index_by_calendar_days(index, 1)

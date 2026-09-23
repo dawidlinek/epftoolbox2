@@ -228,7 +228,7 @@ Creates lagged features for time series. Positive lags look back (past), negativ
 from epftoolbox2.data.transformers import LagTransformer
 
 transformer = LagTransformer(
-    columns=["load_actual", "price"],  # Column(s) to lag (default: None = all columns)
+    columns=["load_actual", "price"],  # Column(s) to lag (default: None = all columns, for looking back only)
     lags=[1, 2, 7],                    # Lag periods (default: 1). Accepts list, range, single int, numpy ints
     freq="day",                        # Time unit (default: "1h")
 )
@@ -243,7 +243,8 @@ transformer = LagTransformer(
 
 **Day lags follow local calendar days**, not 24-hour offsets: `price_d-1` at 10:00 is 10:00 on the previous local
 date, also across DST switches. The hour skipped in spring gives NaN; both occurrences of the repeated autumn hour
-look back to that hour on the previous day, and the day after the switch looks back to the first occurrence. Run
+look back to that hour on the previous day, and the day after the switch looks back to the first occurrence. A NaN
+lag makes the model skip that forecast (e.g. 02:00 on the day after the spring switch with `price_d-1`). Run
 `LagTransformer` after `TimezoneTransformer`; with day lags on a UTC index it warns.
 
 **Output column naming:** `{column}_{unit}-{lag}`

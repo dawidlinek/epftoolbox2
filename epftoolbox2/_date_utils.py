@@ -29,6 +29,14 @@ def resolve_date(s: Any) -> Any:
     return (date.today() + timedelta(days=delta)).isoformat()
 
 
+_UTC_NAMES = {"UTC", "UCT", "GMT", "UNIVERSAL", "ZULU", "GREENWICH", "TZUTC()"}
+
+
+def is_utc_index(index: pd.DatetimeIndex) -> bool:
+    """True for a UTC (or GMT) index, where days are UTC days rather than local market days."""
+    return index.tz is not None and str(index.tz).upper().removeprefix("ETC/") in _UTC_NAMES
+
+
 def _occurrences(wall: pd.DatetimeIndex, tz: Any) -> tuple:
     """Earlier and later UTC instant of each local wall-clock time.
 

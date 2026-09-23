@@ -7,6 +7,7 @@ import inspect
 import multiprocessing
 import os
 import sys
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ from ..scalers.standard import StandardScaler
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef
 from ._worker import _worker_init, _run_day
-from .._date_utils import resolve_date, shift_calendar_days
+from .._date_utils import is_utc_index, resolve_date, shift_calendar_days
 
 _FREQ_TO_PERIODS: Dict[str, int] = {"1h": 24, "15min": 96}
 
@@ -230,6 +231,14 @@ class BaseModel(ABC):
         # per horizon per year): which of the two prices is "the" target is ambiguous, and with the training
         # cut counting rows (see .claude/rules/models.md) a value there would put a target dated on the
         # issue day into training for the hour-2 forecasts on the fall-back day.
+        if is_utc_index(index):
+            warnings.warn(
+                "The model's data has a UTC index, so its days and hours are UTC ones, not local market days, and "
+                "day-lag columns built in local time won't line up with the targets around DST. Keep the market's "
+                "time zone (e.g. after reading a CSV: df.index = pd.to_datetime(df.index, utc=True).tz_convert(zone)).",
+                UserWarning,
+                stacklevel=3,
+            )
         return shift_calendar_days(index, days, ambiguous="NaT")
 
     def _compute_period_index(self, index: pd.DatetimeIndex) -> np.ndarray:
