@@ -318,6 +318,18 @@ class TestApiRequest:
         assert KEY not in str(info.value)
         assert info.value.__cause__ is None and info.value.__context__ is None
 
+    def test_generic_request_exception_is_not_retried_and_clears_context(self):
+        # Unlike the retried network errors above, requests.RequestException subclasses that are not connection,
+        # timeout or chunked-encoding errors are treated as fatal and must not be retried, but the raised
+        # EntsoeApiError must still carry no exception context (nothing to leak into SLURM .out logs or tracebacks).
+        error = requests.exceptions.URLRequired(f"bad url (token {KEY})")
+        source = _source(lambda p: error, type=["load"])
+        with pytest.raises(Exception) as info:
+            self._request(source)
+        assert len(source.session.calls) == 1
+        assert KEY not in str(info.value)
+        assert info.value.__cause__ is None and info.value.__context__ is None
+
     def test_failed_chunk_makes_fetch_raise(self):
         # A chunk that keeps failing must not silently produce a frame with a gap.
         def route(p):

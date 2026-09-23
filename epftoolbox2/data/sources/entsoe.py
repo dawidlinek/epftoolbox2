@@ -614,6 +614,7 @@ class EntsoeSource(DataSource):
         label = "/".join(v for v in (params.get("documentType"), params.get("processType")) if v)
         label = f"{label} {start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} UTC"
         error = ""
+        fatal = None
 
         for attempt in range(self.MAX_RETRIES + 1):
             wait = None
@@ -627,7 +628,11 @@ class EntsoeSource(DataSource):
             except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
                 error = f"{type(exc).__name__}: {exc}"
             except requests.RequestException as exc:
-                raise EntsoeApiError(self._redact(f"ENTSOE [{self._area_name}]: {label} failed: {exc}")) from None
+                # Not retried. Record the message and raise once we're outside the except block, like the
+                # retries-exhausted raise below: raising here would leave __context__ pointing at exc even
+                # with `from None`, which only clears __cause__ and traceback display.
+                fatal = self._redact(f"ENTSOE [{self._area_name}]: {label} failed: {exc}")
+                break
             else:
                 status = response.status_code
                 text = response.text
@@ -654,6 +659,9 @@ class EntsoeSource(DataSource):
                 )
             )
             time.sleep(wait)
+
+        if fatal is not None:
+            raise EntsoeApiError(fatal)
 
         raise EntsoeApiError(
             self._redact(f"ENTSOE [{self._area_name}]: {label} failed after {self.MAX_RETRIES + 1} attempts: {error}")
