@@ -13,6 +13,7 @@ import pandas as pd
 from rich.progress import Progress
 
 from ..scalers.standard import StandardScaler
+from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef
 from ._worker import _worker_init, _run_day
@@ -27,6 +28,7 @@ class BaseModel(ABC):
         predictors: List[Union[str, Callable]],
         training_window: int = 365,
         name: str = "Model",
+        scaler: ScalerSpec = "standard",
     ):
         if callable(predictors):
             self._predictors_fn = predictors
@@ -36,6 +38,8 @@ class BaseModel(ABC):
             self.predictors = predictors
         self.training_window = training_window
         self.name = name
+        # Kept as a name or {"name", "params"} dict so it saves to YAML; each task builds a fresh scaler from it.
+        self.scaler = scaler_spec(scaler)
 
         self._data: Optional[pd.DataFrame] = None
         self._hour_data: Dict[int, pd.DataFrame] = {}
@@ -136,6 +140,8 @@ class BaseModel(ABC):
             "test_start": test_start,
             "training_window": self.training_window,
             "scalable_masks": scalable_masks,
+            # Passed in config rather than _model_kwargs, so subclasses that override _model_kwargs can't drop it.
+            "scaler": self.scaler,
             "threads_per_process": threads_per_process,
             "freq": self._freq,
         }

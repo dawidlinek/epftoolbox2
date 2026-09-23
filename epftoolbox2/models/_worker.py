@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 
-from ..scalers.standard import StandardScaler
+from ..scalers.registry import make_scaler
 
 _W_HOUR_ARRAYS: Dict = {}
 _W_EXPANDED_PREDS: Dict = {}
@@ -64,12 +64,13 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Optional[Dict]:
     run_date_str = run_date.isoformat()
     target_date_str = (run_date + datetime.timedelta(days=hz)).isoformat()
 
-    scaler = StandardScaler()
+    scaler = make_scaler(cfg.get("scaler", "standard"))
     train_x, train_y, test_x = scaler.fit_transform(
         train_x.copy(),
         train_y.copy(),
         test_x.copy(),
         scalable_mask=cfg["scalable_masks"][(hour, hz)],
+        columns=_W_EXPANDED_PREDS[(hour, hz)],
     )
     try:
         pred, coefs = _W_FIT_PREDICT(train_x, train_y, test_x)

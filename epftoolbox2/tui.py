@@ -265,6 +265,14 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": "365",
             "kind": "int",
         },
+        {
+            "name": "scaler",
+            "description": "Scaling: standard, or a variance-stabilising transformation (asinh, npit)",
+            "required": False,
+            "default": "standard",
+            "kind": "select",
+            "choices": ["standard", "asinh", "npit"],
+        },
     ],
     "LassoCVModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "LassoCV", "kind": "text"},
@@ -283,6 +291,14 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "int",
         },
         {"name": "cv", "description": "Cross-validation folds", "required": False, "default": "5", "kind": "int"},
+        {
+            "name": "scaler",
+            "description": "Scaling: standard, or a variance-stabilising transformation (asinh, npit)",
+            "required": False,
+            "default": "standard",
+            "kind": "select",
+            "choices": ["standard", "asinh", "npit"],
+        },
     ],
     "MAEEvaluator": [],
     "ExcelExporter": [
