@@ -27,7 +27,7 @@ epftoolbox2.verify()
 ```
 ## Key Features
 
-- **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (weather forecasts), Calendar (holidays, weekday)
+- **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (archived weather forecasts as known at the forecast issue time), Calendar (holidays, weekday)
 - **Transformers**: Resample, Timezone conversion, Lag features
 - **Validators**: Null checks, Continuity checks, EDA statistics
 - **Models**: OLS, LassoCV

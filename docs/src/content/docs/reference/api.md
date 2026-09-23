@@ -119,9 +119,13 @@ class EntsoeSource(DataSource):
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
 
 class OpenMeteoSource(DataSource):
-    def __init__(self, latitude: float, longitude: float, horizon: int = 7,
-                 model: str = "jma_seamless", columns: List[str] = None,
-                 prefix: str = ""): ...
+    def __init__(self, latitude: float, longitude: float, horizon: int = 5,
+                 model: str = "jma_seamless", columns: Optional[List[str]] = None,
+                 prefix: str = "", proxy_url: Optional[str] = None,
+                 temporal_resolution: Optional[str] = None,
+                 timezone: str = "Europe/Warsaw", issue_time: str = "10:00",
+                 publication_delay_h: float = 10, vintage: str = "issue_time",
+                 strict: bool = False): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
 
 class CalendarSource(DataSource):
