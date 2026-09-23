@@ -113,6 +113,15 @@ class EvaluationReport:
         return {ev.name: ev.compute(df, **kwargs) for ev in self.evaluators}
 
     def _iter_ref(self, ref: ModelResultRef, cols: List[str] = None) -> Iterator[Dict]:
+        # A resumed JSONL can hold rows from an earlier run with a wider or different test window (its
+        # rows are never deleted); filter to this ref's own window so a narrower resume isn't scored on
+        # forecasts outside it. Refs built from plain result lists have no window (test_start/test_end
+        # are "") and are read as given.
+        filter_dates = bool(ref.test_start and ref.test_end)
+
+        def in_window(r: Dict) -> bool:
+            return not filter_dates or ref.test_start <= r["run_date"] <= ref.test_end
+
         if ref.path is not None:
             import json
             from pathlib import Path
@@ -124,10 +133,12 @@ class EvaluationReport:
                         line = line.strip()
                         if line:
                             r = json.loads(line)
-                            yield {k: r[k] for k in cols if k in r} if cols else r
+                            if in_window(r):
+                                yield {k: r[k] for k in cols if k in r} if cols else r
         else:
             for r in ref._results or []:
-                yield {k: r[k] for k in cols if k in r} if cols else r
+                if in_window(r):
+                    yield {k: r[k] for k in cols if k in r} if cols else r
 
     def compute_all(self) -> Dict[str, pd.DataFrame]:
         group_configs = [

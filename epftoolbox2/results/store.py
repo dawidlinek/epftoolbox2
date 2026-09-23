@@ -12,10 +12,16 @@ class ResultStore:
 
     `run_date` (not `day_in_test`) identifies the forecast day: `day_in_test` is an offset from
     `test_start`, so the same offset means a different calendar day if `test_start` changes between
-    runs into the same directory. Keying on the absolute date means a `test_start` change is handled
-    correctly on its own; a change to anything else that defines a forecast (predictors, target,
-    training window, model params, the data itself, ...) is caught separately by the manifest
-    (`epftoolbox2.results.manifest`), which `BaseModel.run` checks before resuming.
+    runs into the same directory. Keying on the absolute date means resuming (deciding which tasks are
+    already done) is correct on its own across a `test_start` change; a change to anything else that
+    defines a forecast (predictors, target, training window, model params, the data itself, ...) is
+    caught separately by the manifest (`epftoolbox2.results.manifest`), which `BaseModel.run` checks
+    before resuming.
+
+    Old rows are never deleted from the file, so a run with a narrower or shifted test window than an
+    earlier run into the same directory leaves out-of-window rows sitting alongside the new ones.
+    Reading results back for evaluation must filter to the current run's window (`EvaluationReport`
+    does this using each ref's own `test_start`/`test_end`); this store does not do it for you.
     """
 
     _SENTINEL = object()
