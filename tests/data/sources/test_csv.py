@@ -336,6 +336,31 @@ class TestCsvSourceTimezones:
         assert list(df.index) == list(expected)
         assert list(df["price"]) == [1, 2, 3, 4]
 
+    def test_naive_local_times_newest_first_raise(self, tmp_path):
+        # Reversed, "infer" would take the first 02:00 row (really CET) as CEST and swap the two values silently.
+        path = _write(
+            tmp_path,
+            "newest_first.csv",
+            [
+                "datetime,price",
+                "2024-10-27 03:00,4",
+                "2024-10-27 02:00,3",
+                "2024-10-27 02:00,2",
+                "2024-10-27 01:00,1",
+            ],
+        )
+        with pytest.raises(ValueError, match="chronological"):
+            CsvSource(path, timezone="Europe/Warsaw").fetch(*WHOLE_RANGE)
+
+    def test_naive_local_times_unsorted_without_repeats_are_sorted(self, tmp_path):
+        path = _write(
+            tmp_path,
+            "unsorted.csv",
+            ["datetime,price", "2024-06-01 02:00,2", "2024-06-01 01:00,1", "2024-06-01 03:00,3"],
+        )
+        df = CsvSource(path, timezone="Europe/Warsaw").fetch(*WHOLE_RANGE)
+        assert list(df["price"]) == [1, 2, 3]
+
     def test_naive_local_spring_forward(self, tmp_path):
         path = _write(
             tmp_path, "spring.csv", ["datetime,price", "2024-03-31 01:00,1", "2024-03-31 03:00,2", "2024-03-31 04:00,3"]

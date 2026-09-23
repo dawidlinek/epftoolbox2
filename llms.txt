@@ -206,8 +206,8 @@ source = CsvSource(
 - Must contain the specified datetime column
 - Datetime column is parsed and set as index; `fetch(start, end)` returns [start, end)
 - Timestamps with a UTC offset (also mixed +01:00/+02:00 across DST) are converted to UTC
-- Naive timestamps are local times in `timezone`, localized with `ambiguous="infer"` (rows must be in
-  chronological order around the fall-back hour) and `nonexistent="raise"`
+- Naive timestamps are local times in `timezone`, localized with `ambiguous="infer"` (rows must be oldest-first
+  around the fall-back hour, otherwise it raises) and `nonexistent="raise"`
 - Duplicated timestamps (after conversion to UTC) and rows without a timestamp raise `ValueError`
 
 **Caching:** Returns None (not cached).

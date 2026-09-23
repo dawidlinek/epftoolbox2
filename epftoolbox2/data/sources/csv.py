@@ -111,6 +111,13 @@ class CsvSource(DataSource):
                 f"CSV Source: {kind} in {self.timezone} around a DST switch ({e}). Naive local timestamps must be "
                 f"complete and in chronological order there; otherwise export them in UTC or with a UTC offset."
             ) from e
+        if parsed.duplicated().any() and not localized.is_monotonic_increasing:
+            # "infer" assumes file order is time order; a newest-first file would swap the two fall-back hours.
+            raise ValueError(
+                f"CSV Source: naive local times repeat (DST fall-back hour in {self.timezone}) but the rows are not in "
+                f"chronological order, so the two occurrences can't be told apart. Sort the file oldest first, or "
+                f"export the timestamps in UTC or with a UTC offset."
+            )
         return localized.tz_convert("UTC")
 
     def _load_data(self) -> pd.DataFrame:

@@ -75,8 +75,9 @@ source = CsvSource(file_path="data/pl_prices.csv", timezone="Europe/Warsaw")
 </Aside>
 
 For naive local times around DST switches:
-- The fall-back hour occurs twice. The rows must be in chronological order (as written by most exporters) so
-  that the first 02:00 is placed before the second; a file with only one 02:00 on that day raises an error.
+- The fall-back hour occurs twice. The rows must be in chronological order (oldest first, as written by most
+  exporters) so that the first 02:00 is placed before the second. A file with repeated times that is not in
+  that order (e.g. newest first) raises an error, and so does a file with only one 02:00 on that day.
 - A time inside the spring-forward gap (02:30 on the last Sunday of March in Central Europe) raises an error.
 
 In both cases, exporting with a UTC offset or in UTC avoids the ambiguity.
