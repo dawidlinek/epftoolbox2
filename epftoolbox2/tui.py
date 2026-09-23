@@ -439,6 +439,29 @@ def _ask_date(label: str, default: str = "") -> str:
         console.print("[red]Expected format: YYYY-MM-DD[/red]")
 
 
+def _load_data_csv(path: Path):  # noqa: ANN202
+    """Read a data CSV with its local time zone; ask for the zone when the file doesn't name it."""
+    from ._frame_csv import load_frame_csv
+
+    tz = None
+    while True:
+        try:
+            return load_frame_csv(path, tz=tz)
+        except ValueError as exc:
+            console.print(f"  [yellow]{exc}[/yellow]")
+            tz = questionary.text("  Time zone of the data (e.g. Europe/Warsaw)").ask()
+            if tz is None:
+                _abort()
+            tz = tz.strip() or None
+
+
+def _ask_freq() -> str:
+    freq = questionary.select("  Data resolution (one model per period)", choices=["1h", "15min"], default="1h").ask()
+    if freq is None:
+        _abort()
+    return freq
+
+
 # ---------------------------------------------------------------------------
 # Component configuration
 # ---------------------------------------------------------------------------
@@ -565,15 +588,16 @@ def build_data_pipeline_interactive():  # noqa: ANN201
         console.print(f"  [green]Saved →[/green] {yaml_path}")
 
     if questionary.confirm("  Run now?", default=True).ask():
+        from ._frame_csv import save_frame_csv
+
         df = dp.run(start=start, end=end, cache=cache)
         if df.empty:
             console.print("[yellow]Warning: pipeline returned an empty DataFrame.[/yellow]")
-        df.to_csv(output)
+        save_frame_csv(df, output)
         console.print(f"[green]Saved {len(df)} rows →[/green] {output}")
 
 
 def build_model_pipeline_interactive() -> None:
-    import pandas as pd
     from .pipelines.model_pipeline import ModelPipeline
 
     console.print("\n[bold cyan]── Model Pipeline ─────────────────────────[/bold cyan]")
@@ -589,8 +613,7 @@ def build_model_pipeline_interactive() -> None:
             break
         console.print(f"  [red]File not found: {p}[/red]")
 
-    df = pd.read_csv(p, index_col=0)
-    df.index = pd.to_datetime(df.index, utc=True)
+    df = _load_data_csv(p)
     available_columns = list(df.columns)
     console.print(f"  Loaded {len(df)} rows, columns: {', '.join(available_columns)}")
 
@@ -623,6 +646,7 @@ def build_model_pipeline_interactive() -> None:
     if horizon_raw is None:
         _abort()
     horizon = int(horizon_raw.strip())
+    freq = _ask_freq()
 
     forecast_only = questionary.confirm("  Forecast-only mode (skip evaluation)?", default=False).ask()
     if forecast_only is None:
@@ -659,6 +683,7 @@ def build_model_pipeline_interactive() -> None:
             test_end=test_end,
             target=target,
             horizon=horizon,
+            freq=freq,
             save_dir=save_dir,
             forecast_only=forecast_only,
         )
@@ -690,14 +715,15 @@ def _run_data_from_yaml() -> None:
     if output is None:
         _abort()
 
+    from ._frame_csv import save_frame_csv
+
     dp = DataPipeline.load(path.strip())
     df = dp.run(start=start, end=end)
-    df.to_csv(output.strip())
+    save_frame_csv(df, output.strip())
     console.print(f"[green]Saved {len(df)} rows →[/green] {output.strip()}")
 
 
 def _run_model_from_yaml() -> None:
-    import pandas as pd
     from .pipelines.model_pipeline import ModelPipeline
 
     path = questionary.text("  ModelPipeline YAML path").ask()
@@ -713,8 +739,7 @@ def _run_model_from_yaml() -> None:
             break
         console.print(f"  [red]File not found: {p}[/red]")
 
-    df = pd.read_csv(p, index_col=0)
-    df.index = pd.to_datetime(df.index, utc=True)
+    df = _load_data_csv(p)
 
     test_start = _ask_date("  Test start (YYYY-MM-DD)")
     test_end = _ask_date("  Test end   (YYYY-MM-DD)")
@@ -724,9 +749,17 @@ def _run_model_from_yaml() -> None:
     horizon_raw = questionary.text("  Forecast horizon (days)", default="7").ask()
     if horizon_raw is None:
         _abort()
+    freq = _ask_freq()
 
     mp = ModelPipeline.load(path.strip())
-    mp.run(data=df, test_start=test_start, test_end=test_end, target=target.strip(), horizon=int(horizon_raw.strip()))
+    mp.run(
+        data=df,
+        test_start=test_start,
+        test_end=test_end,
+        target=target.strip(),
+        horizon=int(horizon_raw.strip()),
+        freq=freq,
+    )
 
 
 # ---------------------------------------------------------------------------

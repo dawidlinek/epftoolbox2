@@ -36,6 +36,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_data(args: argparse.Namespace) -> None:
+    from ._frame_csv import save_frame_csv
     from .pipelines.data_pipeline import DataPipeline
 
     dp = DataPipeline.load(args.yaml)
@@ -48,12 +49,12 @@ def cmd_data(args: argparse.Namespace) -> None:
         console.print("[yellow]Warning: pipeline returned an empty DataFrame.[/yellow]")
 
     output = Path(args.output)
-    df.to_csv(output)
+    save_frame_csv(df, output)
     console.print(f"[green]Saved {len(df)} rows →[/green] {output}")
 
 
 def cmd_model(args: argparse.Namespace) -> None:
-    import pandas as pd
+    from ._frame_csv import load_frame_csv
     from .pipelines.model_pipeline import ModelPipeline
 
     data_path = Path(args.data)
@@ -61,8 +62,11 @@ def cmd_model(args: argparse.Namespace) -> None:
         console.print(f"[red]Data file not found: {data_path}[/red]")
         sys.exit(1)
 
-    df = pd.read_csv(data_path, index_col=0)
-    df.index = pd.to_datetime(df.index, utc=True)
+    try:
+        df = load_frame_csv(data_path, tz=args.tz)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        sys.exit(1)
 
     mp = ModelPipeline.load(args.yaml)
     mp.run(
@@ -71,6 +75,7 @@ def cmd_model(args: argparse.Namespace) -> None:
         test_end=args.test_end,
         target=args.target,
         horizon=args.horizon,
+        freq=args.freq,
         save_dir=args.save_dir,
         forecast_only=args.forecast_only,
     )
@@ -193,7 +198,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="epf",
         description="EPF Toolbox 2 — electricity price forecasting CLI",
@@ -230,7 +235,19 @@ def main() -> None:
     model_p.add_argument("--test-start", required=True, metavar="DATE", help="Test period start date")
     model_p.add_argument("--test-end", required=True, metavar="DATE", help="Test period end date")
     model_p.add_argument("--target", default="price", metavar="COL", help="Target column name (default: price)")
-    model_p.add_argument("--horizon", type=int, default=7, metavar="N", help="Forecast horizon in hours (default: 7)")
+    model_p.add_argument("--horizon", type=int, default=7, metavar="N", help="Forecast horizon in days (default: 7)")
+    model_p.add_argument(
+        "--freq",
+        default="1h",
+        choices=["1h", "15min"],
+        help="Resolution of the data and forecasts: one model per hour or per quarter-hour (default: 1h)",
+    )
+    model_p.add_argument(
+        "--tz",
+        metavar="ZONE",
+        help="Local time zone of the data (e.g. Europe/Warsaw). Files from `epf data` name it in their header; "
+        "older files with UTC offsets need it",
+    )
     model_p.add_argument("--save-dir", metavar="DIR", help="Directory to save per-model prediction JSONL files")
     model_p.add_argument("--forecast-only", action="store_true", help="Skip evaluation and exporters")
 
@@ -241,8 +258,11 @@ def main() -> None:
     # -- init --
     init_p = sub.add_parser("init", help="Scaffold template YAML files in the current directory")
     init_p.add_argument("--force", action="store_true", help="Overwrite existing files")
+    return parser
 
-    args = parser.parse_args()
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     if args.cmd is None:
         from .tui import run_interactive
