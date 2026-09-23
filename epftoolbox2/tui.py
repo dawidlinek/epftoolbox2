@@ -255,6 +255,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": "",
             "kind": "column_select",
         },
+        {
+            "name": "verbose",
+            "description": "Print the statistics table?",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
+        },
     ],
     "OLSModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "OLS", "kind": "text"},

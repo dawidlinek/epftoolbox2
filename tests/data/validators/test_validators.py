@@ -141,6 +141,17 @@ class TestEdaValidator:
         assert len(result.warnings) == 1
 
 
+class TestEdaValidatorPrinting:
+    def test_prints_table_by_default(self, capsys):
+        EdaValidator().validate(pd.DataFrame({"a": [1.0, 2.0]}))
+        assert "EDA Statistics" in capsys.readouterr().out
+
+    def test_verbose_false_is_silent_but_keeps_stats(self, capsys):
+        result = EdaValidator(verbose=False).validate(pd.DataFrame({"a": [1.0, 2.0]}))
+        assert capsys.readouterr().out == ""
+        assert len(result.stats) == 1
+
+
 class TestValidationResult:
     def test_bool_valid(self):
         result = ValidationResult(is_valid=True)
