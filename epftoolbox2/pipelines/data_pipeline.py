@@ -1,4 +1,5 @@
-from typing import List, Optional, Union, Dict, Any
+from typing import List, Optional, Tuple, Union, Dict, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import hashlib
 import json
 import os
@@ -21,7 +22,7 @@ from epftoolbox2.data.cache_manager import (
     unsettled_boundary,
 )
 from epftoolbox2.logging import get_logger
-from epftoolbox2._date_utils import resolve_date
+from epftoolbox2._date_utils import _DATE_PATTERN
 
 logger = get_logger(__name__)
 
@@ -54,12 +55,22 @@ COMPONENT_REGISTRY = {
 class DataPipeline:
     """Data pipeline that combines multiple sources and applies transformers.
 
+    Args:
+        sources: Data sources; their outputs are clipped to ``[start, end)`` and joined column-wise.
+        transformers: Applied in order to the joined source output.
+        validators: Run on the final frame (after the transformers).
+        timezone: Market time zone (e.g. ``"Europe/Warsaw"``). If set, date strings passed to ``run`` are local
+            calendar days: ``start`` begins at local midnight and ``end`` covers its whole local day; naive
+            timestamps are local times. If ``None`` (default), date strings are midnight UTC, ``end`` is exclusive
+            and naive timestamps are UTC (unchanged from before ``timezone`` existed).
+
     Example:
         >>> pipeline = DataPipeline(
         ...     sources=[CsvSource(...), EntsoeSource(...)],
-        ...     transformers=[TimezoneTransformer(target_tz="Europe/Warsaw")]
+        ...     transformers=[TimezoneTransformer(target_tz="Europe/Warsaw")],
+        ...     timezone="Europe/Warsaw",
         ... )
-        >>> df = pipeline.run(start, end)
+        >>> df = pipeline.run("2024-01-01", "2024-06-30")  # 2024-01-01 00:00 .. 2024-06-30 23:00 local
 
     Example:
         >>> pipeline = (
@@ -77,10 +88,20 @@ class DataPipeline:
         sources: Optional[List[DataSource]] = None,
         transformers: Optional[List[Transformer]] = None,
         validators: Optional[List[Validator]] = None,
+        timezone: Optional[str] = None,
     ):
         self.sources: List[DataSource] = sources or []
         self.transformers: List[Transformer] = transformers or []
         self.validators: List[Validator] = validators or []
+        self.timezone = timezone
+        self._validate_settings()
+
+    def _validate_settings(self) -> None:
+        if self.timezone is not None:
+            try:
+                ZoneInfo(self.timezone)
+            except (ZoneInfoNotFoundError, ValueError, TypeError):
+                raise ValueError(f"Invalid timezone: {self.timezone!r} (use an IANA name such as 'Europe/Warsaw')")
 
     def add_source(self, source: DataSource) -> "DataPipeline":
         if not isinstance(source, DataSource):
@@ -142,12 +163,27 @@ class DataPipeline:
         # Cached and missing ranges are disjoint, so there are no duplicate timestamps to resolve.
         return pd.concat(parts).sort_index(kind="stable")
 
-    def _parse_timestamp(self, ts: Union[str, pd.Timestamp]) -> pd.Timestamp:
+    def _parse_timestamp(self, ts: Union[str, pd.Timestamp], is_end: bool = False) -> pd.Timestamp:
+        """UTC bound for ``run``. See the class docstring for how dates, keywords and timestamps are read."""
+        tz = self.timezone or "UTC"
         if isinstance(ts, str):
-            ts = resolve_date(ts)  # "today"/"now_d±N" → local ISO date string
-        if isinstance(ts, str):
-            return pd.Timestamp(ts, tz="UTC")
-        return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
+            day = _calendar_day(ts, self.timezone)
+            if day is not None:
+                if self.timezone is not None and is_end:
+                    day += pd.Timedelta(days=1)  # the end date is included as a whole local day
+                return day.tz_localize(tz, ambiguous=True, nonexistent="shift_forward").tz_convert("UTC")
+        ts = pd.Timestamp(ts)
+        return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize(tz).tz_convert("UTC")
+
+    def resolve_range(
+        self, start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp]
+    ) -> Tuple[pd.Timestamp, pd.Timestamp]:
+        """The half-open UTC range ``[start, end)`` that ``run(start, end)`` returns."""
+        start_ts = self._parse_timestamp(start)
+        end_ts = self._parse_timestamp(end, is_end=True)
+        if end_ts <= start_ts:
+            raise ValueError(f"End timestamp ({end_ts}) must be after start timestamp ({start_ts})")
+        return start_ts, end_ts
 
     def run(
         self, start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp], cache: Union[bool, str] = False
@@ -155,11 +191,7 @@ class DataPipeline:
         if not self.sources:
             raise ValueError("At least one data source is required")
 
-        start = self._parse_timestamp(start)
-        end = self._parse_timestamp(end)
-
-        if end <= start:
-            raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
+        start, end = self.resolve_range(start, end)
 
         result = self._load_or_fetch_sources(start, end, cache)
         if result.empty:
@@ -335,6 +367,35 @@ class DataPipeline:
 
         logger.info(f"Pipeline: Loaded configuration from {path}")
         return pipeline
+
+
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _now(tz: Optional[str]) -> pd.Timestamp:
+    """Current time in ``tz``, or naive machine-local time when ``tz`` is None."""
+    return pd.Timestamp.now(tz=tz) if tz else pd.Timestamp.now()
+
+
+def _calendar_day(text: str, tz: Optional[str]) -> Optional[pd.Timestamp]:
+    """Naive midnight of the day a date string ("2024-01-01") or keyword ("today", "now_d-7") names, else None.
+
+    Keywords count days in ``tz`` (the machine's local date when ``tz`` is None, as before).
+    """
+    s = text.strip()
+    match = _DATE_PATTERN.match(s)
+    if match:
+        offset = int(match.group(2)) if match.group(2) else 0
+        return _now(tz).tz_localize(None).normalize() + pd.Timedelta(days=offset)
+    if _DATE_ONLY.match(s):
+        return pd.Timestamp(s)
+    if ":" in s:
+        return None
+    try:
+        ts = pd.Timestamp(s)
+    except ValueError:
+        return None
+    return ts if ts.tzinfo is None and ts == ts.normalize() else None
 
 
 def _qualified_name(obj: Any) -> str:

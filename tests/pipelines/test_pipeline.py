@@ -381,7 +381,7 @@ class TestDataPipelineCache:
 # Source cache (cache=True) — regression tests for the review findings
 # ---------------------------------------------------------------------------
 
-_FULL = pd.date_range("2023-12-01", "2024-08-01", freq="1h", tz="UTC")
+_FULL = pd.date_range("2023-12-01", "2025-01-01", freq="1h", tz="UTC")
 _RNG = np.random.default_rng(7)
 _SERIES = pd.DataFrame(
     {"price": _RNG.normal(90, 10, len(_FULL)), "load": _RNG.normal(16000, 500, len(_FULL))}, index=_FULL
@@ -701,6 +701,86 @@ class TestFileCache:
         src2 = RangeSource()
         DataPipeline().add_source(src2).run("2024-01-01", "2024-02-01", cache="cache.parquet")
         assert not src2.calls  # "end" was already settled when fetched on day1 — the file is still trusted
+
+
+# ---------------------------------------------------------------------------
+# Date semantics (timezone=...)
+# ---------------------------------------------------------------------------
+
+
+class TestDateSemantics:
+    """pipelines H4: date strings as local calendar days with `timezone`, UTC midnights without it."""
+
+    def test_without_timezone_dates_are_utc_midnights_end_exclusive(self):
+        df = DataPipeline([RangeSource()]).run("2024-01-01", "2024-01-03")
+        assert df.index.min() == _utc("2024-01-01")
+        assert df.index.max() == _utc("2024-01-02 23:00")
+
+    def test_timezone_dates_are_whole_local_days(self):
+        df = DataPipeline([RangeSource()], timezone="Europe/Warsaw").run("2024-01-01", "2024-01-03")
+        local = df.index.tz_convert("Europe/Warsaw")
+        assert local.min() == pd.Timestamp("2024-01-01 00:00", tz="Europe/Warsaw")
+        assert local.max() == pd.Timestamp("2024-01-03 23:00", tz="Europe/Warsaw")
+        assert len(df) == 72
+
+    @pytest.mark.parametrize("day, hours", [("2024-03-31", 23), ("2024-10-27", 25), ("2024-06-01", 24)])
+    def test_timezone_end_day_is_complete_on_dst_days(self, day, hours):
+        df = DataPipeline([RangeSource()], timezone="Europe/Warsaw").run(day, day)
+        assert len(df) == hours
+
+    def test_timezone_keywords_use_the_market_date(self, monkeypatch):
+        from epftoolbox2.pipelines import data_pipeline as dp_module
+
+        # 23:30 UTC on 2024-06-09 is already 2024-06-10 in Warsaw
+        monkeypatch.setattr(dp_module, "_now", lambda tz: pd.Timestamp("2024-06-09 23:30", tz="UTC").tz_convert(tz))
+        pipe = DataPipeline([RangeSource()], timezone="Europe/Warsaw")
+        df = pipe.run("today_d-1", "today")
+        local = df.index.tz_convert("Europe/Warsaw")
+        assert local.min() == pd.Timestamp("2024-06-09 00:00", tz="Europe/Warsaw")
+        assert local.max() == pd.Timestamp("2024-06-10 23:00", tz="Europe/Warsaw")
+
+    def test_timezone_naive_timestamps_are_local_instants(self):
+        pipe = DataPipeline([RangeSource()], timezone="Europe/Warsaw")
+        df = pipe.run(pd.Timestamp("2024-01-01 06:00"), "2024-01-01 09:00")
+        assert df.index.min() == _utc("2024-01-01 05:00")
+        assert df.index.max() == _utc("2024-01-01 07:00")
+
+    def test_aware_timestamps_are_used_as_given(self):
+        pipe = DataPipeline([RangeSource()], timezone="Europe/Warsaw")
+        df = pipe.run(_utc("2024-01-01 06:00"), _utc("2024-01-01 09:00"))
+        assert (df.index.min(), df.index.max()) == (_utc("2024-01-01 06:00"), _utc("2024-01-01 08:00"))
+
+    def test_invalid_timezone_raises(self):
+        with pytest.raises(ValueError, match="timezone"):
+            DataPipeline(timezone="Europe/Warsw")
+
+    def test_forecast_only_end_equal_to_last_horizon_day_gives_every_forecast(self, monkeypatch):
+        """With timezone, `end = run day + H` covers the last target day, so all 24 * H forecasts are produced."""
+        from collections import Counter
+
+        from epftoolbox2.data.sources import CalendarSource
+        from epftoolbox2.data.transformers import LagTransformer
+        from epftoolbox2.models import OLSModel
+
+        monkeypatch.setenv("MAX_PROCESSES", "1")
+        monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+        run_day, horizon = "2024-06-10", 3
+        pipe = (
+            DataPipeline(timezone="Europe/Warsaw")
+            .add_source(RangeSource(columns=["price"]))
+            .add_source(CalendarSource("PL", holidays="binary", weekday="number"))
+            .add_transformer(TimezoneTransformer("Europe/Warsaw"))
+            .add_transformer(LagTransformer(["price"], [1, 7], "day"))
+            .add_transformer(LagTransformer(["weekday"], list(range(-horizon, 1)), "day"))
+        )
+        end = (pd.Timestamp(run_day) + pd.Timedelta(days=horizon)).date().isoformat()
+        df = pipe.run("2024-03-01", end)
+
+        model = OLSModel(["price_d-1", "price_d-7", "weekday_d+{horizon}"], training_window=60)
+        ref = model.run(df, test_start=run_day, test_end=run_day, horizon=horizon, forecast_only=True)
+        per_horizon = Counter(r["horizon"] for r in ref._results)
+        assert len(ref._results) == ref.count == 24 * horizon
+        assert dict(per_horizon) == {h: 24 for h in range(1, horizon + 1)}
 
 
 class TestDataPipelineSerialization:
