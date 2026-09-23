@@ -157,3 +157,8 @@ docs/node_modules/
 tinkering
 
 examples/raw_02_example_reproduction.py
+# Test fixtures are allowed to be CSV
+!tests/fixtures/**/*.csv
+
+# Personal Claude Code settings (shared ones live in .claude/settings.json)
+.claude/settings.local.json

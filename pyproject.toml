@@ -61,5 +61,15 @@ packages = ["epftoolbox2"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: Integration tests requiring API key"]
-filterwarnings = ["ignore::bs4.builder.XMLParsedAsHTMLWarning"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+markers = ["integration: Integration tests that require real API keys and use real connections"]
+filterwarnings = [
+    "ignore::bs4.builder.XMLParsedAsHTMLWarning",
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
