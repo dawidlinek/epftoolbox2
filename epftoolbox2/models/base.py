@@ -16,7 +16,7 @@ from ..scalers.standard import StandardScaler
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef
 from ._worker import _worker_init, _run_day
-from .._date_utils import resolve_date
+from .._date_utils import resolve_date, shift_calendar_days
 
 _FREQ_TO_PERIODS: Dict[str, int] = {"1h": 24, "15min": 96}
 
@@ -225,14 +225,12 @@ class BaseModel(ABC):
         return pd.concat([data, pd.DataFrame(new_cols)], axis=1)
 
     def _shift_index_by_calendar_days(self, index: pd.DatetimeIndex, days: int) -> pd.DatetimeIndex:
-        if index.tz is None:
-            return index + pd.Timedelta(days=days)
-
-        shifted_local_naive = index.tz_localize(None) + pd.Timedelta(days=days)
-        try:
-            return shifted_local_naive.tz_localize(index.tz, ambiguous="infer", nonexistent="NaT")
-        except Exception:
-            return shifted_local_naive.tz_localize(index.tz, ambiguous="NaT", nonexistent="NaT")
+        # Same wall-clock time `days` local calendar days later, NaT on the hour skipped in spring. A target
+        # landing on the hour repeated in autumn from a day where that hour occurs once stays NaT (one row
+        # per horizon per year): which of the two prices is "the" target is ambiguous, and with the training
+        # cut counting rows (see .claude/rules/models.md) a value there would put a target dated on the
+        # issue day into training for the hour-2 forecasts on the fall-back day.
+        return shift_calendar_days(index, days, ambiguous="NaT")
 
     def _compute_period_index(self, index: pd.DatetimeIndex) -> np.ndarray:
         if self._freq == "1h":
