@@ -19,6 +19,7 @@ COMPONENT_REGISTRY = {
         "OpenMeteoSource": "epftoolbox2.data.sources.open_meteo",
         "CsvSource": "epftoolbox2.data.sources.csv",
         "CalendarSource": "epftoolbox2.data.sources.calendar",
+        "SettlementPriceSource": "epftoolbox2.data.sources.settlement",
     },
     "transformers": {
         "TimezoneTransformer": "epftoolbox2.data.transformers.timezone",

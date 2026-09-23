@@ -172,6 +172,80 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "SettlementPriceSource": [
+        {
+            "name": "file_path",
+            "description": "Path to your CSV/Parquet file of daily closes",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "columns",
+            "description": "Price columns to use (comma-separated)",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "timezone",
+            "description": "Time zone of the forecast day (match TimezoneTransformer)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "issue_time",
+            "description": "Issue time HH:MM on the forecast day",
+            "required": False,
+            "default": "11:30",
+            "kind": "text",
+        },
+        {
+            "name": "close_time",
+            "description": "Time HH:MM from which a day's close is known",
+            "required": False,
+            "default": "23:59",
+            "kind": "text",
+        },
+        {
+            "name": "close_timezone",
+            "description": "Time zone of the close time (blank = forecast time zone)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "date_column",
+            "description": "Date column name",
+            "required": False,
+            "default": "date",
+            "kind": "text",
+        },
+        {
+            "name": "date_format",
+            "description": "Date format, e.g. %d.%m.%Y (blank = inferred)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "trading_calendar",
+            "description": "Trading calendar: weekdays, file, or a market code (e.g. IFEU)",
+            "required": False,
+            "default": "weekdays",
+            "kind": "text",
+        },
+        {
+            "name": "lags",
+            "description": "Day lags, comma-separated (1 = prevailing close of D-1)",
+            "required": False,
+            "default": "1",
+            "kind": "lag_list",
+        },
+        {"name": "freq", "description": "Output row frequency", "required": False, "default": "1h", "kind": "text"},
+        {"name": "separator", "description": "CSV separator", "required": False, "default": ",", "kind": "text"},
+    ],
     "TimezoneTransformer": [
         {
             "name": "target_tz",
@@ -480,7 +554,7 @@ def _instantiate(class_name: str, params: dict) -> Any:
 # Pipeline builders
 # ---------------------------------------------------------------------------
 
-_SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
+_SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource", "SettlementPriceSource"]
 _TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer"]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]
