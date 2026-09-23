@@ -1,0 +1,154 @@
+---
+title: Information Set
+description: Check that every predictor only uses data known at the time a forecast is issued
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+# Information Set
+
+A forecast issued on day D may only use values that are actually known at the moment it is issued — not
+everything that ends up in the historical data. `epftoolbox2.information_set` declares when each column
+becomes known and checks every expanded predictor (and the newest training target) against that boundary
+before any model is fitted.
+
+---
+
+## Quick Start
+
+```python
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline(issue_time="11:30", issue_timezone="Europe/Brussels")
+```
+
+`issue_time`/`issue_timezone` is a shortcut for `InformationSet(issue_time, issue_timezone)` with the built-in
+availability rules. `ModelPipeline.run()` (and `Workflow.run()`) then check every model's predictors before
+fitting anything and raise `InformationSetError` (a `ValueError`) if one uses a value that is not known yet:
+
+```
+OLS: 98 use(s) of inputs not known at the issue time (11:30 Europe/Brussels on the issue day D):
+  - predictor load_actual: 'load_actual' is known 1h after the end of the period. Periods 10-23, horizons 1-7;
+    e.g. load_actual for period 23 is known D+1 01:00, issued D 11:30.
+Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too strict for your data, override it
+with InformationSet(rules={...}).
+```
+
+Passing no `issue_time` and no `information_set` (the default) skips the check entirely, so existing pipelines
+are unaffected until you opt in.
+
+---
+
+## Built-in Availability Rules
+
+| Column | Available from |
+|---|---|
+| `price` (ENTSO-E A44) | published ~13:00 Brussels on D-1 (within about 1h of the 12:00 gate closure) |
+| `load_actual` (A65/A16) | 1h after the end of the delivery period |
+| `load_forecast` (A65/A01) | published 10:00 Brussels on D-1 |
+| `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00 Brussels, for the whole following week |
+| `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) |
+| `generation_*` (A75 actual generation) | 1h after the end of the delivery period |
+| Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static — known in advance |
+| Open-Meteo weather columns | the previous-runs model run started about at the row's own time, published ~6h later |
+
+<Aside type="caution">
+  A69 wind/solar's *legal* deadline (18:00 D-1) is after the day-ahead gate closure (12:00 D-1), and ENTSO-E
+  gives no publication time per value, so the default rule is conservative and will flag `generation_*_forecast`
+  predictors used same-day-ahead. Accept `assumptions=["entsoe_a69_by_10"]` to instead assume 10:00 D-1 (the
+  same slot as the day-ahead load forecast) — this is a documented assumption, not the default.
+</Aside>
+
+Column names are parsed the same way predictors are: `price_d-1` resolves to the base column `price` shifted
+one calendar day back, `berlin_temperature_2m_d+{horizon}` resolves to `berlin_temperature_2m` with the
+Open-Meteo prefix. A `DataPipeline`'s sources refine these further — `with_source_rules()` (called automatically
+by `Workflow`) teaches the check about a `CalendarSource(prefix=...)` or an `OpenMeteoSource`'s configured
+`columns`.
+
+---
+
+## Custom Rules and Assumptions
+
+```python
+from epftoolbox2.information_set import Availability, InformationSet
+
+info = InformationSet(
+    "11:30", "Europe/Brussels",
+    rules={
+        "fuel_ttf": Availability.daily_close("18:00"),          # a daily settlement price
+        "my_forecast": Availability.published("09:00", days_before=1),
+    },
+    assumptions=["entsoe_a69_by_10"],
+    unknown="raise",   # "warn" or "ignore" also accepted
+)
+pipeline = ModelPipeline(information_set=info)
+```
+
+<Tabs>
+  <TabItem label="Availability kinds">
+    ```python
+    Availability.static()                                   # known in advance (calendar)
+    Availability.realised(delay="1h")                        # known `delay` after the period ends
+    Availability.published("13:00", days_before=1)           # published at a fixed local time, days_before delivery
+    Availability.daily_close("18:00")                        # published(time, days_before=0)
+    Availability.weekly(weekday="friday", time="10:00")       # published once for the whole next week
+    Availability.weather_run(delay="6h")                      # Open-Meteo previous-runs: run ~ row time + delay
+    ```
+  </TabItem>
+  <TabItem label="Rule keys">
+    Keys in `rules=` may be exact column names or glob patterns (`fuel_*`), and take precedence over accepted
+    assumptions, rules learned from data sources, and the built-in defaults, in that order.
+  </TabItem>
+</Tabs>
+
+**Unknown columns.** A predictor whose base column has no rule anywhere is, by default, a hard error
+(`unknown="raise"`): a check that silently skipped columns it knows nothing about would report a pass it
+cannot vouch for. Pass `unknown="warn"` to log instead, or `"ignore"` to skip silently once you've reviewed
+which columns that affects.
+
+---
+
+## Leakage Probe
+
+`InformationSet.check()` is a static analysis of predictor *names*. `leakage_probe` checks the same boundary
+empirically, against real data and a real model:
+
+```python
+from epftoolbox2.information_set import leakage_probe
+
+result = leakage_probe(model, data, run_day="2024-06-03", information_set=info, target="price", horizon=7)
+result.assert_ok()  # raises AssertionError listing the forecasts that moved
+```
+
+It perturbs every value in `data` that is not known at `information_set`'s issue time on `run_day` (replacing
+it with noise), runs `model` on the original and the perturbed data, and checks that every forecast issued on
+`run_day` is unchanged. Any forecast that moves depends on information from after the issue time. Use it as a
+regression test for a specific model and information set, alongside (not instead of) the static `check()`.
+
+---
+
+## YAML and the CLI
+
+```yaml
+model_pipeline:
+  information_set:
+    issue_time: "11:30"
+    issue_timezone: Europe/Brussels
+    assumptions: [entsoe_a69_by_10]
+  models: [...]
+```
+
+`epf model` accepts `--issue-time HH:MM` and `--issue-timezone ZONE`, which override the YAML's
+`information_set` (or add one if the YAML has none):
+
+```bash
+epf model model_pipeline.yaml --data data.csv --test-start 2024-02-01 --test-end 2024-03-01 \
+  --issue-time 11:30 --issue-timezone Europe/Brussels
+```
+
+---
+
+## See Also
+
+- [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/) — `run()` parameters and the other pre-fit data checks
+- [ModelPipeline Serialization](/epftoolbox2/model-pipeline/serialization/) — the full YAML format

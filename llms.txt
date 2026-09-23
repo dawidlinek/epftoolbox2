@@ -42,7 +42,7 @@ uv add epftoolbox2
 Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame with DatetimeIndex (UTC). Can be saved/loaded as YAML.
 
 ### ModelPipeline
-Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport. Can be saved/loaded as YAML.
+Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport. Can be saved/loaded as YAML. Optionally takes an `information_set` (or `issue_time`/`issue_timezone` shortcut) that checks every predictor is known at the forecast issue time before any fit — see INFORMATION SET below.
 
 ### Workflow
 Orchestrates DataPipeline + ModelPipeline from a single YAML file. Sets environment variables (`OMP_NUM_THREADS`, `PYTHON_GIL`, `MAX_PROCESSES`, `THREADS_PER_PROCESS`). Supports inline component overrides on top of referenced pipeline files.
@@ -441,6 +441,73 @@ nothing raises; any other exception in a task stops the run.
 
 ---
 
+## Information Set
+
+`epftoolbox2.information_set` declares when each base column becomes known and checks every expanded predictor
+(and the newest training target, which must be known by D-1) against the forecast's issue time before any fit.
+
+```python
+from epftoolbox2.pipelines import ModelPipeline
+
+# Shortcut: builds InformationSet(issue_time, issue_timezone) with the built-in rules.
+pipeline = ModelPipeline(issue_time="11:30", issue_timezone="Europe/Brussels")
+```
+
+```python
+from epftoolbox2.information_set import Availability, InformationSet
+
+info = InformationSet(
+    issue_time="11:30",              # Optional. "HH:MM" (default: "11:30")
+    issue_timezone="Europe/Brussels", # Optional. Zone of issue_time (default: "Europe/Brussels")
+    rules=None,                       # Optional. {column name or glob: Availability}, overrides everything else
+    assumptions=None,                 # Optional. Names from ASSUMPTIONS accepted explicitly, e.g. ["entsoe_a69_by_10"]
+    unknown="raise",                  # Optional. "raise" | "warn" | "ignore" for columns with no rule
+    use_defaults=True,                # Optional. Include default_rules()
+)
+pipeline = ModelPipeline(information_set=info)  # equivalent to passing issue_time=/issue_timezone= above
+```
+
+**Built-in default rules** (`default_rules()`), all conservative (latest legally-required time):
+- `price` (A44): published ~13:00 Brussels on D-1
+- `load_actual` (A65/A16), `generation_*` (A75): known 1h after the delivery period ends
+- `load_forecast` (A65/A01): published 10:00 Brussels on D-1
+- `load_forecast_daily_min`/`_max` (A65/A31): published Friday 10:00 Brussels for the whole next week
+- `generation_*_forecast` (A69 wind/solar): published 18:00 Brussels on D-1 (legal deadline; accept the
+  `entsoe_a69_by_10` assumption to instead treat it as 10:00, like the load forecast)
+- Calendar columns (holiday/weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`): static, known in advance
+- Open-Meteo weather columns: `weather_run` — the previous-runs model run started about at the row's own time,
+  published ~6h later
+
+**Availability kinds** (`Availability.<kind>(...)`): `static()`, `realised(delay="1h")`,
+`published(time, days_before=1, timezone="Europe/Brussels")`, `daily_close(time)` (= `published(time, days_before=0)`),
+`weekly(weekday="friday", time="10:00")`, `weather_run(delay="6h")`.
+
+**Unknown columns:** a predictor whose base column has no rule anywhere raises by default (`unknown="raise"`);
+pass `"warn"` to log instead, or `"ignore"` to skip it silently once you've reviewed which columns that affects.
+
+**Leakage probe** — an empirical check against real data and a real model, for use in tests:
+```python
+from epftoolbox2.information_set import leakage_probe
+
+result = leakage_probe(model, data, run_day="2024-06-03", information_set=info, target="price", horizon=7)
+result.assert_ok()  # raises AssertionError listing forecasts that moved when unknown values were perturbed
+```
+It perturbs every value not known at issue time on `run_day` and checks that `model`'s forecasts for that day
+don't change between the original and perturbed data.
+
+**YAML:**
+```yaml
+model_pipeline:
+  information_set:
+    issue_time: "11:30"
+    issue_timezone: Europe/Brussels
+    assumptions: [entsoe_a69_by_10]
+```
+`epf model` also accepts `--issue-time HH:MM` and `--issue-timezone ZONE`, which override or add to the YAML's
+`information_set`.
+
+---
+
 # EVALUATORS
 
 All evaluators implement `Evaluator` base class with:
@@ -633,6 +700,9 @@ pipeline = ModelPipeline.load("model_pipeline.yaml")
 ```
 
 ```yaml
+information_set:            # Optional. Present only if ModelPipeline(information_set=...) was set
+  issue_time: "11:30"
+  issue_timezone: Europe/Brussels
 models:
 - class: OLSModel
   params:
