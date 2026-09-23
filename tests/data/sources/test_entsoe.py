@@ -306,8 +306,11 @@ class TestApiRequest:
         waits = [c.args[0] for c in sleep.call_args_list]
         assert waits == sorted(waits) and waits[0] > 0
 
-    def test_connection_errors_are_retried_and_sanitised(self):
-        error = requests.ConnectionError(f"HTTPSConnectionPool: Max retries exceeded (token {KEY})")
+    @pytest.mark.parametrize(
+        "error_type", [requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError]
+    )
+    def test_network_errors_are_retried_and_sanitised(self, error_type):
+        error = error_type(f"HTTPSConnectionPool: Max retries exceeded (token {KEY})")
         source = _source(lambda p: error, type=["load"])
         with patch.object(entsoe_module.time, "sleep"), pytest.raises(Exception) as info:
             self._request(source)

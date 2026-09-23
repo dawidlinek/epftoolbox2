@@ -610,7 +610,7 @@ class EntsoeSource(DataSource):
                     headers={"SECURITY_TOKEN": self.api_key},
                     timeout=self.REQUEST_TIMEOUT,
                 )
-            except (requests.ConnectionError, requests.Timeout) as exc:
+            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
                 error = f"{type(exc).__name__}: {exc}"
             except requests.RequestException as exc:
                 raise EntsoeApiError(self._redact(f"ENTSOE [{self._area_name}]: {label} failed: {exc}")) from None
