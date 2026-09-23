@@ -236,6 +236,11 @@ _PERIOD_COLUMNS = {
     "load_forecast_daily_min": "P1D",
     "load_forecast_daily_max": "P1D",
 }
+_PERIOD_COLUMN_PREFIXES = {
+    "installed_capacity_": "P1Y",
+}
+
+VALID_TYPES = ("load", "generation", "price", "transfer_capacity", "installed_capacity")
 
 _RESOLUTION_RE = re.compile(r"^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$")
 
@@ -308,6 +313,10 @@ class EntsoeSource(DataSource):
     - Load: actual load, day-ahead forecast, week-ahead forecast (daily min/max)
     - Generation: actual generation and consumption by production type, wind/solar day-ahead forecasts
     - Price: day-ahead (SDAC) market prices
+    - Transfer capacity: day-ahead forecasted transfer capacity (A61) to and from each of ``neighbours``
+    - Installed capacity: installed generation capacity per production type (A68), one value per year
+
+    ``prefix`` is prepended to every column (``f"{prefix}_{column}"``) so that several zones can be combined.
 
     ``fetch(start, end)`` returns the half-open range [start, end) with a UTC index. Prices come on a uniform grid:
     hourly (quarter-hours averaged into hours) with ``prefer_15min=False``, 15-minute (hourly periods step-filled)
@@ -332,11 +341,17 @@ class EntsoeSource(DataSource):
         api_key: str,
         type: List[str],
         prefer_15min: bool = False,
+        neighbours: Optional[Union[List[str], str]] = None,
+        prefix: str = "",
     ):
         self.country_code = country_code
         self.api_key = api_key
         self.type = type
         self.prefer_15min = prefer_15min
+        if isinstance(neighbours, str):
+            neighbours = [n.strip() for n in neighbours.split(",") if n.strip()]
+        self.neighbours = list(neighbours) if neighbours else None
+        self.prefix = prefix or ""
         self._area_name, self._area_code = lookup_area(country_code)
         self._timezone = AREA_TIMEZONES.get(self._area_name, _DEFAULT_TIMEZONE)
         self.session = requests.Session()
@@ -357,16 +372,31 @@ class EntsoeSource(DataSource):
         if not self.type:
             raise ValueError("At least one data type must be specified")
 
-        valid_types = {"load", "generation", "price"}
         for t in self.type:
-            if t not in valid_types:
-                raise ValueError(f"Invalid type '{t}'. Must be one of: {valid_types}")
+            if t not in VALID_TYPES:
+                raise ValueError(f"Invalid type '{t}'. Must be one of: {set(VALID_TYPES)}")
 
         if "price" in self.type and self._area_name in NOT_BIDDING_ZONES:
             raise ValueError(
                 f"'{self.country_code}' is not a bidding zone; day-ahead prices are published per bidding zone. "
                 f"Use {NOT_BIDDING_ZONES[self._area_name]}."
             )
+
+        if "transfer_capacity" in self.type:
+            if not self.neighbours:
+                raise ValueError("type 'transfer_capacity' needs neighbours=[...], e.g. neighbours=['DE_LU', 'CZ']")
+            for area in [self.country_code, *self.neighbours]:
+                name, _ = lookup_area(area)
+                if name in NOT_BIDDING_ZONES:
+                    raise ValueError(
+                        f"'{area}' is not a bidding zone; transfer capacities are published between bidding zones. "
+                        f"Use {NOT_BIDDING_ZONES[name]}."
+                    )
+        elif self.neighbours:
+            raise ValueError("neighbours is only used with type 'transfer_capacity'")
+
+        if not isinstance(self.prefix, str):
+            raise ValueError(f"prefix must be a string, got {self.prefix!r}")
 
         return True
 
@@ -448,7 +478,10 @@ class EntsoeSource(DataSource):
             return pd.DataFrame()
 
         self._log_success(elapsed)
-        return pd.concat(dataframes, axis=1)
+        result = pd.concat(dataframes, axis=1)
+        if self.prefix:
+            result.columns = [f"{self.prefix}_{column}" for column in result.columns]
+        return result
 
     def _generate_chunks(self, start: pd.Timestamp, end: pd.Timestamp, months: int = 3) -> list:
         if months <= 0:
@@ -478,13 +511,20 @@ class EntsoeSource(DataSource):
             # Ungridded: by native resolution. Gridding happens once in fetch(), over all chunks together.
             result["price"] = self._fetch_price_raw(start, end)
 
+        if "transfer_capacity" in self.type:
+            result["transfer_capacity"] = self._fetch_transfer_capacity(start, end)
+
+        if "installed_capacity" in self.type:
+            result["installed_capacity"] = self._fetch_installed_capacity(start, end)
+
         return result
 
     def _clip(self, df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """Keep [start, end). A daily (or longer) value whose period covers ``start`` is moved to ``start``."""
         carried = {}
-        for column, resolution in _PERIOD_COLUMNS.items():
-            if column not in df.columns:
+        for column in df.columns:
+            resolution = self._period_column_resolution(column)
+            if resolution is None:
                 continue
             values = df[column].dropna()
             if values.empty or start in values.index:
@@ -504,6 +544,15 @@ class EntsoeSource(DataSource):
             for column, value in carried.items():
                 df.loc[start, column] = value
         return df
+
+    @staticmethod
+    def _period_column_resolution(column: str) -> Optional[str]:
+        if column in _PERIOD_COLUMNS:
+            return _PERIOD_COLUMNS[column]
+        for prefix, resolution in _PERIOD_COLUMN_PREFIXES.items():
+            if column.startswith(prefix):
+                return resolution
+        return None
 
     def _warn_on_late_start(self, dtype: str, df: pd.DataFrame, start: pd.Timestamp):
         first = df.index.min()
@@ -606,6 +655,50 @@ class EntsoeSource(DataSource):
             end,
         )
         return self._parse_prices(xml)
+
+    def _fetch_transfer_capacity(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        """Day-ahead forecasted transfer capacity (A61, contract type A01) per direction and neighbour, in MW.
+        Borders inside a flow-based capacity calculation region publish none ("No matching data")."""
+        columns = {}
+        for neighbour in self.neighbours:
+            neighbour_name, neighbour_code = lookup_area(neighbour)
+            suffix = neighbour_name.lower()
+            for direction, out_domain, in_domain in (
+                ("export", self._area_code, neighbour_code),
+                ("import", neighbour_code, self._area_code),
+            ):
+                xml = self._api_request(
+                    {
+                        "documentType": "A61",
+                        "contract_MarketAgreement.Type": "A01",
+                        "out_Domain": out_domain,
+                        "in_Domain": in_domain,
+                    },
+                    start,
+                    end,
+                )
+                parts = [
+                    series
+                    for meta, series in self._parse_timeseries(xml, "quantity")
+                    if meta["in_domain"] in (None, in_domain) and meta["out_domain"] in (None, out_domain)
+                ]
+                if parts:
+                    columns[f"transfer_capacity_{direction}_{suffix}"] = _combine(parts)
+        return pd.DataFrame(columns) if columns else pd.DataFrame()
+
+    def _fetch_installed_capacity(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        """Installed generation capacity per production type (A68, year-ahead A33): one value per year, stamped at
+        local midnight of 1 January."""
+        xml = self._api_request(
+            {
+                "documentType": "A68",
+                "processType": "A33",
+                "in_Domain": self._area_code,
+            },
+            start,
+            end,
+        )
+        return self._parse_generation(xml).add_prefix("installed_capacity_")
 
     def _api_request(self, params: Dict, start: pd.Timestamp, end: pd.Timestamp) -> Optional[str]:
         """GET one document. Returns None for "No matching data"; retries 429/5xx and network errors; raises
@@ -825,10 +918,16 @@ class EntsoeSource(DataSource):
         self.logger.info(f"ENTSOE [{self._area_name}]: Download completed successfully in {elapsed:.2f} sec")
 
     def get_cache_config(self) -> dict:
-        return {
+        config = {
             "source_type": "entsoe",
             "area_code": self._area_code,
             "types": sorted(self.type),
             "prefer_15min": self.prefer_15min,
             "schema_version": SCHEMA_VERSION,
         }
+        # Added only when set, so that cache keys of sources without them stay the same.
+        if self.neighbours:
+            config["neighbours"] = sorted(lookup_area(n)[0] for n in self.neighbours)
+        if self.prefix:
+            config["prefix"] = self.prefix
+        return config

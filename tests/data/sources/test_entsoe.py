@@ -662,9 +662,111 @@ def test_known_answer_chunk_across_15min_go_live(zone, prefer_15min):
 
 
 def test_fixtures_do_not_contain_credentials():
-    for path in FIXTURES.iterdir():
+    for path in (p for p in FIXTURES.rglob("*") if p.is_file()):
         text = path.read_text()
         assert "securityToken" not in text and "SECURITY_TOKEN" not in text, path.name
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Transfer capacity, installed capacity, prefix
+# ---------------------------------------------------------------------------------------------------------------
+
+OTHER = FIXTURES / "other"
+
+
+class TestTransferCapacity:
+    def _route(self, params):
+        # recorded: day-ahead forecasted transfer capacity FR -> ES, 2024-10-01..02 (A03, 6 of 48 points present)
+        if params["documentType"] == "A61" and (params["out_Domain"], params["in_Domain"]) == (
+            AREAS["FR"],
+            AREAS["ES"],
+        ):
+            assert params["contract_MarketAgreement.Type"] == "A01"
+            return (OTHER / "A61_FR-ES_2024-10-01_2d.xml").read_text()
+        return NO_DATA
+
+    def test_export_and_import_columns_per_neighbour(self):
+        source = _source(self._route, country="FR", type=["transfer_capacity"], neighbours=["ES"])
+        df = source.fetch(_utc("2024-09-30 22:00"), _utc("2024-10-02 22:00"))
+        assert list(df.columns) == ["transfer_capacity_export_es"]
+        export = df["transfer_capacity_export_es"]
+        assert len(export) == 48 and export.notna().all()
+        expected = [2400] * 24 + [2450] * 4 + [2350] * 2 + [2450] * 5 + [2497] * 4 + [2450] * 9
+        assert export.tolist() == expected
+        requested = {(c["params"]["out_Domain"], c["params"]["in_Domain"]) for c in source.session.calls}
+        assert requested == {(AREAS["FR"], AREAS["ES"]), (AREAS["ES"], AREAS["FR"])}
+
+    def test_neighbours_are_required(self):
+        with pytest.raises(ValueError, match="neighbours"):
+            EntsoeSource("PL", KEY, type=["transfer_capacity"])
+
+    def test_neighbours_must_be_bidding_zones(self):
+        with pytest.raises(ValueError, match="DE_LU"):
+            EntsoeSource("PL", KEY, type=["transfer_capacity"], neighbours=["DE"])
+
+    def test_neighbours_without_transfer_capacity_is_an_error(self):
+        with pytest.raises(ValueError, match="transfer_capacity"):
+            EntsoeSource("PL", KEY, type=["price"], neighbours=["CZ"])
+
+    def test_neighbours_accept_a_comma_separated_string(self):
+        source = EntsoeSource("PL", KEY, type=["transfer_capacity"], neighbours="DE_LU, cz")
+        assert source.neighbours == ["DE_LU", "cz"]
+        assert source.get_cache_config()["neighbours"] == ["CZ", "DE_LU"]
+
+
+class TestInstalledCapacity:
+    def _route(self, params):
+        if (params["documentType"], params.get("processType")) == ("A68", "A33"):
+            return (OTHER / "A68-A33_PL_2024.xml").read_text()
+        return NO_DATA
+
+    def test_yearly_value_is_reported_at_start(self):
+        source = _source(self._route, type=["installed_capacity"])
+        df = source.fetch(_utc("2024-06-01"), _utc("2024-06-08"))
+        assert list(df.index) == [_utc("2024-06-01")]
+        assert df.loc[_utc("2024-06-01"), "installed_capacity_solar"] == 14608.7
+        assert df.loc[_utc("2024-06-01"), "installed_capacity_fossil_hard_coal"] == 18830.51
+
+    def test_value_is_stamped_at_local_new_year(self):
+        source = _source(self._route, type=["installed_capacity"])
+        df = source.fetch(_utc("2023-12-31 23:00"), _utc("2024-12-31 23:00"))
+        assert list(df.index) == [_utc("2023-12-31 23:00")]
+        assert "installed_capacity_wind_onshore" in df.columns
+
+
+class TestPrefix:
+    def _price_doc(self, params):
+        return _doc(_series(_period("2024-01-01T00:00Z", "2024-01-01T02:00Z", "PT60M", {1: 1, 2: 2}, "price.amount")))
+
+    def test_prefix_is_prepended_to_every_column(self):
+        source = _source(self._price_doc, country="CZ", prefix="cz")
+        df = source.fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        assert list(df.columns) == ["cz_price"]
+
+    def test_two_zones_combine_without_collisions(self):
+        pl = _source(self._price_doc, country="PL").fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        cz = _source(self._price_doc, country="CZ", prefix="cz").fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        combined = pd.concat([pl, cz], axis=1)
+        assert list(combined.columns) == ["price", "cz_price"]
+
+    def test_prefix_applies_to_carried_daily_values(self):
+        installed = TestInstalledCapacity()._route
+        source = _source(installed, type=["installed_capacity"], prefix="pl")
+        df = source.fetch(_utc("2024-06-01"), _utc("2024-06-08"))
+        assert df.loc[_utc("2024-06-01"), "pl_installed_capacity_solar"] == 14608.7
+
+    def test_cache_config(self):
+        plain = EntsoeSource("PL", KEY, type=["price"]).get_cache_config()
+        assert "prefix" not in plain and "neighbours" not in plain  # keys of existing caches do not change
+        assert EntsoeSource("PL", KEY, type=["price"], prefix="pl").get_cache_config()["prefix"] == "pl"
+
+    def test_yaml_round_trip_keeps_new_parameters(self):
+        from epftoolbox2.pipelines.data_pipeline import DataPipeline
+
+        source = EntsoeSource("PL", KEY, type=["transfer_capacity"], neighbours=["CZ"], prefix="pl")
+        params = DataPipeline()._serialize_component(source)["params"]
+        clone = EntsoeSource(**params)
+        assert clone.get_cache_config() == source.get_cache_config()
 
 
 # ---------------------------------------------------------------------------------------------------------------
