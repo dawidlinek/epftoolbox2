@@ -330,6 +330,29 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "FreshnessValidator": [
+        {
+            "name": "columns",
+            "description": "Columns to check (blank = all)",
+            "required": False,
+            "default": "",
+            "kind": "column_select",
+        },
+        {
+            "name": "expected_end",
+            "description": "Timestamp of the last value needed (e.g. today_d+1; blank = last row)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "max_delay",
+            "description": "How far before expected_end the last value may be (e.g. 3h)",
+            "required": False,
+            "default": "0h",
+            "kind": "text",
+        },
+    ],
     "OLSModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "OLS", "kind": "text"},
         {
@@ -569,6 +592,7 @@ _VALIDATORS = [
     "EdaValidator",
     "DSTStructureValidator",
     "CoverageValidator",
+    "FreshnessValidator",
 ]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator"]

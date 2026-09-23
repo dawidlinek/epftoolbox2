@@ -7,6 +7,7 @@ from epftoolbox2.data.validators import (
     CoverageValidator,
     DSTStructureValidator,
     EdaValidator,
+    FreshnessValidator,
     NullCheckValidator,
 )
 from epftoolbox2.pipelines import DataPipeline
@@ -19,6 +20,7 @@ VALIDATORS = [
     CoverageValidator(
         columns=["price"], start="2024-01-01", end="today_d-1", freq="1h", min_coverage=0.99, max_gap="6h"
     ),
+    FreshnessValidator(columns=["price"], expected_end="today_d+1", max_delay="3h"),
 ]
 
 
