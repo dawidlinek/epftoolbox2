@@ -1,6 +1,6 @@
 import re
 import unicodedata
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import holidays as holidays_lib
 import numpy as np
@@ -59,6 +59,41 @@ MONTH_NAMES = [
 # depend on the process locale (without it, `holidays` falls back to LANG/LC_ALL) or the country's own language.
 HOLIDAY_LANGUAGE = "en_US"
 
+# Market-structure changes used by `regimes=True`. "date" is the first delivery day (local date); a regime dummy is 1
+# from that date on, for the listed countries only.
+DEFAULT_REGIMES = {
+    "de_at_split": {
+        "date": "2018-10-01",
+        "countries": ["DE", "AT"],
+        "description": "Split of the German-Austrian bidding zone (DE-LU and AT)",
+    },
+    "brexit_decoupling": {
+        "date": "2021-01-01",
+        "countries": ["GB", "IE"],
+        "description": "GB and the Irish SEM leave implicit day-ahead coupling with SDAC",
+    },
+    "core_fb": {
+        "date": "2022-06-09",
+        "countries": ["AT", "BE", "CZ", "DE", "FR", "HU", "NL", "PL", "RO", "SK"],
+        "description": "Core flow-based day-ahead market coupling (first auction 2022-06-08)",
+    },
+    "nordic_fb": {
+        "date": "2024-10-30",
+        "countries": ["DK", "FI", "NO", "SE"],
+        "description": "Nordic flow-based day-ahead market coupling (first auction 2024-10-29)",
+    },
+    "sdac_15min_mtu": {
+        "date": "2025-10-01",
+        "countries": "AT BE BG CZ DE DK ES FI FR GR HU IT NL NO PL PT RO SE SK".split(),
+        "description": "15-minute market time unit in SDAC (first auction 2025-09-30)",
+    },
+    "sem_30min_mtu": {
+        "date": "2025-10-01",
+        "countries": ["IE"],
+        "description": "30-minute market time unit in the Irish SEM day-ahead market",
+    },
+}
+
 
 def _sanitise_name(name: str) -> str:
     """'New Year's Day' -> 'new_years_day': ASCII, lower case, words joined by underscores."""
@@ -92,6 +127,13 @@ class CalendarSource(DataSource):
         freq: str = "1h",
         subdiv: Optional[str] = None,
         categories: Optional[Union[str, List[str]]] = None,
+        bridge_days: bool = False,
+        christmas_period: bool = False,
+        holiday_distance: int = 0,
+        dst_switch: bool = False,
+        fourier_weekly: int = 0,
+        fourier_annual: int = 0,
+        regimes: Union[bool, Dict[str, str]] = False,
     ):
         """
         Args:
@@ -110,6 +152,15 @@ class CalendarSource(DataSource):
             subdiv: Subdivision for regional holidays, e.g. "BY" or "DE-BY" (Bavaria), "ENG" (England), "ZH".
             categories: Holiday categories of the `holidays` package, e.g. ["public", "bank"]
                 (default: the package default, public holidays only).
+            bridge_days: Add `is_bridge_day`: a working day whose previous and next days are both a weekend
+                day or a holiday (e.g. the Friday after a Thursday holiday).
+            christmas_period: Add `is_christmas_period`: 24 December to 1 January inclusive.
+            holiday_distance: If N > 0, add `days_to_holiday` and `days_since_holiday` (0 on a holiday), capped at N.
+            dst_switch: Add `is_dst_switch_day`: local days with 23 or 25 hours.
+            fourier_weekly: Number K of weekly harmonics: `week_sin_k`, `week_cos_k` for k = 1..K.
+            fourier_annual: Number K of annual harmonics: `year_sin_k`, `year_cos_k` for k = 1..K.
+            regimes: Step dummies `regime_{name}` (1 from the local date on). True uses DEFAULT_REGIMES for the
+                country; a dict {name: "YYYY-MM-DD"} replaces them.
         """
         self.country = country.upper()
         self._validate_country()
@@ -130,8 +181,39 @@ class CalendarSource(DataSource):
         self.categories = [categories] if isinstance(categories, str) else categories
         if self.categories is not None:
             self.categories = list(self.categories)
+        self.bridge_days = bridge_days
+        self.christmas_period = christmas_period
+        self.holiday_distance = self._validate_count("holiday_distance", holiday_distance, maximum=366)
+        self.dst_switch = dst_switch
+        self.fourier_weekly = self._validate_count("fourier_weekly", fourier_weekly)
+        self.fourier_annual = self._validate_count("fourier_annual", fourier_annual)
+        self.regimes = self._normalise_regimes(regimes)
 
         self._validate_config()
+
+    @staticmethod
+    def _validate_count(name: str, value, maximum: Optional[int] = None) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+        if value < 0 or (maximum is not None and value > maximum):
+            raise ValueError(f"{name} must be between 0 and {maximum if maximum is not None else 'inf'}, got {value}")
+        return int(value)
+
+    @staticmethod
+    def _normalise_regimes(regimes) -> Union[bool, Dict[str, str]]:
+        if isinstance(regimes, bool):
+            return regimes
+        if not isinstance(regimes, dict) or not regimes:
+            raise ValueError(f"regimes must be True, False or a non-empty dict {{name: date}}, got {regimes!r}")
+        normalised = {}
+        for name, date in regimes.items():
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_]+", name):
+                raise ValueError(f"regimes: name {name!r} must contain only letters, digits and underscores")
+            try:
+                normalised[name] = pd.Timestamp(date).date().isoformat()
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"regimes: {name!r} has an invalid date {date!r}") from e
+        return normalised
 
     def _validate_country(self):
         if self.country not in COUNTRY_DATA:
@@ -189,6 +271,10 @@ class CalendarSource(DataSource):
             if unknown or not self.categories:
                 raise ValueError(f"Invalid categories {unknown} for {self.country}. Valid: {sorted(supported)}")
 
+        for name in ("bridge_days", "christmas_period", "dst_switch"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be True or False, got {getattr(self, name)!r}")
+
     def _holiday_language(self) -> Optional[str]:
         cls = type(holidays_lib.country_holidays(self.country))
         # Countries without translations (GB, IE) only have English names.
@@ -233,8 +319,98 @@ class CalendarSource(DataSource):
             df = self._add_month(df, local_index)
         if self.daylight:
             df = self._add_daylight(df, local_dates, codes)
+        if self.bridge_days or self.holiday_distance:
+            df = self._add_holiday_context(df, local_dates, codes)
+        if self.christmas_period:
+            christmas = ((local_dates.month == 12) & (local_dates.day >= 24)) | (
+                (local_dates.month == 1) & (local_dates.day == 1)
+            )
+            df[f"{self.prefix}is_christmas_period"] = np.asarray(christmas, dtype=int)[codes]
+        if self.dst_switch:
+            df = self._add_dst_switch(df, local_dates, codes)
+        if self.fourier_weekly or self.fourier_annual:
+            df = self._add_fourier(df, local_index)
+        if self.regimes:
+            for name, date in self._resolved_regimes().items():
+                df[f"{self.prefix}regime_{name}"] = np.asarray(local_dates >= pd.Timestamp(date), dtype=int)[codes]
 
         return df
+
+    def _holiday_flags(self, dates: pd.DatetimeIndex) -> np.ndarray:
+        """True where the local date is a holiday of the configured calendar (country, subdiv, categories)."""
+        if not len(dates):
+            return np.zeros(0, dtype=bool)
+        calendar = self._holiday_calendar(list(range(dates.min().year, dates.max().year + 1)))
+        return np.array([date in calendar for date in dates.date], dtype=bool)
+
+    def _add_holiday_context(self, df: pd.DataFrame, local_dates: pd.DatetimeIndex, codes: np.ndarray) -> pd.DataFrame:
+        # Look far enough beyond the range that neighbours and the nearest holidays of its edge days are known.
+        margin = pd.Timedelta(days=max(1, self.holiday_distance))
+        if len(local_dates):
+            span = pd.date_range(local_dates.min() - margin, local_dates.max() + margin, freq="D")
+        else:
+            span = pd.DatetimeIndex([])
+        holiday = self._holiday_flags(span)
+        rows = span.get_indexer(local_dates)[codes]
+
+        if self.bridge_days:
+            day_off = holiday | (span.dayofweek >= 5)
+            bridge = np.zeros(len(span), dtype=bool)
+            bridge[1:-1] = ~day_off[1:-1] & day_off[:-2] & day_off[2:]
+            df[f"{self.prefix}is_bridge_day"] = bridge.astype(int)[rows]
+
+        if self.holiday_distance:
+            cap = self.holiday_distance
+            positions = np.arange(len(span))
+            holidays_at = np.flatnonzero(holiday)
+            to_next = np.full(len(span), cap)
+            since_last = np.full(len(span), cap)
+            if len(holidays_at):
+                nxt = np.searchsorted(holidays_at, positions, side="left")
+                has_next = nxt < len(holidays_at)
+                to_next[has_next] = holidays_at[nxt[has_next]] - positions[has_next]
+                prv = np.searchsorted(holidays_at, positions, side="right") - 1
+                has_prev = prv >= 0
+                since_last[has_prev] = positions[has_prev] - holidays_at[prv[has_prev]]
+            df[f"{self.prefix}days_to_holiday"] = np.minimum(to_next, cap)[rows]
+            df[f"{self.prefix}days_since_holiday"] = np.minimum(since_last, cap)[rows]
+        return df
+
+    def _add_dst_switch(self, df: pd.DataFrame, local_dates: pd.DatetimeIndex, codes: np.ndarray) -> pd.DataFrame:
+        # A local day has 23 or 25 hours when its UTC offset at noon differs from the previous day's.
+        def utc_offset(naive: pd.DatetimeIndex) -> np.ndarray:
+            aware = naive.tz_localize(
+                self.timezone, ambiguous=np.zeros(len(naive), dtype=bool), nonexistent="shift_forward"
+            )
+            return np.asarray(aware.tz_localize(None) - aware.tz_convert("UTC").tz_localize(None))
+
+        noon = local_dates + pd.Timedelta(hours=12)
+        switch = utc_offset(noon) != utc_offset(noon - pd.Timedelta(days=1))
+        df[f"{self.prefix}is_dst_switch_day"] = switch.astype(int)[codes]
+        return df
+
+    def _add_fourier(self, df: pd.DataFrame, local_index: pd.DatetimeIndex) -> pd.DataFrame:
+        # Phases use the local wall clock: the repeated fall-back hour gets the same value twice, and nothing
+        # jumps or drifts when the UTC offset changes.
+        day_fraction = np.asarray(local_index.hour * 3600 + local_index.minute * 60 + local_index.second) / 86400
+        terms = {}
+        if self.fourier_weekly:
+            phase = (np.asarray(local_index.dayofweek) + day_fraction) / 7
+            for k in range(1, self.fourier_weekly + 1):
+                terms[f"{self.prefix}week_sin_{k}"] = np.sin(2 * np.pi * k * phase)
+                terms[f"{self.prefix}week_cos_{k}"] = np.cos(2 * np.pi * k * phase)
+        if self.fourier_annual:
+            days_in_year = np.where(np.asarray(local_index.is_leap_year), 366, 365)
+            phase = (np.asarray(local_index.dayofyear) - 1 + day_fraction) / days_in_year
+            for k in range(1, self.fourier_annual + 1):
+                terms[f"{self.prefix}year_sin_{k}"] = np.sin(2 * np.pi * k * phase)
+                terms[f"{self.prefix}year_cos_{k}"] = np.cos(2 * np.pi * k * phase)
+        return pd.concat([df, pd.DataFrame(terms, index=df.index)], axis=1)
+
+    def _resolved_regimes(self) -> Dict[str, str]:
+        if self.regimes is True:
+            return {name: spec["date"] for name, spec in DEFAULT_REGIMES.items() if self.country in spec["countries"]}
+        return dict(self.regimes) if self.regimes else {}
 
     def _add_holidays(self, df: pd.DataFrame, local_dates: pd.DatetimeIndex, codes: np.ndarray) -> pd.DataFrame:
         years = list(range(local_dates.min().year, local_dates.max().year + 1)) if len(local_dates) else []
