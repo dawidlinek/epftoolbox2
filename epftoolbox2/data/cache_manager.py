@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import uuid
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional, Tuple
@@ -38,6 +39,13 @@ logger = get_logger(__name__)
 
 def _now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
+
+
+def unsettled_boundary(period: pd.Timedelta = UNSETTLED_PERIOD) -> pd.Timestamp:
+    """UTC midnight ``period`` before now: the per-source cache never records data past this point as covered,
+    because it may still be published or completed. The single-file cache (``DataPipeline``'s ``cache="path"``)
+    uses the same boundary to decide whether a cached file might now be stale."""
+    return _now().floor("D") - period
 
 
 def atomic_write(path: Path, write: Callable[[Path], None]) -> None:
@@ -226,20 +234,60 @@ class CacheManager:
         # Recorded ranges are disjoint (a newer write trims older ranges), so the chunks do not overlap.
         return pd.concat(chunks).sort_index(kind="stable")
 
-    def covered_end(self, df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> Optional[pd.Timestamp]:
-        """End of the range ``[start, x)`` that ``df`` (fetched for ``[start, end)``) may be recorded as covering.
+    def covered_ranges(
+        self, df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp
+    ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+        """Contiguous, disjoint sub-ranges of ``[start, end)`` that ``df`` (fetched for ``[start, end)``) may be
+        recorded as covering, each capped at ``end`` and at the start of the unsettled period before now.
 
-        That is the last returned timestamp plus one step, capped at ``end`` and at the start of the unsettled
-        period before now. ``None`` if nothing can be recorded.
+        A gap between two consecutive returned timestamps wider than the data's usual step ends a run; the row
+        after the gap starts a new one. Only rows actually present are ever recorded as covered — a genuine hole
+        in an otherwise regular response (one missing hour out of a day of hourly data) is fetched again next
+        time instead of being silently treated as covered and then lost for good. A single returned timestamp has
+        no neighbour to compare against, so it cannot show a gap: it covers the whole range up to the cap (e.g. a
+        source that publishes one value per requested period, such as a weekly aggregate).
         """
         index = clip_to_range(df, start, end).index.unique().sort_values()
         if len(index) == 0:
-            return None
-        steps = index[1:] - index[:-1]
-        step = steps.min() if len(steps) else pd.Timedelta(0)
-        settled = _now().floor("D") - self.unsettled_period
-        covered = min(end, index[-1] + step, settled)
-        return covered if covered > start else None
+            return []
+        cap = min(end, unsettled_boundary(self.unsettled_period))
+
+        if len(index) == 1:
+            return [(start, cap)] if cap > start else []
+
+        diffs = index[1:] - index[:-1]
+        counts = Counter(diffs)
+        step = min(counts, key=lambda d: (-counts[d], d))  # most common spacing; ties favor the smaller step
+
+        ranges = []
+        run_start = start
+        prev = index[0]
+        for cur, diff in zip(index[1:], diffs):
+            if diff > step:
+                run_end = min(prev + step, cap)
+                if run_end > run_start:
+                    ranges.append((run_start, run_end))
+                run_start = cur
+            prev = cur
+        run_end = min(prev + step, cap)
+        if run_end > run_start:
+            ranges.append((run_start, run_end))
+        return ranges
+
+    def _trim_overlap(
+        self, entries: List[Dict], new_start: pd.Timestamp, new_end: pd.Timestamp, new_filename: str
+    ) -> List[Dict]:
+        """``entries`` with the part inside ``[new_start, new_end)`` removed (an entry left empty is dropped)."""
+        kept = []
+        for entry in entries:
+            if entry["filename"] == new_filename:
+                continue
+            range_start, range_end = self._range(entry)
+            if range_start < new_start:
+                kept.append({**entry, "end": min(range_end, new_start).isoformat()})
+            if range_end > new_end:
+                kept.append({**entry, "start": max(range_start, new_end).isoformat()})
+        return kept
 
     def write_cache(
         self,
@@ -250,45 +298,46 @@ class CacheManager:
         source_config: Dict,
         source_class: Optional[str] = None,
     ) -> Optional[pd.Timestamp]:
-        """Store what ``df`` (fetched for ``[start, end)``) covers; returns the recorded end or ``None``.
+        """Store the contiguous run(s) of ``df`` (fetched for ``[start, end)``) that are actually present and
+        settled — see ``covered_ranges``. Returns the end of the last (rightmost) range recorded, or ``None`` if
+        nothing was recorded; this does not imply contiguous coverage back to ``start`` when ``df`` had a gap, so
+        callers rely on ``find_missing_ranges`` for that, not this return value.
 
-        Rows outside the recorded range are not stored. The new range replaces any overlapping part of older ranges.
+        Rows outside a recorded range are not stored. Each new range replaces any overlapping part of older ranges.
         """
         if df is None or df.empty:
             return None
-        covered = self.covered_end(df, start, end)
-        if covered is None:
+        ranges = self.covered_ranges(df, start, end)
+        if not ranges:
             return None
-        part = clip_to_range(df, start, covered)
-        filename = self._get_data_filename(start, covered)
 
         with self.lock(cache_key):
             cache_path = self._get_cache_path(cache_key)
-            atomic_write(cache_path / filename, lambda tmp: part.to_parquet(tmp))
-
             metadata = self._read_metadata(cache_key)
-            kept = []
-            for entry in metadata.get("cached_ranges", []):
-                if entry["filename"] == filename:
-                    continue
-                range_start, range_end = self._range(entry)
-                if range_start < start:
-                    kept.append({**entry, "end": min(range_end, start).isoformat()})
-                if range_end > covered:
-                    kept.append({**entry, "start": max(range_start, covered).isoformat()})
-            new_entry = {
-                "start": start.isoformat(),
-                "end": covered.isoformat(),
-                "filename": filename,
-                "rows": len(part),
-                "retrieved_at": _now().isoformat(),
-            }
+            kept = list(metadata.get("cached_ranges", []))
+            new_entries = []
+
+            for range_start, range_end in ranges:
+                part = clip_to_range(df, range_start, range_end)
+                filename = self._get_data_filename(range_start, range_end)
+                atomic_write(cache_path / filename, lambda tmp, part=part: part.to_parquet(tmp))
+                kept = self._trim_overlap(kept, range_start, range_end, filename)
+                new_entries.append(
+                    {
+                        "start": range_start.isoformat(),
+                        "end": range_end.isoformat(),
+                        "filename": filename,
+                        "rows": len(part),
+                        "retrieved_at": _now().isoformat(),
+                    }
+                )
+
             metadata.update(
                 {
                     "cache_format": CACHE_FORMAT_VERSION,
                     "source_class": source_class,
                     "source_config": source_config,
-                    "cached_ranges": sorted(kept + [new_entry], key=lambda r: pd.Timestamp(r["start"])),
+                    "cached_ranges": sorted(kept + new_entries, key=lambda r: pd.Timestamp(r["start"])),
                 }
             )
             self._write_metadata(cache_key, metadata)
@@ -298,8 +347,8 @@ class CacheManager:
                 if old.name not in referenced:
                     old.unlink()
 
-        self.logger.debug(f"Cached data: {filename}")
-        return covered
+        self.logger.debug(f"Cached data: {[e['filename'] for e in new_entries]}")
+        return ranges[-1][1]
 
     def get_cache_info(self, cache_key: str) -> Dict:
         metadata = self._read_metadata(cache_key)

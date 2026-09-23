@@ -197,6 +197,77 @@ class TestCoverage:
         assert meta["cached_ranges"][0]["retrieved_at"].startswith("2030-05-05T12:00")
 
 
+class TestCoverageGaps:
+    """pipelines-integration H4-follow-up: a gap in the middle of a response used to be recorded as covered, so
+    the missing hour was never fetched again — silently lost for good."""
+
+    def test_internal_gap_is_not_recorded_as_covered(self, cache_manager, sample_config, frozen_now):
+        key = cache_manager.get_cache_key(sample_config)
+        # hourly 00:00, 01:00, 02:00, then a hole at 03:00, then 04:00
+        idx = pd.DatetimeIndex(
+            [ts("2024-01-01 00:00"), ts("2024-01-01 01:00"), ts("2024-01-01 02:00"), ts("2024-01-01 04:00")]
+        )
+        df = pd.DataFrame({"price": [1.0, 2.0, 3.0, 5.0]}, index=idx)
+
+        cache_manager.write_cache(key, df, ts("2024-01-01 00:00"), ts("2024-01-01 05:00"), sample_config)
+
+        missing = cache_manager.find_missing_ranges(key, ts("2024-01-01 00:00"), ts("2024-01-01 05:00"))
+        assert missing == [(ts("2024-01-01 03:00"), ts("2024-01-01 04:00"))]
+
+    def test_gap_is_fetched_and_cached_on_the_next_run(self, cache_manager, sample_config, frozen_now):
+        """The hole found above is refetched next time, and once filled counts as fully covered."""
+        key = cache_manager.get_cache_key(sample_config)
+        idx = pd.DatetimeIndex(
+            [ts("2024-01-01 00:00"), ts("2024-01-01 01:00"), ts("2024-01-01 02:00"), ts("2024-01-01 04:00")]
+        )
+        df = pd.DataFrame({"price": [1.0, 2.0, 3.0, 5.0]}, index=idx)
+        cache_manager.write_cache(key, df, ts("2024-01-01 00:00"), ts("2024-01-01 05:00"), sample_config)
+
+        gap_start, gap_end = ts("2024-01-01 03:00"), ts("2024-01-01 04:00")
+        gap_df = pd.DataFrame({"price": [4.0]}, index=pd.DatetimeIndex([gap_start]))
+        cache_manager.write_cache(key, gap_df, gap_start, gap_end, sample_config)
+
+        assert cache_manager.find_missing_ranges(key, ts("2024-01-01 00:00"), ts("2024-01-01 05:00")) == []
+        result = cache_manager.read_cached_data(key, ts("2024-01-01 00:00"), ts("2024-01-01 05:00"))
+        assert list(result["price"]) == [1.0, 2.0, 3.0, 4.0, 5.0]
+
+    def test_two_internal_gaps_split_into_three_runs(self, cache_manager, sample_config, frozen_now):
+        key = cache_manager.get_cache_key(sample_config)
+        present = ["00:00", "01:00", "03:00", "04:00", "05:00", "07:00"]
+        idx = pd.DatetimeIndex([ts(f"2024-01-01 {h}") for h in present])
+        df = pd.DataFrame({"price": range(len(idx))}, index=idx)
+
+        cache_manager.write_cache(key, df, ts("2024-01-01 00:00"), ts("2024-01-01 08:00"), sample_config)
+
+        missing = cache_manager.find_missing_ranges(key, ts("2024-01-01 00:00"), ts("2024-01-01 08:00"))
+        assert missing == [
+            (ts("2024-01-01 02:00"), ts("2024-01-01 03:00")),
+            (ts("2024-01-01 06:00"), ts("2024-01-01 07:00")),
+        ]
+
+    def test_single_timestamp_response_is_cached(self, cache_manager, sample_config, frozen_now):
+        """A source that returns exactly one row for the requested range used to never be cached at all, because
+        `covered` computed from a zero-length step equalled `start` and failed the `covered > start` check."""
+        key = cache_manager.get_cache_key(sample_config)
+        df = pd.DataFrame({"price": [42.0]}, index=pd.DatetimeIndex([ts("2024-01-01")]))
+
+        covered_end = cache_manager.write_cache(key, df, ts("2024-01-01"), ts("2024-01-08"), sample_config)
+
+        assert covered_end == ts("2024-01-08")
+        assert cache_manager.find_missing_ranges(key, ts("2024-01-01"), ts("2024-01-08")) == []
+        result = cache_manager.read_cached_data(key, ts("2024-01-01"), ts("2024-01-08"))
+        assert list(result["price"]) == [42.0]
+
+    def test_single_timestamp_still_respects_the_unsettled_boundary(self, cache_manager, sample_config, frozen_now):
+        frozen_now("2024-06-10 09:30")
+        key = cache_manager.get_cache_key(sample_config)
+        df = pd.DataFrame({"price": [1.0]}, index=pd.DatetimeIndex([ts("2024-06-01")]))
+
+        covered_end = cache_manager.write_cache(key, df, ts("2024-06-01"), ts("2024-06-12"), sample_config)
+
+        assert covered_end == ts("2024-06-10 09:30").floor("D") - cache_manager.unsettled_period
+
+
 class TestSeams:
     """entsoe H3, empirical F5b: files overlapping at their edges must not produce half-empty rows."""
 

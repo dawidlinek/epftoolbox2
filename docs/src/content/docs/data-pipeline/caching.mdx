@@ -63,11 +63,15 @@ Cache files are Parquet, so the UTC index, dtypes and floats round-trip exactly.
 
 ### What is recorded as cached
 
-A range counts as cached only up to the last timestamp the source returned (plus one step), and never later than
-**two days before today (UTC midnight)**. Data close to now may still be published or completed: actual load and
-generation appear about an hour after delivery (often later), next-day prices after the auction, weather forecasts
-after the model run finishes. The recent part is returned for the current run but fetched again next time, so a
-daily forecast run with `cache=True` always sees the newly published data.
+A range counts as cached only where the source actually returned data, and never later than **two days before
+today (UTC midnight)**. Data close to now may still be published or completed: actual load and generation appear
+about an hour after delivery (often later), next-day prices after the auction, weather forecasts after the model
+run finishes. The recent part is returned for the current run but fetched again next time, so a daily forecast run
+with `cache=True` always sees the newly published data.
+
+A gap in an otherwise regular response — one missing hour in a day of hourly data — is never recorded as covered:
+only the contiguous run(s) of timestamps actually present are cached, so the hole is fetched again on the next run
+instead of silently being treated as covered and then lost for good.
 
 Each recorded range stores when it was retrieved (`retrieved_at` in `metadata.json`). ENTSO-E sometimes revises
 data long after publication; the cache keeps the version it downloaded. Clear it to pick up revisions.
