@@ -672,6 +672,36 @@ class TestFileCache:
         assert len(set(results)) == 1, results
         assert fetches == 1
 
+    def test_refetches_once_the_unsettled_tail_becomes_settled(self, in_tmp, monkeypatch):
+        """pipelines-integration: a fixed `end` beyond "now" used to cache the not-yet-settled tail forever — the
+        per-source cache never records that tail as covered, but the single-file cache had no such boundary at
+        all. Once the settled boundary has moved past it, the file must be refetched, not served stale."""
+        day1, day2 = _utc("2024-06-10 09:00"), _utc("2024-06-13 09:00")
+
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: day1)
+        src1 = RangeSource()
+        DataPipeline().add_source(src1).run("2024-06-01", "2024-06-15", cache="cache.parquet")
+        assert src1.calls  # cold cache: fetched
+
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: day2)
+        src2 = RangeSource()
+        DataPipeline().add_source(src2).run("2024-06-01", "2024-06-15", cache="cache.parquet")
+        assert src2.calls  # day1's settled boundary no longer covers "now" on day2: refetched
+
+    def test_does_not_refetch_when_the_whole_range_was_already_settled(self, in_tmp, monkeypatch):
+        """The staleness check must not defeat caching for a plain historical range."""
+        day1, day2 = _utc("2024-06-10 09:00"), _utc("2024-06-13 09:00")
+
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: day1)
+        src1 = RangeSource()
+        DataPipeline().add_source(src1).run("2024-01-01", "2024-02-01", cache="cache.parquet")
+        assert src1.calls
+
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: day2)
+        src2 = RangeSource()
+        DataPipeline().add_source(src2).run("2024-01-01", "2024-02-01", cache="cache.parquet")
+        assert not src2.calls  # "end" was already settled when fetched on day1 — the file is still trusted
+
 
 class TestDataPipelineSerialization:
     """Test pipeline serialization (save/load)"""

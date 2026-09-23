@@ -18,6 +18,7 @@ from epftoolbox2.data.cache_manager import (
     clip_to_range,
     hold_lock,
     make_file_lock,
+    unsettled_boundary,
 )
 from epftoolbox2.logging import get_logger
 from epftoolbox2._date_utils import resolve_date
@@ -180,7 +181,8 @@ class DataPipeline:
     def _run_sources_with_file_cache(
         self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[str, os.PathLike]
     ) -> pd.DataFrame:
-        """Cache the combined source output in one file, reused only for the same sources and dates."""
+        """Cache the combined source output in one file, reused only for the same sources, dates and settledness
+        (see ``_is_file_cache_stale``)."""
         fingerprint = self._sources_fingerprint(start, end)
         digest = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()[:16]
         path = _resolve_cache_file(cache, digest)
@@ -189,13 +191,21 @@ class DataPipeline:
 
         with hold_lock(make_file_lock(path.with_name(path.name + ".lock")), str(path)):
             meta = _read_json(meta_path)
-            if path.exists() and meta.get("fingerprint") == digest:
+            fresh = path.exists() and meta.get("fingerprint") == digest
+            stale = fresh and _is_file_cache_stale(meta, end)
+
+            if fresh and not stale:
                 try:
                     result = _read_frame(path, meta)
                     logger.info(f"Cache: Loading source data from {path}")
                     return result
                 except Exception as e:  # noqa: BLE001 - an unreadable cache file is a cache miss
                     logger.warning(f"Cache: cannot read {path} ({type(e).__name__}: {e}); fetching again")
+            elif stale:
+                logger.info(
+                    f"Cache: {path} was fetched while part of the range was still unsettled and that boundary "
+                    "has since moved; fetching again"
+                )
             elif path.exists():
                 logger.info(f"Cache: {path} holds data for {_describe_mismatch(meta, fingerprint)}; fetching again")
 
@@ -207,6 +217,7 @@ class DataPipeline:
                 meta = {
                     "fingerprint": digest,
                     "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+                    "settled_at": unsettled_boundary().isoformat(),
                     "columns": [str(c) for c in result.columns],
                     "dtypes": [str(t) for t in result.dtypes],
                     "index_name": result.index.name,
@@ -407,6 +418,26 @@ def _read_json(path: Path) -> Dict[str, Any]:
         return json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
+
+
+def _is_file_cache_stale(meta: Dict[str, Any], end: pd.Timestamp) -> bool:
+    """Whether a matching-fingerprint file cache might now be missing data that has become settled since it was
+    written (pipelines review, single-file cache finding: the per-source cache never records the unsettled tail
+    before "now" as covered, but the single-file cache had no such boundary at all, so a fixed date range whose
+    `end` was in the future cached NaN for not-yet-published rows forever).
+
+    A file is trusted only if either the whole requested range was already settled when it was fetched (`end` was
+    at or before that fetch's settled boundary, so nothing about it could still change), or the settled boundary
+    has not moved since (same day, or `unsettled_period` unchanged). A file written before this check existed has
+    no "settled_at" and is always treated as stale, so it is refetched once after an upgrade.
+    """
+    settled_at = meta.get("settled_at")
+    if settled_at is None:
+        return True
+    settled_at = pd.Timestamp(settled_at)
+    if end <= settled_at:
+        return False
+    return unsettled_boundary() > settled_at
 
 
 def _describe_mismatch(meta: Dict[str, Any], fingerprint: Dict[str, Any]) -> str:

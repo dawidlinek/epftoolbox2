@@ -124,6 +124,14 @@ cache config, size and modification time of input files such as `CsvSource.file_
 end, the epftoolbox2 version and the cache format version. If any of these differ, the file is rebuilt. The CSV
 reader restores the exact floats, dtypes and column names, so a reload equals a fresh run.
 
+It also records the unsettled boundary (two days before "now", same as the source cache) at the moment the file
+was written. A later run with a matching fingerprint is only served from the file if either the whole requested
+range was already past that boundary when it was written (nothing about it could still change), or the boundary
+hasn't moved since. Otherwise the file is rebuilt — without this, a fixed (non-relative) date range whose `end` is
+in the future would cache missing/not-yet-published rows for the unsettled tail once and keep serving that same
+gap forever, even after the real data was published, because nothing about the requested dates or sources ever
+changes to invalidate the fingerprint.
+
 The single-file cache uses the same temporary-file-and-rename writes and a lock (`<file>.lock`), so parallel
 processes pointed at the same file download the data once.
 
