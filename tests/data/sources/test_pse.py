@@ -271,6 +271,17 @@ class TestAsOfPublication:
             "(as_of='publication'); use a larger lag"
         )
 
+    def test_empty_column_hint_for_a_negative_lag_suggests_a_smaller_horizon(self):
+        # lags=[-1] asks for tomorrow's realised demand, which is never published yet at issue time. "use a
+        # larger lag" would be wrong here: a more negative lag looks even further ahead, making it worse.
+        source = PseSource(series=["demand"], issue_time="11:30", lags=[-1])
+        df = self.fetch(source, **{"his-wlk-cal": demand_records("2025-01-05", "2025-01-25")})
+        assert df["pse_demand_d+1"].isna().all()
+        source.logger.warning.assert_any_call(
+            f"PSE: pse_demand_d+1 is empty: none of its {len(df)} values was published by 11:30 on the row's "
+            "day (as_of='publication'); use a lag closer to zero"
+        )
+
     def test_republished_value_is_dropped(self):
         def published(day):
             # 2025-01-14 was re-published a year later: its last version didn't exist on 2025-01-15

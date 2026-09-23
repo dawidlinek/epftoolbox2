@@ -187,7 +187,7 @@ class PseSource(DataSource):
                     v, a = self._align(values, available, index, lag)
                     keep = a <= issue_utc
                     columns[col] = np.where(keep, v, np.nan)
-                    self._log_dropped(col, np.isfinite(v), keep)
+                    self._log_dropped(col, np.isfinite(v), keep, lag)
                     self._log_missing(col, np.isfinite(v))
 
         return pd.DataFrame(columns, index=index)
@@ -350,15 +350,19 @@ class PseSource(DataSource):
         a = by_local_time(available).reindex(keys).to_numpy()
         return v, a
 
-    def _log_dropped(self, column: str, has_value: np.ndarray, keep: np.ndarray) -> None:
+    def _log_dropped(self, column: str, has_value: np.ndarray, keep: np.ndarray, lag: int) -> None:
         n_values = int(has_value.sum())
         n_dropped = int((has_value & ~keep).sum())
         if n_values == 0 or n_dropped == 0:
             return
         if n_dropped == n_values:
+            # lag > 0 (x_d-k) looks further into the past, which is published earlier and more likely known by
+            # the issue time. lag < 0 (x_d+h) looks into the future: a larger |lag| looks even further ahead and
+            # makes it worse, so the fix there is a lag closer to zero (a smaller horizon).
+            hint = "use a larger lag" if lag >= 0 else "use a lag closer to zero"
             self.logger.warning(
                 f"PSE: {column} is empty: none of its {n_values} values was published by {self.issue_time} "
-                f"on the row's day (as_of={self.as_of!r}); use a larger lag"
+                f"on the row's day (as_of={self.as_of!r}); {hint}"
             )
         else:
             self.logger.warning(
