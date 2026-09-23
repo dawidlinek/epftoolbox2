@@ -1,0 +1,42 @@
+---
+title: ResidualLoadTransformer
+description: Load forecast minus wind and solar forecasts
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# ResidualLoadTransformer
+
+Adds the residual load forecast: the load forecast minus the wind and solar generation forecasts.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import ResidualLoadTransformer
+
+df = ResidualLoadTransformer().transform(df)  # adds residual_load_forecast
+```
+
+With `EntsoeSource(type=["load", "generation"])` the inputs are `load_forecast` (A65/A01) and
+`generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` (A69).
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `load` | str | `"load_forecast"` | Load forecast column |
+| `renewables` | List[str] \| None | `None` | Columns to subtract. `None` uses whichever of the three ENTSO-E wind and solar forecast columns are present |
+| `output` | str | `"residual_load_forecast"` | Name of the new column |
+
+## Behaviour
+
+- Only forecast columns are accepted: a column whose name doesn't contain "forecast" raises `ValueError`, because
+  realised load or generation would make the result look ahead.
+- A missing value in any input gives a missing result; a missing forecast is not treated as zero.
+
+<Aside type="caution">
+  The result is only as available as its inputs. ENTSO-E's day-ahead wind and solar forecast for D+1 may be
+  published as late as 18:00 on D, so `residual_load_forecast_d+1` in a forecast issued in the morning of D assumes
+  it was available in time. Forecasts for D+2 and later are published a day before their delivery day, so they
+  are not known on D at all.
+</Aside>

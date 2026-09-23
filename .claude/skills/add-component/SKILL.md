@@ -21,7 +21,7 @@ A component is finished only when all of these places agree. Work through them i
 
 ## Category specifics
 - **Source.** `fetch(start, end)` returns a UTC-indexed DataFrame. Implement `_validate_config()`. `get_cache_config()` must return `"source_type"` plus every parameter that affects the output. Tests mock HTTP; a real-API test is marked `@pytest.mark.integration`. `_serialize_component` skips attributes named `session`, `console`, `logger`, `lat` and `lon`.
-- **Transformer.** `transform(df) -> df`. Never drop or reorder rows silently. Time shifts should follow local calendar days (see the known issue in `.claude/rules/data.md`).
+- **Transformer.** `transform(df) -> df`. Never drop or reorder rows silently. Time shifts should follow local calendar days: use `shift_calendar_days` from `epftoolbox2/_date_utils.py` (semantics in `.claude/rules/data.md`).
 - **Validator.** `validate(df) -> ValidationResult`. Use errors for data that can't be used and warnings for data that is suspicious.
 - **Model.** Implement `_fit_predict(train_x, train_y, test_x) -> (prediction, coefficients)` on standardised data. Every hyperparameter must be in `__init__` **and** returned by `_model_kwargs`, because workers rebuild the model from `_model_kwargs`. Stochastic models take a `random_state`. `predictors` stays the first parameter. Add the model to `tests/test_golden_metrics.py` so its numbers are pinned.
 - **Evaluator.** Set a class attribute `name` and implement `compute(df, **kwargs) -> float`. Relative metrics read the benchmark from `kwargs["model_dfs"]` and must compare on aligned forecast keys.

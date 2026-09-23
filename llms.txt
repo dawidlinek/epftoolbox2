@@ -228,24 +228,149 @@ Creates lagged features for time series. Positive lags look back (past), negativ
 from epftoolbox2.data.transformers import LagTransformer
 
 transformer = LagTransformer(
-    columns=["load_actual", "price"],  # Required. Column(s) to lag
-    lags=[1, 2, 7],                    # Required. Lag periods. Accepts list, range, or single int
-    freq="day",                        # Required. Unit for lags
+    columns=["load_actual", "price"],  # Column(s) to lag (default: None = all columns, for looking back only)
+    lags=[1, 2, 7],                    # Lag periods (default: 1). Accepts list, range, single int, numpy ints
+    freq="day",                        # Time unit (default: "1h")
 )
 ```
 
 **Frequency options:**
-- `"day"`, `"days"`, `"d"`, `"1D"` → 1 day
-- `"hour"`, `"hours"`, `"h"`, `"1h"` → 1 hour
-- `"minute"`, `"minutes"`, `"min"`, `"1min"` → 1 minute
-- `"second"`, `"seconds"`, `"s"`, `"1s"` → 1 second
+- `"day"`, `"days"`, `"d"`, `"1D"` → 1 local calendar day (whole days such as `"2D"` also count calendar days)
+- `"hour"`, `"hours"`, `"h"`, `"1h"` → 1 hour of elapsed time
+- `"minute"`, `"minutes"`, `"min"`, `"1min"` → 1 minute of elapsed time
+- `"second"`, `"seconds"`, `"s"`, `"1s"` → 1 second of elapsed time
+- other strings that aren't whole days (`"15min"`, `"24h"`) → elapsed time, named in h/min/s
+
+**Day lags follow local calendar days**, not 24-hour offsets: `price_d-1` at 10:00 is 10:00 on the previous local
+date, also across DST switches. The hour skipped in spring gives NaN; both occurrences of the repeated autumn hour
+look back to that hour on the previous day, and the day after the switch looks back to the first occurrence. A NaN
+lag makes the model skip that forecast (e.g. 02:00 on the day after the spring switch with `price_d-1`). Run
+`LagTransformer` after `TimezoneTransformer`; with day lags on a UTC index it warns.
 
 **Output column naming:** `{column}_{unit}-{lag}`
 - Example with `freq="day"`, lag=1: `load_actual_d-1`
-- Example with `freq="day"`, lag=-7: `load_actual_d+7` (forward look)
+- Example with `freq="day"`, lag=-7: `load_actual_d+7` (value recorded for D+7; only safe for columns known in advance, e.g. calendar features)
 - Example with `freq="hour"`: `price_h-24`, `price_h-168`
+- Example with `freq="15min"`, lag=96: `price_h-24` (elapsed time is never named `d`)
+- A name that already exists in the frame raises `ValueError` instead of creating a duplicate column.
 
-**Note:** `range(-7, 1)` is accepted and serialized correctly to YAML (converted to list internally).
+**Note:** `range(-7, 1)` is accepted and serialized correctly to YAML (converted to a list of ints). Lag 0 is skipped (no `x_d-0` copy of the column).
+
+---
+
+## DSTNormalizeTransformer
+
+Optional. Gives every local day exactly 24 slots (96 for 15-min data) on a naive wall-clock index, the convention of the original epftoolbox (Lago et al., 2021).
+
+```python
+from epftoolbox2.data.transformers import DSTNormalizeTransformer
+
+transformer = DSTNormalizeTransformer(
+    freq="1h",   # Slot length (default: "1h"); "15min" gives 96 slots a day. Must divide a day
+    tz=None,     # Time zone to convert to first (default: None = index is already local time)
+)
+```
+
+**Behavior:**
+- Input: a time-zone-aware local-time index (after `TimezoneTransformer`, or pass `tz`). Naive and UTC indexes raise `ValueError`, as do timestamps off the `freq` grid.
+- Output: naive local wall-clock index plus an `is_dst_adjusted` column (1 on synthetic slots, else 0).
+- Autumn switch: the two occurrences of the repeated hour are averaged into one slot.
+- Spring switch: the skipped hour (all four quarter-hours for 15-min data) is the mean of the slot before and the slot after it, on the same local day.
+- A missing value in either input gives a missing result. Non-numeric columns take the first occurrence / the slot before.
+- Gaps not caused by DST and partial days at the ends are left alone. No row uses data from a later day.
+- Order: Timezone → Resample → DSTNormalize → Lag. Don't run `TimezoneTransformer` afterwards (a naive index is read as UTC).
+- On flagged slots the values are synthetic, including model targets and "actuals": exclude those (target_date, hour) keys from error metrics for every model, or report them separately.
+
+---
+
+## DailyProfileTransformer
+
+Copies each local day's values of a column onto every row of that day: `price` becomes `price_h00` .. `price_h23`
+(24 columns, 96 for 15-minute data). Lagging profile columns by days then gives cross-hour inputs such as "all 24
+prices of the previous day" in the one-model-per-hour setup.
+
+```python
+from epftoolbox2.data.transformers import DailyProfileTransformer
+
+transformer = DailyProfileTransformer(
+    columns=["price"],  # Required. Column name(s) to spread
+    freq="1h",           # Optional. Slot length: "1h" -> 24 columns, "15min" -> 96
+)
+```
+
+**Behavior:**
+- A row of day D only gets values of day D. Whether they are known when a forecast is issued on D depends on the column (day-ahead prices/forecasts: yes; realised values: only lagged, e.g. `load_actual_h05_d-1`).
+- On a time-zone-aware index the spring-switch day's skipped slot is NaN and the autumn-switch day's repeated slot takes its first occurrence; a warning suggests running `DSTNormalizeTransformer` first for complete profiles.
+- On a UTC index the "days" are UTC days, and the transformer warns.
+- A name that already exists in the frame raises `ValueError`.
+
+---
+
+## DailyStatsTransformer
+
+Per local day minimum, maximum, mean and last value of a column, on every row of that day.
+
+```python
+from epftoolbox2.data.transformers import DailyStatsTransformer
+
+transformer = DailyStatsTransformer(
+    columns="price",                        # Required. Column name(s) to summarise
+    stats=["min", "max", "mean", "last"],    # Optional. Any subset of these four
+    freq="1h",                               # Optional. Slot length, used to decide when a day is complete
+)
+```
+
+**Output column naming:** `{column}_day_min`, `{column}_day_max`, `{column}_day_mean`, `{column}_day_last` (the value in the day's last slot, 23:00 for hourly data).
+
+**Behavior:**
+- A day gets statistics only when every slot it has (23, 24 or 25 hours on a time-zone-aware index, 24 after `DSTNormalizeTransformer`) holds a value; incomplete days, including partial days at the ends of the data, get NaN.
+- Never a rolling window into D+1: a row of D only gets statistics of D.
+- On a UTC index the "days" are UTC days, and the transformer warns.
+
+---
+
+## ResidualLoadTransformer
+
+Residual load forecast: load forecast minus wind and solar generation forecasts.
+
+```python
+from epftoolbox2.data.transformers import ResidualLoadTransformer
+
+transformer = ResidualLoadTransformer(
+    load="load_forecast",         # Optional. Load forecast column
+    renewables=None,              # Optional. Wind/solar forecast columns; None = whichever ENTSO-E ones are present
+    output="residual_load_forecast",  # Optional. Name of the new column
+)
+```
+
+**Behavior:**
+- Only forecast columns are accepted: a column whose name doesn't contain "forecast" raises `ValueError`, because realised load or generation would make the result look ahead.
+- A missing value in any input gives a missing result (a missing forecast is not treated as zero).
+- `renewables=None` looks for `generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` and uses whichever are present (at least one must be).
+
+---
+
+## SpikeFlagTransformer
+
+Flags values far from the same slot's recent history: `{column}_spike` is 1 for a spike, 0 otherwise, NaN when unknown.
+
+```python
+from epftoolbox2.data.transformers import SpikeFlagTransformer
+
+transformer = SpikeFlagTransformer(
+    columns="price",   # Required. Column name(s) to flag; adds `{column}_spike` for each
+    window=28,          # Optional. Number of previous calendar days in the reference band
+    k=3.0,               # Optional. Band half-width in scaled MADs
+    min_periods=None,    # Optional. Past values needed for a flag; None = half the window
+    side="both",         # Optional. "both" | "upper" | "lower"
+)
+```
+
+**Behavior:**
+- For a row at slot s on local day D, the reference band is median +/- k*MAD of the column's values at slot s on the `window` calendar days before D (D itself excluded, like `closed="left"`). MAD is scaled by 1.4826 to estimate the standard deviation of normal data.
+- The flag is NaN when the value is missing or fewer than `min_periods` past values exist (e.g. the first days of the data).
+- On the autumn DST switch day both occurrences of the repeated slot are compared against the same band, built from the first occurrence's history.
+- On a UTC index the "days" are UTC days, and the transformer warns.
 
 ---
 
@@ -369,6 +494,40 @@ predictors = [
 ```
 
 **YAML serialization constraint:** Callables cannot be serialized to YAML. Use string templates (`"col_d+{horizon}"`) for pipelines intended to be saved with `ModelPipeline.save()` or `Workflow`.
+
+## Predictor Presets
+
+`epftoolbox2.presets` returns the predictor lists of two literature benchmark models, as plain `{horizon}`-template
+strings (YAML-safe). The paper indexes inputs by the day being forecast, d; this library indexes columns by the
+issue day D of the row, with horizon h targeting D+h.
+
+```python
+from epftoolbox2.presets import expert_predictors, lear_predictors, profile_columns, WEEKDAYS
+
+lear_predictors(
+    exogenous=["load_forecast"],  # Required. Exogenous series (their DailyProfileTransformer profile is used)
+    price="price",                # Optional. Day-ahead price column
+    freq="1h",                    # Optional. Slot length ("1h" -> 24 slots, "15min" -> 96)
+    calendar_prefix="",           # Optional. Prefix of the weekday dummy columns
+)  # -> 96 + 48*len(exogenous) + 7 predictors (Lago, Marcjasz, De Schutter & Weron 2021)
+
+expert_predictors(
+    exogenous=("load_forecast",),  # Optional. Exogenous series, used undated (day D value only)
+    price="price",                 # Optional. Day-ahead price column
+    weekdays=WEEKDAYS,             # Optional. Which weekday dummy columns to include
+    calendar_prefix="",            # Optional. Prefix of the weekday dummy columns
+)  # per-hour predictors (Ziel & Weron 2018)
+
+profile_columns("price", freq="1h")  # -> ["price_h00", ..., "price_h23"], the names DailyProfileTransformer creates
+```
+
+**Behavior:**
+- Both presets need `DailyProfileTransformer` (and for `expert_predictors`, `DailyStatsTransformer`) run on the price and exogenous columns, plus `LagTransformer` for the d-1/d-2/d-7 price lags and the horizon-lead exogenous/weekday columns; see the `docs/model-pipeline/presets.mdx` page for the full pipeline.
+- `lear_predictors` returns all slot prices of d-1, d-2, d-3 and d-7; all slot values of each exogenous series for d, d-1 and d-7; seven weekday dummies of d.
+- `expert_predictors` returns the same slot's price on d-1, d-2 and d-7; the min/max/last price of d-1; each exogenous series for d; weekday dummies of d. `OLSModel` (no intercept) needs the default `weekdays=WEEKDAYS`; pass `weekdays=("monday", "saturday", "sunday")` for the original set with an intercept-fitting model such as `LassoCVModel`.
+- An unknown weekday name raises `ValueError`.
+
+---
 
 ## OLSModel
 

@@ -28,7 +28,8 @@ epftoolbox2.verify()
 ## Key Features
 
 - **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (weather forecasts), Calendar (holidays, weekday)
-- **Transformers**: Resample, Timezone conversion, Lag features
+- **Transformers**: Resample, Timezone conversion, Lag features (local calendar days), DST normalisation to 24 slots a day (DSTNormalize), daily profile and daily min/max/mean/last stats (DailyProfile, DailyStats), residual load forecast (ResidualLoad), rolling spike flags (SpikeFlag)
+- **Presets**: `epftoolbox2.presets` — ready-made predictor lists for the LEAR and expert-model benchmarks from the literature
 - **Validators**: Null checks, Continuity checks, EDA statistics
 - **Models**: OLS, LassoCV
 - **Evaluators**: MAE

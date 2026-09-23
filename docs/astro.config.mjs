@@ -65,6 +65,7 @@ export default defineConfig({
                         { label: 'Serialization', link: '/model-pipeline/serialization/' },
                         { label: 'Forecasting', link: '/model-pipeline/forecasting/' },
                         { label: 'Information Set', link: '/model-pipeline/information-set/' },
+                        { label: 'Predictor Presets', link: '/model-pipeline/presets/' },
                     ],
                 },
                 {

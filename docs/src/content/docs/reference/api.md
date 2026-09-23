@@ -169,9 +169,9 @@ class ResampleTransformer(Transformer):
 class LagTransformer(Transformer):
     def __init__(
         self,
-        columns: Union[str, List[str], None] = None,
-        lags: Union[int, List[int], range] = 1,  # range and lists both accepted
-        freq: str = "1h",
+        columns: Union[str, List[str], None] = None,  # None = all columns
+        lags: Union[int, List[int], range] = 1,  # range and lists both accepted; lag 0 is skipped
+        freq: str = "1h",  # "day"/"1D" = local calendar days; hours and minutes = elapsed time
     ): ...
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 

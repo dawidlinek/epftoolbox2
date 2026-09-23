@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.data.transformers import LagTransformer
 from epftoolbox2.evaluators import rMAEEvaluator
 from epftoolbox2.models import OLSModel
 from epftoolbox2.results.report import EvaluationReport
@@ -20,20 +19,6 @@ from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 def single_process(monkeypatch):
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
-
-
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="LagTransformer shifts by elapsed time, not local calendar days"
-)
-def test_lag_transformer_day_lag_keeps_wall_clock_hour_across_dst():
-    index = pd.date_range("2024-03-29 22:00", "2024-04-01 00:00", freq="1h", tz="UTC").tz_convert("Europe/Warsaw")
-    df = pd.DataFrame({"price": np.arange(len(index), dtype=float)}, index=index)
-
-    out = LagTransformer(columns=["price"], lags=[1], freq="day").transform(df)
-
-    on_switch_day = pd.Timestamp("2024-03-31 10:00", tz="Europe/Warsaw")
-    day_before = pd.Timestamp("2024-03-30 10:00", tz="Europe/Warsaw")
-    assert out.loc[on_switch_day, "price_d-1"] == df.loc[day_before, "price"]
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="rMAE divides MAEs computed on different forecast sets")

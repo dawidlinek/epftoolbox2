@@ -46,6 +46,11 @@ COMPONENT_REGISTRY = {
         "TimezoneTransformer": "epftoolbox2.data.transformers.timezone",
         "ResampleTransformer": "epftoolbox2.data.transformers.resample",
         "LagTransformer": "epftoolbox2.data.transformers.lag",
+        "DSTNormalizeTransformer": "epftoolbox2.data.transformers.dst_normalize",
+        "DailyProfileTransformer": "epftoolbox2.data.transformers.daily_profile",
+        "DailyStatsTransformer": "epftoolbox2.data.transformers.daily_stats",
+        "ResidualLoadTransformer": "epftoolbox2.data.transformers.residual_load",
+        "SpikeFlagTransformer": "epftoolbox2.data.transformers.spike_flag",
     },
     "validators": {
         "ContinuityValidator": "epftoolbox2.data.validators.continuity",

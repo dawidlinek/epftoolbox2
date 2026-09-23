@@ -479,9 +479,10 @@ class TestLagTransformerInit:
             LagTransformer(columns=["price"], lags=[])
 
     def test_init_no_columns(self):
-        """Test initialization with no columns raises error"""
+        """None means all columns; an empty list raises"""
+        assert LagTransformer(columns=None).columns is None
         with pytest.raises(ValueError, match="At least one column"):
-            LagTransformer(columns=None)
+            LagTransformer(columns=[])
 
 
 class TestLagTransformerTransform:

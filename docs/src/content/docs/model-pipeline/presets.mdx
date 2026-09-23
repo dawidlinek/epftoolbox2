@@ -1,0 +1,136 @@
+---
+title: Predictor Presets
+description: LEAR and expert-model inputs in this library's column naming
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# Predictor Presets
+
+`epftoolbox2.presets` returns the inputs of two standard benchmark models as predictor lists. The lists are plain
+strings with a `{horizon}` template, so they can be saved in a model pipeline YAML.
+
+```python
+from epftoolbox2.presets import expert_predictors, lear_predictors, profile_columns, WEEKDAYS
+
+lear = lear_predictors(exogenous=["load_forecast", "residual_load_forecast"])  # 247 inputs
+expert = expert_predictors(exogenous=["load_forecast"])
+```
+
+| Function | Parameters (defaults) | Returns |
+|----------|-----------------------|---------|
+| `lear_predictors` | `exogenous` (required), `price="price"`, `freq="1h"`, `calendar_prefix=""` | LEAR inputs (Lago et al. 2021) |
+| `expert_predictors` | `exogenous=("load_forecast",)`, `price="price"`, `weekdays=WEEKDAYS`, `calendar_prefix=""` | Expert-model inputs (Ziel & Weron 2018) |
+| `profile_columns` | `column`, `freq="1h"` | The names `DailyProfileTransformer` creates, e.g. `price_h00` … `price_h23` |
+
+## From "Day d" to the Issue Day
+
+Both are day-ahead models. The papers index inputs by the day being forecast, d. This library indexes a row by the
+day D the forecast is issued on, and horizon h targets D+h. For h = 1 (d = D+1):
+
+| Paper | Column on the row of D | Built by |
+|-------|------------------------|----------|
+| p(d-1, ·) | `price`, `price_h00` … `price_h23` | `DailyProfileTransformer` |
+| p(d-2, ·) | `price_d-1`, `price_h05_d-1` | `LagTransformer(lags=[1], freq="day")` |
+| p(d-3, ·) | `price_h05_d-2` | `LagTransformer(lags=[2], freq="day")` |
+| p(d-7, ·) | `price_d-6`, `price_h05_d-6` | `LagTransformer(lags=[6], freq="day")` |
+| min, max, last price of d-1 | `price_day_min`, `price_day_max`, `price_day_last` | `DailyStatsTransformer` |
+| x(d, ·) | `x_d+{horizon}`, `x_h05_d+{horizon}` | `LagTransformer(lags=[-1, ..., -H], freq="day")` |
+| x(d-1, ·) | `x`, `x_h05` | `DailyProfileTransformer` |
+| x(d-7, ·) | `x_h05_d-6` | `LagTransformer(lags=[6], freq="day")` |
+| weekday of d | `is_monday_d+{horizon}`, … | `CalendarSource(weekday="onehot")` + `LagTransformer(lags=[-1, ..., -H])` |
+
+<Aside type="caution">
+  **What the presets assume is known when the forecast is issued on D:**
+  - D's day-ahead prices (`price`, `price_h05`), published on D-1 around 13:00. The model's training targets still
+    end at D-1, as always.
+  - The exogenous series for D+1. Use day-ahead forecasts, never realised values. ENTSO-E's load forecast for
+    D+1 is published around 10:00 on D and the wind and solar forecast possibly as late as 18:00, so it depends on
+    your issue time.
+  - For h > 1 the price inputs stay anchored at the issue day, which gives the latest prices available.
+    `x_d+{horizon}` must then really be known h days ahead, and ENTSO-E's day-ahead forecasts are not. Run the
+    presets with `horizon=1`, or give them exogenous series that are published far enough ahead.
+</Aside>
+
+## LEAR
+
+`lear_predictors` lists all slot prices of d-1, d-2, d-3 and d-7, all slot values of each exogenous series for d,
+d-1 and d-7, and seven weekday dummies of d. With hourly data and two exogenous series that is
+96 + 144 + 7 = 247 inputs, as in the paper. Every hour's model gets the same inputs.
+
+```python
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+from epftoolbox2.data.sources import EntsoeSource, CalendarSource
+from epftoolbox2.data.transformers import (
+    TimezoneTransformer, ResampleTransformer, DSTNormalizeTransformer, ResidualLoadTransformer,
+    DailyProfileTransformer, LagTransformer,
+)
+from epftoolbox2.models import LassoCVModel
+from epftoolbox2.presets import WEEKDAYS, lear_predictors, profile_columns
+
+EXOGENOUS = ["load_forecast", "residual_load_forecast"]
+H = 1  # day-ahead
+
+data = (
+    DataPipeline()
+    .add_source(EntsoeSource("DE_LU", api_key="YOUR_KEY", type=["load", "generation", "price"]))
+    .add_source(CalendarSource("DE", weekday="onehot", holidays=False))
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Berlin"))
+    .add_transformer(ResampleTransformer(freq="1h"))
+    .add_transformer(DSTNormalizeTransformer(freq="1h"))  # 24 slots a day, so every profile is complete
+    .add_transformer(ResidualLoadTransformer())
+    .add_transformer(DailyProfileTransformer(columns=["price", *EXOGENOUS]))
+    .add_transformer(LagTransformer(columns=profile_columns("price"), lags=[1, 2, 6], freq="day"))
+    .add_transformer(
+        LagTransformer(
+            columns=[c for x in EXOGENOUS for c in profile_columns(x)],
+            lags=[*range(-1, -H - 1, -1), 6],
+            freq="day",
+        )
+    )
+    .add_transformer(LagTransformer(columns=[f"is_{d}" for d in WEEKDAYS], lags=list(range(-1, -H - 1, -1)), freq="day"))
+)
+df = data.run("2022-01-01", "2024-12-31", cache=True)
+
+report = (
+    ModelPipeline()
+    .add_model(LassoCVModel(lear_predictors(exogenous=EXOGENOUS), training_window=728, name="LEAR"))
+    .run(df, test_start="2024-01-01", test_end="2024-12-30", target="price", horizon=H)
+)
+```
+
+## Expert Model
+
+`expert_predictors` lists, for each hour's model: the same hour's price on d-1, d-2 and d-7, the minimum, maximum
+and last price of d-1, each exogenous series for d, and weekday dummies of d.
+
+Ziel & Weron use an intercept plus Monday, Saturday and Sunday dummies. `OLSModel` fits without an intercept and
+takes the level from a full set of one-hot dummies, so the default is all seven weekdays; this spans the intercept
+and the three dummies. Pass `weekdays=("monday", "saturday", "sunday")` for the original set with a model that fits
+an intercept, such as `LassoCVModel`.
+
+```python
+from epftoolbox2.data.transformers import DailyStatsTransformer
+from epftoolbox2.models import OLSModel
+from epftoolbox2.presets import expert_predictors
+
+# after TimezoneTransformer, ResampleTransformer and DSTNormalizeTransformer as above:
+steps = [
+    LagTransformer(columns="price", lags=[1, 6], freq="day"),
+    DailyStatsTransformer(columns="price", stats=["min", "max", "last"]),
+    LagTransformer(columns=["load_forecast"], lags=[-1], freq="day"),
+    LagTransformer(columns=[f"is_{d}" for d in WEEKDAYS], lags=[-1], freq="day"),
+]
+model = OLSModel(expert_predictors(exogenous=["load_forecast"]), training_window=365, name="Expert")
+```
+
+## Checking the Data
+
+Every name a preset returns, after replacing `{horizon}`, must be a column of the data frame:
+
+```python
+predictors = lear_predictors(exogenous=EXOGENOUS)
+missing = [p.replace("{horizon}", str(h)) for h in range(1, H + 1) for p in predictors]
+missing = [c for c in missing if c not in df.columns]
+assert not missing, missing[:10]
+```

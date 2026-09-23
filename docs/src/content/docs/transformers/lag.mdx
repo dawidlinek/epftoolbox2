@@ -24,19 +24,52 @@ df = transformer.transform(df)
 
 ## Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `columns` | List[str] | Yes | Column names to create lags for |
-| `lags` | List[int] | Yes | Lag periods (positive=past, negative=future) |
-| `freq` | str | Yes | Time unit for lags |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `columns` | str \| List[str] \| None | `None` | Column names to create lags for. `None` lags every column of the input frame, and is allowed with backward (positive) lags only |
+| `lags` | int \| List[int] \| range | `1` | Lag periods (positive=past, negative=future). Any integer type, including numpy integers. Lag 0 is skipped: it is the column itself |
+| `freq` | str | `"1h"` | Time unit for lags |
 
 ## Frequency Options
 
-| Input | Aliases | Time Delta |
-|-------|---------|------------|
-| `"day"` | `"days"`, `"d"` | 24 hours |
-| `"hour"` | `"hours"`, `"h"` | 1 hour |
-| `"minute"` | `"minutes"`, `"min"` | 1 minute |
+| Input | Aliases | Shift |
+|-------|---------|-------|
+| `"day"` | `"days"`, `"d"`, `"1d"`, `"1D"` | 1 local calendar day |
+| `"hour"` | `"hours"`, `"h"`, `"1h"` | 1 hour of elapsed time |
+| `"minute"` | `"minutes"`, `"min"`, `"1min"` | 1 minute of elapsed time |
+| `"second"` | `"seconds"`, `"s"`, `"1s"` | 1 second of elapsed time |
+
+Other pandas frequency strings work too. Whole days written in day units (`"2D"`, `"7D"`) shift by calendar days
+and are named `d`; everything else (`"15min"`, `"24h"`) shifts by elapsed time and is named in `h`, `min` or `s`.
+
+---
+
+## Day Lags and DST
+
+Day lags shift by **local calendar days**, not by 24 hours: `price_d-1` at 10:00 is the price at 10:00 on the
+previous local date, even when one of the two days had 23 or 25 hours because of a DST switch. Hour lags stay
+elapsed time, so `price_h-24` at 10:00 on the spring switch day is the price at 09:00 the day before.
+
+On the switch days themselves:
+
+| Row | `price_d-1` |
+|-----|-------------|
+| Day after the spring switch, 02:00 | NaN: 02:00 didn't exist on the switch day |
+| Autumn switch day, 02:00 (both occurrences) | 02:00 of the day before |
+| Day after the autumn switch, 02:00 | the first 02:00 of the switch day |
+
+When both days repeat the hour (a 364-day lag between two autumn switch days), the first occurrence maps to the
+first and the second to the second.
+
+A NaN predictor makes the model skip that forecast, so a model using `price_d-1` and `price_d-2` produces no
+02:00 forecast on the two days after each spring switch. To keep every forecast, give each day 24 slots with
+[`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/) before lagging.
+
+<Aside type="caution">
+  Day lags need a local-time index, so add `LagTransformer` **after** `TimezoneTransformer`. On a UTC index
+  "a day" is a UTC day and local hours drift by one around every DST switch; `LagTransformer` warns when that
+  happens. A naive index is taken as local wall-clock time without DST.
+</Aside>
 
 ---
 
@@ -47,6 +80,11 @@ df = transformer.transform(df)
 | Positive (1) | `load_actual_d-1` (yesterday) |
 | Positive (7) | `load_actual_d-7` (week ago) |
 | Negative (-1) | `is_holiday_d+1` (tomorrow) |
+| `freq="hour"`, lag 24 | `price_h-24` (24 hours earlier) |
+| `freq="15min"`, lag 96 | `price_h-24` (elapsed time, never `price_d-1`) |
+
+If a lag column would get the name of a column that already exists (for example, running the same lag twice),
+`transform` raises a `ValueError` instead of creating a duplicate column.
 
 ---
 
@@ -82,8 +120,11 @@ df = transformer.transform(df)
 # New columns: is_holiday_d+1, is_holiday_d+2, is_holiday_d+3
 ```
 
-<Aside type="tip">
-  Use negative lags for calendar features (holidays, weekends) that are known in advance.
+<Aside type="caution">
+  A negative lag looks up the value that was eventually recorded for that future day, not what was known on
+  the day of the row. Use it for columns known in advance, such as calendar features (holidays, weekdays). For
+  forecasts, check when they're published: ENTSO-E's day-ahead load forecast for D+k is published on D+k-1, so
+  `load_forecast_d+2` and later are not known on D.
 </Aside>
 
 ---
