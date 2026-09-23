@@ -239,6 +239,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": False,
             "kind": "confirm",
         },
+        {
+            "name": "max_null_frac",
+            "description": "Largest share of nulls allowed per column (0-1)",
+            "required": False,
+            "default": 0.0,
+            "kind": "float",
+        },
     ],
     "EdaValidator": [
         {
