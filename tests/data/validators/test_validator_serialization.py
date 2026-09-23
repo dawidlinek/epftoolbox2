@@ -9,6 +9,7 @@ from epftoolbox2.data.validators import (
     EdaValidator,
     FreshnessValidator,
     NullCheckValidator,
+    PlausibilityValidator,
 )
 from epftoolbox2.pipelines import DataPipeline
 
@@ -21,6 +22,10 @@ VALIDATORS = [
         columns=["price"], start="2024-01-01", end="today_d-1", freq="1h", min_coverage=0.99, max_gap="6h"
     ),
     FreshnessValidator(columns=["price"], expected_end="today_d+1", max_delay="3h"),
+    PlausibilityValidator(
+        ranges={"price": (-500, 3000), "load*": [0, None]}, max_constant_run=12, constant_columns=["price"]
+    ),
+    PlausibilityValidator(ranges={}, max_constant_run=None),
 ]
 
 

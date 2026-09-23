@@ -353,6 +353,23 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    # `ranges` (a {pattern: [min, max]} mapping) is set in YAML; the wizard uses the defaults.
+    "PlausibilityValidator": [
+        {
+            "name": "max_constant_run",
+            "description": "Longest run of identical values before a warning (rows)",
+            "required": False,
+            "default": 24,
+            "kind": "int",
+        },
+        {
+            "name": "constant_columns",
+            "description": "Columns checked for constant runs (blank = price* and load_actual*)",
+            "required": False,
+            "default": "",
+            "kind": "column_select",
+        },
+    ],
     "OLSModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "OLS", "kind": "text"},
         {
@@ -593,6 +610,7 @@ _VALIDATORS = [
     "DSTStructureValidator",
     "CoverageValidator",
     "FreshnessValidator",
+    "PlausibilityValidator",
 ]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator"]

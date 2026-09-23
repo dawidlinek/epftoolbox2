@@ -32,6 +32,7 @@ COMPONENT_REGISTRY = {
         "DSTStructureValidator": "epftoolbox2.data.validators.dst_structure",
         "CoverageValidator": "epftoolbox2.data.validators.coverage",
         "FreshnessValidator": "epftoolbox2.data.validators.freshness",
+        "PlausibilityValidator": "epftoolbox2.data.validators.plausibility",
     },
 }
 

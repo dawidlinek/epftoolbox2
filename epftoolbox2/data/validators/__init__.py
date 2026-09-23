@@ -6,6 +6,7 @@ from .eda import EdaValidator
 from .dst_structure import DSTStructureValidator
 from .coverage import CoverageValidator
 from .freshness import FreshnessValidator
+from .plausibility import PlausibilityValidator
 
 __all__ = [
     "Validator",
@@ -17,4 +18,5 @@ __all__ = [
     "DSTStructureValidator",
     "CoverageValidator",
     "FreshnessValidator",
+    "PlausibilityValidator",
 ]
