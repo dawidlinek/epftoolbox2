@@ -296,6 +296,10 @@ class OpenMeteoSource(DataSource):
             raise ValueError(f"publication_delay_h must be a number of hours between 0 and 48, got {delay!r}")
 
         if self.vintage == "valid_time":
+            self.logger.warning(
+                f"{self._label}: vintage='valid_time' uses model runs published after the issue time (look-ahead). "
+                "Use it only to reproduce results of epftoolbox2 <= 2.2."
+            )
             self._buckets = list(range(1, self.horizon + 1))
             return True
 

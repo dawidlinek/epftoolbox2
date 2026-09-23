@@ -250,6 +250,14 @@ class TestIssueTimeVintage:
         late = from_hours(df["temperature_2m_d+1"]) + pd.Timedelta(hours=DELAY_H) > issue_times(df.index)
         assert late.any()
 
+    def test_legacy_valid_time_vintage_warns_at_construction(self, caplog):
+        # A cache hit never calls fetch(), so the warning must not depend on it: it must fire when the source is
+        # built, not only when data is actually downloaded.
+        logging.getLogger("epftoolbox2.data.sources.open_meteo").propagate = True
+        with caplog.at_level(logging.WARNING, logger="epftoolbox2.data.sources.open_meteo"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01, vintage="valid_time")
+        assert "look-ahead" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Calendar-day alignment across DST
