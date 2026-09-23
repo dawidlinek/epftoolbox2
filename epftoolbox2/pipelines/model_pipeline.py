@@ -63,10 +63,14 @@ class ModelPipeline:
     ) -> EvaluationReport:
         if not self.models:
             raise ValueError("At least one model is required")
+        self._check_model_names()
+        # Check every model's inputs before running any, so a bad predictor in the last model fails in seconds.
+        for model in self.models:
+            model._check_inputs(data, target, horizon, freq)
 
         refs: dict[str, ModelResultRef] = {}
         for model in self.models:
-            save_to = f"{save_dir}/{model.name.lower().replace(' ', '_')}.jsonl" if save_dir else None
+            save_to = str(self.results_path(save_dir, model)) if save_dir else None
             ref = model.run(
                 data=data,
                 test_start=test_start,
@@ -87,6 +91,20 @@ class ModelPipeline:
                 exporter.export(report)
 
         return report
+
+    @staticmethod
+    def results_path(save_dir: Union[str, Path], model: BaseModel) -> Path:
+        """The JSONL file a model's results are written to inside `save_dir`."""
+        return Path(save_dir) / f"{model.name.lower().replace(' ', '_')}.jsonl"
+
+    def _check_model_names(self) -> None:
+        names = [m.name for m in self.models]
+        stems = [self.results_path("", m).name for m in self.models]
+        if len(set(names)) != len(names) or len(set(stems)) != len(stems):
+            raise ValueError(
+                f"Model names must be unique (also after lower-casing and replacing spaces, since they name the "
+                f"result files): {names}"
+            )
 
     def _serialize_component(self, component: Any) -> Dict[str, Any]:
         class_name = type(component).__name__
