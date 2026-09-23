@@ -139,6 +139,12 @@ class CalendarSource(DataSource):
                  regimes: Union[bool, Dict[str, str]] = False): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 
+class SchoolHolidaysSource(DataSource):
+    def __init__(self, country: str, subdivisions: Union[str, List[str]] = None,
+                 weights: Union[Dict[str, float], List[float]] = None,
+                 timezone: str = None, prefix: str = "", freq: str = "1h"): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
+
 class CsvSource(DataSource):
     def __init__(self, file_path: str, datetime_column: str = "datetime",
                  columns: List[str] = None, prefix: str = "",

@@ -201,6 +201,45 @@ source = CalendarSource(
 
 ---
 
+## SchoolHolidaysSource
+
+School holiday flags from the OpenHolidays API (https://www.openholidaysapi.org; data under ODbL 1.0, credit
+"School holidays: OpenHolidays API (www.openholidaysapi.org), ODbL 1.0"). No API key. Flags are built from local
+dates on a UTC grid, like CalendarSource; `fetch(start, end)` returns [start, end).
+
+```python
+from epftoolbox2.data.sources import SchoolHolidaysSource
+
+source = SchoolHolidaysSource(
+    country="PL",                # Required. ISO 3166-1 country code
+    subdivisions=None,           # Optional. ["PL-MZ", "PL-SL"] or "MZ,SL"; None = country-wide holidays only
+    weights=None,                # Optional. {code: weight} (e.g. population) or numbers in subdivisions order
+    timezone=None,               # Optional. Time zone override (None = the country's, from CalendarSource)
+    prefix="",                   # Optional. Prefix for column names (used as is)
+    freq="1h",                   # Optional. Row spacing, as in CalendarSource
+)
+```
+
+**Output columns:**
+| Configuration | Output Columns |
+|---------------|----------------|
+| no or one subdivision | `is_school_holiday` (1.0/0.0/NaN) |
+| several subdivisions | `is_school_holiday_{code}`, e.g. `is_school_holiday_pl_mz` |
+| `weights` | also `school_holiday_share` = sum(weight * flag) / sum(weight) |
+
+**Notes:**
+- NaN (with a warning) where the API has no data: any stretch of more than a year without a school holiday
+  (before the history starts, or school years not yet published). A NaN flag makes the share NaN.
+- History starts: DE 2012; HU, RO 2015; AT 2017; FR 2018; BE, BG, CH, CZ, ES, IE, IT, NL, PL, PT, SK 2020
+  (PL from the 2019/20 Christmas break). No school holidays for SE, DK, FI, GB, GR, NO.
+- Parent holidays apply to children (DE-BY to DE-BY-AU); school-type groups are merged (any group on holiday);
+  half-day entries are ignored. Without `subdivisions` only country-wide entries count (none in DE).
+- Known in advance (safe as `_d+k`), but the API serves the current version of each calendar.
+
+**Caching:** Returns None (not cached: a few small requests per run).
+
+---
+
 ## CsvSource
 
 Loads time-series data from CSV files.
