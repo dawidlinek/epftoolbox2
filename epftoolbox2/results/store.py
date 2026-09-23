@@ -1,4 +1,5 @@
 from pathlib import Path
+import datetime
 import json
 import queue
 import threading
@@ -7,10 +8,21 @@ from threading import Lock
 
 
 class ResultStore:
+    """Resumable JSONL storage for one model's results, keyed by `(hour, horizon, run_date)`.
+
+    `run_date` (not `day_in_test`) identifies the forecast day: `day_in_test` is an offset from
+    `test_start`, so the same offset means a different calendar day if `test_start` changes between
+    runs into the same directory. Keying on the absolute date means a `test_start` change is handled
+    correctly on its own; a change to anything else that defines a forecast (predictors, target,
+    training window, model params, the data itself, ...) is caught separately by the manifest
+    (`epftoolbox2.results.manifest`), which `BaseModel.run` checks before resuming.
+    """
+
     _SENTINEL = object()
 
-    def __init__(self, path: str, batch_size: int = 500):
+    def __init__(self, path: str, test_start: Optional[str] = None, batch_size: int = 500):
         self.path = Path(path)
+        self.test_start = test_start
         self._lock = Lock()
         self._completed: Set[tuple] = set()
         self._batch_size = batch_size
@@ -22,7 +34,7 @@ class ResultStore:
         self._load_existing()
 
     def save(self, result: Dict) -> None:
-        key = (result["hour"], result["horizon"], result["day_in_test"])
+        key = (result["hour"], result["horizon"], result["run_date"])
         with self._lock:
             self._completed.add(key)
         self._write_queue.put(result)
@@ -31,8 +43,14 @@ class ResultStore:
         self._write_queue.put(self._SENTINEL)
         self._writer.join()
 
+    def _run_date(self, day_in_test: int) -> str:
+        if self.test_start is None:
+            raise ValueError("ResultStore needs test_start to resolve day_in_test to a calendar date")
+        base = datetime.date.fromisoformat(self.test_start)
+        return (base + datetime.timedelta(days=day_in_test)).isoformat()
+
     def is_done(self, hour: int, horizon: int, day_in_test: int) -> bool:
-        return (hour, horizon, day_in_test) in self._completed
+        return (hour, horizon, self._run_date(day_in_test)) in self._completed
 
     def get_missing(self, all_tasks: List[tuple]) -> List[tuple]:
         return [t for t in all_tasks if not self.is_done(t[0], t[1], t[2])]
@@ -51,8 +69,10 @@ class ResultStore:
                     yield {k: r[k] for k in cols if k in r} if cols else r
 
     def _load_existing(self) -> None:
-        for r in self.iter_lines(cols=["hour", "horizon", "day_in_test"]):
-            self._completed.add((r["hour"], r["horizon"], r["day_in_test"]))
+        for r in self.iter_lines(cols=["hour", "horizon", "run_date"]):
+            if "run_date" not in r:
+                continue  # pre-existing line from an older schema; recomputed rather than trusted
+            self._completed.add((r["hour"], r["horizon"], r["run_date"]))
 
     def _writer_loop(self) -> None:
         buf: List[Dict] = []

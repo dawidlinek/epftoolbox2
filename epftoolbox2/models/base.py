@@ -17,6 +17,7 @@ from rich.progress import Progress
 from ..scalers.standard import StandardScaler
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef
+from ..results.manifest import build_manifest, check_and_write, manifest_path
 from ..logging import get_logger
 from . import _contract
 from ._worker import _worker_init, _run_day
@@ -82,11 +83,19 @@ class BaseModel(ABC):
         save_to: str = None,
         forecast_only: bool = False,
         information_set: Optional["InformationSet"] = None,
+        allow_manifest_mismatch: bool = False,
+        require_manifest: bool = False,
     ) -> ModelResultRef:
         """Forecast every period and horizon for each day in [test_start, test_end].
 
         With `information_set`, every predictor is checked against the issue time before any fit
         (see epftoolbox2.information_set).
+
+        With `save_to`, a manifest is written next to the results (see epftoolbox2.results.manifest) and,
+        if one is already there, compared to this run's configuration before anything is resumed.
+        `allow_manifest_mismatch` overwrites a disagreeing manifest instead of raising; `require_manifest`
+        raises instead of warning when `save_to` has results but no manifest (e.g. from before this
+        feature existed).
         """
         self._set_freq(freq)
 
@@ -125,7 +134,27 @@ class BaseModel(ABC):
             (hour, h, d) for d in range(n_days) for h in range(1, horizon + 1) for hour in range(self._periods_per_day)
         ]
 
-        store = ResultStore(save_to) if save_to else None
+        store = ResultStore(save_to, test_start=test_start) if save_to else None
+        if store:
+            manifest = build_manifest(
+                model=self,
+                data=data,
+                used_columns=used_columns,
+                target=target,
+                horizon=horizon,
+                freq=freq,
+                test_start=test_start,
+                test_end=test_end,
+                information_set=information_set,
+            )
+            check_and_write(
+                manifest_path(store.path),
+                manifest,
+                has_existing_results=store.path.exists() and store.path.stat().st_size > 0,
+                allow_mismatch=allow_manifest_mismatch,
+                require_manifest=require_manifest,
+                model_name=self.name,
+            )
         pending = store.get_missing(all_tasks) if store else all_tasks
 
         skipped: Counter = Counter()

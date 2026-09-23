@@ -84,7 +84,17 @@ class ModelPipeline:
         freq: str = "1h",
         save_dir: Optional[str] = None,
         forecast_only: bool = False,
+        allow_manifest_mismatch: bool = False,
+        require_manifest: bool = False,
     ) -> EvaluationReport:
+        """Run every model, then (unless `forecast_only`) the evaluators and exporters.
+
+        With `save_dir`, each model's results are resumable JSONL with a manifest recording the
+        configuration that produced them (epftoolbox2.results.manifest). Resuming into results made with
+        a different configuration raises `ManifestMismatchError`; `allow_manifest_mismatch` overwrites the
+        manifest and resumes anyway, and `require_manifest` refuses results that predate the manifest
+        feature instead of accepting them with a warning.
+        """
         if not self.models:
             raise ValueError("At least one model is required")
         self._check_model_names()
@@ -109,6 +119,8 @@ class ModelPipeline:
                 save_to=save_to,
                 forecast_only=forecast_only,
                 information_set=self.information_set,
+                allow_manifest_mismatch=allow_manifest_mismatch,
+                require_manifest=require_manifest,
             )
             refs[model.name] = ref
 

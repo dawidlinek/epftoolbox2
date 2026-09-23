@@ -69,6 +69,8 @@ class Workflow:
         cache_path: Optional[str] = None,
         model_index: Optional[int] = None,
         model_save_dir: Optional[str] = None,
+        model_allow_manifest_mismatch: bool = False,
+        model_require_manifest: bool = False,
     ):
         self.data_pipeline = str(data_pipeline) if data_pipeline is not None else None
         self.model_pipeline = str(model_pipeline) if model_pipeline is not None else None
@@ -86,6 +88,8 @@ class Workflow:
         self.cache_path = cache_path
         self.model_index = model_index
         self.model_save_dir = str(model_save_dir) if model_save_dir is not None else None
+        self.model_allow_manifest_mismatch = model_allow_manifest_mismatch
+        self.model_require_manifest = model_require_manifest
         self._yaml_dir: Optional[Path] = None  # set by load(), used for relative path resolution
         self._dp_inline: dict = {}  # inline sources/transformers/validators overrides
         self._mp_inline: dict = {}  # inline models/evaluators/exporters overrides
@@ -175,6 +179,8 @@ class Workflow:
             freq=self.model_freq,
             save_dir=str(save_dir) if save_dir else None,
             forecast_only=self.model_forecast_only,
+            allow_manifest_mismatch=self.model_allow_manifest_mismatch,
+            require_manifest=self.model_require_manifest,
         )
         if array_task:
             logger.info(
@@ -239,6 +245,10 @@ class Workflow:
             mp["test_end"] = self.model_test_end
         if self.model_save_dir is not None:
             mp["save_dir"] = self.model_save_dir
+        if self.model_allow_manifest_mismatch:
+            mp["allow_manifest_mismatch"] = True
+        if self.model_require_manifest:
+            mp["require_manifest"] = True
         if self.model_pipeline is not None:
             mp["path"] = self.model_pipeline
         mp.update(self._mp_inline)
@@ -282,6 +292,8 @@ class Workflow:
             cache_path=env.get("cache_path"),
             model_index=model_index,
             model_save_dir=mp.get("save_dir"),
+            model_allow_manifest_mismatch=mp.get("allow_manifest_mismatch", False),
+            model_require_manifest=mp.get("require_manifest", False),
         )
         workflow._yaml_dir = path.parent
         workflow._dp_inline = {k: dp[k] for k in _DP_SECTIONS if k in dp}

@@ -96,6 +96,8 @@ def cmd_model(args: argparse.Namespace) -> None:
         freq=args.freq,
         save_dir=args.save_dir,
         forecast_only=args.forecast_only,
+        allow_manifest_mismatch=args.allow_manifest_mismatch,
+        require_manifest=args.require_manifest,
     )
 
 
@@ -287,6 +289,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_p.add_argument("--save-dir", metavar="DIR", help="Directory to save per-model prediction JSONL files")
     model_p.add_argument("--forecast-only", action="store_true", help="Skip evaluation and exporters")
+    model_p.add_argument(
+        "--allow-manifest-mismatch",
+        action="store_true",
+        help="Resume even if --save-dir's manifest disagrees with this run's configuration (overwrites it)",
+    )
+    model_p.add_argument(
+        "--require-manifest",
+        action="store_true",
+        help="Refuse to resume from a --save-dir that has results but no manifest, instead of warning",
+    )
 
     # -- validate --
     val_p = sub.add_parser("validate", help="Validate a pipeline or workflow YAML")
