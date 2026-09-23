@@ -130,14 +130,17 @@ class CalendarSource(DataSource):
                  weekday: Union[str, bool] = "number",
                  hour: Union[str, bool] = False,
                  month: Union[str, bool] = False,
-                 daylight: bool = False, prefix: str = ""): ...
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
+                 daylight: bool = False, lat: float = None, lon: float = None,
+                 prefix: str = "", freq: str = "1h", subdiv: str = None,
+                 categories: Union[str, List[str]] = None): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 
 class CsvSource(DataSource):
     def __init__(self, file_path: str, datetime_column: str = "datetime",
                  columns: List[str] = None, prefix: str = "",
-                 datetime_format: str = None, separator: str = ","): ...
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
+                 datetime_format: str = None, separator: str = ",",
+                 timezone: str = "UTC"): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 ```
 
 ---

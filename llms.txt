@@ -131,21 +131,26 @@ source = OpenMeteoSource(
 
 ## CalendarSource
 
-Generates calendar features (holidays, weekday, hour, month, daylight).
+Generates calendar features (holidays, weekday, hour/period, month, daylight) from local dates and wall-clock
+times in the country's time zone; the index stays UTC. `fetch(start, end)` returns the `freq` grid in [start, end).
 
 ```python
 from epftoolbox2.data.sources import CalendarSource
 
 source = CalendarSource(
     country="PL",                # Required. Country code for holidays
-    timezone=None,               # Optional. Override default timezone
+    timezone=None,               # Optional. Time zone override (None = the country's)
     holidays="binary",           # Optional. False | "binary" | "onehot" | "name"
     weekday="number",            # Optional. False | "number" | "onehot" | "name"
     hour=False,                  # Optional. False | "number" | "onehot"
     month=False,                 # Optional. False | "number" | "onehot" | "name"
     daylight=False,              # Optional. Add sunrise/sunset/daylight_hours
-    freq="1h",                   # Optional. Specifies the generation frequency (e.g., "15min")
-    prefix="",                   # Optional. Prefix for column names
+    lat=None,                    # Optional. Latitude for daylight (None = the country's capital)
+    lon=None,                    # Optional. Longitude for daylight (None = the country's capital)
+    prefix="",                   # Optional. Prefix for column names (used as is, no "_" added)
+    freq="1h",                   # Optional. Row spacing: divisor of 1 hour ("15min") or whole hours dividing a day
+    subdiv=None,                 # Optional. Subdivision for regional holidays: "BY"/"DE-BY", "ENG", "ZH"
+    categories=None,             # Optional. holidays categories, e.g. ["public", "bank"] (None = public only)
 )
 ```
 
@@ -153,16 +158,26 @@ source = CalendarSource(
 | Parameter | Value | Output Columns |
 |-----------|-------|----------------|
 | `holidays` | `"binary"` | `is_holiday` (0/1) |
-| `holidays` | `"name"` | `holiday_name` (string or None) |
-| `holidays` | `"onehot"` | `is_holiday` + `holiday_{name}` columns |
+| `holidays` | `"name"` | `holiday_name` (English string or None; two holidays joined with "; ") |
+| `holidays` | `"onehot"` | `is_holiday` + `holiday_{name}` columns, e.g. `holiday_new_years_day` |
 | `weekday` | `"number"` | `weekday` (0=Monday, 6=Sunday) |
 | `weekday` | `"name"` | `weekday_name` ("monday", "tuesday", ...) |
 | `weekday` | `"onehot"` | `is_monday`, `is_tuesday`, ... |
-| `hour` | `"number"` | `hour` (0-23) |
-| `hour` | `"onehot"` | `is_0`, `is_1`, ..., `is_23` |
+| `hour` | `"number"` | hourly `freq`: `hour` (0-23); sub-hourly: `period` (0-95 at 15min) |
+| `hour` | `"onehot"` | hourly: `is_0`, ..., `is_23`; sub-hourly: `is_period_0`, ..., `is_period_95` |
 | `month` | `"number"` | `month` (1-12) |
 | `month` | `"name"` | `month_name` ("january", ...) |
-| `daylight` | `True` | `sunrise`, `sunset`, `daylight_hours` |
+| `month` | `"onehot"` | `is_january`, ..., `is_december` |
+| `daylight` | `True` | `sunrise`, `sunset` (local decimal hours), `daylight_hours` |
+
+**Notes:**
+- Holiday names are pinned to English (`en_US`), so one-hot column names don't depend on the machine's locale.
+  One-hot columns cover every holiday of the years in range.
+- Sweden: Sundays are not flagged (the `holidays` package lists every Sunday as a Swedish holiday).
+- Only national public holidays by default; `subdiv` adds regional ones, `categories` other kinds
+  (`categories` replaces the default, so include "public").
+- `period` = index of the period in the local day (`hour * 4 + minute // 15` at 15 min), as in the models.
+- `"name"` outputs are strings: drop them before modelling (models convert every column to float).
 
 **Caching:** Returns None (not cached - deterministic generation).
 
@@ -176,20 +191,24 @@ Loads time-series data from CSV files.
 from epftoolbox2.data.sources import CsvSource
 
 source = CsvSource(
-    file_path="data/prices.csv",     # Required. Path to CSV file
+    file_path="data/prices.csv",     # Required. Path to CSV file (.csv or .csv.gz/.csv.bz2/.csv.xz/.csv.zip)
     datetime_column="datetime",       # Optional. Name of datetime column (default: "datetime")
     columns=None,                     # Optional. Columns to include (None = all)
-    prefix="",                        # Optional. Prefix for column names
+    prefix="",                        # Optional. Prefix for column names ("c" gives "c_price")
     datetime_format=None,             # Optional. strftime format (None = auto-detect)
     separator=",",                    # Optional. CSV separator (default: ",")
+    timezone="UTC",                   # Optional. Time zone of naive timestamps (default: "UTC")
 )
 ```
 
 **Requirements:**
-- File must have `.csv` extension
+- File must have a `.csv` extension, optionally compressed (`.csv.gz`, `.csv.bz2`, `.csv.xz`, `.csv.zip`)
 - Must contain the specified datetime column
-- Datetime column is parsed and set as index
-- All timestamps are converted to UTC
+- Datetime column is parsed and set as index; `fetch(start, end)` returns [start, end)
+- Timestamps with a UTC offset (also mixed +01:00/+02:00 across DST) are converted to UTC
+- Naive timestamps are local times in `timezone`, localized with `ambiguous="infer"` (rows must be in
+  chronological order around the fall-back hour) and `nonexistent="raise"`
+- Duplicated timestamps (after conversion to UTC) and rows without a timestamp raise `ValueError`
 
 **Caching:** Returns None (not cached).
 
