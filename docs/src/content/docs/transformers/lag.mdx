@@ -62,7 +62,8 @@ When both days repeat the hour (a 364-day lag between two autumn switch days), t
 first and the second to the second.
 
 A NaN predictor makes the model skip that forecast, so a model using `price_d-1` and `price_d-2` produces no
-02:00 forecast on the two days after each spring switch.
+02:00 forecast on the two days after each spring switch. To keep every forecast, give each day 24 slots with
+[`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/) before lagging.
 
 <Aside type="caution">
   Day lags need a local-time index, so add `LagTransformer` **after** `TimezoneTransformer`. On a UTC index

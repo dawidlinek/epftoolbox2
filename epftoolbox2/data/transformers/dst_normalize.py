@@ -4,8 +4,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+from ..._date_utils import is_utc_index
 from .base import Transformer
-from .lag import _is_utc
 
 FLAG_COLUMN = "is_dst_adjusted"
 
@@ -55,7 +55,7 @@ class DSTNormalizeTransformer(Transformer):
             raise ValueError("DSTNormalizeTransformer needs a time-zone-aware DatetimeIndex (local time)")
         if self.tz is not None:
             index = index.tz_convert(self.tz)
-        if _is_utc(index):
+        if is_utc_index(index):
             raise ValueError(
                 "DSTNormalizeTransformer got a UTC index, which has no DST. Pass tz= or run TimezoneTransformer first."
             )
