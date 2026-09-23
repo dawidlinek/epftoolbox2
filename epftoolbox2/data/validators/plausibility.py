@@ -84,7 +84,7 @@ class PlausibilityValidator(Validator):
         stats: Dict[str, dict] = {}
         out_of_range = {}
         for column, (pattern, (low, high)) in rules.items():
-            values = column_values(df, column).to_numpy(dtype=float)
+            values = column_values(df, column).to_numpy(dtype=float, na_value=np.nan)
             outside = np.zeros(len(values), dtype=bool)
             if low is not None:
                 outside |= values < low
@@ -113,7 +113,7 @@ class PlausibilityValidator(Validator):
                 series = column_values(df, column)
                 if not series.index.is_monotonic_increasing:
                     series = series.sort_index(kind="stable")
-                values = series.to_numpy(dtype=float)
+                values = series.to_numpy(dtype=float, na_value=np.nan)
                 starts, lengths = true_runs(values[1:] == values[:-1])  # NaN never equals NaN, so gaps break runs
                 run, start = (int(lengths.max()) + 1, int(starts[np.argmax(lengths)])) if len(lengths) else (1, 0)
                 longest[column] = run

@@ -128,3 +128,11 @@ def test_invalid_max_constant_run_raises():
 
 def test_tuples_are_stored_as_lists():
     assert PlausibilityValidator(ranges={"price": (None, 100)}).ranges == {"price": [None, 100.0]}
+
+
+def test_nullable_integer_columns(frame):
+    frame["load_actual"] = pd.array([15000] * (len(frame) - 2) + [None, 0], dtype="Int64")
+
+    result = PlausibilityValidator().validate(frame)
+
+    assert result.info["out_of_range"] == {"load_actual": 1}

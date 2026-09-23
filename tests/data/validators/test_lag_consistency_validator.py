@@ -164,6 +164,15 @@ def test_explicit_columns_must_be_day_lags_of_present_columns():
     assert len(result.errors) == 3
 
 
+def test_nullable_integer_columns():
+    index = year_index()[: 24 * 10]
+    load = pd.Series(pd.array(range(len(index)), dtype="Int64"), index=index)
+    lagged = pd.Series(pd.array(calendar(load.astype(float), 1).astype("Int64")), index=index)
+    df = pd.DataFrame({"load": load, "load_d-1": lagged})
+
+    assert LagConsistencyValidator().validate(df).is_valid
+
+
 def test_invalid_arguments_raise():
     with pytest.raises(ValueError, match="time zone"):
         LagConsistencyValidator(tz="Nowhere/Land")

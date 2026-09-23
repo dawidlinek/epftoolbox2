@@ -156,7 +156,9 @@ class LagConsistencyValidator(Validator):
         lagged, source = column_values(df, column), column_values(df, base)
         numeric = pd.api.types.is_numeric_dtype(lagged) and pd.api.types.is_numeric_dtype(source)
         dtype = float if numeric else object
-        actual, values = lagged.to_numpy(dtype=dtype), source.to_numpy(dtype=dtype)
+        missing = np.nan if numeric else None
+        actual = lagged.to_numpy(dtype=dtype, na_value=missing)
+        values = source.to_numpy(dtype=dtype, na_value=missing)
         expected = np.full(len(position), np.nan if numeric else None, dtype=dtype)
         found = position >= 0
         expected[found] = values[position[found]]
