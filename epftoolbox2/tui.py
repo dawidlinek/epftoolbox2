@@ -36,7 +36,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
     "EntsoeSource": [
         {
             "name": "country_code",
-            "description": "2-letter country code (e.g. PL, DE)",
+            "description": "Area code (e.g. PL, DE_LU); prices need a bidding zone",
             "required": True,
             "default": None,
             "kind": "text",
@@ -49,6 +49,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "multiselect",
             "choices": ["load", "generation", "price"],
+        },
+        {
+            "name": "prefer_15min",
+            "description": "15-minute price grid (hourly periods step-filled)? No = hourly grid (quarter-hours averaged)",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
         },
     ],
     "OpenMeteoSource": [
