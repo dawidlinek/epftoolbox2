@@ -353,3 +353,71 @@ def test_probe_matches_the_hand_built_scramble_of_the_known_answer_test():
     assert (_changed(perturbed["price"], df["price"]) == future).all()
     recomputed = calendar_shift(perturbed["price"], -1)
     assert (_changed(perturbed["price_d-1"], df["price_d-1"]) == _changed(recomputed, df["price_d-1"])).all()
+
+
+def test_target_from_issue_extends_perturbation_to_the_issue_day_itself():
+    """The default day-ahead rule for 'price' already perturbs D+1 onward (see the delivery-time test
+    above); `target_from_issue` additionally perturbs day D's own rows, matching the model's stricter
+    boundary (training targets end at D-1) even though a real day-ahead market would have published D's
+    price by D-1."""
+    df = make_market_data(days=40)
+    info = InformationSet(rules=SYNTHETIC_RULES)  # unmodified default ("published") rule for "price"
+    run_day = "2023-01-20"
+
+    _, counts, _ = perturb_unknown(df, run_day, info)
+    _, counts_strict, _ = perturb_unknown(df, run_day, info, target_from_issue="price")
+
+    assert counts_strict["price"] == counts["price"] + 24  # the 24 hours of the issue day itself
+
+
+def test_check_target_boundary_lets_the_probe_use_the_unmodified_default_rule():
+    """With `check_target_boundary=True`, `leakage_probe` enforces the model's own D-1 boundary on the
+    target regardless of its Availability rule, so a compliant model passes without the hand-built
+    PRICE_KNOWN_AFTER_DELIVERY override used elsewhere in this file."""
+    df = make_market_data(noise=5.0, seed=7)
+    info = InformationSet(rules=SYNTHETIC_RULES)  # unmodified default rule for "price"
+    result = leakage_probe(
+        lambda: OLSModel(PREDICTORS + ["price_d-1"], training_window=45),
+        df,
+        "2023-04-12",
+        info,
+        horizon=2,
+        check_target_boundary=True,
+    )
+    result.assert_ok()
+
+
+def test_source_rebuild_catches_a_transformer_leak_that_the_final_column_probe_misses():
+    """A transformer that shifts by 24 *elapsed* hours instead of one *calendar* day reads the wrong raw
+    row into `load_forecast_d+1` across a DST spring-forward (Europe/Warsaw, 2024-03-31): the issue row
+    2024-03-30 23:00 ends up holding the raw source's 2024-04-01 00:00 value instead of 2024-03-31 23:00's.
+    By its parsed name, `load_forecast_d+1` is a day-ahead forecast published 10:00 on the issue day D,
+    known well before the 11:30 issue, so perturbing the already-built column never touches that cell.
+    Perturbing the raw source and rebuilding does, because the raw 2024-04-01 00:00 cell it actually reads
+    from is correctly identified as not yet known.
+    """
+    tz = "Europe/Warsaw"
+    index = pd.date_range("2024-03-15", "2024-04-05", freq="1h", tz=tz, inclusive="left")
+    load_forecast = pd.Series(1000 + 50 * np.sin(2 * np.pi * np.arange(len(index)) / 24), index=index)
+    rng = np.random.default_rng(0)
+    source = pd.DataFrame({"load_forecast": load_forecast})
+    source["price"] = 20 + 0.05 * calendar_shift(load_forecast, 1) + rng.normal(0, 0.1, len(index))
+
+    def rebuild_with_elapsed_shift(raw: pd.DataFrame) -> pd.DataFrame:
+        out = raw.copy()
+        out["load_forecast_d+1"] = raw["load_forecast"].shift(-24, freq="h").reindex(raw.index)
+        return out
+
+    info = InformationSet(rules={"price": Availability.static()})  # isolate the load_forecast leak
+    run_day = "2024-03-30"
+
+    def make_model():
+        return OLSModel(["load_forecast_d+1"], training_window=10)
+
+    built = rebuild_with_elapsed_shift(source)
+    final_only = leakage_probe(make_model, built, run_day, info, horizon=1)
+    assert final_only.ok
+
+    from_source = leakage_probe(make_model, source, run_day, info, horizon=1, rebuild=rebuild_with_elapsed_shift)
+    assert not from_source.ok
+    assert (23, 1) in from_source.changed

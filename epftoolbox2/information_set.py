@@ -17,7 +17,7 @@ import math
 import re
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -631,6 +631,8 @@ def leakage_probe(
     columns: Optional[Sequence[str]] = None,
     atol: float = 1e-9,
     seed: int = 0,
+    rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
+    check_target_boundary: bool = False,
 ) -> ProbeResult:
     """Perturb every value not known at issue time on `run_day` and check that the forecasts don't change.
 
@@ -641,16 +643,34 @@ def leakage_probe(
     they are and listed in `unchecked` (or raise, following `information_set.unknown`).
 
     `model` is a model instance (its `run` is called twice) or a zero-argument factory returning one.
+
+    With `rebuild`, `data` is treated as *source* data (before feature engineering) instead of the model's
+    already-built input frame: perturbation is applied to `data` directly, by the raw availability of its
+    own columns, and `rebuild(frame) -> features` reproduces the transformer pipeline that builds the
+    model's input from it. This catches a leak a transformer bakes into a derived column (e.g. an
+    elapsed-time shift that crosses a DST boundary), which perturbing the already-built column by its
+    parsed name cannot see: a wrong shift moves the *right* raw value into the *wrong* row, and that row's
+    own name still looks fine.
+
+    `check_target_boundary` additionally perturbs `target` for every row on or after `run_day`, regardless
+    of its own Availability rule: the model's own boundary (training targets end at D-1) is a deliberate,
+    conservative choice that can be stricter than a column's factual publication time.
     """
     run_day = str(pd.Timestamp(run_day).date())
-    perturbed, counts, unchecked = perturb_unknown(data, run_day, information_set, freq, columns, seed)
+    target_from_issue = target if check_target_boundary else None
+    perturbed, counts, unchecked = perturb_unknown(
+        data, run_day, information_set, freq, columns, seed, target_from_issue=target_from_issue
+    )
+    base = data
+    if rebuild is not None:
+        base, perturbed = rebuild(data), rebuild(perturbed)
 
     def forecasts(frame):
         m = model() if callable(model) and not hasattr(model, "run") else model
         ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, horizon=horizon, freq=freq)
         return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}
 
-    original, probed = forecasts(data), forecasts(perturbed)
+    original, probed = forecasts(base), forecasts(perturbed)
     shared = original.keys() & probed.keys()
     diffs = {k: abs(original[k] - probed[k]) for k in shared}
     changed = sorted(k for k, d in diffs.items() if not d <= atol)
@@ -673,8 +693,15 @@ def perturb_unknown(
     freq: str = "1h",
     columns: Optional[Sequence[str]] = None,
     seed: int = 0,
+    target_from_issue: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, int], List[str]]:
-    """Copy of `data` where every numeric value not known at issue time on `run_day` is replaced by noise."""
+    """Copy of `data` where every numeric value not known at issue time on `run_day` is replaced by noise.
+
+    `target_from_issue`, when given a column name, additionally perturbs every row of that column dated
+    `run_day` or later, regardless of its own Availability rule: the model's own boundary (training targets
+    end at D-1) is a deliberate, conservative choice, and can be stricter than the column's factual
+    publication time (e.g. a day-ahead price is, in reality, already published before its delivery day).
+    """
     index = data.index
     step = _STEP_MINUTES[freq]
     ctx = information_set._contexts(index, run_day, run_day)[0]
@@ -695,6 +722,8 @@ def perturb_unknown(
             continue
         available = _available_array(col, col.rule, day, minute, step, ctx)
         mask = available > ctx.issue_minute
+        if target_from_issue is not None and name == target_from_issue:
+            mask = mask | (day >= 0)
         if mask.any():
             values = out[name].to_numpy(dtype=float, copy=True)
             values[mask] = 1e6 + rng.normal(0.0, 1e4, int(mask.sum()))
