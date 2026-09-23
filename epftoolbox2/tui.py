@@ -370,6 +370,29 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "column_select",
         },
     ],
+    "LagConsistencyValidator": [
+        {
+            "name": "columns",
+            "description": "Lag columns to check (blank = every x_d-k / x_d+k with its base column)",
+            "required": False,
+            "default": "",
+            "kind": "column_select",
+        },
+        {
+            "name": "tz",
+            "description": "Time zone of the local days (blank = the index's own)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "tolerance",
+            "description": "Absolute difference counted as equal",
+            "required": False,
+            "default": 1e-9,
+            "kind": "float",
+        },
+    ],
     "OLSModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "OLS", "kind": "text"},
         {
@@ -611,6 +634,7 @@ _VALIDATORS = [
     "CoverageValidator",
     "FreshnessValidator",
     "PlausibilityValidator",
+    "LagConsistencyValidator",
 ]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator"]

@@ -8,6 +8,7 @@ from epftoolbox2.data.validators import (
     DSTStructureValidator,
     EdaValidator,
     FreshnessValidator,
+    LagConsistencyValidator,
     NullCheckValidator,
     PlausibilityValidator,
 )
@@ -26,6 +27,7 @@ VALIDATORS = [
         ranges={"price": (-500, 3000), "load*": [0, None]}, max_constant_run=12, constant_columns=["price"]
     ),
     PlausibilityValidator(ranges={}, max_constant_run=None),
+    LagConsistencyValidator(columns=["price_d-1"], tz="Europe/Warsaw", tolerance=0.001),
 ]
 
 

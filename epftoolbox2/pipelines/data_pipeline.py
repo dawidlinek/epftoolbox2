@@ -33,6 +33,7 @@ COMPONENT_REGISTRY = {
         "CoverageValidator": "epftoolbox2.data.validators.coverage",
         "FreshnessValidator": "epftoolbox2.data.validators.freshness",
         "PlausibilityValidator": "epftoolbox2.data.validators.plausibility",
+        "LagConsistencyValidator": "epftoolbox2.data.validators.lag_consistency",
     },
 }
 

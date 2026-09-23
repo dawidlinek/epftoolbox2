@@ -7,6 +7,7 @@ from .dst_structure import DSTStructureValidator
 from .coverage import CoverageValidator
 from .freshness import FreshnessValidator
 from .plausibility import PlausibilityValidator
+from .lag_consistency import LagConsistencyValidator
 
 __all__ = [
     "Validator",
@@ -19,4 +20,5 @@ __all__ = [
     "CoverageValidator",
     "FreshnessValidator",
     "PlausibilityValidator",
+    "LagConsistencyValidator",
 ]
