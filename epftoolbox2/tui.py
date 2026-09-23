@@ -215,6 +215,40 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {"name": "freq", "description": "Frequency (e.g. 1h, day)", "required": False, "default": "1h", "kind": "text"},
     ],
+    "DailyProfileTransformer": [
+        {
+            "name": "columns",
+            "description": "Columns to spread",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "freq",
+            "description": "Slot length of the data (1h = 24 columns each, 15min = 96)",
+            "required": False,
+            "default": "1h",
+            "kind": "text",
+        },
+    ],
+    "DailyStatsTransformer": [
+        {
+            "name": "columns",
+            "description": "Columns to summarise",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "stats",
+            "description": "Statistics per local day",
+            "required": False,
+            "default": None,
+            "kind": "multiselect",
+            "choices": ["min", "max", "mean", "last"],
+        },
+        {"name": "freq", "description": "Slot length of the data", "required": False, "default": "1h", "kind": "text"},
+    ],
     "DSTNormalizeTransformer": [
         {
             "name": "freq",
@@ -497,7 +531,14 @@ def _instantiate(class_name: str, params: dict) -> Any:
 # ---------------------------------------------------------------------------
 
 _SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
-_TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer", "DSTNormalizeTransformer"]
+_TRANSFORMERS = [
+    "TimezoneTransformer",
+    "ResampleTransformer",
+    "LagTransformer",
+    "DSTNormalizeTransformer",
+    "DailyProfileTransformer",
+    "DailyStatsTransformer",
+]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator"]

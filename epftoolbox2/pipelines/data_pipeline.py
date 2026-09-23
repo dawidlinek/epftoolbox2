@@ -25,6 +25,8 @@ COMPONENT_REGISTRY = {
         "ResampleTransformer": "epftoolbox2.data.transformers.resample",
         "LagTransformer": "epftoolbox2.data.transformers.lag",
         "DSTNormalizeTransformer": "epftoolbox2.data.transformers.dst_normalize",
+        "DailyProfileTransformer": "epftoolbox2.data.transformers.daily_profile",
+        "DailyStatsTransformer": "epftoolbox2.data.transformers.daily_stats",
     },
     "validators": {
         "ContinuityValidator": "epftoolbox2.data.validators.continuity",
