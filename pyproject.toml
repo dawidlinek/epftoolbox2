@@ -30,7 +30,6 @@ dependencies = [
     "pandas>=2.0.0",
     "numpy>=2.2.0",
     "requests>=2.31.0",
-    "beautifulsoup4>=4.12.0",
     "rich>=13.0.0",
     "pyyaml>=6.0.0",
     "holidays>=0.40",
@@ -66,7 +65,6 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short"
 markers = ["integration: Integration tests that require real API keys and use real connections"]
 filterwarnings = [
-    "ignore::bs4.builder.XMLParsedAsHTMLWarning",
     "ignore::DeprecationWarning",
 ]
 
