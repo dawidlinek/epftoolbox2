@@ -286,6 +286,50 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "confirm",
         },
     ],
+    "CoverageValidator": [
+        {
+            "name": "columns",
+            "description": "Columns to check (blank = all)",
+            "required": False,
+            "default": "",
+            "kind": "column_select",
+        },
+        {
+            "name": "start",
+            "description": "First expected timestamp (e.g. 2024-01-01; blank = each column's first value)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "end",
+            "description": "End of the range, exclusive (blank = each column's last value)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "freq",
+            "description": "Grid step (e.g. 15min, 1h; blank = infer from the data)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "min_coverage",
+            "description": "Smallest share of timestamps with a value (0-1)",
+            "required": False,
+            "default": 1.0,
+            "kind": "float",
+        },
+        {
+            "name": "max_gap",
+            "description": "Longest missing run allowed (e.g. 6h; blank = no limit)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+    ],
     "OLSModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "OLS", "kind": "text"},
         {
@@ -519,7 +563,13 @@ def _instantiate(class_name: str, params: dict) -> Any:
 
 _SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
 _TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer"]
-_VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator", "DSTStructureValidator"]
+_VALIDATORS = [
+    "ContinuityValidator",
+    "NullCheckValidator",
+    "EdaValidator",
+    "DSTStructureValidator",
+    "CoverageValidator",
+]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator"]
 _EXPORTERS = ["TerminalExporter", "ExcelExporter"]

@@ -4,6 +4,7 @@ import pytest
 
 from epftoolbox2.data.validators import (
     ContinuityValidator,
+    CoverageValidator,
     DSTStructureValidator,
     EdaValidator,
     NullCheckValidator,
@@ -15,6 +16,9 @@ VALIDATORS = [
     NullCheckValidator(columns=["price"], allow_nulls=False, max_null_frac=0.05),
     EdaValidator(columns=["price"], verbose=False),
     DSTStructureValidator(tz="Europe/Warsaw", freq="1h", allow_partial_edges=False),
+    CoverageValidator(
+        columns=["price"], start="2024-01-01", end="today_d-1", freq="1h", min_coverage=0.99, max_gap="6h"
+    ),
 ]
 
 

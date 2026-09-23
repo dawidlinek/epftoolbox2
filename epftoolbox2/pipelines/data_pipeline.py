@@ -30,6 +30,7 @@ COMPONENT_REGISTRY = {
         "NullCheckValidator": "epftoolbox2.data.validators.null_check",
         "EdaValidator": "epftoolbox2.data.validators.eda",
         "DSTStructureValidator": "epftoolbox2.data.validators.dst_structure",
+        "CoverageValidator": "epftoolbox2.data.validators.coverage",
     },
 }
 

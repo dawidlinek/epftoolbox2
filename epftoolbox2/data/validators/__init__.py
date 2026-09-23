@@ -4,6 +4,7 @@ from .continuity import ContinuityValidator
 from .null_check import NullCheckValidator
 from .eda import EdaValidator
 from .dst_structure import DSTStructureValidator
+from .coverage import CoverageValidator
 
 __all__ = [
     "Validator",
@@ -13,4 +14,5 @@ __all__ = [
     "NullCheckValidator",
     "EdaValidator",
     "DSTStructureValidator",
+    "CoverageValidator",
 ]
