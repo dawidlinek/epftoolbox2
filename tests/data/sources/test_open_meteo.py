@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 import requests
 
-from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
+from epftoolbox2.data.sources.open_meteo import OpenMeteoSource, stored_step_hours
 from epftoolbox2.pipelines import DataPipeline
 
 TZ = "Europe/Warsaw"
@@ -209,7 +209,7 @@ class TestIssueTimeVintage:
     START = pd.Timestamp("2024-03-25", tz="UTC")
     END = pd.Timestamp("2024-04-05", tz="UTC")
 
-    @pytest.mark.parametrize("model, step_h", [("icon_seamless", 1), ("jma_seamless", 6)])
+    @pytest.mark.parametrize("model, step_h", [("icon_seamless", 1), ("jma_seamless", 6), ("ecmwf_ifs04", 3)])
     def test_every_value_comes_from_runs_published_before_issue_time(self, model, step_h):
         source = make_source(make_archive(step_h=step_h), model=model, horizon=3)
         df = source.fetch(self.START, self.END)
@@ -364,6 +364,16 @@ class TestReturnedRange:
         source = make_source(horizon=1, prefix="warsaw")
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
         assert list(df.columns) == ["warsaw_temperature_2m_d+1", "warsaw_wind_speed_10m_d+1"]
+
+
+class TestStoredStepHours:
+    def test_ecmwf_ifs04_is_not_matched_by_the_hourly_ecmwf_ifs_prefix(self):
+        # ecmwf_ifs04 (ECMWF IFS 0.4 deg) is stored 3-hourly (6-hourly beyond 144 h lead). Its name starts with
+        # "ecmwf_ifs", so without its own entry it used to match the hourly ecmwf_ifs (9 km) one instead,
+        # understating how far the interpolated hourly value can reach into runs not yet published.
+        assert stored_step_hours("ecmwf_ifs04", 1) == 3
+        assert stored_step_hours("ecmwf_ifs04", 6) == 6
+        assert stored_step_hours("ecmwf_ifs", 1) == 1
 
 
 # ---------------------------------------------------------------------------

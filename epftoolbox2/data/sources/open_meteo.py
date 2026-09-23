@@ -36,6 +36,7 @@ _STORED_STEP_H: Tuple[Tuple[str, Tuple[Tuple[Optional[int], int], ...]], ...] = 
     ("icon_d2", ((None, 1),)),
     ("icon_", ((78, 1), (None, 3))),
     ("ecmwf_ifs025", ((144, 3), (None, 6))),
+    ("ecmwf_ifs04", ((144, 3), (None, 6))),
     ("ecmwf_aifs", ((None, 6),)),
     ("ecmwf_ifs", ((90, 1), (144, 3), (None, 6))),
     ("gfs_seamless", ((120, 1), (None, 3))),
