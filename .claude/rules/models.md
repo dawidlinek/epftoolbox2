@@ -25,5 +25,8 @@ In `_fit_one_numpy`, rows cover days `[day - training_window - hz, day]`; the la
 - Models must be deterministic for a given input: stochastic models need a fixed `random_state` exposed as a parameter. `tests/test_golden_metrics.py` pins current numbers.
 
 ## Known issues (don't fix as a side effect of other work)
+- The training cut assumes exactly one row per day in each period's frame, and DST breaks that for the switch hour (hour 2 in Europe/Warsaw). Both cases are pinned in `tests/test_known_issues.py`:
+  - **Fall-back:** the doubled hour makes "drop the last `1 + hz` rows" drop one day too few. On the next `hz` run days, the hour-2 forecasts train on a target dated on or after the issue day, i.e. look-ahead.
+  - **Spring:** the missing hour has no test row on the switch day. The hour-2 forecast is built from the previous day's row but labelled with the switch day's dates, so its `actual` belongs to a different target; for `hz=1` it's dropped.
 - Forecasts disappear silently: `_fit_one_numpy` returns `None` on NaN predictors, too few rows, or `ValueError` from the fit; a crashing day is only `print`ed in `BaseModel.run`. `ModelResultRef.count` reports planned tasks, not produced ones.
 - `_worker_init` sets `OMP_NUM_THREADS`/`MKL_NUM_THREADS` after fork, when BLAS is already initialised in the parent — probably no effect. `threadpoolctl` (installed with scikit-learn) is the reliable way.
