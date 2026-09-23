@@ -263,6 +263,29 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "confirm",
         },
     ],
+    "DSTStructureValidator": [
+        {
+            "name": "tz",
+            "description": "Time zone of the local days (e.g. Europe/Warsaw; blank = the index's own)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "freq",
+            "description": "Period length (e.g. 15min, 1h; blank = infer from the data)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "allow_partial_edges",
+            "description": "Only warn about a partial first/last day?",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
+        },
+    ],
     "OLSModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "OLS", "kind": "text"},
         {
@@ -496,7 +519,7 @@ def _instantiate(class_name: str, params: dict) -> Any:
 
 _SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
 _TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer"]
-_VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
+_VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator", "DSTStructureValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator"]
 _EXPORTERS = ["TerminalExporter", "ExcelExporter"]

@@ -3,6 +3,7 @@ from .result import ValidationResult, results_to_frame
 from .continuity import ContinuityValidator
 from .null_check import NullCheckValidator
 from .eda import EdaValidator
+from .dst_structure import DSTStructureValidator
 
 __all__ = [
     "Validator",
@@ -11,4 +12,5 @@ __all__ = [
     "ContinuityValidator",
     "NullCheckValidator",
     "EdaValidator",
+    "DSTStructureValidator",
 ]
