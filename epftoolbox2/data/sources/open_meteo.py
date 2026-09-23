@@ -150,7 +150,9 @@ class OpenMeteoSource(DataSource):
     uses runs published after the issue time; keep it only to reproduce old results.
 
     Example:
-        >>> source = OpenMeteoSource(latitude=52.23, longitude=21.01, horizon=5, prefix="warsaw")
+        >>> source = OpenMeteoSource(
+        ...     latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=5, prefix="warsaw"
+        ... )
         >>> df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-02-01", tz="UTC"))
     """
 
@@ -192,7 +194,7 @@ class OpenMeteoSource(DataSource):
         prefix: str = "",
         proxy_url: Optional[str] = None,
         temporal_resolution: Optional[str] = None,
-        timezone: str = "Europe/Warsaw",
+        timezone: Optional[str] = None,
         issue_time: str = "10:00",
         publication_delay_h: float = 10,
         vintage: str = "issue_time",
@@ -214,9 +216,11 @@ class OpenMeteoSource(DataSource):
                 None (default) — hourly (1 h), no parameter sent to API;
                 "hourly_3" — 3-hourly; "hourly_6" — 6-hourly;
                 "native" — model-native resolution (inferred from response).
-            timezone: Market time zone. Defines the local calendar day D of each row, the local wall-clock hour
-                that d+i refers to, and the time zone of ``issue_time``. Use the zone of your
-                TimezoneTransformer/CalendarSource.
+            timezone: Market time zone (required). Defines the local calendar day D of each row, the local
+                wall-clock hour that d+i refers to, and the time zone of ``issue_time``. Use the zone of your
+                TimezoneTransformer/CalendarSource, e.g. "Europe/Warsaw" for PL, "Europe/London" for GB. There is
+                no default: a market outside CET that relied on one would leak, since the issue time would be
+                computed in the wrong zone (e.g. London 23:00 on D becoming 10:00 on D+1 in Warsaw time).
             issue_time: Local time ("HH:MM") on day D at which the forecast is issued (default "10:00").
             publication_delay_h: Hours between a run's initialisation and its availability (default 10). The
                 Single Runs docs give 4-6 h for global models; Open-Meteo's model metadata showed 9.6 h for JMA
@@ -283,6 +287,15 @@ class OpenMeteoSource(DataSource):
 
         if self.vintage not in self.VALID_VINTAGES:
             raise ValueError(f"vintage must be one of {self.VALID_VINTAGES}, got {self.vintage!r}")
+
+        if self.timezone is None:
+            raise ValueError(
+                "timezone is required: set it to your market's zone, e.g. 'Europe/Warsaw' for PL, "
+                "'Europe/London' for GB, 'Europe/Berlin' for DE. It defines the local day and the issue time used "
+                "to pick a leak-free forecast vintage; a market outside CET that left it unset used to silently "
+                "fall back to Europe/Warsaw, computing the issue time in the wrong zone (e.g. London 23:00 on D "
+                "became 10:00 on D+1)."
+            )
 
         try:
             ZoneInfo(self.timezone)

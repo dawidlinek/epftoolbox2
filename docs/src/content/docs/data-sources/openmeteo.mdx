@@ -13,6 +13,8 @@ For every row of local day D, the column `{variable}_d+i` is the forecast for th
 
 <Aside type="caution" title="Changed in this version">
   Earlier versions took `d+i` at row t from the run started around t itself, so afternoon and evening hours used runs published after the day-ahead gate closure (look-ahead). They also shifted by 24 h in UTC instead of local calendar days. The new default fixes both, needs a smaller `horizon` (see [Horizon](#horizon)) and gives different numbers. `vintage="valid_time"` reproduces the old mapping. Clear `.cache/sources/` or rely on the new `schema_version` in the cache key.
+
+  `timezone` is now required and has no default. It used to default to `"Europe/Warsaw"`, so a market outside CET that left it unset computed the issue time in the wrong zone and could leak future runs (e.g. London 23:00 on D silently became 10:00 on D+1). Pass your market's zone explicitly.
 </Aside>
 
 ## Basic Usage
@@ -50,7 +52,7 @@ df = source.fetch(
 | `prefix` | str | No | `""` | Prefix for column names |
 | `proxy_url` | str \| None | No | `None` | HTTP(S) proxy, e.g. `"http://proxy.example.com:8080"`. Saved to YAML as is, so don't put credentials in it. |
 | `temporal_resolution` | str \| None | No | `None` | Time step of returned data — see below |
-| `timezone` | str | No | `"Europe/Warsaw"` | Market time zone: defines the local day D of each row, the wall-clock hour that `d+i` refers to, and the zone of `issue_time`. Use the same zone as `TimezoneTransformer` / `CalendarSource`. |
+| `timezone` | str | **Yes** | *(none)* | Market time zone: defines the local day D of each row, the wall-clock hour that `d+i` refers to, and the zone of `issue_time`. Use the same zone as `TimezoneTransformer` / `CalendarSource`, e.g. `"Europe/Warsaw"` for PL, `"Europe/London"` for GB. There is no default: a market outside CET that relied on one would leak (see below). |
 | `issue_time` | str | No | `"10:00"` | Local time (`"HH:MM"`) on D at which the forecast is issued |
 | `publication_delay_h` | float | No | `10` | Hours between a run's initialisation and its availability (0–48) |
 | `vintage` | str | No | `"issue_time"` | `"issue_time"` (leak-free) or `"valid_time"` (old mapping, look-ahead) |
@@ -142,6 +144,7 @@ source = OpenMeteoSource(
     longitude=21.0122,
     horizon=5,
     prefix="warsaw",
+    timezone="Europe/Warsaw",
     temporal_resolution="hourly_3",
 )
 ```
@@ -149,7 +152,9 @@ source = OpenMeteoSource(
 ## Reproducing old results
 
 ```python
-source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, vintage="valid_time")
+source = OpenMeteoSource(
+    latitude=52.2297, longitude=21.0122, timezone="Europe/Warsaw", horizon=7, vintage="valid_time"
+)
 ```
 
 `vintage="valid_time"` maps `d+i` at row t to `previous_day{i}` at t + 24·i hours in UTC, exactly as epftoolbox2 2.2 and earlier did. It logs a look-ahead warning on every fetch. Rows are still limited to `[start, end)`.
@@ -218,6 +223,7 @@ for name, (lat, lon) in cities.items():
         longitude=lon,
         horizon=5,
         prefix=name,
+        timezone="Europe/Warsaw",
     ))
 
 df = pipeline.run(start="2024-01-01", end="2024-06-01", cache=True)

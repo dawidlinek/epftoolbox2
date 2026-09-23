@@ -47,7 +47,7 @@ class DataPipeline:
         >>> pipeline = (
         ...     DataPipeline()
         ...     .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load"]))
-        ...     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
+        ...     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw"))
         ...     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
         ...     .add_validator(NullCheckValidator(columns=["load_actual"]))
         ... )

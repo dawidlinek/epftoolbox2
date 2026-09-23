@@ -119,7 +119,7 @@ from epftoolbox2.data.validators import NullCheckValidator
 pipeline = (
     DataPipeline()
     .add_source(EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"]))
-    .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
+    .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw"))
     .add_source(CalendarSource("PL", holidays="binary", weekday="number"))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))

@@ -40,7 +40,9 @@ if __name__ == "__main__":
     df = (
         DataPipeline()
         .add_source(EntsoeSource(country_code="DE", api_key=ENTSOE_API_KEY, type=["load", "price"], prefer_15min=True))
-        .add_source(OpenMeteoSource(latitude=52.5200, longitude=13.4050, horizon=7, prefix="berlin"))
+        .add_source(
+            OpenMeteoSource(latitude=52.5200, longitude=13.4050, horizon=7, prefix="berlin", timezone="Europe/Berlin")
+        )
         .add_source(CalendarSource(country="DE", holidays="binary", weekday="onehot", daylight=True, freq="15min"))
         .add_transformer(TimezoneTransformer(target_tz="Europe/Berlin"))
         .add_transformer(

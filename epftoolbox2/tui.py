@@ -76,9 +76,9 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "timezone",
-            "description": "Market time zone (defines local days and the issue time)",
-            "required": False,
-            "default": "Europe/Warsaw",
+            "description": "Market time zone (defines local days and the issue time), e.g. Europe/Warsaw",
+            "required": True,
+            "default": None,
             "kind": "text",
         },
         {

@@ -123,7 +123,8 @@ class OpenMeteoSource(DataSource):
                  model: str = "jma_seamless", columns: Optional[List[str]] = None,
                  prefix: str = "", proxy_url: Optional[str] = None,
                  temporal_resolution: Optional[str] = None,
-                 timezone: str = "Europe/Warsaw", issue_time: str = "10:00",
+                 timezone: str = None,  # required: raises if left out, e.g. "Europe/Warsaw"
+                 issue_time: str = "10:00",
                  publication_delay_h: float = 10, vintage: str = "issue_time",
                  strict: bool = False): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...

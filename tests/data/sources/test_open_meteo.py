@@ -73,6 +73,7 @@ def make_archive(step_h=1, latest_run=None, null_columns=(), max_bucket=7):
 
 def make_source(archive=None, **kwargs):
     kwargs.setdefault("columns", ["temperature_2m", "wind_speed_10m"])
+    kwargs.setdefault("timezone", TZ)
     source = OpenMeteoSource(latitude=52.23, longitude=21.01, **kwargs)
     source.session = Mock()
     source.session.get.side_effect = archive or make_archive()
@@ -101,7 +102,7 @@ def from_hours(values):
 
 class TestOpenMeteoSourceInit:
     def test_init_valid_params(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         assert source.latitude == 52.23
         assert source.longitude == 21.01
         assert source.horizon == 5
@@ -115,28 +116,28 @@ class TestOpenMeteoSourceInit:
         assert len(source.columns) > 0
 
     def test_init_custom_model(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, model="icon_seamless")
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, model="icon_seamless")
         assert source.model == "icon_seamless"
 
     def test_init_custom_columns(self):
         custom_cols = ["temperature_2m", "rain"]
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, columns=custom_cols)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, columns=custom_cols)
         assert source.columns == custom_cols
 
     def test_columns_do_not_alias_class_default(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         source.columns.append("wind_speed_100m")
         assert "wind_speed_100m" not in OpenMeteoSource.DEFAULT_COLUMNS
-        assert "wind_speed_100m" not in OpenMeteoSource(latitude=52.23, longitude=21.01).columns
+        assert "wind_speed_100m" not in OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ).columns
 
     def test_columns_copy_caller_list(self):
         custom_cols = ["temperature_2m"]
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, columns=custom_cols)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, columns=custom_cols)
         source.columns.append("rain")
         assert custom_cols == ["temperature_2m"]
 
     def test_init_with_prefix(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, prefix="weather")
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, prefix="weather")
         assert source.prefix == "weather"
 
     @pytest.mark.parametrize("latitude", [91.0, -91.0])
@@ -163,20 +164,30 @@ class TestOpenMeteoSourceInit:
     def test_init_horizon_needing_bucket_8_is_rejected(self):
         # Leak-free d+7 needs previous_day8 for most hours, which the API does not serve.
         with pytest.raises(ValueError, match="previous_day8"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, horizon=7)
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=7)
 
     def test_init_legacy_vintage_allows_horizon_7(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, horizon=7, vintage="valid_time")
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=7, vintage="valid_time")
         assert source.horizon == 7
 
     def test_hourly_model_with_short_delay_allows_horizon_6(self):
         # ICON is published about 4 h after initialisation and stored hourly up to 78 h lead.
         source = OpenMeteoSource(
-            latitude=52.23, longitude=21.01, horizon=6, model="icon_seamless", publication_delay_h=4
+            latitude=52.23, longitude=21.01, timezone=TZ, horizon=6, model="icon_seamless", publication_delay_h=4
         )
         assert source.horizon == 6
         with pytest.raises(ValueError, match="d\\+6 needs previous_day8"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, horizon=6, model="icon_seamless")
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=6, model="icon_seamless")
+
+    def test_timezone_is_required(self):
+        # A default used to compute the issue time in the wrong zone for markets outside CET (e.g. London 23:00
+        # on D silently becoming 10:00 on D+1), leaking future runs. It must now be passed explicitly.
+        with pytest.raises(ValueError, match="timezone is required"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01)
+
+    def test_invalid_timezone_still_reports_the_bad_value(self):
+        with pytest.raises(ValueError, match="Invalid timezone: 'Mars/Olympus'"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Mars/Olympus")
 
     @pytest.mark.parametrize(
         "kwargs, match",
@@ -190,12 +201,13 @@ class TestOpenMeteoSourceInit:
         ],
     )
     def test_init_rejects_invalid_parameters(self, kwargs, match):
+        kwargs.setdefault("timezone", TZ)
         with pytest.raises(ValueError, match=match):
             OpenMeteoSource(latitude=52.23, longitude=21.01, **kwargs)
 
     def test_requests_enough_buckets_for_the_fallback(self):
         # JMA is stored 6-hourly, so the late hours of D+i need previous_day{i+2}.
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, horizon=5)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=5)
         assert max(source._buckets) == 7
         assert min(source._buckets) >= 1
 
@@ -255,7 +267,7 @@ class TestIssueTimeVintage:
         # built, not only when data is actually downloaded.
         logging.getLogger("epftoolbox2.data.sources.open_meteo").propagate = True
         with caplog.at_level(logging.WARNING, logger="epftoolbox2.data.sources.open_meteo"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, vintage="valid_time")
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, vintage="valid_time")
         assert "look-ahead" in caplog.text
 
 
@@ -391,7 +403,7 @@ class TestStoredStepHours:
 
 class TestOpenMeteoSourceValidation:
     def test_fetch_validates_timestamps(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         with pytest.raises(ValueError, match="End timestamp.*must be after start timestamp"):
             source.fetch(pd.Timestamp("2024-01-02", tz="UTC"), pd.Timestamp("2024-01-01", tz="UTC"))
 
@@ -407,13 +419,13 @@ class TestOpenMeteoSourceValidation:
 
 class TestOpenMeteoSourceChunking:
     def test_generate_chunks_single_month(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         start, end = pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-15", tz="UTC")
         chunks = source._generate_chunks(start, end, months=3)
         assert chunks == [(start, end)]
 
     def test_generate_chunks_are_contiguous(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         start, end = pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-07-01", tz="UTC")
         chunks = source._generate_chunks(start, end, months=3)
         assert len(chunks) >= 2
@@ -423,7 +435,7 @@ class TestOpenMeteoSourceChunking:
             assert second_start == first_end
 
     def test_generate_chunks_validates_months_parameter(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         start, end = pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-07-01", tz="UTC")
         for months in (0, -1):
             with pytest.raises(ValueError, match="months parameter must be positive"):
@@ -446,7 +458,7 @@ class TestOpenMeteoSourceAPIRequests:
         response = Mock()
         response.status_code = 200
         response.json.return_value = payload
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         source.session = Mock()
         source.session.get.return_value = response
         return source
@@ -489,7 +501,7 @@ class TestOpenMeteoSourceAPIRequests:
             source._fetch_chunk(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
 
     def test_fetch_chunk_retries_on_request_exception(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         source.session = Mock()
         source.session.get.side_effect = requests.RequestException("Network error")
         with patch("time.sleep"):
@@ -500,7 +512,7 @@ class TestOpenMeteoSourceAPIRequests:
 
 class TestOpenMeteoSourceParsing:
     def test_parse_response_keeps_every_bucket_value_in_place(self, sample_weather_response):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         table = source._parse_response(sample_weather_response)
         assert str(table.index.tz) == "UTC"
         assert len(table) == 72
@@ -511,17 +523,17 @@ class TestOpenMeteoSourceParsing:
 
     def test_parse_response_turns_nulls_into_nan(self, sample_weather_response):
         sample_weather_response["hourly"]["rain_previous_day1"][5] = None
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         table = source._parse_response(sample_weather_response)
         assert np.isnan(table["rain_previous_day1"].iloc[5])
 
     def test_parse_response_handles_missing_hourly(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         assert source._parse_response({}).empty
         assert source._parse_response({"hourly": {}}).empty
 
     def test_parse_response_tolerates_short_arrays(self, sample_weather_response_incomplete):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
         table = source._parse_response(sample_weather_response_incomplete)
         assert len(table) == 2
         assert np.isnan(table["temperature_2m_previous_day1"].iloc[1])
@@ -531,7 +543,12 @@ class TestOpenMeteoSourceParsing:
         response = Mock()
         response.json.return_value = sample_weather_response
         source = OpenMeteoSource(
-            latitude=52.23, longitude=21.01, horizon=2, columns=["temperature_2m"], vintage="valid_time"
+            latitude=52.23,
+            longitude=21.01,
+            timezone=TZ,
+            horizon=2,
+            columns=["temperature_2m"],
+            vintage="valid_time",
         )
         source.session = Mock()
         source.session.get.return_value = response
@@ -542,7 +559,7 @@ class TestOpenMeteoSourceParsing:
 
 class TestCacheConfigAndSerialization:
     def test_cache_config_has_schema_version_and_vintage_parameters(self):
-        config = OpenMeteoSource(latitude=52.23, longitude=21.01).get_cache_config()
+        config = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ).get_cache_config()
         assert config["schema_version"] >= 2
         for key in ("vintage", "issue_time", "publication_delay_h", "timezone", "horizon", "model", "columns"):
             assert key in config
@@ -557,13 +574,13 @@ class TestCacheConfigAndSerialization:
         ],
     )
     def test_output_affecting_parameters_change_the_cache_config(self, change):
-        base = OpenMeteoSource(latitude=52.23, longitude=21.01).get_cache_config()
-        other = OpenMeteoSource(latitude=52.23, longitude=21.01, **change).get_cache_config()
+        base = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ).get_cache_config()
+        other = OpenMeteoSource(latitude=52.23, longitude=21.01, **{"timezone": TZ, **change}).get_cache_config()
         assert base != other
 
     def test_strict_does_not_change_the_cache_config(self):
-        base = OpenMeteoSource(latitude=52.23, longitude=21.01).get_cache_config()
-        strict = OpenMeteoSource(latitude=52.23, longitude=21.01, strict=True).get_cache_config()
+        base = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ).get_cache_config()
+        strict = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, strict=True).get_cache_config()
         assert base == strict
 
     def test_yaml_round_trip(self, tmp_path):
@@ -592,7 +609,7 @@ class TestOpenMeteoSourceIntegration:
     """Integration tests that hit the real API"""
 
     def test_fetch_weather_data_warsaw(self):
-        source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=3)
+        source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, timezone=TZ, horizon=3)
         start, end = pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-03", tz="UTC")
         df = source.fetch(start, end)
         assert len(df) == 48
@@ -600,7 +617,11 @@ class TestOpenMeteoSourceIntegration:
 
     def test_fetch_weather_data_limited_columns(self):
         source = OpenMeteoSource(
-            latitude=52.2297, longitude=21.0122, horizon=2, columns=["temperature_2m", "wind_speed_10m"]
+            latitude=52.2297,
+            longitude=21.0122,
+            timezone=TZ,
+            horizon=2,
+            columns=["temperature_2m", "wind_speed_10m"],
         )
         df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
         assert sorted(df.columns) == sorted(
@@ -608,6 +629,8 @@ class TestOpenMeteoSourceIntegration:
         )
 
     def test_fetch_long_period(self):
-        source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, columns=["temperature_2m"])
+        source = OpenMeteoSource(
+            latitude=52.2297, longitude=21.0122, timezone=TZ, horizon=5, columns=["temperature_2m"]
+        )
         df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-06-01", tz="UTC"))
         assert len(df) == (pd.Timestamp("2024-06-01") - pd.Timestamp("2024-01-01")) / HOUR
