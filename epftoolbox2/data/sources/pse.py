@@ -1,4 +1,5 @@
 import datetime
+import re
 import time
 from typing import Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
@@ -25,9 +26,10 @@ SERIES = {
     "exchange_non_parallel": ("his-wlk-cal", "swm_np", "realised"),
 }
 
-# Nominal availability used by as_of="schedule": (days relative to the business day, local time).
-# Based on publication_ts of 2024-06..2026-09 (see docs): market results appear on B-1 around 13:30-14:30
-# (latest first publication 18:00), realised values on B+1 around 03:00 in 2026 (5% of days later, up to 19:00).
+# Nominal availability used by as_of="schedule": (days relative to the business day, local time). An assumption,
+# checked only where first publications survive (September 2026): market results appeared on B-1 around 13:50
+# (latest 17:05); realised values on B+1 around 03:00 in Feb-Apr and Jul-Sep 2026 (a few days up to 19:00).
+# All realised records before 2026-01-18 were re-published then, so their first publication times are unknown.
 SCHEDULE = {
     "day_ahead": (-1, "18:00"),
     "realised": (1, "06:00"),
@@ -140,10 +142,13 @@ class PseSource(DataSource):
         return True
 
     def _issue_offset(self) -> pd.Timedelta:
+        # Only strings: unquoted 17:00 in YAML is the integer 1020, which fromisoformat would read as 10:20.
+        if not isinstance(self.issue_time, str) or not re.fullmatch(r"\d{1,2}:\d{2}", self.issue_time):
+            raise ValueError(f"issue_time must be a string 'HH:MM', got {self.issue_time!r}")
         try:
-            t = datetime.time.fromisoformat(str(self.issue_time))
+            t = datetime.time.fromisoformat(self.issue_time.zfill(5))
         except ValueError:
-            raise ValueError(f"issue_time must be 'HH:MM', got {self.issue_time!r}")
+            raise ValueError(f"issue_time must be a string 'HH:MM', got {self.issue_time!r}")
         return pd.Timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
 
     # ------------------------------------------------------------------ fetching
@@ -181,6 +186,7 @@ class PseSource(DataSource):
                     keep = a <= issue_utc
                     columns[col] = np.where(keep, v, np.nan)
                     self._log_dropped(col, np.isfinite(v), keep)
+                    self._log_missing(col, np.isfinite(v))
 
         return pd.DataFrame(columns, index=index)
 
@@ -353,6 +359,14 @@ class PseSource(DataSource):
                 f"PSE: {column}: {n_dropped} of {n_values} values were published after {self.issue_time} on the "
                 f"row's day and were set to NaN (as_of={self.as_of!r}; PSE keeps only the last version, "
                 f"so re-published values count as late)"
+            )
+
+    def _log_missing(self, column: str, has_value: np.ndarray) -> None:
+        n_missing = int((~has_value).sum())
+        if n_missing and n_missing < len(has_value):
+            self.logger.info(
+                f"PSE: {column}: {n_missing} of {len(has_value)} rows have no source value "
+                f"(no data, or the hour missing on a spring DST day)"
             )
 
     def _column_name(self, series: str, lag: Optional[int]) -> str:

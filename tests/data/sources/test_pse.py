@@ -149,6 +149,13 @@ class TestPseSourceInit:
         with pytest.raises(ValueError, match=match):
             PseSource(**kwargs)
 
+    @pytest.mark.parametrize("issue_time", [1020, "1020", "11.30", "11:30 CET"])
+    def test_issue_time_must_be_an_hh_mm_string(self, issue_time):
+        # Unquoted `issue_time: 17:00` in hand-written YAML is read as the base-60 integer 1020, which Python 3.11+
+        # would otherwise parse as 10:20.
+        with pytest.raises(ValueError, match="issue_time must be"):
+            PseSource(series=["rce"], issue_time=issue_time)
+
     def test_forecast_series_are_not_offered(self):
         # PSE keeps only the last version of its forecasts, so none may be offered as backtest predictors.
         assert all(kind in ("day_ahead", "realised") for _, _, kind in SERIES.values())
@@ -334,6 +341,35 @@ class TestAsOfPublication:
         pd.testing.assert_frame_equal(a[known_before], b[known_before])
         rows_17 = days == pd.Timestamp("2025-01-17", tz=TZ)
         assert (b.loc[rows_17, "pse_demand_d-2"] == 1e9).all()
+
+    def test_spring_gap_lands_on_switch_day_plus_lag(self):
+        source = PseSource(series=["rce"], issue_time="11:30", lags=[7, -1])
+        df = self.fetch(source, "2025-03-25", "2025-04-10", **{"rce-pln": rce_records("2025-03-15", "2025-04-15")})
+        assert np.isnan(local_row(df, "2025-04-06 02:00")["pse_rce_d-7"])  # 2025-03-30 + 7
+        assert np.isnan(local_row(df, "2025-03-29 02:00")["pse_rce_d+1"])  # 2025-03-30 - 1
+        assert df["pse_rce_d-7"].isna().sum() == 1
+        source.logger.info.assert_any_call(
+            f"PSE: pse_rce_d-7: 1 of {len(df)} rows have no source value "
+            "(no data, or the hour missing on a spring DST day)"
+        )
+
+    @pytest.mark.parametrize("as_of", ["publication", "schedule"])
+    @pytest.mark.parametrize("freq", ["1h", "15min"])
+    @pytest.mark.parametrize("switch_day", ["2024-10-27", "2025-03-30"])
+    def test_leakage_probe_across_dst(self, as_of, freq, switch_day):
+        """Realised values of day D and later are unknown at 11:30 on D under both rules; changing them must not
+        change any row of D or earlier, including DST switch days and quarter-hour output."""
+        day = pd.Timestamp(switch_day)
+        base = demand_records(day - pd.Timedelta(days=12), day + pd.Timedelta(days=12))
+        perturbed = [dict(r, demand=1e9) if pd.Timestamp(r["business_date"]) >= day else r for r in base]
+        kwargs = dict(series=["demand"], issue_time="11:30", lags=[0, 1, 2, 7], as_of=as_of, freq=freq)
+        start, end = day - pd.Timedelta(days=3), day + pd.Timedelta(days=3)
+        a = self.fetch(PseSource(**kwargs), start, end, **{"his-wlk-cal": base})
+        b = self.fetch(PseSource(**kwargs), start, end, **{"his-wlk-cal": perturbed})
+        days = a.tz_convert(TZ).index.tz_localize(None).normalize()
+        pd.testing.assert_frame_equal(a[days <= day], b[days <= day])
+        next_day = b.loc[days == day + pd.Timedelta(days=1), "pse_demand_d-1"].dropna()
+        assert len(next_day) >= 23 * (4 if freq == "15min" else 1) and (next_day == 1e9).all()
 
 
 class TestAsOfSchedule:
