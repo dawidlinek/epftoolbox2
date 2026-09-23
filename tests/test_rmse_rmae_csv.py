@@ -157,8 +157,8 @@ class TestRMAEEvaluator:
     def test_serialization_roundtrip(self):
         """rMAEEvaluator should serialize/deserialize via COMPONENT_REGISTRY."""
         from epftoolbox2.pipelines.model_pipeline import ModelPipeline
-        import tempfile, yaml
-        from pathlib import Path
+        import tempfile
+        import yaml
 
         pipeline = ModelPipeline().add_evaluator(rMAEEvaluator(base_model="OLS"))
         d = pipeline.to_dict()

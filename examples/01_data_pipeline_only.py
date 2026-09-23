@@ -83,7 +83,7 @@ df = pipeline.run(
 
 print(f"\nDownloaded {len(df)} rows")
 print(f"Columns: {list(df.columns)}")
-print(f"\nFirst few rows:")
+print("\nFirst few rows:")
 print(df.head())
 
 output_path = "data_output_PL.csv"

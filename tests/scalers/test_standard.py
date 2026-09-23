@@ -89,8 +89,8 @@ class TestStandardScaler:
 
         mask = StandardScaler.get_scalable_mask(arr)
 
-        assert mask[0] == True  # continuous
-        assert mask[1] == False  # binary
-        assert mask[2] == False  # constant 0
-        assert mask[3] == False  # constant 1
-        assert mask[4] == True  # continuous
+        assert mask[0]  # continuous
+        assert not mask[1]  # binary
+        assert not mask[2]  # constant 0
+        assert not mask[3]  # constant 1
+        assert mask[4]  # continuous

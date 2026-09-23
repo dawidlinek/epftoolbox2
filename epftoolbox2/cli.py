@@ -36,7 +36,6 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_data(args: argparse.Namespace) -> None:
-    import pandas as pd
     from .pipelines.data_pipeline import DataPipeline
 
     dp = DataPipeline.load(args.yaml)

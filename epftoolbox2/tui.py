@@ -326,7 +326,6 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
 
 def _ask_field(field: dict, available_columns: Optional[list[str]] = None) -> Any:
     """Prompt the user for a single parameter field. Returns the value or sentinel SKIP."""
-    name = field["name"]
     desc = field["description"]
     kind = field["kind"]
     default = field["default"]
@@ -680,7 +679,6 @@ def _run_experiment_from_yaml() -> None:
 
 
 def _run_data_from_yaml() -> None:
-    import pandas as pd
     from .pipelines.data_pipeline import DataPipeline
 
     path = questionary.text("  DataPipeline YAML path").ask()

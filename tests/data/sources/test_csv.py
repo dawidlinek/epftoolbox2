@@ -1,8 +1,5 @@
 import pytest
 import pandas as pd
-import tempfile
-import os
-from pathlib import Path
 from epftoolbox2.data.sources.csv import CsvSource
 
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
 from epftoolbox2.data.sources import CalendarSource, CsvSource
-from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer, TimezoneTransformer
+from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import NullCheckValidator, ContinuityValidator
 from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator
