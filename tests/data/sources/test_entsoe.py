@@ -437,6 +437,37 @@ class TestPrices:
         price = source.fetch(_utc("2025-10-01"), _utc("2025-10-02"))["price"]
         assert price.dropna().tolist() == [6.5]
 
+    def test_chunk_boundary_does_not_drop_the_straddled_hour(self):
+        # A 3-month chunk boundary that lands mid-hour (e.g. a request that doesn't start on the hour) splits one
+        # hour's four quarter-hours across two separate API responses. Gridding per chunk sees only two of the four
+        # quarter-hours in each response, so neither chunk can average a complete hour and it is dropped entirely.
+        boundary = _utc("2024-01-01 00:30")
+        first_half = _doc(
+            _series(
+                _period("2024-01-01T00:00Z", "2024-01-01T00:30Z", "PT15M", {1: 10.0, 2: 20.0}, "price.amount"),
+                curve="A01",
+            )
+        )
+        second_half = _doc(
+            _series(
+                _period("2024-01-01T00:30Z", "2024-01-01T01:00Z", "PT15M", {1: 30.0, 2: 40.0}, "price.amount"),
+                curve="A01",
+            )
+        )
+
+        def route(params):
+            req_start = pd.to_datetime(params["periodStart"], format="%Y%m%d%H%M", utc=True)
+            return first_half if req_start < boundary else second_half
+
+        source = _source(route)
+        source._generate_chunks = lambda start, end, months=3: [(start, boundary), (boundary, end)]
+
+        df = source.fetch(_utc("2024-01-01 00:00"), _utc("2024-01-01 01:00"))
+        assert "price" in df.columns
+        price = df["price"]
+        assert list(price.index) == [_utc("2024-01-01 00:00")]
+        assert price.iloc[0] == pytest.approx(25.0)
+
 
 class TestGeneration:
     def test_generation_and_consumption_are_separate_columns(self):

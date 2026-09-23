@@ -384,6 +384,10 @@ class EntsoeSource(DataSource):
         self.logger.info(f"ENTSOE [{self._area_name}]: Start downloading {', '.join(self.type)} data")
 
         all_results = {dtype: [] for dtype in self.type}
+        # Prices are gridded once over the whole requested range (see _prices_to_grid): a 3-month chunk boundary
+        # that lands mid-hour splits that hour's quarter-hours across two API responses, and gridding each chunk
+        # on its own would see an incomplete hour in both and drop it.
+        price_by_resolution: Dict[pd.Timedelta, List[pd.Series]] = {}
 
         with Progress(
             SpinnerColumn(),
@@ -405,10 +409,21 @@ class EntsoeSource(DataSource):
                 chunk_data = self._fetch_chunk(chunk_start, chunk_end)
 
                 for dtype in self.type:
+                    if dtype == "price":
+                        for step, series in chunk_data.get("price", {}).items():
+                            if series is not None and not series.empty:
+                                price_by_resolution.setdefault(step, []).append(series)
+                        continue
                     chunk_df = chunk_data.get(dtype)
                     if chunk_df is not None and not chunk_df.empty:
                         all_results[dtype].append(chunk_df)
                 progress.advance(task)
+
+        if "price" in self.type:
+            merged = {step: _combine(parts) for step, parts in price_by_resolution.items()}
+            graded = self._prices_to_grid(merged)
+            if not graded.empty:
+                all_results["price"].append(pd.DataFrame({"price": graded}))
 
         dataframes = []
         for dtype in self.type:
@@ -450,7 +465,7 @@ class EntsoeSource(DataSource):
 
         return chunks
 
-    def _fetch_chunk(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, pd.DataFrame]:
+    def _fetch_chunk(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, Union[pd.DataFrame, Dict]]:
         result = {}
 
         if "load" in self.type:
@@ -460,7 +475,8 @@ class EntsoeSource(DataSource):
             result["generation"] = self._fetch_generation(start, end)
 
         if "price" in self.type:
-            result["price"] = self._fetch_price(start, end)
+            # Ungridded: by native resolution. Gridding happens once in fetch(), over all chunks together.
+            result["price"] = self._fetch_price_raw(start, end)
 
         return result
 
@@ -578,7 +594,8 @@ class EntsoeSource(DataSource):
         dfs = [df for df in dfs if not df.empty]
         return pd.concat(dfs, axis=1) if dfs else pd.DataFrame()
 
-    def _fetch_price(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    def _fetch_price_raw(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[pd.Timedelta, pd.Series]:
+        """Day-ahead prices for one chunk, by native resolution and not yet put on a grid (see fetch())."""
         xml = self._api_request(
             {
                 "documentType": "A44",
@@ -588,10 +605,7 @@ class EntsoeSource(DataSource):
             start,
             end,
         )
-        series = self._prices_to_grid(self._parse_prices(xml))
-        if series.empty:
-            return pd.DataFrame()
-        return pd.DataFrame({"price": series})
+        return self._parse_prices(xml)
 
     def _api_request(self, params: Dict, start: pd.Timestamp, end: pd.Timestamp) -> Optional[str]:
         """GET one document. Returns None for "No matching data"; retries 429/5xx and network errors; raises
