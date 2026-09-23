@@ -7,6 +7,8 @@ from epftoolbox2.data.sources.open_meteo_single_runs import OpenMeteoSingleRunsS
 from epftoolbox2.data.sources.open_meteo_weighted import OpenMeteoWeightedSource, parse_locations
 from epftoolbox2.pipelines import DataPipeline
 
+TZ = "Europe/Warsaw"
+
 LOCATIONS = [
     {"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": 3.0},
     {"name": "krakow", "latitude": 50.06, "longitude": 19.94, "weight": 1.0},
@@ -19,7 +21,7 @@ def _frame(index, **columns):
 
 def make_source(locations=None, fetch_returns=None, **kwargs):
     """Build a weighted source and stub each underlying source's `fetch` with `fetch_returns[i]`."""
-    kwargs.setdefault("source_params", {"columns": ["temperature_2m"], "horizon": 1})
+    kwargs.setdefault("source_params", {"columns": ["temperature_2m"], "horizon": 1, "timezone": TZ})
     source = OpenMeteoWeightedSource(locations=locations or LOCATIONS, **kwargs)
     if fetch_returns is not None:
         for underlying, frame in zip(source._sources, fetch_returns):
@@ -89,7 +91,7 @@ class TestParseLocations:
 
 class TestInit:
     def test_defaults(self):
-        source = OpenMeteoWeightedSource(locations=LOCATIONS)
+        source = OpenMeteoWeightedSource(locations=LOCATIONS, source_params={"timezone": TZ})
         assert source.source == "OpenMeteoSource"
         assert source.keep_locations is False
         assert source.prefix == ""
@@ -97,7 +99,9 @@ class TestInit:
         assert all(isinstance(s, OpenMeteoSource) for s in source._sources)
 
     def test_can_use_single_runs_source(self):
-        source = OpenMeteoWeightedSource(locations=LOCATIONS, source="OpenMeteoSingleRunsSource")
+        source = OpenMeteoWeightedSource(
+            locations=LOCATIONS, source="OpenMeteoSingleRunsSource", source_params={"timezone": TZ}
+        )
         assert all(isinstance(s, OpenMeteoSingleRunsSource) for s in source._sources)
 
     def test_rejects_unknown_source(self):
@@ -115,7 +119,8 @@ class TestInit:
 
     def test_source_params_reach_the_underlying_sources(self):
         source = OpenMeteoWeightedSource(
-            locations=LOCATIONS, source_params={"columns": ["temperature_2m"], "horizon": 3, "model": "icon_seamless"}
+            locations=LOCATIONS,
+            source_params={"columns": ["temperature_2m"], "horizon": 3, "model": "icon_seamless", "timezone": TZ},
         )
         for underlying, loc in zip(source._sources, LOCATIONS):
             assert underlying.latitude == loc["latitude"]
@@ -124,7 +129,7 @@ class TestInit:
             assert underlying.model == "icon_seamless"
 
     def test_weights_are_normalised(self):
-        source = OpenMeteoWeightedSource(locations=LOCATIONS)
+        source = OpenMeteoWeightedSource(locations=LOCATIONS, source_params={"timezone": TZ})
         np.testing.assert_allclose(source._weights, [0.75, 0.25])
 
 
@@ -291,7 +296,9 @@ class TestKeepLocations:
 
 class TestCacheConfigAndSerialization:
     def test_cache_config_contains_locations_and_source_config(self):
-        source = OpenMeteoWeightedSource(locations=LOCATIONS, source_params={"columns": ["temperature_2m"]})
+        source = OpenMeteoWeightedSource(
+            locations=LOCATIONS, source_params={"columns": ["temperature_2m"], "timezone": TZ}
+        )
         config = source.get_cache_config()
         assert config["source_type"] == "open_meteo_weighted"
         assert config["schema_version"] >= 1
@@ -301,26 +308,32 @@ class TestCacheConfigAndSerialization:
         assert "prefix" not in config["source_config"]
 
     def test_changing_a_weight_changes_the_cache_config(self):
-        base = OpenMeteoWeightedSource(locations=LOCATIONS).get_cache_config()
+        base = OpenMeteoWeightedSource(locations=LOCATIONS, source_params={"timezone": TZ}).get_cache_config()
         changed_locations = [dict(LOCATIONS[0], weight=5.0), LOCATIONS[1]]
-        other = OpenMeteoWeightedSource(locations=changed_locations).get_cache_config()
+        other = OpenMeteoWeightedSource(locations=changed_locations, source_params={"timezone": TZ}).get_cache_config()
         assert base != other
 
     def test_changing_source_params_changes_the_cache_config(self):
-        base = OpenMeteoWeightedSource(locations=LOCATIONS, source_params={"horizon": 2}).get_cache_config()
-        other = OpenMeteoWeightedSource(locations=LOCATIONS, source_params={"horizon": 3}).get_cache_config()
+        base = OpenMeteoWeightedSource(
+            locations=LOCATIONS, source_params={"horizon": 2, "timezone": TZ}
+        ).get_cache_config()
+        other = OpenMeteoWeightedSource(
+            locations=LOCATIONS, source_params={"horizon": 3, "timezone": TZ}
+        ).get_cache_config()
         assert base != other
 
     def test_keep_locations_changes_the_cache_config(self):
-        base = OpenMeteoWeightedSource(locations=LOCATIONS).get_cache_config()
-        other = OpenMeteoWeightedSource(locations=LOCATIONS, keep_locations=True).get_cache_config()
+        base = OpenMeteoWeightedSource(locations=LOCATIONS, source_params={"timezone": TZ}).get_cache_config()
+        other = OpenMeteoWeightedSource(
+            locations=LOCATIONS, source_params={"timezone": TZ}, keep_locations=True
+        ).get_cache_config()
         assert base != other
 
     def test_yaml_round_trip(self, tmp_path):
         source = OpenMeteoWeightedSource(
             locations=LOCATIONS,
             source="OpenMeteoSource",
-            source_params={"columns": ["temperature_2m"], "horizon": 3, "model": "icon_seamless"},
+            source_params={"columns": ["temperature_2m"], "horizon": 3, "model": "icon_seamless", "timezone": TZ},
             prefix="pl",
             keep_locations=True,
         )
@@ -334,7 +347,7 @@ class TestCacheConfigAndSerialization:
     def test_yaml_round_trip_with_compact_string_locations(self, tmp_path):
         source = OpenMeteoWeightedSource(
             locations="warsaw:52.23:21.01:3.0, krakow:50.06:19.94:1.0",
-            source_params={"columns": ["temperature_2m"]},
+            source_params={"columns": ["temperature_2m"], "timezone": TZ},
         )
         path = tmp_path / "dp.yaml"
         DataPipeline().add_source(source).save(path)

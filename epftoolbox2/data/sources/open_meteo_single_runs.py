@@ -25,7 +25,9 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
     from 2026-05-13 00Z. A ``model`` not covered here should be checked the same way before relying on it.
 
     Example:
-        >>> source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, horizon=7, prefix="warsaw")
+        >>> source = OpenMeteoSingleRunsSource(
+        ...     latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=7, prefix="warsaw"
+        ... )
         >>> df = source.fetch(pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2025-02-01", tz="UTC"))
     """
 
@@ -44,7 +46,7 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
         columns: Optional[List[str]] = None,
         prefix: str = "",
         proxy_url: Optional[str] = None,
-        timezone: str = "Europe/Warsaw",
+        timezone: Optional[str] = None,
         issue_time: str = "10:00",
         publication_delay_h: float = 10,
         run_interval_h: int = 6,
@@ -62,7 +64,8 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
             columns: Weather variables (default: DEFAULT_COLUMNS)
             prefix: Prefix for column names
             proxy_url: HTTP(S) proxy URL
-            timezone: Market time zone of the local day D, the d+i wall-clock hour and ``issue_time``
+            timezone: Market time zone of the local day D, the d+i wall-clock hour and ``issue_time`` (required,
+                e.g. "Europe/Warsaw" for PL, "Europe/London" for GB; no default)
             issue_time: Local time ("HH:MM") on D at which the forecast is issued
             publication_delay_h: Hours between a run's initialisation and its availability (default 10)
             run_interval_h: Hours between model runs, starting at 00 UTC (6 for global models, 3 for ICON-EU/D2)

@@ -90,6 +90,7 @@ def make_run_archive(missing=(), short_runs=None, null_columns_by_run=None):
 
 def make_source(archive=None, **kwargs):
     kwargs.setdefault("columns", ["temperature_2m", "wind_speed_100m"])
+    kwargs.setdefault("timezone", TZ)
     source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, **kwargs)
     source.session = Mock()
     source.session.get.side_effect = archive or make_run_archive()
@@ -104,7 +105,7 @@ def make_source(archive=None, **kwargs):
 
 class TestInit:
     def test_defaults(self):
-        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone=TZ)
         assert source.model == "ecmwf_ifs"
         assert source.horizon == 7
         assert source.run_interval_h == 6
@@ -113,7 +114,7 @@ class TestInit:
 
     @pytest.mark.parametrize("horizon", [1, 14])
     def test_accepts_horizon_up_to_14(self, horizon):
-        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, horizon=horizon)
+        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=horizon)
         assert source.horizon == horizon
 
     def test_rejects_horizon_above_14(self):
@@ -123,12 +124,18 @@ class TestInit:
     @pytest.mark.parametrize("interval", [0, -6, 5, 7, 24.0, True])
     def test_rejects_run_interval_not_dividing_24(self, interval):
         with pytest.raises(ValueError, match="run_interval_h"):
-            OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, run_interval_h=interval)
+            OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone=TZ, run_interval_h=interval)
 
     @pytest.mark.parametrize("interval", [1, 2, 3, 4, 6, 8, 12, 24])
     def test_accepts_divisors_of_24(self, interval):
-        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, run_interval_h=interval)
+        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone=TZ, run_interval_h=interval)
         assert source.run_interval_h == interval
+
+    def test_timezone_is_required(self):
+        # A default used to compute the issue time in the wrong zone for markets outside CET, leaking future
+        # runs. It must now be passed explicitly.
+        with pytest.raises(ValueError, match="timezone is required"):
+            OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01)
 
     def test_rejects_invalid_timezone(self):
         with pytest.raises(ValueError, match="timezone"):
@@ -136,7 +143,7 @@ class TestInit:
 
     def test_rejects_unknown_derived_name(self):
         with pytest.raises(ValueError, match="derived must be a subset"):
-            OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, derived=["not_a_column"])
+            OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone=TZ, derived=["not_a_column"])
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +319,7 @@ class TestFetchRun:
         assert source.session.get.call_count == OpenMeteoSingleRunsSource.MAX_RETRIES
 
     def test_fetch_validates_timestamps(self):
-        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01)
+        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone=TZ)
         with pytest.raises(ValueError, match="End timestamp.*must be after start timestamp"):
             source.fetch(pd.Timestamp("2024-01-02", tz="UTC"), pd.Timestamp("2024-01-01", tz="UTC"))
 
@@ -324,7 +331,7 @@ class TestFetchRun:
 
 class TestCacheConfigAndSerialization:
     def test_cache_config_has_schema_version_and_key_parameters(self):
-        config = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01).get_cache_config()
+        config = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone=TZ).get_cache_config()
         assert config["schema_version"] >= 1
         for key in ("run_interval_h", "issue_time", "publication_delay_h", "timezone", "horizon", "model", "columns"):
             assert key in config
@@ -341,13 +348,15 @@ class TestCacheConfigAndSerialization:
         ],
     )
     def test_output_affecting_parameters_change_the_cache_config(self, change):
-        base = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01).get_cache_config()
-        other = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, **change).get_cache_config()
+        base = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone=TZ).get_cache_config()
+        other = OpenMeteoSingleRunsSource(
+            latitude=52.23, longitude=21.01, **{"timezone": TZ, **change}
+        ).get_cache_config()
         assert base != other
 
     def test_strict_does_not_change_the_cache_config(self):
-        base = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01).get_cache_config()
-        strict = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, strict=True).get_cache_config()
+        base = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone=TZ).get_cache_config()
+        strict = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone=TZ, strict=True).get_cache_config()
         assert base == strict
 
     def test_yaml_round_trip(self, tmp_path):
@@ -378,7 +387,7 @@ class TestOpenMeteoSingleRunsSourceIntegration:
     """Integration tests that hit the real API"""
 
     def test_fetch_weather_data_warsaw(self):
-        source = OpenMeteoSingleRunsSource(latitude=52.2297, longitude=21.0122, horizon=3)
+        source = OpenMeteoSingleRunsSource(latitude=52.2297, longitude=21.0122, timezone=TZ, horizon=3)
         start, end = pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2025-01-03", tz="UTC")
         df = source.fetch(start, end)
         assert len(df) == 48

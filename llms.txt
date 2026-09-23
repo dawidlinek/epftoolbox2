@@ -163,7 +163,7 @@ source = OpenMeteoSingleRunsSource(
     columns=None,                # Optional. Weather variables (default: None = DEFAULT_COLUMNS)
     prefix="warsaw",             # Optional. Prefix for column names (default: "")
     proxy_url=None,              # Optional. HTTP(S) proxy URL, saved to YAML as is (default: None)
-    timezone="Europe/Warsaw",    # Optional. Market time zone of local days and the issue time (default: "Europe/Warsaw")
+    timezone="Europe/Warsaw",    # Required. Market time zone of local days and the issue time; no default (raises if omitted)
     issue_time="10:00",          # Optional. Local "HH:MM" on D when the forecast is issued (default: "10:00")
     publication_delay_h=10,      # Optional. Hours from run initialisation to availability (default: 10)
     run_interval_h=6,            # Optional. Hours between model runs, must divide 24 (default: 6)
@@ -178,7 +178,7 @@ source = OpenMeteoSingleRunsSource(
 
 **Archive start** (probed against the API, September 2026): `ecmwf_ifs` (default) from 2024-03-14 00Z (only 00/12 UTC runs at first); `icon_seamless`, `gfs_seamless` and most other seamless models from 2026-04-02 00Z; `jma_gsm`/`jma_seamless` from 2026-05-13 00Z. Check any other model the same way before relying on it.
 
-**Returned rows:** exactly `[start, end)`, UTC hourly index. Rows whose issue time is still in the future use runs published by now (provisional); trailing rows without any value are not returned. Missing values per column are logged with their share and first valid timestamp; `strict=True` raises.
+**Returned rows:** exactly `[start, end)`, UTC hourly index. Rows whose issue time is still in the future use runs published by now (provisional); trailing rows without any value are not returned. Missing values per column are logged with their share, the timestamp the column is complete from, and the missing share by local hour when it's uneven across hours; `strict=True` raises.
 
 **Output column naming:** `{prefix}_{variable}_d+{i}`
 - Example: `warsaw_temperature_2m_d+1`, `warsaw_temperature_2m_d+2`, ..., `warsaw_temperature_2m_d+7`

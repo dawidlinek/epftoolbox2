@@ -124,7 +124,7 @@ When a row's issue time is still in the future (for example `end="today_d+7"`, o
 | `ecmwf_ifs` | from 2025-10-01 | ECMWF IFS at 9 km, hourly to 90 h. About 8 % of hours were missing in the first half of 2026. |
 | `gfs_seamless` | temperature from 2021-03, other variables from 2024-01-19 | NCEP GFS. |
 
-The dates are the first valid `previous_day1` values at Warsaw (checked in September 2026). For data from 2024 on, ECMWF IFS 0.25° or ICON are better choices than JMA. The source logs the share of missing values and the first valid timestamp for every column that has gaps; with `strict=True` it raises instead. Missing weather values make the model drop those forecasts, so check the log before comparing models.
+The dates are the first valid `previous_day1` values at Warsaw (checked in September 2026). For data from 2024 on, ECMWF IFS 0.25° or ICON are better choices than JMA. The source logs, for every column that has gaps, the share of missing values, the timestamp it is complete from, and the missing share by local hour when that's uneven (e.g. JMA's `previous_day5`-`7`, which are missing before 2021 only for the hours that need them); with `strict=True` it raises instead. Missing weather values make the model drop those forecasts, so check the log before comparing models.
 
 ## Variables that describe the preceding hour
 
