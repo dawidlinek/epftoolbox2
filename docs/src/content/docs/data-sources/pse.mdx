@@ -30,7 +30,7 @@ df = source.fetch(
 # pse_rce, pse_rce_d-1, pse_rce_d-7, pse_demand (empty), pse_demand_d-1, pse_demand_d-7, pse_wind, ...
 ```
 
-A typical pipeline uses one raw instance for the target and one as-of instance for predictors:
+A typical pipeline uses one raw instance for the target and one as-of instance, with a **different prefix**, for predictors:
 
 ```python
 from epftoolbox2.pipelines import DataPipeline
@@ -41,16 +41,24 @@ pipeline = (
     DataPipeline()
     .add_source(PseSource(series=["rce"], issue_time=None))  # target column pse_rce
     .add_source(PseSource(series=["rce", "demand", "wind", "solar"], issue_time="11:30", lags=[1, 2, 7], prefix="asof"))
-    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))  # same zone as the source's `timezone`
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))  # required: the source's `timezone`
 )
 ```
+
+<Aside type="caution">
+  Give the as-of instance its own prefix. With the same prefix, a raw `pse_rce` target and an as-of `pse_rce_d+1` column would collide with the target columns `pse_rce_d+1`, … that `ModelPipeline` creates, and two instances would produce duplicate column names. Neither is detected yet; both give wrong numbers without an error.
+</Aside>
+
+<Aside type="caution">
+  The pipeline must convert the index with `TimezoneTransformer(target_tz=...)` set to the source's `timezone`. The source decides day D and the issue time in that zone; `ModelPipeline` takes D from the index. On a UTC index, the late-evening rows would belong to a different day than the source assumed, and some would see values published after their issue time.
+</Aside>
 
 ## Parameters
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `series` | List[str] | Yes | - | Series to fetch (see below) |
-| `issue_time` | str \| None | No | `"11:30"` | Local time `"HH:MM"` (in `timezone`) at which forecasts are issued on day D. `None` returns raw values at delivery time, without any availability filtering |
+| `issue_time` | str \| None | No | `"11:30"` | Local time `"HH:MM"` (in `timezone`) at which forecasts are issued on day D. Must be a string: quote it in YAML (`issue_time: "17:00"`), since unquoted `17:00` is read as a number. `None` returns raw values at delivery time, without any availability filtering |
 | `lags` | int \| List[int] | No | `0` | Calendar-day offset(s) relative to D: positive = past, negative = future, `0` = D itself. Without `issue_time` only `0` is allowed |
 | `as_of` | str | No | `"publication"` | Availability rule: `"publication"` (the record's `publication_ts`) or `"schedule"` (nominal publication times, see below) |
 | `timezone` | str | No | `"Europe/Warsaw"` | Time zone that defines day D, the same local hour and the issue time. Must match `TimezoneTransformer(target_tz=...)` |
@@ -91,17 +99,19 @@ This matches the library's naming: `x_d-k` is x on D-k, `x_d+h` is x on D+h as k
 
 Examples at `issue_time="11:30"`:
 - `pse_rce` is filled: RCE for D is published around 14:00 on D-1.
-- `pse_rce_d+1` is empty: RCE for D+1 appears around 14:00 on D, after 11:30. With `issue_time="15:00"` it would be filled on most days.
+- `pse_rce_d+1` is empty: RCE for D+1 appears around 14:00 on D, after 11:30. With `issue_time="15:00"` it would be filled on most days (with its own prefix, see above).
 - `pse_demand` is empty: realised values for D are published on D+1. Use `lags=[1, ...]`.
 
-Lags follow **local calendar days**, not 24-hour offsets. On the day after a DST switch, 10:00 takes 10:00 of the switch day. The missing 02:00 of the spring switch day leaves 02:00 of the next day empty; both 02:00 hours of the autumn switch day take 02:00 of the day before.
+Lags follow **local calendar days**, not 24-hour offsets. On the day after a DST switch, 10:00 takes 10:00 of the switch day. The spring switch day S has no 02:00, so lag `k` leaves 02:00 empty on day S+k (lag 7: a week later; lag -1: the day before S). Both 02:00 hours of the autumn switch day take 02:00 of the day before.
 
 <Aside type="caution">
   Don't apply `LagTransformer` to as-of columns. It shifts by elapsed time and ignores publication times; ask the source for the lags you need instead.
+
+  Keep as-of columns out of `ResampleTransformer`'s gap filling: it currently interpolates every `NaN` from the neighbouring values (the default `method="linear"`), which fills "not yet published" with later values. The source already returns hourly data with `freq="1h"`; if you resample other columns, list them in `ResampleTransformer(columns=[...])`.
 </Aside>
 
 <Aside type="caution">
-  `ModelPipeline` skips a forecast whose predictors contain `NaN`. An empty or sparse as-of column therefore drops forecasts. Check how many forecasts each model produced, and compare models on identical forecast keys.
+  `NaN` predictors are not reported by `ModelPipeline`: a forecast whose predictors contain `NaN` is skipped, and training rows with `NaN` predictors are dropped, which silently shortens the training window. An empty or sparse as-of column therefore drops forecasts in blocks (see the re-publication periods below). Check how many forecasts each model produced, and compare models on identical forecast keys.
 </Aside>
 
 ## `publication_ts` is the time of the last version
@@ -110,13 +120,13 @@ The API keeps only the **last version** of each record. When PSE re-publishes a 
 
 | Data | First publication | Re-publications |
 |------|-------------------|-----------------|
-| `rce`, `csdac` | D-1, median ~13:50 local; 99% before 15:15; latest 18:00 | 3 RCE days (2024-06-26, 2025-10-23, 2026-03-04) re-published on D |
-| `his-wlk-cal` (demand, generation, exchange) | D+1 ~03:00 local in 2026; Feb–Apr 2026: 99% by 04:00; Jul–Sep 2026: ~5% of days later, up to 19:00 | About 75% of business days before 2026-01 carry a bulk re-publication date (e.g. 2026-01-18); some 2026-05/06 days were re-published weeks later |
+| `rce`, `csdac` | D-1, median ~13:50 local; 99% before 15:15; latest 17:05 (`rce`) and 18:00 (`csdac`) | 3 RCE days re-published on D: 2024-06-26 13:06, 2025-10-23 12:34, 2026-03-04 08:05 |
+| `his-wlk-cal` (demand, generation, exchange) | Unknown before 2026-01-18. Since then D+1 ~03:00 local; Feb–Apr 2026: 99% by 04:00; Jul–Sep 2026: ~5% of days later, up to 19:00 | **Every** business day from 2024-06-14 to 2026-01-17 was re-published on 2026-01-18; so were all of June 2026, 13 days of May 2026 and 4 days of July 2026 (weeks later) |
 
 The two `as_of` rules handle this differently:
 
-- **`"publication"`** (default): a value counts as known from its `publication_ts`. This never uses a value before it existed in its current form. But re-published values count as late, so realised lags are **mostly empty before 2026** and `rce` loses the three re-published days.
-- **`"schedule"`**: a value counts as known at a nominal time: market results (`rce`, `csdac`) at 18:00 on D-1, realised values at 06:00 on D+1 (local Polish time). Realised lags are then filled over the whole history. This is an assumption: it uses the last revision of each value, and it is optimistic on days that were first published after the nominal time.
+- **`"publication"`** (default): a value counts as known from its `publication_ts`. This never uses a value before it existed in its current form. But re-published values count as late: realised lags are **empty for every row before 2026-01-18** and for most of May–June 2026, and at 11:30 `pse_rce` loses two days (2024-06-26 and 2025-10-23).
+- **`"schedule"`**: a value counts as known at a nominal time: market results (`rce`, `csdac`) at 18:00 on D-1, realised values at 06:00 on D+1 (local Polish time). Realised lags are then filled over the whole history. This is an **assumption**. It matches the publication times observed in 2026, but no first-publication time survives for 2024–2025, so it can't be checked there. It uses the last revision of each value (for 2024–2025, the January 2026 re-publication), and it is optimistic on days that were first published after the nominal time.
 
 <Aside type="note">
   Because re-publications move `publication_ts`, the `"publication"` output can change between downloads. Cache the data (`pipeline.run(..., cache=True)`) to keep an experiment reproducible, and clear `.cache/sources/` deliberately when you want fresh data.

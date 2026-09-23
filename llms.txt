@@ -219,10 +219,10 @@ source = PseSource(
 - Example at 11:30: `pse_rce` filled (published ~14:00 on D-1), `pse_rce_d+1` empty, `pse_demand` empty (realised D is published on D+1), `pse_demand_d-1` filled.
 
 **as_of:** PSE keeps only the last version of each record, so `publication_ts` is the last (re-)publication time.
-- `"publication"`: known from `publication_ts`. No look-ahead, but re-published values count as late: realised lags are mostly empty before 2026 (bulk re-publications), 3 RCE days are lost.
-- `"schedule"`: known at nominal times: rce/csdac 18:00 on D-1, realised 06:00 on D+1 (Polish time). Fills the whole history; uses last revisions and is optimistic on days published late.
+- `"publication"`: known from `publication_ts`. No look-ahead, but re-published values count as late: realised lags are empty before 2026-01-18 (every earlier day was re-published then) and for most of May-June 2026; 2 RCE days are lost at 11:30.
+- `"schedule"`: known at nominal times: rce/csdac 18:00 on D-1, realised 06:00 on D+1 (Polish time). Fills the whole history, but is an assumption (unverifiable for 2024-2025), uses last revisions and is optimistic on days published late.
 
-**Notes:** PSE forecasts (load_fcst, PK5L, price-fcst) and balancing prices are not offered: last version only, i.e. look-ahead in backtests. Don't apply LagTransformer to as-of columns. NaN predictors make ModelPipeline skip forecasts. Use a separate raw instance (`issue_time=None`) for the target.
+**Notes:** PSE forecasts (load_fcst, PK5L, price-fcst) and balancing prices are not offered: last version only, i.e. look-ahead in backtests. Don't apply LagTransformer to as-of columns, and keep them out of ResampleTransformer (it interpolates NaNs from later values; list other columns in `columns=`). NaN predictors make ModelPipeline skip forecasts and drop training rows silently. Use a separate raw instance (`issue_time=None`) for the target, and give the as-of instance a different prefix (same-prefix `pse_rce_d+1` would collide with the target columns; duplicate names aren't detected). A `TimezoneTransformer` with the source's `timezone` is required. Quote `issue_time` in YAML.
 
 **Caching:** Cache config includes `schema_version` and all parameters. `"publication"` output can change when PSE re-publishes; cache for reproducibility.
 
