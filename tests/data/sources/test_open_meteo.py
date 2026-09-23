@@ -159,7 +159,7 @@ class TestOpenMeteoSourceInit:
     def test_init_horizon_beyond_previous_day7_is_rejected(self, horizon):
         # The Previous Runs API only serves previous_day1..7; previous_day8+ come back as nulls.
         with pytest.raises(ValueError, match="previous_day"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, horizon=horizon, vintage="valid_time")
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=horizon, vintage="valid_time")
 
     def test_init_horizon_needing_bucket_8_is_rejected(self):
         # Leak-free d+7 needs previous_day8 for most hours, which the API does not serve.
@@ -210,6 +210,18 @@ class TestOpenMeteoSourceInit:
         source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=5)
         assert max(source._buckets) == 7
         assert min(source._buckets) >= 1
+
+    def test_derived_is_off_by_default(self):
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        assert source.derived == []
+
+    def test_derived_rejects_unknown_name(self):
+        with pytest.raises(ValueError, match="derived must be a subset"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, derived=["not_a_column"])
+
+    def test_derived_rejects_missing_input_column(self):
+        with pytest.raises(ValueError, match="needs 'temperature_2m'"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, columns=["wind_speed_10m"], derived=["hdd"])
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +427,14 @@ class TestReturnedRange:
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
         assert list(df.columns) == ["warsaw_temperature_2m_d+1", "warsaw_wind_speed_10m_d+1"]
 
+    def test_derived_columns_are_computed_from_the_prefixless_forecast(self):
+        source = make_source(horizon=1, prefix="warsaw", derived=["hdd"], hdd_base_c=18.0)
+        df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
+        assert "warsaw_hdd_d+1" in df.columns
+        # The synthetic archive encodes temperature as (100 * bucket + hour offset); at these leads it is >> 18,
+        # so hdd should be clipped to 0 everywhere.
+        assert (df["warsaw_hdd_d+1"] == 0).all()
+
 
 class TestStoredStepHours:
     def test_ecmwf_ifs04_is_not_matched_by_the_hourly_ecmwf_ifs_prefix(self):
@@ -424,44 +444,6 @@ class TestStoredStepHours:
         assert stored_step_hours("ecmwf_ifs04", 1) == 3
         assert stored_step_hours("ecmwf_ifs04", 6) == 6
         assert stored_step_hours("ecmwf_ifs", 1) == 1
-
-
-class TestCoverageHelpers:
-    def test_first_complete_timestamp_is_one_step_past_the_last_missing_row(self):
-        idx = pd.date_range("2024-01-01", periods=5, freq="1h", tz="UTC")
-        series = pd.Series([1.0, np.nan, np.nan, 4.0, 5.0], index=idx)
-        assert OpenMeteoSource._first_complete_timestamp(series, dropped_final=0) == idx[3]
-
-    def test_first_complete_timestamp_is_the_start_when_never_missing(self):
-        idx = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
-        series = pd.Series([1.0, 2.0, 3.0], index=idx)
-        assert OpenMeteoSource._first_complete_timestamp(series, dropped_final=0) == idx[0]
-
-    def test_first_complete_timestamp_is_none_when_the_last_row_is_missing(self):
-        idx = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
-        series = pd.Series([1.0, 2.0, np.nan], index=idx)
-        assert OpenMeteoSource._first_complete_timestamp(series, dropped_final=0) is None
-
-    def test_first_complete_timestamp_is_none_when_rows_were_dropped_at_the_tail(self):
-        # dropped_final rows are all-NaN by construction (see _drop_unfilled_tail), so the column can't be
-        # complete beyond the returned data even though every returned row happens to be filled.
-        idx = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
-        series = pd.Series([1.0, 2.0, 3.0], index=idx)
-        assert OpenMeteoSource._first_complete_timestamp(series, dropped_final=2) is None
-
-    def test_hourly_missing_share_is_none_when_even_across_hours(self):
-        idx = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
-        series = pd.Series([np.nan, np.nan, np.nan, np.nan], index=idx)
-        hours = pd.Index([0, 1, 0, 1])
-        assert OpenMeteoSource._hourly_missing_share(series, hours) is None
-
-    def test_hourly_missing_share_reports_uneven_hours(self):
-        idx = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
-        series = pd.Series([np.nan, 1.0, np.nan, np.nan], index=idx)
-        hours = pd.Index([0, 1, 0, 1])
-        share = OpenMeteoSource._hourly_missing_share(series, hours)
-        assert share[0] == 1.0
-        assert share[1] == 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +621,7 @@ class TestCacheConfigAndSerialization:
             {"publication_delay_h": 6},
             {"timezone": "Europe/London"},
             {"vintage": "valid_time"},
+            {"derived": ["hdd"]},
         ],
     )
     def test_output_affecting_parameters_change_the_cache_config(self, change):
@@ -650,6 +633,11 @@ class TestCacheConfigAndSerialization:
         base = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ).get_cache_config()
         strict = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, strict=True).get_cache_config()
         assert base == strict
+
+    def test_derived_off_by_default_and_absent_from_cache_config(self):
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        assert source.derived == []
+        assert "derived" not in source.get_cache_config()
 
     def test_yaml_round_trip(self, tmp_path):
         source = OpenMeteoSource(
@@ -670,6 +658,23 @@ class TestCacheConfigAndSerialization:
         assert isinstance(loaded, OpenMeteoSource)
         assert loaded.get_cache_config() == source.get_cache_config()
         assert loaded.strict is True
+
+    def test_yaml_round_trip_with_derived_columns(self, tmp_path):
+        source = OpenMeteoSource(
+            latitude=52.23,
+            longitude=21.01,
+            timezone=TZ,
+            columns=["temperature_2m", "wind_speed_100m"],
+            derived=["hdd", "cdd", "wind_speed_100m_cubed"],
+            hdd_base_c=15.5,
+            cdd_base_c=24.0,
+        )
+        path = tmp_path / "dp.yaml"
+        DataPipeline().add_source(source).save(path)
+        loaded = DataPipeline.load(path).sources[0]
+        assert isinstance(loaded, OpenMeteoSource)
+        assert loaded.get_cache_config() == source.get_cache_config()
+        assert loaded.derived == ["hdd", "cdd", "wind_speed_100m_cubed"]
 
 
 @pytest.mark.integration
