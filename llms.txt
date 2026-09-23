@@ -151,6 +151,13 @@ source = CalendarSource(
     freq="1h",                   # Optional. Row spacing: divisor of 1 hour ("15min") or whole hours dividing a day
     subdiv=None,                 # Optional. Subdivision for regional holidays: "BY"/"DE-BY", "ENG", "ZH"
     categories=None,             # Optional. holidays categories, e.g. ["public", "bank"] (None = public only)
+    bridge_days=False,           # Optional. Add is_bridge_day
+    christmas_period=False,      # Optional. Add is_christmas_period (24 Dec - 1 Jan)
+    holiday_distance=0,          # Optional. N > 0: add days_to_holiday, days_since_holiday capped at N
+    dst_switch=False,            # Optional. Add is_dst_switch_day (23- or 25-hour local days)
+    fourier_weekly=0,            # Optional. K weekly harmonics: week_sin_k, week_cos_k
+    fourier_annual=0,            # Optional. K annual harmonics: year_sin_k, year_cos_k
+    regimes=False,               # Optional. True (DEFAULT_REGIMES for the country) or {name: "YYYY-MM-DD"}
 )
 ```
 
@@ -169,6 +176,13 @@ source = CalendarSource(
 | `month` | `"name"` | `month_name` ("january", ...) |
 | `month` | `"onehot"` | `is_january`, ..., `is_december` |
 | `daylight` | `True` | `sunrise`, `sunset` (local decimal hours), `daylight_hours` |
+| `bridge_days` | `True` | `is_bridge_day`: working day whose previous and next days are weekend days or holidays |
+| `christmas_period` | `True` | `is_christmas_period`: local dates 24 Dec - 1 Jan |
+| `holiday_distance` | `N` | `days_to_holiday`, `days_since_holiday` (0 on a holiday, capped at N) |
+| `dst_switch` | `True` | `is_dst_switch_day` (every row of a 23/25-hour local day) |
+| `fourier_weekly` | `K` | `week_sin_k`, `week_cos_k`, phase (weekday + time of day / 24) / 7 on local wall clock |
+| `fourier_annual` | `K` | `year_sin_k`, `year_cos_k`, phase (day of year - 1 + time of day / 24) / days in year |
+| `regimes` | `True`/dict | `regime_{name}`: 0 before the first local delivery day, 1 from it on |
 
 **Notes:**
 - Holiday names are pinned to English (`en_US`), so one-hot column names don't depend on the machine's locale.
@@ -178,6 +192,10 @@ source = CalendarSource(
   (`categories` replaces the default, so include "public").
 - `period` = index of the period in the local day (`hour * 4 + minute // 15` at 15 min), as in the models.
 - `"name"` outputs are strings: drop them before modelling (models convert every column to float).
+- Default regimes (first delivery day): `de_at_split` 2018-10-01 (DE, AT), `brexit_decoupling` 2021-01-01
+  (GB, IE), `core_fb` 2022-06-09 (Core zones), `nordic_fb` 2024-10-30 (DK, FI, NO, SE), `sdac_15min_mtu`
+  2025-10-01 (SDAC countries), `sem_30min_mtu` 2025-10-01 (IE). A dict replaces the set.
+- All calendar features are known in advance, so `_d+k` versions are legal predictors.
 
 **Caching:** Returns None (not cached - deterministic generation).
 

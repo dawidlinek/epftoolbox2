@@ -132,7 +132,11 @@ class CalendarSource(DataSource):
                  month: Union[str, bool] = False,
                  daylight: bool = False, lat: float = None, lon: float = None,
                  prefix: str = "", freq: str = "1h", subdiv: str = None,
-                 categories: Union[str, List[str]] = None): ...
+                 categories: Union[str, List[str]] = None,
+                 bridge_days: bool = False, christmas_period: bool = False,
+                 holiday_distance: int = 0, dst_switch: bool = False,
+                 fourier_weekly: int = 0, fourier_annual: int = 0,
+                 regimes: Union[bool, Dict[str, str]] = False): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 
 class CsvSource(DataSource):
