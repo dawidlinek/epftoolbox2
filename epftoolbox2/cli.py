@@ -78,6 +78,15 @@ def cmd_model(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     mp = ModelPipeline.load(args.yaml)
+    if args.issue_time or args.issue_timezone:
+        from .information_set import InformationSet
+
+        settings = mp.information_set.to_dict() if mp.information_set is not None else {}
+        if args.issue_time:
+            settings["issue_time"] = args.issue_time
+        if args.issue_timezone:
+            settings["issue_timezone"] = args.issue_timezone
+        mp.information_set = InformationSet.from_dict(settings)
     mp.run(
         data=df,
         test_start=args.test_start,
@@ -267,6 +276,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ZONE",
         help="Local time zone of the data (e.g. Europe/Warsaw). Files from `epf data` name it in their header; "
         "older files with UTC offsets need it",
+    )
+    model_p.add_argument(
+        "--issue-time",
+        metavar="HH:MM",
+        help="Check every predictor against this issue time before fitting (information set; overrides the YAML)",
+    )
+    model_p.add_argument(
+        "--issue-timezone", metavar="ZONE", help="Zone of --issue-time (default: the YAML's, else Europe/Brussels)"
     )
     model_p.add_argument("--save-dir", metavar="DIR", help="Directory to save per-model prediction JSONL files")
     model_p.add_argument("--forecast-only", action="store_true", help="Skip evaluation and exporters")

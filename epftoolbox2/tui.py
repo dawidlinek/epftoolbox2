@@ -684,7 +684,13 @@ def build_model_pipeline_interactive() -> None:
         _abort()
     save_dir = save_dir_raw.strip() or None
 
-    mp = ModelPipeline()
+    issue_time = questionary.text(
+        "  Issue time to check predictors against, Brussels time (HH:MM, blank to skip)", default="11:30"
+    ).ask()
+    if issue_time is None:
+        _abort()
+
+    mp = ModelPipeline(issue_time=issue_time.strip() or None)
     for m in models:
         mp.add_model(m)
     for e in evaluators:

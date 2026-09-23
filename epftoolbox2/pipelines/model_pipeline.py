@@ -7,6 +7,7 @@ import pandas as pd
 import yaml
 
 from .._date_utils import resolve_date
+from ..information_set import InformationSet
 from ..models.base import BaseModel
 from ..evaluators.base import Evaluator
 from ..exporters.base import Exporter
@@ -36,10 +37,30 @@ COMPONENT_REGISTRY = {
 
 
 class ModelPipeline:
-    def __init__(self):
+    """Runs models over a test period, then evaluators and exporters.
+
+    Args:
+        information_set: Check every predictor against the time the forecast is issued before any fit
+            (see epftoolbox2.information_set). None skips the check.
+        issue_time: Shortcut for `information_set=InformationSet(issue_time, issue_timezone)` with the
+            built-in availability rules, e.g. "11:30".
+        issue_timezone: Zone of `issue_time`.
+    """
+
+    def __init__(
+        self,
+        information_set: Optional[InformationSet] = None,
+        issue_time: Optional[str] = None,
+        issue_timezone: str = "Europe/Brussels",
+    ):
+        if issue_time is not None:
+            if information_set is not None:
+                raise ValueError("Pass either issue_time/issue_timezone or information_set, not both")
+            information_set = InformationSet(issue_time, issue_timezone)
         self.models: List[BaseModel] = []
         self.evaluators: List[Evaluator] = []
         self.exporters: List[Exporter] = []
+        self.information_set: Optional[InformationSet] = information_set
 
     def add_model(self, model: BaseModel) -> "ModelPipeline":
         self.models.append(model)
@@ -67,9 +88,13 @@ class ModelPipeline:
         if not self.models:
             raise ValueError("At least one model is required")
         self._check_model_names()
+        if forecast_only:
+            check_start, check_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
+        else:
+            check_start, check_end = resolve_date(test_start), resolve_date(test_end)
         # Check every model's inputs before running any, so a bad predictor in the last model fails in seconds.
         for model in self.models:
-            model._check_inputs(data, target, horizon, freq)
+            model._check_inputs(data, target, horizon, freq, self.information_set, check_start, check_end)
 
         refs: dict[str, ModelResultRef] = {}
         for model in self.models:
@@ -83,6 +108,7 @@ class ModelPipeline:
                 freq=freq,
                 save_to=save_to,
                 forecast_only=forecast_only,
+                information_set=self.information_set,
             )
             refs[model.name] = ref
 
@@ -199,11 +225,14 @@ class ModelPipeline:
         return {"class": class_name, "params": params}
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out = {
             "models": [self._serialize_component(m) for m in self.models],
             "evaluators": [self._serialize_component(e) for e in self.evaluators],
             "exporters": [self._serialize_component(e) for e in self.exporters],
         }
+        if self.information_set is not None:
+            out["information_set"] = self.information_set.to_dict()
+        return out
 
     def save(self, path: Union[str, Path]) -> None:
         path = Path(path)
@@ -225,7 +254,8 @@ class ModelPipeline:
         path = Path(path)
         with open(path, "r") as f:
             config = yaml.safe_load(f)
-        pipeline = cls()
+        info = config.get("information_set")
+        pipeline = cls(information_set=InformationSet.from_dict(info) if info else None)
         for c in config.get("models", []):
             pipeline.add_model(cls._load_component("models", c))
         for c in config.get("evaluators", []):

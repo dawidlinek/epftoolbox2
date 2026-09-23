@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List, Dict, Callable, Union, Tuple, Optional
+from typing import TYPE_CHECKING, List, Dict, Callable, Union, Tuple, Optional
 
 import datetime
 import gc
@@ -21,6 +21,9 @@ from ..logging import get_logger
 from . import _contract
 from ._worker import _worker_init, _run_day
 from .._date_utils import resolve_date
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ..information_set import InformationSet
 
 logger = get_logger(__name__)
 
@@ -78,7 +81,13 @@ class BaseModel(ABC):
         freq: str = "1h",
         save_to: str = None,
         forecast_only: bool = False,
+        information_set: Optional["InformationSet"] = None,
     ) -> ModelResultRef:
+        """Forecast every period and horizon for each day in [test_start, test_end].
+
+        With `information_set`, every predictor is checked against the issue time before any fit
+        (see epftoolbox2.information_set).
+        """
         self._set_freq(freq)
 
         if forecast_only:
@@ -91,7 +100,7 @@ class BaseModel(ABC):
             test_end = resolve_date(test_end)
 
         self._target = target
-        self._check_inputs(data, target, horizon, freq)
+        self._check_inputs(data, target, horizon, freq, information_set, test_start, test_end)
         used_columns = list(dict.fromkeys([target, *self._used_predictors]))
 
         self._data = self._preprocess(data[used_columns], horizon, target)
@@ -233,18 +242,29 @@ class BaseModel(ABC):
         self._periods_per_day = _FREQ_TO_PERIODS[freq]
 
     def _check_inputs(
-        self, data: pd.DataFrame, target: str, horizon: int, freq: str
+        self,
+        data: pd.DataFrame,
+        target: str,
+        horizon: int,
+        freq: str,
+        information_set: Optional["InformationSet"] = None,
+        test_start: Optional[str] = None,
+        test_end: Optional[str] = None,
     ) -> Dict[Tuple[int, int], List[str]]:
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
 
         Raises ValueError on a frequency mismatch, duplicate timestamps, reserved or colliding column names,
-        and missing or non-numeric predictors. `ModelPipeline` calls it for every model before running any.
+        and missing or non-numeric predictors, and InformationSetError (a ValueError) when `information_set`
+        is given and a predictor is not known at issue time. `ModelPipeline` calls it for every model before
+        running any.
         """
         self._set_freq(freq)
         _contract.check_index(data, freq)
         _contract.check_names(data, target, horizon)
         expanded = self._precompute_expanded_predictors(horizon)
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
+        if information_set is not None:
+            information_set.check(expanded, target, freq, data.index, test_start, test_end, model_name=self.name)
         return expanded
 
     def _executor_config(self) -> tuple:

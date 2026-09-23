@@ -5,6 +5,7 @@ import yaml
 
 from .data_pipeline import DataPipeline
 from .model_pipeline import ModelPipeline
+from ..information_set import InformationSet
 from ..results.report import EvaluationReport
 from ..logging import get_logger
 
@@ -12,6 +13,7 @@ logger = get_logger(__name__)
 
 _DP_SECTIONS = ("sources", "transformers", "validators")
 _MP_SECTIONS = ("models", "evaluators", "exporters")
+_MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set")
 
 
 class Workflow:
@@ -127,6 +129,9 @@ class Workflow:
             if section in self._mp_inline:
                 components = [ModelPipeline._load_component(section, c) for c in self._mp_inline[section]]
                 setattr(mp, section, components)
+        if "information_set" in self._mp_inline:
+            info = self._mp_inline["information_set"]
+            mp.information_set = InformationSet.from_dict(info) if info else None
         if self.model_index is not None and not all_models:
             n = len(mp.models)
             if not 0 <= self.model_index < n:
@@ -137,9 +142,10 @@ class Workflow:
     def _save_dir(self) -> Optional[Path]:
         return self._resolve(self.model_save_dir) if self.model_save_dir else None
 
-    def _run_data(self):  # noqa: ANN202
+    def _run_data(self, dp: Optional[DataPipeline] = None):  # noqa: ANN202
         cache = self.cache_path if self.cache_path else self.data_cache
-        return self._build_data_pipeline().run(start=self.data_start, end=self.data_end, cache=cache)
+        dp = dp if dp is not None else self._build_data_pipeline()
+        return dp.run(start=self.data_start, end=self.data_end, cache=cache)
 
     def run(self) -> EvaluationReport:
         self._apply_environment()
@@ -155,9 +161,13 @@ class Workflow:
         if array_task:
             # Evaluators such as rMAE and the exporters need every model; report() runs them after all tasks.
             mp.evaluators, mp.exporters = [], []
+        dp = self._build_data_pipeline()
+        if mp.information_set is not None:
+            # Knows the columns of the configured sources, e.g. a CalendarSource prefix or Open-Meteo variables.
+            mp.information_set = mp.information_set.with_source_rules(dp.sources)
 
         report = mp.run(
-            data=self._run_data(),
+            data=self._run_data(dp),
             test_start=self.model_test_start,
             test_end=self.model_test_end,
             target=self.model_target,
@@ -275,6 +285,6 @@ class Workflow:
         )
         workflow._yaml_dir = path.parent
         workflow._dp_inline = {k: dp[k] for k in _DP_SECTIONS if k in dp}
-        workflow._mp_inline = {k: mp[k] for k in _MP_SECTIONS if k in mp}
+        workflow._mp_inline = {k: mp[k] for k in _MP_INLINE_KEYS if k in mp}
         logger.info(f"Workflow: Loaded configuration from {path}")
         return workflow
