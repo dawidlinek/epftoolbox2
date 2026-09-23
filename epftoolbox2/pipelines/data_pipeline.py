@@ -1,4 +1,8 @@
 from typing import List, Optional, Union, Dict, Any
+import hashlib
+import json
+import os
+import re
 import pandas as pd
 from pathlib import Path
 import yaml
@@ -7,11 +11,24 @@ import importlib
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
 from epftoolbox2.data.validators.base import Validator
-from epftoolbox2.data.cache_manager import CacheManager, clip_to_range
+from epftoolbox2.data.cache_manager import (
+    CACHE_FORMAT_VERSION,
+    CacheManager,
+    atomic_write,
+    clip_to_range,
+    hold_lock,
+    make_file_lock,
+)
 from epftoolbox2.logging import get_logger
 from epftoolbox2._date_utils import resolve_date
 
 logger = get_logger(__name__)
+
+# Attributes that are runtime objects, not configuration.
+_RUNTIME_ATTRIBUTES = {"session", "console", "logger"}
+# Configuration that never changes the fetched data and must not end up in cache files.
+_SECRET_ATTRIBUTES = {"api_key"}
+_UNSET_ENV_VAR = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 
 COMPONENT_REGISTRY = {
     "sources": {
@@ -153,20 +170,62 @@ class DataPipeline:
         logger.info(f"Pipeline: Completed with {len(result)} rows")
         return result
 
-    def _load_or_fetch_sources(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]) -> pd.DataFrame:
-        if isinstance(cache, str):
-            cache_file = Path(cache)
-            if cache_file.exists():
-                logger.info(f"Cache: Loading source data from {cache}")
-                result = pd.read_csv(cache_file, index_col=0)
-                result.index = pd.to_datetime(result.index, utc=True)
-                return result
-            result = self._run_sources(start, end, cache)
-            if not result.empty:
-                result.to_csv(cache)
-                logger.info(f"Cache: Saved source data to {cache}")
-            return result
+    def _load_or_fetch_sources(
+        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str, os.PathLike]
+    ) -> pd.DataFrame:
+        if isinstance(cache, (str, os.PathLike)):
+            return self._run_sources_with_file_cache(start, end, cache)
         return self._run_sources(start, end, cache)
+
+    def _run_sources_with_file_cache(
+        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[str, os.PathLike]
+    ) -> pd.DataFrame:
+        """Cache the combined source output in one file, reused only for the same sources and dates."""
+        fingerprint = self._sources_fingerprint(start, end)
+        digest = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()[:16]
+        path = _resolve_cache_file(cache, digest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path = path.with_name(path.name + ".meta.json")
+
+        with hold_lock(make_file_lock(path.with_name(path.name + ".lock")), str(path)):
+            meta = _read_json(meta_path)
+            if path.exists() and meta.get("fingerprint") == digest:
+                try:
+                    result = _read_frame(path, meta)
+                    logger.info(f"Cache: Loading source data from {path}")
+                    return result
+                except Exception as e:  # noqa: BLE001 - an unreadable cache file is a cache miss
+                    logger.warning(f"Cache: cannot read {path} ({type(e).__name__}: {e}); fetching again")
+            elif path.exists():
+                logger.info(f"Cache: {path} holds data for {_describe_mismatch(meta, fingerprint)}; fetching again")
+
+            result = self._run_sources(start, end, cache=False)
+            if not result.empty:
+                # Invalidate first: a crash between the two writes must not pair old metadata with new data.
+                meta_path.unlink(missing_ok=True)
+                atomic_write(path, lambda tmp: _write_frame(result, tmp, path))
+                meta = {
+                    "fingerprint": digest,
+                    "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+                    "columns": [str(c) for c in result.columns],
+                    "dtypes": [str(t) for t in result.dtypes],
+                    "index_name": result.index.name,
+                    "config": fingerprint,
+                }
+                atomic_write(meta_path, lambda tmp: tmp.write_text(json.dumps(meta, indent=2, default=str)))
+                logger.info(f"Cache: Saved source data to {path}")
+            return result
+
+    def _sources_fingerprint(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, Any]:
+        from epftoolbox2 import __version__
+
+        return {
+            "epftoolbox2": __version__,
+            "cache_format": CACHE_FORMAT_VERSION,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "sources": [_component_fingerprint(source) for source in self.sources],
+        }
 
     def _run_sources(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]) -> pd.DataFrame:
         cache_manager = CacheManager() if cache is True else None
@@ -270,3 +329,92 @@ class DataPipeline:
 def _qualified_name(obj: Any) -> str:
     cls = type(obj)
     return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _fingerprint_value(value: Any) -> Any:
+    """JSON-safe, deterministic stand-in for a parameter value. Files are identified by size and mtime."""
+    if isinstance(value, Path):
+        if value.exists():
+            stat = value.stat()
+            return {"path": str(value.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        return str(value)
+    if isinstance(value, (list, tuple, range)):
+        return [_fingerprint_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _fingerprint_value(v) for k, v in value.items()}
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if hasattr(value, "tolist"):  # numpy scalars and arrays
+        return _fingerprint_value(value.tolist())
+    return repr(value)
+
+
+def _component_fingerprint(component: Any) -> Dict[str, Any]:
+    params = {
+        key: _fingerprint_value(value)
+        for key, value in vars(component).items()
+        if not key.startswith("_") and key not in _RUNTIME_ATTRIBUTES and key not in _SECRET_ATTRIBUTES
+    }
+    fingerprint = {"class": _qualified_name(component), "params": params}
+    if isinstance(component, DataSource):
+        fingerprint["cache_config"] = _fingerprint_value(component.get_cache_config())
+    return fingerprint
+
+
+def _resolve_cache_file(cache: Union[str, os.PathLike], digest: str) -> Path:
+    """Expand ``$VAR`` and ``~`` in a cache path. A directory (existing, trailing separator, or a new path without a
+    file suffix) gets one Parquet file per configuration; ``*.parquet`` is Parquet; any other file is CSV."""
+    raw = os.fspath(cache)
+    expanded = os.path.expanduser(os.path.expandvars(raw))
+    unset = _UNSET_ENV_VAR.findall(expanded)
+    if unset:
+        raise ValueError(f"Cache path {raw!r} uses environment variables that are not set: {', '.join(unset)}")
+    path = Path(expanded)
+    if path.is_file():
+        return path
+    if path.is_dir() or raw.endswith(("/", os.sep)) or path.suffix == "":
+        return path / f"data_{digest}.parquet"
+    return path
+
+
+def _is_parquet(path: Path) -> bool:
+    return path.suffix.lower() in (".parquet", ".pq")
+
+
+def _write_frame(df: pd.DataFrame, tmp: Path, path: Path) -> None:
+    if _is_parquet(path):
+        df.to_parquet(tmp)
+    else:
+        df.to_csv(tmp)
+
+
+def _read_frame(path: Path, meta: Dict[str, Any]) -> pd.DataFrame:
+    if _is_parquet(path):
+        return pd.read_parquet(path)
+    df = pd.read_csv(path, index_col=0, float_precision="round_trip")
+    df.index = pd.to_datetime(df.index, utc=True)
+    df.index.name = meta.get("index_name")
+    # CSV loses column names (duplicates get ".1") and dtypes (an all-null column comes back as float).
+    df.columns = meta["columns"]
+    for i, dtype in enumerate(meta["dtypes"]):
+        if str(df.dtypes.iloc[i]) != dtype:
+            df.isetitem(i, df.iloc[:, i].astype(dtype))
+    return df
+
+
+def _read_json(path: Path) -> Dict[str, Any]:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _describe_mismatch(meta: Dict[str, Any], fingerprint: Dict[str, Any]) -> str:
+    old = meta.get("config")
+    if not old:
+        return "an unknown configuration (written by an older version)"
+    if (old.get("start"), old.get("end")) != (fingerprint["start"], fingerprint["end"]):
+        return f"{old.get('start')} .. {old.get('end')}, requested {fingerprint['start']} .. {fingerprint['end']}"
+    if old.get("sources") != fingerprint["sources"]:
+        return "different sources or source parameters"
+    return "a different epftoolbox2 version or cache format"

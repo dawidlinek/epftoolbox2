@@ -572,6 +572,107 @@ def _run_concurrently(workdir, cache, n=3):
     return results, fetches
 
 
+# ---------------------------------------------------------------------------
+# Single-file cache (cache="file.csv" / "file.parquet" / directory)
+# ---------------------------------------------------------------------------
+
+
+class TestFileCache:
+    def _pipe(self, **kw):
+        return DataPipeline().add_source(RangeSource(**kw))
+
+    def test_refetches_when_dates_change(self, in_tmp):
+        """pipelines M3 / empirical F5e: a different range must not return the old frame."""
+        self._pipe().run("2024-01-01", "2024-03-01", cache="cache.csv")
+        other = self._pipe().run("2024-02-01", "2024-05-01", cache="cache.csv")
+        fresh = self._pipe().run("2024-02-01", "2024-05-01")
+        pd.testing.assert_frame_equal(fresh, other, check_freq=False)
+
+    def test_refetches_when_sources_change(self, in_tmp):
+        self._pipe(columns=["price", "load"]).run("2024-01-01", "2024-02-01", cache="cache.csv")
+        other = self._pipe(columns=["price"]).run("2024-01-01", "2024-02-01", cache="cache.csv")
+        assert list(other.columns) == ["price"]
+
+    def test_hit_does_not_call_the_source(self, in_tmp):
+        self._pipe().run("2024-01-01", "2024-02-01", cache="cache.csv")
+        src = RangeSource()
+        DataPipeline().add_source(src).run("2024-01-01", "2024-02-01", cache="cache.csv")
+        assert src.calls == []
+
+    @pytest.mark.parametrize("name", ["cache.csv", "cache"])
+    def test_file_from_older_version_is_rebuilt(self, in_tmp, name):
+        """A cache file without a fingerprint (written before this version) is never trusted."""
+        pd.DataFrame({"price": [1.0]}, index=pd.DatetimeIndex(["2020-01-01"], tz="UTC")).to_csv(in_tmp / name)
+        got = self._pipe().run("2024-01-01", "2024-02-01", cache=name)
+        pd.testing.assert_frame_equal(got, self._pipe().run("2024-01-01", "2024-02-01"), check_freq=False)
+        assert (in_tmp / name).is_file()
+
+    @pytest.mark.parametrize("name", ["cache.csv", "cache.parquet"])
+    def test_reload_is_exact(self, in_tmp, name):
+        """Floats, dtypes and the UTC index survive the file (read_csv's fast float parser lost a digit)."""
+        from epftoolbox2.data.sources import CalendarSource
+
+        def pipe():
+            return (
+                DataPipeline()
+                .add_source(RangeSource())
+                .add_source(CalendarSource("PL", holidays="name", weekday="onehot", daylight=True))
+            )
+
+        fresh = pipe().run("2024-01-01", "2024-03-01")
+        pipe().run("2024-01-01", "2024-03-01", cache=name)
+        reload = pipe().run("2024-01-01", "2024-03-01", cache=name)
+        pd.testing.assert_frame_equal(fresh, reload, check_freq=False, check_exact=True)
+
+    def test_refetches_when_csv_input_changes(self, in_tmp):
+        from epftoolbox2.data.sources import CsvSource
+
+        path = in_tmp / "input.csv"
+        path.write_text("datetime,price\n2024-01-01 00:00,1.0\n2024-01-01 01:00,2.0\n")
+        DataPipeline().add_source(CsvSource(str(path))).run("2024-01-01", "2024-01-02", cache="cache.csv")
+        path.write_text("datetime,price\n2024-01-01 00:00,1.0\n2024-01-01 01:00,5.0\n2024-01-01 02:00,6.0\n")
+        again = DataPipeline().add_source(CsvSource(str(path))).run("2024-01-01", "2024-01-02", cache="cache.csv")
+        assert again["price"].tolist() == [1.0, 5.0, 6.0]
+
+    def test_expands_environment_variables(self, in_tmp, monkeypatch):
+        monkeypatch.setenv("EPF_TEST_JOB", "job42")
+        self._pipe().run("2024-01-01", "2024-01-02", cache="scratch/$EPF_TEST_JOB/data.csv")
+        assert (in_tmp / "scratch" / "job42" / "data.csv").exists()
+
+    def test_unset_environment_variable_fails_before_fetching(self, in_tmp, monkeypatch):
+        monkeypatch.delenv("EPF_TEST_UNSET", raising=False)
+        src = RangeSource()
+        with pytest.raises(ValueError, match="EPF_TEST_UNSET"):
+            DataPipeline().add_source(src).run("2024-01-01", "2024-01-02", cache="scratch/${EPF_TEST_UNSET}/data.csv")
+        assert src.calls == []
+
+    @pytest.mark.parametrize("target", ["existing_dir", "new_dir/", "no_suffix"])
+    def test_directory_holds_one_file_per_configuration(self, in_tmp, target):
+        if target == "existing_dir":
+            (in_tmp / target).mkdir()
+        a = self._pipe().run("2024-01-01", "2024-01-05", cache=target)
+        b = self._pipe().run("2024-02-01", "2024-02-05", cache=target)
+        folder = in_tmp / target.rstrip("/")
+        assert folder.is_dir()
+        assert len(list(folder.glob("data_*.parquet"))) == 2
+        pd.testing.assert_frame_equal(a, self._pipe().run("2024-01-01", "2024-01-05", cache=target), check_freq=False)
+        pd.testing.assert_frame_equal(b, self._pipe().run("2024-02-01", "2024-02-05", cache=target), check_freq=False)
+
+    def test_fingerprint_file_does_not_contain_api_key(self, in_tmp):
+        src = RangeSource()
+        src.api_key = "SECRET-KEY-123"
+        DataPipeline().add_source(src).run("2024-01-01", "2024-01-02", cache="cache.csv")
+        for f in in_tmp.iterdir():
+            if f.is_file():
+                assert "SECRET-KEY-123" not in f.read_text(errors="ignore"), f.name
+
+    def test_concurrent_runs_fetch_once_and_agree(self, in_tmp):
+        """pipelines H1: parallel tasks sharing one cache file must not read it half-written."""
+        results, fetches = _run_concurrently(in_tmp, cache="shared.csv")
+        assert len(set(results)) == 1, results
+        assert fetches == 1
+
+
 class TestDataPipelineSerialization:
     """Test pipeline serialization (save/load)"""
 
