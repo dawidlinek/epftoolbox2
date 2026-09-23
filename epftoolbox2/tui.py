@@ -201,8 +201,8 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
     "LagTransformer": [
         {
             "name": "columns",
-            "description": "Columns to lag",
-            "required": True,
+            "description": "Columns to lag (blank = all)",
+            "required": False,
             "default": None,
             "kind": "column_select",
         },

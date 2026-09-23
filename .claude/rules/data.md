@@ -16,11 +16,11 @@ paths:
 
 ## Column naming (relative to the row's local date D)
 - `x_d-k`: value of `x` on D-k (LagTransformer, positive lag). `x_d+h`: value of `x` on D+h as known on D (negative lag, Open-Meteo forecasts, model targets). Hourly/minute lags use `h`/`min` units, e.g. `price_h-24`.
+- Day lags shift by **local calendar days** (`shift_calendar_days` in `epftoolbox2/_date_utils.py`, shared with the model's target shift): same wall-clock time on D-k; the hour skipped in spring is NaN; the repeated autumn hour maps occurrence to occurrence, else to the first occurrence (the model's targets keep NaN there instead, see `BaseModel._shift_index_by_calendar_days`). `h`/`min`/`s` lags, and any frequency that isn't whole days (`"24h"`, `"15min"`), are elapsed time and never named `d`. Day lags need a local index: run `LagTransformer` after `TimezoneTransformer` (it warns on a UTC index).
 - Open-Meteo uses the **previous-runs** API: `{prefix}_{col}_d+i` at row t is the forecast for t+i days issued about i days earlier, and rows later than now+13h are dropped. Never switch a backtest to the plain forecast/archive API — it returns latest or observed values, i.e. look-ahead.
 
 ## ENTSO-E specifics
 Document types: A65/A16 actual load, A65/A01 day-ahead load forecast, A65/A31 week-ahead min/max (period starts anchored at UTC+2, hence `TimezoneTransformer.daily_columns` snapping), A75 generation, A69 wind/solar forecast, A44 prices. `prefer_15min` fetches 15-minute day-ahead prices where published. The API key travels as `securityToken`; never log it.
 
 ## Known issues (don't fix as a side effect of other work)
-- `LagTransformer` shifts by elapsed time (`index + Timedelta * lag`), not calendar days. On a local-time index, `price_d-1` on the DST switch day comes from the wrong hour, and `d-7` lags are off by one hour for a week after each switch. The model's own targets use calendar-day shifts, so features and targets disagree around DST. Pinned by an `xfail(strict=True)` test in `tests/test_known_issues.py`.
 - `api_key` is serialized into pipeline YAML in plain text by `DataPipeline.save()`.
