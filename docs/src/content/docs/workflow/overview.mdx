@@ -66,7 +66,7 @@ model_pipeline:
 data_pipeline:
   path: data_pipeline.yaml
   start: "now_d-735"       # ~2 years of history, relative to today
-  end: "today_d+7"         # fetch weather/calendar through the forecast window
+  end: "today_d+7"         # whole horizon-7 day, given `timezone` in data_pipeline.yaml (see below)
   cache: true
 
 model_pipeline:
@@ -76,6 +76,14 @@ model_pipeline:
   freq: 1h                 # set to 15min for 15-minute forecasting
   forecast_only: true      # test_start/test_end default to "today"; skips evaluators and exporters
 ```
+
+<Aside type="caution">
+  `end: "today_d+7"` only fetches the whole horizon-7 day if `data_pipeline.yaml` was saved from a
+  `DataPipeline(timezone="Europe/Warsaw", ...)` (or your market's zone) — see
+  [Date Format Options](/epftoolbox2/data-pipeline/overview/#date-format-options). Without `timezone` set, date
+  keywords resolve to UTC midnight and `end` is exclusive, so `"today_d+7"` covers only a few hours of the last
+  horizon day; use `"today_d+8"` instead, or set `timezone`.
+</Aside>
 
 <Aside type="tip">
   All paths in the YAML are resolved relative to the workflow YAML's own directory. Move the whole experiment folder and nothing breaks.

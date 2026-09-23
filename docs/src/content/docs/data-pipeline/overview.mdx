@@ -13,9 +13,14 @@ The `DataPipeline` class combines data sources, transformers, and validators int
 
 The pipeline consists of three types of components:
 
-- **Sources** fetch raw data from external APIs or files
+- **Sources** fetch raw data from external APIs or files. Two sources producing the same column name raise
+  `ValueError` naming both sources — give one a `prefix` to resolve it.
 - **Transformers** modify the DataFrame (resample, create lags, convert timezone)
-- **Validators** check data quality without modifying the DataFrame
+- **Validators** check data quality without modifying the DataFrame. `validators` run on the final frame;
+  `source_validators` run on the raw, joined source output, before any transformer. Every result is kept in
+  `pipeline.validation_results`; `DataPipeline(on_invalid="raise")` raises `DataValidationError` on a failure
+  instead of the default (`"warn"`, log and continue). See
+  [Serialization](/epftoolbox2/data-pipeline/serialization/#validators-and-on_invalid).
 
 ## Basic Usage
 
@@ -65,9 +70,36 @@ The `start` and `end` parameters accept multiple formats:
   </TabItem>
 </Tabs>
 
-The returned frame covers the half-open range `[start, end)`: `end` itself is excluded. Date strings mean
-midnight UTC, and naive timestamps are taken as UTC. Every source's output is clipped to this range, whether it
-comes from the API or from the cache (see [Data Caching](/epftoolbox2/data-pipeline/caching/)).
+By default, date strings mean midnight UTC, `end` is excluded, and naive timestamps are taken as UTC. Every
+source's output is clipped to the resolved range, whether it comes from the API or from the cache (see
+[Data Caching](/epftoolbox2/data-pipeline/caching/)).
+
+### Timezone (local calendar days)
+
+Pass a market time zone to make `run()` dates mean **local calendar days** instead:
+
+```python
+pipeline = DataPipeline(timezone="Europe/Warsaw", sources=[...], transformers=[...])
+
+# 2024-01-01 00:00 local .. 2024-01-03 23:00 local (both days complete, inclusive)
+df = pipeline.run(start="2024-01-01", end="2024-01-03")
+```
+
+With `timezone` set:
+- `start` begins at local midnight; `end` covers its *whole local day* (inclusive), correctly sized (23 or 25
+  hours) on a DST-transition day.
+- `"today"` / `"now_d±N"` keywords resolve using the current date **in that zone**.
+- Naive timestamps passed to `run()` are read as local instants; timezone-aware timestamps are used as given.
+
+Without `timezone` (the default), behaviour is unchanged: date strings and keywords mean midnight UTC, `end` is
+exclusive, and naive timestamps are UTC.
+
+<Aside type="caution">
+  A forecast-only recipe with `end="today_d+{horizon}"` (e.g. `"today_d+7"`) only fetches the whole last horizon
+  day if `timezone` is set — without it, `end` stops at that day's UTC midnight, so the last horizon day gets only
+  a few hours of data. Either set `timezone`, or use `"today_d+{horizon + 1}"`. See
+  [Forecast-Only Mode](/epftoolbox2/model-pipeline/forecasting/).
+</Aside>
 
 ## Data Flow
 
