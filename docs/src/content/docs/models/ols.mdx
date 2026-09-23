@@ -39,6 +39,7 @@ model = OLSModel(
 | `predictors` | List | Required | Predictor specifications (strings, `{horizon}` templates, or callables) |
 | `training_window` | int | `365` | Days of training data |
 | `name` | str | `"Model"` | Display name for reports |
+| `scaler` | str, dict or scaler | `"standard"` | `"standard"`, `"asinh"` or `"npit"`, or `{"name": ..., "params": {...}}` — see [Scalers and VSTs](/epftoolbox2/models/scalers/) |
 
 Callable predictors accept `(horizon)` or `(horizon, hour)` — the two-parameter form enables features that differ by hour of day:
 

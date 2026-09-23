@@ -60,12 +60,14 @@ models:
     - warsaw_temperature_2m_d+{horizon}
     training_window: 365
     name: OLS
+    scaler: standard
 - class: LassoCVModel
   params:
     predictors: *id001
     training_window: 365
     cv: 5
     name: LassoCV
+    scaler: standard
 evaluators:
 - class: MAEEvaluator
   params: {}
@@ -85,6 +87,7 @@ exporters:
 | `str`, `int`, `float`, `bool`, `list`, `dict`, `None` | Serialized as-is |
 | `Path` | Converted to `str` |
 | Callable predictors | **Raises `ValueError`** — use `"{horizon}"` string templates instead |
+| Model `scaler` | Saved as a name (`standard`) or a `{name, params}` mapping; a scaler instance is converted when the model is built. A model without `scaler` loads with `standard` |
 | Private attrs (`_name`) | Excluded |
 
 ## Callable Predictors

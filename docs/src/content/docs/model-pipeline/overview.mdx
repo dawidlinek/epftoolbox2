@@ -150,7 +150,7 @@ See [Installation](/epftoolbox2/getting-started/installation/#parallel-model-tra
 
 ## Feature Scaling
 
-Models automatically apply `StandardScaler`:
+Models scale each task's data with a scaler fitted on that task's training rows only. By default this is `StandardScaler`:
 
 <Steps>
 
@@ -161,6 +161,8 @@ Models automatically apply `StandardScaler`:
 3. **Target variable** is scaled, predictions are inverse-scaled
 
 </Steps>
+
+Set a model's `scaler` parameter to `"asinh"` or `"npit"` to use a variance-stabilising transformation instead, which damps price spikes and handles negative prices. See [Scalers and VSTs](/epftoolbox2/models/scalers/).
 
 ---
 

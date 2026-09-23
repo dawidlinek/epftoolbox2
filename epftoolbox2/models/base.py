@@ -16,6 +16,7 @@ import pandas as pd
 from rich.progress import Progress
 
 from ..scalers.standard import StandardScaler
+from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef
 from ..results.manifest import build_manifest, check_and_write, manifest_path
@@ -41,6 +42,7 @@ class BaseModel(ABC):
         predictors: List[Union[str, Callable]],
         training_window: int = 365,
         name: str = "Model",
+        scaler: ScalerSpec = "standard",
     ):
         if callable(predictors):
             self._predictors_fn = predictors
@@ -50,6 +52,7 @@ class BaseModel(ABC):
             self.predictors = predictors
         self.training_window = training_window
         self.name = name
+        self.scaler = scaler  # validated and normalised in __setattr__
 
         self._data: Optional[pd.DataFrame] = None
         self._hour_data: Dict[int, pd.DataFrame] = {}
@@ -59,6 +62,13 @@ class BaseModel(ABC):
         self._freq: str = "1h"
         self._periods_per_day: int = 24
         self._used_predictors: List[str] = []
+
+    def __setattr__(self, key, value):
+        # The scaler is kept as a name or {"name", "params"} dict, also when assigned after construction, so a
+        # typo fails here rather than in every worker and a scaler instance can't be dropped by save().
+        if key == "scaler":
+            value = scaler_spec(value)
+        super().__setattr__(key, value)
 
     @property
     def _model_kwargs(self) -> Dict:
@@ -212,6 +222,8 @@ class BaseModel(ABC):
             "test_start": test_start,
             "training_window": self.training_window,
             "scalable_masks": scalable_masks,
+            # Passed in config rather than _model_kwargs, so subclasses that override _model_kwargs can't drop it.
+            "scaler": self.scaler,
             "threads_per_process": threads_per_process,
             "freq": self._freq,
         }

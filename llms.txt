@@ -540,6 +540,7 @@ model = OLSModel(
     predictors=predictors,       # Required. List of predictor specifications
     training_window=365,         # Optional. Days of training data (default: 365)
     name="OLS Baseline",         # Optional. Model display name
+    scaler="standard",           # Optional. "standard", "asinh", "npit" or a spec dict, see Scalers (default: "standard")
 )
 ```
 
@@ -558,8 +559,49 @@ model = LassoCVModel(
     cv=5,                        # Optional. Cross-validation folds (default: 5)
     max_iter=10000,              # Optional. Max iterations (default: 10000)
     name="Lasso CV",             # Optional. Model display name
+    scaler="standard",           # Optional. "standard", "asinh", "npit" or a spec dict, see Scalers (default: "standard")
 )
 ```
+
+---
+
+## Scalers
+
+Every model scales each (hour, horizon, run day) task with a fresh scaler fitted on that task's training rows only; the
+test row is transformed with the training parameters and the prediction is mapped back. Choose it with the model's
+`scaler` parameter. `AsinhScaler` and `NPITScaler` are variance-stabilising transformations (VSTs) for spiky and
+negative prices (Uniejewski, Weron & Ziel 2018, IEEE TPWRS 33(2); Uniejewski 2026, EPSR 257, arXiv:2511.13603).
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.scalers import AsinhScaler, NPITScaler, StandardScaler
+
+OLSModel(predictors, name="OLS", scaler="standard")      # StandardScaler: (x - mean) / sd
+OLSModel(predictors, name="OLS asinh", scaler="asinh")   # AsinhScaler: asinh((x - median) / (MAD / 0.6745)), then standardised
+OLSModel(predictors, name="OLS npit", scaler="npit")     # NPITScaler: Phi^-1(empirical CDF of training rows), then standardised
+OLSModel(predictors, name="OLS asinh prices", scaler={"name": "asinh", "params": {"apply_to": ["price", "price_d-*"]}})
+OLSModel(predictors, name="OLS npit target", scaler=NPITScaler(apply_to="target"))  # stored as {"name", "params"}
+
+AsinhScaler(
+    apply_to="all",              # Optional. "all", "target" or list of glob patterns on predictor names (default: "all")
+)
+NPITScaler(
+    apply_to="all",              # Optional. Same as AsinhScaler (default: "all")
+)
+StandardScaler()                 # No parameters
+```
+
+- The target always gets the VST. `apply_to="all"` also transforms every non-binary predictor (as epftoolbox's LEAR
+  does); `"target"` only standardises predictors; a pattern list (e.g. `["price", "price_d-*"]`) transforms the matching
+  predictors. Binary 0/1 predictors are never changed. Each column has its own parameters.
+- After the VST, transformed columns and the target are standardised (mean 0, sd 1), so `OLSModel` (no intercept) stays valid.
+- AsinhScaler: a zero MAD falls back to the sample standard deviation, then 1.0. NPITScaler: positions i/(n+1),
+  mid-ranks for ties, linear between knots; values outside the training range are clamped, so an N-PIT forecast stays
+  within the training window's [min, max] price.
+- Back-transformed forecasts are median-type (the inverse is non-linear): fine for MAE, possibly biased for RMSE. No
+  bias correction is applied.
+- Give each scaler variant its own model `name`: result files are keyed by model name and resumed by (hour, horizon, day).
+- Don't fit a VST over the whole data set in a DataPipeline; that leaks test-period information into training.
 
 ---
 
@@ -569,7 +611,7 @@ Uses `ProcessPoolExecutor` (one process per forecast day) + inner `ThreadPoolExe
 
 For each (hour, horizon, day) combination:
 1. Extract training data (rolling window)
-2. Scale features with StandardScaler (auto-skips binary features)
+2. Fit the model's scaler (default StandardScaler) on the training rows; binary features are skipped
 3. Fit model on scaled data
 4. Predict and inverse-scale prediction
 5. Store result with metadata
@@ -886,6 +928,7 @@ models:
     predictors: [load_actual, "is_monday_d+{horizon}", "price_d-1"]
     training_window: 365
     name: OLS
+    scaler: standard     # or asinh / npit, or {name: asinh, params: {apply_to: target}}
 - class: LassoCVModel
   params:
     predictors: *id001   # YAML alias if same list object — valid, loads correctly

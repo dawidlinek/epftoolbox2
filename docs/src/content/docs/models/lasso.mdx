@@ -42,6 +42,7 @@ model = LassoCVModel(
 | `cv` | int | `5` | Cross-validation folds |
 | `max_iter` | int | `10000` | Max optimization iterations |
 | `name` | str | `"Model"` | Display name for reports |
+| `scaler` | str, dict or scaler | `"standard"` | `"standard"`, `"asinh"` or `"npit"`, or `{"name": ..., "params": {...}}` — see [Scalers and VSTs](/epftoolbox2/models/scalers/) |
 
 Callable predictors accept `(horizon)` or `(horizon, hour)` — see [OLSModel](/epftoolbox2/models/ols/#parameters) for details.
 

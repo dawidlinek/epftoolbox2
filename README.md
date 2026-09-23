@@ -32,6 +32,7 @@ epftoolbox2.verify()
 - **Presets**: `epftoolbox2.presets` — ready-made predictor lists for the LEAR and expert-model benchmarks from the literature
 - **Validators**: Null checks, Continuity checks, EDA statistics
 - **Models**: OLS, LassoCV
+- **Scalers**: standardisation (default) or variance-stabilising transformations for spiky prices (asinh, N-PIT), fitted per forecast on training data only
 - **Evaluators**: MAE
 - **Exporters**: Excel with conditional formatting, Terminal output
 - **Caching**: Built-in per-source Parquet cache that fetches only missing ranges, refetches not-yet-published data and is safe for parallel jobs
