@@ -96,6 +96,33 @@ def test_daily_local_index_across_dst():
     assert CoverageValidator(start="2024-03-24 23:00", end="2024-04-05 22:00").validate(df).is_valid
 
 
+def test_step_is_inferred_per_column_on_a_mixed_resolution_frame():
+    # Raw source frame: 15-minute load and hourly price share one index.
+    index = pd.date_range("2024-10-22", "2024-10-25", freq="15min", tz="UTC", inclusive="left")
+    df = pd.DataFrame({"load_actual": 1.0, "price": np.nan}, index=index)
+    df.loc[df.index.minute == 0, "price"] = 50.0
+    df.loc[pd.Timestamp("2024-10-23 05:00", tz="UTC"), "price"] = np.nan
+
+    result = CoverageValidator().validate(df)
+    as_quarter_hours = CoverageValidator(columns=["price"], freq="15min").validate(df)
+
+    assert result.info["freq"] == {"load_actual": "15min", "price": "1h"}
+    assert result.errors == [result.errors[0]] and "'price'" in result.errors[0]
+    assert result.stats.set_index("column").loc["price", "missing"] == 1
+    assert as_quarter_hours.stats.loc[0, "coverage"] < 0.3
+
+
+def test_daily_column_in_an_hourly_frame():
+    index = pd.date_range("2024-03-25", "2024-04-05", freq="1h", tz=TZ, inclusive="left")
+    df = pd.DataFrame({"load": 1.0, "daily_min": np.nan}, index=index)
+    df.loc[df.index.hour == 0, "daily_min"] = 7.0  # one value per local midnight, across the spring switch
+
+    result = CoverageValidator().validate(df)
+
+    assert result.is_valid, result.errors
+    assert result.info["freq"]["daily_min"] == "1D"
+
+
 def test_missing_and_empty_columns(hourly):
     hourly["empty"] = np.nan
 

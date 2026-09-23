@@ -30,13 +30,14 @@ class CoverageValidator(Validator):
         start: First expected timestamp, e.g. the `start` given to `DataPipeline.run`. None uses each column's first
             value, so lag columns that are empty at the edges by construction pass.
         end: End of the range, exclusive. None uses each column's last value.
-        freq: Grid step ("15min", "1h"). None infers it as the most common step.
+        freq: Grid step ("15min", "1h"). None infers it per column as the most common step between the column's
+            values, so hourly prices and 15-minute load in one raw source frame are each measured on their own grid.
         min_coverage: Smallest share of expected timestamps that must have a value (1.0 = all).
         max_gap: Longest run of missing timestamps allowed, as a duration ("6h"). None = no limit.
 
     `start` and `end` accept dates, timestamps and the "today" / "today_d-1" keywords of `DataPipeline.run`; naive
-    values are UTC, like pipeline dates. `stats` has one row per column with expected, present and missing counts,
-    coverage, the longest missing run and the first and last value in the range.
+    values are UTC, like pipeline dates. `stats` has one row per column with its step, expected, present and missing
+    counts, coverage, the longest missing run and the first and last value in the range.
     """
 
     def __init__(
@@ -76,73 +77,57 @@ class CoverageValidator(Validator):
             result.info["missing_columns"] = sorted(missing)
 
         index = df.index
-        step = self._step if self._step is not None else infer_step(as_utc(index))
-        if step is None:
+        utc = as_utc(index)
+        index_step = infer_step(utc)
+        if self._step is None and index_step is None:
             result.warnings.append("Fewer than two distinct timestamps: coverage can't be measured")
             return result
-        freq = self.freq if self.freq is not None else format_step(step)
-        result.info["expected_freq"] = freq
-
-        # The grid runs in elapsed time, except day-or-longer steps on a local index, which follow the local calendar.
-        on_calendar = index.tz is not None and step % ONE_DAY == pd.Timedelta(0)
-        if on_calendar:
-            times = index.tz_localize(None)
-
-            def to_grid(ts):
-                return ts.tz_convert(index.tz).tz_localize(None)
-
-            def shown(ts):
-                return ts.tz_localize(index.tz, ambiguous=True, nonexistent="shift_forward")
-
-        else:
-            times = as_utc(index)
-
-            def to_grid(ts):
-                return ts.tz_convert("UTC")
-
-            def shown(ts):
-                return display_time(ts, index)
-
         start, end = parse_timestamp(self.start), parse_timestamp(self.end)
-        start = to_grid(start) if start is not None else None
-        end = to_grid(end) if end is not None else None
-        origin = times.min()
 
         rows, errors, warnings = [], [], []
         for column in columns:
-            values = column_values(df, column)
-            valid = times[values.notna().to_numpy()].unique().sort_values()
+            has_value = column_values(df, column).notna().to_numpy()
+            # Each column on its own grid: a raw source frame mixes hourly prices with 15-minute load.
+            step = self._step
+            if step is None:
+                step = infer_step(utc[has_value]) or index_step
+            freq = self.freq if self.freq is not None else format_step(step)
+            grid = _Grid(index, step)
+            valid = grid.times[has_value].unique().sort_values()
             if len(valid) == 0 and (start is None or end is None):
-                rows.append({"column": column, "expected": 0, "present": 0, "missing": 0, "coverage": 0.0})
+                rows.append({"column": column, "freq": freq, "expected": 0, "present": 0, "missing": 0})
+                rows[-1]["coverage"] = 0.0
                 errors.append(f"Column '{column}' has no values")
                 continue
 
-            lo = start if start is not None else valid[0]
-            hi = end if end is not None else valid[-1] + step
-            offset = (lo - origin) % step  # put the grid on the same phase as the index
+            lo = grid.to_grid(start) if start is not None else valid[0]
+            hi = grid.to_grid(end) if end is not None else valid[-1] + step
+            origin = valid[0] if len(valid) else grid.times.min()
+            offset = (lo - origin) % step  # put the grid on the same phase as the column's values
             if offset != pd.Timedelta(0):
                 lo = lo + (step - offset)
-            grid = pd.date_range(lo, hi, freq=step, inclusive="left")
-            if len(grid) == 0:
-                warnings.append(f"Column '{column}': the range [{shown(lo)}, {shown(hi)}) is empty")
+            expected = pd.date_range(lo, hi, freq=step, inclusive="left")
+            if len(expected) == 0:
+                warnings.append(f"Column '{column}': the range [{grid.shown(lo)}, {grid.shown(hi)}) is empty")
                 continue
 
-            present = grid.isin(valid)
+            present = expected.isin(valid)
             count = int(present.sum())
             run, run_start = longest_run(~present)
             row = {
                 "column": column,
-                "start": shown(lo),
-                "end": shown(hi),
-                "expected": len(grid),
+                "freq": freq,
+                "start": grid.shown(lo),
+                "end": grid.shown(hi),
+                "expected": len(expected),
                 "present": count,
-                "missing": len(grid) - count,
-                "coverage": count / len(grid),
+                "missing": len(expected) - count,
+                "coverage": count / len(expected),
                 "longest_missing_run": run,
-                "longest_missing_start": shown(grid[run_start]) if run else None,
-                "longest_missing_end": shown(grid[run_start + run - 1]) if run else None,
-                "first_valid": shown(grid[present][0]) if count else None,
-                "last_valid": shown(grid[present][-1]) if count else None,
+                "longest_missing_start": grid.shown(expected[run_start]) if run else None,
+                "longest_missing_end": grid.shown(expected[run_start + run - 1]) if run else None,
+                "first_valid": grid.shown(expected[present][0]) if count else None,
+                "last_valid": grid.shown(expected[present][-1]) if count else None,
             }
             rows.append(row)
             if count == 0:
@@ -154,7 +139,7 @@ class CoverageValidator(Validator):
             too_sparse = row["coverage"] < self.min_coverage
             too_long = self._max_gap is not None and run * step > self._max_gap
             message = (
-                f"Column '{column}' has values at {count} of {len(grid)} expected {freq} timestamps in "
+                f"Column '{column}' has values at {count} of {len(expected)} expected {freq} timestamps in "
                 f"[{row['start']}, {row['end']}) ({row['coverage']:.2%}, min {self.min_coverage:.2%}); longest "
                 f"missing run {run} timestamps ({format_step(run * step)}) from {row['longest_missing_start']} "
                 f"to {row['longest_missing_end']}"
@@ -165,6 +150,7 @@ class CoverageValidator(Validator):
 
         result.stats = pd.DataFrame(rows)
         if rows:
+            result.info["freq"] = {r["column"]: r["freq"] for r in rows}
             result.info["coverage"] = {r["column"]: r["coverage"] for r in rows}
             result.info["longest_missing_run"] = {r["column"]: r.get("longest_missing_run", 0) for r in rows}
             result.info["first_valid"] = {r["column"]: r.get("first_valid") for r in rows}
@@ -173,3 +159,21 @@ class CoverageValidator(Validator):
             result.add_error(message)
         result.warnings.extend(warnings)
         return result
+
+
+class _Grid:
+    """Time coordinate for a column's grid: elapsed (UTC) time, or the local wall clock for day-or-longer steps on a
+    tz-aware index, where a local day lasts 23 or 25 hours on DST switches."""
+
+    def __init__(self, index: pd.DatetimeIndex, step: pd.Timedelta):
+        self._index = index
+        self._on_calendar = index.tz is not None and step % ONE_DAY == pd.Timedelta(0)
+        self.times = index.tz_localize(None) if self._on_calendar else as_utc(index)
+
+    def to_grid(self, ts: pd.Timestamp) -> pd.Timestamp:
+        return ts.tz_convert(self._index.tz).tz_localize(None) if self._on_calendar else ts.tz_convert("UTC")
+
+    def shown(self, ts: pd.Timestamp) -> pd.Timestamp:
+        if self._on_calendar:
+            return ts.tz_localize(self._index.tz, ambiguous=True, nonexistent="shift_forward")
+        return display_time(ts, self._index)

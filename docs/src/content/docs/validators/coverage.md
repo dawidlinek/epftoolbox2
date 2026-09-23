@@ -38,11 +38,11 @@ print(result.stats)
 | `columns` | str, List[str] or None | `None` | Columns to check. `None` checks every column. |
 | `start` | str or None | `None` | First expected timestamp. `None` uses each column's first value. |
 | `end` | str or None | `None` | End of the range, **exclusive**. `None` uses each column's last value. |
-| `freq` | str or None | `None` | Grid step (`"15min"`, `"1h"`). `None` infers it from the data. |
+| `freq` | str or None | `None` | Grid step (`"15min"`, `"1h"`). `None` infers it per column from the column's own values, so a raw frame with hourly prices and 15-minute load measures each on its own grid. |
 | `min_coverage` | float | `1.0` | Smallest share of expected timestamps that must have a value. |
 | `max_gap` | str or None | `None` | Longest missing run allowed, as a duration (`"6h"`, `"2D"`). `None` means no limit. |
 
-`start` and `end` accept dates, timestamps and the `today` / `today_d-1` keywords of `DataPipeline.run`. They are resolved each time the validator runs, and naive values are UTC, like pipeline dates. The grid follows the phase of the index, so a UTC-midnight start works for a local-time frame.
+`start` and `end` accept dates, timestamps and the `today` / `today_d-1` keywords of `DataPipeline.run`. They are resolved each time the validator runs, and naive values are UTC, like pipeline dates. The grid follows the phase of the column's values, so a UTC-midnight start works for a local-time frame.
 
 With `start`/`end` left at `None`, lag columns pass even though they are empty at the edges of the frame by construction, and so do sources that pad the frame (A31 starting the evening before, Open-Meteo running past `end`). Set `start`/`end` when late starts and early ends matter.
 
@@ -50,8 +50,8 @@ With `start`/`end` left at `None`, lag columns pass even though they are empty a
 
 - **Errors:** missing columns; columns with no values; columns below `min_coverage` or with a missing run longer than `max_gap`.
 - **Warnings:** columns with missing timestamps that are still within both limits.
-- **info:** `expected_freq`, `coverage`, `longest_missing_run` (in timestamps), `first_valid`, `last_valid` (per column).
-- **stats:** `column`, `start`, `end`, `expected`, `present`, `missing`, `coverage`, `longest_missing_run`, `longest_missing_start`, `longest_missing_end`, `first_valid`, `last_valid`.
+- **info:** `freq`, `coverage`, `longest_missing_run` (in timestamps), `first_valid`, `last_valid` (all per column).
+- **stats:** `column`, `freq`, `start`, `end`, `expected`, `present`, `missing`, `coverage`, `longest_missing_run`, `longest_missing_start`, `longest_missing_end`, `first_valid`, `last_valid`.
 
 ```python
 print(result.errors[0])

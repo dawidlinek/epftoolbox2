@@ -376,8 +376,8 @@ validator = CoverageValidator(
     columns=["price"],       # Optional. Columns to check (default: None = all columns)
     start="2024-01-01",      # Optional. First expected timestamp (default: None = each column's first value)
     end="2025-01-01",        # Optional. End of the range, exclusive (default: None = each column's last value)
-    freq=None,               # Optional. Grid step (default: None = infer)
-    min_coverage=1.0,        # Optional. Smallest share of timestamps with a value (default: 1.0)
+    freq=None,               # Optional. Grid step (default: None = infer per column from its own values)
+    min_coverage=1.0,       # Optional. Smallest share of timestamps with a value (default: 1.0)
     max_gap=None,            # Optional. Longest missing run allowed, e.g. "6h" (default: None = no limit)
 )
 ```
@@ -385,8 +385,8 @@ validator = CoverageValidator(
 `start`/`end` accept dates, timestamps and `today`/`today_d-N` keywords (resolved at validation time; naive = UTC, like `DataPipeline.run`).
 
 **Errors:** missing or empty columns; coverage below `min_coverage`; a missing run longer than `max_gap`. **Warnings:** missing timestamps within both limits.
-**Info:** `expected_freq`, `coverage`, `longest_missing_run`, `first_valid`, `last_valid` (per column).
-**Stats:** column, start, end, expected, present, missing, coverage, longest_missing_run, longest_missing_start, longest_missing_end, first_valid, last_valid.
+**Info:** `freq`, `coverage`, `longest_missing_run`, `first_valid`, `last_valid` (all per column).
+**Stats:** column, freq, start, end, expected, present, missing, coverage, longest_missing_run, longest_missing_start, longest_missing_end, first_valid, last_valid.
 
 ---
 
