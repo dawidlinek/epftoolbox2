@@ -341,7 +341,9 @@ class EntsoeSource(DataSource):
         if not df_week.empty:
             dfs.append(df_week)
         elif xml is not None:
-            self.logger.warning(f"ENTSOE [{self._area_name}]: A31 (week-ahead forecast) data available but no min/max values found")
+            self.logger.warning(
+                f"ENTSOE [{self._area_name}]: A31 (week-ahead forecast) data available but no min/max values found"
+            )
 
         if not dfs:
             return pd.DataFrame()
@@ -391,11 +393,7 @@ class EntsoeSource(DataSource):
         price_dict = self._parse_prices(xml)
 
         series = pd.Series()
-        order = (
-            ("15min", "30min", "60min")
-            if self.prefer_15min
-            else ("60min", "30min", "15min")
-        )
+        order = ("15min", "30min", "60min") if self.prefer_15min else ("60min", "30min", "15min")
         for res in order:
             if price_dict.get(res) is not None and len(price_dict[res]) > 0:
                 series = price_dict[res]

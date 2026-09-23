@@ -43,8 +43,8 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Optional[Dict]:
 
     train_x = x_full[: -(1 + hz)]
     train_y = y_full[: -(1 + hz)]
-    test_x  = x_full[-1:]
-    actual  = float(arrays["y"][mask][-1, hz - 1])
+    test_x = x_full[-1:]
+    actual = float(arrays["y"][mask][-1, hz - 1])
 
     # Drop rows with NaN/inf in either predictors or target to avoid model fit failures.
     finite_rows = np.isfinite(train_y)
@@ -60,13 +60,15 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Optional[Dict]:
     if not np.isfinite(test_x).all():
         return None
 
-    run_date        = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
-    run_date_str    = run_date.isoformat()
+    run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
+    run_date_str = run_date.isoformat()
     target_date_str = (run_date + datetime.timedelta(days=hz)).isoformat()
 
     scaler = StandardScaler()
     train_x, train_y, test_x = scaler.fit_transform(
-        train_x.copy(), train_y.copy(), test_x.copy(),
+        train_x.copy(),
+        train_y.copy(),
+        test_x.copy(),
         scalable_mask=cfg["scalable_masks"][(hour, hz)],
     )
     try:
@@ -76,16 +78,16 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Optional[Dict]:
         return None
 
     return {
-        "run_date":     run_date_str,
-        "target_date":  target_date_str,
-        "run_weekday":  run_date.weekday(),
-        "hour":         hour,
-        "horizon":      hz,
-        "day_in_test":  day_in_test,
-        "prediction":   scaler.inverse(float(pred)),
-        "actual":       actual,
+        "run_date": run_date_str,
+        "target_date": target_date_str,
+        "run_weekday": run_date.weekday(),
+        "hour": hour,
+        "horizon": hz,
+        "day_in_test": day_in_test,
+        "prediction": scaler.inverse(float(pred)),
+        "actual": actual,
         "coefficients": coefs,
-        "freq":         cfg.get("freq", "1h"),
+        "freq": cfg.get("freq", "1h"),
     }
 
 

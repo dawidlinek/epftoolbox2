@@ -66,11 +66,7 @@ class ModelPipeline:
 
         refs: dict[str, ModelResultRef] = {}
         for model in self.models:
-            save_to = (
-                f"{save_dir}/{model.name.lower().replace(' ', '_')}.jsonl"
-                if save_dir
-                else None
-            )
+            save_to = f"{save_dir}/{model.name.lower().replace(' ', '_')}.jsonl" if save_dir else None
             ref = model.run(
                 data=data,
                 test_start=test_start,

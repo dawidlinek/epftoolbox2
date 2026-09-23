@@ -70,20 +70,18 @@ class BaseModel(ABC):
         forecast_only: bool = False,
     ) -> ModelResultRef:
         if freq not in _FREQ_TO_PERIODS:
-            raise ValueError(
-                f"Unsupported freq '{freq}'. Supported: {list(_FREQ_TO_PERIODS)}"
-            )
+            raise ValueError(f"Unsupported freq '{freq}'. Supported: {list(_FREQ_TO_PERIODS)}")
         self._freq = freq
         self._periods_per_day = _FREQ_TO_PERIODS[freq]
 
         if forecast_only:
             test_start = resolve_date(test_start or "today")
-            test_end   = resolve_date(test_end   or "today")
+            test_end = resolve_date(test_end or "today")
         else:
             if test_start is None or test_end is None:
                 raise ValueError("test_start and test_end are required unless forecast_only=True")
             test_start = resolve_date(test_start)
-            test_end   = resolve_date(test_end)
+            test_end = resolve_date(test_end)
 
         self._target = target
 
@@ -134,12 +132,12 @@ class BaseModel(ABC):
         threads_per_process, n_processes = self._executor_config()
 
         config = {
-            "offset":              self._offset,
-            "test_start":          test_start,
-            "training_window":     self.training_window,
-            "scalable_masks":      scalable_masks,
+            "offset": self._offset,
+            "test_start": test_start,
+            "training_window": self.training_window,
+            "scalable_masks": scalable_masks,
             "threads_per_process": threads_per_process,
-            "freq":                self._freq,
+            "freq": self._freq,
         }
 
         in_memory = None if save_to else []
@@ -156,10 +154,7 @@ class BaseModel(ABC):
                 self._model_kwargs,
             ),
         ) as pool:
-            futures = {
-                pool.submit(_run_day, day_tasks): day
-                for day, day_tasks in tasks_by_day.items()
-            }
+            futures = {pool.submit(_run_day, day_tasks): day for day, day_tasks in tasks_by_day.items()}
             n_days_total = test_end_day - self._offset + 1
             n_days_done = n_days_total - len(tasks_by_day)
             with Progress() as progress:
@@ -226,26 +221,18 @@ class BaseModel(ABC):
         day_ids = local_dates.map(lambda d: d.toordinal() - base_ordinal).astype(np.int64)
         new_cols["day"] = day_ids
 
-        new_cols["hour"] = pd.Series(
-            self._compute_period_index(data.index), index=data.index
-        )
+        new_cols["hour"] = pd.Series(self._compute_period_index(data.index), index=data.index)
         return pd.concat([data, pd.DataFrame(new_cols)], axis=1)
 
-    def _shift_index_by_calendar_days(
-        self, index: pd.DatetimeIndex, days: int
-    ) -> pd.DatetimeIndex:
+    def _shift_index_by_calendar_days(self, index: pd.DatetimeIndex, days: int) -> pd.DatetimeIndex:
         if index.tz is None:
             return index + pd.Timedelta(days=days)
 
         shifted_local_naive = index.tz_localize(None) + pd.Timedelta(days=days)
         try:
-            return shifted_local_naive.tz_localize(
-                index.tz, ambiguous="infer", nonexistent="NaT"
-            )
+            return shifted_local_naive.tz_localize(index.tz, ambiguous="infer", nonexistent="NaT")
         except Exception:
-            return shifted_local_naive.tz_localize(
-                index.tz, ambiguous="NaT", nonexistent="NaT"
-            )
+            return shifted_local_naive.tz_localize(index.tz, ambiguous="NaT", nonexistent="NaT")
 
     def _compute_period_index(self, index: pd.DatetimeIndex) -> np.ndarray:
         if self._freq == "1h":
@@ -259,22 +246,17 @@ class BaseModel(ABC):
         hour_arrays = {}
         for hour in range(self._periods_per_day):
             hour_df = self._hour_data[hour]
-            feature_cols = [
-                c for c in hour_df.columns
-                if c not in target_cols + ["day", "hour"]
-            ]
+            feature_cols = [c for c in hour_df.columns if c not in target_cols + ["day", "hour"]]
             hour_arrays[hour] = {
-                "x":         hour_df[feature_cols].to_numpy(dtype=np.float64, copy=True),
-                "y":         hour_df[target_cols].to_numpy(dtype=np.float64, copy=True),
-                "days":      self._hour_days[hour].copy(),
+                "x": hour_df[feature_cols].to_numpy(dtype=np.float64, copy=True),
+                "y": hour_df[target_cols].to_numpy(dtype=np.float64, copy=True),
+                "days": self._hour_days[hour].copy(),
                 "timestamps": hour_df.index.values.copy(),
                 "col_index": {c: i for i, c in enumerate(feature_cols)},
             }
         return hour_arrays
 
-    def _precompute_scalable_masks(
-        self, horizon: int
-    ) -> Dict[Tuple[int, int], np.ndarray]:
+    def _precompute_scalable_masks(self, horizon: int) -> Dict[Tuple[int, int], np.ndarray]:
         masks = {}
         for hour in range(self._periods_per_day):
             days = self._hour_days[hour]
@@ -284,16 +266,11 @@ class BaseModel(ABC):
                 day_min = day - self.training_window - hz
                 mask = (days >= day_min) & (days <= day)
                 preds = self._expand_predictors(hz, hour=hour)
-                sample_x = (
-                    hour_df[mask][preds]
-                    .to_numpy(dtype=np.float64)[: -(1 + hz)]
-                )
+                sample_x = hour_df[mask][preds].to_numpy(dtype=np.float64)[: -(1 + hz)]
                 masks[(hour, hz)] = StandardScaler.get_scalable_mask(sample_x)
         return masks
 
-    def _precompute_expanded_predictors(
-        self, horizon: int
-    ) -> Dict[Tuple[int, int], List[str]]:
+    def _precompute_expanded_predictors(self, horizon: int) -> Dict[Tuple[int, int], List[str]]:
         return {
             (hour, hz): self._expand_predictors(hz, hour=hour)
             for hour in range(self._periods_per_day)
@@ -324,7 +301,5 @@ class BaseModel(ABC):
         return result
 
     @abstractmethod
-    def _fit_predict(
-        self, train_x: np.ndarray, train_y: np.ndarray, test_x: np.ndarray
-    ) -> Tuple[float, list]:
+    def _fit_predict(self, train_x: np.ndarray, train_y: np.ndarray, test_x: np.ndarray) -> Tuple[float, list]:
         pass

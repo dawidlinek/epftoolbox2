@@ -31,9 +31,9 @@ class TimezoneTransformer(Transformer):
                 Defaults to ["load_forecast_daily_min", "load_forecast_daily_max"].
         """
         self.target_tz = target_tz
-        self.daily_columns = daily_columns if daily_columns is not None else [
-            "load_forecast_daily_min", "load_forecast_daily_max"
-        ]
+        self.daily_columns = (
+            daily_columns if daily_columns is not None else ["load_forecast_daily_min", "load_forecast_daily_max"]
+        )
         self._validate_timezone()
 
     def _validate_timezone(self) -> None:
@@ -66,7 +66,7 @@ class TimezoneTransformer(Transformer):
             # midnight while 00:xx/01:xx/02:xx still snap to the current one.
             # This handles ENTSOE's UTC+2-anchored period starts, which land at
             # 23:00 local time in UTC+1 (winter) zones instead of at midnight.
-            midnight_index = (non_null.index + pd.Timedelta('1h')).normalize()
+            midnight_index = (non_null.index + pd.Timedelta("1h")).normalize()
             needs_shift = non_null.index != midnight_index
             if not needs_shift.any():
                 continue

@@ -119,7 +119,12 @@ class TestWeekdayFeatures:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-01-08", tz="UTC")
         df = source.fetch(start, end)
-        weekday_cols = [c for c in df.columns if c.startswith("is_") and any(day in c for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"])]
+        weekday_cols = [
+            c
+            for c in df.columns
+            if c.startswith("is_")
+            and any(day in c for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"])
+        ]
         assert len(weekday_cols) == 7
 
 
@@ -162,7 +167,20 @@ class TestMonthFeatures:
         start = pd.Timestamp("2024-01-01", tz="UTC")
         end = pd.Timestamp("2024-12-31", tz="UTC")
         df = source.fetch(start, end)
-        month_names = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
+        month_names = [
+            "january",
+            "february",
+            "march",
+            "april",
+            "may",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "november",
+            "december",
+        ]
         month_cols = [c for c in df.columns if c.startswith("is_") and any(m in c for m in month_names)]
         assert len(month_cols) == 12
 
@@ -186,9 +204,7 @@ class TestDaylightFeatures:
     def test_daylight_respects_coordinate_override(self):
         # A more northern latitude has longer daylight at the summer solstice.
         warsaw = CalendarSource(country="PL", holidays=False, weekday=False, daylight=True)
-        northern = CalendarSource(
-            country="PL", holidays=False, weekday=False, daylight=True, lat=59.3293, lon=18.0686
-        )
+        northern = CalendarSource(country="PL", holidays=False, weekday=False, daylight=True, lat=59.3293, lon=18.0686)
         start = pd.Timestamp("2024-06-21", tz="UTC")
         end = pd.Timestamp("2024-06-22", tz="UTC")
         warsaw_df = warsaw.fetch(start, end)

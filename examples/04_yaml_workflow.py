@@ -55,11 +55,28 @@ predictors = [
     DataPipeline()
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
     .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
-    .add_source(CalendarSource(country="PL", holidays="binary",daylight=True, weekday="onehot"))
+    .add_source(CalendarSource(country="PL", holidays="binary", daylight=True, weekday="onehot"))
     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
-    .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "is_tuesday", "daylight_hours", "is_wednesday", "is_thursday", "is_friday", "is_saturday", "is_sunday", "load_forecast", "is_holiday"]))
+    .add_transformer(
+        LagTransformer(
+            lags=range(-7, 1),
+            freq="day",
+            columns=[
+                "is_monday",
+                "is_tuesday",
+                "daylight_hours",
+                "is_wednesday",
+                "is_thursday",
+                "is_friday",
+                "is_saturday",
+                "is_sunday",
+                "load_forecast",
+                "is_holiday",
+            ],
+        )
+    )
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
     .save("data_pipeline.yaml")
 )
@@ -90,7 +107,7 @@ Workflow(
 ).save("experiment.yaml")
 
 # ---------------------------------------------------------------------------
-# Phase 2: Load and run 
+# Phase 2: Load and run
 # ---------------------------------------------------------------------------
 
 # if __name__ == "__main__":

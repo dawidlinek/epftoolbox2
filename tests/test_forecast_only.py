@@ -16,6 +16,7 @@ from epftoolbox2.results.report import EvaluationReport
 # Shared fixture
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def sample_data():
     """400 days of hourly data with price + one predictor, no NaNs."""
@@ -37,6 +38,7 @@ def sample_data():
 # ---------------------------------------------------------------------------
 # resolve_date
 # ---------------------------------------------------------------------------
+
 
 class TestResolveDate:
     def test_today(self):
@@ -75,6 +77,7 @@ class TestResolveDate:
 # ---------------------------------------------------------------------------
 # forecast_only=True — test_start/test_end default to today
 # ---------------------------------------------------------------------------
+
 
 class TestForecastOnlyDefaults:
     def test_model_runs_without_test_dates(self, sample_data):
@@ -130,6 +133,7 @@ class TestForecastOnlyDefaults:
 # forecast_only skips evaluators and exporters
 # ---------------------------------------------------------------------------
 
+
 class TestForecastOnlySkipsEvaluatorsExporters:
     def test_evaluators_not_run(self, sample_data):
         """With forecast_only=True evaluators should be skipped — report.summary() is empty."""
@@ -160,6 +164,7 @@ class TestForecastOnlySkipsEvaluatorsExporters:
 # _resolve_day raises ValueError for missing dates
 # ---------------------------------------------------------------------------
 
+
 class TestResolveDayError:
     def test_missing_test_start_raises(self, sample_data):
         """Requesting a test_start beyond data end must raise a clear ValueError."""
@@ -178,21 +183,50 @@ class TestResolveDayError:
 # EvaluationReport.predictions()
 # ---------------------------------------------------------------------------
 
+
 class TestPredictions:
     @pytest.fixture
     def simple_report(self):
         results = {
             "ModelA": [
-                {"run_date": "2024-01-01", "target_date": "2024-01-02", "hour": 3, "horizon": 1,
-                 "day_in_test": 0, "prediction": 55.0, "actual": 54.0},
-                {"run_date": "2024-01-01", "target_date": "2024-01-02", "hour": 0, "horizon": 1,
-                 "day_in_test": 0, "prediction": 50.0, "actual": 51.0},
-                {"run_date": "2024-01-01", "target_date": "2024-01-03", "hour": 0, "horizon": 2,
-                 "day_in_test": 0, "prediction": 60.0, "actual": 61.0},
+                {
+                    "run_date": "2024-01-01",
+                    "target_date": "2024-01-02",
+                    "hour": 3,
+                    "horizon": 1,
+                    "day_in_test": 0,
+                    "prediction": 55.0,
+                    "actual": 54.0,
+                },
+                {
+                    "run_date": "2024-01-01",
+                    "target_date": "2024-01-02",
+                    "hour": 0,
+                    "horizon": 1,
+                    "day_in_test": 0,
+                    "prediction": 50.0,
+                    "actual": 51.0,
+                },
+                {
+                    "run_date": "2024-01-01",
+                    "target_date": "2024-01-03",
+                    "hour": 0,
+                    "horizon": 2,
+                    "day_in_test": 0,
+                    "prediction": 60.0,
+                    "actual": 61.0,
+                },
             ],
             "ModelB": [
-                {"run_date": "2024-01-01", "target_date": "2024-01-02", "hour": 0, "horizon": 1,
-                 "day_in_test": 0, "prediction": 48.0, "actual": 51.0},
+                {
+                    "run_date": "2024-01-01",
+                    "target_date": "2024-01-02",
+                    "hour": 0,
+                    "horizon": 1,
+                    "day_in_test": 0,
+                    "prediction": 48.0,
+                    "actual": 51.0,
+                },
             ],
         }
         return EvaluationReport(results, [])

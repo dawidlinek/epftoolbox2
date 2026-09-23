@@ -7,8 +7,8 @@ forecasting models on pre-existing data (loaded from CSV).
 
 import os
 
-os.environ["THREADS_PER_PROCESS"] = "16" 
-os.environ["MAX_PROCESSES"] = "2" 
+os.environ["THREADS_PER_PROCESS"] = "16"
+os.environ["MAX_PROCESSES"] = "2"
 
 import pandas as pd
 from epftoolbox2.pipelines import ModelPipeline
@@ -63,7 +63,7 @@ if __name__ == "__main__":
         .add_evaluator(MAEEvaluator())
         .add_evaluator(RMSEEvaluator())
         .add_evaluator(rMAEEvaluator(base_model="OLS Baseline"))
-        .add_exporter(TerminalExporter(['horizon']))
+        .add_exporter(TerminalExporter(["horizon"]))
         .add_exporter(ExcelExporter("model_results.xlsx"))
         .add_exporter(CsvExporter("model_results.csv"))
     )

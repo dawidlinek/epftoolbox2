@@ -154,7 +154,9 @@ class TestEntsoeSourceAPIRequests:
         source = EntsoeSource("PL", "test-key", type=["load"])
         source.session = mock_session.return_value
 
-        result = source._api_request({"documentType": "A65"}, pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
+        result = source._api_request(
+            {"documentType": "A65"}, pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC")
+        )
 
         assert result == "<data>test</data>"
 
@@ -170,7 +172,9 @@ class TestEntsoeSourceAPIRequests:
         source = EntsoeSource("PL", "test-key", type=["load"])
         source.session = mock_session.return_value
 
-        result = source._api_request({"documentType": "A65"}, pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
+        result = source._api_request(
+            {"documentType": "A65"}, pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC")
+        )
 
         assert result is None
 

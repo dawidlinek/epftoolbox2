@@ -3,6 +3,7 @@
 Launched when `epf` is run with no subcommand. Guides the user through
 building and running pipelines without writing YAML by hand.
 """
+
 from __future__ import annotations
 
 import sys
@@ -33,80 +34,287 @@ console = Console()
 
 PARAM_SCHEMAS: dict[str, list[dict]] = {
     "EntsoeSource": [
-        {"name": "country_code", "description": "2-letter country code (e.g. PL, DE)", "required": True, "default": None, "kind": "text"},
+        {
+            "name": "country_code",
+            "description": "2-letter country code (e.g. PL, DE)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
         {"name": "api_key", "description": "ENTSOE API key", "required": True, "default": None, "kind": "text"},
-        {"name": "type", "description": "Data types to fetch", "required": True, "default": None, "kind": "multiselect",
-         "choices": ["load", "generation", "price"]},
+        {
+            "name": "type",
+            "description": "Data types to fetch",
+            "required": True,
+            "default": None,
+            "kind": "multiselect",
+            "choices": ["load", "generation", "price"],
+        },
     ],
     "OpenMeteoSource": [
         {"name": "latitude", "description": "Latitude (-90 to 90)", "required": True, "default": None, "kind": "float"},
-        {"name": "longitude", "description": "Longitude (-180 to 180)", "required": True, "default": None, "kind": "float"},
-        {"name": "horizon", "description": "Forecast horizon in days", "required": False, "default": "7", "kind": "int"},
-        {"name": "prefix", "description": "Column name prefix (optional)", "required": False, "default": "", "kind": "text"},
+        {
+            "name": "longitude",
+            "description": "Longitude (-180 to 180)",
+            "required": True,
+            "default": None,
+            "kind": "float",
+        },
+        {
+            "name": "horizon",
+            "description": "Forecast horizon in days",
+            "required": False,
+            "default": "7",
+            "kind": "int",
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
     ],
     "CsvSource": [
         {"name": "file_path", "description": "Path to CSV file", "required": True, "default": None, "kind": "text"},
-        {"name": "datetime_column", "description": "Datetime column name", "required": False, "default": "datetime", "kind": "text"},
+        {
+            "name": "datetime_column",
+            "description": "Datetime column name",
+            "required": False,
+            "default": "datetime",
+            "kind": "text",
+        },
         {"name": "separator", "description": "CSV separator", "required": False, "default": ",", "kind": "text"},
-        {"name": "prefix", "description": "Column name prefix (optional)", "required": False, "default": "", "kind": "text"},
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
     ],
     "CalendarSource": [
-        {"name": "country", "description": "Country code", "required": True, "default": None, "kind": "select",
-         "choices": ["PL", "DE", "FR", "ES", "IT", "NL", "BE", "AT", "CH", "CZ", "SK", "HU", "RO", "BG", "GR", "PT", "DK", "SE", "NO", "FI", "GB", "IE"]},
-        {"name": "holidays", "description": "Holiday encoding", "required": False, "default": "binary", "kind": "select",
-         "choices": ["binary", "onehot", "name", "false"]},
-        {"name": "weekday", "description": "Weekday encoding", "required": False, "default": "number", "kind": "select",
-         "choices": ["number", "onehot", "name", "false"]},
-        {"name": "hour", "description": "Hour encoding", "required": False, "default": "false", "kind": "select",
-         "choices": ["false", "number", "onehot"]},
-        {"name": "month", "description": "Month encoding", "required": False, "default": "false", "kind": "select",
-         "choices": ["false", "number", "onehot", "name"]},
-        {"name": "daylight", "description": "Include sunrise/sunset/daylight hours", "required": False, "default": False, "kind": "confirm"},
-        {"name": "prefix", "description": "Column name prefix (optional)", "required": False, "default": "", "kind": "text"},
+        {
+            "name": "country",
+            "description": "Country code",
+            "required": True,
+            "default": None,
+            "kind": "select",
+            "choices": [
+                "PL",
+                "DE",
+                "FR",
+                "ES",
+                "IT",
+                "NL",
+                "BE",
+                "AT",
+                "CH",
+                "CZ",
+                "SK",
+                "HU",
+                "RO",
+                "BG",
+                "GR",
+                "PT",
+                "DK",
+                "SE",
+                "NO",
+                "FI",
+                "GB",
+                "IE",
+            ],
+        },
+        {
+            "name": "holidays",
+            "description": "Holiday encoding",
+            "required": False,
+            "default": "binary",
+            "kind": "select",
+            "choices": ["binary", "onehot", "name", "false"],
+        },
+        {
+            "name": "weekday",
+            "description": "Weekday encoding",
+            "required": False,
+            "default": "number",
+            "kind": "select",
+            "choices": ["number", "onehot", "name", "false"],
+        },
+        {
+            "name": "hour",
+            "description": "Hour encoding",
+            "required": False,
+            "default": "false",
+            "kind": "select",
+            "choices": ["false", "number", "onehot"],
+        },
+        {
+            "name": "month",
+            "description": "Month encoding",
+            "required": False,
+            "default": "false",
+            "kind": "select",
+            "choices": ["false", "number", "onehot", "name"],
+        },
+        {
+            "name": "daylight",
+            "description": "Include sunrise/sunset/daylight hours",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
     ],
     "TimezoneTransformer": [
-        {"name": "target_tz", "description": "IANA timezone (e.g. Europe/Warsaw)", "required": True, "default": None, "kind": "text"},
+        {
+            "name": "target_tz",
+            "description": "IANA timezone (e.g. Europe/Warsaw)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
     ],
     "ResampleTransformer": [
-        {"name": "freq", "description": "Target frequency (e.g. 1h, 15min)", "required": False, "default": "1h", "kind": "text"},
-        {"name": "method", "description": "Interpolation method", "required": False, "default": "linear", "kind": "select",
-         "choices": ["linear", "ffill", "bfill"]},
+        {
+            "name": "freq",
+            "description": "Target frequency (e.g. 1h, 15min)",
+            "required": False,
+            "default": "1h",
+            "kind": "text",
+        },
+        {
+            "name": "method",
+            "description": "Interpolation method",
+            "required": False,
+            "default": "linear",
+            "kind": "select",
+            "choices": ["linear", "ffill", "bfill"],
+        },
     ],
     "LagTransformer": [
-        {"name": "columns", "description": "Columns to lag", "required": True, "default": None, "kind": "column_select"},
-        {"name": "lags", "description": "Lag values, comma-separated integers (e.g. 1,2,24 or -7,-1)", "required": False, "default": "1", "kind": "lag_list"},
+        {
+            "name": "columns",
+            "description": "Columns to lag",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "lags",
+            "description": "Lag values, comma-separated integers (e.g. 1,2,24 or -7,-1)",
+            "required": False,
+            "default": "1",
+            "kind": "lag_list",
+        },
         {"name": "freq", "description": "Frequency (e.g. 1h, day)", "required": False, "default": "1h", "kind": "text"},
     ],
     "ContinuityValidator": [
-        {"name": "freq", "description": "Expected frequency (e.g. 1h)", "required": False, "default": "1h", "kind": "text"},
+        {
+            "name": "freq",
+            "description": "Expected frequency (e.g. 1h)",
+            "required": False,
+            "default": "1h",
+            "kind": "text",
+        },
     ],
     "NullCheckValidator": [
-        {"name": "columns", "description": "Columns to check (comma-separated, blank = all)", "required": False, "default": "", "kind": "column_select"},
-        {"name": "allow_nulls", "description": "Allow nulls (just warn)?", "required": False, "default": False, "kind": "confirm"},
+        {
+            "name": "columns",
+            "description": "Columns to check (comma-separated, blank = all)",
+            "required": False,
+            "default": "",
+            "kind": "column_select",
+        },
+        {
+            "name": "allow_nulls",
+            "description": "Allow nulls (just warn)?",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
+        },
     ],
     "EdaValidator": [
-        {"name": "columns", "description": "Columns to analyse (comma-separated, blank = auto)", "required": False, "default": "", "kind": "column_select"},
+        {
+            "name": "columns",
+            "description": "Columns to analyse (comma-separated, blank = auto)",
+            "required": False,
+            "default": "",
+            "kind": "column_select",
+        },
     ],
     "OLSModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "OLS", "kind": "text"},
-        {"name": "predictors", "description": "Predictor column names", "required": True, "default": None, "kind": "column_select"},
-        {"name": "training_window", "description": "Training window in days", "required": False, "default": "365", "kind": "int"},
+        {
+            "name": "predictors",
+            "description": "Predictor column names",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "training_window",
+            "description": "Training window in days",
+            "required": False,
+            "default": "365",
+            "kind": "int",
+        },
     ],
     "LassoCVModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "LassoCV", "kind": "text"},
-        {"name": "predictors", "description": "Predictor column names", "required": True, "default": None, "kind": "column_select"},
-        {"name": "training_window", "description": "Training window in days", "required": False, "default": "365", "kind": "int"},
+        {
+            "name": "predictors",
+            "description": "Predictor column names",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "training_window",
+            "description": "Training window in days",
+            "required": False,
+            "default": "365",
+            "kind": "int",
+        },
         {"name": "cv", "description": "Cross-validation folds", "required": False, "default": "5", "kind": "int"},
     ],
     "MAEEvaluator": [],
     "ExcelExporter": [
         {"name": "path", "description": "Output Excel file path", "required": True, "default": None, "kind": "text"},
-        {"name": "sheets", "description": "Sheets to include", "required": False, "default": None, "kind": "multiselect",
-         "choices": ["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon", "run_weekday_horizon", "target_weekday_horizon", "details"]},
+        {
+            "name": "sheets",
+            "description": "Sheets to include",
+            "required": False,
+            "default": None,
+            "kind": "multiselect",
+            "choices": [
+                "summary",
+                "hour",
+                "horizon",
+                "hour_horizon",
+                "year",
+                "year_horizon",
+                "run_weekday_horizon",
+                "target_weekday_horizon",
+                "details",
+            ],
+        },
     ],
     "TerminalExporter": [
-        {"name": "show", "description": "Sections to display", "required": False, "default": None, "kind": "multiselect",
-         "choices": ["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon"]},
+        {
+            "name": "show",
+            "description": "Sections to display",
+            "required": False,
+            "default": None,
+            "kind": "multiselect",
+            "choices": ["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon"],
+        },
     ],
 }
 
@@ -114,6 +322,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
 # ---------------------------------------------------------------------------
 # Low-level prompt helpers
 # ---------------------------------------------------------------------------
+
 
 def _ask_field(field: dict, available_columns: Optional[list[str]] = None) -> Any:
     """Prompt the user for a single parameter field. Returns the value or sentinel SKIP."""
@@ -220,6 +429,7 @@ def _abort() -> None:
 
 def _ask_date(label: str, default: str = "") -> str:
     import re
+
     while True:
         val = questionary.text(label, default=default).ask()
         if val is None:
@@ -233,6 +443,7 @@ def _ask_date(label: str, default: str = "") -> str:
 # ---------------------------------------------------------------------------
 # Component configuration
 # ---------------------------------------------------------------------------
+
 
 def configure_component(class_name: str, available_columns: Optional[list[str]] = None) -> dict:
     """Ask the user to fill in all params for a component. Returns a params dict."""
@@ -250,11 +461,18 @@ def _instantiate(class_name: str, params: dict) -> Any:
     from .pipelines.data_pipeline import COMPONENT_REGISTRY as DR
     from .pipelines.model_pipeline import COMPONENT_REGISTRY as MR
 
-    all_registries = {**DR.get("sources", {}), **DR.get("transformers", {}), **DR.get("validators", {}),
-                      **MR.get("models", {}), **MR.get("evaluators", {}), **MR.get("exporters", {})}
+    all_registries = {
+        **DR.get("sources", {}),
+        **DR.get("transformers", {}),
+        **DR.get("validators", {}),
+        **MR.get("models", {}),
+        **MR.get("evaluators", {}),
+        **MR.get("exporters", {}),
+    }
     if class_name not in all_registries:
         raise ValueError(f"Unknown component: {class_name}")
     import importlib
+
     module = importlib.import_module(all_registries[class_name])
     return getattr(module, class_name)(**params)
 
@@ -451,11 +669,13 @@ def build_model_pipeline_interactive() -> None:
 # YAML-based runners (thin wrappers used from main menu)
 # ---------------------------------------------------------------------------
 
+
 def _run_experiment_from_yaml() -> None:
     path = questionary.text("  Workflow YAML path").ask()
     if path is None:
         _abort()
     from .pipelines.workflow import Workflow
+
     Workflow.load(path.strip()).run()
 
 
@@ -516,22 +736,22 @@ def _run_model_from_yaml() -> None:
 # ---------------------------------------------------------------------------
 
 _MENU_CHOICES = [
-    questionary.Choice("Run experiment from YAML",             value="run_experiment"),
-    questionary.Choice("Run data pipeline from YAML → CSV",    value="run_data"),
-    questionary.Choice("Run model pipeline from YAML",         value="run_model"),
+    questionary.Choice("Run experiment from YAML", value="run_experiment"),
+    questionary.Choice("Run data pipeline from YAML → CSV", value="run_data"),
+    questionary.Choice("Run model pipeline from YAML", value="run_model"),
     questionary.Separator(),
-    questionary.Choice("Build & run data pipeline interactively",  value="build_data"),
+    questionary.Choice("Build & run data pipeline interactively", value="build_data"),
     questionary.Choice("Build & run model pipeline interactively", value="build_model"),
     questionary.Separator(),
-    questionary.Choice("Exit",                                 value="exit"),
+    questionary.Choice("Exit", value="exit"),
 ]
 
 _DISPATCH = {
     "run_experiment": _run_experiment_from_yaml,
-    "run_data":       _run_data_from_yaml,
-    "run_model":      _run_model_from_yaml,
-    "build_data":     build_data_pipeline_interactive,
-    "build_model":    build_model_pipeline_interactive,
+    "run_data": _run_data_from_yaml,
+    "run_model": _run_model_from_yaml,
+    "build_data": build_data_pipeline_interactive,
+    "build_model": build_model_pipeline_interactive,
 }
 
 

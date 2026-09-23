@@ -82,7 +82,9 @@ class DataPipeline:
         self.validators.append(validator)
         return self
 
-    def _fetch_with_cache(self, source: DataSource, start: pd.Timestamp, end: pd.Timestamp, cache_manager: CacheManager) -> pd.DataFrame:
+    def _fetch_with_cache(
+        self, source: DataSource, start: pd.Timestamp, end: pd.Timestamp, cache_manager: CacheManager
+    ) -> pd.DataFrame:
         source_config = source.get_cache_config()
         if source_config is None:
             return source.fetch(start, end)
@@ -115,7 +117,9 @@ class DataPipeline:
             return pd.Timestamp(ts, tz="UTC")
         return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
 
-    def run(self, start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp], cache: Union[bool, str] = False) -> pd.DataFrame:
+    def run(
+        self, start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp], cache: Union[bool, str] = False
+    ) -> pd.DataFrame:
         if not self.sources:
             raise ValueError("At least one data source is required")
 
@@ -155,7 +159,9 @@ class DataPipeline:
         dataframes = []
 
         for source in self.sources:
-            df = self._fetch_with_cache(source, start, end, cache_manager) if cache is True else source.fetch(start, end)
+            df = (
+                self._fetch_with_cache(source, start, end, cache_manager) if cache is True else source.fetch(start, end)
+            )
             if df is not None and not df.empty:
                 dataframes.append(df)
 

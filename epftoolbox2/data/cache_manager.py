@@ -38,14 +38,18 @@ class CacheManager:
     def _get_data_filename(self, start: pd.Timestamp, end: pd.Timestamp) -> str:
         return f"data_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}.csv"
 
-    def find_missing_ranges(self, cache_key: str, requested_start: pd.Timestamp, requested_end: pd.Timestamp) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+    def find_missing_ranges(
+        self, cache_key: str, requested_start: pd.Timestamp, requested_end: pd.Timestamp
+    ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
         metadata = self._read_metadata(cache_key)
         cached_ranges = metadata.get("cached_ranges", [])
 
         if not cached_ranges:
             return [(requested_start, requested_end)]
 
-        cached_ts_ranges = sorted([(pd.Timestamp(r["start"]), pd.Timestamp(r["end"])) for r in cached_ranges], key=lambda x: x[0])
+        cached_ts_ranges = sorted(
+            [(pd.Timestamp(r["start"]), pd.Timestamp(r["end"])) for r in cached_ranges], key=lambda x: x[0]
+        )
 
         missing_ranges = []
         current_start = requested_start
@@ -91,7 +95,9 @@ class CacheManager:
         combined = pd.concat(overlapping_chunks).sort_index()
         return combined[~combined.index.duplicated(keep="first")]
 
-    def write_cache(self, cache_key: str, df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, source_config: Dict):
+    def write_cache(
+        self, cache_key: str, df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, source_config: Dict
+    ):
         if df.empty:
             return
 
@@ -104,7 +110,9 @@ class CacheManager:
 
         new_range = {"start": start.isoformat(), "end": end.isoformat(), "filename": filename}
 
-        existing_idx = next((i for i, r in enumerate(metadata.get("cached_ranges", [])) if r["filename"] == filename), None)
+        existing_idx = next(
+            (i for i, r in enumerate(metadata.get("cached_ranges", [])) if r["filename"] == filename), None
+        )
         if existing_idx is not None:
             metadata["cached_ranges"][existing_idx] = new_range
         else:
@@ -118,4 +126,9 @@ class CacheManager:
         cached_ranges = metadata.get("cached_ranges", [])
         if not cached_ranges:
             return {"exists": False, "num_chunks": 0, "date_ranges": []}
-        return {"exists": True, "num_chunks": len(cached_ranges), "date_ranges": [{"start": r["start"], "end": r["end"]} for r in cached_ranges], "source_config": metadata.get("source_config", {})}
+        return {
+            "exists": True,
+            "num_chunks": len(cached_ranges),
+            "date_ranges": [{"start": r["start"], "end": r["end"]} for r in cached_ranges],
+            "source_config": metadata.get("source_config", {}),
+        }

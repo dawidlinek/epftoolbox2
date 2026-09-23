@@ -187,8 +187,12 @@ class TestGapDetection:
         df2 = pd.DataFrame({"load": range(24)}, index=dates2)
 
         # Cache Jan 1-2 and Jan 15-16
-        cache_manager.write_cache(cache_key, df1, pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"), sample_config)
-        cache_manager.write_cache(cache_key, df2, pd.Timestamp("2024-01-15", tz="UTC"), pd.Timestamp("2024-01-16", tz="UTC"), sample_config)
+        cache_manager.write_cache(
+            cache_key, df1, pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"), sample_config
+        )
+        cache_manager.write_cache(
+            cache_key, df2, pd.Timestamp("2024-01-15", tz="UTC"), pd.Timestamp("2024-01-16", tz="UTC"), sample_config
+        )
 
         # Request Jan 1-20
         req_start = pd.Timestamp("2024-01-01", tz="UTC")

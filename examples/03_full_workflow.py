@@ -8,8 +8,8 @@ This example demonstrates a complete electricity price forecasting workflow:
 
 import os
 
-os.environ["THREADS_PER_PROCESS"] = "16" 
-os.environ["MAX_PROCESSES"] = "2" 
+os.environ["THREADS_PER_PROCESS"] = "16"
+os.environ["MAX_PROCESSES"] = "2"
 
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
@@ -27,16 +27,32 @@ DATA_END = "2024-04-01"
 TEST_START = "2024-02-01"
 TEST_END = "2024-03-01"
 if __name__ == "__main__":
-
     df = (
         DataPipeline()
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
         .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
-        .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot",daylight=True))
+        .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
         .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
         .add_transformer(ResampleTransformer(freq="1h"))
-        .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7],freq="day"))
-        .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "is_tuesday", "daylight_hours", "is_wednesday", "is_thursday", "is_friday", "is_saturday", "is_sunday", "load_forecast", "is_holiday"]))
+        .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
+        .add_transformer(
+            LagTransformer(
+                lags=range(-7, 1),
+                freq="day",
+                columns=[
+                    "is_monday",
+                    "is_tuesday",
+                    "daylight_hours",
+                    "is_wednesday",
+                    "is_thursday",
+                    "is_friday",
+                    "is_saturday",
+                    "is_sunday",
+                    "load_forecast",
+                    "is_holiday",
+                ],
+            )
+        )
         .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
         .run(start=DATA_START, end=DATA_END, cache=True)
     )
@@ -64,7 +80,13 @@ if __name__ == "__main__":
 
     model_pipeline = (
         ModelPipeline()
-        .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS",))
+        .add_model(
+            OLSModel(
+                predictors=predictors,
+                training_window=365,
+                name="OLS",
+            )
+        )
         .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=7, name="LassoCV"))
         .add_evaluator(MAEEvaluator())
         .add_evaluator(RMSEEvaluator())

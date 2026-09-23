@@ -167,7 +167,12 @@ class Workflow:
         dp.update(self._dp_inline)
         config["data_pipeline"] = dp
 
-        mp: dict = {"target": self.model_target, "horizon": self.model_horizon, "freq": self.model_freq, "forecast_only": self.model_forecast_only}
+        mp: dict = {
+            "target": self.model_target,
+            "horizon": self.model_horizon,
+            "freq": self.model_freq,
+            "forecast_only": self.model_forecast_only,
+        }
         if self.model_test_start is not None:
             mp["test_start"] = self.model_test_start
         if self.model_test_end is not None:

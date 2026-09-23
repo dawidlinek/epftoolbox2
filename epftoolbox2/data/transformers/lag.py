@@ -54,11 +54,7 @@ class LagTransformer(Transformer):
             unit, value = self._freq_unit, abs(lag)
         else:
             total_seconds = int((self._freq * abs(lag)).total_seconds())
-            value, unit = next(
-                (total_seconds // d, u)
-                for d, u in _UNIT_THRESHOLDS
-                if total_seconds % d == 0
-            )
+            value, unit = next((total_seconds // d, u) for d, u in _UNIT_THRESHOLDS if total_seconds % d == 0)
         sign = "-" if lag >= 0 else "+"
         return f"{column}_{unit}{sign}{value}"
 

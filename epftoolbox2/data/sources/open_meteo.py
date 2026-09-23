@@ -194,7 +194,9 @@ class OpenMeteoSource(DataSource):
             result_df = pd.DataFrame()
 
         elapsed = time.time() - start_time
-        self.logger.info(f"Open-Meteo [{self.latitude}, {self.longitude}]: Download completed successfully in {elapsed:.2f} sec")
+        self.logger.info(
+            f"Open-Meteo [{self.latitude}, {self.longitude}]: Download completed successfully in {elapsed:.2f} sec"
+        )
 
         return result_df
 

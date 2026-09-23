@@ -14,9 +14,7 @@ class rMAEEvaluator(Evaluator):
     def compute(self, df: pd.DataFrame, **kwargs) -> float:
         model_dfs: Dict[str, pd.DataFrame] = kwargs.get("model_dfs", {})
         if not model_dfs:
-            raise ValueError(
-                "rMAEEvaluator requires 'model_dfs' kwarg containing all model DataFrames."
-            )
+            raise ValueError("rMAEEvaluator requires 'model_dfs' kwarg containing all model DataFrames.")
         if self.base_model not in model_dfs:
             return math.nan
         base_df = model_dfs[self.base_model]

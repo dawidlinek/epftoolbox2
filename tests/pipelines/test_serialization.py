@@ -15,8 +15,8 @@ from epftoolbox2.exporters import TerminalExporter, ExcelExporter
 # DataPipeline serialization
 # ---------------------------------------------------------------------------
 
-class TestDataPipelineSerialization:
 
+class TestDataPipelineSerialization:
     def test_save_creates_yaml_file(self, tmp_path):
         pipeline = DataPipeline().add_source(CalendarSource(country="PL"))
         path = tmp_path / "dp.yaml"
@@ -67,9 +67,7 @@ class TestDataPipelineSerialization:
         assert t.method == "ffill"
 
     def test_round_trip_lag_transformer_list(self, tmp_path):
-        original = DataPipeline().add_transformer(
-            LagTransformer(columns=["price", "load"], lags=[1, 2, 7], freq="day")
-        )
+        original = DataPipeline().add_transformer(LagTransformer(columns=["price", "load"], lags=[1, 2, 7], freq="day"))
         path = tmp_path / "dp.yaml"
         original.save(path)
         loaded = DataPipeline.load(path)
@@ -82,9 +80,7 @@ class TestDataPipelineSerialization:
 
     def test_round_trip_lag_transformer_range(self, tmp_path):
         # range(-7, 1) must serialize correctly as a list
-        original = DataPipeline().add_transformer(
-            LagTransformer(columns=["price"], lags=range(-7, 1), freq="day")
-        )
+        original = DataPipeline().add_transformer(LagTransformer(columns=["price"], lags=range(-7, 1), freq="day"))
         path = tmp_path / "dp.yaml"
         original.save(path)
         loaded = DataPipeline.load(path)
@@ -142,8 +138,8 @@ class TestDataPipelineSerialization:
 # ModelPipeline serialization
 # ---------------------------------------------------------------------------
 
-class TestModelPipelineSerialization:
 
+class TestModelPipelineSerialization:
     def test_save_creates_yaml_file(self, tmp_path):
         pipeline = ModelPipeline().add_model(OLSModel(predictors=["price"], name="OLS"))
         path = tmp_path / "mp.yaml"
@@ -169,9 +165,7 @@ class TestModelPipelineSerialization:
 
     def test_round_trip_ols_model(self, tmp_path):
         predictors = ["load_actual", "price_d-1", "is_monday_d+{horizon}"]
-        original = ModelPipeline().add_model(
-            OLSModel(predictors=predictors, training_window=180, name="MyOLS")
-        )
+        original = ModelPipeline().add_model(OLSModel(predictors=predictors, training_window=180, name="MyOLS"))
         path = tmp_path / "mp.yaml"
         original.save(path)
         loaded = ModelPipeline.load(path)
@@ -224,9 +218,7 @@ class TestModelPipelineSerialization:
         assert loaded.exporters[0].path == Path("results/out.xlsx")
 
     def test_callable_predictor_raises_on_save(self, tmp_path):
-        pipeline = ModelPipeline().add_model(
-            OLSModel(predictors=[lambda h: f"col_d+{h}"], name="Bad")
-        )
+        pipeline = ModelPipeline().add_model(OLSModel(predictors=[lambda h: f"col_d+{h}"], name="Bad"))
         with pytest.raises(ValueError, match="callable"):
             pipeline.save(tmp_path / "mp.yaml")
 
@@ -256,8 +248,8 @@ class TestModelPipelineSerialization:
 # Workflow serialization
 # ---------------------------------------------------------------------------
 
-class TestWorkflowSerialization:
 
+class TestWorkflowSerialization:
     @pytest.fixture
     def pipeline_yamls(self, tmp_path):
         dp_path = tmp_path / "dp.yaml"

@@ -16,9 +16,7 @@ class ResultStore:
         self._batch_size = batch_size
 
         self._write_queue: queue.Queue = queue.Queue()
-        self._writer = threading.Thread(
-            target=self._writer_loop, daemon=True, name="store-writer"
-        )
+        self._writer = threading.Thread(target=self._writer_loop, daemon=True, name="store-writer")
         self._writer.start()
 
         self._load_existing()
@@ -51,7 +49,6 @@ class ResultStore:
                 if line:
                     r = json.loads(line)
                     yield {k: r[k] for k in cols if k in r} if cols else r
-
 
     def _load_existing(self) -> None:
         for r in self.iter_lines(cols=["hour", "horizon", "day_in_test"]):

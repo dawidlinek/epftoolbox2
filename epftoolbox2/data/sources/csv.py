@@ -71,7 +71,9 @@ class CsvSource(DataSource):
         )
 
         if self.datetime_column not in df.columns:
-            raise ValueError(f"Datetime column '{self.datetime_column}' not found in CSV. Available columns: {list(df.columns)}")
+            raise ValueError(
+                f"Datetime column '{self.datetime_column}' not found in CSV. Available columns: {list(df.columns)}"
+            )
 
         if self.datetime_format:
             df[self.datetime_column] = pd.to_datetime(

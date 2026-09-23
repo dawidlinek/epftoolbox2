@@ -28,7 +28,6 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_ENTSOE_API_KEY")
 
 if __name__ == "__main__":
-
     # Fetch 2 years of history + 7-day weather/calendar forecast.
     # Adjust "now_d-730" to match your largest model's training_window.
     df = (
@@ -39,12 +38,24 @@ if __name__ == "__main__":
         .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
         .add_transformer(ResampleTransformer(freq="1h"))
         .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
-        .add_transformer(LagTransformer(
-            lags=range(-7, 1), freq="day",
-            columns=["is_monday", "is_tuesday", "is_wednesday", "is_thursday",
-                     "is_friday", "is_saturday", "is_sunday", "is_holiday",
-                     "daylight_hours", "load_forecast"],
-        ))
+        .add_transformer(
+            LagTransformer(
+                lags=range(-7, 1),
+                freq="day",
+                columns=[
+                    "is_monday",
+                    "is_tuesday",
+                    "is_wednesday",
+                    "is_thursday",
+                    "is_friday",
+                    "is_saturday",
+                    "is_sunday",
+                    "is_holiday",
+                    "daylight_hours",
+                    "load_forecast",
+                ],
+            )
+        )
         .run(start="now_d-735", end="today_d+8", cache=True)
     )
 

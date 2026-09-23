@@ -149,7 +149,13 @@ class TestDataPipelineBuilder:
         transformer1 = MockTransformer(suffix="_first")
         transformer2 = TimezoneTransformer(target_tz="Europe/Warsaw")
 
-        pipeline = DataPipeline().add_source(source1).add_source(source2).add_transformer(transformer1).add_transformer(transformer2)
+        pipeline = (
+            DataPipeline()
+            .add_source(source1)
+            .add_source(source2)
+            .add_transformer(transformer1)
+            .add_transformer(transformer2)
+        )
 
         assert len(pipeline.sources) == 2
         assert len(pipeline.transformers) == 2
@@ -352,7 +358,9 @@ class TestDataPipelineCache:
             assert info["exists"] is False
 
             # Run with cache disabled first (default)
-            result = pipeline.run(start=pd.Timestamp("2024-01-01", tz="UTC"), end=pd.Timestamp("2024-01-02", tz="UTC"), cache=False)
+            result = pipeline.run(
+                start=pd.Timestamp("2024-01-01", tz="UTC"), end=pd.Timestamp("2024-01-02", tz="UTC"), cache=False
+            )
 
             assert len(result) == 5
             assert source.fetch_called
@@ -406,7 +414,12 @@ class TestDataPipelineSerialization:
         from epftoolbox2.data.sources import CalendarSource
         from epftoolbox2.data.validators import ContinuityValidator
 
-        pipeline = DataPipeline().add_source(CalendarSource(country="PL", holidays="binary", weekday="number")).add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw")).add_validator(ContinuityValidator(freq="1h"))
+        pipeline = (
+            DataPipeline()
+            .add_source(CalendarSource(country="PL", holidays="binary", weekday="number"))
+            .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+            .add_validator(ContinuityValidator(freq="1h"))
+        )
 
         yaml_path = tmp_path / "pipeline.yaml"
         pipeline.save(yaml_path)
@@ -469,7 +482,11 @@ class TestDataPipelineSerialization:
         from epftoolbox2.data.sources import CalendarSource
         from epftoolbox2.data.transformers import ResampleTransformer
 
-        pipeline = DataPipeline().add_source(CalendarSource(country="DE", holidays="onehot", weekday="name", month="number")).add_transformer(ResampleTransformer(freq="1h", method="ffill"))
+        pipeline = (
+            DataPipeline()
+            .add_source(CalendarSource(country="DE", holidays="onehot", weekday="name", month="number"))
+            .add_transformer(ResampleTransformer(freq="1h", method="ffill"))
+        )
 
         yaml_path = tmp_path / "pipeline.yaml"
         pipeline.save(yaml_path)

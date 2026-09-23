@@ -11,6 +11,7 @@ console = Console()
 # Commands
 # ---------------------------------------------------------------------------
 
+
 def cmd_run(args: argparse.Namespace) -> None:
     from .pipelines.workflow import Workflow
 
@@ -95,16 +96,19 @@ def cmd_validate(args: argparse.Namespace) -> None:
     try:
         if "data_pipeline" in top_keys or "model_pipeline" in top_keys:
             from .pipelines.workflow import Workflow
+
             wf = Workflow.load(path)
             wf._build_data_pipeline()
             wf._build_model_pipeline()
             console.print(f"[green]Workflow YAML valid:[/green] {path}")
         elif "sources" in top_keys or "transformers" in top_keys or "validators" in top_keys:
             from .pipelines.data_pipeline import DataPipeline
+
             DataPipeline.load(path)
             console.print(f"[green]DataPipeline YAML valid:[/green] {path}")
         elif "models" in top_keys or "evaluators" in top_keys or "exporters" in top_keys:
             from .pipelines.model_pipeline import ModelPipeline
+
             ModelPipeline.load(path)
             console.print(f"[green]ModelPipeline YAML valid:[/green] {path}")
         else:
@@ -189,6 +193,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="epf",
@@ -211,9 +216,12 @@ def main() -> None:
     data_p.add_argument("--end", required=True, metavar="DATE", help="Fetch end date (e.g. 2024-01-01)")
     data_p.add_argument("--output", required=True, metavar="FILE", help="Output CSV path (e.g. data.csv)")
     data_p.add_argument(
-        "--cache", nargs="?", const=True, metavar="PATH",
+        "--cache",
+        nargs="?",
+        const=True,
+        metavar="PATH",
         help="Enable caching. Without a value uses automatic per-source cache (.cache/sources/). "
-             "With a value (--cache my.csv) caches all merged sources to that CSV file.",
+        "With a value (--cache my.csv) caches all merged sources to that CSV file.",
     )
 
     # -- model --
@@ -239,6 +247,7 @@ def main() -> None:
 
     if args.cmd is None:
         from .tui import run_interactive
+
         run_interactive()
         return
 
