@@ -237,6 +237,44 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {"name": "freq", "description": "Frequency (e.g. 1h, day)", "required": False, "default": "1h", "kind": "text"},
     ],
+    "ImputeTransformer": [
+        {
+            "name": "columns",
+            "description": "Columns to impute",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "method",
+            "description": "Fill method (leak-safe only)",
+            "required": False,
+            "default": "ffill",
+            "kind": "select",
+            "choices": ["ffill", "previous_day", "previous_week"],
+        },
+        {
+            "name": "limit",
+            "description": "Max gap to fill: integer rows, a duration (e.g. 6h, 2D), or blank for none",
+            "required": False,
+            "default": "1D",
+            "kind": "text",
+        },
+        {
+            "name": "flag",
+            "description": "Add a {column}_imputed flag column?",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
+        },
+        {
+            "name": "suffix",
+            "description": "Write filled values to {column}{suffix} instead of overwriting (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
+    ],
     "ContinuityValidator": [
         {
             "name": "freq",
@@ -503,7 +541,7 @@ def _instantiate(class_name: str, params: dict) -> Any:
 # ---------------------------------------------------------------------------
 
 _SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
-_TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer"]
+_TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer", "ImputeTransformer"]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator"]
