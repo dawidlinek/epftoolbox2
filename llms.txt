@@ -116,6 +116,9 @@ source = OpenMeteoSource(
     issue_time="10:00",          # Optional. Local "HH:MM" on D when the forecast is issued (default: "10:00")
     publication_delay_h=10,      # Optional. Hours from run initialisation to availability (default: 10)
     vintage="issue_time",        # Optional. Leak-free default, or "valid_time" = look-ahead mapping of <= 2.2 (default: "issue_time")
+    derived=None,                # Optional. Names of extra computed columns: "hdd", "cdd", "wind_speed_100m_cubed" (default: None = off)
+    hdd_base_c=18.0,             # Optional. Base temperature (°C) for "hdd" (default: 18.0)
+    cdd_base_c=21.0,             # Optional. Base temperature (°C) for "cdd" (default: 21.0)
     strict=False,                # Optional. Raise instead of warning when a column has missing values (default: False)
 )
 ```
@@ -139,7 +142,50 @@ source = OpenMeteoSource(
 **Output column naming:** `{prefix}_{variable}_d+{i}`
 - Example: `warsaw_temperature_2m_d+1`, `warsaw_temperature_2m_d+2`, ..., `warsaw_temperature_2m_d+5`
 
-**Caching:** Cache key includes location, horizon, model, columns, prefix, temporal_resolution, vintage, timezone, issue_time, publication_delay_h and schema_version (bumped for the vintage change, so old caches are not reused).
+**Derived columns (off by default):** set `derived` to add `{name}_d+{i}` computed per lead from the same vintage: `"hdd"` = `max(hdd_base_c - temperature_2m, 0)` (needs `temperature_2m` in `columns`), `"cdd"` = `max(temperature_2m - cdd_base_c, 0)` (needs `temperature_2m`), `"wind_speed_100m_cubed"` = `(wind_speed_100m / 3.6) ** 3` (needs `wind_speed_100m`).
+
+**Caching:** Cache key includes location, horizon, model, columns, prefix, temporal_resolution, vintage, timezone, issue_time, publication_delay_h, derived (and hdd_base_c/cdd_base_c only when derived uses them) and schema_version (bumped for the vintage change, so old caches are not reused).
+
+---
+
+## OpenMeteoSingleRunsSource
+
+Downloads archived weather forecasts from the Open-Meteo Single Runs API, which stores every model run separately (unlike OpenMeteoSource's Previous Runs API buckets). No API key required. Each `{variable}_d+i` value on a row of local day D comes from one exact model run: the latest run on the `run_interval_h` cycle whose initialisation, plus `publication_delay_h`, is at or before `issue_time` on D. Runs published after the issue instant are never used.
+
+```python
+from epftoolbox2.data.sources import OpenMeteoSingleRunsSource
+
+source = OpenMeteoSingleRunsSource(
+    latitude=52.2297,            # Required. Location latitude (-90 to 90)
+    longitude=21.0122,           # Required. Location longitude (-180 to 180)
+    horizon=7,                   # Optional. Days ahead, 1-14; leads beyond the run's length come back empty (default: 7)
+    model="ecmwf_ifs",           # Optional. Weather model, longest single-run archive (default: "ecmwf_ifs")
+    columns=None,                # Optional. Weather variables (default: None = DEFAULT_COLUMNS)
+    prefix="warsaw",             # Optional. Prefix for column names (default: "")
+    proxy_url=None,              # Optional. HTTP(S) proxy URL, saved to YAML as is (default: None)
+    timezone="Europe/Warsaw",    # Optional. Market time zone of local days and the issue time (default: "Europe/Warsaw")
+    issue_time="10:00",          # Optional. Local "HH:MM" on D when the forecast is issued (default: "10:00")
+    publication_delay_h=10,      # Optional. Hours from run initialisation to availability (default: 10)
+    run_interval_h=6,            # Optional. Hours between model runs, must divide 24 (default: 6)
+    derived=None,                # Optional. Names of extra computed columns: "hdd", "cdd", "wind_speed_100m_cubed" (default: None = off)
+    hdd_base_c=18.0,             # Optional. Base temperature (°C) for "hdd" (default: 18.0)
+    cdd_base_c=21.0,             # Optional. Base temperature (°C) for "cdd" (default: 21.0)
+    strict=False,                # Optional. Raise instead of warning when a column has missing values (default: False)
+)
+```
+
+**Run selection:** the ideal run is the latest one on the `run_interval_h` cycle (00, 06, 12, 18 UTC by default) initialised at least `publication_delay_h` hours before the issue instant. If that run is missing from the archive or too short for a lead, up to 4 older runs on the same cycle fill the remaining leads; a run that is available settles every valid time it covers even where one variable is null there (no silent backfill from an older forecast for just that gap).
+
+**Archive start** (probed against the API, September 2026): `ecmwf_ifs` (default) from 2024-03-14 00Z (only 00/12 UTC runs at first); `icon_seamless`, `gfs_seamless` and most other seamless models from 2026-04-02 00Z; `jma_gsm`/`jma_seamless` from 2026-05-13 00Z. Check any other model the same way before relying on it.
+
+**Returned rows:** exactly `[start, end)`, UTC hourly index. Rows whose issue time is still in the future use runs published by now (provisional); trailing rows without any value are not returned. Missing values per column are logged with their share and first valid timestamp; `strict=True` raises.
+
+**Output column naming:** `{prefix}_{variable}_d+{i}`
+- Example: `warsaw_temperature_2m_d+1`, `warsaw_temperature_2m_d+2`, ..., `warsaw_temperature_2m_d+7`
+
+**Derived columns (off by default):** set `derived` to add `{name}_d+{i}` computed per lead from the same run: `"hdd"` = `max(hdd_base_c - temperature_2m, 0)` (needs `temperature_2m` in `columns`), `"cdd"` = `max(temperature_2m - cdd_base_c, 0)` (needs `temperature_2m`), `"wind_speed_100m_cubed"` = `(wind_speed_100m / 3.6) ** 3` (needs `wind_speed_100m`).
+
+**Caching:** Cache key includes location, horizon, model, columns, prefix, run_interval_h, timezone, issue_time, publication_delay_h, derived (and hdd_base_c/cdd_base_c only when derived uses them) and schema_version.
 
 ---
 

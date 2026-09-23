@@ -126,7 +126,18 @@ class OpenMeteoSource(DataSource):
                  timezone: str = None,  # required: raises if left out, e.g. "Europe/Warsaw"
                  issue_time: str = "10:00",
                  publication_delay_h: float = 10, vintage: str = "issue_time",
-                 strict: bool = False): ...
+                 derived: Optional[List[str]] = None, hdd_base_c: float = 18.0,
+                 cdd_base_c: float = 21.0, strict: bool = False): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
+
+class OpenMeteoSingleRunsSource(DataSource):
+    def __init__(self, latitude: float, longitude: float, horizon: int = 7,
+                 model: str = "ecmwf_ifs", columns: Optional[List[str]] = None,
+                 prefix: str = "", proxy_url: Optional[str] = None,
+                 timezone: str = "Europe/Warsaw", issue_time: str = "10:00",
+                 publication_delay_h: float = 10, run_interval_h: int = 6,
+                 derived: Optional[List[str]] = None, hdd_base_c: float = 18.0,
+                 cdd_base_c: float = 21.0, strict: bool = False): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
 
 class CalendarSource(DataSource):

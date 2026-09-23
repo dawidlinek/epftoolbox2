@@ -56,6 +56,9 @@ df = source.fetch(
 | `issue_time` | str | No | `"10:00"` | Local time (`"HH:MM"`) on D at which the forecast is issued |
 | `publication_delay_h` | float | No | `10` | Hours between a run's initialisation and its availability (0–48) |
 | `vintage` | str | No | `"issue_time"` | `"issue_time"` (leak-free) or `"valid_time"` (old mapping, look-ahead) |
+| `derived` | List[str] \| None | No | `None` (= off) | Extra columns computed from the forecast — see [Derived columns](#derived-columns) |
+| `hdd_base_c` | float | No | `18.0` | Base temperature (°C) for `hdd` |
+| `cdd_base_c` | float | No | `21.0` | Base temperature (°C) for `cdd` |
 | `strict` | bool | No | `False` | Raise instead of warning when a returned column has missing values |
 
 ## How the forecast vintage is chosen
@@ -204,6 +207,30 @@ With `jma_seamless`, `showers` is always 0; pass `columns=[...]` to skip it.
 
 ---
 
+## Derived columns
+
+Off by default. Set `derived` to a list of names to add `{name}_d+{i}` alongside the forecast columns, computed per lead from the same vintage (so they carry no extra look-ahead):
+
+| Name | Needs in `columns` | Formula |
+|------|---------------------|---------|
+| `hdd` | `temperature_2m` | `max(hdd_base_c - temperature_2m, 0)`, heating degree-hours |
+| `cdd` | `temperature_2m` | `max(temperature_2m - cdd_base_c, 0)`, cooling degree-hours |
+| `wind_speed_100m_cubed` | `wind_speed_100m` | `(wind_speed_100m / 3.6) ** 3`, a proxy for wind power below rated speed (input is km/h, cubed in m/s) |
+
+```python
+source = OpenMeteoSource(
+    latitude=52.2297,
+    longitude=21.0122,
+    columns=["temperature_2m", "wind_speed_100m"],
+    derived=["hdd", "cdd", "wind_speed_100m_cubed"],
+    hdd_base_c=15.5,
+)
+```
+
+`derived` and, only when used, `hdd_base_c` / `cdd_base_c` are part of the cache key.
+
+---
+
 ## Example: Multiple Locations
 
 ```python
@@ -242,4 +269,4 @@ print(df.columns[:5].tolist())
 
 ## Caching
 
-The cache key includes the location, `horizon`, `model`, `columns`, `prefix`, `temporal_resolution`, `vintage`, `timezone`, `issue_time`, `publication_delay_h` and a `schema_version`, so caches written by earlier versions are not reused. `strict` and `proxy_url` don't change the data and are not part of the key.
+The cache key includes the location, `horizon`, `model`, `columns`, `prefix`, `temporal_resolution`, `vintage`, `timezone`, `issue_time`, `publication_delay_h`, `derived` (and `hdd_base_c` / `cdd_base_c` only when `derived` uses them) and a `schema_version`, so caches written by earlier versions are not reused. `strict` and `proxy_url` don't change the data and are not part of the key.

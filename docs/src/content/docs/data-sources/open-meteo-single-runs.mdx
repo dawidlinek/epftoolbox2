@@ -1,0 +1,124 @@
+---
+title: OpenMeteoSingleRunsSource
+description: Weather forecasts from the exact Open-Meteo model run that was available at the forecast issue time
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# OpenMeteoSingleRunsSource
+
+Downloads archived weather forecasts from the [Open-Meteo Single Runs API](https://open-meteo.com/en/docs/single-runs-api), which stores every model run separately (unlike [`OpenMeteoSource`](/data-sources/openmeteo/)'s Previous Runs API, which only stores forecasts at fixed lead-time offsets). **No API key required.**
+
+For every row of local day D, the column `{variable}_d+i` is the forecast for the **same local wall-clock hour on D+i**, taken from **one exact model run**: the latest run on the `run_interval_h` cycle whose initialisation, plus `publication_delay_h`, is at or before the forecast issue time on D. That is a more direct reconstruction of "the forecast a day-ahead bidder actually saw" than the bucket-based `OpenMeteoSource`, at the cost of a shorter archive for most models.
+
+## Basic Usage
+
+```python
+import pandas as pd
+from epftoolbox2.data.sources import OpenMeteoSingleRunsSource
+
+source = OpenMeteoSingleRunsSource(
+    latitude=52.2297,    # Warsaw
+    longitude=21.0122,
+    horizon=7,
+    prefix="warsaw",
+    timezone="Europe/Warsaw",  # market time zone: local days and issue time
+    issue_time="10:00",        # forecasts are issued at 10:00 local time on D
+)
+
+df = source.fetch(
+    start=pd.Timestamp("2025-01-01", tz="UTC"),
+    end=pd.Timestamp("2025-06-01", tz="UTC"),
+)
+```
+
+`fetch` returns exactly the rows in `[start, end)` with a **UTC** index.
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `latitude` | float | Yes | - | Location latitude (-90 to 90) |
+| `longitude` | float | Yes | - | Location longitude (-180 to 180) |
+| `horizon` | int | No | `7` | Days ahead: columns `d+1` .. `d+horizon` (1–14; leads beyond the run's own length come back empty) |
+| `model` | str | No | `"ecmwf_ifs"` | Weather model (see [Choosing a model](#choosing-a-model)) |
+| `columns` | List[str] \| None | No | `None` (= `DEFAULT_COLUMNS`) | Weather variables |
+| `prefix` | str | No | `""` | Prefix for column names |
+| `proxy_url` | str \| None | No | `None` | HTTP(S) proxy, e.g. `"http://proxy.example.com:8080"`. Saved to YAML as is, so don't put credentials in it. |
+| `timezone` | str | No | `"Europe/Warsaw"` | Market time zone: defines the local day D of each row, the wall-clock hour that `d+i` refers to, and the zone of `issue_time`. Use the same zone as `TimezoneTransformer` / `CalendarSource`. |
+| `issue_time` | str | No | `"10:00"` | Local time (`"HH:MM"`) on D at which the forecast is issued |
+| `publication_delay_h` | float | No | `10` | Hours between a run's initialisation and its availability (0–48) |
+| `run_interval_h` | int | No | `6` | Hours between model runs, starting at 00 UTC. Must divide 24 (1, 2, 3, 4, 6, 8, 12, 24). Use `3` for ICON-EU/ICON-D2. |
+| `derived` | List[str] \| None | No | `None` (= off) | Extra columns computed from the forecast — see [Derived columns](#derived-columns) |
+| `hdd_base_c` | float | No | `18.0` | Base temperature (°C) for `hdd` |
+| `cdd_base_c` | float | No | `21.0` | Base temperature (°C) for `cdd` |
+| `strict` | bool | No | `False` | Raise instead of warning when a returned column has missing values |
+
+## How the run is chosen
+
+Unlike the Previous Runs API's lead-time buckets, the Single Runs API lets the source ask for one exact run by its initialisation timestamp:
+
+1. For a row on local day D, the issue instant is `issue_time` on D in `timezone`.
+2. The **ideal** run is the latest one on the `run_interval_h` cycle (00, 06, 12, 18 UTC by default) whose initialisation, plus `publication_delay_h`, is at or before the issue instant.
+3. If that run is missing from the archive, or does not reach far enough ahead for some lead (some cycles have a shorter forecast length than others, e.g. ECMWF IFS 06/18Z historically ran shorter than 00/12Z), the source falls back to up to `MAX_FALLBACK_RUNS` (4) older runs on the same cycle to fill the remaining leads. A run that is available is trusted for every valid time it covers, **even where one variable is null there**: falling back for just that cell would hide a real gap in the archive behind a stale forecast.
+4. Runs published after the issue instant are never used, so every returned value satisfies `run_init + publication_delay_h <= issue_time`.
+
+`{variable}_d+i` for every hour of local day D therefore comes from the **same run**, unlike `OpenMeteoSource` where different hours of the same D+i can come from different lead-time buckets.
+
+### Archive start
+
+Probed against the API (September 2026); a `model` not covered here should be checked the same way before relying on it:
+
+| Model | Archive starts | Notes |
+|---|---|---|
+| `ecmwf_ifs` *(default)* | 2024-03-14 00Z | Longest archive. Only 00/12 UTC runs at first; other cycles (06/18Z) become available later in 2024. |
+| `icon_seamless`, `gfs_seamless` and most other seamless models | 2026-04-02 00Z | |
+| `jma_gsm`, `jma_seamless` | 2026-05-13 00Z | |
+
+### Local calendar days and DST
+
+`d+i` always refers to the same local wall-clock hour i calendar days later, exactly as in `OpenMeteoSource`: a target hour that doesn't exist (spring switch) takes the next hour; an ambiguous one (autumn switch) takes its first occurrence.
+
+### Live use
+
+When a row's issue time is still in the future, the source uses the runs published by **now** instead, logs that those rows are provisional, and does not return trailing rows it has no values for.
+
+## Derived columns
+
+Off by default. Set `derived` to a list of names to add `{name}_d+{i}` alongside the forecast columns, computed per lead from the same run:
+
+| Name | Needs in `columns` | Formula |
+|------|---------------------|---------|
+| `hdd` | `temperature_2m` | `max(hdd_base_c - temperature_2m, 0)`, heating degree-hours |
+| `cdd` | `temperature_2m` | `max(temperature_2m - cdd_base_c, 0)`, cooling degree-hours |
+| `wind_speed_100m_cubed` | `wind_speed_100m` | `(wind_speed_100m / 3.6) ** 3`, a proxy for wind power below rated speed (input is km/h, cubed in m/s) |
+
+`derived` and, only when used, `hdd_base_c` / `cdd_base_c` are part of the cache key.
+
+## Choosing a model
+
+`ecmwf_ifs` has by far the longest archive and is the default. Prefer it unless you specifically need another model's characteristics; check that model's archive start with a couple of API calls before relying on it for a backtest that reaches further back.
+
+## Rate Limiting
+
+<Aside type="caution">
+  Network errors and "too many concurrent requests" are retried up to 5 times with exponential backoff capped at 60 s; the minutely limit waits 60 s. The hourly and daily limits raise a `RuntimeError` instead of sleeping for hours.
+</Aside>
+
+---
+
+## Output Column Naming
+
+Columns are named: `{prefix}_{variable}_d+{i}`
+
+```python
+# Example output columns:
+# warsaw_temperature_2m_d+1
+# warsaw_temperature_2m_d+2
+# ...
+# warsaw_temperature_2m_d+7
+```
+
+## Caching
+
+The cache key includes the location, `horizon`, `model`, `columns`, `prefix`, `run_interval_h`, `timezone`, `issue_time`, `publication_delay_h`, `derived` (and `hdd_base_c` / `cdd_base_c` only when `derived` uses them) and a `schema_version`. `strict` and `proxy_url` don't change the data and are not part of the key.

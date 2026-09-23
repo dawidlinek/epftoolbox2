@@ -110,6 +110,72 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "OpenMeteoSingleRunsSource": [
+        {"name": "latitude", "description": "Latitude (-90 to 90)", "required": True, "default": None, "kind": "float"},
+        {
+            "name": "longitude",
+            "description": "Longitude (-180 to 180)",
+            "required": True,
+            "default": None,
+            "kind": "float",
+        },
+        {
+            "name": "horizon",
+            "description": "Forecast horizon in days (1-14; leads beyond the run's length come back empty)",
+            "required": False,
+            "default": "7",
+            "kind": "int",
+        },
+        {
+            "name": "model",
+            "description": "Weather model (e.g. ecmwf_ifs, icon_seamless, gfs_seamless)",
+            "required": False,
+            "default": "ecmwf_ifs",
+            "kind": "text",
+        },
+        {
+            "name": "timezone",
+            "description": "Market time zone (defines local days and the issue time)",
+            "required": False,
+            "default": "Europe/Warsaw",
+            "kind": "text",
+        },
+        {
+            "name": "issue_time",
+            "description": "Local time the forecast is issued, HH:MM",
+            "required": False,
+            "default": "10:00",
+            "kind": "text",
+        },
+        {
+            "name": "publication_delay_h",
+            "description": "Hours from model run start to its availability",
+            "required": False,
+            "default": "10",
+            "kind": "float",
+        },
+        {
+            "name": "run_interval_h",
+            "description": "Hours between model runs, starting at 00 UTC",
+            "required": False,
+            "default": "6",
+            "kind": "int",
+        },
+        {
+            "name": "strict",
+            "description": "Fail when a weather column has missing values?",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
+    ],
     "CsvSource": [
         {"name": "file_path", "description": "Path to CSV file", "required": True, "default": None, "kind": "text"},
         {
@@ -515,7 +581,7 @@ def _instantiate(class_name: str, params: dict) -> Any:
 # Pipeline builders
 # ---------------------------------------------------------------------------
 
-_SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
+_SOURCES = ["EntsoeSource", "OpenMeteoSource", "OpenMeteoSingleRunsSource", "CsvSource", "CalendarSource"]
 _TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer"]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]
