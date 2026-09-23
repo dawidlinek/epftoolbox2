@@ -796,7 +796,9 @@ model_pipeline:
   horizon: 7
   freq: 1h                          # optional; defaults to 1h. Set to 15min for 15-min forecasting
   forecast_only: false              # optional; default false
-  save_dir: results                 # optional; one resumable JSONL per model, relative to this file
+  save_dir: results                 # optional; one resumable JSONL (+ manifest) per model, relative to this file
+  allow_manifest_mismatch: false    # optional; overwrite a disagreeing manifest and resume anyway
+  require_manifest: false           # optional; refuse save_dir results that have no manifest, instead of warning
 ```
 
 **SLURM array (one model per task):** set `environment.model_index` and `model_pipeline.save_dir`. Each task
@@ -886,12 +888,36 @@ df = pipeline.run(start, end, cache=False)
 # Enable incremental training (resumable)
 report = pipeline.run(..., save_dir="results")
 
-# Results stored as JSONL files: results/{model_name}.jsonl
-# On re-run, only missing (hour, horizon, day) combinations are computed
+# Results stored as JSONL files: results/{model_name}.jsonl, plus results/{model_name}.manifest.json
+# On re-run, only missing (hour, horizon, run_date) combinations are computed
 
 # Report from saved results (e.g. after one run per model)
 report = pipeline.report("results", test_start="2024-02-01", test_end="2024-03-01", horizon=7, freq="1h")
 ```
+
+**The manifest** (`epftoolbox2.results.manifest`) records what produced a results file — predictors, target,
+horizon, freq, training_window, model class and hyperparameters, a content hash of the data columns used, and
+the information_set settings — and compares it before resuming. A disagreement raises `ManifestMismatchError`:
+
+```python
+report = pipeline.run(..., save_dir="results")
+# ManifestMismatchError: OLS: the results in results were produced with a different configuration than this
+# run (ols.manifest.json):
+#   - predictors: [...] (existing results) vs [...] (this run)
+# ... pass allow_manifest_mismatch=True (`epf model --allow-manifest-mismatch`) to overwrite and resume anyway.
+
+report = pipeline.run(..., save_dir="results", allow_manifest_mismatch=True)   # overwrite and resume anyway
+report = pipeline.run(..., save_dir="results", require_manifest=True)          # refuse a directory with results
+                                                                                 # but no manifest, instead of
+                                                                                 # warning and continuing (the
+                                                                                 # default, for pre-existing
+                                                                                 # results directories)
+```
+
+Package version and git SHA are recorded for provenance but not compared, so a version bump or a new commit
+does not by itself invalidate a results directory. Extending `test_start`/`test_end` is not a mismatch either:
+the resume key is `(hour, horizon, run_date)` — the calendar date, not the `day_in_test` offset from
+`test_start` — so growing the test period is the normal way to extend a resumable run.
 
 ---
 
@@ -1553,7 +1579,9 @@ epf model model_pipeline.yaml \
 Required flags: `--data FILE`, `--test-start DATE`, `--test-end DATE`
 Optional flags: `--target COL` (default: price), `--horizon N` days (default: 7), `--freq {1h,15min}` (default: 1h),
 `--tz ZONE` (local zone of the data; needed for CSVs with UTC offsets but no zone in the header), `--save-dir DIR`,
-`--forecast-only`
+`--forecast-only`, `--issue-time HH:MM` and `--issue-timezone ZONE` (information set; overrides the YAML),
+`--allow-manifest-mismatch` (resume even if `--save-dir`'s manifest disagrees with this run, overwriting it),
+`--require-manifest` (refuse to resume from a `--save-dir` with results but no manifest, instead of warning)
 
 ### `epf validate <file.yaml>`
 Auto-detect YAML type (Workflow / DataPipeline / ModelPipeline), load, and instantiate all components. Exits 1 on error.
