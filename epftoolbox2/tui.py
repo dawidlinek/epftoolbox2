@@ -283,8 +283,35 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "int",
         },
         {"name": "cv", "description": "Cross-validation folds", "required": False, "default": "5", "kind": "int"},
+        {
+            "name": "max_iter",
+            "description": "Maximum iterations per fit",
+            "required": False,
+            "default": "10000",
+            "kind": "int",
+        },
     ],
     "MAEEvaluator": [],
+    "RMSEEvaluator": [],
+    "rMAEEvaluator": [
+        {
+            "name": "base_model",
+            "description": "Name of the benchmark model (rMAE = MAE / benchmark MAE)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+    ],
+    "CsvExporter": [
+        {"name": "path", "description": "Output CSV file path", "required": True, "default": None, "kind": "text"},
+        {
+            "name": "extra_columns",
+            "description": "Source columns to add to each row (comma-separated, optional)",
+            "required": False,
+            "default": None,
+            "kind": "comma_list",
+        },
+    ],
     "ExcelExporter": [
         {"name": "path", "description": "Output Excel file path", "required": True, "default": None, "kind": "text"},
         {
@@ -507,8 +534,8 @@ _SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
 _TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer"]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]
-_EVALUATORS = ["MAEEvaluator"]
-_EXPORTERS = ["TerminalExporter", "ExcelExporter"]
+_EVALUATORS = ["MAEEvaluator", "RMSEEvaluator", "rMAEEvaluator"]
+_EXPORTERS = ["TerminalExporter", "ExcelExporter", "CsvExporter"]
 
 
 def _build_component_list(choices: list[str], label: str, available_columns: Optional[list[str]] = None) -> list[Any]:
