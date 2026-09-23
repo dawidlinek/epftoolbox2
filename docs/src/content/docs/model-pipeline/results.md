@@ -84,3 +84,5 @@ print(predictions.head())
 ## Reports from saved results
 
 `ModelPipeline.report(save_dir, test_start=..., test_end=..., horizon=..., freq=...)` builds a report from the per-model JSONL files a previous run wrote to `save_dir` and runs the evaluators and exporters. `Workflow.report()` / `epf report` use it to merge the results of a SLURM array (see [Workflow](/epftoolbox2/workflow/overview/#run-only-one-model-slurm-arrays)).
+
+If any model's file has fewer lines than the planned count for `test_start`..`test_end` × `horizon` × `freq` (an array task that failed or never ran), `report()` warns, naming the models and their produced/planned/missing counts, and notes that metrics are then computed on different forecast sets for those models.

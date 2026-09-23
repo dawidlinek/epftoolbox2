@@ -2,6 +2,7 @@ from datetime import date
 from typing import List, Optional, Union, Dict, Any
 from pathlib import Path
 import importlib
+import warnings
 import pandas as pd
 import yaml
 
@@ -146,6 +147,18 @@ class ModelPipeline:
             raise FileNotFoundError(f"No results for model(s): {', '.join(missing)}. Run them first.")
         for name in missing:
             logger.warning(f"Report: no results for {name}; it is left out")
+
+        shortfall = {name: ref for name, ref in refs.items() if ref.produced is not None and ref.produced < ref.count}
+        if shortfall:
+            details = "; ".join(
+                f"{name} ({ref.produced} of {ref.count}, {ref.count - ref.produced} missing)"
+                for name, ref in shortfall.items()
+            )
+            warnings.warn(
+                f"Report: model(s) with missing forecasts: {details}. Metrics are then computed on different "
+                "forecast sets for these models; compare with care.",
+                stacklevel=2,
+            )
 
         report = EvaluationReport(refs, [] if forecast_only else self.evaluators, source_data=data)
         if not forecast_only:
