@@ -895,15 +895,19 @@ report = pipeline.run(..., save_dir="results")
 report = pipeline.report("results", test_start="2024-02-01", test_end="2024-03-01", horizon=7, freq="1h")
 ```
 
-**The manifest** (`epftoolbox2.results.manifest`) records what produced a results file — predictors, target,
-horizon, freq, training_window, model class and hyperparameters, a content hash of the data columns used, and
-the information_set settings — and compares it before resuming. A disagreement raises `ManifestMismatchError`:
+**The manifest** (`epftoolbox2.results.manifest`) records what produced a results file — a hash of the
+predictors' ordered per-(period, horizon) layout (not just a set of names: order and per-task differences
+both matter), target, horizon, freq, training_window, model class and all hyperparameters (whatever the
+model's `_model_kwargs` returns), a content hash of the data columns used up to `test_end` (rows after
+`test_end` don't count, so appending them between runs isn't a mismatch), and the data's own time zone —
+and compares it before resuming. The information_set settings and provenance (package version, git SHA,
+timestamps) are recorded but not compared. A disagreement raises `ManifestMismatchError`:
 
 ```python
 report = pipeline.run(..., save_dir="results")
 # ManifestMismatchError: OLS: the results in results were produced with a different configuration than this
 # run (ols.manifest.json):
-#   - predictors: [...] (existing results) vs [...] (this run)
+#   - predictor_layout_hash: '...' (existing results) vs '...' (this run)
 # ... pass allow_manifest_mismatch=True (`epf model --allow-manifest-mismatch`) to overwrite and resume anyway.
 
 report = pipeline.run(..., save_dir="results", allow_manifest_mismatch=True)   # overwrite and resume anyway

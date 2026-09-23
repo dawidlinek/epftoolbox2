@@ -61,12 +61,19 @@ directory can't make an unrelated date look already computed.
 
 ## The Manifest
 
-`<model>.manifest.json` records what produced `<model>.jsonl`: predictors, target, horizon, freq, training
-window, the model class and its hyperparameters, a content hash of the data columns used, and the
-[information set](/epftoolbox2/model-pipeline/information-set/) settings — everything that defines what a
-forecast in the file actually *is*. It also records provenance (package version, git SHA if available,
-when it was first and last written), but provenance is not compared: a version bump or a new commit does
-not by itself invalidate a results directory.
+`<model>.manifest.json` records what produced `<model>.jsonl`: the model class and its hyperparameters (all
+of them — whatever the model returns from its `_model_kwargs`), the predictors' per-`(period, horizon)`
+order (not just which names are used — a reordering changes what stored coefficients mean, and a hash of
+the ordered layout tells `["price_d-1", "price_d-2"]` apart from `["price_d-{horizon}"]`), target, horizon,
+freq, training window, a content hash of the data columns used up to `test_end` (rows after `test_end`
+don't affect any forecast in this run, so appending them between runs isn't a mismatch), and the data's own
+time zone (converting the same instants to a different zone keeps the same hash, since it's over each
+value's own representation, not the zone label) — everything that defines what a forecast in the file
+actually *is*. It also records provenance (package version, git SHA if available, when it was first and
+last written) and the
+[information set](/epftoolbox2/model-pipeline/information-set/) settings, but neither is compared: a
+version bump or a new commit does not by itself invalidate a results directory, and the information set
+gates which predictors are allowed before fitting rather than changing what a fitted model predicts.
 
 Before resuming, the pipeline compares a manifest built from the current run to the one on disk. If they
 disagree, it raises rather than silently mixing forecasts made under two configurations:
@@ -74,7 +81,7 @@ disagree, it raises rather than silently mixing forecasts made under two configu
 ```
 ManifestMismatchError: OLS: the results in results were produced with a different configuration than this
 run (ols.manifest.json):
-  - predictors: ['load_actual', 'price_d-1'] (existing results) vs ['load_actual', 'price_d-1', 'price_d-7'] (this run)
+  - predictor_layout_hash: '9c2c1f...' (existing results) vs 'a71e08...' (this run)
 Resuming would silently mix forecasts made under two configurations. Use a different save_dir, remove the
 existing results, or pass allow_manifest_mismatch=True (`epf model --allow-manifest-mismatch`) to overwrite
 the manifest and resume anyway.

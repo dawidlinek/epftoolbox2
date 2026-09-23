@@ -38,7 +38,7 @@ epftoolbox2.verify()
 - **Multiprocessing**: Process-based parallelism with inner thread pools; SLURM array mode (one model per task) with `epf report` to merge the results
 - **Safeguards**: The model's input (resolution, time stamps, column names, predictors) is checked before any fit, and forecasts that could not be made are counted per model (`report.forecast_counts()`)
 - **Information Set**: Optional `issue_time` check that every predictor is known at the moment the forecast is issued, with built-in availability rules for the shipped sources and an empirical leakage probe (`epftoolbox2.information_set`)
-- **Result Manifests**: Resumable results (`save_dir`) are fingerprinted with the configuration that produced them (predictors, data, model params, information set, ...); resuming into results made with a different configuration raises instead of silently mixing them (`epftoolbox2.results.manifest`)
+- **Result Manifests**: Resumable results (`save_dir`) are fingerprinted with the configuration that produced them (the predictors' ordered layout, data up to `test_end` and its time zone, model params, ...); resuming into results made with a different configuration raises instead of silently mixing them (`epftoolbox2.results.manifest`)
 - **Extensibility**: Extensible base classes for data sources, transformers, validators, models, evaluators, and exporters
 
 ## Quick Start
