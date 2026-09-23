@@ -174,7 +174,7 @@ class TestCsvSourceFetch:
 
         df = source.fetch(start, end)
 
-        assert len(df) == 3  # 02:00, 03:00, 04:00
+        assert list(df.index.hour) == [2, 3]  # [start, end): 04:00 belongs to the next range
 
     def test_fetch_with_prefix(self, sample_csv_file):
         """Test fetching with column prefix"""
@@ -288,3 +288,128 @@ class TestCsvSourceEdgeCases:
 
         assert df["price"].dtype in [float, "float64"]
         assert df["load"].dtype in [int, "int64"]
+
+
+def _write(tmp_path, name: str, lines: list) -> str:
+    path = tmp_path / name
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+WHOLE_RANGE = (pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2025-01-01", tz="UTC"))
+
+
+class TestCsvSourceTimezones:
+    def test_mixed_offsets_from_a_local_aware_index(self, tmp_path):
+        # What pandas writes for an Europe/Warsaw index across the fall-back switch.
+        index = pd.date_range("2024-10-26 22:00", "2024-10-27 03:00", freq="h", tz="UTC").tz_convert("Europe/Warsaw")
+        frame = pd.DataFrame({"price": range(len(index))}, index=index.rename("datetime"))
+        path = tmp_path / "local_aware.csv"
+        frame.to_csv(path)
+        assert "+02:00" in path.read_text() and "+01:00" in path.read_text()
+
+        df = CsvSource(str(path)).fetch(*WHOLE_RANGE)
+
+        assert str(df.index.tz) == "UTC"
+        assert df.index.is_unique
+        assert list(df.index) == list(index.tz_convert("UTC"))
+        assert list(df["price"]) == list(range(len(index)))
+
+    def test_naive_local_times_with_timezone(self, tmp_path):
+        # A chronological local-time export: 02:00 appears twice on the fall-back day.
+        path = _write(
+            tmp_path,
+            "naive_local.csv",
+            [
+                "datetime,price",
+                "2024-10-27 01:00,1",
+                "2024-10-27 02:00,2",
+                "2024-10-27 02:00,3",
+                "2024-10-27 03:00,4",
+            ],
+        )
+        df = CsvSource(path, timezone="Europe/Warsaw").fetch(*WHOLE_RANGE)
+
+        expected = pd.to_datetime(
+            ["2024-10-26 23:00", "2024-10-27 00:00", "2024-10-27 01:00", "2024-10-27 02:00"]
+        ).tz_localize("UTC")
+        assert list(df.index) == list(expected)
+        assert list(df["price"]) == [1, 2, 3, 4]
+
+    def test_naive_local_spring_forward(self, tmp_path):
+        path = _write(
+            tmp_path, "spring.csv", ["datetime,price", "2024-03-31 01:00,1", "2024-03-31 03:00,2", "2024-03-31 04:00,3"]
+        )
+        df = CsvSource(path, timezone="Europe/Warsaw").fetch(*WHOLE_RANGE)
+        assert list(df.index.hour) == [0, 1, 2]  # 01:00 CET, 03:00 CEST, 04:00 CEST in UTC
+
+    def test_nonexistent_local_time_raises(self, tmp_path):
+        path = _write(tmp_path, "gap.csv", ["datetime,price", "2024-03-31 01:00,1", "2024-03-31 02:30,2"])
+        with pytest.raises(ValueError, match="does not exist"):
+            CsvSource(path, timezone="Europe/Warsaw").fetch(*WHOLE_RANGE)
+
+    def test_ambiguous_local_time_that_cannot_be_inferred_raises(self, tmp_path):
+        # A fall-back day with a single 02:00 row: which of the two 02:00s is it?
+        path = _write(
+            tmp_path,
+            "one_two.csv",
+            ["datetime,price", "2024-10-27 01:00,1", "2024-10-27 02:00,2", "2024-10-27 03:00,3"],
+        )
+        with pytest.raises(ValueError, match="ambiguous"):
+            CsvSource(path, timezone="Europe/Warsaw").fetch(*WHOLE_RANGE)
+
+    def test_timezone_is_ignored_for_aware_timestamps(self, tmp_path):
+        path = _write(tmp_path, "aware.csv", ["datetime,price", "2024-01-01T00:00:00Z,1", "2024-01-01T01:00:00Z,2"])
+        df = CsvSource(path, timezone="Europe/Warsaw").fetch(*WHOLE_RANGE)
+        assert list(df.index.hour) == [0, 1]
+
+    def test_mixed_naive_and_aware_raises(self, tmp_path):
+        path = _write(tmp_path, "mixed.csv", ["datetime,price", "2024-01-01 00:00,1", "2024-01-01 01:00+01:00,2"])
+        with pytest.raises(ValueError):
+            CsvSource(path).fetch(*WHOLE_RANGE)
+
+    def test_invalid_timezone_raises(self, sample_csv_file):
+        with pytest.raises(ValueError, match="timezone"):
+            CsvSource(str(sample_csv_file), timezone="Mars/Olympus_Mons")
+
+
+class TestCsvSourceIntegrity:
+    def test_duplicated_timestamps_raise(self, tmp_path):
+        # A local-time export read as UTC (the default) has a repeated 02:00 on the fall-back day.
+        path = _write(
+            tmp_path, "dup.csv", ["datetime,price", "2024-10-27 01:00,1", "2024-10-27 02:00,2", "2024-10-27 02:00,3"]
+        )
+        with pytest.raises(ValueError, match="[Dd]uplicate"):
+            CsvSource(path).fetch(*WHOLE_RANGE)
+
+    def test_duplicated_instants_with_different_offsets_raise(self, tmp_path):
+        path = _write(tmp_path, "dup_aware.csv", ["datetime,price", "2024-01-01 01:00+01:00,1", "2024-01-01 00:00Z,2"])
+        with pytest.raises(ValueError, match="[Dd]uplicate"):
+            CsvSource(path).fetch(*WHOLE_RANGE)
+
+    def test_missing_timestamp_raises(self, tmp_path):
+        path = _write(tmp_path, "nat.csv", ["datetime,price", "2024-01-01 00:00,1", ",2"])
+        with pytest.raises(ValueError, match="no timestamp"):
+            CsvSource(path).fetch(*WHOLE_RANGE)
+
+    def test_end_is_exclusive(self, sample_csv_file):
+        source = CsvSource(file_path=str(sample_csv_file))
+        df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
+        assert len(df) == 6
+        assert df.index.max() == pd.Timestamp("2024-01-01 05:00", tz="UTC")
+
+
+class TestCsvSourceCompression:
+    def test_gzip_file(self, tmp_path):
+        path = tmp_path / "data.csv.gz"
+        pd.DataFrame({"datetime": ["2024-01-01 00:00", "2024-01-01 01:00"], "price": [1.0, 2.0]}).to_csv(
+            path, index=False
+        )
+        df = CsvSource(str(path)).fetch(*WHOLE_RANGE)
+        assert list(df["price"]) == [1.0, 2.0]
+
+    def test_other_extension_still_rejected(self, tmp_path):
+        path = tmp_path / "data.txt.gz"
+        path.write_bytes(b"")
+        with pytest.raises(ValueError, match="File must have .csv extension"):
+            CsvSource(str(path))
