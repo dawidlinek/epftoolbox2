@@ -805,3 +805,12 @@ class TestEntsoeSourceIntegration:
         assert any("load" in col for col in df.columns)
         assert any(col.startswith("generation_") for col in df.columns)
         assert "price" in df.columns
+
+    def test_fetch_installed_and_transfer_capacity(self, entsoe_api_key):
+        start, end = _utc("2024-06-01"), _utc("2024-06-03")
+        installed = EntsoeSource("PL", entsoe_api_key, type=["installed_capacity"], prefix="pl").fetch(start, end)
+        assert list(installed.index) == [start]
+        assert installed["pl_installed_capacity_solar"].iloc[0] > 0
+        ntc = EntsoeSource("FR", entsoe_api_key, type=["transfer_capacity"], neighbours=["ES"]).fetch(start, end)
+        assert {"transfer_capacity_export_es", "transfer_capacity_import_es"} <= set(ntc.columns)
+        assert len(ntc) == 48 and ntc.notna().all().all()
