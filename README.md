@@ -43,10 +43,11 @@ epftoolbox2.verify()
 ### Standalone source use
 
 ```python
+import pandas as pd
 from epftoolbox2.data.sources import EntsoeSource
 
 source = EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"])
-df = source.run("2024-01-01", "2024-06-01", cache=True)
+df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-06-01", tz="UTC"))  # [start, end), UTC
 ```
 
 ### Standalone transformer use
