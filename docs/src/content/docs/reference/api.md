@@ -116,7 +116,9 @@ class EvaluationReport:
 ```python
 class EntsoeSource(DataSource):
     def __init__(self, country_code: str, api_key: str, type: List[str],
-                 prefer_15min: bool = False): ...
+                 prefer_15min: bool = False,
+                 neighbours: Optional[Union[List[str], str]] = None,
+                 prefix: str = ""): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), UTC
 
 class OpenMeteoSource(DataSource):

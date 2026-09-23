@@ -7,7 +7,8 @@ import { Aside } from '@astrojs/starlight/components';
 
 # EntsoeSource
 
-Downloads electricity data from the ENTSOE Transparency Platform including load, price, and generation data.
+Downloads electricity data from the ENTSOE Transparency Platform: load, day-ahead prices, generation, cross-border
+transfer capacity and installed capacity.
 
 ## Setup
 
@@ -41,8 +42,10 @@ df = source.fetch(
 |-----------|------|----------|-------------|
 | `country_code` | str | Yes | Area code (see table below). Prices need a bidding zone, e.g. `"DE_LU"` rather than `"DE"`. |
 | `api_key` | str | Yes | ENTSOE API key. It is sent in the `SECURITY_TOKEN` request header, never in the URL, and error messages never contain it. |
-| `type` | List[str] | Yes | Data types: `load`, `price`, `generation` |
+| `type` | List[str] | Yes | Data types: `load`, `price`, `generation`, `transfer_capacity`, `installed_capacity` |
 | `prefer_15min` | bool | No | Defaults to `False`. Selects the grid of the `price` column: `False` gives hourly prices, `True` gives 15-minute prices. See [Price resolution](#price-resolution). |
+| `neighbours` | List[str] or str | With `transfer_capacity` | Defaults to `None`. Neighbouring bidding zones for `transfer_capacity`, e.g. `["DE_LU", "CZ"]` or `"DE_LU,CZ"`. Required with that type and rejected without it. |
+| `prefix` | str | No | Defaults to `""`. Prepended to every column as `f"{prefix}_{column}"`, so several zones can be combined in one pipeline. |
 
 ## Returned range
 
@@ -139,6 +142,54 @@ into the generation column.
 Column names are the snake_case of ENTSO-E's production type names; an unknown code becomes `generation_<code>`,
 e.g. `generation_b99`.
 
+### Transfer Capacity (`type=["transfer_capacity"]`)
+
+Day-ahead forecasted transfer capacity (A61, contract type daily) in MW, for each zone in `neighbours`:
+
+| Column | Description |
+|--------|-------------|
+| `transfer_capacity_export_<neighbour>` | Capacity from `country_code` to the neighbour, e.g. `transfer_capacity_export_es` |
+| `transfer_capacity_import_<neighbour>` | Capacity from the neighbour to `country_code` |
+
+```python
+source = EntsoeSource("FR", api_key=key, type=["transfer_capacity"], neighbours=["ES", "CH"])
+```
+
+<Aside type="note">
+  Many borders publish no day-ahead forecasted capacity, in particular borders inside a flow-based capacity
+  calculation region (Core since 2022-06-08). The API then answers "No matching data": the column is missing and
+  a warning is logged. In a check for 2024-10-01..02, PL→DE_LU, PL→LT, LT→PL and SE_4→PL returned nothing (PL→DE_LU
+  also nothing in March 2021), while FR→ES and CH→DE_LU returned hourly values.
+</Aside>
+
+### Installed Capacity (`type=["installed_capacity"]`)
+
+Installed generation capacity per production type (A68, year-ahead) in MW, as `installed_capacity_<type>` with the
+same type names as generation (e.g. `installed_capacity_solar`, `installed_capacity_wind_onshore`). There is one
+value per year, stamped at local midnight of 1 January; if that lies before `start`, the value is reported at
+`start`. Fill it forward with `ResampleTransformer(method="ffill", columns=[...])`.
+
+### Combining zones with `prefix`
+
+```python
+from epftoolbox2.pipelines import DataPipeline
+
+pipeline = (
+    DataPipeline()
+    .add_source(EntsoeSource("PL", api_key=key, type=["load", "price"]))
+    .add_source(EntsoeSource("CZ", api_key=key, type=["price"], prefix="cz"))            # cz_price
+    .add_source(EntsoeSource("DE_LU", api_key=key, type=["price"], prefix="de"))         # de_price
+)
+```
+
+### Not offered: unavailability of generation units (A77/A80)
+
+Outage documents are versioned, but the API returns only the latest revision of each outage by default. With
+`mRID` it returns every revision, but their `createdDateTime` is not the original publication time: for Polish
+outages active on 2024-10-01..02, all 75 latest revisions, and all three revisions of the one outage checked, were
+dated October 2025. So the values known at issue time cannot be rebuilt from the API (it would also take one request
+per outage), and the latest revision is look-ahead. These documents are left out.
+
 ---
 
 ## Information available at forecast time
@@ -155,6 +206,8 @@ as produced by `LagTransformer` (`x_d-1` is yesterday, `x_d+1` tomorrow):
 | `load_forecast_daily_min/max` | Fridays, 2 hours before gate closure, for Monday–Sunday of the following week; updated when significant changes occur (Art. 6) | `_d+0` to `_d+2` always; `_d+3` when issued at or after 10:00 (on Friday mornings only the week up to Sunday is known). Larger horizons leak on some weekdays |
 | `generation_*` (actual, incl. `_consumption`) | No later than 1 hour after the operational period (Art. 16) | `_d-1` and older only |
 | `generation_*_forecast` | 18:00 Brussels time on the day before delivery, updated during intraday trading with at least one update at 08:00 on the delivery day (Art. 14) | `_d+0` and older. `_d+1` is published after gate closure: not guaranteed at issue time |
+| `transfer_capacity_*` | "Sufficiently in advance of the allocation process" (Art. 11): before the day-ahead gate closure, no fixed hour | `_d+0` and older. `_d+1` is known before 12:00 on D but at no guaranteed hour, so borderline for an early issue time |
+| `installed_capacity_*` | Annually, no later than one week before the end of the previous year (Art. 14) | The current year's value (and `_d+h` within the same year). The API serves the latest revision |
 
 The API serves the latest revision of each series, not the version published at the deadline, so forecasts that
 are revised after the issue time (load forecasts, wind and solar forecasts) can still carry a small amount of
