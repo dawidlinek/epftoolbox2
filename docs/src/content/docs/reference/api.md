@@ -140,6 +140,13 @@ class OpenMeteoSingleRunsSource(DataSource):
                  cdd_base_c: float = 21.0, strict: bool = False): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
 
+class OpenMeteoWeightedSource(DataSource):
+    def __init__(self, locations: Union[str, List[Dict[str, Any]]],
+                 source: str = "OpenMeteoSource",
+                 source_params: Optional[Dict[str, Any]] = None,
+                 prefix: str = "", keep_locations: bool = False): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
+
 class CalendarSource(DataSource):
     def __init__(self, country: str, timezone: str = None,
                  holidays: Union[str, bool] = "binary",

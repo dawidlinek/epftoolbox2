@@ -176,6 +176,38 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "OpenMeteoWeightedSource": [
+        {
+            "name": "locations",
+            "description": 'Locations as "name:lat:lon:weight, name:lat:lon:weight, ..." '
+            "(weight = population or installed capacity, fixed for the whole sample)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "source",
+            "description": "Underlying Open-Meteo source to fetch each location with",
+            "required": False,
+            "default": "OpenMeteoSource",
+            "kind": "select",
+            "choices": ["OpenMeteoSource", "OpenMeteoSingleRunsSource"],
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
+        {
+            "name": "keep_locations",
+            "description": "Also return each location's own columns, not just the weighted average?",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
+        },
+    ],
     "CsvSource": [
         {"name": "file_path", "description": "Path to CSV file", "required": True, "default": None, "kind": "text"},
         {
@@ -581,7 +613,14 @@ def _instantiate(class_name: str, params: dict) -> Any:
 # Pipeline builders
 # ---------------------------------------------------------------------------
 
-_SOURCES = ["EntsoeSource", "OpenMeteoSource", "OpenMeteoSingleRunsSource", "CsvSource", "CalendarSource"]
+_SOURCES = [
+    "EntsoeSource",
+    "OpenMeteoSource",
+    "OpenMeteoSingleRunsSource",
+    "OpenMeteoWeightedSource",
+    "CsvSource",
+    "CalendarSource",
+]
 _TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer"]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]

@@ -189,6 +189,33 @@ source = OpenMeteoSingleRunsSource(
 
 ---
 
+## OpenMeteoWeightedSource
+
+Fetches several locations with the same underlying Open-Meteo source (OpenMeteoSource or OpenMeteoSingleRunsSource) and `source_params`, and returns one weighted-average series per variable, e.g. population-weighted temperature for a bidding zone. Weights are fixed and must be known on D (use a reference date before the sample starts, not end-of-sample figures).
+
+```python
+from epftoolbox2.data.sources import OpenMeteoWeightedSource
+
+source = OpenMeteoWeightedSource(
+    locations=[                  # Required. list of {"name","latitude","longitude","weight"} or "name:lat:lon:weight, ..."
+        {"name": "warsaw", "latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},
+        {"name": "krakow", "latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
+    ],
+    source="OpenMeteoSource",    # Optional. "OpenMeteoSource" or "OpenMeteoSingleRunsSource" (default: "OpenMeteoSource")
+    source_params=None,          # Optional. Params for the underlying class above, shared by every location; not latitude/longitude/prefix (default: None)
+    prefix="pl",                 # Optional. Prefix for the weighted columns (default: "")
+    keep_locations=False,        # Optional. Also return each location's own columns (default: False)
+)
+```
+
+**Weighted average:** weights normalise to sum to 1; most variables use `sum(w_l * x_l) / sum(w_l)`; variables whose name contains "direction" use a weighted circular mean; `weather_code` is categorical and is never averaged (dropped unless `keep_locations=True`, which then keeps it per location only). A row is NaN if any location is missing there (weights are never re-normalised over the available ones).
+
+**Output column naming:** `{prefix}_{variable}_d+{i}`; with `keep_locations=True` also `{prefix}_{name}_{variable}_d+{i}` per location.
+
+**Caching:** Cache key includes locations (name, latitude, longitude, weight per location), source, the underlying source's cache config (minus latitude/longitude/prefix), prefix, keep_locations and schema_version.
+
+---
+
 ## CalendarSource
 
 Generates calendar features (holidays, weekday, hour, month, daylight).

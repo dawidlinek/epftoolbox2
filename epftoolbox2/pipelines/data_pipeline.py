@@ -18,6 +18,7 @@ COMPONENT_REGISTRY = {
         "EntsoeSource": "epftoolbox2.data.sources.entsoe",
         "OpenMeteoSource": "epftoolbox2.data.sources.open_meteo",
         "OpenMeteoSingleRunsSource": "epftoolbox2.data.sources.open_meteo_single_runs",
+        "OpenMeteoWeightedSource": "epftoolbox2.data.sources.open_meteo_weighted",
         "CsvSource": "epftoolbox2.data.sources.csv",
         "CalendarSource": "epftoolbox2.data.sources.calendar",
     },

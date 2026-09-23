@@ -27,7 +27,7 @@ epftoolbox2.verify()
 ```
 ## Key Features
 
-- **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (archived weather forecasts as known at the forecast issue time; OpenMeteoSingleRunsSource picks an exact model run through the Single Runs API), Calendar (holidays, weekday)
+- **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (archived weather forecasts as known at the forecast issue time; OpenMeteoSingleRunsSource picks an exact model run through the Single Runs API; OpenMeteoWeightedSource aggregates several locations into one population- or capacity-weighted series), Calendar (holidays, weekday)
 - **Transformers**: Resample, Timezone conversion, Lag features
 - **Validators**: Null checks, Continuity checks, EDA statistics
 - **Models**: OLS, LassoCV
