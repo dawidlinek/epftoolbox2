@@ -726,7 +726,10 @@ def _available_array(
     if rule.kind == "weather_run":
         return point + _parse_delay(rule.delay)
     local_time = _minutes(rule.time) + _zone_shift(rule.timezone, ctx)
-    delivery_day = np.floor(point / 1440.0)
+    # The delivery day is a calendar day in the rule's own (market) zone, not in the data's: a value at
+    # 23:00 UTC in winter (CET, UTC+1) delivers at 00:00 CET the next day, even though `point` (the data
+    # zone's own wall clock) hasn't crossed midnight yet.
+    delivery_day = np.floor((point - _zone_shift(rule.timezone, ctx)) / 1440.0)
     if rule.kind == "published":
         return (delivery_day - rule.days_before) * 1440.0 + local_time
     # weekly: published on `weekday` of the week before the delivery week

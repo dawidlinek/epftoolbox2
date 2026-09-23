@@ -126,6 +126,16 @@ def test_day_ahead_values_are_known_for_the_next_day_only():
     assert {name for name, _, _ in found} == {"price_d+1"} | {f"load_forecast_d+{h}" for h in range(2, 8)}
 
 
+def test_day_ahead_values_are_known_for_the_next_day_only_with_utc_data():
+    """Same day-ahead rules (published 13:00/10:00 Brussels D-1), but UTC-indexed data: winter CET is
+    UTC+1, so the last UTC hour of the day (23:00-00:00 UTC) delivers in the *next* CET calendar day. The
+    delivery day must be read in the rule's own (market) zone, not floored in the data's zone, or this
+    hour's value is wrongly treated as already published a full day early."""
+    utc = WARSAW.tz_convert("UTC")
+    found, _ = violations(["price", "load_forecast_d+1"], index=utc, horizon=1)
+    assert {(name, p) for name, p, _ in found} == {("price", 23), ("load_forecast_d+1", 23)}
+
+
 def test_week_ahead_load_depends_on_the_issue_weekday():
     thursday, friday = "2024-01-11", "2024-01-12"
     found, _ = violations(["load_forecast_daily_max_d+{horizon}"], start=thursday, end=thursday)
