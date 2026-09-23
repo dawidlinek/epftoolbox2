@@ -26,7 +26,7 @@ from .logging import get_logger
 
 logger = get_logger(__name__)
 
-KINDS = ("static", "realised", "published", "weekly", "weather_run")
+KINDS = ("static", "realised", "published", "weekly", "weather_run", "as_of")
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 _UNKNOWN_POLICIES = ("raise", "warn", "ignore")
 _SUFFIX = re.compile(r"^(?P<base>.+)_(?P<unit>d|h|min|s)(?P<sign>[+-])(?P<n>\d+)$")
@@ -82,6 +82,9 @@ class Availability:
         weather_run: a weather forecast column `x_d+k` from the Open-Meteo previous-runs API. The value at row t
                      comes from the model run started about at t (lead time k days), published `delay` later, so
                      availability depends on the row time, not on k.
+        as_of:       known at a fixed `time` (in `timezone`) on the issue day D, regardless of a leading `_d+k`
+                     (a value fixed as of the source's own issue time, e.g. a reanalysis snapshot rather than a
+                     rolling forecast run).
     """
 
     kind: str
@@ -131,6 +134,11 @@ class Availability:
     def weather_run(cls, delay: str = "6h", note: str = "") -> "Availability":
         return cls("weather_run", delay=delay, note=note)
 
+    @classmethod
+    def as_of(cls, time: str, timezone: Optional[str] = "Europe/Brussels", note: str = "") -> "Availability":
+        """Known at a fixed `time` on the issue day D; a leading `_d+k` doesn't change that."""
+        return cls("as_of", time=time, timezone=timezone, note=note)
+
     def to_dict(self) -> Dict[str, Any]:
         keys = {
             "static": [],
@@ -138,6 +146,7 @@ class Availability:
             "published": ["time", "days_before", "timezone"],
             "weekly": ["weekday", "time", "timezone"],
             "weather_run": ["delay"],
+            "as_of": ["time", "timezone"],
         }[self.kind]
         out: Dict[str, Any] = {"kind": self.kind}
         out.update({k: getattr(self, k) for k in keys})
@@ -165,6 +174,8 @@ class Availability:
             return f"published {self.time}{zone} {-self.days_before} day(s) after delivery"
         if self.kind == "weekly":
             return f"published {self.weekday.capitalize()} {self.time}{zone} for the following week"
+        if self.kind == "as_of":
+            return f"known {self.time}{zone} on the issue day"
         return f"weather model run published {self.delay} after its start (about the row time)"
 
 
@@ -181,10 +192,14 @@ ASSUMPTIONS: Dict[str, Tuple[str, Availability, str]] = {
 
 
 def default_rules() -> Dict[str, Availability]:
-    """Built-in rules for the columns the library's sources emit (unprefixed names; weather with any prefix).
+    """Built-in rules for the columns the library's ENTSO-E and calendar sources emit (unprefixed names).
 
     ENTSO-E publication times follow Reg. 543/2013 and SDAC practice; they are the latest times the data
     should be available, so a check against them is conservative.
+
+    Weather columns have no rule here: a `*_temperature_2m`-style suffix alone doesn't say whether a column
+    is a forecast or an observed value. `source_rules()` assigns one to exactly the columns an
+    `OpenMeteoSource` emits.
     """
     rules: Dict[str, Availability] = {
         # ENTSO-E
@@ -235,12 +250,6 @@ def default_rules() -> Dict[str, Availability]:
         rules[f"is_{month}"] = calendar
     rules["holiday_*"] = calendar
     rules["is_[0-9]*"] = calendar
-    weather = Availability.weather_run(
-        "6h", note="Open-Meteo previous-runs forecast: run started about at the row time, published ~4-6 h later"
-    )
-    for variable in _open_meteo_default_columns():
-        rules[variable] = weather
-        rules[f"*_{variable}"] = weather
     return rules
 
 
@@ -259,11 +268,25 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
                     rules[f"{prefix}{key}"] = rule
         elif isinstance(source, OpenMeteoSource):
             prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
+            rule = _weather_availability(source)
             for variable in source.columns:
-                rules[f"{prefix}{variable}"] = defaults.get(variable) or Availability.weather_run(
-                    "6h", note="Open-Meteo previous-runs forecast"
-                )
+                rules[f"{prefix}{variable}"] = rule
     return rules
+
+
+def _weather_availability(source: Any) -> Availability:
+    """A weather source's own vintage decides its rule.
+
+    `vintage`, `issue_time`, `timezone` and `publication_delay_h` are read with `getattr` and default when a
+    source doesn't set them (they are added to `OpenMeteoSource` on another branch), so this works with any
+    `OpenMeteoSource`-like object.
+    """
+    if getattr(source, "vintage", None) == "issue_time":
+        issue_time = getattr(source, "issue_time", "11:30")
+        timezone = getattr(source, "timezone", "Europe/Brussels")
+        return Availability.as_of(issue_time, timezone, note="Open-Meteo: known as of the source's issue time")
+    delay_h = getattr(source, "publication_delay_h", 6)
+    return Availability.weather_run(f"{delay_h}h", note="Open-Meteo previous-runs forecast")
 
 
 # ---------------------------------------------------------------------------
@@ -744,6 +767,10 @@ def _available_array(
     """Vectorised `_available` for rows at (D + day, minute); the value is `col` read through `rule`."""
     if rule.kind == "static":
         return np.full(len(day), -np.inf)
+    if rule.kind == "as_of":
+        # Fixed to a time on the issue day D itself: independent of the row's own day/minute or any shift,
+        # so a leading `_d+k` doesn't change it.
+        return np.full(len(day), _minutes(rule.time) + _zone_shift(rule.timezone, ctx))
     shifts = list(col.shifts)
     if rule.kind == "weather_run" and shifts and shifts[0].unit == "d" and shifts[0].offset > 0:
         shifts = shifts[1:]
@@ -770,15 +797,6 @@ def _available_array(
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-
-
-def _open_meteo_default_columns() -> List[str]:
-    try:
-        from .data.sources.open_meteo import OpenMeteoSource
-
-        return list(OpenMeteoSource.DEFAULT_COLUMNS)
-    except Exception:  # pragma: no cover - the source module is part of the package
-        return []
 
 
 def _offsets(times: pd.DatetimeIndex, zone: str) -> List[int]:

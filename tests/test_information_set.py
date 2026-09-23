@@ -13,7 +13,9 @@ from epftoolbox2.information_set import (
     leakage_probe,
     parse_predictor,
     perturb_unknown,
+    source_rules,
 )
+from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import ModelPipeline, Workflow
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
@@ -21,6 +23,13 @@ from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 WARSAW = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
 # Synthetic drivers are known in advance (like calendar data or perfect forecasts); price follows the A44 default.
 SYNTHETIC_RULES = {name: Availability.static() for name in ("load", "wind", "is_weekend", "is_weekday")}
+
+
+def _warsaw_weather_source(**overrides) -> OpenMeteoSource:
+    source = OpenMeteoSource(latitude=52.23, longitude=21.01, prefix="warsaw", columns=["temperature_2m"])
+    for key, value in overrides.items():
+        setattr(source, key, value)
+    return source
 
 
 @pytest.fixture(autouse=True)
@@ -64,12 +73,50 @@ def test_parse_predictor_strips_suffixes_innermost_first():
         ("generation_wind_onshore", "generation_wind_onshore", "realised"),
         ("load_forecast_daily_min_d+3", "load_forecast_daily_min", "weekly"),
         ("is_sunday_d+2", "is_sunday", "static"),
-        ("berlin_temperature_2m_d+2", "berlin_temperature_2m", "weather_run"),
     ],
 )
 def test_default_rules_cover_the_builtin_sources(name, base, kind):
     col = InformationSet().resolve(name)
     assert (col.base, col.rule.kind) == (base, kind)
+
+
+def test_default_rules_have_no_weather_glob():
+    """A `*_temperature_2m`-style suffix alone doesn't say whether a column is a forecast or an observed
+    value, so weather timing is assigned only through source_rules (see the tests below), never by the
+    unprefixed defaults."""
+    col = InformationSet().resolve("berlin_temperature_2m_d+2")
+    assert col.rule is None
+
+
+def test_as_of_rule_ignores_a_leading_day_shift():
+    """`as_of` is known at a fixed time on the issue day D; a leading `_d+k` must not change that."""
+    info = InformationSet(rules={"x": Availability.as_of("09:00", "Europe/Brussels")})
+    assert info.resolve("x").rule.kind == "as_of"
+    early, _ = violations(["x", "x_d+1", "x_d+3"], info=info, horizon=3, start="2024-01-10", end="2024-01-10")
+    assert early == set()  # 09:00 Brussels is before the 11:30 issue, for every shift alike
+
+    late_info = InformationSet(rules={"x": Availability.as_of("12:00", "Europe/Brussels")})
+    late, _ = violations(["x", "x_d+1", "x_d+3"], info=late_info, horizon=3, start="2024-01-10", end="2024-01-10")
+    assert {name for name, _, _ in late} == {"x", "x_d+1", "x_d+3"}  # all fail identically (12:00 > 11:30 issue)
+
+
+def test_source_rules_as_of_for_a_weather_source_with_issue_time_vintage():
+    """`vintage`/`issue_time`/`timezone`/`publication_delay_h` are added to `OpenMeteoSource` on another
+    branch; source_rules reads them with getattr so this works with a stub that has them."""
+    source = _warsaw_weather_source(vintage="issue_time", issue_time="09:00", timezone="Europe/Brussels")
+    rule = source_rules([source])["warsaw_temperature_2m"]
+    assert (rule.kind, rule.time, rule.timezone) == ("as_of", "09:00", "Europe/Brussels")
+
+
+def test_source_rules_weather_run_uses_the_sources_publication_delay():
+    source = _warsaw_weather_source(publication_delay_h=3)  # no vintage: falls back to weather_run
+    rule = source_rules([source])["warsaw_temperature_2m"]
+    assert (rule.kind, rule.delay) == ("weather_run", "3h")
+
+
+def test_source_rules_weather_run_defaults_without_a_publication_delay():
+    rule = source_rules([_warsaw_weather_source()])["warsaw_temperature_2m"]
+    assert (rule.kind, rule.delay) == ("weather_run", "6h")
 
 
 def test_user_rules_take_precedence_and_exact_names_beat_suffix_parsing():
@@ -156,7 +203,8 @@ def test_a69_needs_the_explicit_assumption():
 
 
 def test_weather_forecasts_depend_on_the_row_time():
-    found, _ = violations(["warsaw_temperature_2m_d+{horizon}"])
+    info = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=info)
     # Run started about at the row time and published 6 h later: rows up to 05:00 are known by 11:30.
     assert {p for _, p, _ in found} == set(range(6, 24))
     assert {hz for _, _, hz in found} == set(range(1, 8))
@@ -210,7 +258,8 @@ def test_shipped_example_predictors_are_flagged():
         "price_d-2",
         "warsaw_temperature_2m_d+{horizon}",
     ]
-    found, unknown = violations(shipped)
+    info = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    found, unknown = violations(shipped, info=info)
     assert unknown == set()
     assert {name for name, _, _ in found} == {"load_actual"} | {f"warsaw_temperature_2m_d+{h}" for h in range(1, 8)}
 
