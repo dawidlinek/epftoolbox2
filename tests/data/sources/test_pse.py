@@ -373,7 +373,10 @@ class TestAsOfPublication:
 
 
 class TestAsOfSchedule:
-    def test_schedule_ignores_republication_time(self):
+    def test_schedule_still_drops_a_value_actually_published_after_the_issue_time(self):
+        # A known (not missing) publication_ts that is later than the issue time must still drop the value: the
+        # nominal schedule is a fallback for when publication_ts is unknown, not permission to ignore a known,
+        # later one. Every record here was really re-published long after delivery, so both rules must agree.
         def published(day):
             return pd.Timestamp("2026-01-18 17:00")  # everything re-published long after delivery
 
@@ -385,7 +388,7 @@ class TestAsOfSchedule:
         start, end = pd.Timestamp("2025-01-10", tz="UTC"), pd.Timestamp("2025-01-20", tz="UTC")
         df_strict, df_nominal = strict.fetch(start, end), nominal.fetch(start, end)
         assert df_strict["pse_demand_d-1"].isna().all()
-        assert df_nominal["pse_demand_d-1"].notna().all()
+        assert df_nominal["pse_demand_d-1"].isna().all()
         # realised D is nominally published on D+1 06:00, so it is still unknown at 11:30 on D
         assert df_nominal["pse_demand"].isna().all()
 
@@ -395,6 +398,58 @@ class TestAsOfSchedule:
         df = source.fetch(pd.Timestamp("2025-01-10", tz="UTC"), pd.Timestamp("2025-01-20", tz="UTC"))
         assert df["pse_rce"].notna().all()
         assert df["pse_rce_d+1"].isna().all()  # nominally known from 18:00 on D
+
+    def test_schedule_falls_back_to_nominal_only_when_publication_is_unknown(self):
+        # _availability('schedule'): available once the nominal schedule time has passed AND, wherever
+        # publication_ts is known, the actual publication has also happened by then; a missing publication_ts
+        # (NaT) falls back to the nominal schedule alone.
+        source = PseSource(series=["demand"], issue_time="11:30", lags=[1], as_of="schedule")
+        frame = pd.DataFrame(
+            {
+                "business_date": [pd.Timestamp("2025-03-10")] * 3,
+                "published": [
+                    pd.Timestamp("2025-03-11 19:00"),  # later than the nominal schedule: this governs
+                    pd.Timestamp("2025-03-11 03:00"),  # earlier than the nominal schedule: nominal still governs
+                    pd.NaT,  # unknown: nominal alone applies
+                ],
+            }
+        )
+        available = source._availability(frame, "realised")
+        nominal = pd.Timestamp("2025-03-11 05:00")  # business_date + 1 day, 06:00 Europe/Warsaw (winter) = 05:00 UTC
+        assert available.iloc[0] == pd.Timestamp("2025-03-11 19:00")
+        assert available.iloc[1] == nominal
+        assert available.iloc[2] == nominal
+
+    def test_values_published_after_issue_time_never_leak(self):
+        """Leakage probe for as_of='schedule' (mirrors TestAsOfPublication's probe of the same name): a value
+        that is nominally due by the schedule, but was actually (re-)published later according to
+        publication_ts, must not leak into rows issued before that actual publication."""
+
+        def published(day):
+            if day == pd.Timestamp("2025-01-15"):
+                # nominally known from 2025-01-16 06:00 local (well before that day's 11:30 issue time), but
+                # actually republished at 19:00 UTC on 2025-01-16, after that day's issue time
+                return pd.Timestamp("2025-01-16 19:00")
+            return realised_published(day)
+
+        base = demand_records("2025-01-05", "2025-01-25", published)
+        perturbed = [dict(r) for r in base]
+        for r in perturbed:
+            if r["business_date"] == "2025-01-15":
+                r["demand"] = 1e9
+
+        kwargs = dict(series=["demand"], issue_time="11:30", lags=[0, 1, 2], as_of="schedule")
+        start, end = pd.Timestamp("2025-01-10", tz="UTC"), pd.Timestamp("2025-01-20", tz="UTC")
+        a_source, b_source = PseSource(**kwargs), PseSource(**kwargs)
+        mock_api(a_source, {"his-wlk-cal": base})
+        mock_api(b_source, {"his-wlk-cal": perturbed})
+        a, b = a_source.fetch(start, end), b_source.fetch(start, end)
+
+        days = a.tz_convert(TZ).index.normalize()
+        known_before = days <= pd.Timestamp("2025-01-16", tz=TZ)
+        pd.testing.assert_frame_equal(a[known_before], b[known_before])
+        rows_17 = days == pd.Timestamp("2025-01-17", tz=TZ)
+        assert (b.loc[rows_17, "pse_demand_d-2"] == 1e9).all()
 
 
 class TestPseSourceConfig:

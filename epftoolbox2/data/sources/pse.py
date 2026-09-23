@@ -86,7 +86,9 @@ class PseSource(DataSource):
             lags: Calendar-day offset(s) relative to D (positive = past, negative = future, 0 = D itself).
                 Default 0. Only 0 is allowed without `issue_time`.
             as_of: "publication" (value published at or before the issue time according to `publication_ts`)
-                or "schedule" (value assumed available at the nominal time in `SCHEDULE`, ignoring re-publications).
+                or "schedule" (value assumed available at the nominal time in `SCHEDULE`; still requires
+                `publication_ts` at or before the issue time wherever it is known, and falls back to the
+                nominal time alone only where `publication_ts` is missing).
             timezone: Time zone defining the local day D and the issue time; must match the TimezoneTransformer.
             freq: Output resolution, "1h" (mean of the quarter-hours) or "15min" (native).
             prefix: Column prefix (default "pse"); "" for none.
@@ -284,7 +286,11 @@ class PseSource(DataSource):
         t = datetime.time.fromisoformat(hhmm)
         local = frame["business_date"] + pd.Timedelta(days=days, hours=t.hour, minutes=t.minute)
         local = local.dt.tz_localize(PSE_TZ, ambiguous=True, nonexistent="shift_forward")
-        return local.dt.tz_convert("UTC").dt.tz_localize(None)
+        nominal = local.dt.tz_convert("UTC").dt.tz_localize(None)
+        # The nominal schedule is a fallback for when the actual publication time is unknown, not permission to
+        # ignore a known one: wherever publication_ts is present, a record counts as known only once it was both
+        # nominally due AND actually published (a real, later re-publication still makes it late).
+        return pd.concat([nominal, frame["published"]], axis=1).max(axis=1)
 
     def _series_table(self, frame: pd.DataFrame, field: str, kind: str) -> tuple:
         """(values, availability) indexed by UTC slot start at `freq`."""
