@@ -172,6 +172,30 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "EpftoolboxBenchmarkSource": [
+        {
+            "name": "dataset",
+            "description": "Benchmark dataset of Lago et al. (2021)",
+            "required": True,
+            "default": None,
+            "kind": "select",
+            "choices": ["NP", "PJM", "FR", "BE", "DE"],
+        },
+        {
+            "name": "cache_dir",
+            "description": "Download directory (blank = ~/.cache/epftoolbox2/epftoolbox-benchmark)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
+    ],
     "TimezoneTransformer": [
         {
             "name": "target_tz",
@@ -480,7 +504,7 @@ def _instantiate(class_name: str, params: dict) -> Any:
 # Pipeline builders
 # ---------------------------------------------------------------------------
 
-_SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
+_SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource", "EpftoolboxBenchmarkSource"]
 _TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer"]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]
