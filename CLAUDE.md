@@ -12,7 +12,7 @@ Electricity price forecasting library (a rewrite of Lago et al.'s epftoolbox): d
 ## Hooks you will see
 - Editing a `.py` file formats it with ruff and reports lint errors back (unused imports are ignored mid-edit).
 - Before finishing a turn in which Python files changed, `ruff check`, `ruff format --check` and the fast tests run; failures come back as feedback. The user can disable this with `EPF_SKIP_STOP_CHECKS=1`.
-- `git commit` is blocked when changes contain a real-looking API key. `DataPipeline.save()` writes `api_key` into YAML in plain text, and pipeline YAMLs are tracked.
+- `git commit` is blocked when changes contain a real-looking API key. `DataPipeline.save()` writes `api_key` as a `${ENV_VAR}` reference by default; the hook still matters because `save(path, include_secrets=True)` is an explicit, documented opt-out into plain text, and pipeline YAMLs are tracked.
 
 ## How the pieces fit
 `DataPipeline` (sources → transformers → validators, UTC in, cached per source) produces one DataFrame. `ModelPipeline` fits one model per (period of day, horizon, run day) in a process pool, stores results as JSONL (resumable), then evaluators and exporters run over an `EvaluationReport`. `Workflow` runs both from YAML; `environment.model_index` exists for SLURM array jobs. Component classes must be registered in `COMPONENT_REGISTRY` (`pipelines/data_pipeline.py`, `pipelines/model_pipeline.py`) to load from YAML.

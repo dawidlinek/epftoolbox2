@@ -13,7 +13,9 @@ paths:
 - Unit tests never hit the network: mock `session.get` (patterns in `tests/data/sources/test_entsoe.py`, `test_open_meteo.py`). Real-API tests get `@pytest.mark.integration` and the `entsoe_api_key` fixture, which skips without `ENTSOE_API_KEY`.
 
 ## Serialization contract (YAML)
-`DataPipeline._serialize_component` dumps every public attribute (skipping `session`, `console`, `logger`, `lat`, `lon`) and reloads with `Class(**params)`. So constructor parameter names must equal attribute names, and derived/internal state must start with `_`. New components must be registered in `COMPONENT_REGISTRY` in `pipelines/data_pipeline.py` (see the `add-component` skill).
+`DataPipeline._serialize_component` dumps every public attribute (skipping `session`, `console`, `logger`) and reloads with `Class(**params)`. So constructor parameter names must equal attribute names, and derived/internal state must start with `_`. New components must be registered in `COMPONENT_REGISTRY` in `pipelines/data_pipeline.py` (see the `add-component` skill). A parameter value that isn't a plain type (str/int/float/bool/None/list/dict, plus numpy scalars/arrays, tuples, ranges and `Path`, all converted) raises `TypeError` on save rather than being silently dropped.
+
+`api_key` (and any component's declared secrets) is written as `${<SOURCE>_API_KEY}` by default and expanded from the environment on load; `save(path, include_secrets=True)` opts out and writes the literal value. Any string parameter may itself contain a `${VAR}` reference, expanded on load and preserved (not flattened to the expanded value) on resave. File-like parameters (`path`, `*_path`, `*_file`, `*_dir`) loaded from a relative path are resolved against the YAML file's directory, not the working directory, and are written relative to it again on save.
 
 ## Column naming (relative to the row's local date D)
 - `x_d-k`: value of `x` on D-k (LagTransformer, positive lag). `x_d+h`: value of `x` on D+h as known on D (negative lag, Open-Meteo forecasts, model targets). Hourly/minute lags use `h`/`min` units, e.g. `price_h-24`.
@@ -24,4 +26,3 @@ Document types: A65/A16 actual load, A65/A01 day-ahead load forecast, A65/A31 we
 
 ## Known issues (don't fix as a side effect of other work)
 - `LagTransformer` shifts by elapsed time (`index + Timedelta * lag`), not calendar days. On a local-time index, `price_d-1` on the DST switch day comes from the wrong hour, and `d-7` lags are off by one hour for a week after each switch. The model's own targets use calendar-day shifts, so features and targets disagree around DST. Pinned by an `xfail(strict=True)` test in `tests/test_known_issues.py`.
-- `api_key` is serialized into pipeline YAML in plain text by `DataPipeline.save()`.
