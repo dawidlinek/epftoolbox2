@@ -29,7 +29,7 @@ epftoolbox2.verify()
 
 - **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (weather forecasts), Calendar (holidays, weekday)
 - **Transformers**: Resample, Timezone conversion, Lag features
-- **Validators**: Null checks, Continuity checks, EDA statistics
+- **Validators**: Null checks, Continuity (duplicates, gaps, mixed resolutions), DSTStructure (rows per local day), Coverage (per-column outages), Freshness, Plausibility (SDAC price limits, frozen values), LagConsistency (calendar-day lags), EDA statistics
 - **Models**: OLS, LassoCV
 - **Evaluators**: MAE
 - **Exporters**: Excel with conditional formatting, Terminal output
@@ -64,7 +64,8 @@ df = transformer.run(df)
 from epftoolbox2.data.validators import NullCheckValidator
 
 validator = NullCheckValidator(columns=["load_actual", "price"])
-df = validator.run(df)
+result = validator.validate(df)
+print(result)  # VALID/INVALID with errors, warnings and details; result.stats has one row per column
 ```
 
 ### Standalone model use

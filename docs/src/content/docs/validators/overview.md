@@ -1,0 +1,69 @@
+---
+title: Validators overview
+description: Which validator catches what, and how to read validation results
+sidebar:
+  order: 0
+---
+
+# Validators
+
+Validators check a DataFrame without changing it. `validate(df)` returns a `ValidationResult`: **errors** for data that can't be used, **warnings** for data that is suspicious. Invalid settings raise `ValueError` when the validator is created.
+
+## Which Validator Catches What
+
+| Problem | Validator |
+|---------|-----------|
+| Duplicate, unsorted or missing timestamps; mixed resolutions | [ContinuityValidator](/epftoolbox2/validators/continuity/) |
+| A local day with the wrong number of rows (DST days, naive wall-clock index) | [DSTStructureValidator](/epftoolbox2/validators/dst-structure/) |
+| One column missing for a stretch on a complete index; late start or early end | [CoverageValidator](/epftoolbox2/validators/coverage/) |
+| Too many nulls in the columns the model uses | [NullCheckValidator](/epftoolbox2/validators/null-check/) |
+| A source that stopped updating; inputs not yet published for a live forecast | [FreshnessValidator](/epftoolbox2/validators/freshness/) |
+| Prices outside the SDAC limits, zero load, frozen values | [PlausibilityValidator](/epftoolbox2/validators/plausibility/) |
+| `x_d-k` columns built from elapsed hours instead of calendar days | [LagConsistencyValidator](/epftoolbox2/validators/lag-consistency/) |
+| Summary statistics for a first look | [EdaValidator](/epftoolbox2/validators/eda/) |
+
+Data gaps are easiest to see **before** transformers run: resampling with interpolation or forward fill hides them. Validators that work on raw source data (UTC index) take a `tz` parameter where local days matter.
+
+## ValidationResult
+
+```python
+from epftoolbox2.data.validators import ValidationResult
+
+@dataclass
+class ValidationResult:
+    is_valid: bool = True
+    errors: List[str] = []
+    warnings: List[str] = []
+    info: Dict[str, Any] = {}          # counts, timestamps and details per check
+    stats: pd.DataFrame = pd.DataFrame()  # a table per column or per day, depending on the validator
+    validator: str = ""                 # class name of the validator that produced it
+```
+
+- `bool(result)` is `result.is_valid`.
+- `print(result)` shows the status, errors, warnings, `info` (long lists shortened) and the size of `stats`.
+- `result.add_error(message)` appends an error and marks the result invalid (useful in custom validators).
+- `result.to_frame()` returns the messages as a table.
+
+## Printing Several Results as a Table
+
+```python
+from epftoolbox2.data.validators import (
+    ContinuityValidator,
+    CoverageValidator,
+    NullCheckValidator,
+    results_to_frame,
+)
+
+validators = [ContinuityValidator(), CoverageValidator(columns=["price"]), NullCheckValidator(columns=["price"])]
+results = [v.validate(df) for v in validators]
+print(results_to_frame(results).to_string(index=False))
+```
+
+```
+          validator  valid   level  message
+ContinuityValidator   True      ok
+  CoverageValidator  False   error  Column 'price' has values at 168 of 240 expected 1h timestamps ...
+ NullCheckValidator  False   error  Column 'price' has 72 null values (30.00% of 240 rows, max 0.00%) ...
+```
+
+`results_to_frame` takes a list of results, a list of `(name, result)` pairs or a dict `{name: result}`, and returns one row per error and warning (columns `validator`, `valid`, `level`, `message`); a result without messages gets one `ok` row.

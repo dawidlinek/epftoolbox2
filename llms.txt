@@ -272,6 +272,8 @@ transformer = TimezoneTransformer(
 All validators implement `Validator` base class with:
 - `validate(df: pd.DataFrame) -> ValidationResult`
 
+Validators never modify the frame and never raise on bad data: errors mark data that can't be used, warnings data that is suspicious. Invalid settings raise `ValueError` in the constructor. Gaps are easiest to see on raw source data, before resampling fills them; validators that need local days take a `tz` parameter for a UTC source frame.
+
 ## ValidationResult
 
 Dataclass returned by all validators:
@@ -280,48 +282,174 @@ Dataclass returned by all validators:
 @dataclass
 class ValidationResult:
     is_valid: bool = True           # Overall validity
-    errors: List[str] = []          # Critical errors
-    warnings: List[str] = []        # Non-critical warnings
-    info: Dict[str, Any] = {}       # Additional metadata
-    stats: pd.DataFrame = None      # Statistics (EdaValidator only)
+    errors: List[str] = []          # Data that can't be used
+    warnings: List[str] = []        # Suspicious data
+    info: Dict[str, Any] = {}       # Counts, timestamps and details per check
+    stats: pd.DataFrame = pd.DataFrame()  # Table per column (or per day), depending on the validator
+    validator: str = ""             # Class name of the validator that produced it
+
+    def add_error(self, message: str) -> None: ...   # append an error and set is_valid=False
+    def to_frame(self) -> pd.DataFrame: ...          # messages as a table
+```
+
+`bool(result)` is `result.is_valid`; `print(result)` shows status, errors, warnings, info (long lists shortened) and the size of `stats`.
+
+```python
+from epftoolbox2.data.validators import results_to_frame
+
+# list of results, list of (name, result) pairs, or {name: result}
+table = results_to_frame([v.validate(df) for v in validators])
+print(table.to_string(index=False))   # columns: validator, valid, level (error/warning/ok), message
 ```
 
 ## NullCheckValidator
 
-Checks for null values in specified columns.
+Checks that columns exist and have few enough null values. Only the listed columns are null-checked (lag columns such as `price_d-7` are empty at the start of the frame by construction, so list the columns that matter).
 
 ```python
 from epftoolbox2.data.validators import NullCheckValidator
 
 validator = NullCheckValidator(
-    columns=["load_actual", "price"],  # Optional. Columns to check (None = all)
-    allow_nulls=False,                 # Optional. If True, only checks column existence
+    columns=["load_actual", "price"],  # Optional. Columns to check (default: None = all columns)
+    allow_nulls=False,                 # Optional. If True, nulls are warnings only (default: False)
+    max_null_frac=0.0,                 # Optional. Largest share of nulls allowed per column, 0-1 (default: 0.0)
 )
 ```
 
-**Errors:**
-- Missing required columns
-- Columns containing null values (if `allow_nulls=False`)
+**Errors:** missing columns; columns whose null share is above `max_null_frac`.
+**Warnings:** columns with nulls within the limit (or any nulls with `allow_nulls=True`).
+**Info:** `missing_columns`, `null_counts`, `null_fraction`, `longest_null_run` (rows).
+**Stats:** column, rows, null_count, null_frac, longest_null_run, longest_null_run_start, longest_null_run_end.
 
 ---
 
 ## ContinuityValidator
 
-Checks for gaps in datetime index.
+Checks that the index is a sorted grid with one step, no duplicates and no missing timestamps. Steps are measured in elapsed time, so a tz-aware local index is continuous across DST; day-or-longer steps on a tz-aware index follow the local calendar. A naive local wall-clock index shows DST switches as a gap and a duplicate.
 
 ```python
 from epftoolbox2.data.validators import ContinuityValidator
 
 validator = ContinuityValidator(
-    freq="1h",    # Optional. Expected frequency (default: "1h")
+    freq=None,    # Optional. Expected step, e.g. "15min", "1h" (default: None = infer the most common step)
 )
 ```
 
 **Errors:**
 - Non-DatetimeIndex
-- Gaps larger than expected frequency
+- Duplicate timestamps; unsorted index
+- Gaps (steps longer than `freq`), at most 10 listed plus a count of the rest
+- Steps that are not a multiple of `freq` (mixed resolutions, off-grid rows)
 
-**Info:** `gaps` (list of gap details), `gap_count`, `expected_freq`
+**Info:** `expected_freq`, `freq_inferred`, `duplicate_count`, `duplicates`, `unsorted_count`, `gaps` (start, end, duration, missing), `gap_count`, `missing_periods`, `irregular_steps`, `irregular`
+
+---
+
+## DSTStructureValidator
+
+Checks rows per local calendar day: (23, 24 or 25 hours, from the time zone) × periods per hour. Catches naive wall-clock indexes, filled-in or duplicated DST hours, missing hours and missing days.
+
+```python
+from epftoolbox2.data.validators import DSTStructureValidator
+
+validator = DSTStructureValidator(
+    tz="Europe/Warsaw",         # Optional. Time zone of the local days (default: None = the index's own; naive = UTC)
+    freq=None,                  # Optional. Period length (default: None = infer)
+    allow_partial_edges=True,   # Optional. A short first/last day is a warning, not an error (default: True)
+)
+```
+
+**Errors:** days with the wrong row count. **Warnings:** partial first/last days; daily data (skipped).
+**Info:** `tz`, `freq`, `rows_per_day` ({rows: days}), `dst_days`, `bad_days`, `partial_days`.
+**Stats:** one row per local day: date, hours, rows, expected.
+
+---
+
+## CoverageValidator
+
+Per-column coverage of the `freq` grid over a range: finds an outage of one column on a complete index, rows missing from the index, and late starts / early ends.
+
+```python
+from epftoolbox2.data.validators import CoverageValidator
+
+validator = CoverageValidator(
+    columns=["price"],       # Optional. Columns to check (default: None = all columns)
+    start="2024-01-01",      # Optional. First expected timestamp (default: None = each column's first value)
+    end="2025-01-01",        # Optional. End of the range, exclusive (default: None = each column's last value)
+    freq=None,               # Optional. Grid step (default: None = infer)
+    min_coverage=1.0,        # Optional. Smallest share of timestamps with a value (default: 1.0)
+    max_gap=None,            # Optional. Longest missing run allowed, e.g. "6h" (default: None = no limit)
+)
+```
+
+`start`/`end` accept dates, timestamps and `today`/`today_d-N` keywords (resolved at validation time; naive = UTC, like `DataPipeline.run`).
+
+**Errors:** missing or empty columns; coverage below `min_coverage`; a missing run longer than `max_gap`. **Warnings:** missing timestamps within both limits.
+**Info:** `expected_freq`, `coverage`, `longest_missing_run`, `first_valid`, `last_valid` (per column).
+**Stats:** column, start, end, expected, present, missing, coverage, longest_missing_run, longest_missing_start, longest_missing_end, first_valid, last_valid.
+
+---
+
+## FreshnessValidator
+
+Checks that every column has values up to an expected end (live forecasting; a source that stopped updating).
+
+```python
+from epftoolbox2.data.validators import FreshnessValidator
+
+validator = FreshnessValidator(
+    columns=["price", "load_forecast"],  # Optional. Columns to check (default: None = all columns)
+    expected_end="today_d+1",            # Optional. Timestamp of the last value needed (default: None = last row of the frame)
+    max_delay="0h",                      # Optional. How far before the expected end the last value may be (default: "0h")
+)
+```
+
+**Errors:** missing or empty columns; columns whose last value is before `expected_end - max_delay`.
+**Info:** `expected_end`, `last_valid` (per column), `stale_columns`. **Stats:** column, last_valid, behind.
+
+---
+
+## PlausibilityValidator
+
+Range checks per column or glob pattern, and frozen (constant) runs.
+
+```python
+from epftoolbox2.data.validators import PlausibilityValidator
+
+validator = PlausibilityValidator(
+    ranges=None,              # Optional. {column or glob: [min, max]}, inclusive, None = no bound; first match wins (default: None = SDAC price limits and load >= 1 MW)
+    max_constant_run=24,      # Optional. Longest run of identical values in rows before a warning; None = off (default: 24)
+    constant_columns=None,    # Optional. Columns/patterns checked for constant runs (default: None = price* and load_actual*)
+)
+```
+
+Default ranges: `price*` in [-600, 4000] EUR/MWh (SDAC harmonised min/max; the min was -500 until trading day 2026-05-28), `load*` >= 1 MW. `ranges={}` turns range checks off.
+
+**Errors:** values out of range. **Warnings:** constant runs longer than `max_constant_run`; a pattern you passed that matches no column.
+**Info:** `out_of_range`, `longest_constant_run`, `checked_columns`.
+**Stats:** column, rule, low, high, min, max, out_of_range, longest_constant_run, constant_value, constant_start.
+
+---
+
+## LagConsistencyValidator
+
+Checks that `x_d-k` / `x_d+k` hold `x` from k **local calendar days** earlier / later at the same wall-clock time (the naming contract). A lag built from elapsed 24-h steps is wrong around DST: on a year of hourly Europe/Warsaw data, 49 rows of `price_d-1` and 337 of `price_d-7`.
+
+```python
+from epftoolbox2.data.validators import LagConsistencyValidator
+
+validator = LagConsistencyValidator(
+    columns=None,       # Optional. Lag columns to check (default: None = every x_d±k whose base column x exists)
+    tz=None,            # Optional. Time zone of the local days (default: None = the index's own)
+    tolerance=1e-9,     # Optional. Absolute difference counted as equal (default: 1e-09)
+)
+```
+
+Repeated autumn hour: first occurrence when the source day has it once. Skipped spring hour: the lag must be missing. Rows whose source lies outside the frame are skipped. Columns without a base column (Open-Meteo forecasts) are not checked; hour lags (`x_h-24`) are not checked.
+
+**Errors:** columns with mismatches (first row, actual and expected value); listed columns that aren't day lags or have no base column.
+**Info:** `tz`, `checked`, `mismatch_counts`, `mismatches` (first 10 rows per column).
+**Stats:** column, base, days, checked, unverifiable, mismatches, first_mismatch.
 
 ---
 
@@ -334,10 +462,11 @@ from epftoolbox2.data.validators import EdaValidator
 
 validator = EdaValidator(
     columns=None,    # Optional. Columns to analyze (None = all numeric)
+    verbose=True,    # Optional. Print the Rich table (default: True)
 )
 ```
 
-**Prints rich table with:** column, dtype, count, null_count, null%, min, max, mean, std
+**Prints rich table with (verbose=True):** column, dtype, count, null_count, null%, min, max, mean, std
 
 **Stats DataFrame:** Contains all statistics for programmatic access.
 
