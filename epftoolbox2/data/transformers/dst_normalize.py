@@ -68,6 +68,14 @@ class DSTNormalizeTransformer(Transformer):
         offsets = wall - wall.normalize()
         if (offsets % self._step != pd.Timedelta(0)).any():
             raise ValueError(f"Timestamps are not on the {self.freq} grid; resample to {self.freq} first")
+        gaps = wall[1:] - wall[:-1]
+        positive_gaps = gaps[gaps > pd.Timedelta(0)]
+        if len(positive_gaps) and positive_gaps.min() != self._step:
+            # Coarser data (e.g. hourly) still lands on a finer freq's grid, so the check above alone misses it.
+            raise ValueError(
+                f"Data is spaced {positive_gaps.min()} apart, not the configured freq {self.freq!r}; "
+                f"resample to {self.freq} first"
+            )
 
         data = df.set_axis(wall)
         numeric = [c for c in data.columns if pd.api.types.is_numeric_dtype(data[c])]

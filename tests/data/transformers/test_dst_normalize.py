@@ -147,6 +147,14 @@ def test_rejects_existing_flag_column_and_bad_freq():
         DSTNormalizeTransformer(freq="7h")
 
 
+def test_rejects_data_coarser_than_the_configured_freq():
+    # Hourly timestamps also sit on the 15-minute grid, so only checking grid alignment misses this: it would
+    # silently insert 3 extra "skipped slot" rows an hour instead of 1, mixing NaN wherever the model expects data.
+    df = make_market_data(days=10, freq="1h")[["price"]]
+    with pytest.raises(ValueError, match="15min|spaced"):
+        DSTNormalizeTransformer(freq="15min").transform(df)
+
+
 def test_changing_data_after_d_does_not_change_rows_of_d():
     df = local_frame("2024-10-20", "2024-11-03")
     for issue_day in ["2024-10-26", "2024-10-27"]:
