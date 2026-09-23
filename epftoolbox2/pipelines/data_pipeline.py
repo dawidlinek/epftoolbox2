@@ -12,6 +12,7 @@ import importlib
 
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
+from epftoolbox2.data.transformers.timezone import TimezoneTransformer
 from epftoolbox2.data.validators.base import Validator
 from epftoolbox2.data.validators.result import ValidationResult
 from epftoolbox2.data.cache_manager import (
@@ -71,7 +72,9 @@ class DataPipeline:
         timezone: Market time zone (e.g. ``"Europe/Warsaw"``). If set, date strings passed to ``run`` are local
             calendar days: ``start`` begins at local midnight and ``end`` covers its whole local day; naive
             timestamps are local times. If ``None``, date strings are midnight UTC, ``end`` is exclusive and naive
-            timestamps are UTC.
+            timestamps are UTC. If any ``transformers`` entry is a ``TimezoneTransformer``, its ``target_tz`` must
+            equal ``timezone`` (raises ``ValueError`` otherwise): ``timezone`` decides what a local calendar day
+            is, so converting to a different zone downstream would silently split that day across two dates.
         on_invalid: ``"warn"`` (default) logs failed validations and continues; ``"raise"`` raises
             ``DataValidationError`` after the failing validation stage. Results are kept in ``validation_results``.
 
@@ -120,6 +123,18 @@ class DataPipeline:
                 ZoneInfo(self.timezone)
             except (ZoneInfoNotFoundError, ValueError, TypeError):
                 raise ValueError(f"Invalid timezone: {self.timezone!r} (use an IANA name such as 'Europe/Warsaw')")
+            mismatched = [
+                t.target_tz
+                for t in self.transformers
+                if isinstance(t, TimezoneTransformer) and t.target_tz != self.timezone
+            ]
+            if mismatched:
+                raise ValueError(
+                    f"DataPipeline.timezone={self.timezone!r} does not match "
+                    f"TimezoneTransformer.target_tz={mismatched[0]!r}. DataPipeline.timezone decides what a local "
+                    "calendar day is (date strings, 'today_d+h' keywords); a TimezoneTransformer converting to a "
+                    "different zone silently splits that day across two local dates. Use the same zone in both."
+                )
         if self.on_invalid not in self.ON_INVALID:
             raise ValueError(f"on_invalid must be one of {self.ON_INVALID}, got {self.on_invalid!r}")
 
@@ -217,6 +232,7 @@ class DataPipeline:
     ) -> pd.DataFrame:
         if not self.sources:
             raise ValueError("At least one data source is required")
+        self._validate_settings()  # settings (e.g. timezone) may have changed via add_transformer since __init__
 
         start, end = self.resolve_range(start, end)
         self.validation_results = {}

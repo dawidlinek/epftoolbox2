@@ -757,6 +757,37 @@ class TestDateSemantics:
         with pytest.raises(ValueError, match="timezone"):
             DataPipeline(timezone="Europe/Warsw")
 
+    def test_timezone_mismatched_with_timezone_transformer_raises(self):
+        """pipelines review, finding 3: DataPipeline.timezone decides what a local calendar day is, so a
+        TimezoneTransformer converting to a different zone silently splits that day across two local dates."""
+        with pytest.raises(ValueError, match="America/New_York.*Europe/Warsaw|Europe/Warsaw.*America/New_York"):
+            DataPipeline(
+                sources=[RangeSource()],
+                timezone="America/New_York",
+                transformers=[TimezoneTransformer(target_tz="Europe/Warsaw")],
+            )
+
+    def test_timezone_matching_timezone_transformer_is_allowed(self):
+        pipeline = DataPipeline(
+            sources=[RangeSource()],
+            timezone="Europe/Warsaw",
+            transformers=[TimezoneTransformer(target_tz="Europe/Warsaw")],
+        )
+        assert pipeline.timezone == "Europe/Warsaw"
+
+    def test_timezone_mismatch_added_via_builder_is_caught_before_running(self):
+        """The mismatch isn't only checked at construction: add_transformer can introduce it afterwards."""
+        pipeline = DataPipeline(sources=[RangeSource()], timezone="America/New_York").add_transformer(
+            TimezoneTransformer(target_tz="Europe/Warsaw")
+        )
+        with pytest.raises(ValueError, match="America/New_York.*Europe/Warsaw|Europe/Warsaw.*America/New_York"):
+            pipeline.run("2024-01-01", "2024-01-02")
+
+    def test_no_timezone_with_timezone_transformer_is_allowed(self):
+        """Without DataPipeline.timezone there is no local-day boundary to disagree about."""
+        pipeline = DataPipeline(sources=[RangeSource()], transformers=[TimezoneTransformer(target_tz="Europe/Warsaw")])
+        assert pipeline.timezone is None
+
     def test_forecast_only_end_equal_to_last_horizon_day_gives_every_forecast(self, monkeypatch):
         """With timezone, `end = run day + H` covers the last target day, so all 24 * H forecasts are produced."""
         from collections import Counter
