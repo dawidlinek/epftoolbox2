@@ -475,12 +475,19 @@ pipeline = ModelPipeline(information_set=info)  # equivalent to passing issue_ti
 - `generation_*_forecast` (A69 wind/solar): published 18:00 Brussels on D-1 (legal deadline; accept the
   `entsoe_a69_by_10` assumption to instead treat it as 10:00, like the load forecast)
 - Calendar columns (holiday/weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`): static, known in advance
-- Open-Meteo weather columns: `weather_run` — the previous-runs model run started about at the row's own time,
-  published ~6h later
+
+Weather columns have no default rule (a `*_temperature_2m`-style name alone doesn't mean "forecast timing" —
+it could be an observed value too): `source_rules(sources)` / `InformationSet.with_source_rules(sources)`
+(called automatically by `Workflow`) assigns one only to the columns an `OpenMeteoSource` actually emits, using
+`source.vintage` if set: `as_of(source.issue_time, source.timezone)` when `vintage == "issue_time"` (known as of
+a fixed time on the issue day, unaffected by a leading `_d+k`), else `weather_run(f"{source.publication_delay_h}h")`
+(default "6h").
 
 **Availability kinds** (`Availability.<kind>(...)`): `static()`, `realised(delay="1h")`,
 `published(time, days_before=1, timezone="Europe/Brussels")`, `daily_close(time)` (= `published(time, days_before=0)`),
-`weekly(weekday="friday", time="10:00")`, `weather_run(delay="6h")`.
+`weekly(weekday="friday", time="10:00")`, `weather_run(delay="6h")`,
+`as_of(time, timezone="Europe/Brussels")` (known at a fixed time on the issue day D; a leading `_d+k` doesn't
+change that).
 
 **Unknown columns:** a predictor whose base column has no rule anywhere raises by default (`unknown="raise"`);
 pass `"warn"` to log instead, or `"ignore"` to skip it silently once you've reviewed which columns that affects.
@@ -493,7 +500,10 @@ result = leakage_probe(model, data, run_day="2024-06-03", information_set=info, 
 result.assert_ok()  # raises AssertionError listing forecasts that moved when unknown values were perturbed
 ```
 It perturbs every value not known at issue time on `run_day` and checks that `model`'s forecasts for that day
-don't change between the original and perturbed data.
+don't change between the original and perturbed data. `check_target_boundary=True` also perturbs the target
+from `run_day` onward regardless of its own rule (the model's own D-1 training boundary). `rebuild=<callable>`
+treats `data` as pre-transform source data instead: perturbation runs on it directly and `rebuild(frame)`
+reproduces the transformer pipeline before/after perturbation, catching a leak a transformer itself bakes in.
 
 **YAML:**
 ```yaml

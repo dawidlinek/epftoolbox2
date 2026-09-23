@@ -50,7 +50,6 @@ are unaffected until you opt in.
 | `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) |
 | `generation_*` (A75 actual generation) | 1h after the end of the delivery period |
 | Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static — known in advance |
-| Open-Meteo weather columns | the previous-runs model run started about at the row's own time, published ~6h later |
 
 <Aside type="caution">
   A69 wind/solar's *legal* deadline (18:00 D-1) is after the day-ahead gate closure (12:00 D-1), and ENTSO-E
@@ -60,10 +59,18 @@ are unaffected until you opt in.
 </Aside>
 
 Column names are parsed the same way predictors are: `price_d-1` resolves to the base column `price` shifted
-one calendar day back, `berlin_temperature_2m_d+{horizon}` resolves to `berlin_temperature_2m` with the
-Open-Meteo prefix. A `DataPipeline`'s sources refine these further — `with_source_rules()` (called automatically
-by `Workflow`) teaches the check about a `CalendarSource(prefix=...)` or an `OpenMeteoSource`'s configured
-`columns`.
+one calendar day back. There is no built-in default rule for weather columns — a `*_temperature_2m`-style
+name alone doesn't say whether it's a forecast or an observed value. A `DataPipeline`'s sources refine the
+check — `with_source_rules()` (called automatically by `Workflow`) teaches it about a `CalendarSource(prefix=...)`
+and assigns a rule to exactly the columns an `OpenMeteoSource` emits:
+
+- `as_of(source.issue_time, source.timezone)` when `source.vintage == "issue_time"` — known as of a fixed time
+  on the issue day, unaffected by a leading `_d+k` (e.g. a reanalysis snapshot, not a rolling forecast run);
+- otherwise `weather_run(f"{source.publication_delay_h}h")` (default `"6h"` if the source doesn't set one) —
+  the previous-runs model run started about at the row's own time, published that many hours later.
+
+`vintage`, `issue_time` and `publication_delay_h` are read with `getattr` and default when a source doesn't
+set them, so this works with any `OpenMeteoSource`-like object.
 
 ---
 
@@ -93,6 +100,8 @@ pipeline = ModelPipeline(information_set=info)
     Availability.daily_close("18:00")                        # published(time, days_before=0)
     Availability.weekly(weekday="friday", time="10:00")       # published once for the whole next week
     Availability.weather_run(delay="6h")                      # Open-Meteo previous-runs: run ~ row time + delay
+    Availability.as_of("09:00", "Europe/Brussels")             # known at a fixed time on the issue day D;
+                                                                # a leading `_d+k` doesn't change that
     ```
   </TabItem>
   <TabItem label="Rule keys">
@@ -124,6 +133,29 @@ It perturbs every value in `data` that is not known at `information_set`'s issue
 it with noise), runs `model` on the original and the perturbed data, and checks that every forecast issued on
 `run_day` is unchanged. Any forecast that moves depends on information from after the issue time. Use it as a
 regression test for a specific model and information set, alongside (not instead of) the static `check()`.
+
+**`check_target_boundary=True`** additionally perturbs the target column for every row on or after `run_day`,
+regardless of its own Availability rule: the model's own boundary (training targets end at D-1) is a deliberate,
+conservative choice that can be stricter than a column's factual publication time — a day-ahead price, for
+example, really is published before its own delivery day.
+
+**`rebuild`** catches a leak a transformer bakes into a derived column, which perturbing the already-built
+column by its parsed name cannot see (a wrong shift moves the *right* raw value into the *wrong* row, and
+that row's name still looks fine). Pass raw, pre-transform data as `data` and a callable that reproduces the
+transformer pipeline:
+
+```python
+def rebuild(raw):
+    df = raw.copy()
+    for transformer in data_pipeline.transformers:
+        df = transformer.transform(df)
+    return df
+
+result = leakage_probe(model, source_data, run_day="2024-06-03", information_set=info, rebuild=rebuild)
+```
+
+Perturbation is applied to the raw `data` by its own columns' availability, then `rebuild` is called on both
+the original and the perturbed raw data before the model runs.
 
 ---
 
