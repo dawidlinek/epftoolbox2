@@ -7,8 +7,11 @@ no evaluation, no scores.
 Key patterns:
 - Date keywords: "today", "now_d-730", "today_d+7" resolve at runtime, so this
   script can be run every day without changing any dates.
-- DataPipeline end is set to "today_d+7" so that weather forecasts and calendar
-  features are fetched for the full prediction window (needed as predictors).
+- DataPipeline is given timezone="Europe/Warsaw", so "today"/"end" mean whole
+  local calendar days: end="today_d+7" fetches weather forecasts and calendar
+  features through the full 7-day prediction window (needed as predictors).
+  Without `timezone`, date keywords resolve to UTC midnight and `end` is
+  exclusive, so the last horizon day would need "today_d+8" instead.
 - ModelPipeline uses forecast_only=True to skip evaluators and exporters.
 - report.predictions() returns a clean DataFrame with no "actual" column.
 
@@ -31,7 +34,7 @@ if __name__ == "__main__":
     # Fetch 2 years of history + 7-day weather/calendar forecast.
     # Adjust "now_d-730" to match your largest model's training_window.
     df = (
-        DataPipeline()
+        DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
         .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
@@ -56,7 +59,7 @@ if __name__ == "__main__":
                 ],
             )
         )
-        .run(start="now_d-735", end="today_d+8", cache=True)
+        .run(start="now_d-735", end="today_d+7", cache=True)
     )
 
     seasonal_indicators = [

@@ -33,8 +33,8 @@ epftoolbox2.verify()
 - **Models**: OLS, LassoCV
 - **Evaluators**: MAE
 - **Exporters**: Excel with conditional formatting, Terminal output
-- **Caching**: Built-in data caching to avoid redundant API calls
-- **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files
+- **Caching**: Built-in per-source Parquet cache that fetches only missing ranges, refetches not-yet-published data and is safe for parallel jobs
+- **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files; an optional market timezone makes dates mean local calendar days, duplicate column names across sources raise instead of colliding silently, and `api_key` is written to YAML as an `${ENV_VAR}` reference instead of plain text
 - **Multiprocessing**: Process-based parallelism with inner thread pools
 - **Extensibility**: Extensible base classes for data sources, transformers, validators, models, evaluators, and exporters
 
@@ -117,7 +117,7 @@ from epftoolbox2.data.transformers import ResampleTransformer
 from epftoolbox2.data.validators import NullCheckValidator
 
 pipeline = (
-    DataPipeline()
+    DataPipeline(timezone="Europe/Warsaw")  # optional: dates below then mean local calendar days
     .add_source(EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"]))
     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
     .add_source(CalendarSource("PL", holidays="binary", weekday="number"))

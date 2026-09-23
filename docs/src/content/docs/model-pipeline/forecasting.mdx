@@ -27,7 +27,7 @@ ENTSOE_API_KEY = os.environ["ENTSOE_API_KEY"]
 
 if __name__ == "__main__":
     df = (
-        DataPipeline()
+        DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
         .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
@@ -73,13 +73,15 @@ The offset `N` in `_d±N` accepts **any integer**, so it can match any model's `
 
 <Aside type="tip">
   Set `end="today_d+7"` in `DataPipeline` so that `OpenMeteoSource` and `CalendarSource` fetch forecast data for the full prediction window. ENTSOE columns will be `NaN` beyond today, but lag features (price/load from past days) remain valid and are what models use as predictors.
+
+  This requires `DataPipeline(timezone="Europe/Warsaw")` (or your market's zone): with `timezone` set, `end` covers the *whole local day* it names, so `"today_d+7"` includes all 24 hours of the last horizon day. Without `timezone`, date keywords resolve to UTC midnight and `end` is exclusive, so `"today_d+7"` cuts off at the start of that day — use `"today_d+8"` instead, or (better) set `timezone`.
 </Aside>
 
 <Aside type="caution">
   If `test_start` is not in the fetched data, `BaseModel.run()` raises `ValueError` with a message like:
   `'test_start' date '2026-04-03' is not in the data (data ends at 2026-04-02). Fetch data through at least '2026-04-03'.`
   
-  Increase `end` in `DataPipeline` (e.g. `"today_d+7"`) to ensure today's rows exist after all transformers.
+  Increase `end` in `DataPipeline` (e.g. `"today_d+7"` with `timezone` set, or `"today_d+8"` without it) to ensure today's rows exist after all transformers.
 </Aside>
 
 ---
@@ -99,12 +101,12 @@ Total: **24 × 7 = 168 prediction rows** per model.
 
 ## YAML Workflow (Daily Automation)
 
-Save once and schedule via cron — no date changes needed:
+Save once and schedule via cron — no date changes needed. The referenced `data_pipeline.yaml` must have been saved from a `DataPipeline(timezone="Europe/Warsaw", ...)` (or your market's zone) for `end: today_d+7` to include the whole last horizon day; see [Date Format Options](/epftoolbox2/data-pipeline/overview/#date-format-options):
 
 ```yaml
 data_pipeline:
   start: now_d-730    # adjust to cover largest training_window + horizon
-  end: today_d+7      # include forecast window for weather/calendar features
+  end: today_d+7       # whole horizon-7 day, given `timezone` in data_pipeline.yaml
   cache: true
 
 model_pipeline:

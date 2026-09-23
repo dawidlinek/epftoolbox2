@@ -39,7 +39,7 @@ uv add epftoolbox2
 ## Core Concepts
 
 ### DataPipeline
-Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame with DatetimeIndex (UTC). Can be saved/loaded as YAML.
+Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame covering `[start, end)` with a DatetimeIndex (UTC from the sources; local time after `TimezoneTransformer`). Can be saved/loaded as YAML.
 
 ### ModelPipeline
 Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport. Can be saved/loaded as YAML.
@@ -61,8 +61,8 @@ All pipelines use method chaining:
 # DATA SOURCES
 
 All sources implement `DataSource` base class with:
-- `fetch(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame`
-- `get_cache_config() -> Optional[Dict]` (returns None if not cacheable)
+- `fetch(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame` (UTC index covering at least `[start, end)`; `DataPipeline` drops rows outside that range)
+- `get_cache_config() -> Optional[Dict]` (returns None if not cacheable; must include every parameter that changes the output and a `schema_version` bumped when parsing changes)
 
 ## EntsoeSource
 
@@ -590,11 +590,13 @@ pipeline = DataPipeline.load("data_pipeline.yaml")
 ```
 
 ```yaml
+timezone: Europe/Warsaw    # optional; date strings passed to run() then mean local calendar days
+on_invalid: warn           # "warn" (default, logs and continues) or "raise" (raises DataValidationError)
 sources:
 - class: EntsoeSource
   params:
     country_code: PL
-    api_key: YOUR_KEY
+    api_key: ${ENTSOE_API_KEY}   # save() writes this by default; expanded from the environment on load
     type: [load, price]
 - class: CalendarSource
   params:
@@ -602,13 +604,19 @@ sources:
     holidays: binary
     weekday: onehot
     daylight: true
+    lat: 52.23                   # serialized (no longer dropped)
+    lon: 21.01
+source_validators:               # run on raw source output, before any transformer
+- class: ContinuityValidator
+  params:
+    freq: 1h
 transformers:
 - class: LagTransformer
   params:
     columns: [load_actual, price]
     lags: [1, 2, 7]
     freq: day
-validators:
+validators:                      # run on the final (post-transformer) frame
 - class: NullCheckValidator
   params:
     columns: [load_actual, price]
@@ -646,12 +654,22 @@ exporters:
     path: results.xlsx
 ```
 
-**Serialization rules:**
-- Only primitive attributes are serialized: `str`, `int`, `float`, `bool`, `list`, `dict`, `None`, `Path` (→ str)
-- Non-serializable public attributes excluded: `session`, `console`, `logger`, `lat`, `lon`
+**Serialization rules (DataPipeline and ModelPipeline):**
+- Serialized as plain YAML types: `str`, `int`, `float`, `bool`, `list`, `dict`, `None`, `Path` (→ str), numpy
+  scalars/arrays (→ Python `int`/`float`/`list`), `tuple`/`range` (→ `list`)
+- Runtime attributes excluded: `session`, `console`, `logger`
 - Private attributes (prefixed `_`) are always excluded
-- `range` lags are converted to `list` at construction time — serialize correctly
-- Callable predictors raise `ValueError` at `save()` time — use `"{horizon}"` string templates instead
+- Anything else (a `set`, a callable, an arbitrary object) raises `TypeError` naming the parameter, instead of being
+  silently dropped — use `"{horizon}"` string templates instead of callable predictors
+- `DataPipeline` only — **secrets**: `api_key` (and any component's declared secret) is written as
+  `${<SOURCE>_API_KEY}` by default and expanded from the environment on load;
+  `pipeline.save(path, include_secrets=True)` opts out and writes the literal value. Any string parameter may
+  itself contain a `${VAR}` reference; it is expanded on load and written back as the reference (not the expanded
+  value) on resave.
+- `DataPipeline` only — **relative paths**: file-like parameters (`path`, `*_path`, `*_file`, `*_dir`) loaded from
+  a relative path are resolved against the YAML file's directory, not the working directory, and written relative
+  to it again on save — a pipeline and its data can be moved together.
+- `DataPipeline.load()` raises `ValueError` on an unknown top-level YAML key (e.g. a typo'd `timezon:`).
 
 ---
 
@@ -709,9 +727,12 @@ model_pipeline:
 
 **Forecast-only workflow (runs daily without changing dates):**
 ```yaml
+# `end: today_d+7` covers the whole horizon-7 day only if data_pipeline.yaml was saved from
+# DataPipeline(timezone="Europe/Warsaw", ...) — see "Timezone and Date Semantics" below.
+# Without `timezone`, `end` is exclusive UTC midnight; use `today_d+8` instead.
 data_pipeline:
   start: now_d-730      # 2 years of history; adjust to match largest training_window
-  end: today_d+7        # fetch weather/calendar forecast window too
+  end: today_d+7         # fetch weather/calendar forecast window too
   cache: true
 
 model_pipeline:
@@ -767,20 +788,27 @@ Pipeline paths in the workflow YAML are resolved relative to the workflow YAML's
 ## Source Caching (DataPipeline)
 
 ```python
-# Enable automatic caching (stored in .cache/sources/)
+# Enable automatic caching (stored in .cache/sources/, one Parquet file per fetched range)
 df = pipeline.run(start, end, cache=True)
 
-# Custom cache file (single CSV file)
+# Whole source output in one file: CSV, or Parquet for *.parquet; rebuilt when sources or dates change
 df = pipeline.run(start, end, cache="custom_cache.csv")
+
+# Directory (existing, trailing "/", or no file suffix): one Parquet file per configuration; $VAR and ~ expanded
+df = pipeline.run(start, end, cache="$SCRATCH/epf_cache/")
 
 # No caching
 df = pipeline.run(start, end, cache=False)
 ```
 
 **Cache behavior:**
-- Each source gets unique cache key based on its configuration
-- Only fetches missing date ranges from API
-- Merges cached and fresh data automatically
+- All three modes return the same frame: each source's output is clipped to `[start, end)`
+- Each source gets a cache key hashing the cache format version, the source class and `get_cache_config()`
+- Only fetches missing date ranges from the API; each cached file is only read inside its own recorded range
+- Records only what the source actually returned, and never the last 2 days before now (data may still be published); that tail is fetched again on the next run
+- Deleted or unreadable cache files count as missing and are fetched again
+- Atomic writes and a per-source file lock: parallel processes (SLURM arrays) on a cold cache fetch once and get identical data
+- Single-file cache stores `<file>.meta.json` with a fingerprint (sources and their parameters without `api_key`, input file size/mtime, start, end, package version); a mismatch rebuilds the file
 
 ## Result Caching (ModelPipeline)
 
@@ -990,7 +1018,7 @@ predictors = [
 ]
 
 (
-    DataPipeline()
+    DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
     .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary", daylight=True, weekday="onehot"))
@@ -1052,8 +1080,11 @@ if __name__ == "__main__":
     # Date keywords resolve at runtime — run this script every day without changing anything.
     # "now_d-730" → 2 years ago; "today_d+7" → 7 days from now.
     # Adjust the -N offset to cover your largest model's training_window.
+    # timezone="Europe/Warsaw" makes "end" cover the *whole local day* it names, so "today_d+7"
+    # includes all 24 hours of the last horizon day. Without it, "end" is exclusive UTC midnight
+    # and the last horizon day would need "today_d+8" instead.
     df = (
-        DataPipeline()
+        DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
         .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
@@ -1109,25 +1140,48 @@ class DataPipeline:
         self,
         sources: Optional[List[DataSource]] = None,
         transformers: Optional[List[Transformer]] = None,
-        validators: Optional[List[Validator]] = None,
+        validators: Optional[List[Validator]] = None,        # run on the final (post-transformer) frame
+        source_validators: Optional[List[Validator]] = None,  # run on raw source output, before any transformer
+        timezone: Optional[str] = None,   # e.g. "Europe/Warsaw"; makes run() dates mean local calendar days;
+                                           # must match any TimezoneTransformer.target_tz in transformers, or raises
+        on_invalid: str = "warn",         # "warn" (log and continue) or "raise" (raise DataValidationError)
     ): ...
 
     def add_source(self, source: DataSource) -> "DataPipeline": ...
     def add_transformer(self, transformer: Transformer) -> "DataPipeline": ...
     def add_validator(self, validator: Validator) -> "DataPipeline": ...
+    def add_source_validator(self, validator: Validator) -> "DataPipeline": ...
+
+    validation_results: Dict[str, ValidationResult]  # keyed "source_validators.<Class>"/"validators.<Class>", reset each run()
 
     def run(
         self,
-        start: Union[str, pd.Timestamp],  # "YYYY-MM-DD", Timestamp, or keyword: "today", "now_d-730"
-        end: Union[str, pd.Timestamp],    # Same. Use "today_d+7" to include weather forecast window.
-        cache: Union[bool, str] = False,  # True, False, or path string
+        start: Union[str, pd.Timestamp],  # "YYYY-MM-DD", Timestamp, or "today", "now_d-730" (see Timezone below)
+        end: Union[str, pd.Timestamp],    # Same. Use "today_d+7" to include weather forecast window (see Timezone)
+        cache: Union[bool, str] = False,  # True (per-source cache), False, or a file/directory path
     ) -> pd.DataFrame: ...
 
-    def save(self, path: Union[str, Path]) -> None: ...   # Save to YAML
+    def save(self, path: Union[str, Path], include_secrets: bool = False) -> None: ...   # Save to YAML
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "DataPipeline": ...  # Load from YAML
 ```
+
+### Timezone and Date Semantics
+
+- `timezone=None` (default): `start`/`end` date strings and "today"/"now_d±N" keywords mean **midnight UTC**;
+  `end` is **exclusive**. Unchanged from before `timezone` existed — `end="today_d+7"` therefore only reaches UTC
+  midnight of that day, not the end of it; use `"today_d+8"` to include the whole 7th day ahead.
+- `timezone="Europe/Warsaw"` (or any IANA zone): date strings and keywords mean **local calendar days**; `start`
+  begins at local midnight and `end` covers its **whole local day** (inclusive), correctly sized on DST-transition
+  days (23/25 hours). `end="today_d+7"` then includes all 24 hours of the 7th day ahead — the natural choice for a
+  `horizon=7` forecast-only run. Naive timestamps passed to `run()` are read as local instants; timezone-aware
+  timestamps are used as given.
+- If any `transformers` entry is a `TimezoneTransformer`, its `target_tz` must equal `timezone` — checked at
+  construction and again at the start of `run()` (so `add_transformer` can't introduce a mismatch unnoticed) —
+  otherwise `DataPipeline.__init__`/`run` raises `ValueError`. `timezone` decides what a local calendar day is;
+  converting to a different zone downstream would silently split that day across two local dates.
+- Two sources producing the same column name raise `ValueError` naming both sources (e.g. give one a `prefix`).
 
 ## ModelPipeline
 
@@ -1261,13 +1315,16 @@ Callable predictors cannot be serialized to YAML. Use `"{horizon}"` string templ
 
 ## Date Keywords
 `DataPipeline.run()`, `ModelPipeline.run()`, `BaseModel.run()`, and `Workflow` all accept date keywords:
-- `"today"` / `"now"` → today's local date (`datetime.date.today()`)
+- `"today"` / `"now"` → today's date
 - `"today_d+7"` / `"now_d+7"` → today + 7 days
 - `"now_d-730"` → today − 730 days
 - The offset `N` in `_d±N` is any integer — use any value to match your training window.
 - Normal ISO date strings (`"2024-01-01"`) pass through unchanged.
-
-Implemented in `epftoolbox2/_date_utils.py:resolve_date()`.
+- `ModelPipeline.run()`, `BaseModel.run()` and `Workflow` resolve "today" as the machine's local date
+  (`datetime.date.today()`, implemented in `epftoolbox2/_date_utils.py:resolve_date()`).
+  `DataPipeline.run()` resolves it the same way when `timezone` is not set; with `timezone="Europe/Warsaw"` (etc.)
+  set, it uses today's date **in that zone** instead, and `end` covers the whole local day it names rather than
+  stopping at UTC midnight — see "Timezone and Date Semantics" under DataPipeline in API REFERENCE.
 
 ## Windows Multiprocessing
 Windows uses `spawn` context (not `fork`). Scripts must use `if __name__ == '__main__':` guard.
@@ -1295,11 +1352,12 @@ class MySource(DataSource):
         return True
 
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-        # Return DataFrame with DatetimeIndex (UTC)
+        # Return DataFrame with DatetimeIndex (UTC) covering at least [start, end)
         ...
 
     def get_cache_config(self) -> Optional[dict]:
-        return {"source_type": "my_source", "param": self.my_param}
+        # Every parameter that changes the output; bump schema_version when parsing changes
+        return {"source_type": "my_source", "param": self.my_param, "schema_version": 1}
 ```
 
 Register in `COMPONENT_REGISTRY["sources"]` in `data_pipeline.py` for YAML support.

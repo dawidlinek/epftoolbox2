@@ -7,81 +7,138 @@ import { Steps, Aside, FileTree } from '@astrojs/starlight/components';
 
 # Data Caching
 
-epftoolbox2 caches downloaded data to avoid redundant API calls and speed up subsequent runs.
+epftoolbox2 caches downloaded data to avoid redundant API calls and speed up subsequent runs. There are two
+independent caches:
 
-## Cache Flow
+- **Source cache** (`cache=True`): one cache per source under `.cache/sources/`, filled range by range. Recommended.
+- **Single-file cache** (`cache="file.csv"`, `cache="file.parquet"` or `cache="some/dir/"`): the combined output of
+  all sources for one exact configuration and date range.
+
+Both return exactly the same frame as `cache=False`: every source's output is clipped to the requested half-open
+range `[start, end)` whether it comes from the API or from disk.
+
+```python
+# Source-level caching (recommended)
+df = pipeline.run(start="2024-01-01", end="2024-06-01", cache=True)
+
+# Whole source output in one file (CSV, or Parquet for *.parquet)
+df = pipeline.run(start="2024-01-01", end="2024-06-01", cache="my_data.csv")
+
+# A directory: one Parquet file per configuration and date range
+df = pipeline.run(start="2024-01-01", end="2024-06-01", cache="$SCRATCH/epf_cache/")
+```
+
+## Source cache (`cache=True`)
 
 <Steps>
 
-1. **Check cache** - Pipeline checks if data exists in cache
+1. **Look up the key** - each source gets a directory named after a hash of the cache format version, the source
+   class and `source.get_cache_config()`
 
-2. **Validate metadata** - Verify source configuration matches
+2. **Find missing ranges** - `metadata.json` lists the ranges already cached; only the gaps are fetched
 
-3. **Fetch missing data** - Only download data not in cache
+3. **Fetch and record** - the fetched data is stored, but only the part the source actually returned, and never
+   the last two days before now (see below)
 
-4. **Merge and store** - Combine with cached data and save
+4. **Combine** - each cached file is read only inside its own recorded range, then cached and fresh pieces are
+   joined in time order
 
 </Steps>
-
-## Enabling Caching
-
-```python
-# Enable source-level caching (recommended)
-df = pipeline.run(start="2024-01-01", end="2024-06-01", cache=True)
-
-# Or cache entire pipeline output to a single file
-df = pipeline.run(start="2024-01-01", end="2024-06-01", cache="my_data.csv")
-```
-
-## Cache Directory Structure
 
 <FileTree>
 
 - .cache/
   - sources/
-    - a1b2c3d4e5f6/ (EntsoeSource hash)
+    - a1b2c3d4e5f6a7b8/ (EntsoeSource)
       - metadata.json
-      - data_20230101_20240101.csv
-      - data_20240101_20240601.csv
-    - f6e5d4c3b2a1/ (OpenMeteoSource hash)
+      - data_20230101T000000_20240101T000000.parquet
+      - data_20240101T000000_20240601T000000.parquet
+    - f6e5d4c3b2a1f0e9/ (OpenMeteoSource)
       - metadata.json
-      - data_20230101_20240601.csv
+      - data_20230101T000000_20240601T000000.parquet
 
 </FileTree>
 
-## How It Works
+Cache files are Parquet, so the UTC index, dtypes and floats round-trip exactly.
 
-```mermaid
-flowchart TB
-    A[Pipeline Run] --> B{Cache exists?}
-    B -->|No| C[Fetch all data]
-    B -->|Yes| D{Config matches?}
-    D -->|No| C
-    D -->|Yes| E{Date range covered?}
-    E -->|Yes| F[Load from cache]
-    E -->|Partial| G[Fetch missing dates]
-    G --> H[Merge with cache]
-    C --> I[Save to cache]
-    H --> I
-    F --> J[Return DataFrame]
-    I --> J
-```
+### What is recorded as cached
 
-## Cache Key Generation
+A range counts as cached only where the source actually returned data, and never later than **two days before
+today (UTC midnight)**. Data close to now may still be published or completed: actual load and generation appear
+about an hour after delivery (often later), next-day prices after the auction, weather forecasts after the model
+run finishes. The recent part is returned for the current run but fetched again next time, so a daily forecast run
+with `cache=True` always sees the newly published data.
 
-Each source generates a unique cache key based on its configuration:
+A gap in an otherwise regular response — one missing hour in a day of hourly data — is never recorded as covered:
+only the contiguous run(s) of timestamps actually present are cached, so the hole is fetched again on the next run
+instead of silently being treated as covered and then lost for good.
+
+Each recorded range stores when it was retrieved (`retrieved_at` in `metadata.json`). ENTSO-E sometimes revises
+data long after publication; the cache keeps the version it downloaded. Clear it to pick up revisions.
+
+### Several processes
+
+Writes go to a temporary file that is then renamed into place, and each source's cache is protected by a file lock
+(`.lock` in its directory). When several processes (for example SLURM array tasks) start together on a cold cache,
+the first one downloads each source while the others wait and then read its result: every task gets identical data
+and the API is called once.
+
+<Aside type="caution">
+  The lock relies on `flock`. On network file systems that do not support it, a plain lock file is used instead;
+  if a job is killed while holding it, delete the `.lock` file by hand.
+</Aside>
+
+### Missing or damaged files
+
+A cache file that was deleted or cannot be read counts as missing: its range is removed from `metadata.json` and
+downloaded again. A broken `metadata.json` makes the whole source cache count as empty.
+
+### Cache key
 
 ```python
 # These create different cache directories:
-EntsoeSource(country_code="PL", type=["load"])
-EntsoeSource(country_code="PL", type=["load", "price"])
-EntsoeSource(country_code="DE", type=["load"])
+EntsoeSource(country_code="PL", api_key="...", type=["load"])
+EntsoeSource(country_code="PL", api_key="...", type=["load", "price"])
+EntsoeSource(country_code="DE_LU", api_key="...", type=["load"])
 ```
+
+`get_cache_config()` must contain every parameter that changes the output. Sources also put a `schema_version`
+there and bump it when their parsing changes, and the package bumps its cache format version when the file layout
+changes, so stale files are never served after an upgrade. Old directories are then simply ignored; delete them to
+reclaim disk space.
+
+## Single-file cache (`cache="path"`)
+
+The combined source output (before transformers) is stored in one file:
+
+| `cache` value | Stored as |
+|---------------|-----------|
+| `"data.csv"` (or any other file name) | CSV |
+| `"data.parquet"` | Parquet |
+| An existing directory, a path ending in `/`, or a new path without a file suffix | `data_<hash>.parquet` inside that directory, one file per configuration |
+
+`$VAR`, `${VAR}` and `~` are expanded. A variable that is not set raises an error before anything is downloaded.
+
+Next to the file, `<file>.meta.json` records a fingerprint of the sources (class, parameters without `api_key`,
+cache config, size and modification time of input files such as `CsvSource.file_path`), the requested start and
+end, the epftoolbox2 version and the cache format version. If any of these differ, the file is rebuilt. The CSV
+reader restores the exact floats, dtypes and column names, so a reload equals a fresh run.
+
+It also records the unsettled boundary (two days before "now", same as the source cache) at the moment the file
+was written. A later run with a matching fingerprint is only served from the file if either the whole requested
+range was already past that boundary when it was written (nothing about it could still change), or the boundary
+hasn't moved since. Otherwise the file is rebuilt — without this, a fixed (non-relative) date range whose `end` is
+in the future would cache missing/not-yet-published rows for the unsettled tail once and keep serving that same
+gap forever, even after the real data was published, because nothing about the requested dates or sources ever
+changes to invalidate the fingerprint.
+
+The single-file cache uses the same temporary-file-and-rename writes and a lock (`<file>.lock`), so parallel
+processes pointed at the same file download the data once.
 
 ## Supported Sources
 
-| Source | Caching |
-|--------|---------|
+| Source | Source cache |
+|--------|--------------|
 | `EntsoeSource` | ✅ Yes |
 | `OpenMeteoSource` | ✅ Yes |
 | `CalendarSource` | ❌ No (generated locally) |
@@ -92,13 +149,13 @@ EntsoeSource(country_code="DE", type=["load"])
 ```python
 import shutil
 
-# Clear all cache
-shutil.rmtree(".cache")
+# Clear all source caches
+shutil.rmtree(".cache/sources")
 
-# Or clear specific source cache
-shutil.rmtree(".cache/sources/a1b2c3d4e5f6")
+# Or clear one source
+shutil.rmtree(".cache/sources/a1b2c3d4e5f6a7b8")
 ```
 
 <Aside type="tip">
-  Cache is stored relative to your working directory. Use version control to ignore the `.cache` folder.
+  The source cache is stored relative to your working directory. Use version control to ignore the `.cache` folder.
 </Aside>
