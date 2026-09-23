@@ -285,6 +285,50 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "SchoolHolidaysSource": [
+        {
+            "name": "country",
+            "description": "Country code (e.g. PL, DE)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "subdivisions",
+            "description": "Subdivision codes, comma-separated (e.g. PL-MZ,PL-SL; empty = country-wide only)",
+            "required": False,
+            "default": None,
+            "kind": "comma_list",
+        },
+        {
+            "name": "weights",
+            "description": "Weights in the order of the subdivisions, comma-separated (empty = no share column)",
+            "required": False,
+            "default": None,
+            "kind": "comma_list",
+        },
+        {
+            "name": "timezone",
+            "description": "Time zone override (empty = the country's)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "freq",
+            "description": "Row spacing (e.g. 1h, 15min)",
+            "required": False,
+            "default": "1h",
+            "kind": "text",
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
+    ],
     "TimezoneTransformer": [
         {
             "name": "target_tz",
@@ -593,7 +637,7 @@ def _instantiate(class_name: str, params: dict) -> Any:
 # Pipeline builders
 # ---------------------------------------------------------------------------
 
-_SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
+_SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource", "SchoolHolidaysSource"]
 _TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer"]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]
