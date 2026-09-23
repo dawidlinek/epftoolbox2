@@ -258,6 +258,31 @@ lag makes the model skip that forecast (e.g. 02:00 on the day after the spring s
 
 ---
 
+## DSTNormalizeTransformer
+
+Optional. Gives every local day exactly 24 slots (96 for 15-min data) on a naive wall-clock index, the convention of the original epftoolbox (Lago et al., 2021).
+
+```python
+from epftoolbox2.data.transformers import DSTNormalizeTransformer
+
+transformer = DSTNormalizeTransformer(
+    freq="1h",   # Slot length (default: "1h"); "15min" gives 96 slots a day. Must divide a day
+    tz=None,     # Time zone to convert to first (default: None = index is already local time)
+)
+```
+
+**Behavior:**
+- Input: a time-zone-aware local-time index (after `TimezoneTransformer`, or pass `tz`). Naive and UTC indexes raise `ValueError`, as do timestamps off the `freq` grid.
+- Output: naive local wall-clock index plus an `is_dst_adjusted` column (1 on synthetic slots, else 0).
+- Autumn switch: the two occurrences of the repeated hour are averaged into one slot.
+- Spring switch: the skipped hour (all four quarter-hours for 15-min data) is the mean of the slot before and the slot after it, on the same local day.
+- A missing value in either input gives a missing result. Non-numeric columns take the first occurrence / the slot before.
+- Gaps not caused by DST and partial days at the ends are left alone. No row uses data from a later day.
+- Order: Timezone → Resample → DSTNormalize → Lag. Don't run `TimezoneTransformer` afterwards (a naive index is read as UTC).
+- On flagged slots the values are synthetic, including model targets and "actuals": exclude those (target_date, hour) keys from error metrics for every model, or report them separately.
+
+---
+
 ## TimezoneTransformer
 
 Converts DataFrame index timezone.

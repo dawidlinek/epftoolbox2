@@ -28,7 +28,7 @@ epftoolbox2.verify()
 ## Key Features
 
 - **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (weather forecasts), Calendar (holidays, weekday)
-- **Transformers**: Resample, Timezone conversion, Lag features
+- **Transformers**: Resample, Timezone conversion, Lag features (local calendar days), DST normalisation to 24 slots a day (DSTNormalize)
 - **Validators**: Null checks, Continuity checks, EDA statistics
 - **Models**: OLS, LassoCV
 - **Evaluators**: MAE
