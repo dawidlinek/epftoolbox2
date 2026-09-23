@@ -33,7 +33,7 @@ epftoolbox2.verify()
 - **Models**: OLS, LassoCV
 - **Evaluators**: MAE
 - **Exporters**: Excel with conditional formatting, Terminal output
-- **Caching**: Built-in data caching to avoid redundant API calls
+- **Caching**: Built-in per-source Parquet cache that fetches only missing ranges, refetches not-yet-published data and is safe for parallel jobs
 - **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files
 - **Multiprocessing**: Process-based parallelism with inner thread pools
 - **Extensibility**: Extensible base classes for data sources, transformers, validators, models, evaluators, and exporters

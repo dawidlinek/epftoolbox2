@@ -39,7 +39,7 @@ uv add epftoolbox2
 ## Core Concepts
 
 ### DataPipeline
-Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame with DatetimeIndex (UTC). Can be saved/loaded as YAML.
+Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame covering `[start, end)` with a DatetimeIndex (UTC from the sources; local time after `TimezoneTransformer`). Can be saved/loaded as YAML.
 
 ### ModelPipeline
 Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport. Can be saved/loaded as YAML.
@@ -61,8 +61,8 @@ All pipelines use method chaining:
 # DATA SOURCES
 
 All sources implement `DataSource` base class with:
-- `fetch(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame`
-- `get_cache_config() -> Optional[Dict]` (returns None if not cacheable)
+- `fetch(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame` (UTC index covering at least `[start, end)`; `DataPipeline` drops rows outside that range)
+- `get_cache_config() -> Optional[Dict]` (returns None if not cacheable; must include every parameter that changes the output and a `schema_version` bumped when parsing changes)
 
 ## EntsoeSource
 
@@ -767,20 +767,27 @@ Pipeline paths in the workflow YAML are resolved relative to the workflow YAML's
 ## Source Caching (DataPipeline)
 
 ```python
-# Enable automatic caching (stored in .cache/sources/)
+# Enable automatic caching (stored in .cache/sources/, one Parquet file per fetched range)
 df = pipeline.run(start, end, cache=True)
 
-# Custom cache file (single CSV file)
+# Whole source output in one file: CSV, or Parquet for *.parquet; rebuilt when sources or dates change
 df = pipeline.run(start, end, cache="custom_cache.csv")
+
+# Directory (existing, trailing "/", or no file suffix): one Parquet file per configuration; $VAR and ~ expanded
+df = pipeline.run(start, end, cache="$SCRATCH/epf_cache/")
 
 # No caching
 df = pipeline.run(start, end, cache=False)
 ```
 
 **Cache behavior:**
-- Each source gets unique cache key based on its configuration
-- Only fetches missing date ranges from API
-- Merges cached and fresh data automatically
+- All three modes return the same frame: each source's output is clipped to `[start, end)`
+- Each source gets a cache key hashing the cache format version, the source class and `get_cache_config()`
+- Only fetches missing date ranges from the API; each cached file is only read inside its own recorded range
+- Records only what the source actually returned, and never the last 2 days before now (data may still be published); that tail is fetched again on the next run
+- Deleted or unreadable cache files count as missing and are fetched again
+- Atomic writes and a per-source file lock: parallel processes (SLURM arrays) on a cold cache fetch once and get identical data
+- Single-file cache stores `<file>.meta.json` with a fingerprint (sources and their parameters without `api_key`, input file size/mtime, start, end, package version); a mismatch rebuilds the file
 
 ## Result Caching (ModelPipeline)
 
@@ -1118,9 +1125,9 @@ class DataPipeline:
 
     def run(
         self,
-        start: Union[str, pd.Timestamp],  # "YYYY-MM-DD", Timestamp, or keyword: "today", "now_d-730"
-        end: Union[str, pd.Timestamp],    # Same. Use "today_d+7" to include weather forecast window.
-        cache: Union[bool, str] = False,  # True, False, or path string
+        start: Union[str, pd.Timestamp],  # "YYYY-MM-DD" (midnight UTC), Timestamp (naive = UTC), or "today", "now_d-730"
+        end: Union[str, pd.Timestamp],    # Same; exclusive. Use "today_d+7" to include weather forecast window.
+        cache: Union[bool, str] = False,  # True (per-source cache), False, or a file/directory path
     ) -> pd.DataFrame: ...
 
     def save(self, path: Union[str, Path]) -> None: ...   # Save to YAML
@@ -1295,11 +1302,12 @@ class MySource(DataSource):
         return True
 
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-        # Return DataFrame with DatetimeIndex (UTC)
+        # Return DataFrame with DatetimeIndex (UTC) covering at least [start, end)
         ...
 
     def get_cache_config(self) -> Optional[dict]:
-        return {"source_type": "my_source", "param": self.my_param}
+        # Every parameter that changes the output; bump schema_version when parsing changes
+        return {"source_type": "my_source", "param": self.my_param, "schema_version": 1}
 ```
 
 Register in `COMPONENT_REGISTRY["sources"]` in `data_pipeline.py` for YAML support.

@@ -7,8 +7,9 @@ paths:
 # Data sources, transformers, validators
 
 ## Source contract
-- `fetch(start, end)` returns a DataFrame with a **UTC** `DatetimeIndex`. Local time only appears after `TimezoneTransformer`.
-- `get_cache_config()` must include **every** parameter that changes the output. The cache key is a hash of that dict (`CacheManager`, files under `.cache/sources/<key>/`); a missing parameter means stale data is served silently. Changing parsing logic does not invalidate existing caches — tell the user to clear `.cache/sources/` when it matters.
+- `fetch(start, end)` returns a DataFrame with a **UTC** `DatetimeIndex` covering at least `[start, end)`. Local time only appears after `TimezoneTransformer`. `DataPipeline` clips every source to `[start, end)` (cached or not), and a cached run is assembled from pieces fetched separately, so a fetch of a sub-range must give the same values as a fetch of a larger range.
+- `get_cache_config()` must include **every** parameter that changes the output; a missing parameter means stale data is served silently. The cache key (`CacheManager`, Parquet files under `.cache/sources/<key>/`) hashes `CACHE_FORMAT_VERSION`, the source class and that dict. When parsing logic changes, add or bump `"schema_version"` in `get_cache_config()`; when the cache layout changes, bump `CACHE_FORMAT_VERSION` in `data/cache_manager.py`.
+- The cache records only what a source returned, never the last `UNSETTLED_PERIOD` (2 days) before now; each file is read only inside its recorded range; writes are atomic and each key is locked (`filelock`) around fetch + write.
 - Unit tests never hit the network: mock `session.get` (patterns in `tests/data/sources/test_entsoe.py`, `test_open_meteo.py`). Real-API tests get `@pytest.mark.integration` and the `entsoe_api_key` fixture, which skips without `ENTSOE_API_KEY`.
 
 ## Serialization contract (YAML)

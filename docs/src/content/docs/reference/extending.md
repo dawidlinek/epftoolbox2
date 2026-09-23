@@ -33,15 +33,20 @@ class MyApiSource(DataSource):
         # Fetch data from API
         # ... your implementation ...
         
-        return df
+        return df  # UTC DatetimeIndex covering at least [start, end)
     
     def get_cache_config(self) -> Optional[dict]:
         # Return dict for caching, or None to disable
         return {
             "source_type": "my_api",
             "api_url": self.api_url,
+            "schema_version": 1,  # bump when parsing changes, so old caches are not served
         }
 ```
+
+`get_cache_config()` must contain every parameter that changes the output (not the API key). The pipeline drops
+rows outside `[start, end)`, and a fetch for a sub-range must give the same values as a fetch for a larger range;
+otherwise a run assembled from cached pieces differs from a fresh one.
 
 ---
 

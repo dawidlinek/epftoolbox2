@@ -59,11 +59,15 @@ The `start` and `end` parameters accept multiple formats:
   </TabItem>
   <TabItem label="Keywords">
     ```python
-    df = pipeline.run(start="today", end="today")
+    df = pipeline.run(start="today", end="today_d+1")
     df = pipeline.run(start="2024-01-01", end="today")
     ```
   </TabItem>
 </Tabs>
+
+The returned frame covers the half-open range `[start, end)`: `end` itself is excluded. Date strings mean
+midnight UTC, and naive timestamps are taken as UTC. Every source's output is clipped to this range, whether it
+comes from the API or from the cache (see [Data Caching](/epftoolbox2/data-pipeline/caching/)).
 
 ## Data Flow
 
