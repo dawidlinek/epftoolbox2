@@ -909,7 +909,14 @@ class TestDataPipelineSerialization:
         pipeline = DataPipeline()
         config = pipeline.to_dict()
 
-        assert config == {"sources": [], "transformers": [], "validators": []}
+        assert config == {
+            "timezone": None,
+            "on_invalid": "warn",
+            "sources": [],
+            "source_validators": [],
+            "transformers": [],
+            "validators": [],
+        }
 
     def test_to_dict_with_source(self):
         """Test serializing pipeline with source to dict"""

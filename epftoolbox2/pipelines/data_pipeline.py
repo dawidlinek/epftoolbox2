@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import numpy as np
 import pandas as pd
 from pathlib import Path
 import yaml
@@ -69,8 +70,8 @@ class DataPipeline:
             resampling would interpolate over.
         timezone: Market time zone (e.g. ``"Europe/Warsaw"``). If set, date strings passed to ``run`` are local
             calendar days: ``start`` begins at local midnight and ``end`` covers its whole local day; naive
-            timestamps are local times. If ``None`` (default), date strings are midnight UTC, ``end`` is exclusive
-            and naive timestamps are UTC (unchanged from before ``timezone`` existed).
+            timestamps are local times. If ``None``, date strings are midnight UTC, ``end`` is exclusive and naive
+            timestamps are UTC.
         on_invalid: ``"warn"`` (default) logs failed validations and continues; ``"raise"`` raises
             ``DataValidationError`` after the failing validation stage. Results are kept in ``validation_results``.
 
@@ -351,45 +352,112 @@ class DataPipeline:
             raise DataValidationError(f"Validation failed: {summary}")
         logger.warning(f"Validation: {len(failed)} validator(s) failed, continuing (on_invalid='warn'): {summary}")
 
-    def _serialize_component(self, component: Any) -> Dict[str, Any]:
+    def _serialize_component(
+        self, component: Any, include_secrets: bool = False, base_dir: Optional[Path] = None
+    ) -> Dict[str, Any]:
         class_name = type(component).__name__
+        refs = getattr(component, "_yaml_refs", {})
         params = {}
-        excluded = {"session", "console", "logger", "lat", "lon"}
-        if hasattr(component, "__dict__"):
-            for key, value in component.__dict__.items():
-                if not key.startswith("_") and key not in excluded:
-                    if isinstance(value, Path):
-                        params[key] = str(value)
-                    elif isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                        params[key] = value
+        for key, value in vars(component).items():
+            if key.startswith("_") or key in _RUNTIME_ATTRIBUTES:
+                continue
+            where = f"{class_name}.{key}"
+            plain = _to_yaml_value(value, where)
+            ref = refs.get(key)
+            unchanged = ref is not None and ref["value"] == plain
+            if unchanged and _ENV_REF.search(str(ref["raw"])):
+                params[key] = ref["raw"]  # written back as ${VAR}, as it was in the loaded YAML
+            elif key in _SECRET_ATTRIBUTES and value and not include_secrets:
+                params[key] = "${" + _secret_env_var(component, key) + "}"
+            elif _is_path_param(key) and isinstance(plain, str) and plain:
+                params[key] = _portable_path(plain, base_dir, was_relative=unchanged and ref["relative"])
+            else:
+                params[key] = plain
         return {"class": class_name, "params": params}
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, include_secrets: bool = False, base_dir: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
+        """Pipeline configuration as plain Python values (see ``save``)."""
+        base = Path(base_dir) if base_dir is not None else None
+
+        def serialize(components):
+            return [self._serialize_component(c, include_secrets, base) for c in components]
+
         return {
-            "sources": [self._serialize_component(s) for s in self.sources],
-            "transformers": [self._serialize_component(t) for t in self.transformers],
-            "validators": [self._serialize_component(v) for v in self.validators],
+            "timezone": self.timezone,
+            "on_invalid": self.on_invalid,
+            "sources": serialize(self.sources),
+            "source_validators": serialize(self.source_validators),
+            "transformers": serialize(self.transformers),
+            "validators": serialize(self.validators),
         }
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: Union[str, Path], include_secrets: bool = False) -> None:
+        """Write the configuration to YAML.
+
+        ``api_key`` is written as ``${<SOURCE>_API_KEY}`` (e.g. ``${ENTSOE_API_KEY}``) and read from the environment
+        on load, unless ``include_secrets=True``. Values loaded from ``${VAR}`` references are written back as the
+        reference. Relative file paths are written relative to the YAML file. Parameters that cannot be represented
+        in YAML (callables, sets, arbitrary objects) raise ``TypeError``.
+        """
         path = Path(path)
-        config = self.to_dict()
+        config = self.to_dict(include_secrets=include_secrets, base_dir=path.parent)
         with open(path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
         logger.info(f"Pipeline: Saved configuration to {path}")
 
     @classmethod
-    def _load_component(cls, component_type: str, config: Dict[str, Any]) -> Any:
+    def _load_component(
+        cls, component_type: str, config: Dict[str, Any], base_dir: Optional[Union[str, Path]] = None
+    ) -> Any:
+        """Build one component; ``${VAR}`` in string values is expanded and, with ``base_dir``, relative file paths
+        are resolved against it."""
         class_name = config["class"]
-        params = config.get("params", {})
+        raw_params = config.get("params") or {}
 
         if class_name not in COMPONENT_REGISTRY[component_type]:
             raise ValueError(f"Unknown {component_type[:-1]}: {class_name}")
 
+        params, refs = {}, {}
+        for key, raw in raw_params.items():
+            value = _expand_env(raw, f"{class_name}.{key}")
+            relative = False
+            if base_dir is not None and _is_path_param(key) and isinstance(value, str) and value:
+                local = os.path.expanduser(value)
+                if not os.path.isabs(local):
+                    value = os.path.normpath(os.path.join(os.path.abspath(base_dir), local))
+                    relative = True
+            if value != raw:
+                refs[key] = {"raw": raw, "value": value, "relative": relative}
+            params[key] = value
+
         module_path = COMPONENT_REGISTRY[component_type][class_name]
         module = importlib.import_module(module_path)
         component_class = getattr(module, class_name)
-        return component_class(**params)
+        component = component_class(**params)
+        if refs:
+            component._yaml_refs = refs
+        return component
+
+    @classmethod
+    def from_dict(cls, config: Dict[str, Any], base_dir: Optional[Union[str, Path]] = None) -> "DataPipeline":
+        """Build a pipeline from a configuration dict as written by ``to_dict``; relative file paths are resolved
+        against ``base_dir`` (``load`` passes the YAML file's directory)."""
+        config = config or {}
+        unknown = set(config) - set(_PIPELINE_KEYS)
+        if unknown:
+            raise ValueError(f"Unknown DataPipeline setting(s) {sorted(unknown)}; expected {list(_PIPELINE_KEYS)}")
+
+        def build(section: str, registry_section: str) -> list:
+            return [cls._load_component(registry_section, c, base_dir) for c in config.get(section) or []]
+
+        return cls(
+            sources=build("sources", "sources"),
+            source_validators=build("source_validators", "validators"),
+            transformers=build("transformers", "transformers"),
+            validators=build("validators", "validators"),
+            timezone=config.get("timezone"),
+            on_invalid=config.get("on_invalid", "warn"),
+        )
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "DataPipeline":
@@ -397,21 +465,13 @@ class DataPipeline:
         with open(path, "r") as f:
             config = yaml.safe_load(f)
 
-        pipeline = cls()
-
-        for source_config in config.get("sources", []):
-            pipeline.add_source(cls._load_component("sources", source_config))
-
-        for transformer_config in config.get("transformers", []):
-            pipeline.add_transformer(cls._load_component("transformers", transformer_config))
-
-        for validator_config in config.get("validators", []):
-            pipeline.add_validator(cls._load_component("validators", validator_config))
-
+        pipeline = cls.from_dict(config, base_dir=path.parent)
         logger.info(f"Pipeline: Loaded configuration from {path}")
         return pipeline
 
 
+_PIPELINE_KEYS = ("timezone", "on_invalid", "sources", "source_validators", "transformers", "validators")
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -458,6 +518,81 @@ def _check_unique_columns(labelled: List[Tuple[str, pd.DataFrame]]) -> None:
 def _summarize(name: str, result: ValidationResult) -> str:
     errors = result.errors[:3] + ([f"... {len(result.errors) - 3} more"] if len(result.errors) > 3 else [])
     return f"{name}: {', '.join(errors) or 'invalid'}"
+
+
+def _expand_env(value: Any, where: str) -> Any:
+    """Replace ``${VAR}`` in strings (also inside lists and dicts) with the environment variable's value."""
+    if isinstance(value, str):
+
+        def substitute(match: "re.Match[str]") -> str:
+            name = match.group(1)
+            if name not in os.environ:
+                raise ValueError(
+                    f"{where} refers to ${{{name}}}, but the environment variable {name} is not set "
+                    "(set it, or save the pipeline with include_secrets=True)"
+                )
+            return os.environ[name]
+
+        return _ENV_REF.sub(substitute, value)
+    if isinstance(value, list):
+        return [_expand_env(v, where) for v in value]
+    if isinstance(value, dict):
+        return {k: _expand_env(v, f"{where}.{k}") for k, v in value.items()}
+    return value
+
+
+def _is_path_param(name: str) -> bool:
+    return name == "path" or name.endswith(("_path", "_file", "_dir"))
+
+
+def _portable_path(value: str, base_dir: Optional[Path], was_relative: bool) -> str:
+    """Absolute paths stay absolute; relative ones (to the working directory, or to the YAML they were loaded from)
+    are written relative to the directory of the YAML being saved."""
+    local = os.path.expanduser(value)
+    if base_dir is None or (os.path.isabs(local) and not was_relative):
+        return value
+    try:
+        return Path(os.path.relpath(os.path.abspath(local), os.path.abspath(base_dir))).as_posix()
+    except ValueError:  # e.g. different drives on Windows
+        return os.path.abspath(local)
+
+
+def _secret_env_var(component: Any, key: str) -> str:
+    """Environment variable a secret is read from: ``api_key_env`` on the class, else e.g. ENTSOE_API_KEY."""
+    explicit = getattr(type(component), f"{key}_env", None)
+    if explicit:
+        return explicit
+    name = type(component).__name__
+    if name.endswith("Source") and len(name) > len("Source"):
+        name = name[: -len("Source")]
+    return f"{name.upper()}_{key.upper()}"
+
+
+def _to_yaml_value(value: Any, where: str) -> Any:
+    """Plain YAML-safe value (numpy scalars and arrays, tuples, ranges and paths converted); raises otherwise."""
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, np.generic):
+        return _to_yaml_value(value.item(), where)
+    if isinstance(value, np.ndarray):
+        return _to_yaml_value(value.tolist(), where)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple, range)):
+        return [_to_yaml_value(v, where) for v in value]
+    if isinstance(value, dict):
+        if not all(isinstance(k, (str, int)) for k in value):
+            raise TypeError(f"Cannot save {where}: dictionary keys must be strings or integers")
+        return {k: _to_yaml_value(v, f"{where}.{k}") for k, v in value.items()}
+    kind = "a callable" if callable(value) else f"a {type(value).__name__}"
+    raise TypeError(
+        f"Cannot save {where}: it is {kind}, which YAML cannot represent "
+        "(use str, int, float, bool, None, list or dict)"
+    )
 
 
 def _qualified_name(obj: Any) -> str:
