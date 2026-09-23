@@ -37,6 +37,7 @@ def make_manifest(data, **overrides):
         model=_DummyModel(),
         data=data,
         used_columns=["price", "load"],
+        expanded={(0, 1): ["load"]},
         target="price",
         horizon=1,
         freq="1h",
@@ -56,15 +57,46 @@ def test_build_manifest_records_everything_that_defines_a_forecast():
     data = make_data()
     manifest = make_manifest(data, model=_DummyModel(training_window=45, model_kwargs={"cv": 5}))
 
-    assert manifest.predictors == ["load"]  # used_columns minus target
+    assert manifest.predictors == ["load"]  # used_columns minus target (informational; order isn't compared)
     assert manifest.target == "price"
     assert manifest.horizon == 1
     assert manifest.freq == "1h"
     assert manifest.training_window == 45
     assert manifest.model_params == {"cv": 5}
-    assert manifest.data_columns_hash == hash_columns(data, ["price", "load"])
+    assert manifest.data_timezone == "Europe/Warsaw"
     assert manifest.package_version  # recorded
     assert manifest.schema_version == 1
+
+
+def test_data_timezone_is_part_of_the_comparison():
+    """Converting Warsaw-local data to UTC keeps the same instants, and so the same data_columns_hash (the
+    hash is over epoch values, not the tz label) - but resuming would silently mix rows recorded under two
+    different wall-clock conventions unless the timezone itself is compared."""
+    data = make_data()
+    utc = data.tz_convert("UTC")
+    a = make_manifest(data)
+    b = make_manifest(utc)
+
+    assert a.data_columns_hash == b.data_columns_hash  # same instants: the hash alone can't tell them apart
+    diffs = a.differences(b)
+    assert len(diffs) == 1 and "data_timezone" in diffs[0]
+
+
+def test_predictor_layout_hash_is_sensitive_to_order_and_per_task_layout():
+    """A sorted union of names can't tell `["price_d-1","price_d-2"]` apart from `["price_d-{horizon}"]`
+    expanded per horizon, and doesn't notice a reordering that changes what stored coefficients mean."""
+    data = make_data()
+    fixed = make_manifest(data, expanded={(0, 1): ["price_d-1", "price_d-2"]})
+    per_horizon = make_manifest(data, expanded={(0, 1): ["price_d-1"], (0, 2): ["price_d-2"]})
+    reordered = make_manifest(data, expanded={(0, 1): ["price_d-2", "price_d-1"]})
+    same_again = make_manifest(data, expanded={(0, 1): ["price_d-1", "price_d-2"]})
+
+    assert fixed.predictor_layout_hash == same_again.predictor_layout_hash
+    assert fixed.predictor_layout_hash != per_horizon.predictor_layout_hash
+    assert fixed.predictor_layout_hash != reordered.predictor_layout_hash
+
+    diffs = fixed.differences(reordered)
+    assert len(diffs) == 1 and "predictor_layout_hash" in diffs[0]
 
 
 def test_data_hash_changes_with_the_data_and_not_with_column_order():
@@ -75,6 +107,37 @@ def test_data_hash_changes_with_the_data_and_not_with_column_order():
 
     assert hash_columns(data, ["price", "load"]) == hash_columns(same_columns_reordered, ["price", "load"])
     assert hash_columns(data, ["price", "load"]) != hash_columns(changed, ["price", "load"])
+
+
+def test_data_hash_excludes_rows_after_test_end():
+    """A source's own fetch window can catch up a little between two runs on the same day, appending rows
+    after test_end; that must not raise a manifest mismatch. Rows at or before test_end still matter."""
+    data = make_data(n=48)  # 2024-01-01 00:00 .. 2024-01-02 23:00
+    base = dict(model=_DummyModel(training_window=1), test_start="2024-01-02", test_end="2024-01-02")
+    a = make_manifest(data, **base)
+
+    extra_index = pd.date_range("2024-01-03", periods=24, freq="h", tz="Europe/Warsaw")
+    extra = pd.DataFrame({"price": 0.0, "load": 0.0}, index=extra_index)
+    extended = pd.concat([data, extra])  # the first 48 rows are byte-identical to `data`
+    b = make_manifest(extended, **base)
+    assert a.data_columns_hash == b.data_columns_hash
+
+    changed_within_range = data.copy()
+    changed_within_range.iloc[0, changed_within_range.columns.get_loc("price")] += 1.0
+    c = make_manifest(changed_within_range, **base)
+    assert a.data_columns_hash != c.data_columns_hash
+
+
+def test_data_hash_is_unaffected_by_a_different_test_start_over_the_same_data():
+    """Resuming into the same save_dir with a different (e.g. narrower) test_start over otherwise
+    unchanged data - as when a wide run is followed by a narrower one - must not look like a configuration
+    change: only the data (up to test_end) matters, not where test_start happens to fall within it."""
+    data = make_data(n=96)  # 2024-01-01 00:00 .. 2024-01-04 23:00
+    a = make_manifest(data, test_start="2024-01-01", test_end="2024-01-04")
+    b = make_manifest(data, test_start="2024-01-03", test_end="2024-01-04")
+
+    assert a.data_columns_hash == b.data_columns_hash
+    assert a.differences(b) == []
 
 
 def test_differences_only_reports_compared_fields():
@@ -160,12 +223,27 @@ def test_missing_manifest_is_accepted_by_default_and_can_be_required(tmp_path):
         check_and_write(path, manifest, has_existing_results=True, require_manifest=True)
 
 
-def test_information_set_settings_are_part_of_the_comparison():
+def test_information_set_is_recorded_but_not_compared():
+    """The information set gates which predictors are allowed before fitting; it doesn't change what a
+    fitted model predicts, so a change to it alone must not force a resume mismatch. It is still recorded
+    for provenance."""
     from epftoolbox2.information_set import InformationSet
 
     data = make_data()
     a = make_manifest(data, information_set=InformationSet("11:30", "Europe/Brussels"))
     b = make_manifest(data, information_set=InformationSet("13:00", "Europe/Brussels"))
 
+    assert a.information_set != b.information_set  # still recorded
+    assert a.differences(b) == []  # but not compared
+
+
+def test_model_params_generically_covers_any_constructor_parameter():
+    """model_params comes from model._model_kwargs generically, so a brand-new constructor parameter (like
+    the `scaler` option feat/vst-scalers adds) is covered by the comparison without any manifest change, as
+    long as the model returns it from _model_kwargs."""
+    data = make_data()
+    a = make_manifest(data, model=_DummyModel(model_kwargs={"scaler": "standard"}))
+    b = make_manifest(data, model=_DummyModel(model_kwargs={"scaler": "minmax"}))
+
     diffs = a.differences(b)
-    assert len(diffs) == 1 and "information_set" in diffs[0]
+    assert len(diffs) == 1 and "model_params" in diffs[0]

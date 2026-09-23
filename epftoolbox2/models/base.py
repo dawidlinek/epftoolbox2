@@ -109,7 +109,7 @@ class BaseModel(ABC):
             test_end = resolve_date(test_end)
 
         self._target = target
-        self._check_inputs(data, target, horizon, freq, information_set, test_start, test_end)
+        expanded = self._check_inputs(data, target, horizon, freq, information_set, test_start, test_end)
         used_columns = list(dict.fromkeys([target, *self._used_predictors]))
 
         self._data = self._preprocess(data[used_columns], horizon, target)
@@ -140,6 +140,7 @@ class BaseModel(ABC):
                 model=self,
                 data=data,
                 used_columns=used_columns,
+                expanded=expanded,
                 target=target,
                 horizon=horizon,
                 freq=freq,

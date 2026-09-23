@@ -165,5 +165,5 @@ def test_array_task_refuses_to_resume_a_model_with_changed_predictors(tmp_path, 
     config["model_pipeline"]["models"][0]["params"]["predictors"] = ["price_d-1"]
     path.write_text(yaml.safe_dump(config))
 
-    with pytest.raises(ManifestMismatchError, match="predictors"):
+    with pytest.raises(ManifestMismatchError, match="predictor_layout_hash"):
         Workflow.load(path).run()

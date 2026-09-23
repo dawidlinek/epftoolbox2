@@ -201,7 +201,7 @@ class TestModels:
 
         # Same file, different predictors: the existing results no longer describe what this run would fit.
         changed = OLSModel(predictors=["load", "temperature"], training_window=30, name="OLS")
-        with pytest.raises(ManifestMismatchError, match="predictors"):
+        with pytest.raises(ManifestMismatchError, match="predictor_layout_hash"):
             changed.run(
                 data=sample_data,
                 test_start="2023-12-01",
@@ -290,6 +290,9 @@ class TestModels:
             target="price",
             horizon=1,
             save_to=save_to,
+            # A later test_end legitimately includes more of `data` in data_columns_hash (roadmap item 8):
+            # this is a real, expected forecast-window change, not the config drift the manifest guards.
+            allow_manifest_mismatch=True,
         )
         # 2023-12-02 has no result yet under the old run, so it must be (re)computed, not skipped as "done".
         assert ref.produced == ref.count
