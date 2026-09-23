@@ -146,7 +146,14 @@ class CsvSource(DataSource):
 
 ```python
 class ResampleTransformer(Transformer):
-    def __init__(self, freq: str = "1h", method: str = "linear"): ...
+    def __init__(
+        self,
+        freq: str = "1h",
+        agg: Union[str, Dict[str, str]] = "mean",  # dict: {column: agg}, "default" key for the rest
+        fill: Union[str, None, Dict[str, Optional[str]]] = "ffill",  # "ffill" | None
+        method: Optional[str] = None,  # deprecated
+        columns: Union[str, List[str], None] = None,  # deprecated
+    ): ...
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 
 class LagTransformer(Transformer):
@@ -159,7 +166,12 @@ class LagTransformer(Transformer):
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 
 class TimezoneTransformer(Transformer):
-    def __init__(self, target_tz: str): ...
+    def __init__(
+        self,
+        target_tz: str,
+        daily_columns: Optional[List[str]] = None,  # None = ["load_forecast_daily_min", "load_forecast_daily_max"]
+        daily_anchor: str = "UTC+02:00",
+    ): ...
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 ```
 

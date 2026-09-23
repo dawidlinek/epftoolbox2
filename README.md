@@ -52,10 +52,10 @@ df = source.run("2024-01-01", "2024-06-01", cache=True)
 ### Standalone transformer use
 
 ```python
-from epftoolbox2.data.transformers import ResampleTransformer
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer
 
-transformer = ResampleTransformer(freq="1h")
-df = transformer.run(df)
+df = TimezoneTransformer(target_tz="Europe/Warsaw").transform(df)  # sources return UTC
+df = ResampleTransformer(freq="1h").transform(df)  # aggregates or step-fills; never fills real gaps
 ```
 
 ### Standalone validator use
@@ -113,7 +113,7 @@ Download and process electricity market data from ENTSOE, weather forecasts from
 ```python
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
-from epftoolbox2.data.transformers import ResampleTransformer
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer
 from epftoolbox2.data.validators import NullCheckValidator
 
 pipeline = (
@@ -121,6 +121,7 @@ pipeline = (
     .add_source(EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"]))
     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
     .add_source(CalendarSource("PL", holidays="binary", weekday="number"))
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
 )
