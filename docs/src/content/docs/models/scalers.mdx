@@ -53,7 +53,7 @@ A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `
 - **Predictors** follow `apply_to`. The default `"all"` matches epftoolbox's LEAR, which applies the Invariant scaler to every input except the day-of-week dummies. The VST papers transform the price series; `apply_to=["price", "price_d-*"]` does that and only standardises exogenous inputs such as load or weather. If no pattern matches any predictor, a warning says that only the target is transformed.
 - **Binary 0/1 predictors** (dummies) are never changed, whatever `apply_to` says. The same rule as for `StandardScaler` decides what is binary.
 - Every column gets its own parameters (median/MAD or empirical CDF), estimated from the task's training rows.
-- After the VST every transformed column, and the target, is standardised, so models always receive centred data with unit variance. This is why `OLSModel`, which fits without an intercept, stays valid.
+- After the VST every transformed column, and the target, is standardised, so models always receive centred data with unit variance. This is why `OLSModel`, which fits without an intercept, stays valid. epftoolbox's LEAR skips this step. An affine rescaling doesn't change a least-squares fit with an intercept, but it does change the relative scale of the inputs that a Lasso penalty sees, so LassoCV results won't match LEAR's exactly.
 
 ## No look-ahead
 

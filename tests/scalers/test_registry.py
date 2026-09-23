@@ -95,6 +95,21 @@ def test_scaler_survives_yaml_round_trip(tmp_path):
     ]
 
 
+def test_scaler_assigned_after_construction_is_validated_and_saved(tmp_path):
+    model = OLSModel(["price_d-1"], name="OLS")
+    model.scaler = NPITScaler(apply_to=["price_d-*"])
+    expected = {"name": "npit", "params": {"apply_to": ["price_d-*"]}}
+    assert model.scaler == expected
+
+    path = tmp_path / "mp.yaml"
+    ModelPipeline().add_model(model).save(path)
+    assert ModelPipeline.load(path).models[0].scaler == expected
+
+    with pytest.raises(ValueError, match="Unknown scaler"):
+        model.scaler = "Asinh"
+    assert model.scaler == expected
+
+
 def test_yaml_without_scaler_loads_the_standard_scaler(tmp_path):
     path = tmp_path / "old.yaml"
     path.write_text(

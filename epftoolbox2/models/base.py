@@ -38,8 +38,7 @@ class BaseModel(ABC):
             self.predictors = predictors
         self.training_window = training_window
         self.name = name
-        # Kept as a name or {"name", "params"} dict so it saves to YAML; each task builds a fresh scaler from it.
-        self.scaler = scaler_spec(scaler)
+        self.scaler = scaler  # validated and normalised in __setattr__
 
         self._data: Optional[pd.DataFrame] = None
         self._hour_data: Dict[int, pd.DataFrame] = {}
@@ -48,6 +47,13 @@ class BaseModel(ABC):
         self._target: str = ""
         self._freq: str = "1h"
         self._periods_per_day: int = 24
+
+    def __setattr__(self, key, value):
+        # The scaler is kept as a name or {"name", "params"} dict, also when assigned after construction, so a
+        # typo fails here rather than in every worker and a scaler instance can't be dropped by save().
+        if key == "scaler":
+            value = scaler_spec(value)
+        super().__setattr__(key, value)
 
     @property
     def _model_kwargs(self) -> Dict:

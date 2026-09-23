@@ -1,11 +1,12 @@
 """The model's `scaler` reaches the worker, is fitted on training rows only, and every scaler runs end to end."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from epftoolbox2.models import LassoCVModel, OLSModel, _worker
 from epftoolbox2.models.base import BaseModel
-from tests.synthetic import PREDICTORS, make_market_data
+from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 SCALERS = ["standard", "asinh", "npit", {"name": "asinh", "params": {"apply_to": ["price_d-*"]}}]
 CAPTURED: list = []
@@ -80,6 +81,27 @@ def test_prices_from_the_issue_day_on_do_not_reach_the_scaler(scaler):
 def single_process(monkeypatch):
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+
+
+@pytest.mark.parametrize("scaler", SCALERS[1:] + [{"name": "npit", "params": {"apply_to": "target"}}])
+def test_vst_forecasts_ignore_prices_dated_on_or_after_the_issue_day(scaler, single_process):
+    """End-to-end version of the worker test above, as in tests/test_known_answer.py."""
+    run_day = "2023-04-12"
+    df = make_market_data(noise=5.0, seed=7)
+    scrambled = df.copy()
+    future = pd.Series(df.index.date >= pd.Timestamp(run_day).date(), index=df.index)
+    scrambled.loc[future, "price"] = 1e4 + np.arange(future.sum())
+    scrambled["price_d-1"] = calendar_shift(scrambled["price"], -1)
+
+    runs = []
+    for data in (df, scrambled):
+        model = OLSModel(PREDICTORS + ["price_d-1"], training_window=45, scaler=scaler)
+        ref = model.run(data, test_start=run_day, test_end=run_day, target="price", horizon=2)
+        runs.append({(r["hour"], r["horizon"]): r["prediction"] for r in ref._results})
+
+    assert runs[0].keys() == runs[1].keys() and len(runs[0]) == 24 * 2
+    for key, prediction in runs[0].items():
+        assert runs[1][key] == pytest.approx(prediction, abs=1e-9), key
 
 
 @pytest.mark.parametrize("model_cls", [OLSModel, LassoCVModel])
