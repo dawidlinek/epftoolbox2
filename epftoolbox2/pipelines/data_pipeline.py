@@ -24,6 +24,7 @@ COMPONENT_REGISTRY = {
         "TimezoneTransformer": "epftoolbox2.data.transformers.timezone",
         "ResampleTransformer": "epftoolbox2.data.transformers.resample",
         "LagTransformer": "epftoolbox2.data.transformers.lag",
+        "ImputeTransformer": "epftoolbox2.data.transformers.impute",
     },
     "validators": {
         "ContinuityValidator": "epftoolbox2.data.validators.continuity",
