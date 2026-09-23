@@ -249,6 +249,67 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {"name": "freq", "description": "Slot length of the data", "required": False, "default": "1h", "kind": "text"},
     ],
+    "ResidualLoadTransformer": [
+        {
+            "name": "load",
+            "description": "Load forecast column",
+            "required": False,
+            "default": "load_forecast",
+            "kind": "text",
+        },
+        {
+            "name": "renewables",
+            "description": "Wind/solar forecast columns (blank = the ENTSO-E ones present)",
+            "required": False,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "output",
+            "description": "Name of the new column",
+            "required": False,
+            "default": "residual_load_forecast",
+            "kind": "text",
+        },
+    ],
+    "SpikeFlagTransformer": [
+        {
+            "name": "columns",
+            "description": "Columns to flag",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "window",
+            "description": "Previous days in the reference band",
+            "required": False,
+            "default": 28,
+            "kind": "int",
+        },
+        {
+            "name": "k",
+            "description": "Band half-width in scaled MADs",
+            "required": False,
+            "default": 3.0,
+            "kind": "float",
+        },
+        {
+            "name": "min_periods",
+            "description": "Past values needed for a flag (blank = half the window)",
+            "required": False,
+            "default": None,
+            "kind": "int",
+        },
+        {
+            "name": "side",
+            "description": "Which spikes to flag",
+            "required": False,
+            "default": "both",
+            "kind": "select",
+            "choices": ["both", "upper", "lower"],
+        },
+    ],
     "DSTNormalizeTransformer": [
         {
             "name": "freq",
@@ -538,6 +599,8 @@ _TRANSFORMERS = [
     "DSTNormalizeTransformer",
     "DailyProfileTransformer",
     "DailyStatsTransformer",
+    "ResidualLoadTransformer",
+    "SpikeFlagTransformer",
 ]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]
