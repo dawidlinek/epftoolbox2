@@ -188,12 +188,35 @@ class EdaValidator(Validator):
 ```python
 class OLSModel(BaseModel):
     def __init__(self, predictors: List, training_window: int = 365,
-                 name: str = "Model"): ...
+                 name: str = "Model", scaler: ScalerSpec = "standard"): ...
 
 class LassoCVModel(BaseModel):
     def __init__(self, predictors: List, training_window: int = 365,
-                 cv: int = 5, max_iter: int = 10000, name: str = "Model"): ...
+                 cv: int = 5, max_iter: int = 10000, name: str = "Model",
+                 scaler: ScalerSpec = "standard"): ...
 ```
+
+`ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance.
+
+### Scalers
+
+```python
+from epftoolbox2.scalers import StandardScaler, AsinhScaler, NPITScaler, make_scaler, scaler_spec
+
+class StandardScaler(BaseScaler):
+    def __init__(self): ...
+
+class AsinhScaler(BaseScaler):
+    def __init__(self, apply_to: Union[str, List[str]] = "all"): ...
+
+class NPITScaler(BaseScaler):
+    def __init__(self, apply_to: Union[str, List[str]] = "all"): ...
+
+def make_scaler(spec: ScalerSpec = "standard") -> BaseScaler: ...          # fresh instance
+def scaler_spec(spec: ScalerSpec = "standard") -> Union[str, dict]: ...    # validated, YAML-safe form
+```
+
+See [Scalers and VSTs](/epftoolbox2/models/scalers/).
 
 ---
 

@@ -31,6 +31,7 @@ epftoolbox2.verify()
 - **Transformers**: Resample, Timezone conversion, Lag features
 - **Validators**: Null checks, Continuity checks, EDA statistics
 - **Models**: OLS, LassoCV
+- **Scalers**: standardisation (default) or variance-stabilising transformations for spiky prices (asinh, N-PIT), fitted per forecast on training data only
 - **Evaluators**: MAE
 - **Exporters**: Excel with conditional formatting, Terminal output
 - **Caching**: Built-in data caching to avoid redundant API calls
