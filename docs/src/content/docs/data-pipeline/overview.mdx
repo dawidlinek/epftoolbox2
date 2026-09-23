@@ -95,6 +95,12 @@ Without `timezone` (the default), behaviour is unchanged: date strings and keywo
 exclusive, and naive timestamps are UTC.
 
 <Aside type="caution">
+  If any transformer is a `TimezoneTransformer`, its `target_tz` must match `timezone` — a mismatch raises
+  `ValueError` at construction and again at the start of `run()`. `timezone` decides what a local calendar day
+  is; converting to a *different* zone downstream would silently split that day across two local dates.
+</Aside>
+
+<Aside type="caution">
   A forecast-only recipe with `end="today_d+{horizon}"` (e.g. `"today_d+7"`) only fetches the whole last horizon
   day if `timezone` is set — without it, `end` stops at that day's UTC midnight, so the last horizon day gets only
   a few hours of data. Either set `timezone`, or use `"today_d+{horizon + 1}"`. See

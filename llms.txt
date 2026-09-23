@@ -1142,7 +1142,8 @@ class DataPipeline:
         transformers: Optional[List[Transformer]] = None,
         validators: Optional[List[Validator]] = None,        # run on the final (post-transformer) frame
         source_validators: Optional[List[Validator]] = None,  # run on raw source output, before any transformer
-        timezone: Optional[str] = None,   # e.g. "Europe/Warsaw"; makes run() dates mean local calendar days
+        timezone: Optional[str] = None,   # e.g. "Europe/Warsaw"; makes run() dates mean local calendar days;
+                                           # must match any TimezoneTransformer.target_tz in transformers, or raises
         on_invalid: str = "warn",         # "warn" (log and continue) or "raise" (raise DataValidationError)
     ): ...
 
@@ -1176,6 +1177,10 @@ class DataPipeline:
   days (23/25 hours). `end="today_d+7"` then includes all 24 hours of the 7th day ahead — the natural choice for a
   `horizon=7` forecast-only run. Naive timestamps passed to `run()` are read as local instants; timezone-aware
   timestamps are used as given.
+- If any `transformers` entry is a `TimezoneTransformer`, its `target_tz` must equal `timezone` — checked at
+  construction and again at the start of `run()` (so `add_transformer` can't introduce a mismatch unnoticed) —
+  otherwise `DataPipeline.__init__`/`run` raises `ValueError`. `timezone` decides what a local calendar day is;
+  converting to a different zone downstream would silently split that day across two local dates.
 - Two sources producing the same column name raise `ValueError` naming both sources (e.g. give one a `prefix`).
 
 ## ModelPipeline
