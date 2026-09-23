@@ -131,20 +131,19 @@ def sample_xml_with_weekly_resolution():
 
 @pytest.fixture
 def sample_weather_response():
-    """Sample JSON response from Open-Meteo API"""
+    """Sample Previous Runs API response: 3 days of hourly valid times (UTC) from 2024-01-01.
+
+    Values encode 100 * bucket + position (temperature) and bucket + position / 100 (rain), so a wrong offset or
+    direction in the d+i mapping changes the numbers instead of passing silently.
+    """
+    n = 72
     return {
         "hourly": {
-            "time": [
-                "2024-01-01T00:00",
-                "2024-01-01T01:00",
-                "2024-01-01T02:00",
-            ],
-            # Need at least x + (horizon * 24) data points for each timestamp
-            # For 3 timestamps with horizon=2: need at least 3 + (2*24) = 51 items
-            "temperature_2m_previous_day1": [10.0] * 60,
-            "temperature_2m_previous_day2": [11.0] * 60,
-            "rain_previous_day1": [0.0] * 60,
-            "rain_previous_day2": [0.5] * 60,
+            "time": [f"2024-01-{1 + j // 24:02d}T{j % 24:02d}:00" for j in range(n)],
+            "temperature_2m_previous_day1": [100.0 + j for j in range(n)],
+            "temperature_2m_previous_day2": [200.0 + j for j in range(n)],
+            "rain_previous_day1": [1.0 + j / 100 for j in range(n)],
+            "rain_previous_day2": [2.0 + j / 100 for j in range(n)],
         }
     }
 
