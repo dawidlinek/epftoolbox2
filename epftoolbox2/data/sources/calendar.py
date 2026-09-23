@@ -102,6 +102,34 @@ def _sanitise_name(name: str) -> str:
     return re.sub(r"[^0-9a-z]+", "_", ascii_name.lower()).strip("_") or "unnamed"
 
 
+def _grid_step(freq: str) -> pd.Timedelta:
+    """Row spacing of a calendar grid: a divisor of one hour, or whole hours dividing a day."""
+    try:
+        step = pd.Timedelta(to_offset(freq))
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Invalid freq {freq!r}: must be a fixed frequency such as '1h' or '15min'") from e
+    hour, day, zero = pd.Timedelta(hours=1), pd.Timedelta(days=1), pd.Timedelta(0)
+    divides_hour = zero < step <= hour and hour % step == zero
+    whole_hours = step >= hour and step % hour == zero and day % step == zero
+    if not (divides_hour or whole_hours):
+        raise ValueError(f"Invalid freq {freq!r}: must divide one hour (e.g. '15min') or be whole hours dividing a day")
+    return step
+
+
+def _local_grid(start: pd.Timestamp, end: pd.Timestamp, step: pd.Timedelta, timezone: str):
+    """UTC grid over [start, end), its local-time view, and the local date of each row (codes into dates)."""
+    start = pd.Timestamp(start)
+    end = pd.Timestamp(end)
+    start = start.tz_convert("UTC") if start.tzinfo else start.tz_localize("UTC")
+    end = end.tz_convert("UTC") if end.tzinfo else end.tz_localize("UTC")
+    if end <= start:
+        raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
+    index = pd.date_range(start.ceil(step), end, freq=step, inclusive="left")
+    local_index = index.tz_convert(timezone)
+    codes, dates = pd.factorize(local_index.tz_localize(None).normalize())
+    return index, local_index, codes, pd.DatetimeIndex(dates)
+
+
 class CalendarSource(DataSource):
     """Calendar features on a UTC grid, computed from local dates and local wall-clock times.
 
@@ -243,19 +271,7 @@ class CalendarSource(DataSource):
         if self.month not in valid_month:
             raise ValueError(f"Invalid month value: {self.month}. Valid: {valid_month}")
 
-        try:
-            self._step = pd.Timedelta(to_offset(self.freq))
-        except (ValueError, TypeError) as e:
-            raise ValueError(f"Invalid freq {self.freq!r}: must be a fixed frequency such as '1h' or '15min'") from e
-        hour, day = pd.Timedelta(hours=1), pd.Timedelta(days=1)
-        divides_hour = self._step <= hour and hour % self._step == pd.Timedelta(0)
-        whole_hours = (
-            self._step >= hour and self._step % hour == pd.Timedelta(0) and day % self._step == pd.Timedelta(0)
-        )
-        if self._step <= pd.Timedelta(0) or not (divides_hour or whole_hours):
-            raise ValueError(
-                f"Invalid freq {self.freq!r}: must divide one hour (e.g. '15min') or be whole hours dividing a day"
-            )
+        self._step = _grid_step(self.freq)
 
         cls = type(holidays_lib.country_holidays(self.country))
         if self.subdiv is not None:
@@ -289,23 +305,10 @@ class CalendarSource(DataSource):
             return holidays_lib.Sweden(include_sundays=False, **kwargs)
         return holidays_lib.country_holidays(self.country, **kwargs)
 
-    @staticmethod
-    def _to_utc(ts: pd.Timestamp) -> pd.Timestamp:
-        ts = pd.Timestamp(ts)
-        return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
-
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """Rows on the `freq` grid in [start, end), indexed in UTC."""
-        start = self._to_utc(start)
-        end = self._to_utc(end)
-        if end <= start:
-            raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
-
-        index = pd.date_range(start.ceil(self._step), end, freq=self._step, inclusive="left")
-        local_index = index.tz_convert(self.timezone)
         # Features that depend only on the local date are computed once per date and broadcast to its rows.
-        codes, dates = pd.factorize(local_index.tz_localize(None).normalize())
-        local_dates = pd.DatetimeIndex(dates)
+        index, local_index, codes, local_dates = _local_grid(start, end, self._step, self.timezone)
 
         df = pd.DataFrame(index=index)
 
