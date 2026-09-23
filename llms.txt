@@ -228,24 +228,32 @@ Creates lagged features for time series. Positive lags look back (past), negativ
 from epftoolbox2.data.transformers import LagTransformer
 
 transformer = LagTransformer(
-    columns=["load_actual", "price"],  # Required. Column(s) to lag
-    lags=[1, 2, 7],                    # Required. Lag periods. Accepts list, range, or single int
-    freq="day",                        # Required. Unit for lags
+    columns=["load_actual", "price"],  # Column(s) to lag (default: None = all columns)
+    lags=[1, 2, 7],                    # Lag periods (default: 1). Accepts list, range, single int, numpy ints
+    freq="day",                        # Time unit (default: "1h")
 )
 ```
 
 **Frequency options:**
-- `"day"`, `"days"`, `"d"`, `"1D"` → 1 day
-- `"hour"`, `"hours"`, `"h"`, `"1h"` → 1 hour
-- `"minute"`, `"minutes"`, `"min"`, `"1min"` → 1 minute
-- `"second"`, `"seconds"`, `"s"`, `"1s"` → 1 second
+- `"day"`, `"days"`, `"d"`, `"1D"` → 1 local calendar day (whole days such as `"2D"` also count calendar days)
+- `"hour"`, `"hours"`, `"h"`, `"1h"` → 1 hour of elapsed time
+- `"minute"`, `"minutes"`, `"min"`, `"1min"` → 1 minute of elapsed time
+- `"second"`, `"seconds"`, `"s"`, `"1s"` → 1 second of elapsed time
+- other strings that aren't whole days (`"15min"`, `"24h"`) → elapsed time, named in h/min/s
+
+**Day lags follow local calendar days**, not 24-hour offsets: `price_d-1` at 10:00 is 10:00 on the previous local
+date, also across DST switches. The hour skipped in spring gives NaN; both occurrences of the repeated autumn hour
+look back to that hour on the previous day, and the day after the switch looks back to the first occurrence. Run
+`LagTransformer` after `TimezoneTransformer`; with day lags on a UTC index it warns.
 
 **Output column naming:** `{column}_{unit}-{lag}`
 - Example with `freq="day"`, lag=1: `load_actual_d-1`
-- Example with `freq="day"`, lag=-7: `load_actual_d+7` (forward look)
+- Example with `freq="day"`, lag=-7: `load_actual_d+7` (value recorded for D+7; only safe for columns known in advance, e.g. calendar features)
 - Example with `freq="hour"`: `price_h-24`, `price_h-168`
+- Example with `freq="15min"`, lag=96: `price_h-24` (elapsed time is never named `d`)
+- A name that already exists in the frame raises `ValueError` instead of creating a duplicate column.
 
-**Note:** `range(-7, 1)` is accepted and serialized correctly to YAML (converted to list internally).
+**Note:** `range(-7, 1)` is accepted and serialized correctly to YAML (converted to a list of ints). Lag 0 is skipped (no `x_d-0` copy of the column).
 
 ---
 
