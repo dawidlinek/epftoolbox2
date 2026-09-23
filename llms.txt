@@ -202,7 +202,7 @@ source = OpenMeteoWeightedSource(
         {"name": "krakow", "latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
     ],
     source="OpenMeteoSource",    # Optional. "OpenMeteoSource" or "OpenMeteoSingleRunsSource" (default: "OpenMeteoSource")
-    source_params=None,          # Optional. Params for the underlying class above, shared by every location; not latitude/longitude/prefix (default: None)
+    source_params=None,          # Optional. Params for the underlying class above, shared by every location; not latitude/longitude/prefix (default: None). Must include "timezone", which has no default and is otherwise required.
     prefix="pl",                 # Optional. Prefix for the weighted columns (default: "")
     keep_locations=False,        # Optional. Also return each location's own columns (default: False)
 )

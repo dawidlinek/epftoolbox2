@@ -78,7 +78,12 @@ class OpenMeteoWeightedSource(DataSource):
         ...         {"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": 1.86},
         ...         {"name": "krakow", "latitude": 50.06, "longitude": 19.94, "weight": 0.80},
         ...     ],
-        ...     source_params={"model": "icon_seamless", "horizon": 5, "columns": ["temperature_2m"]},
+        ...     source_params={
+        ...         "model": "icon_seamless",
+        ...         "horizon": 5,
+        ...         "columns": ["temperature_2m"],
+        ...         "timezone": "Europe/Warsaw",
+        ...     },
         ...     prefix="pl",
         ... )
     """
@@ -100,7 +105,8 @@ class OpenMeteoWeightedSource(DataSource):
                 "name:lat:lon:weight, ...". Names become column prefixes with ``keep_locations``.
             source: "OpenMeteoSource" (Previous Runs API) or "OpenMeteoSingleRunsSource" (Single Runs API)
             source_params: Parameters for the underlying source, shared by all locations (anything but latitude,
-                longitude and prefix), e.g. {"model": "icon_seamless", "horizon": 5, "derived": ["hdd"]}.
+                longitude and prefix), e.g. {"model": "icon_seamless", "horizon": 5, "derived": ["hdd"]}. Must
+                include "timezone": the underlying source has no default for it and raises without it.
             prefix: Prefix for the weighted columns
             keep_locations: Also return each location's columns as ``{prefix}_{name}_{variable}_d+{i}``
         """
@@ -136,8 +142,17 @@ class OpenMeteoWeightedSource(DataSource):
         weights = np.array([loc["weight"] for loc in self._locations], dtype=float)
         return weights / weights.sum()
 
+    def _now(self) -> pd.Timestamp:
+        return pd.Timestamp.now(tz="UTC")
+
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """Fetch every location with the underlying source and return the weighted columns for [start, end)."""
+        # Resolve "now" once and pin every location's source to it, so a live fetch can't have some locations
+        # settle rows as final and others as still-provisional depending on how long earlier locations took.
+        now = self._now()
+        for source in self._sources:
+            source._now = lambda now=now: now
+
         frames = []
         for location, source in zip(self._locations, self._sources):
             self.logger.info(f"Open-Meteo weighted: location {location['name']} (weight {location['weight']})")

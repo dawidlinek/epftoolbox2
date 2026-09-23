@@ -24,7 +24,12 @@ source = OpenMeteoWeightedSource(
         {"name": "krakow", "latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
         {"name": "gdansk", "latitude": 54.3520, "longitude": 18.6466, "weight": 0.47},
     ],
-    source_params={"model": "icon_seamless", "horizon": 5, "columns": ["temperature_2m", "wind_speed_10m"]},
+    source_params={
+        "model": "icon_seamless",
+        "horizon": 5,
+        "columns": ["temperature_2m", "wind_speed_10m"],
+        "timezone": "Europe/Warsaw",  # required, shared by every location
+    },
     prefix="pl",
 )
 
@@ -39,7 +44,7 @@ df = source.fetch(start="2024-01-01", end="2024-06-01")
 |-----------|------|----------|---------|-------------|
 | `locations` | List[dict] \| str | Yes | - | `[{"name", "latitude", "longitude", "weight"}, ...]` or the compact string form. Names must use letters, digits and underscores, and be unique; weights must be positive numbers. |
 | `source` | str | No | `"OpenMeteoSource"` | `"OpenMeteoSource"` (Previous Runs API) or `"OpenMeteoSingleRunsSource"` (Single Runs API) |
-| `source_params` | dict \| None | No | `None` | Parameters for the underlying source, shared by every location — anything but `latitude`, `longitude` and `prefix`, which come from `locations` |
+| `source_params` | dict \| None | No | `None` | Parameters for the underlying source, shared by every location — anything but `latitude`, `longitude` and `prefix`, which come from `locations`. Must include `timezone`: it has no default on the underlying source, so omitting it raises. |
 | `prefix` | str | No | `""` | Prefix for the weighted columns |
 | `keep_locations` | bool | No | `False` | Also return each location's own columns as `{prefix}_{name}_{variable}_d+{i}` |
 

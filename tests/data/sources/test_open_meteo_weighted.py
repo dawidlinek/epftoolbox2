@@ -289,6 +289,34 @@ class TestKeepLocations:
         assert list(df.columns) == ["temperature_2m_d+1"]
 
 
+class TestSharedNow:
+    def test_every_location_fetches_against_the_same_now(self):
+        # Fetching locations one after another can let wall-clock time advance between them; if each location
+        # resolved "now" independently, live rows near the issue-time boundary could end up on different sides
+        # of it for different locations, mixing vintages within what should be one consistent row.
+        source = make_source()
+        seen_now = []
+        for underlying in source._sources:
+
+            def fake_fetch(start, end, _underlying=underlying):
+                seen_now.append(_underlying._now())
+                return pd.DataFrame()
+
+            underlying.fetch = fake_fetch
+
+        ticks = iter(
+            [
+                pd.Timestamp("2024-01-11 08:00", tz="UTC"),
+                pd.Timestamp("2024-01-11 09:00", tz="UTC"),
+                pd.Timestamp("2024-01-11 10:00", tz="UTC"),
+            ]
+        )
+        source._now = lambda: next(ticks)
+        source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
+        assert len(seen_now) == len(source._sources)
+        assert len(set(seen_now)) == 1, f"locations used different 'now' values: {seen_now}"
+
+
 # ---------------------------------------------------------------------------
 # Cache config and serialization
 # ---------------------------------------------------------------------------
