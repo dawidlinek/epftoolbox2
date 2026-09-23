@@ -218,9 +218,9 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
     "ContinuityValidator": [
         {
             "name": "freq",
-            "description": "Expected frequency (e.g. 1h)",
+            "description": "Expected frequency (e.g. 15min, 1h; blank = infer from the data)",
             "required": False,
-            "default": "1h",
+            "default": None,
             "kind": "text",
         },
     ],
