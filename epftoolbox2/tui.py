@@ -215,6 +215,22 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {"name": "freq", "description": "Frequency (e.g. 1h, day)", "required": False, "default": "1h", "kind": "text"},
     ],
+    "DSTNormalizeTransformer": [
+        {
+            "name": "freq",
+            "description": "Slot length of the data (1h = 24 slots a day, 15min = 96)",
+            "required": False,
+            "default": "1h",
+            "kind": "text",
+        },
+        {
+            "name": "tz",
+            "description": "Convert to this IANA timezone first (blank = index is already local)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+    ],
     "ContinuityValidator": [
         {
             "name": "freq",
@@ -481,7 +497,7 @@ def _instantiate(class_name: str, params: dict) -> Any:
 # ---------------------------------------------------------------------------
 
 _SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
-_TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer"]
+_TRANSFORMERS = ["TimezoneTransformer", "ResampleTransformer", "LagTransformer", "DSTNormalizeTransformer"]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator"]
