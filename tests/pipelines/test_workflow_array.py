@@ -136,3 +136,34 @@ def test_epf_report_command(tmp_path, experiment, capsys):
     args = cli.build_parser().parse_args(["report", str(experiment())])
     cli.cmd_report(args)
     assert (tmp_path / "results.csv").exists()
+
+
+def test_manifest_flags_round_trip_through_workflow_yaml(tmp_path, experiment):
+    wf = Workflow.load(experiment())
+    assert wf.model_allow_manifest_mismatch is False
+    assert wf.model_require_manifest is False
+
+    wf.model_allow_manifest_mismatch = True
+    wf.model_require_manifest = True
+    wf.save(tmp_path / "copy.yaml")
+    saved = yaml.safe_load((tmp_path / "copy.yaml").read_text())["model_pipeline"]
+    assert saved["allow_manifest_mismatch"] is True
+    assert saved["require_manifest"] is True
+
+    reloaded = Workflow.load(tmp_path / "copy.yaml")
+    assert reloaded.model_allow_manifest_mismatch is True
+    assert reloaded.model_require_manifest is True
+
+
+def test_array_task_refuses_to_resume_a_model_with_changed_predictors(tmp_path, experiment):
+    from epftoolbox2.results.manifest import ManifestMismatchError
+
+    Workflow.load(experiment(model_index=0)).run()  # writes results/ols.jsonl and its manifest
+
+    path = experiment(model_index=0)
+    config = yaml.safe_load(path.read_text())
+    config["model_pipeline"]["models"][0]["params"]["predictors"] = ["price_d-1"]
+    path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ManifestMismatchError, match="predictors"):
+        Workflow.load(path).run()

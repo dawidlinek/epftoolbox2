@@ -1,9 +1,11 @@
+import json
 import pytest
 import pandas as pd
 import numpy as np
 import tempfile
 from pathlib import Path
 from epftoolbox2.models import OLSModel, LassoCVModel
+from epftoolbox2.results import ResultStore
 
 
 class TestModels:
@@ -161,6 +163,139 @@ class TestModels:
             assert results1.count == results2.count
         finally:
             Path(temp_path).unlink(missing_ok=True)
+
+    def test_manifest_written_next_to_results(self, sample_data, tmp_path):
+        from epftoolbox2.results.manifest import Manifest, manifest_path
+
+        save_to = tmp_path / "ols.jsonl"
+        model = OLSModel(predictors=["load"], training_window=30, name="OLS")
+        model.run(
+            data=sample_data,
+            test_start="2023-12-01",
+            test_end="2023-12-01",
+            target="price",
+            horizon=1,
+            save_to=str(save_to),
+        )
+
+        manifest = Manifest.from_dict(json.loads(manifest_path(save_to).read_text()))
+        assert manifest.predictors == ["load"]
+        assert manifest.target == "price"
+        assert manifest.horizon == 1
+        assert manifest.training_window == 30
+        assert manifest.model_class == "OLSModel"
+        assert manifest.package_version  # recorded, not asserted to a specific value
+
+    def test_resume_raises_on_manifest_mismatch(self, sample_data, tmp_path):
+        from epftoolbox2.results.manifest import ManifestMismatchError
+
+        save_to = str(tmp_path / "ols.jsonl")
+        OLSModel(predictors=["load"], training_window=30, name="OLS").run(
+            data=sample_data,
+            test_start="2023-12-01",
+            test_end="2023-12-01",
+            target="price",
+            horizon=1,
+            save_to=save_to,
+        )
+
+        # Same file, different predictors: the existing results no longer describe what this run would fit.
+        changed = OLSModel(predictors=["load", "temperature"], training_window=30, name="OLS")
+        with pytest.raises(ManifestMismatchError, match="predictors"):
+            changed.run(
+                data=sample_data,
+                test_start="2023-12-01",
+                test_end="2023-12-01",
+                target="price",
+                horizon=1,
+                save_to=save_to,
+            )
+
+    def test_allow_manifest_mismatch_overwrites_and_resumes(self, sample_data, tmp_path):
+        save_to = str(tmp_path / "ols.jsonl")
+        OLSModel(predictors=["load"], training_window=30, name="OLS").run(
+            data=sample_data,
+            test_start="2023-12-01",
+            test_end="2023-12-01",
+            target="price",
+            horizon=1,
+            save_to=save_to,
+        )
+
+        changed = OLSModel(predictors=["load", "temperature"], training_window=30, name="OLS")
+        ref = changed.run(
+            data=sample_data,
+            test_start="2023-12-01",
+            test_end="2023-12-01",
+            target="price",
+            horizon=1,
+            save_to=save_to,
+            allow_manifest_mismatch=True,
+        )
+        assert ref.produced == ref.count
+
+        from epftoolbox2.results.manifest import Manifest, manifest_path
+
+        manifest = Manifest.from_dict(json.loads(manifest_path(Path(save_to)).read_text()))
+        assert manifest.predictors == ["load", "temperature"]
+
+    def test_missing_manifest_warns_by_default_and_can_be_required(self, sample_data, tmp_path):
+        from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path
+
+        save_to = tmp_path / "ols.jsonl"
+        save_to.write_text('{"run_date": "2023-12-01", "hour": 0, "horizon": 1, "day_in_test": 0}\n')
+        model = OLSModel(predictors=["load"], training_window=30, name="OLS")
+
+        # Default: an old results file with no manifest is accepted, and a manifest is now written for it.
+        assert not manifest_path(save_to).exists()
+        model.run(
+            data=sample_data,
+            test_start="2023-12-01",
+            test_end="2023-12-01",
+            target="price",
+            horizon=1,
+            save_to=str(save_to),
+        )
+        assert manifest_path(save_to).exists()
+        manifest_path(save_to).unlink()  # back to "results with no manifest" for the strict check below
+
+        with pytest.raises(ManifestMismatchError, match="no manifest"):
+            model.run(
+                data=sample_data,
+                test_start="2023-12-01",
+                test_end="2023-12-01",
+                target="price",
+                horizon=1,
+                save_to=str(save_to),
+                require_manifest=True,
+            )
+
+    def test_resume_key_uses_run_date_not_the_test_start_offset(self, sample_data, tmp_path):
+        """Changing test_start must not make an old file's day_in_test=0 look done for a different date."""
+        save_to = str(tmp_path / "ols.jsonl")
+        model = OLSModel(predictors=["load"], training_window=30, name="OLS")
+        model.run(
+            data=sample_data,
+            test_start="2023-12-01",
+            test_end="2023-12-01",
+            target="price",
+            horizon=1,
+            save_to=save_to,
+        )
+
+        ref = model.run(
+            data=sample_data,
+            test_start="2023-12-02",
+            test_end="2023-12-02",
+            target="price",
+            horizon=1,
+            save_to=save_to,
+        )
+        # 2023-12-02 has no result yet under the old run, so it must be (re)computed, not skipped as "done".
+        assert ref.produced == ref.count
+
+        dates = {r["run_date"] for r in ResultStore(save_to, test_start="2023-12-01").load_all()}
+        assert dates == {"2023-12-01", "2023-12-02"}
 
     def test_multi_horizon(self, sample_data):
         model = OLSModel(
