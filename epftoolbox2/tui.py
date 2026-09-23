@@ -180,6 +180,20 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        {
+            "name": "daily_columns",
+            "description": "Columns with one value per day, moved to local midnight (none = ENTSO-E daily min/max)",
+            "required": False,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "daily_anchor",
+            "description": "Zone whose calendar date a daily value belongs to (UTC offset or IANA name)",
+            "required": False,
+            "default": "UTC+02:00",
+            "kind": "text",
+        },
     ],
     "ResampleTransformer": [
         {
@@ -190,12 +204,20 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
         {
-            "name": "method",
-            "description": "Interpolation method",
+            "name": "agg",
+            "description": "Aggregation when downsampling",
             "required": False,
-            "default": "linear",
+            "default": "mean",
             "kind": "select",
-            "choices": ["linear", "ffill", "bfill"],
+            "choices": ["mean", "sum", "first", "last", "min", "max", "median"],
+        },
+        {
+            "name": "fill",
+            "description": "Upsampled slots: repeat the value within its own period, or leave empty",
+            "required": False,
+            "default": "ffill",
+            "kind": "select",
+            "choices": ["ffill", "none"],
         },
     ],
     "LagTransformer": [
