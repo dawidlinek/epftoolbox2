@@ -124,7 +124,7 @@ source = OpenMeteoSource(
 
 **Horizon limit:** the API serves previous_day1..7 only. With the default settings the largest horizon is 5 (6 for `icon_seamless`/`gfs_seamless` with `publication_delay_h=4`); a larger one raises `ValueError`.
 
-**Returned rows:** exactly `[start, end)`, UTC index. Rows whose issue time is still in the future use runs published by now (provisional); trailing rows without any value are not returned. Missing values per column are logged with their share and first valid timestamp; `strict=True` raises.
+**Returned rows:** exactly `[start, end)`, UTC index. Rows whose issue time is still in the future use runs published by now (provisional); trailing rows without any value are not returned. Missing values per column are logged with their share, the timestamp the column is complete from, and the missing share by local hour when it's uneven across hours; `strict=True` raises.
 
 **Model notes:** `jma_seamless` (default) is JMA GSM over Europe: ~55 km, stored 6-hourly, archive from 2018 (at Warsaw only d+1/d+2 before 2021). `ecmwf_ifs025` from 2024-02-04, `icon_seamless` from 2024-01-19 (sub-models mixed by lead), `ecmwf_ifs` from 2025-10-01. `rain`, `showers`, `snowfall`, `precipitation` and radiation are preceding-hour values.
 

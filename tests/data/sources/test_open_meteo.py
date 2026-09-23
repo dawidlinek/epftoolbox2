@@ -361,13 +361,43 @@ class TestReturnedRange:
         assert df.index.max() < pd.Timestamp("2024-01-15", tz="UTC")
         assert (from_hours(df["temperature_2m_d+1"].dropna()) <= latest_run).all()
 
-    def test_warns_about_missing_values_with_share_and_first_valid(self, caplog):
+    def test_warns_about_missing_values_with_share_and_complete_from(self, caplog):
         source = make_source(make_archive(null_columns=("wind_speed_10m",)), horizon=1)
         with caplog.at_level(logging.WARNING, logger="epftoolbox2.data.sources.open_meteo"):
             source.logger.propagate = True
             source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-12", tz="UTC"))
         assert "wind_speed_10m_d+1" in caplog.text
         assert "100.0%" in caplog.text
+        assert "complete from None" in caplog.text  # never becomes complete in this window
+        assert "temperature_2m_d+1:" not in caplog.text
+
+    def test_warns_with_missing_share_by_local_hour_when_uneven(self, caplog):
+        # Some columns are complete for most local hours but missing for a few, the way JMA's previous_day5-7 are
+        # missing before 2021 only for the hours that need that bucket. The overall share hides this.
+        def get(url, params=None, timeout=None):
+            times = pd.date_range(params["start_date"], params["end_date"] + " 23:00", freq="1h", tz="UTC")
+            local_hour = times.tz_convert(TZ).hour
+            hourly = {"time": [t.strftime("%Y-%m-%dT%H:%M") for t in times]}
+            for key in params["hourly"]:
+                column, _ = key.rsplit("_previous_day", 1)
+                if column == "wind_speed_10m":
+                    values = [None if h in (22, 23) else float(_hours(t)) for h, t in zip(local_hour, times)]
+                else:
+                    values = [float(_hours(t)) for t in times]
+                hourly[key] = values
+            response = Mock()
+            response.status_code = 200
+            response.json.return_value = {"hourly": hourly}
+            return response
+
+        source = make_source(get, model="icon_seamless", horizon=1)
+        with caplog.at_level(logging.WARNING, logger="epftoolbox2.data.sources.open_meteo"):
+            source.logger.propagate = True
+            source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-12", tz="UTC"))
+        assert "wind_speed_10m_d+1" in caplog.text
+        assert "missing share by local hour" in caplog.text
+        assert "22h 100%" in caplog.text
+        assert "23h 100%" in caplog.text
         assert "temperature_2m_d+1:" not in caplog.text
 
     def test_strict_raises_on_missing_values(self):
@@ -394,6 +424,44 @@ class TestStoredStepHours:
         assert stored_step_hours("ecmwf_ifs04", 1) == 3
         assert stored_step_hours("ecmwf_ifs04", 6) == 6
         assert stored_step_hours("ecmwf_ifs", 1) == 1
+
+
+class TestCoverageHelpers:
+    def test_first_complete_timestamp_is_one_step_past_the_last_missing_row(self):
+        idx = pd.date_range("2024-01-01", periods=5, freq="1h", tz="UTC")
+        series = pd.Series([1.0, np.nan, np.nan, 4.0, 5.0], index=idx)
+        assert OpenMeteoSource._first_complete_timestamp(series, dropped_final=0) == idx[3]
+
+    def test_first_complete_timestamp_is_the_start_when_never_missing(self):
+        idx = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
+        series = pd.Series([1.0, 2.0, 3.0], index=idx)
+        assert OpenMeteoSource._first_complete_timestamp(series, dropped_final=0) == idx[0]
+
+    def test_first_complete_timestamp_is_none_when_the_last_row_is_missing(self):
+        idx = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
+        series = pd.Series([1.0, 2.0, np.nan], index=idx)
+        assert OpenMeteoSource._first_complete_timestamp(series, dropped_final=0) is None
+
+    def test_first_complete_timestamp_is_none_when_rows_were_dropped_at_the_tail(self):
+        # dropped_final rows are all-NaN by construction (see _drop_unfilled_tail), so the column can't be
+        # complete beyond the returned data even though every returned row happens to be filled.
+        idx = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
+        series = pd.Series([1.0, 2.0, 3.0], index=idx)
+        assert OpenMeteoSource._first_complete_timestamp(series, dropped_final=2) is None
+
+    def test_hourly_missing_share_is_none_when_even_across_hours(self):
+        idx = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+        series = pd.Series([np.nan, np.nan, np.nan, np.nan], index=idx)
+        hours = pd.Index([0, 1, 0, 1])
+        assert OpenMeteoSource._hourly_missing_share(series, hours) is None
+
+    def test_hourly_missing_share_reports_uneven_hours(self):
+        idx = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+        series = pd.Series([np.nan, 1.0, np.nan, np.nan], index=idx)
+        hours = pd.Index([0, 1, 0, 1])
+        share = OpenMeteoSource._hourly_missing_share(series, hours)
+        assert share[0] == 1.0
+        assert share[1] == 0.5
 
 
 # ---------------------------------------------------------------------------

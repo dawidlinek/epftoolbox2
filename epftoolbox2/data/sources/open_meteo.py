@@ -563,26 +563,39 @@ class OpenMeteoSource(DataSource):
         return result.iloc[:keep], final[:keep], dropped_final
 
     def _report_coverage(self, result: pd.DataFrame, final: np.ndarray, dropped_final: int):
-        """Log the share of missing values and first valid timestamp per column; raise under `strict`.
+        """Log per-column coverage and raise under `strict`.
 
-        Only final rows count: provisional rows (issue time in the future) are expected to be incomplete. Final rows
-        dropped because they had no value at all count as missing.
+        Only final rows count: provisional rows (issue time in the future) are expected to be incomplete. Final
+        rows dropped because they had no value at all (`_drop_unfilled_tail`) count as missing but, having no
+        timestamp, aren't part of the per-hour breakdown below.
+
+        For each incomplete column this reports the timestamp the column is complete *from* (one step past its
+        last missing row), not the first non-null value: a column whose coverage is restricted to some local
+        hours can have an early first valid value while other hours of the same day stay NaN for years (this is
+        exactly how JMA's `previous_day5`-`7` behave: missing for 2018-2020, but only for the hours that need
+        that bucket). It also reports the missing share by local hour whenever it differs across hours, since the
+        overall share hides which hours are affected.
         """
         final_rows = result[final]
         total = len(final_rows) + dropped_final
         if total == 0:
             return
         missing = (final_rows.isna().sum() + dropped_final) / total
-        first_valid = {column: final_rows[column].first_valid_index() for column in result.columns}
-        for column, share in missing.items():
-            self.logger.debug(f"{self._label}: {column}: {share:.1%} missing, first valid {first_valid[column]}")
         incomplete = missing[missing > 0]
         if incomplete.empty:
             return
-        lines = [
-            f"  {column}: {share:.1%} missing, first valid {first_valid[column]}"
-            for column, share in incomplete.items()
-        ]
+
+        local_hour = final_rows.index.tz_convert(self.timezone).hour
+        lines = []
+        for column, share in incomplete.items():
+            complete_from = self._first_complete_timestamp(final_rows[column], dropped_final)
+            line = f"  {column}: {share:.1%} missing, complete from {complete_from}"
+            hourly = self._hourly_missing_share(final_rows[column], local_hour)
+            if hourly is not None:
+                by_hour = ", ".join(f"{hour:02d}h {hour_share:.0%}" for hour, hour_share in hourly.items())
+                line += f"; missing share by local hour: {by_hour}"
+            lines.append(line)
+
         message = (
             f"{self._label} model={self.model!r}: {len(incomplete)} of {len(missing)} columns have missing values "
             f"in {total} rows whose issue time has passed:\n" + "\n".join(lines)
@@ -590,6 +603,31 @@ class OpenMeteoSource(DataSource):
         if self.strict:
             raise ValueError(message)
         self.logger.warning(message)
+
+    @staticmethod
+    def _first_complete_timestamp(series: pd.Series, dropped_final: int) -> Optional[pd.Timestamp]:
+        """Timestamp right after `series`'s last missing row, or None if it is still missing at the end.
+
+        Rows dropped for having no value in any column follow the end of `series` and are always missing, so a
+        positive `dropped_final` means the column never becomes complete within the fetched range.
+        """
+        if dropped_final > 0 or len(series) == 0:
+            return None
+        na = series.isna().to_numpy()
+        if not na.any():
+            return series.index[0]
+        last_na = int(np.flatnonzero(na)[-1])
+        return series.index[last_na + 1] if last_na + 1 < len(series) else None
+
+    @staticmethod
+    def _hourly_missing_share(series: pd.Series, local_hour: pd.Index) -> Optional[pd.Series]:
+        """Missing share of `series` grouped by `local_hour`, or None when every hour has the same share."""
+        if len(series) == 0:
+            return None
+        share = series.isna().groupby(local_hour).mean().sort_index()
+        if np.isclose(share.max(), share.min()):
+            return None
+        return share
 
     def get_cache_config(self) -> dict:
         config = {
