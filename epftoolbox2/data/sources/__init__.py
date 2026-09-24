@@ -8,7 +8,6 @@ from .open_meteo_weighted import OpenMeteoWeightedSource
 from .csv import CsvSource
 from .calendar import CalendarSource
 from .school_holidays import SchoolHolidaysSource
-from .pse import PseSource
 from .settlement import SettlementPriceSource
 from .benchmark import EpftoolboxBenchmarkSource
 
@@ -21,7 +20,6 @@ __all__ = [
     "CsvSource",
     "CalendarSource",
     "SchoolHolidaysSource",
-    "PseSource",
     "SettlementPriceSource",
     "EpftoolboxBenchmarkSource",
 ]

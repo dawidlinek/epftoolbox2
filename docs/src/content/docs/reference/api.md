@@ -196,12 +196,6 @@ class CsvSource(DataSource):
                  timezone: str = "UTC"): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 
-class PseSource(DataSource):
-    def __init__(self, series: List[str], issue_time: Optional[str] = "11:30",
-                 lags: Union[int, List[int]] = 0, as_of: str = "publication",
-                 timezone: str = "Europe/Warsaw", freq: str = "1h", prefix: str = "pse"): ...
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
-
 class SettlementPriceSource(DataSource):
     def __init__(self, file_path: Union[str, List[str]], columns: Union[List[str], Dict[str, str]],
                  timezone: str, issue_time: str = "11:30", close_time: str = "23:59",

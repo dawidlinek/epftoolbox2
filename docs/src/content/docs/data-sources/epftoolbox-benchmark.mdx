@@ -68,7 +68,7 @@ What this means:
 
 - Convert with `TimezoneTransformer(target_tz=source.index_timezone)`. You get the file's wall-clock labels back, 24 rows on every day.
 - On this index a day is always 24 hours, so `LagTransformer(freq="day")` and `ModelPipeline`'s calendar-day targets agree. The DST lag problem of real-time indices doesn't arise.
-- In summer, the UTC timestamps are one hour off the true instants: they are labels for the wall clock. Don't combine this source with sources on real time (`EntsoeSource`, `OpenMeteoSource`, `PseSource`); they would be misaligned by an hour for half of each year. `CalendarSource(..., timezone=source.index_timezone)` is fine for weekday and holiday features.
+- In summer, the UTC timestamps are one hour off the true instants: they are labels for the wall clock. Don't combine this source with sources on real time (`EntsoeSource`, `OpenMeteoSource`); they would be misaligned by an hour for half of each year. `CalendarSource(..., timezone=source.index_timezone)` is fine for weekday and holiday features.
 - Don't convert to `Europe/Berlin` or another DST zone: summer hours would shift by one and some would move to the neighbouring day.
 - DST days hold synthetic values (the interpolated and the averaged hour), exactly as in the paper's evaluation.
 
