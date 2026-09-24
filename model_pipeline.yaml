@@ -50,6 +50,6 @@ exporters:
     - target_weekday_horizon
     - details
 information_set:
-  issue_time: '12:30'
+  issue_time: '11:30'
   issue_timezone: Europe/Warsaw
   unknown: raise

@@ -86,10 +86,10 @@ if __name__ == "__main__":
         lambda h: f"warsaw_temperature_2m_d+{h}",
     ]
 
-    # issue_time is 30 min after the 12:00 CET day-ahead gate closure. with_source_rules() teaches the check
+    # issue_time is 30 min before the 12:00 CET day-ahead gate closure. with_source_rules() teaches the check
     # that "warsaw_temperature_2m" is an Open-Meteo issue-time vintage column (see docs/model-pipeline/
     # information-set); Workflow does this automatically, but a standalone ModelPipeline needs it spelled out.
-    information_set = InformationSet("12:30", "Europe/Warsaw").with_source_rules(data_pipeline.sources)
+    information_set = InformationSet("11:30", "Europe/Warsaw").with_source_rules(data_pipeline.sources)
 
     model_pipeline = (
         ModelPipeline(information_set=information_set)
