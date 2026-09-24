@@ -11,6 +11,7 @@ import requests
 from rich.console import Console
 
 from epftoolbox2.logging import get_logger
+from .._market_timezone import resolve as _resolve_timezone
 from .base import DataSource
 
 _ISSUE_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
@@ -130,6 +131,27 @@ class OpenMeteoBase(DataSource):
     BACKOFF_CAP_S = 60.0
     REQUEST_TIMEOUT_S = 60
 
+    # Set by DataPipeline._bind_component_timezones() when `timezone` is left unset; never written by users.
+    _pipeline_timezone: Optional[str] = None
+
+    @property
+    def market_timezone(self) -> Optional[str]:
+        """Resolved zone: `timezone` if set, else the one a `DataPipeline` inherited it from (`None` if neither)."""
+        return _resolve_timezone(self.timezone, self)
+
+    def _require_market_timezone(self) -> str:
+        zone = self.market_timezone
+        if zone is not None:
+            return zone
+        raise ValueError(
+            "timezone is required: set it to your market's zone, e.g. 'Europe/Warsaw' for PL, 'Europe/London' "
+            "for GB, 'Europe/Berlin' for DE — either directly on this source, or once via "
+            "DataPipeline(timezone=...). It defines the local day and the issue time used to pick a leak-free "
+            "forecast vintage; a market outside CET that left it unset used to silently fall back to "
+            "Europe/Warsaw, computing the issue time in the wrong zone (e.g. London 23:00 on D became 10:00 on "
+            "D+1)."
+        )
+
     def _setup(self):
         self.session = requests.Session()
         self._configure_proxy()
@@ -176,19 +198,13 @@ class OpenMeteoBase(DataSource):
         if not self.columns or not all(isinstance(c, str) and c for c in self.columns):
             raise ValueError("At least one weather column must be specified")
 
-        if self.timezone is None:
-            raise ValueError(
-                "timezone is required: set it to your market's zone, e.g. 'Europe/Warsaw' for PL, "
-                "'Europe/London' for GB, 'Europe/Berlin' for DE. It defines the local day and the issue time used "
-                "to pick a leak-free forecast vintage; a market outside CET that left it unset used to silently "
-                "fall back to Europe/Warsaw, computing the issue time in the wrong zone (e.g. London 23:00 on D "
-                "became 10:00 on D+1)."
-            )
-
-        try:
-            ZoneInfo(self.timezone)
-        except (KeyError, ValueError, TypeError):
-            raise ValueError(f"Invalid timezone: {self.timezone!r}")
+        # `timezone` may be left unset here and inherited from DataPipeline.timezone instead (see
+        # `market_timezone`); `_require_market_timezone()` raises once a concrete zone is actually needed.
+        if self.timezone is not None:
+            try:
+                ZoneInfo(self.timezone)
+            except (KeyError, ValueError, TypeError):
+                raise ValueError(f"Invalid timezone: {self.timezone!r}")
 
         parse_issue_time(self.issue_time)
 
@@ -256,7 +272,7 @@ class OpenMeteoBase(DataSource):
         Rows whose issue time is still in the future (live runs) get "now" instead: they use the runs published so
         far, are provisional and change when fetched again later.
         """
-        issue = local_issue_times(rows, self.timezone, self.issue_time)
+        issue = local_issue_times(rows, self._require_market_timezone(), self.issue_time)
         now = self._now()
         final = np.asarray(issue <= now)
         if not final.all():
@@ -312,7 +328,7 @@ class OpenMeteoBase(DataSource):
         if incomplete.empty:
             return
 
-        local_hour = final_rows.index.tz_convert(self.timezone).hour
+        local_hour = final_rows.index.tz_convert(self._require_market_timezone()).hour
         lines = []
         for column, share in incomplete.items():
             complete_from = self._first_complete_timestamp(final_rows[column], dropped_final)
@@ -364,7 +380,7 @@ class OpenMeteoBase(DataSource):
             "model": self.model,
             "columns": sorted(self.columns),
             "prefix": self.prefix,
-            "timezone": self.timezone,
+            "timezone": self._require_market_timezone(),
             "issue_time": self.issue_time,
             "publication_delay_h": self.publication_delay_h,
         }

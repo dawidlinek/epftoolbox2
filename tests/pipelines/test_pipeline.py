@@ -862,7 +862,18 @@ class TestDateSemantics:
         from epftoolbox2.data.sources import CalendarSource
 
         with pytest.raises(ValueError, match="America/New_York.*Europe/Warsaw|Europe/Warsaw.*America/New_York"):
-            DataPipeline(sources=[CalendarSource(country="PL")], timezone="America/New_York")
+            DataPipeline(sources=[CalendarSource(country="PL", timezone="Europe/Warsaw")], timezone="America/New_York")
+
+    def test_calendar_source_without_explicit_timezone_inherits_the_pipeline_s(self):
+        """CalendarSource(timezone=None) doesn't fall back to the country's own zone once a DataPipeline gives
+        it one: DataPipeline.timezone is the single place the market zone needs to be written."""
+        from epftoolbox2.data.sources import CalendarSource
+
+        source = CalendarSource(country="PL")
+        assert source.timezone is None
+        pipeline = DataPipeline(sources=[source], timezone="America/New_York")
+        assert pipeline.timezone == "America/New_York"
+        assert source.market_timezone == "America/New_York"
 
     def test_timezone_matching_open_meteo_source_is_allowed(self):
         from epftoolbox2.data.sources import OpenMeteoSource

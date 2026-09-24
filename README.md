@@ -126,11 +126,13 @@ from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransform
 from epftoolbox2.data.validators import NullCheckValidator
 
 pipeline = (
+    # timezone is the single place the market zone needs to be written: sources/transformers below that
+    # compute their own local time inherit it and leave their own timezone/target_tz unset.
     DataPipeline(timezone="Europe/Warsaw")  # optional: dates below then mean local calendar days
     .add_source(EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"]))
-    .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw"))
+    .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
     .add_source(CalendarSource("PL", holidays="binary", weekday="onehot", daylight=True))
-    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+    .add_transformer(TimezoneTransformer())
     .add_transformer(ResampleTransformer(freq="1h"))
     # load_actual is only known for D once D is over; never offer its same-day (unlagged) value.
     .add_transformer(LagTransformer(columns=["load_actual"], lags=[1], freq="day"))

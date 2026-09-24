@@ -45,11 +45,12 @@ if __name__ == "__main__":
         .add_source(EntsoeSource(country_code="DE", api_key=ENTSOE_API_KEY, type=["load", "price"], prefer_15min=True))
         .add_source(
             # jma_seamless (default model) is only leak-free up to 5 days ahead at the default issue_time/
-            # publication_delay_h; a longer horizon needs a different model or publication_delay_h.
-            OpenMeteoSource(latitude=52.5200, longitude=13.4050, horizon=5, prefix="berlin", timezone="Europe/Berlin")
+            # publication_delay_h; a longer horizon needs a different model or publication_delay_h. timezone is
+            # left unset: it inherits DataPipeline(timezone=...) above.
+            OpenMeteoSource(latitude=52.5200, longitude=13.4050, horizon=5, prefix="berlin")
         )
         .add_source(CalendarSource(country="DE", holidays="binary", weekday="onehot", daylight=True, freq="15min"))
-        .add_transformer(TimezoneTransformer(target_tz="Europe/Berlin"))
+        .add_transformer(TimezoneTransformer())
         # Hourly values become a step over their four quarter-hours; daily min/max cover their local day
         .add_transformer(ResampleTransformer(freq="15min"))
         # load_actual is only known for D once D is over; never offer its same-day (unlagged) value —

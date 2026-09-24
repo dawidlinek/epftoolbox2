@@ -14,6 +14,9 @@ class DataPipeline:
         sources: Optional[List[DataSource]] = None,
         transformers: Optional[List[Transformer]] = None,
         validators: Optional[List[Validator]] = None,
+        source_validators: Optional[List[Validator]] = None,
+        timezone: Optional[str] = None,  # the single place the market zone needs to be written; see Data Sources
+        on_invalid: str = "warn",  # "warn" or "raise"
     ): ...
 
     def add_source(self, source: DataSource) -> "DataPipeline": ...
@@ -143,7 +146,7 @@ class OpenMeteoSource(DataSource):
                  model: str = "jma_seamless", columns: Optional[List[str]] = None,
                  prefix: str = "", proxy_url: Optional[str] = None,
                  temporal_resolution: Optional[str] = None,
-                 timezone: str = None,  # required: raises if left out, e.g. "Europe/Warsaw"
+                 timezone: Optional[str] = None,  # inherits DataPipeline.timezone; fetching w/o either raises
                  issue_time: str = "10:00",
                  publication_delay_h: float = 10, vintage: str = "issue_time",
                  derived: Optional[List[str]] = None, hdd_base_c: float = 18.0,
@@ -154,7 +157,7 @@ class OpenMeteoSingleRunsSource(DataSource):
     def __init__(self, latitude: float, longitude: float, horizon: int = 7,
                  model: str = "ecmwf_ifs", columns: Optional[List[str]] = None,
                  prefix: str = "", proxy_url: Optional[str] = None,
-                 timezone: str = None,  # required: raises if left out, e.g. "Europe/Warsaw"
+                 timezone: Optional[str] = None,  # inherits DataPipeline.timezone; fetching w/o either raises
                  issue_time: str = "10:00",
                  publication_delay_h: float = 10, run_interval_h: int = 6,
                  derived: Optional[List[str]] = None, hdd_base_c: float = 18.0,

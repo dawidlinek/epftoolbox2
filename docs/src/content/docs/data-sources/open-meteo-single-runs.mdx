@@ -45,7 +45,7 @@ df = source.fetch(
 | `columns` | List[str] \| None | No | `None` (= `DEFAULT_COLUMNS`) | Weather variables |
 | `prefix` | str | No | `""` | Prefix for column names |
 | `proxy_url` | str \| None | No | `None` | HTTP(S) proxy, e.g. `"http://proxy.example.com:8080"`. Saved to YAML as is, so don't put credentials in it. |
-| `timezone` | str | **Yes** | *(none)* | Market time zone: defines the local day D of each row, the wall-clock hour that `d+i` refers to, and the zone of `issue_time`. Use the same zone as `TimezoneTransformer` / `CalendarSource`, e.g. `"Europe/Warsaw"` for PL, `"Europe/London"` for GB. There is no default: leaving it out would compute the issue time in the wrong zone for a market outside CET. |
+| `timezone` | str \| None | No | `None` | Market time zone: defines the local day D of each row, the wall-clock hour that `d+i` refers to, and the zone of `issue_time`. `None` inherits `DataPipeline.timezone` when part of a pipeline; fetching without either raises — leaving it out entirely would otherwise compute the issue time in the wrong zone for a market outside CET. |
 | `issue_time` | str | No | `"10:00"` | Local time (`"HH:MM"`) on D at which the forecast is issued |
 | `publication_delay_h` | float | No | `10` | Hours between a run's initialisation and its availability (0–48) |
 | `run_interval_h` | int | No | `6` | Hours between model runs, starting at 00 UTC. Must divide 24 (1, 2, 3, 4, 6, 8, 12, 24). Use `3` for ICON-EU/ICON-D2. |

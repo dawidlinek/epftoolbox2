@@ -31,11 +31,12 @@ from epftoolbox2.data.transformers import ResampleTransformer, TimezoneTransform
 from epftoolbox2.data.validators import NullCheckValidator
 
 pipeline = (
-    DataPipeline()
+    DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load", "price"]))
     .add_source(CalendarSource(country="PL", holidays="binary"))
     .add_transformer(ResampleTransformer(freq="1h"))
-    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+    # target_tz is left unset: it inherits DataPipeline.timezone above.
+    .add_transformer(TimezoneTransformer())
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
 )
 
@@ -94,10 +95,14 @@ With `timezone` set:
 Without `timezone` (the default), behaviour is unchanged: date strings and keywords mean midnight UTC, `end` is
 exclusive, and naive timestamps are UTC.
 
-<Aside type="caution">
-  If any transformer is a `TimezoneTransformer`, its `target_tz` must match `timezone` — a mismatch raises
-  `ValueError` at construction and again at the start of `run()`. `timezone` decides what a local calendar day
-  is; converting to a *different* zone downstream would silently split that day across two local dates.
+<Aside type="tip">
+  `timezone` is the single place the market zone needs to be written. `TimezoneTransformer.target_tz`,
+  `CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`/`OpenMeteoWeightedSource`'s own zone may all be
+  left unset (`None`) and they then inherit `timezone` — as in the example above, where only `DataPipeline`
+  carries `"Europe/Warsaw"`. Setting one of them explicitly to a *different* zone still raises `ValueError` (at
+  construction and again at the start of `run()`), since `timezone` decides what a local calendar day is and a
+  component computing its own local time in a different zone would silently disagree with it. A component that
+  needs a zone and has neither raises a clear error when the pipeline runs.
 </Aside>
 
 <Aside type="caution">

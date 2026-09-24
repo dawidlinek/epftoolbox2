@@ -18,11 +18,18 @@ transformer = TimezoneTransformer(target_tz="Europe/Warsaw")
 df = transformer.transform(df)
 ```
 
+As part of a `DataPipeline`, `target_tz` can be left unset: it then inherits `DataPipeline.timezone`, so the zone
+is written once instead of in both places.
+
+```python
+pipeline = DataPipeline(timezone="Europe/Warsaw").add_transformer(TimezoneTransformer())
+```
+
 ## Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `target_tz` | str | required | Target IANA time zone, e.g. `"Europe/Warsaw"` |
+| `target_tz` | str | `None` | Target IANA time zone, e.g. `"Europe/Warsaw"`. `None` inherits `DataPipeline.timezone` when part of a pipeline; transforming without either raises |
 | `daily_columns` | list[str] \| None | `None` | Columns holding one value per day. `None` means `["load_forecast_daily_min", "load_forecast_daily_max"]` (ENTSO-E week-ahead forecast); columns not in the frame are skipped |
 | `daily_anchor` | str | `"UTC+02:00"` | Time zone whose calendar date a daily value belongs to: a UTC offset (`"UTC+02:00"`, `"+01:00"`, `"UTC"`) or an IANA name |
 
@@ -78,9 +85,9 @@ After the move, `ResampleTransformer` spreads each daily value over exactly its 
 
 ```python
 pipeline = (
-    DataPipeline()
+    DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(...))  # Output: UTC
-    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))  # Creates DST gaps
+    .add_transformer(TimezoneTransformer())  # target_tz inherits DataPipeline.timezone; creates DST gaps
     .add_transformer(ResampleTransformer(freq="1h"))  # Fills DST gaps
     .add_transformer(LagTransformer(columns=["price"], lags=[1, 2, 7], freq="day"))  # Lags by local calendar day
 )

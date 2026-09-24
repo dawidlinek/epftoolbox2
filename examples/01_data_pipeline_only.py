@@ -37,7 +37,7 @@ pipeline = (
             # shorter publication_delay_h, and 7 isn't reachable leak-free with any current model.
             horizon=5,
             prefix="warsaw",
-            timezone="Europe/Warsaw",
+            # timezone is left unset: it inherits DataPipeline(timezone=...) above.
         )
     )
     .add_source(
@@ -48,7 +48,7 @@ pipeline = (
             daylight=True,  # Add daylight hours feature
         )
     )
-    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+    .add_transformer(TimezoneTransformer())
     # Averages 15-min series, spreads the daily min/max over their local day, leaves real gaps as NaN
     .add_transformer(ResampleTransformer(freq="1h"))
     # load_actual/price are only known for D once D is over; never offer their same-day (unlagged) value.

@@ -11,7 +11,10 @@ class TestCalendarSourceInit:
     def test_init_valid_country(self):
         source = CalendarSource(country="PL")
         assert source.country == "PL"
-        assert source.timezone == "Europe/Warsaw"
+        # `timezone` stays unset (it may still be inherited from a DataPipeline); `market_timezone` resolves it,
+        # falling back to the country's own zone for standalone use.
+        assert source.timezone is None
+        assert source.market_timezone == "Europe/Warsaw"
 
     def test_init_lowercase_country(self):
         source = CalendarSource(country="pl")

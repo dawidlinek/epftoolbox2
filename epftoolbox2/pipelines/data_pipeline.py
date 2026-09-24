@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 import importlib
 
+from epftoolbox2.data._market_timezone import bind as _bind_timezone
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
 from epftoolbox2.data.transformers.timezone import TimezoneTransformer
@@ -83,33 +84,34 @@ class DataPipeline:
         validators: Run on the final frame (after the transformers).
         source_validators: Run on the joined source output before any transformer, e.g. to catch gaps that
             resampling would interpolate over.
-        timezone: Market time zone (e.g. ``"Europe/Warsaw"``). If set, date strings passed to ``run`` are local
-            calendar days: ``start`` begins at local midnight and ``end`` covers its whole local day; naive
-            timestamps are local times. If ``None``, date strings are midnight UTC, ``end`` is exclusive and naive
-            timestamps are UTC. If any ``transformers`` entry is a ``TimezoneTransformer``, its ``target_tz`` must
-            equal ``timezone`` (raises ``ValueError`` otherwise): ``timezone`` decides what a local calendar day
-            is, so converting to a different zone downstream would silently split that day across two dates. The
-            same check applies to the market time zone of any source that computes local time itself —
+        timezone: Market time zone (e.g. ``"Europe/Warsaw"``), the single place it needs to be set. If set, date
+            strings passed to ``run`` are local calendar days: ``start`` begins at local midnight and ``end``
+            covers its whole local day; naive timestamps are local times. If ``None``, date strings are midnight
+            UTC, ``end`` is exclusive and naive timestamps are UTC. Components whose own zone decides a local
+            calendar day or an issue time — ``TimezoneTransformer.target_tz``,
             ``OpenMeteoSource``/``OpenMeteoSingleRunsSource``/``OpenMeteoWeightedSource.timezone`` and
-            ``CalendarSource.timezone`` — but not ``CsvSource.timezone``, which is the input file's own zone, not
-            the market's.
+            ``CalendarSource.timezone`` (but not ``CsvSource.timezone``, which is the input file's own zone, not
+            the market's) — may leave it unset (``None``) and inherit ``timezone`` instead; an explicitly set,
+            different zone still raises ``ValueError``, since a component computing its own local time in a
+            different zone would silently disagree with it. A component that needs a zone and has neither raises
+            when run.
         on_invalid: ``"warn"`` (default) logs failed validations and continues; ``"raise"`` raises
             ``DataValidationError`` after the failing validation stage. Results are kept in ``validation_results``.
 
     Example:
         >>> pipeline = DataPipeline(
         ...     sources=[CsvSource(...), EntsoeSource(...)],
-        ...     transformers=[TimezoneTransformer(target_tz="Europe/Warsaw")],
+        ...     transformers=[TimezoneTransformer()],
         ...     timezone="Europe/Warsaw",
         ... )
         >>> df = pipeline.run("2024-01-01", "2024-06-30")  # 2024-01-01 00:00 .. 2024-06-30 23:00 local
 
     Example:
         >>> pipeline = (
-        ...     DataPipeline()
+        ...     DataPipeline(timezone="Europe/Warsaw")
         ...     .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load"]))
-        ...     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw"))
-        ...     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+        ...     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
+        ...     .add_transformer(TimezoneTransformer())
         ...     .add_validator(NullCheckValidator(columns=["load_actual"]))
         ... )
         >>> df = pipeline.run(start, end)
@@ -141,52 +143,39 @@ class DataPipeline:
                 ZoneInfo(self.timezone)
             except (ZoneInfoNotFoundError, ValueError, TypeError):
                 raise ValueError(f"Invalid timezone: {self.timezone!r} (use an IANA name such as 'Europe/Warsaw')")
-            mismatched = [
-                t.target_tz
-                for t in self.transformers
-                if isinstance(t, TimezoneTransformer) and t.target_tz != self.timezone
-            ]
-            if mismatched:
-                raise ValueError(
-                    f"DataPipeline.timezone={self.timezone!r} does not match "
-                    f"TimezoneTransformer.target_tz={mismatched[0]!r}. DataPipeline.timezone decides what a local "
-                    "calendar day is (date strings, 'today_d+h' keywords); a TimezoneTransformer converting to a "
-                    "different zone silently splits that day across two local dates. Use the same zone in both."
-                )
-            source_mismatch = self._mismatched_source_timezone()
-            if source_mismatch is not None:
-                label, tz = source_mismatch
-                raise ValueError(
-                    f"DataPipeline.timezone={self.timezone!r} does not match {label}={tz!r}. DataPipeline.timezone "
-                    "decides what a local calendar day is; a source computing its own local time (issue times, "
-                    "local calendar days) in a different zone would silently disagree with it. Use the same zone "
-                    "in both, or leave the source's timezone unset if it has no default."
-                )
+        self._bind_component_timezones()
         if self.on_invalid not in self.ON_INVALID:
             raise ValueError(f"on_invalid must be one of {self.ON_INVALID}, got {self.on_invalid!r}")
 
-    def _mismatched_source_timezone(self) -> Optional[Tuple[str, str]]:
-        """First (label, timezone) among ``self.sources`` whose own market time zone disagrees with
-        ``self.timezone``, or ``None``. Only sources whose time zone decides a local calendar day or an issue
-        time are checked; ``CsvSource.timezone`` is the input file's own zone, not the market's, so it is
-        excluded."""
+    def _bind_component_timezones(self) -> None:
+        """Make ``self.timezone`` the single place the market zone needs to be written.
+
+        Every ``TimezoneTransformer``/``CalendarSource``/``OpenMeteoSource``/``OpenMeteoSingleRunsSource``/
+        ``OpenMeteoWeightedSource`` whose own zone (``target_tz`` / ``timezone`` / ``source_params['timezone']``)
+        is left unset inherits ``self.timezone`` instead, resolved through ``_market_timezone.bind``: the
+        component's private ``_pipeline_timezone`` attribute is set (never the public one, so ``save()`` keeps
+        writing the value the user gave, and a YAML round trip re-resolves the same way given the same
+        ``DataPipeline.timezone``); an explicitly set, different zone still raises. ``CsvSource.timezone`` is the
+        input file's own zone, not the market's, and is not touched.
+        """
         from epftoolbox2.data.sources.calendar import CalendarSource
         from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
         from epftoolbox2.data.sources.open_meteo_single_runs import OpenMeteoSingleRunsSource
         from epftoolbox2.data.sources.open_meteo_weighted import OpenMeteoWeightedSource
 
+        for transformer in self.transformers:
+            if isinstance(transformer, TimezoneTransformer):
+                _bind_timezone(transformer, transformer.target_tz, self.timezone, "TimezoneTransformer.target_tz")
+
         for source in self.sources:
             if isinstance(source, OpenMeteoWeightedSource):
-                tz = source.source_params.get("timezone")
-                label = "OpenMeteoWeightedSource.source_params['timezone']"
+                # OpenMeteoWeightedSource has no zone of its own; source_params['timezone'] (explicit or not) was
+                # already passed to each of its own sources at construction, so binding them binds it too.
+                for child in source._sources:
+                    where = f"{type(child).__name__}.timezone (via OpenMeteoWeightedSource.source_params)"
+                    _bind_timezone(child, child.timezone, self.timezone, where)
             elif isinstance(source, (OpenMeteoSource, OpenMeteoSingleRunsSource, CalendarSource)):
-                tz = getattr(source, "timezone", None)
-                label = f"{type(source).__name__}.timezone"
-            else:
-                continue
-            if tz is not None and tz != self.timezone:
-                return label, tz
-        return None
+                _bind_timezone(source, source.timezone, self.timezone, f"{type(source).__name__}.timezone")
 
     def add_source(self, source: DataSource) -> "DataPipeline":
         if not isinstance(source, DataSource):
@@ -691,6 +680,13 @@ def _component_fingerprint(component: Any) -> Dict[str, Any]:
         if not key.startswith("_") and key not in _RUNTIME_ATTRIBUTES and key not in _SECRET_ATTRIBUTES
     }
     fingerprint = {"class": _qualified_name(component), "params": params}
+    # A component may inherit its market zone from DataPipeline.timezone (a private attribute, so it is not in
+    # `params` above); include the value it actually resolved to, so the file cache is invalidated when only the
+    # pipeline's zone changes (this matters for a source such as CalendarSource, whose get_cache_config() is
+    # always None).
+    market_timezone = getattr(component, "market_timezone", None)
+    if market_timezone is not None:
+        fingerprint["market_timezone"] = market_timezone
     if isinstance(component, DataSource):
         fingerprint["cache_config"] = _fingerprint_value(component.get_cache_config())
     return fingerprint

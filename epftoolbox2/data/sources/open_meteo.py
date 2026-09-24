@@ -159,10 +159,10 @@ class OpenMeteoSource(OpenMeteoBase):
                 None (default) — hourly (1 h), no parameter sent to API;
                 "hourly_3" — 3-hourly; "hourly_6" — 6-hourly;
                 "native" — model-native resolution (inferred from response).
-            timezone: Market time zone (required). Defines the local calendar day D of each row, the local
-                wall-clock hour that d+i refers to, and the time zone of ``issue_time``. Use the zone of your
-                TimezoneTransformer/CalendarSource, e.g. "Europe/Warsaw" for PL, "Europe/London" for GB. There is
-                no default: a market outside CET that relied on one would leak, since the issue time would be
+            timezone: Market time zone. Defines the local calendar day D of each row, the local wall-clock hour
+                that d+i refers to, and the time zone of ``issue_time``. None (default) inherits
+                ``DataPipeline.timezone``; there is no other default, and fetching without either raises: a
+                market outside CET that silently fell back to one would leak, since the issue time would be
                 computed in the wrong zone (e.g. London 23:00 on D becoming 10:00 on D+1 in Warsaw time).
             issue_time: Local time ("HH:MM") on day D at which the forecast is issued (default "10:00").
             publication_delay_h: Hours between a run's initialisation and its availability (default 10). The
@@ -224,15 +224,23 @@ class OpenMeteoSource(OpenMeteoBase):
             self._buckets = list(range(1, self.horizon + 1))
             return True
 
+        # The buckets depend on the market time zone, which may not be known yet (it can be inherited from
+        # DataPipeline.timezone later): resolve them now if it is already known, else lazily at fetch() time.
+        if self.timezone is not None:
+            self._resolve_buckets(self.timezone)
+        return True
+
+    def _resolve_buckets(self, timezone: str) -> None:
+        """Work out which previous_dayK buckets to request, for a now-known market `timezone`."""
         delay = self.publication_delay_h
-        needs = _bucket_requirements(self.model, self.timezone, self.issue_time, float(delay), self.horizon)
+        needs = _bucket_requirements(self.model, timezone, self.issue_time, float(delay), self.horizon)
         worst = max(high for _, high in needs)
         if worst > MAX_PREVIOUS_DAY:
             first_bad = next(lead for lead, (_, high) in enumerate(needs, 1) if high > MAX_PREVIOUS_DAY)
             raise ValueError(
                 f"horizon={self.horizon} cannot be served without look-ahead: d+{first_bad} needs "
                 f"previous_day{needs[first_bad - 1][1]} for some hours (model={self.model!r}, "
-                f"issue_time={self.issue_time!r} {self.timezone}, publication_delay_h={delay}), but Open-Meteo "
+                f"issue_time={self.issue_time!r} {timezone}, publication_delay_h={delay}), but Open-Meteo "
                 f"serves previous_day1..{MAX_PREVIOUS_DAY} only. Use horizon<={first_bad - 1}; a shorter "
                 "publication_delay_h if it is justified for this model; or vintage='valid_time' (look-ahead) to "
                 "reproduce results of epftoolbox2 <= 2.2."
@@ -240,7 +248,6 @@ class OpenMeteoSource(OpenMeteoBase):
         low = min(lo for lo, _ in needs)
         # One spare bucket lets live runs made before the issue time fall back further (see _build_features).
         self._buckets = list(range(low, min(worst + 1, MAX_PREVIOUS_DAY) + 1))
-        return True
 
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """
@@ -259,6 +266,12 @@ class OpenMeteoSource(OpenMeteoBase):
 
         if end <= start:
             raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
+
+        # `timezone` may have been unset at construction and inherited from DataPipeline.timezone since (see
+        # `market_timezone`); the buckets could not be resolved until now in that case.
+        tz = self._require_market_timezone()
+        if self.vintage != "valid_time" and not self._buckets:
+            self._resolve_buckets(tz)
 
         if self.vintage == "valid_time":
             self.logger.warning(
@@ -354,7 +367,7 @@ class OpenMeteoSource(OpenMeteoBase):
                     features[f"{column}_d+{lead}"] = self._take(table, f"{column}_previous_day{lead}", positions)
             return pd.DataFrame(features, index=rows), final
 
-        issue = local_issue_times(rows, self.timezone, self.issue_time)
+        issue = local_issue_times(rows, self.market_timezone, self.issue_time)
         now = self._now()
         final = np.asarray(issue <= now)
         if not final.all():
@@ -370,7 +383,7 @@ class OpenMeteoSource(OpenMeteoBase):
         tolerance = pd.Timedelta(int(steps.min()) // 2 if len(steps) else 0)
         max_bucket = max(self._buckets)
         for lead in range(1, self.horizon + 1):
-            target = shift_local_days(rows, self.timezone, lead)
+            target = shift_local_days(rows, self.market_timezone, lead)
             positions = table.index.get_indexer(target, method="nearest", tolerance=tolerance)
             valid = pd.DatetimeIndex(np.where(positions >= 0, table.index.asi8[positions], np.iinfo(np.int64).min))
             valid = valid.tz_localize("UTC")

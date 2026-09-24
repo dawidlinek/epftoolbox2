@@ -46,7 +46,7 @@ df = pipeline.run(start="2023-01-01", end="2024-01-01", cache=True)
 from epftoolbox2.data.sources import OpenMeteoSource
 
 pipeline = (
-    DataPipeline()
+    DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(
         country_code="PL",
         api_key=os.environ["ENTSOE_API_KEY"],
@@ -57,7 +57,7 @@ pipeline = (
         longitude=21.0122,
         horizon=7,
         prefix="warsaw",
-        timezone="Europe/Warsaw",
+        # timezone is left unset: it inherits DataPipeline.timezone above.
     ))
     .add_transformer(ResampleTransformer(freq="1h"))
 )
@@ -74,7 +74,7 @@ cities = {
     "gdansk": (54.3520, 18.6466),
 }
 
-pipeline = DataPipeline()
+pipeline = DataPipeline(timezone="Europe/Warsaw")
 
 # Add ENTSOE source
 pipeline.add_source(EntsoeSource(
@@ -83,14 +83,13 @@ pipeline.add_source(EntsoeSource(
     type=["load", "price"],
 ))
 
-# Add weather for each city
+# Add weather for each city; timezone is left unset on each and inherits DataPipeline.timezone above.
 for name, (lat, lon) in cities.items():
     pipeline.add_source(OpenMeteoSource(
         latitude=lat,
         longitude=lon,
         horizon=7,
         prefix=name,
-        timezone="Europe/Warsaw",
     ))
 
 df = pipeline.run(start="2023-01-01", end="2024-01-01", cache=True)

@@ -66,10 +66,29 @@ the old one) rather than resuming them; don't rely on the manifest to catch this
 
 ## Required and renamed parameters
 
-- **`OpenMeteoSource`/`OpenMeteoSingleRunsSource`: `timezone` is now required.** It used to default to
-  `"Europe/Warsaw"`, which silently mis-timed the issue-time cutoff (and therefore leaked or over-restricted
-  data) for any market outside that zone. Pass the market's zone explicitly — the same one as your
-  `TimezoneTransformer`/`CalendarSource`.
+- **`OpenMeteoSource`/`OpenMeteoSingleRunsSource`: `timezone` is now required (directly or inherited).** It used
+  to default to `"Europe/Warsaw"`, which silently mis-timed the issue-time cutoff (and therefore leaked or
+  over-restricted data) for any market outside that zone. Pass the market's zone explicitly, or set it once with
+  `DataPipeline(timezone=...)` and leave it unset here (see the next bullet) — fetching without either raises.
+- **The market zone can now be set once, on `DataPipeline(timezone=...)`.** `TimezoneTransformer.target_tz`,
+  `CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`/`OpenMeteoWeightedSource`'s own zone all default
+  to `None` and then inherit it, instead of each needing the same zone written out again. An explicitly set,
+  different zone still raises. This is a drop-in simplification: existing configs that already spell the zone
+  out everywhere keep working unchanged.
+  ```python
+  # before: the same zone written four times
+  DataPipeline(
+      sources=[OpenMeteoSource(lat, lon, timezone="Europe/Warsaw"), CalendarSource(country="PL", timezone="Europe/Warsaw")],
+      transformers=[TimezoneTransformer(target_tz="Europe/Warsaw")],
+      timezone="Europe/Warsaw",
+  )
+  # after: written once
+  DataPipeline(
+      sources=[OpenMeteoSource(lat, lon), CalendarSource(country="PL")],
+      transformers=[TimezoneTransformer()],
+      timezone="Europe/Warsaw",
+  )
+  ```
 - **`ResampleTransformer`: `method`/`columns` → `agg`/`fill`.** The old two parameters are still accepted
   (with a `FutureWarning`) and mapped onto the new ones, but under the new, leak-free resampling semantics
   above — not a like-for-like translation of the old behaviour. Prefer `agg="mean", fill="ffill"` (or a

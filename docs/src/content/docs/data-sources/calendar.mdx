@@ -43,7 +43,7 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `country` | str | Required | Country code (see the list below) |
-| `timezone` | str | Auto | Time zone whose local dates and times define the features (default: the country's) |
+| `timezone` | str \| None | `None` | Time zone whose local dates and times define the features. `None` inherits `DataPipeline.timezone` when part of a pipeline; standalone, it falls back to the country's own zone |
 | `holidays` | str/bool | `"binary"` | Holiday output format |
 | `weekday` | str/bool | `"number"` | Weekday output format |
 | `hour` | str/bool | `False` | Hour (or period) output format |
@@ -67,7 +67,9 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 | `school_weights` | dict/List[float] | `None` | Weight per subdivision for `school_holiday_share`: `{code: weight}`, or numbers in the order of `school_subdivisions`. With a dict, `school_subdivisions` defaults to its keys |
 
 <Aside type="tip">
-  The timezone is automatically extracted from the country code. It should match your `TimezoneTransformer` target if you're using one.
+  Inside a `DataPipeline`, leave `timezone` unset: it inherits `DataPipeline.timezone`, the single place the
+  market zone needs to be written (an explicit, different zone still raises). Standalone, it falls back to the
+  zone the country code implies.
 </Aside>
 
 ---

@@ -279,11 +279,13 @@ def _weather_availability(source: Any) -> Availability:
 
     `vintage`, `issue_time`, `timezone` and `publication_delay_h` are read with `getattr` and default when a
     source doesn't set them (they are added to `OpenMeteoSource` on another branch), so this works with any
-    `OpenMeteoSource`-like object.
+    `OpenMeteoSource`-like object. `timezone` reads the resolved `market_timezone` when the source has one (it
+    may have inherited it from `DataPipeline.timezone` rather than setting its own `timezone`), falling back to
+    the raw `timezone` attribute for anything that only has that.
     """
     if getattr(source, "vintage", None) == "issue_time":
         issue_time = getattr(source, "issue_time", "11:30")
-        timezone = getattr(source, "timezone", "Europe/Brussels")
+        timezone = getattr(source, "market_timezone", None) or getattr(source, "timezone", None) or "Europe/Brussels"
         return Availability.as_of(issue_time, timezone, note="Open-Meteo: known as of the source's issue time")
     delay_h = getattr(source, "publication_delay_h", 6)
     return Availability.weather_run(f"{delay_h}h", note="Open-Meteo previous-runs forecast")

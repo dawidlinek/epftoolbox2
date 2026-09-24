@@ -72,10 +72,10 @@ EXOGENOUS = ["load_forecast", "residual_load_forecast"]
 H = 1  # day-ahead
 
 data = (
-    DataPipeline()
+    DataPipeline(timezone="Europe/Berlin")
     .add_source(EntsoeSource("DE_LU", api_key="YOUR_KEY", type=["load", "generation", "price"]))
     .add_source(CalendarSource("DE", weekday="onehot", holidays=False))
-    .add_transformer(TimezoneTransformer(target_tz="Europe/Berlin"))
+    .add_transformer(TimezoneTransformer())
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(DSTNormalizeTransformer(freq="1h"))  # 24 slots a day, so every profile is complete
     .add_transformer(ResidualLoadTransformer())

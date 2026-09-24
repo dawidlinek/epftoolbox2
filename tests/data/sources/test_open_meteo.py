@@ -181,9 +181,14 @@ class TestOpenMeteoSourceInit:
 
     def test_timezone_is_required(self):
         # A default used to compute the issue time in the wrong zone for markets outside CET (e.g. London 23:00
-        # on D silently becoming 10:00 on D+1), leaking future runs. It must now be passed explicitly.
+        # on D silently becoming 10:00 on D+1), leaking future runs. Construction with no zone is allowed (a
+        # DataPipeline may still supply one later), but fetching without one anywhere raises.
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01)
+        assert source.timezone is None
         with pytest.raises(ValueError, match="timezone is required"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01)
+            source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
+        with pytest.raises(ValueError, match="timezone is required"):
+            source.get_cache_config()
 
     def test_invalid_timezone_still_reports_the_bad_value(self):
         with pytest.raises(ValueError, match="Invalid timezone: 'Mars/Olympus'"):

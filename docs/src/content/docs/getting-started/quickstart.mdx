@@ -33,7 +33,7 @@ This guide shows you how to download electricity data and run a simple forecast 
    from epftoolbox2.data.validators import NullCheckValidator
 
    pipeline = (
-       DataPipeline()
+       DataPipeline(timezone="Europe/Warsaw")
        .add_source(EntsoeSource(
            country_code="PL",
            api_key=os.environ["ENTSOE_API_KEY"],

@@ -133,9 +133,12 @@ class TestInit:
 
     def test_timezone_is_required(self):
         # A default used to compute the issue time in the wrong zone for markets outside CET, leaking future
-        # runs. It must now be passed explicitly.
+        # runs. Construction with no zone is allowed (a DataPipeline may still supply one later), but fetching
+        # without one anywhere raises.
+        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01)
+        assert source.timezone is None
         with pytest.raises(ValueError, match="timezone is required"):
-            OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01)
+            source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
 
     def test_rejects_invalid_timezone(self):
         with pytest.raises(ValueError, match="timezone"):

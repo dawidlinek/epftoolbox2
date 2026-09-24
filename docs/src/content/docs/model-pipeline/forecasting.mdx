@@ -31,7 +31,7 @@ if __name__ == "__main__":
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
         .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
-        .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+        .add_transformer(TimezoneTransformer())
         .add_transformer(ResampleTransformer(freq="1h"))
         .add_transformer(LagTransformer(columns=["price"], lags=[1, 2, 7], freq="day"))
         .run(start="now_d-730", end="today_d+7", cache=True)

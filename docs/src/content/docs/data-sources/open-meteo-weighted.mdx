@@ -28,7 +28,7 @@ source = OpenMeteoWeightedSource(
         "model": "icon_seamless",
         "horizon": 5,
         "columns": ["temperature_2m", "wind_speed_10m"],
-        "timezone": "Europe/Warsaw",  # required, shared by every location
+        "timezone": "Europe/Warsaw",  # shared by every location; may be left out inside a DataPipeline(timezone=...)
     },
     prefix="pl",
 )
@@ -44,7 +44,7 @@ df = source.fetch(start="2024-01-01", end="2024-06-01")
 |-----------|------|----------|---------|-------------|
 | `locations` | List[dict] \| str | Yes | - | `[{"name", "latitude", "longitude", "weight"}, ...]` or the compact string form. Names must use letters, digits and underscores, and be unique; weights must be positive numbers. |
 | `source` | str | No | `"OpenMeteoSource"` | `"OpenMeteoSource"` (Previous Runs API) or `"OpenMeteoSingleRunsSource"` (Single Runs API) |
-| `source_params` | dict \| None | No | `None` | Parameters for the underlying source, shared by every location — anything but `latitude`, `longitude` and `prefix`, which come from `locations`. Must include `timezone`: it has no default on the underlying source, so omitting it raises. |
+| `source_params` | dict \| None | No | `None` | Parameters for the underlying source, shared by every location — anything but `latitude`, `longitude` and `prefix`, which come from `locations`. `source_params['timezone']` may be left unset: it then inherits `DataPipeline.timezone` like the underlying source's own `timezone` would; fetching without either raises. |
 | `prefix` | str | No | `""` | Prefix for the weighted columns |
 | `keep_locations` | bool | No | `False` | Also return each location's own columns as `{prefix}_{name}_{variable}_d+{i}` |
 

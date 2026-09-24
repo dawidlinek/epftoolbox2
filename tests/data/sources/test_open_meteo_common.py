@@ -237,9 +237,12 @@ class TestValidateCommon:
 
     def test_timezone_is_required(self):
         # A default used to compute the issue time in the wrong zone for markets outside CET (e.g. London 23:00
-        # on D silently becoming 10:00 on D+1), leaking future runs. It must now be passed explicitly.
+        # on D silently becoming 10:00 on D+1), leaking future runs. Construction with no zone is allowed (a
+        # DataPipeline may still supply one later), but using the source without one anywhere raises.
+        source = _StubSource(timezone=None)
+        assert source.timezone is None
         with pytest.raises(ValueError, match="timezone is required"):
-            _StubSource(timezone=None)
+            source.get_cache_config()
 
     def test_invalid_timezone_still_reports_the_bad_value(self):
         with pytest.raises(ValueError, match="Invalid timezone: 'Mars/Olympus'"):

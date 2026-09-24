@@ -1,11 +1,14 @@
 import re
 import warnings
 from datetime import timedelta, timezone
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
+from .._market_timezone import resolve as _resolve_timezone
+from .._market_timezone import require as _require_timezone
 from .base import Transformer
 
 DEFAULT_DAILY_COLUMNS = ["load_forecast_daily_min", "load_forecast_daily_max"]
@@ -33,7 +36,8 @@ class TimezoneTransformer(Transformer):
     has a hole there, and a ``UserWarning`` is emitted.
 
     Args:
-        target_tz: Target IANA time zone, e.g. ``"Europe/Warsaw"``.
+        target_tz: Target IANA time zone, e.g. ``"Europe/Warsaw"``. None (default) inherits
+            ``DataPipeline.timezone``; transforming without either raises.
         daily_columns: Columns holding one value per day. Defaults to
             ``["load_forecast_daily_min", "load_forecast_daily_max"]``; columns not in the frame are skipped.
         daily_anchor: Time zone whose calendar date a daily value belongs to: a UTC offset such as
@@ -47,7 +51,12 @@ class TimezoneTransformer(Transformer):
         >>> df = transformer.transform(df)
     """
 
-    def __init__(self, target_tz: str, daily_columns: list[str] | None = None, daily_anchor: str = "UTC+02:00"):
+    # Set by DataPipeline._bind_component_timezones() when `target_tz` is left unset; never written by users.
+    _pipeline_timezone: Optional[str] = None
+
+    def __init__(
+        self, target_tz: Optional[str] = None, daily_columns: list[str] | None = None, daily_anchor: str = "UTC+02:00"
+    ):
         self.target_tz = target_tz
         self.daily_columns = list(daily_columns) if daily_columns is not None else list(DEFAULT_DAILY_COLUMNS)
         self.daily_anchor = daily_anchor
@@ -55,29 +64,40 @@ class TimezoneTransformer(Transformer):
         self._anchor = _parse_anchor(daily_anchor)
 
     def _validate_timezone(self) -> None:
+        if self.target_tz is None:
+            return
         try:
             ZoneInfo(self.target_tz)
         except (KeyError, ValueError):
             raise ValueError(f"Invalid timezone: '{self.target_tz}'")
 
+    @property
+    def market_timezone(self) -> Optional[str]:
+        """Resolved zone: `target_tz` if set, else the one a `DataPipeline` inherited it from (`None` if neither)."""
+        return _resolve_timezone(self.target_tz, self)
+
+    def _require_market_timezone(self) -> str:
+        return _require_timezone(self.market_timezone, "TimezoneTransformer.target_tz")
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         if not isinstance(df.index, pd.DatetimeIndex):
             raise ValueError("DataFrame index must be a DatetimeIndex")
 
+        tz = self._require_market_timezone()
         result = df.copy()
 
         if result.index.tz is None:
-            result.index = result.index.tz_localize("UTC").tz_convert(self.target_tz)
+            result.index = result.index.tz_localize("UTC").tz_convert(tz)
         else:
-            result.index = result.index.tz_convert(self.target_tz)
+            result.index = result.index.tz_convert(tz)
 
         for col in self.daily_columns:
             if col in result.columns:
-                result = self._snap_to_local_midnight(result, col)
+                result = self._snap_to_local_midnight(result, col, tz)
 
         return result
 
-    def _snap_to_local_midnight(self, result: pd.DataFrame, col: str) -> pd.DataFrame:
+    def _snap_to_local_midnight(self, result: pd.DataFrame, col: str, tz: str) -> pd.DataFrame:
         values = result[col].dropna()
         if values.empty:
             return result
@@ -92,9 +112,9 @@ class TimezoneTransformer(Transformer):
                 "per day; if the column was resampled already, run TimezoneTransformer before ResampleTransformer."
             )
 
-        midnights = days.tz_localize(
-            self.target_tz, ambiguous=np.ones(len(days), dtype=bool), nonexistent="shift_forward"
-        ).as_unit(result.index.unit)
+        midnights = days.tz_localize(tz, ambiguous=np.ones(len(days), dtype=bool), nonexistent="shift_forward").as_unit(
+            result.index.unit
+        )
         move = values.index != midnights
         if not move.any():
             return result

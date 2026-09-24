@@ -43,10 +43,11 @@ if __name__ == "__main__":
         DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
         .add_source(
-            OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw", timezone="Europe/Warsaw")
+            # timezone is left unset: it inherits DataPipeline(timezone=...) above.
+            OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw")
         )
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
-        .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+        .add_transformer(TimezoneTransformer())
         .add_transformer(ResampleTransformer(freq="1h"))
         # load_actual/price are only known for D once D is over; never offer their same-day (unlagged) value.
         .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))

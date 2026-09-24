@@ -12,6 +12,7 @@ from pandas.tseries.frequencies import to_offset
 
 from epftoolbox2.logging import get_logger
 from . import _openholidays
+from .._market_timezone import resolve as _resolve_timezone
 from .base import DataSource
 
 logger = get_logger(__name__)
@@ -156,6 +157,9 @@ class CalendarSource(DataSource):
         >>> #                  school_holiday_share
     """
 
+    # Set by DataPipeline._bind_component_timezones() when `timezone` is left unset; never written by users.
+    _pipeline_timezone: Optional[str] = None
+
     def __init__(
         self,
         country: str,
@@ -185,7 +189,9 @@ class CalendarSource(DataSource):
         """
         Args:
             country: ISO country code (see COUNTRY_DATA).
-            timezone: Time zone whose local dates and wall-clock times define the features (default: the country's).
+            timezone: Time zone whose local dates and wall-clock times define the features. None (default)
+                inherits `DataPipeline.timezone` when this source is part of a pipeline; standalone, it falls
+                back to the country's own zone.
             holidays: False | "binary" | "onehot" | "name".
             weekday: False | "number" | "onehot" | "name".
             hour: False | "number" | "onehot". Hourly or coarser `freq`: local hour of day (`hour`, `is_{h}`).
@@ -221,7 +227,7 @@ class CalendarSource(DataSource):
         self._validate_country()
 
         country_info = COUNTRY_DATA[self.country]
-        self.timezone = timezone or country_info["timezone"]
+        self.timezone = timezone
         self.lat = lat if lat is not None else country_info["lat"]
         self.lon = lon if lon is not None else country_info["lon"]
 
@@ -277,6 +283,12 @@ class CalendarSource(DataSource):
             return {code: float(value) for code, value in pairs}
         except (TypeError, ValueError) as e:
             raise ValueError(f"school_weights must be numbers, got {weights!r}") from e
+
+    @property
+    def market_timezone(self) -> str:
+        """Resolved zone: `timezone` if set, else the one a `DataPipeline` inherited it from, else the
+        country's own zone (COUNTRY_DATA) for standalone use."""
+        return _resolve_timezone(self.timezone, self) or COUNTRY_DATA[self.country]["timezone"]
 
     @staticmethod
     def _validate_count(name: str, value, maximum: Optional[int] = None) -> int:
@@ -381,7 +393,7 @@ class CalendarSource(DataSource):
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """Rows on the `freq` grid in [start, end), indexed in UTC."""
         # Features that depend only on the local date are computed once per date and broadcast to its rows.
-        index, local_index, codes, local_dates = _local_grid(start, end, self._step, self.timezone)
+        index, local_index, codes, local_dates = _local_grid(start, end, self._step, self.market_timezone)
 
         df = pd.DataFrame(index=index)
 
@@ -458,7 +470,7 @@ class CalendarSource(DataSource):
         # A local day has 23 or 25 hours when its UTC offset at noon differs from the previous day's.
         def utc_offset(naive: pd.DatetimeIndex) -> np.ndarray:
             aware = naive.tz_localize(
-                self.timezone, ambiguous=np.zeros(len(naive), dtype=bool), nonexistent="shift_forward"
+                self.market_timezone, ambiguous=np.zeros(len(naive), dtype=bool), nonexistent="shift_forward"
             )
             return np.asarray(aware.tz_localize(None) - aware.tz_convert("UTC").tz_localize(None))
 
@@ -560,7 +572,7 @@ class CalendarSource(DataSource):
         return df
 
     def _add_daylight(self, df: pd.DataFrame, local_dates: pd.DatetimeIndex, codes: np.ndarray) -> pd.DataFrame:
-        location = LocationInfo(latitude=self.lat, longitude=self.lon, timezone=self.timezone)
+        location = LocationInfo(latitude=self.lat, longitude=self.lon, timezone=self.market_timezone)
 
         per_date = np.full((len(local_dates), 3), np.nan)
         missing = []

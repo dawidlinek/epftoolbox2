@@ -34,10 +34,11 @@ def _expand(predictors, horizon, periods=24):
 
 
 def _local_timezone(data_pipeline: DataPipeline) -> str:
-    """The zone the data actually ends up in: TimezoneTransformer.target_tz, falling back to DataPipeline.timezone."""
+    """The zone the data actually ends up in: TimezoneTransformer.target_tz (or the zone it inherited from
+    DataPipeline.timezone), falling back to DataPipeline.timezone with no TimezoneTransformer at all."""
     for transformer in data_pipeline.transformers:
         if isinstance(transformer, TimezoneTransformer):
-            return transformer.target_tz
+            return transformer.market_timezone or "UTC"
     return data_pipeline.timezone or "UTC"
 
 

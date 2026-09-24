@@ -105,8 +105,9 @@ class OpenMeteoWeightedSource(DataSource):
                 "name:lat:lon:weight, ...". Names become column prefixes with ``keep_locations``.
             source: "OpenMeteoSource" (Previous Runs API) or "OpenMeteoSingleRunsSource" (Single Runs API)
             source_params: Parameters for the underlying source, shared by all locations (anything but latitude,
-                longitude and prefix), e.g. {"model": "icon_seamless", "horizon": 5, "derived": ["hdd"]}. Must
-                include "timezone": the underlying source has no default for it and raises without it.
+                longitude and prefix), e.g. {"model": "icon_seamless", "horizon": 5, "derived": ["hdd"]}.
+                Its "timezone" may be left unset: it then inherits ``DataPipeline.timezone``, like the
+                underlying source's own ``timezone``; fetching without either raises.
             prefix: Prefix for the weighted columns
             keep_locations: Also return each location's columns as ``{prefix}_{name}_{variable}_d+{i}``
         """

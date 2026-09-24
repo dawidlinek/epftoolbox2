@@ -131,7 +131,7 @@ source = OpenMeteoSource(
     prefix="warsaw",             # Optional. Prefix for column names (default: "")
     proxy_url=None,              # Optional. HTTP(S) proxy URL, saved to YAML as is (default: None)
     temporal_resolution=None,    # Optional. None|"hourly_3"|"hourly_6"|"native" (default: None = 1 h)
-    timezone="Europe/Warsaw",    # Required. Market time zone of local days and the issue time; no default (raises if omitted)
+    timezone="Europe/Warsaw",    # Optional (default None). Market time zone of local days and the issue time; inherits DataPipeline.timezone when left unset; fetching without either raises
     issue_time="10:00",          # Optional. Local "HH:MM" on D when the forecast is issued (default: "10:00")
     publication_delay_h=10,      # Optional. Hours from run initialisation to availability (default: 10)
     vintage="issue_time",        # Optional. "issue_time" is the leak-free default; "valid_time" is the look-ahead mapping of <= 2.2
@@ -182,7 +182,7 @@ source = OpenMeteoSingleRunsSource(
     columns=None,                # Optional. Weather variables (default: None = DEFAULT_COLUMNS)
     prefix="warsaw",             # Optional. Prefix for column names (default: "")
     proxy_url=None,              # Optional. HTTP(S) proxy URL, saved to YAML as is (default: None)
-    timezone="Europe/Warsaw",    # Required. Market time zone of local days and the issue time; no default (raises if omitted)
+    timezone="Europe/Warsaw",    # Optional (default None). Market time zone of local days and the issue time; inherits DataPipeline.timezone when left unset; fetching without either raises
     issue_time="10:00",          # Optional. Local "HH:MM" on D when the forecast is issued (default: "10:00")
     publication_delay_h=10,      # Optional. Hours from run initialisation to availability (default: 10)
     run_interval_h=6,            # Optional. Hours between forecast runs, must divide 24 (default: 6)
@@ -221,7 +221,7 @@ source = OpenMeteoWeightedSource(
         {"name": "krakow", "latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
     ],
     source="OpenMeteoSource",    # Optional. "OpenMeteoSource" or "OpenMeteoSingleRunsSource" (default: "OpenMeteoSource")
-    source_params=None,          # Optional. Params for the underlying class above, shared by every location; not latitude/longitude/prefix (default: None). Must include "timezone", which has no default and is otherwise required.
+    source_params=None,          # Optional (default None). Params for the underlying class above, shared by every location; not latitude/longitude/prefix. Its "timezone" entry may be left unset to inherit DataPipeline.timezone, like the underlying class's own timezone parameter.
     prefix="pl",                 # Optional. Prefix for the weighted columns (default: "")
     keep_locations=False,        # Optional. Also return each location's own columns (default: False)
 )
@@ -245,7 +245,7 @@ from epftoolbox2.data.sources import CalendarSource
 
 source = CalendarSource(
     country="PL",                # Required. Country code for holidays
-    timezone=None,               # Optional. Time zone override (None = the country's)
+    timezone=None,               # Optional. None inherits DataPipeline.timezone; standalone, falls back to the country's
     holidays="binary",           # Optional. False | "binary" | "onehot" | "name"
     weekday="number",            # Optional. False | "number" | "onehot" | "name"
     hour=False,                  # Optional. False | "number" | "onehot"
@@ -581,7 +581,7 @@ Converts the index timezone and moves daily values to local midnight. Pipeline o
 from epftoolbox2.data.transformers import TimezoneTransformer
 
 transformer = TimezoneTransformer(
-    target_tz="Europe/Warsaw",    # Required. Target IANA timezone
+    target_tz="Europe/Warsaw",    # Optional. Target IANA timezone; None (default) inherits DataPipeline.timezone
     daily_columns=None,           # Optional (default: None = ["load_forecast_daily_min", "load_forecast_daily_max"]).
                                   #   Columns with one value per day; absent columns are skipped
     daily_anchor="UTC+02:00",     # Optional (default: "UTC+02:00"). ENTSO-E A31 anchor; UTC offset or IANA name
@@ -1535,9 +1535,9 @@ from epftoolbox2.data.validators import NullCheckValidator
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 
 pipeline = (
-    DataPipeline()
+    DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw", timezone="Europe/Warsaw"))
+    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual"], lags=[1, 2, 7], freq="day"))
@@ -1634,9 +1634,9 @@ from epftoolbox2.exporters import ExcelExporter, TerminalExporter
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 
 data_pipeline = (
-    DataPipeline()
+    DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw", timezone="Europe/Warsaw"))
+    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
@@ -1720,7 +1720,7 @@ predictors = [
 (
     DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw", timezone="Europe/Warsaw"))
+    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary", daylight=True, weekday="onehot"))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
@@ -1786,9 +1786,9 @@ if __name__ == "__main__":
     df = (
         DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-        .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw", timezone="Europe/Warsaw"))
+        .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
-        .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+        .add_transformer(TimezoneTransformer())
         .add_transformer(ResampleTransformer(freq="1h"))
         .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
         .add_transformer(LagTransformer(
@@ -1842,8 +1842,11 @@ class DataPipeline:
         transformers: Optional[List[Transformer]] = None,
         validators: Optional[List[Validator]] = None,        # run on the final (post-transformer) frame
         source_validators: Optional[List[Validator]] = None,  # run on raw source output, before any transformer
-        timezone: Optional[str] = None,   # e.g. "Europe/Warsaw"; makes run() dates mean local calendar days;
-                                           # must match any TimezoneTransformer.target_tz in transformers, or raises
+        timezone: Optional[str] = None,   # e.g. "Europe/Warsaw"; makes run() dates mean local calendar days.
+                                           # The single place the market zone needs to be written: components
+                                           # whose own zone decides a local day (TimezoneTransformer.target_tz,
+                                           # Calendar/OpenMeteo*.timezone) inherit it when left unset; an
+                                           # explicit, different zone still raises.
         on_invalid: str = "warn",         # "warn" (log and continue) or "raise" (raise DataValidationError)
     ): ...
 
@@ -1877,10 +1880,14 @@ class DataPipeline:
   days (23/25 hours). `end="today_d+7"` then includes all 24 hours of the 7th day ahead — the natural choice for a
   `horizon=7` forecast-only run. Naive timestamps passed to `run()` are read as local instants; timezone-aware
   timestamps are used as given.
-- If any `transformers` entry is a `TimezoneTransformer`, its `target_tz` must equal `timezone` — checked at
-  construction and again at the start of `run()` (so `add_transformer` can't introduce a mismatch unnoticed) —
-  otherwise `DataPipeline.__init__`/`run` raises `ValueError`. `timezone` decides what a local calendar day is;
-  converting to a different zone downstream would silently split that day across two local dates.
+- `timezone` is also the single place the market zone needs to be written: `TimezoneTransformer.target_tz`,
+  `CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`/`OpenMeteoWeightedSource`'s own zone may all be
+  left unset (`None`) and they then inherit it — checked and bound at construction and again at the start of
+  `run()` (so `add_transformer`/`add_source` can't introduce a mismatch unnoticed). An explicitly set, different
+  zone still raises `ValueError`: `timezone` decides what a local calendar day is, and a component computing its
+  own local time in a different zone would silently disagree with it. A component that needs a zone and has
+  neither raises a clear error when the pipeline runs. `CsvSource.timezone` is excluded (it is the input file's
+  own zone, not the market's).
 - Two sources producing the same column name raise `ValueError` naming both sources (e.g. give one a `prefix`).
 
 ## ModelPipeline

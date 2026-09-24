@@ -14,7 +14,10 @@ For every row of local day D, the column `{variable}_d+i` is the forecast for th
 <Aside type="caution" title="Changed in this version">
   Earlier versions took `d+i` at row t from the run started around t itself, so afternoon and evening hours used runs published after the day-ahead gate closure (look-ahead). They also shifted by 24 h in UTC instead of local calendar days. The new default fixes both, needs a smaller `horizon` (see [Horizon](#horizon)) and gives different numbers. `vintage="valid_time"` reproduces the old mapping. Clear `.cache/sources/` or rely on the new `schema_version` in the cache key.
 
-  `timezone` is now required and has no default. It used to default to `"Europe/Warsaw"`, so a market outside CET that left it unset computed the issue time in the wrong zone and could leak future runs (e.g. London 23:00 on D silently became 10:00 on D+1). Pass your market's zone explicitly.
+  `timezone` no longer defaults to `"Europe/Warsaw"`: a market outside CET that left it unset computed the issue
+  time in the wrong zone and could leak future runs (e.g. London 23:00 on D silently became 10:00 on D+1). Pass
+  your market's zone explicitly, or leave it unset and give it once via `DataPipeline(timezone=...)` — fetching
+  without either raises a clear error.
 </Aside>
 
 ## Basic Usage
@@ -52,7 +55,7 @@ df = source.fetch(
 | `prefix` | str | No | `""` | Prefix for column names |
 | `proxy_url` | str \| None | No | `None` | HTTP(S) proxy, e.g. `"http://proxy.example.com:8080"`. Saved to YAML as is, so don't put credentials in it. |
 | `temporal_resolution` | str \| None | No | `None` | Time step of returned data — see below |
-| `timezone` | str | **Yes** | *(none)* | Market time zone: defines the local day D of each row, the wall-clock hour that `d+i` refers to, and the zone of `issue_time`. Use the same zone as `TimezoneTransformer` / `CalendarSource`, e.g. `"Europe/Warsaw"` for PL, `"Europe/London"` for GB. There is no default: a market outside CET that relied on one would leak (see below). |
+| `timezone` | str \| None | No | `None` | Market time zone: defines the local day D of each row, the wall-clock hour that `d+i` refers to, and the zone of `issue_time`. `None` inherits `DataPipeline.timezone` when part of a pipeline; fetching without either raises. There is no other default: a market outside CET that relied on one would leak (see below). |
 | `issue_time` | str | No | `"10:00"` | Local time (`"HH:MM"`) on D at which the forecast is issued |
 | `publication_delay_h` | float | No | `10` | Hours between a run's initialisation and its availability (0–48) |
 | `vintage` | str | No | `"issue_time"` | `"issue_time"` (leak-free) or `"valid_time"` (old mapping, look-ahead) |

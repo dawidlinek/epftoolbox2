@@ -31,11 +31,9 @@ sources:
     - wind_direction_10m
     prefix: warsaw
     proxy_url: null
-    timezone: Europe/Warsaw
 - class: CalendarSource
   params:
     country: PL
-    timezone: Europe/Warsaw
     holidays: binary
     weekday: onehot
     hour: false
@@ -46,7 +44,6 @@ sources:
 transformers:
 - class: TimezoneTransformer
   params:
-    target_tz: Europe/Warsaw
     daily_columns:
     - load_forecast_daily_min
     - load_forecast_daily_max

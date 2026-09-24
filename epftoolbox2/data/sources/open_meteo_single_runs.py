@@ -64,8 +64,9 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
             columns: Weather variables (default: DEFAULT_COLUMNS)
             prefix: Prefix for column names
             proxy_url: HTTP(S) proxy URL
-            timezone: Market time zone of the local day D, the d+i wall-clock hour and ``issue_time`` (required,
-                e.g. "Europe/Warsaw" for PL, "Europe/London" for GB; no default)
+            timezone: Market time zone of the local day D, the d+i wall-clock hour and ``issue_time``, e.g.
+                "Europe/Warsaw" for PL, "Europe/London" for GB. None (default) inherits
+                ``DataPipeline.timezone``; fetching without either raises.
             issue_time: Local time ("HH:MM") on D at which the forecast is issued
             publication_delay_h: Hours between a run's initialisation and its availability (default 10)
             run_interval_h: Hours between model runs, starting at 00 UTC (6 for global models, 3 for ICON-EU/D2)
@@ -126,7 +127,7 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
         interval = pd.Timedelta(hours=self.run_interval_h)
         # Latest run on the cycle that was published by the issue instant.
         chosen_init = (issue - pd.Timedelta(hours=self.publication_delay_h)).floor(f"{self.run_interval_h}h")
-        targets = {lead: shift_local_days(rows, self.timezone, lead) for lead in range(1, self.horizon + 1)}
+        targets = {lead: shift_local_days(rows, self.market_timezone, lead) for lead in range(1, self.horizon + 1)}
         values = {
             f"{column}_d+{lead}": np.full(len(rows), np.nan)
             for lead in range(1, self.horizon + 1)
