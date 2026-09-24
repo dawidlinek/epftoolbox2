@@ -57,6 +57,11 @@ COMPONENT_REGISTRY = {
         "ContinuityValidator": "epftoolbox2.data.validators.continuity",
         "NullCheckValidator": "epftoolbox2.data.validators.null_check",
         "EdaValidator": "epftoolbox2.data.validators.eda",
+        "DSTStructureValidator": "epftoolbox2.data.validators.dst_structure",
+        "CoverageValidator": "epftoolbox2.data.validators.coverage",
+        "FreshnessValidator": "epftoolbox2.data.validators.freshness",
+        "PlausibilityValidator": "epftoolbox2.data.validators.plausibility",
+        "LagConsistencyValidator": "epftoolbox2.data.validators.lag_consistency",
     },
 }
 

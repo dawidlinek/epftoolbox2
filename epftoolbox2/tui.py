@@ -389,9 +389,9 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
     "ContinuityValidator": [
         {
             "name": "freq",
-            "description": "Expected frequency (e.g. 1h)",
+            "description": "Expected frequency (e.g. 15min, 1h; blank = infer from the data)",
             "required": False,
-            "default": "1h",
+            "default": None,
             "kind": "text",
         },
     ],
@@ -410,6 +410,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": False,
             "kind": "confirm",
         },
+        {
+            "name": "max_null_frac",
+            "description": "Largest share of nulls allowed per column (0-1)",
+            "required": False,
+            "default": 0.0,
+            "kind": "float",
+        },
     ],
     "EdaValidator": [
         {
@@ -418,6 +425,143 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "required": False,
             "default": "",
             "kind": "column_select",
+        },
+        {
+            "name": "verbose",
+            "description": "Print the statistics table?",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
+        },
+    ],
+    "DSTStructureValidator": [
+        {
+            "name": "tz",
+            "description": "Time zone of the local days (e.g. Europe/Warsaw; blank = the index's own)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "freq",
+            "description": "Period length (e.g. 15min, 1h; blank = infer from the data)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "allow_partial_edges",
+            "description": "Only warn about a partial first/last day?",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
+        },
+    ],
+    "CoverageValidator": [
+        {
+            "name": "columns",
+            "description": "Columns to check (blank = all)",
+            "required": False,
+            "default": "",
+            "kind": "column_select",
+        },
+        {
+            "name": "start",
+            "description": "First expected timestamp (e.g. 2024-01-01; blank = each column's first value)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "end",
+            "description": "End of the range, exclusive (blank = each column's last value)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "freq",
+            "description": "Grid step (e.g. 15min, 1h; blank = infer from the data)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "min_coverage",
+            "description": "Smallest share of timestamps with a value (0-1)",
+            "required": False,
+            "default": 1.0,
+            "kind": "float",
+        },
+        {
+            "name": "max_gap",
+            "description": "Longest missing run allowed (e.g. 6h; blank = no limit)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+    ],
+    "FreshnessValidator": [
+        {
+            "name": "columns",
+            "description": "Columns to check (blank = all)",
+            "required": False,
+            "default": "",
+            "kind": "column_select",
+        },
+        {
+            "name": "expected_end",
+            "description": "Timestamp of the last value needed (e.g. today_d+1; blank = last row)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "max_delay",
+            "description": "How far before expected_end the last value may be (e.g. 3h)",
+            "required": False,
+            "default": "0h",
+            "kind": "text",
+        },
+    ],
+    # `ranges` (a {pattern: [min, max]} mapping) is set in YAML; the wizard uses the defaults.
+    "PlausibilityValidator": [
+        {
+            "name": "max_constant_run",
+            "description": "Longest run of identical values before a warning (rows)",
+            "required": False,
+            "default": 24,
+            "kind": "int",
+        },
+        {
+            "name": "constant_columns",
+            "description": "Columns checked for constant runs (blank = price* and load_actual*)",
+            "required": False,
+            "default": "",
+            "kind": "column_select",
+        },
+    ],
+    "LagConsistencyValidator": [
+        {
+            "name": "columns",
+            "description": "Lag columns to check (blank = every x_d-k / x_d+k with its base column)",
+            "required": False,
+            "default": "",
+            "kind": "column_select",
+        },
+        {
+            "name": "tz",
+            "description": "Time zone of the local days (blank = the index's own)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "tolerance",
+            "description": "Absolute difference counted as equal",
+            "required": False,
+            "default": 1e-9,
+            "kind": "float",
         },
     ],
     "OLSModel": [
@@ -729,7 +873,16 @@ _TRANSFORMERS = [
     "SpikeFlagTransformer",
     "ImputeTransformer",
 ]
-_VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
+_VALIDATORS = [
+    "ContinuityValidator",
+    "NullCheckValidator",
+    "EdaValidator",
+    "DSTStructureValidator",
+    "CoverageValidator",
+    "FreshnessValidator",
+    "PlausibilityValidator",
+    "LagConsistencyValidator",
+]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator", "RMSEEvaluator", "rMAEEvaluator"]
 _EXPORTERS = ["TerminalExporter", "ExcelExporter", "CsvExporter"]

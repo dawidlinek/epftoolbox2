@@ -7,12 +7,20 @@ from .result import ValidationResult
 
 
 class EdaValidator(Validator):
-    def __init__(self, columns: Optional[List[str]] = None):
+    """Descriptive statistics per numeric column, in `result.stats` and optionally printed as a table.
+
+    Args:
+        columns: Columns to describe. None uses every numeric column.
+        verbose: Print the statistics table to the console.
+    """
+
+    def __init__(self, columns: Optional[List[str]] = None, verbose: bool = True):
         self.columns = columns
+        self.verbose = verbose
         self.console = Console()
 
     def validate(self, df: pd.DataFrame) -> ValidationResult:
-        result = ValidationResult()
+        result = self._result()
 
         if df.empty:
             result.warnings.append("DataFrame is empty")
@@ -52,7 +60,8 @@ class EdaValidator(Validator):
         result.stats = pd.DataFrame(stats_data)
         result.info["columns_analyzed"] = len(stats_data)
 
-        self._print_table(stats_data)
+        if self.verbose:
+            self._print_table(stats_data)
         return result
 
     def _print_table(self, stats_data: List[dict]) -> None:

@@ -30,7 +30,7 @@ epftoolbox2.verify()
 - **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (weather forecasts), Calendar (holidays, weekday)
 - **Transformers**: Resample, Timezone conversion, Lag features (local calendar days), DST normalisation to 24 slots a day (DSTNormalize), daily profile and daily min/max/mean/last stats (DailyProfile, DailyStats), residual load forecast (ResidualLoad), rolling spike flags (SpikeFlag), Impute (leak-safe gap filling)
 - **Presets**: `epftoolbox2.presets` — ready-made predictor lists for the LEAR and expert-model benchmarks from the literature
-- **Validators**: Null checks, Continuity checks, EDA statistics
+- **Validators**: Null checks, Continuity (duplicates, gaps, mixed resolutions), DSTStructure (rows per local day), Coverage (per-column outages), Freshness, Plausibility (SDAC price limits, frozen values), LagConsistency (calendar-day lags), EDA statistics
 - **Models**: OLS, LassoCV
 - **Scalers**: standardisation (default) or variance-stabilising transformations for spiky prices (asinh, N-PIT), fitted per forecast on training data only
 - **Evaluators**: MAE
@@ -69,7 +69,8 @@ df = ResampleTransformer(freq="1h").transform(df)  # aggregates or step-fills; n
 from epftoolbox2.data.validators import NullCheckValidator
 
 validator = NullCheckValidator(columns=["load_actual", "price"])
-df = validator.run(df)
+result = validator.validate(df)
+print(result)  # VALID/INVALID with errors, warnings and details; result.stats has one row per column
 ```
 
 ### Standalone model use

@@ -5,7 +5,7 @@ description: Display exploratory data analysis statistics
 
 # EdaValidator
 
-Calculates and displays EDA statistics for numeric columns. Uses Rich for formatted console output.
+Calculates EDA statistics for numeric columns, returns them in `result.stats` and, by default, prints them as a Rich table.
 
 ## Basic Usage
 
@@ -14,7 +14,17 @@ from epftoolbox2.data.validators import EdaValidator
 
 validator = EdaValidator()
 result = validator.validate(df)
+
+quiet = EdaValidator(columns=["price", "load_actual"], verbose=False)
+stats_df = quiet.validate(df).stats
 ```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `columns` | List[str] or None | `None` | Columns to analyse. `None` uses every numeric column. |
+| `verbose` | bool | `True` | Print the statistics table to the console. Set `False` for unattended runs. |
 
 ## Console Output
 
@@ -54,4 +64,4 @@ print(stats_df)
 
 - Initial data exploration
 - Checking for outliers
-- Verifying data ranges are reasonable
+- Verifying data ranges are reasonable (for automated range checks use [PlausibilityValidator](/epftoolbox2/validators/plausibility/))

@@ -197,17 +197,52 @@ class TimezoneTransformer(Transformer):
 ## Validators
 
 ```python
+# Every validator: validate(df: pd.DataFrame) -> ValidationResult
+
 class NullCheckValidator(Validator):
-    def __init__(self, columns: List[str] = None, allow_nulls: bool = False): ...
-    def validate(self, df: pd.DataFrame) -> ValidationResult: ...
+    def __init__(self, columns: Union[str, List[str]] = None, allow_nulls: bool = False,
+                 max_null_frac: float = 0.0): ...
 
 class ContinuityValidator(Validator):
-    def __init__(self, freq: str = "1h"): ...
-    def validate(self, df: pd.DataFrame) -> ValidationResult: ...
+    def __init__(self, freq: Optional[str] = None): ...  # None = infer
+
+class DSTStructureValidator(Validator):
+    def __init__(self, tz: Optional[str] = None, freq: Optional[str] = None,
+                 allow_partial_edges: bool = True): ...
+
+class CoverageValidator(Validator):
+    def __init__(self, columns: Union[str, List[str]] = None, start: Optional[str] = None,
+                 end: Optional[str] = None, freq: Optional[str] = None,
+                 min_coverage: float = 1.0, max_gap: Optional[str] = None): ...
+
+class FreshnessValidator(Validator):
+    def __init__(self, columns: Union[str, List[str]] = None, expected_end: Optional[str] = None,
+                 max_delay: str = "0h"): ...
+
+class PlausibilityValidator(Validator):
+    def __init__(self, ranges: Optional[Dict[str, List[Optional[float]]]] = None,
+                 max_constant_run: Optional[int] = 24,
+                 constant_columns: Optional[List[str]] = None): ...
+
+class LagConsistencyValidator(Validator):
+    def __init__(self, columns: Union[str, List[str]] = None, tz: Optional[str] = None,
+                 tolerance: float = 1e-9): ...
 
 class EdaValidator(Validator):
-    def __init__(self, columns: List[str] = None): ...
-    def validate(self, df: pd.DataFrame) -> ValidationResult: ...
+    def __init__(self, columns: List[str] = None, verbose: bool = True): ...
+
+@dataclass
+class ValidationResult:
+    is_valid: bool = True
+    errors: List[str]
+    warnings: List[str]
+    info: Dict[str, Any]
+    stats: pd.DataFrame
+    validator: str = ""
+    def add_error(self, message: str) -> None: ...
+    def to_frame(self) -> pd.DataFrame: ...
+
+def results_to_frame(results) -> pd.DataFrame: ...  # list, (name, result) pairs or dict
 ```
 
 ---
