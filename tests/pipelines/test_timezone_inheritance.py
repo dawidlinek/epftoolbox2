@@ -218,3 +218,29 @@ class TestInformationSetSeesTheInheritedZone:
         rules = source_rules(dp.sources)
 
         assert rules["temperature_2m"].timezone == TZ
+
+
+# ---------------------------------------------------------------------------
+# One component instance shared by two pipelines
+# ---------------------------------------------------------------------------
+
+
+class TestSharedComponent:
+    def test_second_pipeline_with_another_zone_raises(self):
+        source = CalendarSource(country="PL")
+        DataPipeline(sources=[source], timezone="Europe/Warsaw")
+        with pytest.raises(ValueError, match="another DataPipeline"):
+            DataPipeline(sources=[source], timezone="Europe/London")
+        assert source.market_timezone == "Europe/Warsaw"
+
+    def test_second_pipeline_with_the_same_zone_is_fine(self):
+        transformer = TimezoneTransformer()
+        DataPipeline(transformers=[transformer], timezone="Europe/Warsaw")
+        DataPipeline(transformers=[transformer], timezone="Europe/Warsaw")
+
+    def test_rebinding_by_the_same_pipeline_is_fine(self):
+        source = CalendarSource(country="PL")
+        pipeline = DataPipeline(sources=[source], timezone="Europe/Warsaw")
+        pipeline.timezone = "Europe/Berlin"
+        pipeline._bind_component_timezones()
+        assert source.market_timezone == "Europe/Berlin"

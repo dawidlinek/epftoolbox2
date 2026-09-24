@@ -16,6 +16,7 @@ raises through `require`.
 from typing import Optional
 
 PIPELINE_TIMEZONE_ATTR = "_pipeline_timezone"
+PIPELINE_OWNER_ATTR = "_pipeline_timezone_owner"
 
 
 def resolve(own: Optional[str], component: object) -> Optional[str]:
@@ -43,7 +44,22 @@ def check_match(own: Optional[str], pipeline_timezone: Optional[str], where: str
         )
 
 
-def bind(component: object, own: Optional[str], pipeline_timezone: Optional[str], where: str) -> None:
-    """Check `own` against `pipeline_timezone` and store the inherited zone on `component` (see module docstring)."""
+def bind(
+    component: object, own: Optional[str], pipeline_timezone: Optional[str], where: str, owner: object = None
+) -> None:
+    """Check `own` against `pipeline_timezone` and store the inherited zone on `component` (see module docstring).
+
+    A component instance belongs to one pipeline's zone: binding it from a different `owner` to a different zone
+    raises instead of silently changing the zone the first pipeline (or a later standalone use) relies on.
+    """
     check_match(own, pipeline_timezone, where)
+    bound = getattr(component, PIPELINE_TIMEZONE_ATTR, None)
+    bound_owner = getattr(component, PIPELINE_OWNER_ATTR, None)
+    if bound_owner is not None and owner is not None and bound_owner != id(owner) and bound != pipeline_timezone:
+        raise ValueError(
+            f"{where} is already used by another DataPipeline with timezone={bound!r}, so it can't also inherit "
+            f"timezone={pipeline_timezone!r}. Give each pipeline its own component instance."
+        )
     setattr(component, PIPELINE_TIMEZONE_ATTR, pipeline_timezone)
+    if owner is not None:
+        setattr(component, PIPELINE_OWNER_ATTR, id(owner))

@@ -102,7 +102,9 @@ exclusive, and naive timestamps are UTC.
   carries `"Europe/Warsaw"`. Setting one of them explicitly to a *different* zone still raises `ValueError` (at
   construction and again at the start of `run()`), since `timezone` decides what a local calendar day is and a
   component computing its own local time in a different zone would silently disagree with it. A component that
-  needs a zone and has neither raises a clear error when the pipeline runs.
+  needs a zone and has neither raises a clear error when the pipeline runs. An inheriting component belongs to
+  one pipeline's zone: adding the same instance to a second pipeline with a different `timezone` raises too, so
+  give each pipeline its own instances.
 </Aside>
 
 <Aside type="caution">

@@ -165,7 +165,9 @@ class DataPipeline:
 
         for transformer in self.transformers:
             if isinstance(transformer, TimezoneTransformer):
-                _bind_timezone(transformer, transformer.target_tz, self.timezone, "TimezoneTransformer.target_tz")
+                _bind_timezone(
+                    transformer, transformer.target_tz, self.timezone, "TimezoneTransformer.target_tz", owner=self
+                )
 
         for source in self.sources:
             if isinstance(source, OpenMeteoWeightedSource):
@@ -173,9 +175,9 @@ class DataPipeline:
                 # already passed to each of its own sources at construction, so binding them binds it too.
                 for child in source._sources:
                     where = f"{type(child).__name__}.timezone (via OpenMeteoWeightedSource.source_params)"
-                    _bind_timezone(child, child.timezone, self.timezone, where)
+                    _bind_timezone(child, child.timezone, self.timezone, where, owner=self)
             elif isinstance(source, (OpenMeteoSource, OpenMeteoSingleRunsSource, CalendarSource)):
-                _bind_timezone(source, source.timezone, self.timezone, f"{type(source).__name__}.timezone")
+                _bind_timezone(source, source.timezone, self.timezone, f"{type(source).__name__}.timezone", owner=self)
 
     def add_source(self, source: DataSource) -> "DataPipeline":
         if not isinstance(source, DataSource):
