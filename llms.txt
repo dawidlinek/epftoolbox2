@@ -134,7 +134,7 @@ source = OpenMeteoSource(
     timezone="Europe/Warsaw",    # Required. Market time zone of local days and the issue time; no default (raises if omitted)
     issue_time="10:00",          # Optional. Local "HH:MM" on D when the forecast is issued (default: "10:00")
     publication_delay_h=10,      # Optional. Hours from run initialisation to availability (default: 10)
-    vintage="issue_time",        # Optional. Leak-free default, or "valid_time" = look-ahead mapping of <= 2.2 (default: "issue_time")
+    vintage="issue_time",        # Optional. "issue_time" is the leak-free default; "valid_time" is the look-ahead mapping of <= 2.2
     derived=None,                # Optional. Names of extra computed columns: "hdd", "cdd", "wind_speed_100m_cubed" (default: None = off)
     hdd_base_c=18.0,             # Optional. Base temperature (°C) for "hdd" (default: 18.0)
     cdd_base_c=21.0,             # Optional. Base temperature (°C) for "cdd" (default: 21.0)
@@ -185,7 +185,7 @@ source = OpenMeteoSingleRunsSource(
     timezone="Europe/Warsaw",    # Required. Market time zone of local days and the issue time; no default (raises if omitted)
     issue_time="10:00",          # Optional. Local "HH:MM" on D when the forecast is issued (default: "10:00")
     publication_delay_h=10,      # Optional. Hours from run initialisation to availability (default: 10)
-    run_interval_h=6,            # Optional. Hours between model runs, must divide 24 (default: 6)
+    run_interval_h=6,            # Optional. Hours between forecast runs, must divide 24 (default: 6)
     derived=None,                # Optional. Names of extra computed columns: "hdd", "cdd", "wind_speed_100m_cubed" (default: None = off)
     hdd_base_c=18.0,             # Optional. Base temperature (°C) for "hdd" (default: 18.0)
     cdd_base_c=21.0,             # Optional. Base temperature (°C) for "cdd" (default: 21.0)

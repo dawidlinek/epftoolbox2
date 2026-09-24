@@ -6,6 +6,7 @@ building and running pipelines without writing YAML by hand.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -31,6 +32,8 @@ console = Console()
 #   "multiselect"  – one or more choices (checkbox)
 #   "comma_list"   – comma-separated text → list[str]
 #   "column_select"– checkbox from available_columns (falls back to comma_list)
+#   "lag_list"     – comma-separated text → list[int] (e.g. "1,2,7" or "-7,-1,0")
+#   "json"         – free text parsed as JSON → dict/list (e.g. {"price": [-500, 4000]})
 
 PARAM_SCHEMAS: dict[str, list[dict]] = {
     "EntsoeSource": [
@@ -96,6 +99,20 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
         {
+            "name": "columns",
+            "description": "Weather variables to fetch, comma-separated (blank = the default 14)",
+            "required": False,
+            "default": None,
+            "kind": "comma_list",
+        },
+        {
+            "name": "temporal_resolution",
+            "description": "One of hourly_3, hourly_6, native (blank = hourly, no extra API parameter)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
             "name": "timezone",
             "description": "Market time zone (defines local days and the issue time), e.g. Europe/Warsaw",
             "required": True,
@@ -117,6 +134,36 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "float",
         },
         {
+            "name": "vintage",
+            "description": '"issue_time" (leak-free) or "valid_time" (look-ahead, reproduces epftoolbox2 <= 2.2)',
+            "required": False,
+            "default": "issue_time",
+            "kind": "select",
+            "choices": ["issue_time", "valid_time"],
+        },
+        {
+            "name": "derived",
+            "description": "Extra computed columns: hdd, cdd (need temperature_2m), wind_speed_100m_cubed",
+            "required": False,
+            "default": None,
+            "kind": "multiselect",
+            "choices": ["hdd", "cdd", "wind_speed_100m_cubed"],
+        },
+        {
+            "name": "hdd_base_c",
+            "description": 'Base temperature (°C) for the "hdd" derived column',
+            "required": False,
+            "default": "18.0",
+            "kind": "float",
+        },
+        {
+            "name": "cdd_base_c",
+            "description": 'Base temperature (°C) for the "cdd" derived column',
+            "required": False,
+            "default": "21.0",
+            "kind": "float",
+        },
+        {
             "name": "strict",
             "description": "Fail when a weather column has missing values?",
             "required": False,
@@ -128,6 +175,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "description": "Column name prefix (optional)",
             "required": False,
             "default": "",
+            "kind": "text",
+        },
+        {
+            "name": "proxy_url",
+            "description": "HTTP(S) proxy URL (blank = none)",
+            "required": False,
+            "default": None,
             "kind": "text",
         },
     ],
@@ -153,6 +207,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "required": False,
             "default": "ecmwf_ifs",
             "kind": "text",
+        },
+        {
+            "name": "columns",
+            "description": "Weather variables to fetch, comma-separated (blank = the default 14)",
+            "required": False,
+            "default": None,
+            "kind": "comma_list",
         },
         {
             "name": "timezone",
@@ -183,6 +244,28 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "int",
         },
         {
+            "name": "derived",
+            "description": "Extra computed columns: hdd, cdd (need temperature_2m), wind_speed_100m_cubed",
+            "required": False,
+            "default": None,
+            "kind": "multiselect",
+            "choices": ["hdd", "cdd", "wind_speed_100m_cubed"],
+        },
+        {
+            "name": "hdd_base_c",
+            "description": 'Base temperature (°C) for the "hdd" derived column',
+            "required": False,
+            "default": "18.0",
+            "kind": "float",
+        },
+        {
+            "name": "cdd_base_c",
+            "description": 'Base temperature (°C) for the "cdd" derived column',
+            "required": False,
+            "default": "21.0",
+            "kind": "float",
+        },
+        {
             "name": "strict",
             "description": "Fail when a weather column has missing values?",
             "required": False,
@@ -194,6 +277,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "description": "Column name prefix (optional)",
             "required": False,
             "default": "",
+            "kind": "text",
+        },
+        {
+            "name": "proxy_url",
+            "description": "HTTP(S) proxy URL (blank = none)",
+            "required": False,
+            "default": None,
             "kind": "text",
         },
     ],
@@ -213,6 +303,16 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": "OpenMeteoSource",
             "kind": "select",
             "choices": ["OpenMeteoSource", "OpenMeteoSingleRunsSource"],
+        },
+        {
+            "name": "source_params",
+            "description": (
+                "Params for the underlying source, as JSON (must include timezone), "
+                'e.g. {"model": "icon_seamless", "horizon": 5, "timezone": "Europe/Warsaw"} (blank = none)'
+            ),
+            "required": False,
+            "default": None,
+            "kind": "json",
         },
         {
             "name": "prefix",
@@ -686,6 +786,20 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "select",
             "choices": ["ffill", "none"],
         },
+        {
+            "name": "method",
+            "description": "Deprecated legacy interpolation method (use agg/fill instead); blank = not set",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "columns",
+            "description": "Deprecated: columns the legacy method applies to (use agg/fill instead); blank = all",
+            "required": False,
+            "default": None,
+            "kind": "column_select",
+        },
     ],
     "LagTransformer": [
         {
@@ -994,6 +1108,16 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
     # `ranges` (a {pattern: [min, max]} mapping) is set in YAML; the wizard uses the defaults.
     "PlausibilityValidator": [
         {
+            "name": "ranges",
+            "description": (
+                'Column pattern -> [min, max] overrides, as JSON, e.g. {"price": [-500, 4000]} '
+                "(blank = price* within the SDAC limits, load* >= 1 MW)"
+            ),
+            "required": False,
+            "default": None,
+            "kind": "json",
+        },
+        {
             "name": "max_constant_run",
             "description": "Longest run of identical values before a warning (rows)",
             "required": False,
@@ -1177,6 +1301,22 @@ def _ask_field(field: dict, available_columns: Optional[list[str]] = None) -> An
         if val is None:
             _abort()
         return val if val else None
+
+    if kind == "json":
+        raw = questionary.text(label, default=json.dumps(default) if default is not None else "").ask()
+        if raw is None:
+            _abort()
+        raw = raw.strip()
+        if not raw:
+            if required:
+                console.print("[red]This field is required.[/red]")
+                return _ask_field(field, available_columns)
+            return default
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            console.print('[red]Please enter valid JSON, e.g. {"price": [-500, 4000]}[/red]')
+            return _ask_field(field, available_columns)
 
     if kind == "lag_list":
         while True:
