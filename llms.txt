@@ -66,33 +66,52 @@ All sources implement `DataSource` base class with:
 
 ## EntsoeSource
 
-Downloads electricity data from ENTSOE Transparency Platform.
+Downloads electricity data from ENTSOE Transparency Platform. `fetch(start, end)` returns the half-open range [start, end) with a UTC index.
 
 ```python
 from epftoolbox2.data.sources import EntsoeSource
 
 source = EntsoeSource(
-    country_code="PL",           # Required. Country code (see SUPPORTED_COUNTRIES)
-    api_key="YOUR_API_KEY",      # Required. ENTSOE API key
-    type=["load", "price"],      # Required. Options: "load", "price", "generation"
-    prefer_15min=False,          # Optional. If True, fetches 15-min price data when available.
+    country_code="PL",           # Required. Area code, e.g. "PL", "DE_LU" (see SUPPORTED_COUNTRIES)
+    api_key="YOUR_API_KEY",      # Required. ENTSOE API key (sent as a header, never in URLs or error messages)
+    type=["load", "price"],      # Required. Options: "load", "price", "generation", "transfer_capacity", "installed_capacity"
+    prefer_15min=False,          # Optional. Price grid: False = hourly, True = 15-minute (default: False)
+    neighbours=None,             # Optional. Bidding zones for "transfer_capacity", e.g. ["DE_LU", "CZ"] (default: None)
+    prefix="",                   # Optional. Column prefix, columns become f"{prefix}_{col}" (default: "")
 )
 ```
 
 **Parameters:**
-- `country_code` (str): ISO country code. See SUPPORTED_COUNTRIES section.
+- `country_code` (str): Area code, a key of `epftoolbox2.data.sources.entsoe.AREAS`. `type` with `"price"` needs a bidding zone: `"DE"`, `"DK"`, `"NO"`, `"SE"`, `"IT"`, `"LU"` etc. raise `ValueError` naming the zone to use (Germany: `"DE_LU"`, `"DE_AT_LU"` before 2018-10-01).
 - `api_key` (str): ENTSOE API key from https://transparency.entsoe.eu/
-- `type` (List[str]): Data types to fetch. Options: `"load"`, `"price"`, `"generation"`
-- `prefer_15min` (bool): Defaults to False. If True, prioritizes fetching 15-minute resolution data (particularly relevant for prices).
+- `type` (List[str]): Data types to fetch. Options: `"load"`, `"price"`, `"generation"`, `"transfer_capacity"`, `"installed_capacity"`
+- `prefer_15min` (bool): Defaults to False. Grid of the `price` column. False: hourly; 15-minute periods (all prices from 2025-10-01) are averaged into hours. True: 15-minute; hourly periods (before 2025-10-01) are step-filled, each quarter-hour gets its hour's price. No period is ever dropped.
+- `neighbours` (List[str] or comma-separated str): Defaults to None. Required with `"transfer_capacity"` (and rejected without it); each must be a bidding zone.
+- `prefix` (str): Defaults to "". Prepended to every column (`"cz"` -> `cz_price`), so several zones can be combined in one pipeline without collisions.
 
 **Output columns by type:**
-- `type=["load"]`: `load_actual`, `load_forecast`, `load_forecast_daily_min`, `load_forecast_daily_max`
-- `type=["price"]`: `price` (EUR/MWh)
-- `type=["generation"]`: `generation_biomass`, `generation_fossil_gas`, `generation_nuclear`, `generation_solar`, `generation_wind_onshore`, etc.
+- `type=["load"]`: `load_actual` (A65/A16), `load_forecast` (A65/A01, day-ahead), `load_forecast_daily_min`, `load_forecast_daily_max` (A65/A31 week-ahead; one value at local midnight per day, fill with `ResampleTransformer(method="ffill", columns=[...])`)
+- `type=["price"]`: `price` (EUR/MWh), the SDAC day-ahead price only (classificationSequence 1; the second 15-minute DE_LU/AT auction is ignored)
+- `type=["generation"]`: actual generation per production type `generation_<type>` (A75), e.g. `generation_biomass`, `generation_fossil_gas`, `generation_hydro_run_of_river_and_pondage`, `generation_nuclear`, `generation_solar`, `generation_wind_onshore`, `generation_energy_storage`; consumption of a type (pumped-storage pumping etc.) as `generation_<type>_consumption`; day-ahead wind/solar forecasts `generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` (A69). Unknown production types become `generation_<code>`.
+- `type=["transfer_capacity"]`: `transfer_capacity_export_<neighbour>` and `transfer_capacity_import_<neighbour>` (A61 day-ahead forecasted transfer capacity, MW), e.g. `transfer_capacity_export_es`. Borders without NTC publication (e.g. inside flow-based Core, all PL borders in 2024) return no data and the column is absent.
+- `type=["installed_capacity"]`: `installed_capacity_<type>` (A68, MW), one value per year at local midnight of 1 January (reported at `start` if the year began earlier); fill with `ResampleTransformer(method="ffill", columns=[...])`.
+- Unavailability of generation units (A77/A80) is not offered: the API cannot give the revision known at issue time.
 
-> **Note on Germany Price Data:** ENTSOE publishes price data by bidding zone. Since the split in 2018, the correct bidding zone code for German energy prices is `"DE_LU"` (Germany/Luxembourg). Using `"DE"` will return an empty DataFrame for prices.
+Omitted points under curveType A03 are forward-filled; daily values follow the local calendar across DST.
 
-**Caching:** Returns cache config based on area_code and types. Cached to `.cache/sources/`.
+**Safe predictors for a forecast issued on D (before 12:00 CET gate closure; Regulation 543/2013 deadlines):**
+- `price`, `price_d-k`: safe (published 1 h after gate closure the day before).
+- `load_actual`, `generation_*` actuals: only `_d-1` and older (published 1 h after each period; unlagged is look-ahead).
+- `load_forecast`: row D and `_d+1` (published 10:00 CET the day before delivery); `_d+2` and later are look-ahead.
+- `load_forecast_daily_min/max`: `_d+0` to `_d+2` always, `_d+3` if issued after 10:00 (published Fridays 10:00 for the next Mon-Sun).
+- `generation_*_forecast`: `_d+0` and older; `_d+1` has an 18:00 deadline, after gate closure.
+- `transfer_capacity_*`: `_d+0` and older; `_d+1` is published before gate closure at no fixed hour (borderline).
+- `installed_capacity_*`: safe within the year (published a week before the year starts).
+- The API returns the latest revision, so revised forecasts can still carry slight look-ahead.
+
+**Errors:** "No matching data" chunks are skipped with a warning; 429/5xx/network errors are retried 5 times with backoff (honouring Retry-After); other errors raise `EntsoeApiError` with ENTSO-E's reason text. A failed chunk raises instead of leaving a gap.
+
+**Caching:** Cache config = area_code, types, prefer_15min, a parser schema_version, and neighbours/prefix when set. Cached to `.cache/sources/`; after upgrading, a changed schema_version makes old cache entries unused.
 
 ---
 

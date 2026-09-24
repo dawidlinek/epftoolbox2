@@ -27,7 +27,7 @@ epftoolbox2.verify()
 ```
 ## Key Features
 
-- **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (weather forecasts), Calendar (holidays, weekday)
+- **Data Sources**: ENTSOE (load, generation, day-ahead prices on an hourly or 15-minute grid, cross-border transfer capacity, installed capacity; `prefix` to combine zones), Open-Meteo (weather forecasts), Calendar (holidays, weekday)
 - **Transformers**: Resample, Timezone conversion, Lag features (local calendar days), DST normalisation to 24 slots a day (DSTNormalize), daily profile and daily min/max/mean/last stats (DailyProfile, DailyStats), residual load forecast (ResidualLoad), rolling spike flags (SpikeFlag), Impute (leak-safe gap filling)
 - **Presets**: `epftoolbox2.presets` — ready-made predictor lists for the LEAR and expert-model benchmarks from the literature
 - **Validators**: Null checks, Continuity (duplicates, gaps, mixed resolutions), DSTStructure (rows per local day), Coverage (per-column outages), Freshness, Plausibility (SDAC price limits, frozen values), LagConsistency (calendar-day lags), EDA statistics
@@ -48,10 +48,11 @@ epftoolbox2.verify()
 ### Standalone source use
 
 ```python
+import pandas as pd
 from epftoolbox2.data.sources import EntsoeSource
 
 source = EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"])
-df = source.run("2024-01-01", "2024-06-01", cache=True)
+df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-06-01", tz="UTC"))  # [start, end), UTC
 ```
 
 ### Standalone transformer use
