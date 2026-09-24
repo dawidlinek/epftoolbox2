@@ -45,6 +45,7 @@ COMPONENT_REGISTRY = {
         "CalendarSource": "epftoolbox2.data.sources.calendar",
         "SchoolHolidaysSource": "epftoolbox2.data.sources.school_holidays",
         "PseSource": "epftoolbox2.data.sources.pse",
+        "SettlementPriceSource": "epftoolbox2.data.sources.settlement",
     },
     "transformers": {
         "TimezoneTransformer": "epftoolbox2.data.transformers.timezone",
