@@ -1,0 +1,96 @@
+---
+title: Upgrading
+description: What changes for users of an earlier epftoolbox2 version, and what to do about it
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# Upgrading
+
+This release fixes several methodology issues in the data layer (look-ahead, DST misalignment, silently
+dropped rows). Fixing them changes numbers computed on the same dates and config. This page lists what
+changed, why, and what you need to do before trusting new results.
+
+<Aside type="caution">
+  Don't compare old and new numbers directly, and don't resume an old results directory into this version —
+  see [Results directories](#results-directories-recompute-dont-resume) below.
+</Aside>
+
+## Why results change
+
+- **ENTSO-E parsing.** A chunk that mixed hourly and 15-minute periods used to keep only one resolution,
+  silently dropping the other (this also produced gaps around the 2025-10-01 15-minute go-live). Values
+  ENTSO-E omits under curve type A03 because they repeat the previous point are now forward-filled instead
+  of left missing. DE_LU/AT day-ahead prices no longer mix the main SDAC auction with the separate EXAA
+  auction. Pumped-storage generation and consumption are no longer merged into one series.
+- **Open-Meteo vintage.** `OpenMeteoSource`/`OpenMeteoSingleRunsSource` used to serve whichever forecast run
+  Open-Meteo's API returns for a `previous_dayK`/`previous_runs` bucket, which can be a run published
+  *after* the forecast's own issue time — look-ahead. They now select, per row and lead time, the latest run
+  that was actually published in time (`vintage="issue_time"`, the new default). Every `*_d+i` weather
+  value can change.
+- **Calendar-day lags.** `LagTransformer` and the target-shifting in `ModelPipeline` used to shift by a
+  fixed 24-hour offset; DST days have 23 or 25 hours, so a day lag landed on the wrong wall-clock hour
+  around a spring/autumn switch. Lags now shift by local calendar days. Only the days near each DST switch
+  are affected, but every `_d-k`/`_d+k` column in the training window can shift.
+- **Resampling.** `ResampleTransformer` no longer interpolates or back-fills real gaps in the source; it
+  only fills slots created by *upsampling* (e.g. an hourly value stepped over its four quarter-hours), from
+  that slot's own period. The old behaviour could smooth a real outage into a plausible-looking value.
+- **The cache.** Per-source caching now writes atomically and locks around fetch+write (concurrent SLURM
+  array tasks used to be able to read a half-written file), records coverage from the data actually
+  returned rather than the whole requested range, and never caches the part of a range that isn't settled
+  yet (today's still-provisional weather, tomorrow's not-yet-published price). The cache key format changed
+  to match (`CACHE_FORMAT_VERSION` 2 → 3): old cache entries are never read by the new code, so old and new
+  values can't get mixed silently.
+
+## `.cache/sources/` should be cleared
+
+The format-version bump above means old cache entries are already ignored — reading them again won't return
+stale data. Clearing `.cache/sources/` isn't required for correctness, but old entries are dead weight (they
+will never be reused), so delete them to reclaim disk space and avoid confusion when inspecting the cache
+directory.
+
+## Results directories: recompute, don't resume
+
+A `save_dir` from before this version has no manifest. On resume, epftoolbox2 now writes a
+[manifest](/epftoolbox2/model-pipeline/caching/#the-manifest) — model params, the predictors' ordered
+layout, a content hash of the data up to `test_end`, its time zone, target, horizon and freq — and compares
+it to the current run before adding to an existing results file. A directory with results but no manifest
+is accepted with a warning by default (`require_manifest=False`), and a manifest is written from then on;
+pass `--require-manifest` (`require_manifest=True`) to refuse instead.
+
+That check only catches *configuration* drift (a different predictor list, a different target, …). It
+cannot tell that the same configuration now produces different numbers because a bug fix above changed a
+column's values — old rows already in the file are kept as they are and reported as if they were computed
+by this version. **Recompute results made before this version from scratch** (a new `save_dir`, or delete
+the old one) rather than resuming them; don't rely on the manifest to catch this class of change for you.
+
+## Required and renamed parameters
+
+- **`OpenMeteoSource`/`OpenMeteoSingleRunsSource`: `timezone` is now required.** It used to default to
+  `"Europe/Warsaw"`, which silently mis-timed the issue-time cutoff (and therefore leaked or over-restricted
+  data) for any market outside that zone. Pass the market's zone explicitly — the same one as your
+  `TimezoneTransformer`/`CalendarSource`.
+- **`ResampleTransformer`: `method`/`columns` → `agg`/`fill`.** The old two parameters are still accepted
+  (with a `FutureWarning`) and mapped onto the new ones, but under the new, leak-free resampling semantics
+  above — not a like-for-like translation of the old behaviour. Prefer `agg="mean", fill="ffill"` (or a
+  `{column: ...}` dict for per-column control) going forward.
+
+## New components
+
+`OpenMeteoSingleRunsSource` and `OpenMeteoWeightedSource` (exact-run and multi-location weather),
+`PseSource` and `SettlementPriceSource` (Polish system data and fuel/carbon closes), `SchoolHolidaysSource`,
+`EpftoolboxBenchmarkSource` (the Lago et al. 2021 datasets); `DSTNormalizeTransformer`, `DailyProfileTransformer`,
+`DailyStatsTransformer`, `ResidualLoadTransformer`, `SpikeFlagTransformer`, `ImputeTransformer`;
+`CoverageValidator`, `DSTStructureValidator`, `FreshnessValidator`, `PlausibilityValidator`,
+`LagConsistencyValidator`; variance-stabilising scalers (`asinh`, N-PIT) alongside the default standardiser;
+and `epftoolbox2.presets` (ready-made LEAR/expert-model predictor lists).
+
+## The new information-set check
+
+`epftoolbox2.information_set` can check, before any model is fit, that every predictor (and the newest
+training target) is actually known at the moment a forecast is issued — same-day `load_actual` is the
+canonical example of a predictor that isn't. It's opt-in: pass `issue_time` (and optionally
+`issue_timezone`) to `ModelPipeline`/`Workflow`, or nothing to skip the check entirely, so existing pipelines
+are unaffected until you turn it on. See [Information Set](/epftoolbox2/model-pipeline/information-set/) for
+the built-in availability rules, custom rules, and `leakage_probe`, an empirical check that perturbs
+not-yet-known values and asserts a model's forecasts don't move.

@@ -32,6 +32,7 @@ export default defineConfig({
                         { label: 'Installation', link: '/getting-started/installation/' },
                         { label: 'Quick Start', link: '/getting-started/quickstart/' },
                         { label: 'CLI Reference', link: '/getting-started/cli/' },
+                        { label: 'Upgrading', link: '/getting-started/upgrading/' },
                     ],
                 },
                 {
