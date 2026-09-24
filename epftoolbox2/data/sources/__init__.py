@@ -10,6 +10,7 @@ from .calendar import CalendarSource
 from .school_holidays import SchoolHolidaysSource
 from .pse import PseSource
 from .settlement import SettlementPriceSource
+from .benchmark import EpftoolboxBenchmarkSource
 
 __all__ = [
     "DataSource",
@@ -22,4 +23,5 @@ __all__ = [
     "SchoolHolidaysSource",
     "PseSource",
     "SettlementPriceSource",
+    "EpftoolboxBenchmarkSource",
 ]

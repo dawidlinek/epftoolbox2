@@ -615,6 +615,30 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         {"name": "freq", "description": "Output row frequency", "required": False, "default": "1h", "kind": "text"},
         {"name": "separator", "description": "CSV separator", "required": False, "default": ",", "kind": "text"},
     ],
+    "EpftoolboxBenchmarkSource": [
+        {
+            "name": "dataset",
+            "description": "Benchmark dataset of Lago et al. (2021)",
+            "required": True,
+            "default": None,
+            "kind": "select",
+            "choices": ["NP", "PJM", "FR", "BE", "DE"],
+        },
+        {
+            "name": "cache_dir",
+            "description": "Download directory (blank = ~/.cache/epftoolbox2/epftoolbox-benchmark)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
+    ],
     "TimezoneTransformer": [
         {
             "name": "target_tz",
@@ -1314,6 +1338,7 @@ _SOURCES = [
     "SchoolHolidaysSource",
     "PseSource",
     "SettlementPriceSource",
+    "EpftoolboxBenchmarkSource",
 ]
 _TRANSFORMERS = [
     "TimezoneTransformer",

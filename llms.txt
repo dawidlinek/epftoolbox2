@@ -442,6 +442,33 @@ source = SettlementPriceSource(
 
 ---
 
+## EpftoolboxBenchmarkSource
+
+The five open-access benchmark datasets of Lago et al. (2021, Applied Energy 293): NP, PJM, FR, BE, DE. Downloaded on first use from Zenodo record 4624805, md5-verified against the record metadata, cached locally. Not shipped (licence "other-open"; the authors don't own the data).
+
+```python
+from epftoolbox2.data.sources import EpftoolboxBenchmarkSource
+
+source = EpftoolboxBenchmarkSource(
+    dataset="DE",                # Required. "NP" | "PJM" | "FR" | "BE" | "DE"
+    cache_dir=None,              # Optional. Download directory (default: None = $XDG_CACHE_HOME or ~/.cache /epftoolbox2/epftoolbox-benchmark)
+    prefix="",                   # Optional. Column prefix "{prefix}_{column}" (default: "")
+)
+source.index_timezone            # fixed-offset zone of the index: "Etc/GMT-1" (UTC+1; PJM: "Etc/GMT+5")
+source.test_period               # paper's test period (delivery days), e.g. ("2016-01-04", "2017-12-31")
+```
+
+**Output columns:** `price` + two exogenous day-ahead forecasts (value at (d, h) = forecast for (d, h), available on d-1):
+- NP: `load_forecast`, `wind_forecast`; PJM: `load_forecast`, `zonal_load_forecast`; FR: `load_forecast`, `generation_forecast`; BE: `load_forecast_fr`, `generation_forecast_fr` (French series); DE: `load_forecast_amprion`, `wind_solar_forecast`
+
+**Index:** files are local wall-clock time with 24 values per day (DST hours interpolated/averaged). Mapped to UTC through the fixed standard-time offset, so every day keeps 24 rows. Use `TimezoneTransformer(target_tz=source.index_timezone)`, never a DST zone; day lags then equal calendar-day lags. Summer UTC timestamps are labels (1 h off real time): don't mix with real-time sources (ENTSO-E, Open-Meteo, PSE).
+
+**Like the paper:** row D forecasts D+1 with `horizon=1` (`x_d+2`+ would be look-ahead: day-ahead forecasts only). Paper inputs for delivery d: `price`, `price_d-1`, `price_d-2`, `price_d-6`, `x_d+1`, `x`, `x_d-6`. Issue days start one day before the test period's delivery days.
+
+**Caching:** Returns None; the source keeps its own verified copy (`{dataset}.csv` + `{dataset}.csv.md5`). Offline machines: copy both files into `cache_dir`.
+
+---
+
 # TRANSFORMERS
 
 All transformers implement `Transformer` base class with:
