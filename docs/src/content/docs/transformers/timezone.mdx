@@ -1,13 +1,13 @@
 ---
 title: TimezoneTransformer
-description: Convert DataFrame index timezone
+description: Convert the index to local time and put daily values on local midnight
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 # TimezoneTransformer
 
-Converts the DataFrame index from UTC to a target timezone.
+Converts the DataFrame index from UTC (what every source returns) to a local time zone, and moves the values of daily columns to local midnight.
 
 ## Basic Usage
 
@@ -20,24 +20,61 @@ df = transformer.transform(df)
 
 ## Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `target_tz` | str | Yes | Target timezone name |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `target_tz` | str | required | Target IANA time zone, e.g. `"Europe/Warsaw"` |
+| `daily_columns` | list[str] \| None | `None` | Columns holding one value per day. `None` means `["load_forecast_daily_min", "load_forecast_daily_max"]` (ENTSO-E week-ahead forecast); columns not in the frame are skipped |
+| `daily_anchor` | str | `"UTC+02:00"` | Time zone whose calendar date a daily value belongs to: a UTC offset (`"UTC+02:00"`, `"+01:00"`, `"UTC"`) or an IANA name |
+
+---
+
+## Daily columns
+
+ENTSO-E's week-ahead load forecast (A31) has one value per day, but its periods start at 00:00 **UTC+2** (22:00 UTC) all year. In Warsaw that is 00:00 in summer and 23:00 **of the previous day** in winter, so without correction a later `ResampleTransformer` would give each winter value to the wrong hours.
+
+The rule `TimezoneTransformer` applies:
+
+> A value at timestamp *t* belongs to the calendar date of *t* in `daily_anchor`. It is moved to 00:00 local time (`target_tz`) on that date.
+
+With the default anchor `UTC+02:00`:
+
+| Zone | A31 period start (22:00 UTC) in local time | Moved to |
+|------|------|------|
+| Europe/Warsaw, winter | 23:00 on D-1 | 00:00 on D |
+| Europe/Warsaw, summer | 00:00 on D | 00:00 on D (unchanged) |
+| Europe/Helsinki, summer | 01:00 on D | 00:00 on D |
+| Europe/Lisbon, winter | 22:00 on D-1 | 00:00 on D |
+
+This is right for A31 data in every zone from UTC-10 to UTC+13. Values that are already stamped at local midnight are also kept on their day in zones up to UTC+2. For data stamped at local midnight further east (e.g. EET in summer, UTC+3), pass `daily_anchor=target_tz`:
+
+```python
+TimezoneTransformer(target_tz="Europe/Helsinki", daily_columns=["my_daily_value"], daily_anchor="Europe/Helsinki")
+```
+
+After the move, `ResampleTransformer` spreads each daily value over exactly its own local day (23, 24 or 25 hours).
+
+**Checks:**
+
+- A daily column must hold at most one value per day. If it holds more (typically because `ResampleTransformer` already ran and made it dense), `TimezoneTransformer` raises a `ValueError` instead of collapsing the column to a few values.
+- If the local midnight a value belongs to is not in the index, that row is added (other columns NaN). This is routine at the start of a winter frame: the A31 value for the first local day is stamped an hour before the other sources begin. If the missing midnight lies inside the data, the index has a hole there and a `UserWarning` is emitted.
 
 ---
 
 ## Pipeline Order
 
 <Aside type="caution">
-  The order of transformers matters! Apply `TimezoneTransformer` **before** `LagTransformer`. Day lags shift by
-  local calendar days, which exist only once the index is in local time. On a UTC index they shift by UTC days,
-  so around each DST switch `price_d-1` comes from the wrong local hour and daily features such as
-  `is_monday_d+1` can point at the wrong day. `LagTransformer` warns when it gets day lags on a UTC index.
+  Run `TimezoneTransformer` **first**, then `ResampleTransformer`, then `LagTransformer` (and `ImputeTransformer`,
+  if used, after `ResampleTransformer` and before `LagTransformer`):
+
+  1. **Timezone**: local index; daily values on local midnight.
+  2. **Resample**: one regular grid; daily values fill their own local day; bins follow local days.
+  3. **Lag**: `_d-k` / `_d+k` columns on the local grid.
+
+  Resampling before the timezone step aggregates over UTC days and makes daily columns dense, which `TimezoneTransformer` rejects.
+  Day lags shift by local calendar days, which exist only once the index is in local time: on a UTC index they
+  shift by UTC days, so around each DST switch `price_d-1` comes from the wrong local hour and daily features
+  such as `is_monday_d+1` can point at the wrong day. `LagTransformer` warns when it gets day lags on a UTC index.
 </Aside>
-
-### Recommended Pipeline Order
-
-It is recommended to add `ResampleTransformer` **after** `TimezoneTransformer` to fill gaps created by daylight saving time transitions:
 
 ```python
 pipeline = (
@@ -45,13 +82,13 @@ pipeline = (
     .add_source(EntsoeSource(...))  # Output: UTC
     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))  # Creates DST gaps
     .add_transformer(ResampleTransformer(freq="1h"))  # Fills DST gaps
-    .add_transformer(LagTransformer(...))  # Lags by local calendar day
+    .add_transformer(LagTransformer(columns=["price"], lags=[1, 2, 7], freq="day"))  # Lags by local calendar day
 )
 ```
 
-<Aside type="tip">
-  During DST spring-forward, one hour is skipped (e.g., 2:00 AM). `ResampleTransformer` will interpolate to fill this gap.
-</Aside>
+### What happens on DST days
+
+Converting to local time adds and removes nothing: the spring switch day has 23 hourly rows (no 02:00, because that local time doesn't exist) and the autumn switch day has 25 (02:00 twice). `ResampleTransformer` keeps these 23 and 25 hours; it does not invent an 02:00 row.
 
 ---
 

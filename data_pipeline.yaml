@@ -51,8 +51,8 @@ transformers:
 - class: ResampleTransformer
   params:
     freq: 1h
-    method: linear
-    columns: null
+    agg: mean
+    fill: ffill
 - class: LagTransformer
   params:
     columns:

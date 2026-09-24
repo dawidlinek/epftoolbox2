@@ -51,6 +51,7 @@ COMPONENT_REGISTRY = {
         "DailyStatsTransformer": "epftoolbox2.data.transformers.daily_stats",
         "ResidualLoadTransformer": "epftoolbox2.data.transformers.residual_load",
         "SpikeFlagTransformer": "epftoolbox2.data.transformers.spike_flag",
+        "ImputeTransformer": "epftoolbox2.data.transformers.impute",
     },
     "validators": {
         "ContinuityValidator": "epftoolbox2.data.validators.continuity",

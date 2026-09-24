@@ -43,11 +43,7 @@ if __name__ == "__main__":
         .add_source(OpenMeteoSource(latitude=52.5200, longitude=13.4050, horizon=7, prefix="berlin"))
         .add_source(CalendarSource(country="DE", holidays="binary", weekday="onehot", daylight=True, freq="15min"))
         .add_transformer(TimezoneTransformer(target_tz="Europe/Berlin"))
-        .add_transformer(
-            ResampleTransformer(
-                freq="15min", columns=["load_forecast_daily_min", "load_forecast_daily_max"], method="ffill"
-            )
-        )
+        # Hourly values become a step over their four quarter-hours; daily min/max cover their local day
         .add_transformer(ResampleTransformer(freq="15min"))
         .add_transformer(LagTransformer(columns=["load_actual"], lags=[1, 2, 7], freq="day"))
         .add_transformer(

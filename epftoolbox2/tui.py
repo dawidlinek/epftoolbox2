@@ -180,6 +180,20 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        {
+            "name": "daily_columns",
+            "description": "Columns with one value per day, moved to local midnight (none = ENTSO-E daily min/max)",
+            "required": False,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "daily_anchor",
+            "description": "Zone whose calendar date a daily value belongs to (UTC offset or IANA name)",
+            "required": False,
+            "default": "UTC+02:00",
+            "kind": "text",
+        },
     ],
     "ResampleTransformer": [
         {
@@ -190,12 +204,20 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
         {
-            "name": "method",
-            "description": "Interpolation method",
+            "name": "agg",
+            "description": "Aggregation when downsampling",
             "required": False,
-            "default": "linear",
+            "default": "mean",
             "kind": "select",
-            "choices": ["linear", "ffill", "bfill"],
+            "choices": ["mean", "sum", "first", "last", "min", "max", "median"],
+        },
+        {
+            "name": "fill",
+            "description": "Upsampled slots: repeat the value within its own period, or leave empty",
+            "required": False,
+            "default": "ffill",
+            "kind": "select",
+            "choices": ["ffill", "none"],
         },
     ],
     "LagTransformer": [
@@ -323,6 +345,44 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "description": "Convert to this IANA timezone first (blank = index is already local)",
             "required": False,
             "default": None,
+            "kind": "text",
+        },
+    ],
+    "ImputeTransformer": [
+        {
+            "name": "columns",
+            "description": "Columns to impute",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "method",
+            "description": "Fill method (leak-safe only)",
+            "required": False,
+            "default": "ffill",
+            "kind": "select",
+            "choices": ["ffill", "previous_day", "previous_week"],
+        },
+        {
+            "name": "limit",
+            "description": "Max gap to fill: integer rows, a duration (e.g. 6h, 2D), or blank for none",
+            "required": False,
+            "default": "1D",
+            "kind": "text",
+        },
+        {
+            "name": "flag",
+            "description": "Add a {column}_imputed flag column?",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
+        },
+        {
+            "name": "suffix",
+            "description": "Write filled values to {column}{suffix} instead of overwriting (optional)",
+            "required": False,
+            "default": "",
             "kind": "text",
         },
     ],
@@ -667,6 +727,7 @@ _TRANSFORMERS = [
     "DailyStatsTransformer",
     "ResidualLoadTransformer",
     "SpikeFlagTransformer",
+    "ImputeTransformer",
 ]
 _VALIDATORS = ["ContinuityValidator", "NullCheckValidator", "EdaValidator"]
 _MODELS = ["OLSModel", "LassoCVModel"]

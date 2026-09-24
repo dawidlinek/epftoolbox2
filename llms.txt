@@ -202,21 +202,31 @@ All transformers implement `Transformer` base class with:
 
 ## ResampleTransformer
 
-Resamples data to specified frequency with interpolation or aggregation.
+Brings every column to one regular frequency without inventing data. Run it after TimezoneTransformer.
 
 ```python
 from epftoolbox2.data.transformers import ResampleTransformer
 
 transformer = ResampleTransformer(
-    freq="1h",          # Required. Pandas frequency string ("1h", "15min", "1D")
-    method="linear",    # Optional. Method: "linear" | "ffill" | "bfill" | "sum" | "first" | "last"
+    freq="1h",          # Optional (default: "1h"). Target pandas frequency ("15min", "1h", "1D")
+    agg="mean",         # Optional (default: "mean"). Downsampling: "mean" | "sum" | "first" | "last" | "min" | "max" | "median",
+                        #   or a dict {column: agg}; unlisted columns use the "default" key, else "mean"
+    fill="ffill",       # Optional (default: "ffill"). Upsampled slots: "ffill" (repeat the value within its own period) | None,
+                        #   or a dict {column: fill}
+    method=None,        # Deprecated (default: None). Old combined setting; only its aggregation is kept
+    columns=None,       # Deprecated (default: None). Limits `method` to these columns
 )
+
+ResampleTransformer(freq="1h", agg={"default": "mean", "energy_mwh": "sum"})
 ```
 
 **Behavior:**
-- **Downsampling** (e.g. 15min → 1h): Applies an aggregation function (e.g., `mean` for linear, `sum`, `first`, `last`).
-- **Upsampling** (e.g. 1h → 15min): Fills gaps using the specified method (e.g., linear interpolation, forward-fill, backward-fill).
-- Rounds final values to 3 decimal places.
+- Each value covers a period: from its timestamp for the column's own spacing (15 min, 1 h, one local calendar day), found per column, so mixed hourly/15-min/daily frames work column by column.
+- **Upsampling** (1h → 15min): the value repeats over the slots inside its own period (a step; dummies stay 0/1); `sum` columns are split evenly; the last period is completed (96 quarter-hours on the last day). `fill=None` leaves the new slots NaN.
+- **Downsampling** (15min → 1h): `agg` over the values inside each target period; incomplete periods are NaN (no partial sums, no zeros for empty periods). Non-numeric columns use "first" for numeric-only aggregations.
+- Missing values from the source are never filled and nothing is extrapolated past a column's last value (no look-ahead). No rounding.
+- DST: on a local index the spring day keeps 23 hours (no 02:00 row is created) and the autumn day 25.
+- Migration: `method="linear"` → `agg="mean"`; `"ffill"`/`"first"` → `agg="first"`; `"bfill"`/`"last"` → `agg="last"`; `"sum"` → `agg="sum"`. `method=m, columns=[c]` → `agg={"default": "mean", c: agg(m)}, fill={"default": None, c: "ffill"}`. Both emit a FutureWarning. Linear interpolation and back-fill are gone.
 
 ---
 
@@ -376,19 +386,57 @@ transformer = SpikeFlagTransformer(
 
 ## TimezoneTransformer
 
-Converts DataFrame index timezone.
+Converts the index timezone and moves daily values to local midnight. Pipeline order: TimezoneTransformer → ResampleTransformer → LagTransformer.
 
 ```python
 from epftoolbox2.data.transformers import TimezoneTransformer
 
 transformer = TimezoneTransformer(
-    target_tz="Europe/Warsaw",    # Required. Target timezone
+    target_tz="Europe/Warsaw",    # Required. Target IANA timezone
+    daily_columns=None,           # Optional (default: None = ["load_forecast_daily_min", "load_forecast_daily_max"]).
+                                  #   Columns with one value per day; absent columns are skipped
+    daily_anchor="UTC+02:00",     # Optional (default: "UTC+02:00"). ENTSO-E A31 anchor; UTC offset or IANA name
 )
 ```
 
 **Behavior:**
 - If index is timezone-naive, localizes to UTC first, then converts
-- If index has timezone, converts directly
+- If index has timezone, converts directly; local days have 23/24/25 rows, nothing is added for DST
+- Daily columns: a value at t belongs to the calendar date of t in `daily_anchor` and moves to 00:00 local on that date (works for A31 in any zone UTC-10..UTC+13; use `daily_anchor=target_tz` for data stamped at local midnight east of UTC+2)
+- Raises ValueError if a daily column has more than one value per day (e.g. ResampleTransformer ran first)
+- If that local midnight is not in the index the row is added; a UserWarning is emitted when it lies inside the data
+
+---
+
+## ImputeTransformer
+
+Fills missing values with leak-safe methods only: forward fill, or a seasonal-naive lookup at the same
+local wall-clock hour on the previous day or week. Interpolation and backward fill are refused.
+
+```python
+from epftoolbox2.data.transformers import ImputeTransformer
+
+transformer = ImputeTransformer(
+    columns=["price"],  # Required. Column(s) to impute
+    method="ffill",     # Optional (default: "ffill"). "ffill" | "previous_day" | "previous_week"
+    limit="1D",          # Optional (default: "1D"). Positive int (rows), a pandas duration string, or None
+    flag=True,           # Optional (default: True). Add a {column}_imputed 0/1 column
+    suffix="",           # Optional (default: ""). Write to {column}{suffix} instead of overwriting {column}
+)
+```
+
+**Behavior:**
+- `"ffill"` repeats the last valid value forward. `"previous_day"`/`"previous_week"` use the same local
+  wall-clock hour 1 calendar day/week earlier (DST-safe: 23/24/25-hour days), walking further back through
+  the *original* series if that source day is itself missing.
+- `limit` bounds how long an outage may be, measured from the last real value before the gap; it does not
+  bound how far back a seasonal source is searched.
+- Never fills before a column's first observed value or after its last one.
+- `flag=True` adds `{column}{suffix}_imputed`; if that column already exists (e.g. running it twice), the
+  new flags are OR'd into it instead of replacing it.
+- Logs, per column, how many values were imputed and how many are still missing.
+- Raises ValueError for an unsorted or duplicate-timestamp index (does not silently sort, unlike
+  `ResampleTransformer`).
 
 ---
 
@@ -1653,9 +1701,10 @@ Callable predictors cannot be serialized to YAML. Use `"{horizon}"` string templ
 ```
 
 ## Timezone Handling
-- All internal processing uses UTC
-- Sources convert to UTC automatically
-- Use TimezoneTransformer if you need local time features
+- Sources return UTC
+- Use TimezoneTransformer for local time; order: TimezoneTransformer → ResampleTransformer → LagTransformer
+- DST days keep 23 or 25 local hours; ResampleTransformer does not create the missing 02:00 row
+- ResampleTransformer fills only slots it creates by upsampling; real gaps stay NaN
 
 ## Column Naming
 - Lag columns: `{column}_{unit}-{lag}` (e.g., `load_actual_d-1`)
