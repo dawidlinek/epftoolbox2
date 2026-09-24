@@ -175,7 +175,7 @@ class TestDataPipelineSerializationFidelity:
                 freq="15min",
             ),
             "TimezoneTransformer": TimezoneTransformer("Europe/Berlin", daily_columns=["a"]),
-            "ResampleTransformer": ResampleTransformer("15min", "ffill", columns=["a"]),
+            "ResampleTransformer": ResampleTransformer("15min", method="ffill", columns=["a"]),
             "LagTransformer": LagTransformer(["a"], [1, -2], "15min"),
             "ContinuityValidator": ContinuityValidator("15min"),
             "NullCheckValidator": NullCheckValidator(["a"], allow_nulls=True),
