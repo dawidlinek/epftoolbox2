@@ -180,13 +180,10 @@ class CalendarSource(DataSource):
                  bridge_days: bool = False, christmas_period: bool = False,
                  holiday_distance: int = 0, dst_switch: bool = False,
                  fourier_weekly: int = 0, fourier_annual: int = 0,
-                 regimes: Union[bool, Dict[str, str]] = False): ...
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
-
-class SchoolHolidaysSource(DataSource):
-    def __init__(self, country: str, subdivisions: Union[str, List[str]] = None,
-                 weights: Union[Dict[str, float], List[float]] = None,
-                 timezone: str = None, prefix: str = "", freq: str = "1h"): ...
+                 regimes: Union[bool, Dict[str, str]] = False,
+                 school_holidays: bool = False,
+                 school_subdivisions: Union[str, List[str]] = None,
+                 school_weights: Union[Dict[str, float], List[float]] = None): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 
 class CsvSource(DataSource):

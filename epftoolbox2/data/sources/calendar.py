@@ -5,11 +5,13 @@ from typing import Dict, List, Optional, Union
 import holidays as holidays_lib
 import numpy as np
 import pandas as pd
+import requests
 from astral import LocationInfo
 from astral.sun import sun
 from pandas.tseries.frequencies import to_offset
 
 from epftoolbox2.logging import get_logger
+from . import _openholidays
 from .base import DataSource
 
 logger = get_logger(__name__)
@@ -135,9 +137,23 @@ class CalendarSource(DataSource):
 
     Every feature is known in advance, so its `_d+k` versions are legal predictors.
 
+    With `school_holidays=True`, it also downloads school holiday flags from the OpenHolidays API
+    (https://www.openholidaysapi.org, ODbL 1.0 licence: credit it when you publish results or share a dataset
+    built from it, e.g. `epftoolbox2.data.sources._openholidays.ATTRIBUTION`). This is the only case where
+    CalendarSource makes network calls; without it, it stays offline and deterministic. Values are NaN before
+    the API's history starts for the country, or for school years not yet published, and a warning names the
+    affected dates; entries marked as half days are ignored (not counted as a holiday).
+
     Example:
         >>> source = CalendarSource(country="DE", subdiv="BY", holidays="binary", weekday="onehot")
         >>> df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2025-01-01", tz="UTC"))
+
+    Example:
+        >>> source = CalendarSource(
+        ...     country="PL", school_holidays=True, school_weights={"PL-MZ": 5.5, "PL-SL": 4.4, "PL-WP": 3.5}
+        ... )
+        >>> # columns include: is_school_holiday_pl_mz, is_school_holiday_pl_sl, is_school_holiday_pl_wp,
+        >>> #                  school_holiday_share
     """
 
     def __init__(
@@ -162,6 +178,9 @@ class CalendarSource(DataSource):
         fourier_weekly: int = 0,
         fourier_annual: int = 0,
         regimes: Union[bool, Dict[str, str]] = False,
+        school_holidays: bool = False,
+        school_subdivisions: Optional[Union[str, List[str]]] = None,
+        school_weights: Optional[Union[Dict[str, float], List[float], str]] = None,
     ):
         """
         Args:
@@ -189,6 +208,14 @@ class CalendarSource(DataSource):
             fourier_annual: Number K of annual harmonics: `year_sin_k`, `year_cos_k` for k = 1..K.
             regimes: Step dummies `regime_{name}` (1 from the local date on). True uses DEFAULT_REGIMES for the
                 country; a dict {name: "YYYY-MM-DD"} replaces them.
+            school_holidays: Download school holiday flags from the OpenHolidays API (network calls happen only
+                when this is True). No or one `school_subdivisions` entry: `is_school_holiday`; several: one
+                `is_school_holiday_{code}` per entry, e.g. `is_school_holiday_pl_mz`.
+            school_subdivisions: OpenHolidays subdivision codes, e.g. ["PL-MZ", "PL-SL"] or "MZ,SL" (the
+                country prefix is optional). None: only holidays that apply to the whole country.
+            school_weights: Weight per subdivision (e.g. population) for `school_holiday_share`: a dict
+                {code: weight}, or numbers in the order of `school_subdivisions`. With a dict,
+                `school_subdivisions` defaults to its keys.
         """
         self.country = country.upper()
         self._validate_country()
@@ -217,7 +244,39 @@ class CalendarSource(DataSource):
         self.fourier_annual = self._validate_count("fourier_annual", fourier_annual)
         self.regimes = self._normalise_regimes(regimes)
 
+        self.school_holidays = school_holidays
+        if school_subdivisions is None and isinstance(school_weights, dict):
+            school_subdivisions = list(school_weights)
+        if isinstance(school_subdivisions, str):
+            school_subdivisions = [s for s in school_subdivisions.split(",") if s.strip()]
+        self.school_subdivisions = (
+            [self._normalise_school_code(s) for s in school_subdivisions] if school_subdivisions is not None else None
+        )
+        self.school_weights = self._normalise_school_weights(school_weights)
+
+        self.session = requests.Session()
+
         self._validate_config()
+
+    def _normalise_school_code(self, code: str) -> str:
+        code = str(code).strip().upper()
+        return code if code.startswith(f"{self.country}-") else f"{self.country}-{code}"
+
+    def _normalise_school_weights(self, weights) -> Optional[Dict[str, float]]:
+        if weights is None:
+            return None
+        if isinstance(weights, str):
+            weights = [w for w in weights.split(",") if w.strip()]
+        if isinstance(weights, dict):
+            pairs = [(self._normalise_school_code(k), v) for k, v in weights.items()]
+        else:
+            if self.school_subdivisions is None or len(weights) != len(self.school_subdivisions):
+                raise ValueError("school_weights given as a list need one number per entry of `school_subdivisions`")
+            pairs = list(zip(self.school_subdivisions, weights))
+        try:
+            return {code: float(value) for code, value in pairs}
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"school_weights must be numbers, got {weights!r}") from e
 
     @staticmethod
     def _validate_count(name: str, value, maximum: Optional[int] = None) -> int:
@@ -287,9 +346,23 @@ class CalendarSource(DataSource):
             if unknown or not self.categories:
                 raise ValueError(f"Invalid categories {unknown} for {self.country}. Valid: {sorted(supported)}")
 
-        for name in ("bridge_days", "christmas_period", "dst_switch"):
+        for name in ("bridge_days", "christmas_period", "dst_switch", "school_holidays"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be True or False, got {getattr(self, name)!r}")
+
+        if self.school_subdivisions is not None:
+            if not self.school_subdivisions:
+                raise ValueError("school_subdivisions must not be empty; use None for country-wide school holidays")
+            if len(set(self.school_subdivisions)) != len(self.school_subdivisions):
+                raise ValueError(f"school_subdivisions contains duplicates: {self.school_subdivisions}")
+        if self.school_weights is not None:
+            if self.school_subdivisions is None or set(self.school_weights) != set(self.school_subdivisions):
+                raise ValueError(
+                    "school_weights must have exactly one entry per subdivision: "
+                    f"{sorted(self.school_weights)} vs {self.school_subdivisions}"
+                )
+            if not all(np.isfinite(w) and w > 0 for w in self.school_weights.values()):
+                raise ValueError(f"school_weights must be positive numbers, got {self.school_weights}")
 
     def _holiday_language(self) -> Optional[str]:
         cls = type(holidays_lib.country_holidays(self.country))
@@ -336,6 +409,8 @@ class CalendarSource(DataSource):
         if self.regimes:
             for name, date in self._resolved_regimes().items():
                 df[f"{self.prefix}regime_{name}"] = np.asarray(local_dates >= pd.Timestamp(date), dtype=int)[codes]
+        if self.school_holidays:
+            df = self._add_school_holidays(df, local_dates, codes)
 
         return df
 
@@ -512,6 +587,54 @@ class CalendarSource(DataSource):
         df[f"{self.prefix}sunset"] = values[:, 1]
         df[f"{self.prefix}daylight_hours"] = values[:, 2]
         return df
+
+    def _add_school_holidays(self, df: pd.DataFrame, local_dates: pd.DatetimeIndex, codes: np.ndarray) -> pd.DataFrame:
+        """School holiday flags (and, with `school_weights`, their weighted share) from the OpenHolidays API."""
+        targets = self.school_subdivisions or [None]
+        if len(targets) == 1:
+            columns = {targets[0]: f"{self.prefix}is_school_holiday"}
+        else:
+            columns = {t: f"{self.prefix}is_school_holiday_{t.lower().replace('-', '_')}" for t in targets}
+        if not len(local_dates):
+            for column in columns.values():
+                df[column] = np.array([], dtype=float)
+            if self.school_weights is not None:
+                df[f"{self.prefix}school_holiday_share"] = np.array([], dtype=float)
+            return df
+
+        if self.school_subdivisions is not None:
+            known = _openholidays.known_subdivisions(self.session, self.country)
+            unknown = [s for s in self.school_subdivisions if s not in known]
+            if unknown:
+                raise ValueError(f"Unknown subdivisions for {self.country}: {unknown}. Known: {sorted(known)}")
+
+        margin = pd.Timedelta(days=_openholidays.QUERY_MARGIN_DAYS)
+        days = pd.date_range(local_dates.min() - margin, local_dates.max() + margin, freq="D")
+        entries = _openholidays.fetch_entries(self.session, self.country, days[0], days[-1])
+        logger.info(
+            f"OpenHolidays [{self.country}]: {len(entries)} school holiday periods. {_openholidays.ATTRIBUTION}"
+        )
+
+        positions = days.get_indexer(local_dates)
+        for target, column in columns.items():
+            per_date = _openholidays.daily_flags(entries, target, days)[positions]
+            df[column] = per_date[codes]
+            if np.isnan(per_date).any():
+                self._warn_missing_school_holidays(target, column, local_dates[np.isnan(per_date)])
+
+        if self.school_weights is not None:
+            weights = np.array([self.school_weights[t] for t in targets])
+            flags = df[[columns[t] for t in targets]].to_numpy()
+            # A NaN flag makes the share NaN: a partial share would look like fewer regions on holiday.
+            df[f"{self.prefix}school_holiday_share"] = flags @ weights / weights.sum()
+        return df
+
+    def _warn_missing_school_holidays(self, target: Optional[str], column: str, missing: pd.DatetimeIndex) -> None:
+        hint = "" if target is not None else "; pass `school_subdivisions` for regional school holidays"
+        logger.warning(
+            f"OpenHolidays [{target or self.country}]: no school holiday data for {len(missing)} local date(s) "
+            f"from {missing.min().date()} to {missing.max().date()}; {column} is NaN there{hint}"
+        )
 
     def get_cache_config(self) -> Optional[dict]:
         return None

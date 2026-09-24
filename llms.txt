@@ -264,8 +264,16 @@ source = CalendarSource(
     fourier_weekly=0,            # Optional. K weekly harmonics: week_sin_k, week_cos_k
     fourier_annual=0,            # Optional. K annual harmonics: year_sin_k, year_cos_k
     regimes=False,               # Optional. True (DEFAULT_REGIMES for the country) or {name: "YYYY-MM-DD"}
+    school_holidays=False,       # Optional. Download school holiday flags from the OpenHolidays API
+    school_subdivisions=None,    # Optional. ["PL-MZ", "PL-SL"] or "MZ,SL"; None = country-wide holidays only
+    school_weights=None,         # Optional. {code: weight} (e.g. population) or numbers in school_subdivisions order
 )
 ```
+
+`school_holidays=True` is the only case where CalendarSource makes network calls (to the OpenHolidays API,
+https://www.openholidaysapi.org); it stays offline and deterministic otherwise. Data under ODbL 1.0: credit
+"School holidays: OpenHolidays API (www.openholidaysapi.org), ODbL 1.0" when you publish results built from it.
+No API key.
 
 **Output columns by parameter:**
 | Parameter | Value | Output Columns |
@@ -289,6 +297,9 @@ source = CalendarSource(
 | `fourier_weekly` | `K` | `week_sin_k`, `week_cos_k`, phase (weekday + time of day / 24) / 7 on local wall clock |
 | `fourier_annual` | `K` | `year_sin_k`, `year_cos_k`, phase (day of year - 1 + time of day / 24) / days in year |
 | `regimes` | `True`/dict | `regime_{name}`: 0 before the first local delivery day, 1 from it on |
+| `school_holidays` | `True`, no/one `school_subdivisions` | `is_school_holiday` (1.0/0.0/NaN) |
+| `school_holidays` | `True`, several `school_subdivisions` | `is_school_holiday_{code}`, e.g. `is_school_holiday_pl_mz` |
+| `school_holidays` | `True` with `school_weights` | also `school_holiday_share` = sum(weight * flag) / sum(weight) |
 
 **Notes:**
 - Holiday names are pinned to English (`en_US`), so one-hot column names don't depend on the machine's locale.
@@ -302,47 +313,16 @@ source = CalendarSource(
   (GB, IE), `core_fb` 2022-06-09 (Core zones), `nordic_fb` 2024-10-30 (DK, FI, NO, SE), `sdac_15min_mtu`
   2025-10-01 (SDAC countries), `sem_30min_mtu` 2025-10-01 (IE). A dict replaces the set.
 - All calendar features are known in advance, so `_d+k` versions are legal predictors.
+- School holiday NaN (with a warning) where the API has no data: any stretch of more than a year without a
+  school holiday (before the history starts, or school years not yet published). A NaN flag makes the share NaN.
+- School holiday history starts: DE 2012; HU, RO 2015; AT 2017; FR 2018; BE, BG, CH, CZ, ES, IE, IT, NL, PL, PT,
+  SK 2020 (PL from the 2019/20 Christmas break). No school holidays for SE, DK, FI, GB, GR, NO.
+- Parent school holidays apply to children (DE-BY to DE-BY-AU); school-type groups are merged (any group on
+  holiday); half-day entries are ignored. Without `school_subdivisions` only country-wide entries count (none
+  in DE).
 
-**Caching:** Returns None (not cached - deterministic generation).
-
----
-
-## SchoolHolidaysSource
-
-School holiday flags from the OpenHolidays API (https://www.openholidaysapi.org; data under ODbL 1.0, credit
-"School holidays: OpenHolidays API (www.openholidaysapi.org), ODbL 1.0"). No API key. Flags are built from local
-dates on a UTC grid, like CalendarSource; `fetch(start, end)` returns [start, end).
-
-```python
-from epftoolbox2.data.sources import SchoolHolidaysSource
-
-source = SchoolHolidaysSource(
-    country="PL",                # Required. ISO 3166-1 country code
-    subdivisions=None,           # Optional. ["PL-MZ", "PL-SL"] or "MZ,SL"; None = country-wide holidays only
-    weights=None,                # Optional. {code: weight} (e.g. population) or numbers in subdivisions order
-    timezone=None,               # Optional. Time zone override (None = the country's, from CalendarSource)
-    prefix="",                   # Optional. Prefix for column names (used as is)
-    freq="1h",                   # Optional. Row spacing, as in CalendarSource
-)
-```
-
-**Output columns:**
-| Configuration | Output Columns |
-|---------------|----------------|
-| no or one subdivision | `is_school_holiday` (1.0/0.0/NaN) |
-| several subdivisions | `is_school_holiday_{code}`, e.g. `is_school_holiday_pl_mz` |
-| `weights` | also `school_holiday_share` = sum(weight * flag) / sum(weight) |
-
-**Notes:**
-- NaN (with a warning) where the API has no data: any stretch of more than a year without a school holiday
-  (before the history starts, or school years not yet published). A NaN flag makes the share NaN.
-- History starts: DE 2012; HU, RO 2015; AT 2017; FR 2018; BE, BG, CH, CZ, ES, IE, IT, NL, PL, PT, SK 2020
-  (PL from the 2019/20 Christmas break). No school holidays for SE, DK, FI, GB, GR, NO.
-- Parent holidays apply to children (DE-BY to DE-BY-AU); school-type groups are merged (any group on holiday);
-  half-day entries are ignored. Without `subdivisions` only country-wide entries count (none in DE).
-- Known in advance (safe as `_d+k`), but the API serves the current version of each calendar.
-
-**Caching:** Returns None (not cached: a few small requests per run).
+**Caching:** Returns None (not cached - deterministic generation without `school_holidays`; a few small
+requests per run with it, and a cache would keep the NaN of school years published after it was written).
 
 ---
 
