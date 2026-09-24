@@ -91,7 +91,11 @@ class DataPipeline:
             timestamps are local times. If ``None``, date strings are midnight UTC, ``end`` is exclusive and naive
             timestamps are UTC. If any ``transformers`` entry is a ``TimezoneTransformer``, its ``target_tz`` must
             equal ``timezone`` (raises ``ValueError`` otherwise): ``timezone`` decides what a local calendar day
-            is, so converting to a different zone downstream would silently split that day across two dates.
+            is, so converting to a different zone downstream would silently split that day across two dates. The
+            same check applies to the market time zone of any source that computes local time itself —
+            ``OpenMeteoSource``/``OpenMeteoSingleRunsSource``/``OpenMeteoWeightedSource.timezone`` and
+            ``CalendarSource.timezone`` — but not ``CsvSource.timezone``, which is the input file's own zone, not
+            the market's.
         on_invalid: ``"warn"`` (default) logs failed validations and continues; ``"raise"`` raises
             ``DataValidationError`` after the failing validation stage. Results are kept in ``validation_results``.
 
@@ -152,8 +156,40 @@ class DataPipeline:
                     "calendar day is (date strings, 'today_d+h' keywords); a TimezoneTransformer converting to a "
                     "different zone silently splits that day across two local dates. Use the same zone in both."
                 )
+            source_mismatch = self._mismatched_source_timezone()
+            if source_mismatch is not None:
+                label, tz = source_mismatch
+                raise ValueError(
+                    f"DataPipeline.timezone={self.timezone!r} does not match {label}={tz!r}. DataPipeline.timezone "
+                    "decides what a local calendar day is; a source computing its own local time (issue times, "
+                    "local calendar days) in a different zone would silently disagree with it. Use the same zone "
+                    "in both, or leave the source's timezone unset if it has no default."
+                )
         if self.on_invalid not in self.ON_INVALID:
             raise ValueError(f"on_invalid must be one of {self.ON_INVALID}, got {self.on_invalid!r}")
+
+    def _mismatched_source_timezone(self) -> Optional[Tuple[str, str]]:
+        """First (label, timezone) among ``self.sources`` whose own market time zone disagrees with
+        ``self.timezone``, or ``None``. Only sources whose time zone decides a local calendar day or an issue
+        time are checked; ``CsvSource.timezone`` is the input file's own zone, not the market's, so it is
+        excluded."""
+        from epftoolbox2.data.sources.calendar import CalendarSource
+        from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
+        from epftoolbox2.data.sources.open_meteo_single_runs import OpenMeteoSingleRunsSource
+        from epftoolbox2.data.sources.open_meteo_weighted import OpenMeteoWeightedSource
+
+        for source in self.sources:
+            if isinstance(source, OpenMeteoWeightedSource):
+                tz = source.source_params.get("timezone")
+                label = "OpenMeteoWeightedSource.source_params['timezone']"
+            elif isinstance(source, (OpenMeteoSource, OpenMeteoSingleRunsSource, CalendarSource)):
+                tz = getattr(source, "timezone", None)
+                label = f"{type(source).__name__}.timezone"
+            else:
+                continue
+            if tz is not None and tz != self.timezone:
+                return label, tz
+        return None
 
     def add_source(self, source: DataSource) -> "DataPipeline":
         if not isinstance(source, DataSource):

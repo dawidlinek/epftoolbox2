@@ -783,6 +783,69 @@ class TestDateSemantics:
         with pytest.raises(ValueError, match="America/New_York.*Europe/Warsaw|Europe/Warsaw.*America/New_York"):
             pipeline.run("2024-01-01", "2024-01-02")
 
+    def test_timezone_mismatched_with_open_meteo_source_raises(self):
+        """integration check b: a weather source computing its own local calendar day/issue time in a
+        different zone than DataPipeline.timezone would silently disagree with it."""
+        from epftoolbox2.data.sources import OpenMeteoSource
+
+        with pytest.raises(ValueError, match="America/New_York.*Europe/Warsaw|Europe/Warsaw.*America/New_York"):
+            DataPipeline(
+                sources=[OpenMeteoSource(52.23, 21.01, timezone="Europe/Warsaw")],
+                timezone="America/New_York",
+            )
+
+    def test_timezone_mismatched_with_open_meteo_single_runs_source_raises(self):
+        from epftoolbox2.data.sources import OpenMeteoSingleRunsSource
+
+        with pytest.raises(ValueError, match="America/New_York.*Europe/Warsaw|Europe/Warsaw.*America/New_York"):
+            DataPipeline(
+                sources=[OpenMeteoSingleRunsSource(52.23, 21.01, timezone="Europe/Warsaw")],
+                timezone="America/New_York",
+            )
+
+    def test_timezone_mismatched_with_open_meteo_weighted_source_raises(self):
+        from epftoolbox2.data.sources import OpenMeteoWeightedSource
+
+        with pytest.raises(ValueError, match="America/New_York.*Europe/Warsaw|Europe/Warsaw.*America/New_York"):
+            DataPipeline(
+                sources=[
+                    OpenMeteoWeightedSource(
+                        locations=[
+                            {"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": 1.0},
+                        ],
+                        source_params={"timezone": "Europe/Warsaw", "columns": ["temperature_2m"]},
+                    )
+                ],
+                timezone="America/New_York",
+            )
+
+    def test_timezone_mismatched_with_calendar_source_raises(self):
+        from epftoolbox2.data.sources import CalendarSource
+
+        with pytest.raises(ValueError, match="America/New_York.*Europe/Warsaw|Europe/Warsaw.*America/New_York"):
+            DataPipeline(sources=[CalendarSource(country="PL")], timezone="America/New_York")
+
+    def test_timezone_matching_open_meteo_source_is_allowed(self):
+        from epftoolbox2.data.sources import OpenMeteoSource
+
+        pipeline = DataPipeline(
+            sources=[OpenMeteoSource(52.23, 21.01, timezone="Europe/Warsaw")],
+            timezone="Europe/Warsaw",
+        )
+        assert pipeline.timezone == "Europe/Warsaw"
+
+    def test_csv_source_timezone_is_not_checked_against_pipeline_timezone(self, tmp_path):
+        """CsvSource.timezone is the input file's own zone, not the market's, so it is excluded."""
+        from epftoolbox2.data.sources import CsvSource
+
+        csv_path = tmp_path / "p.csv"
+        csv_path.write_text("ts;price\n2024-01-01 00:00;1.0\n")
+        pipeline = DataPipeline(
+            sources=[CsvSource(str(csv_path), datetime_column="ts", timezone="America/New_York")],
+            timezone="Europe/Warsaw",
+        )
+        assert pipeline.timezone == "Europe/Warsaw"
+
     def test_no_timezone_with_timezone_transformer_is_allowed(self):
         """Without DataPipeline.timezone there is no local-day boundary to disagree about."""
         pipeline = DataPipeline(sources=[RangeSource()], transformers=[TimezoneTransformer(target_tz="Europe/Warsaw")])
