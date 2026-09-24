@@ -2,7 +2,7 @@ sources:
 - class: EntsoeSource
   params:
     country_code: PL
-    api_key: YOUR_API_KEY_HERE
+    api_key: ${ENTSOE_API_KEY}
     type:
     - load
     - price

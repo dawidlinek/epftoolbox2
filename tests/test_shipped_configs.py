@@ -17,6 +17,13 @@ ROOT = Path(__file__).resolve().parent.parent
 SHIPPED_YAMLS = ["data_pipeline.yaml", "model_pipeline.yaml", "experiment.yaml"]
 
 
+@pytest.fixture(autouse=True)
+def fake_api_key(monkeypatch):
+    """data_pipeline.yaml's api_key is ${ENTSOE_API_KEY}; loading expands and validates it eagerly, well before
+    any network call, so a placeholder value is enough to construct the pipeline."""
+    monkeypatch.setenv("ENTSOE_API_KEY", "test-key-not-a-secret")
+
+
 def _expand(predictors, horizon, periods=24):
     """{(period, horizon): [predictor names with {horizon} filled in]}, the shape InformationSet.check() wants."""
     return {
