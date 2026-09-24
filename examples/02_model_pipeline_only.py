@@ -3,6 +3,9 @@ Example 2: Model Pipeline Only
 
 This example demonstrates how to use the ModelPipeline to train and evaluate
 forecasting models on pre-existing data (loaded from CSV).
+
+Run 01_data_pipeline_only.py first: it writes the "data_output.csv" this example reads, with
+load_actual/price/load_forecast already lagged to leak-free horizons.
 """
 
 import os
@@ -12,6 +15,8 @@ os.environ["MAX_PROCESSES"] = "2"
 
 import pandas as pd
 from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.data.sources import OpenMeteoSource
+from epftoolbox2.information_set import InformationSet
 from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
 from epftoolbox2.exporters import ExcelExporter, TerminalExporter, CsvExporter
@@ -34,7 +39,6 @@ if __name__ == "__main__":
     ]
 
     predictors = [
-        "load_actual",
         *seasonal_indicators,
         "load_actual_d-1",
         "load_actual_d-7",
@@ -43,8 +47,14 @@ if __name__ == "__main__":
         "warsaw_temperature_2m_d+{horizon}",
     ]
 
+    # issue_time is 30 min after the 12:00 CET day-ahead gate closure. with_source_rules() teaches the check
+    # that "warsaw_temperature_2m" is an Open-Meteo issue-time vintage column (see docs/model-pipeline/
+    # information-set); Workflow does this automatically, but a standalone ModelPipeline needs it spelled out.
+    weather_source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, prefix="warsaw", timezone="Europe/Warsaw")
+    information_set = InformationSet("12:30", "Europe/Warsaw").with_source_rules([weather_source])
+
     pipeline = (
-        ModelPipeline()
+        ModelPipeline(information_set=information_set)
         .add_model(
             OLSModel(
                 predictors=predictors,
@@ -73,7 +83,9 @@ if __name__ == "__main__":
         test_start="2024-02-01",
         test_end="2024-03-01",
         target="price",  # Column to predict
-        horizon=7,  # Forecast up to 7 days ahead
+        # Forecast up to 5 days ahead: warsaw_temperature_2m_d+{horizon} only goes up to d+5 (see
+        # 01_data_pipeline_only.py's OpenMeteoSource comment on jma_seamless's leak-free horizon limit).
+        horizon=5,
         save_dir="results",  # Directory to save intermediate results
     )
 

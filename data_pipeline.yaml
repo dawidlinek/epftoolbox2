@@ -11,7 +11,7 @@ sources:
   params:
     latitude: 52.2297
     longitude: 21.0122
-    horizon: 7
+    horizon: 5
     model: jma_seamless
     columns:
     - temperature_2m
@@ -75,7 +75,6 @@ transformers:
     - is_friday
     - is_saturday
     - is_sunday
-    - load_forecast
     - is_holiday
     lags:
     - -7
@@ -86,6 +85,13 @@ transformers:
     - -2
     - -1
     - 0
+    freq: day
+- class: LagTransformer
+  params:
+    columns:
+    - load_forecast
+    lags:
+    - -1
     freq: day
 validators:
 - class: NullCheckValidator

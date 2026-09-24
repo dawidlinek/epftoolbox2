@@ -42,7 +42,6 @@ seasonal_indicators = [
 ]
 
 predictors = [
-    "load_actual",
     *seasonal_indicators,
     "load_actual_d-1",
     "load_actual_d-2",
@@ -55,11 +54,14 @@ predictors = [
     DataPipeline()
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
     .add_source(
-        OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw", timezone="Europe/Warsaw")
+        # jma_seamless (default model) is only leak-free up to 5 days ahead at the default issue_time/
+        # publication_delay_h; a longer horizon needs a different model or publication_delay_h.
+        OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw", timezone="Europe/Warsaw")
     )
     .add_source(CalendarSource(country="PL", holidays="binary", daylight=True, weekday="onehot"))
     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
     .add_transformer(ResampleTransformer(freq="1h"))
+    # load_actual/price are only known for D once D is over; never offer their same-day (unlagged) value.
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
     .add_transformer(
         LagTransformer(
@@ -74,17 +76,20 @@ predictors = [
                 "is_friday",
                 "is_saturday",
                 "is_sunday",
-                "load_forecast",
                 "is_holiday",
             ],
         )
     )
+    # load_forecast (A65/A01) is published 10:00 CET the day before delivery: only d+1 is ever safe.
+    .add_transformer(LagTransformer(lags=range(-1, 0), freq="day", columns=["load_forecast"]))
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
     .save("data_pipeline.yaml")
 )
 
 (
-    ModelPipeline()
+    # issue_time is 30 min after the 12:00 CET day-ahead gate closure: every predictor above is checked
+    # against it before any model is fit (see docs/model-pipeline/information-set).
+    ModelPipeline(issue_time="12:30", issue_timezone="Europe/Warsaw")
     .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
     .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=5, name="LassoCV"))
     .add_evaluator(MAEEvaluator())
@@ -103,7 +108,7 @@ Workflow(
     model_test_start="2024-06-01",
     model_test_end="2024-07-01",
     model_target="price",
-    model_horizon=7,
+    model_horizon=5,  # matches warsaw_temperature_2m's leak-free horizon (see the OpenMeteoSource above)
     max_processes=4,
     threads_per_process=8,
 ).save("experiment.yaml")
