@@ -443,10 +443,6 @@ class TestYamlRoundTrip:
         start, end = _local_day("2024-08-15", "Europe/Berlin")
         pd.testing.assert_frame_equal(source.fetch(start, end), loaded.fetch(start, end))
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="DataPipeline._serialize_component drops lat/lon (review M4/F7); fixed on the pipeline branch",
-    )
     def test_lat_lon_round_trip(self, tmp_path):
         from epftoolbox2.pipelines import DataPipeline
 
