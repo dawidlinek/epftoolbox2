@@ -377,38 +377,6 @@ source = CsvSource(
 
 ---
 
-## SettlementPriceSource
-
-Daily settlement/close prices (TTF, EUA, API2, Brent, ...) from your own CSV/Parquet files, as known at issue time. Ships and downloads no data (licensed).
-
-```python
-from epftoolbox2.data.sources import SettlementPriceSource
-
-source = SettlementPriceSource(
-    file_path="data/fuels.csv",          # Required. .csv/.parquet/.pq file or list of files (merged on the date)
-    columns={"TTF_settle": "ttf"},       # Required. List (keep names) or dict {file column: output name}
-    timezone="Europe/Warsaw",            # Required. Zone of forecast day D; match TimezoneTransformer
-    issue_time="11:30",                  # Optional. Local "HH:MM" issue time on D (default: "11:30")
-    close_time="23:59",                  # Optional. "HH:MM" from which a trading day's close is known (default: "23:59")
-    close_timezone=None,                 # Optional. Zone of the close time (default: None = forecast zone)
-    date_column="date",                  # Optional. Trading-date column (default: "date")
-    date_format=None,                    # Optional. strftime format, e.g. "%d.%m.%Y" (default: None = inferred)
-    trading_calendar="weekdays",         # Optional. "weekdays" | holidays market code e.g. "IFEU" | "file" (default: "weekdays")
-    lags=1,                              # Optional. Day offset(s) k >= 0 (default: 1)
-    freq="1h",                           # Optional. Output row frequency (default: "1h")
-    separator=",",                       # Optional. CSV separator (default: ",")
-)
-```
-
-**Output columns:** `{name}_d-{k}` (`{name}` for k=0) on every row of local day D = the prevailing close on D-k, i.e. the close of the last trading day <= D-k (forward-filled over non-trading days only), kept only if that trading day at the close time is not later than the issue time on D; else NaN with a warning.
-- Default `lags=1`: Tuesday gets Monday's close; Saturday, Sunday and Monday get Friday's close. D-1's close is T-2 relative to delivery T = D+1, as in Marcjasz et al. (2023).
-- Don't use same-day closes (look-ahead: set after the 12:00 CET auction). With the default close time, `lags=0` is NaN on every trading day.
-- A trading day without a close (calendar gap, or after the file ends) gives NaN; it is never filled from an earlier close. Warnings list the missing dates.
-
-**Caching:** Returns None (files are read on every run). Parquet needs `pip install pyarrow`.
-
----
-
 ## EpftoolboxBenchmarkSource
 
 The five open-access benchmark datasets of Lago et al. (2021, Applied Energy 293): NP, PJM, FR, BE, DE. Downloaded on first use from Zenodo record 4624805, md5-verified against the record metadata, cached locally. Not shipped (licence "other-open"; the authors don't own the data).

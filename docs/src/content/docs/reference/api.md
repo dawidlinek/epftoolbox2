@@ -196,14 +196,6 @@ class CsvSource(DataSource):
                  timezone: str = "UTC"): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 
-class SettlementPriceSource(DataSource):
-    def __init__(self, file_path: Union[str, List[str]], columns: Union[List[str], Dict[str, str]],
-                 timezone: str, issue_time: str = "11:30", close_time: str = "23:59",
-                 close_timezone: Optional[str] = None, date_column: str = "date",
-                 date_format: Optional[str] = None, trading_calendar: str = "weekdays",
-                 lags: Union[int, List[int]] = 1, freq: str = "1h", separator: str = ","): ...
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
-
 class EpftoolboxBenchmarkSource(DataSource):
     def __init__(self, dataset: str, cache_dir: Optional[str] = None, prefix: str = ""): ...
     index_timezone: str   # property: fixed-offset zone of the index

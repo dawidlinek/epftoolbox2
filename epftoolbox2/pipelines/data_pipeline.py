@@ -44,7 +44,6 @@ COMPONENT_REGISTRY = {
         "CsvSource": "epftoolbox2.data.sources.csv",
         "CalendarSource": "epftoolbox2.data.sources.calendar",
         "SchoolHolidaysSource": "epftoolbox2.data.sources.school_holidays",
-        "SettlementPriceSource": "epftoolbox2.data.sources.settlement",
         "EpftoolboxBenchmarkSource": "epftoolbox2.data.sources.benchmark",
     },
     "transformers": {
