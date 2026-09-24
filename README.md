@@ -33,7 +33,7 @@ epftoolbox2.verify()
 - **Validators**: Null checks, Continuity (duplicates, gaps, mixed resolutions), DSTStructure (rows per local day), Coverage (per-column outages), Freshness, Plausibility (SDAC price limits, frozen values), LagConsistency (calendar-day lags), EDA statistics
 - **Models**: OLS, LassoCV
 - **Scalers**: standardisation (default) or variance-stabilising transformations for spiky prices (asinh, N-PIT), fitted per forecast on training data only
-- **Evaluators**: MAE
+- **Evaluators**: MAE, RMSE, rMAE (relative to a base model)
 - **Exporters**: Excel with conditional formatting, Terminal output
 - **Caching**: Built-in per-source Parquet cache that fetches only missing ranges, refetches not-yet-published data and is safe for parallel jobs
 - **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files; an optional market timezone makes dates mean local calendar days, duplicate column names across sources raise instead of colliding silently, and `api_key` is written to YAML as an `${ENV_VAR}` reference instead of plain text
@@ -91,7 +91,7 @@ seasonal_indicators = [
     "daylight_hours_d+{horizon}",
 ]
 
-model = OLSModel(predictors=["load_actual", *seasonal_indicators], name="OLS")
+model = OLSModel(predictors=["load_actual_d-1", *seasonal_indicators], name="OLS")
 report = model.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
 ```
 
@@ -101,7 +101,7 @@ report = model.run(df, test_start="2024-04-01", test_end="2024-06-01", target="p
 from epftoolbox2.evaluators import MAEEvaluator
 
 evaluator = MAEEvaluator()
-report = evaluator.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
+mae = evaluator.compute(predictions)  # DataFrame with "prediction" and "actual" columns
 ```
 
 ### Standalone exporter use
@@ -110,7 +110,7 @@ report = evaluator.run(df, test_start="2024-04-01", test_end="2024-06-01", targe
 from epftoolbox2.exporters import ExcelExporter
 
 exporter = ExcelExporter("results.xlsx")
-report = exporter.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
+exporter.export(report)  # an EvaluationReport, e.g. from ModelPipeline.run() below
 ```
 
 ### Data Pipeline
@@ -120,16 +120,36 @@ Download and process electricity market data from ENTSOE, weather forecasts from
 ```python
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
-from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import NullCheckValidator
 
 pipeline = (
     DataPipeline(timezone="Europe/Warsaw")  # optional: dates below then mean local calendar days
     .add_source(EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"]))
     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw"))
-    .add_source(CalendarSource("PL", holidays="binary", weekday="number"))
+    .add_source(CalendarSource("PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
     .add_transformer(ResampleTransformer(freq="1h"))
+    # load_actual is only known for D once D is over; never offer its same-day (unlagged) value.
+    .add_transformer(LagTransformer(columns=["load_actual"], lags=[1], freq="day"))
+    # calendar features are known arbitrarily far in advance, so d+1..d+7 is safe.
+    .add_transformer(
+        LagTransformer(
+            lags=range(-7, 0),
+            freq="day",
+            columns=[
+                "is_monday",
+                "is_tuesday",
+                "is_wednesday",
+                "is_thursday",
+                "is_friday",
+                "is_saturday",
+                "is_sunday",
+                "is_holiday",
+                "daylight_hours",
+            ],
+        )
+    )
     .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
 )
 
@@ -148,8 +168,8 @@ from epftoolbox2.exporters import ExcelExporter
 
 pipeline = (
     ModelPipeline()
-    .add_model(OLSModel(predictors=["load_actual", *seasonal_indicators], name="OLS"))
-    .add_model(LassoCVModel(predictors=["load_actual", *seasonal_indicators], name="Lasso"))
+    .add_model(OLSModel(predictors=["load_actual_d-1", *seasonal_indicators], name="OLS"))
+    .add_model(LassoCVModel(predictors=["load_actual_d-1", *seasonal_indicators], name="Lasso"))
     .add_evaluator(MAEEvaluator())
     .add_exporter(ExcelExporter("results.xlsx"))
 )
