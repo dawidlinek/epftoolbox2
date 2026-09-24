@@ -30,7 +30,9 @@ if __name__ == "__main__":
     df = (
         DataPipeline()
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-        .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+        .add_source(
+            OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw", timezone="Europe/Warsaw")
+        )
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
         .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
         .add_transformer(ResampleTransformer(freq="1h"))

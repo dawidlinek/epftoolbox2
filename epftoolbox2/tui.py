@@ -83,10 +83,45 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "horizon",
-            "description": "Forecast horizon in days",
+            "description": "Forecast horizon in days (max 5 for jma_seamless with the default issue settings)",
             "required": False,
-            "default": "7",
+            "default": "5",
             "kind": "int",
+        },
+        {
+            "name": "model",
+            "description": "Weather model (e.g. jma_seamless, icon_seamless, ecmwf_ifs025)",
+            "required": False,
+            "default": "jma_seamless",
+            "kind": "text",
+        },
+        {
+            "name": "timezone",
+            "description": "Market time zone (defines local days and the issue time), e.g. Europe/Warsaw",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "issue_time",
+            "description": "Local time the forecast is issued, HH:MM",
+            "required": False,
+            "default": "10:00",
+            "kind": "text",
+        },
+        {
+            "name": "publication_delay_h",
+            "description": "Hours from model run start to its availability",
+            "required": False,
+            "default": "10",
+            "kind": "float",
+        },
+        {
+            "name": "strict",
+            "description": "Fail when a weather column has missing values?",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
         },
         {
             "name": "prefix",
@@ -94,6 +129,104 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "required": False,
             "default": "",
             "kind": "text",
+        },
+    ],
+    "OpenMeteoSingleRunsSource": [
+        {"name": "latitude", "description": "Latitude (-90 to 90)", "required": True, "default": None, "kind": "float"},
+        {
+            "name": "longitude",
+            "description": "Longitude (-180 to 180)",
+            "required": True,
+            "default": None,
+            "kind": "float",
+        },
+        {
+            "name": "horizon",
+            "description": "Forecast horizon in days (1-14; leads beyond the run's length come back empty)",
+            "required": False,
+            "default": "7",
+            "kind": "int",
+        },
+        {
+            "name": "model",
+            "description": "Weather model (e.g. ecmwf_ifs, icon_seamless, gfs_seamless)",
+            "required": False,
+            "default": "ecmwf_ifs",
+            "kind": "text",
+        },
+        {
+            "name": "timezone",
+            "description": "Market time zone (defines local days and the issue time), e.g. Europe/Warsaw",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "issue_time",
+            "description": "Local time the forecast is issued, HH:MM",
+            "required": False,
+            "default": "10:00",
+            "kind": "text",
+        },
+        {
+            "name": "publication_delay_h",
+            "description": "Hours from model run start to its availability",
+            "required": False,
+            "default": "10",
+            "kind": "float",
+        },
+        {
+            "name": "run_interval_h",
+            "description": "Hours between model runs, starting at 00 UTC",
+            "required": False,
+            "default": "6",
+            "kind": "int",
+        },
+        {
+            "name": "strict",
+            "description": "Fail when a weather column has missing values?",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
+    ],
+    "OpenMeteoWeightedSource": [
+        {
+            "name": "locations",
+            "description": 'Locations as "name:lat:lon:weight, name:lat:lon:weight, ..." '
+            "(weight = population or installed capacity, fixed for the whole sample)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "source",
+            "description": "Underlying Open-Meteo source to fetch each location with",
+            "required": False,
+            "default": "OpenMeteoSource",
+            "kind": "select",
+            "choices": ["OpenMeteoSource", "OpenMeteoSingleRunsSource"],
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
+        {
+            "name": "keep_locations",
+            "description": "Also return each location's own columns, not just the weighted average?",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
         },
     ],
     "CsvSource": [
@@ -882,7 +1015,14 @@ def _instantiate(class_name: str, params: dict) -> Any:
 # Pipeline builders
 # ---------------------------------------------------------------------------
 
-_SOURCES = ["EntsoeSource", "OpenMeteoSource", "CsvSource", "CalendarSource"]
+_SOURCES = [
+    "EntsoeSource",
+    "OpenMeteoSource",
+    "OpenMeteoSingleRunsSource",
+    "OpenMeteoWeightedSource",
+    "CsvSource",
+    "CalendarSource",
+]
 _TRANSFORMERS = [
     "TimezoneTransformer",
     "ResampleTransformer",

@@ -57,6 +57,7 @@ pipeline = (
         longitude=21.0122,
         horizon=7,
         prefix="warsaw",
+        timezone="Europe/Warsaw",
     ))
     .add_transformer(ResampleTransformer(freq="1h"))
 )
@@ -89,6 +90,7 @@ for name, (lat, lon) in cities.items():
         longitude=lon,
         horizon=7,
         prefix=name,
+        timezone="Europe/Warsaw",
     ))
 
 df = pipeline.run(start="2023-01-01", end="2024-01-01", cache=True)

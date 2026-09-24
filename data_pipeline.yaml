@@ -30,6 +30,7 @@ sources:
     - wind_direction_10m
     prefix: warsaw
     proxy_url: null
+    timezone: Europe/Warsaw
 - class: CalendarSource
   params:
     country: PL

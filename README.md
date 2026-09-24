@@ -27,7 +27,7 @@ epftoolbox2.verify()
 ```
 ## Key Features
 
-- **Data Sources**: ENTSOE (load, generation, day-ahead prices on an hourly or 15-minute grid, cross-border transfer capacity, installed capacity; `prefix` to combine zones), Open-Meteo (weather forecasts), Calendar (holidays, weekday)
+- **Data Sources**: ENTSOE (load, generation, day-ahead prices on an hourly or 15-minute grid, cross-border transfer capacity, installed capacity; `prefix` to combine zones), Open-Meteo (archived weather forecasts as known at the forecast issue time; OpenMeteoSingleRunsSource picks an exact model run through the Single Runs API; OpenMeteoWeightedSource aggregates several locations into one population- or capacity-weighted series), Calendar (holidays, weekday)
 - **Transformers**: Resample, Timezone conversion, Lag features (local calendar days), DST normalisation to 24 slots a day (DSTNormalize), daily profile and daily min/max/mean/last stats (DailyProfile, DailyStats), residual load forecast (ResidualLoad), rolling spike flags (SpikeFlag), Impute (leak-safe gap filling)
 - **Presets**: `epftoolbox2.presets` — ready-made predictor lists for the LEAR and expert-model benchmarks from the literature
 - **Validators**: Null checks, Continuity (duplicates, gaps, mixed resolutions), DSTStructure (rows per local day), Coverage (per-column outages), Freshness, Plausibility (SDAC price limits, frozen values), LagConsistency (calendar-day lags), EDA statistics
@@ -126,7 +126,7 @@ from epftoolbox2.data.validators import NullCheckValidator
 pipeline = (
     DataPipeline(timezone="Europe/Warsaw")  # optional: dates below then mean local calendar days
     .add_source(EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"]))
-    .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
+    .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw"))
     .add_source(CalendarSource("PL", holidays="binary", weekday="number"))
     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
     .add_transformer(ResampleTransformer(freq="1h"))

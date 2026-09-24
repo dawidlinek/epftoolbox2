@@ -1,16 +1,20 @@
 ---
 title: OpenMeteoSource
-description: Download weather forecast data from Open-Meteo API
+description: Weather forecasts from the Open-Meteo Previous Runs API, as known at the forecast issue time
 ---
 
-import { Tabs, TabItem, Aside, Badge } from '@astrojs/starlight/components';
+import { Aside } from '@astrojs/starlight/components';
 
 # OpenMeteoSource
 
-Downloads weather forecast data from [Open-Meteo Previous Runs API](https://open-meteo.com/en/docs/previous-runs-api). **No API key required.**
+Downloads archived weather forecasts from the [Open-Meteo Previous Runs API](https://open-meteo.com/en/docs/previous-runs-api). **No API key required.**
 
-<Aside type="note">
-  This source uses the **Previous Runs API** to get historical weather forecasts as they were available at the time, which is essential for realistic backtesting.
+For every row of local day D, the column `{variable}_d+i` is the forecast for the **same local wall-clock hour on D+i**, taken from model runs that had been **published before the forecast issue time on D** (by default 10:00 in `timezone`). This is what makes the columns usable as predictors in a backtest.
+
+<Aside type="caution" title="Changed in this version">
+  Earlier versions took `d+i` at row t from the run started around t itself, so afternoon and evening hours used runs published after the day-ahead gate closure (look-ahead). They also shifted by 24 h in UTC instead of local calendar days. The new default fixes both, needs a smaller `horizon` (see [Horizon](#horizon)) and gives different numbers. `vintage="valid_time"` reproduces the old mapping. Clear `.cache/sources/` or rely on the new `schema_version` in the cache key.
+
+  `timezone` is now required and has no default. It used to default to `"Europe/Warsaw"`, so a market outside CET that left it unset computed the issue time in the wrong zone and could leak future runs (e.g. London 23:00 on D silently became 10:00 on D+1). Pass your market's zone explicitly.
 </Aside>
 
 ## Basic Usage
@@ -22,8 +26,10 @@ from epftoolbox2.data.sources import OpenMeteoSource
 source = OpenMeteoSource(
     latitude=52.2297,   # Warsaw
     longitude=21.0122,
-    horizon=7,
+    horizon=5,
     prefix="warsaw",
+    timezone="Europe/Warsaw",  # market time zone: local days and issue time
+    issue_time="10:00",        # forecasts are issued at 10:00 local time on D
 )
 
 df = source.fetch(
@@ -32,64 +38,148 @@ df = source.fetch(
 )
 ```
 
+`fetch` returns exactly the rows in `[start, end)` with a **UTC** index.
+
 ## Parameters
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `latitude` | float | Yes | - | Location latitude (-90 to 90) |
 | `longitude` | float | Yes | - | Location longitude (-180 to 180) |
-| `horizon` | int | No | 7 | Days ahead for forecasts |
-| `model` | str | No | `"jma_seamless"` | Weather model |
-| `columns` | List[str] | No | DEFAULT_COLUMNS | Weather variables |
+| `horizon` | int | No | `5` | Days ahead: columns `d+1` .. `d+horizon` (1–7; see [Horizon](#horizon)) |
+| `model` | str | No | `"jma_seamless"` | Weather model (see [Choosing a model](#choosing-a-model)) |
+| `columns` | List[str] \| None | No | `None` (= `DEFAULT_COLUMNS`) | Weather variables |
 | `prefix` | str | No | `""` | Prefix for column names |
+| `proxy_url` | str \| None | No | `None` | HTTP(S) proxy, e.g. `"http://proxy.example.com:8080"`. Saved to YAML as is, so don't put credentials in it. |
 | `temporal_resolution` | str \| None | No | `None` | Time step of returned data — see below |
+| `timezone` | str | **Yes** | *(none)* | Market time zone: defines the local day D of each row, the wall-clock hour that `d+i` refers to, and the zone of `issue_time`. Use the same zone as `TimezoneTransformer` / `CalendarSource`, e.g. `"Europe/Warsaw"` for PL, `"Europe/London"` for GB. There is no default: a market outside CET that relied on one would leak (see below). |
+| `issue_time` | str | No | `"10:00"` | Local time (`"HH:MM"`) on D at which the forecast is issued |
+| `publication_delay_h` | float | No | `10` | Hours between a run's initialisation and its availability (0–48) |
+| `vintage` | str | No | `"issue_time"` | `"issue_time"` (leak-free) or `"valid_time"` (old mapping, look-ahead) |
+| `derived` | List[str] \| None | No | `None` (= off) | Extra columns computed from the forecast — see [Derived columns](#derived-columns) |
+| `hdd_base_c` | float | No | `18.0` | Base temperature (°C) for `hdd` |
+| `cdd_base_c` | float | No | `21.0` | Base temperature (°C) for `cdd` |
+| `strict` | bool | No | `False` | Raise instead of warning when a returned column has missing values |
 
-### Temporal Resolution
+## How the forecast vintage is chosen
+
+The Previous Runs API stores forecasts at fixed lead times: `{variable}_previous_dayK` at valid time T comes from the latest run **initialised at least 24·K hours before T**. There is no way to ask it for "the run that was available at 10:00 on D"; the source reconstructs that from the buckets:
+
+1. For a row at local hour h on day D, the target valid time T is hour h on D+i in `timezone`.
+2. The issue instant is `issue_time` on D in `timezone`.
+3. The source picks the **smallest K ≥ i** such that every run that can influence `previous_dayK` at T was initialised at least `publication_delay_h` hours before the issue instant. It requests `previous_day1` .. `previous_day7` as needed for this fallback.
+
+Because the buckets are defined by lead time, not by issue day, the chosen run is older than the one a live forecaster would use: most D+1 hours come from bucket 2 or 3 (a run of D-1 or D-2). The bucket per local hour of D+1, for rows on D:
+
+| Model, `publication_delay_h` | Local hours 00–23 of D+1 (summer, issue 10:00) |
+|---|---|
+| `jma_seamless`, 10 | K=2 for 00:00–14:00, K=3 for 15:00–23:00 |
+| `icon_seamless`, 10 | K=1 for 00:00, K=2 for 01:00–23:00 |
+| `icon_seamless`, 4 | K=1 for 00:00–06:00, K=2 for 07:00–23:00 |
+| `ecmwf_ifs`, 8 | K=1 for 00:00–02:00, K=2 for 03:00–23:00 |
+
+On real data (ICON, Warsaw, May 2026, compared with the model's latest run as a proxy for the truth), the leak-free `d+1` has a mean absolute error of 0.89 °C for temperature and 1.72 km/h for wind speed, against 0.64 °C and 1.27 km/h for the old look-ahead mapping. The old features looked better because they used runs that did not exist yet at the issue time.
+
+<Aside type="note" title="Why the model's time step matters">
+  Some models are stored at a coarser step than hourly (JMA every 6 h; ICON every 3 h beyond 78 h lead; ECMWF IFS 0.25° every 3 h, 6 h beyond 144 h). Open-Meteo fills the hours in between by interpolating across stored points, and neighbouring stored points come from **different runs**. An hourly value at T can therefore depend on the run behind the stored point up to two steps after T. The source accounts for this with a per-model table of stored steps (6 h for models it doesn't know), which is why JMA needs one bucket more for the late hours of each day.
+</Aside>
+
+### Publication delay
+
+Open-Meteo's [Single Runs API documentation](https://open-meteo.com/en/docs/single-runs-api) says a run needs "typically 4–6 hours for global models (e.g. ECMWF IFS, GFS) and 1–3 hours for regional models" before it is available. Open-Meteo's own model metadata (`https://api.open-meteo.com/data/<model>/static/meta.json`, checked in September 2026) showed longer delays for some global models:
+
+| Model | Delay from initialisation to availability |
+|---|---|
+| JMA GSM | 9.6 h |
+| UKMO global 10 km | 8.4 h |
+| ECMWF IFS 0.25° | 7.8 h |
+| ECMWF IFS 9 km | 6.3–7.0 h |
+| GFS | 5.6–6.5 h |
+| Météo-France ARPEGE | 4.9 h |
+| DWD ICON global | 3.8 h |
+| DWD ICON-EU | 3.0 h |
+| DWD ICON-D2 | 1.5 h |
+
+These are single observations, not guarantees. The default of 10 h covers all of them. A shorter delay makes more hours use a fresher bucket (and can allow a longer horizon); only lower it for a model whose runs you know were available that early.
+
+### Horizon
+
+The API serves `previous_day1` .. `previous_day7` only. Under the issue-time rule, an hour of D+i needs bucket i, i+1 or i+2 (later hours need the larger ones), so the largest usable horizon depends on the model and on `issue_time` / `publication_delay_h`. With the defaults it is **5** for `jma_seamless`, `icon_seamless`, ECMWF IFS and GFS; `icon_seamless` or `gfs_seamless` with `publication_delay_h=4` allow 6. The constructor raises a `ValueError` for a horizon that would need `previous_day8` or later, and names the largest usable one.
+
+### Local calendar days and DST
+
+`d+i` always refers to the same local wall-clock hour i calendar days later, so a row at 10:00 on the day before the spring switch gets the forecast for 10:00 CEST (08:00 UTC), not 11:00. A target hour that doesn't exist (02:00 on the spring switch day) takes the next hour (03:00); an ambiguous one (02:00 on the autumn switch day) takes its first occurrence.
+
+### Live use
+
+When a row's issue time is still in the future (for example `end="today_d+7"`, or running before `issue_time`), the source uses the runs published by **now** instead, logs that those rows are provisional, and does not return trailing rows it has no values for. Provisional values change when fetched again later; don't use them as training data.
+
+## Choosing a model
+
+| Model | Archive (Previous Runs) | Notes |
+|---|---|---|
+| `jma_seamless` *(default)* | from 2018 | Over Europe this is JMA GSM: about 55 km grid, stored every 6 h, so hourly values are interpolated. Longest history, coarse. At Warsaw only `d+1`/`d+2` exist for 2018–2020; `d+5`–`d+7` start on 2021-01-06. |
+| `icon_seamless` | from 2024-01 | DWD ICON-D2 / ICON-EU / ICON global, **mixed by lead time**: different `d+i` columns come from different sub-models. First value at Warsaw 2024-01-19; `rain` is missing for Dec 2023–Jun 2024. |
+| `ecmwf_ifs025` | from 2024-02-04 | ECMWF IFS at 0.25°, stored every 3 h (6 h beyond 144 h lead). |
+| `ecmwf_ifs` | from 2025-10-01 | ECMWF IFS at 9 km, hourly to 90 h. About 8 % of hours were missing in the first half of 2026. |
+| `gfs_seamless` | temperature from 2021-03, other variables from 2024-01-19 | NCEP GFS. |
+
+The dates are the first valid `previous_day1` values at Warsaw (checked in September 2026). For data from 2024 on, ECMWF IFS 0.25° or ICON are better choices than JMA. The source logs, for every column that has gaps, the share of missing values, the timestamp it is complete from, and the missing share by local hour when that's uneven (e.g. JMA's `previous_day5`-`7`, which are missing before 2021 only for the hours that need them); with `strict=True` it raises instead. Missing weather values make the model drop those forecasts, so check the log before comparing models.
+
+## Variables that describe the preceding hour
+
+`rain`, `showers`, `snowfall` and `precipitation` (and radiation variables such as `shortwave_radiation`) are sums or means over the **preceding** hour: the value at 14:00 describes 13:00–14:00, while the 14:00 price covers delivery 14:00–15:00. This is a lag, not a leak. Instantaneous variables (temperature, wind, pressure) refer to the timestamp itself.
+
+## Temporal Resolution
 
 | Value | Time step | Notes |
 |-------|-----------|-------|
 | `None` *(default)* | 1 h | Standard hourly data; no extra API parameter sent |
 | `"hourly_3"` | 3 h | 8 data points per day |
 | `"hourly_6"` | 6 h | 4 data points per day |
-| `"native"` | model-dependent | Uses the weather model's native resolution; step is inferred automatically from the response |
+| `"native"` | model-dependent | The model's native step as returned by the API |
+
+With a step longer than 1 h, `d+i` uses the stored time closest to the target local hour.
 
 ```python
-# 3-hourly data — useful for coarser feature sets or faster pipelines
 source = OpenMeteoSource(
     latitude=52.2297,
     longitude=21.0122,
-    horizon=7,
+    horizon=5,
     prefix="warsaw",
+    timezone="Europe/Warsaw",
     temporal_resolution="hourly_3",
 )
+```
 
-# Model-native resolution
+## Reproducing old results
+
+```python
 source = OpenMeteoSource(
-    latitude=52.2297,
-    longitude=21.0122,
-    model="icon_seamless",
-    temporal_resolution="native",
+    latitude=52.2297, longitude=21.0122, timezone="Europe/Warsaw", horizon=7, vintage="valid_time"
 )
 ```
+
+`vintage="valid_time"` maps `d+i` at row t to `previous_day{i}` at t + 24·i hours in UTC, exactly as epftoolbox2 2.2 and earlier did. It logs a look-ahead warning on every fetch. Rows are still limited to `[start, end)`.
 
 ## Rate Limiting
 
 <Aside type="caution">
-  Open-Meteo has API rate limits. When the limit is reached, the source automatically waits (e.g., 60 seconds) before retrying.
+  Network errors and "too many concurrent requests" are retried up to 5 times with exponential backoff capped at 60 s; the minutely limit waits 60 s. The hourly and daily limits raise a `RuntimeError` instead of sleeping for hours.
 </Aside>
 
 ---
 
 ## Output Column Naming
 
-Columns are named: `{prefix}_{variable}_d+{horizon}`
+Columns are named: `{prefix}_{variable}_d+{i}`
 
 ```python
 # Example output columns:
 # warsaw_temperature_2m_d+1
 # warsaw_temperature_2m_d+2
 # ...
-# warsaw_temperature_2m_d+7
+# warsaw_temperature_2m_d+5
 ```
 
 ---
@@ -99,19 +189,45 @@ Columns are named: `{prefix}_{variable}_d+{horizon}`
 | Variable | Description |
 |----------|-------------|
 | `temperature_2m` | Temperature at 2m (°C) |
-| `rain` | Rain amount (mm) |
-| `showers` | Shower amount (mm) |
-| `snowfall` | Snowfall amount (cm) |
+| `rain` | Rain amount (mm), preceding hour |
+| `showers` | Shower amount (mm), preceding hour |
+| `snowfall` | Snowfall amount (cm), preceding hour |
 | `relative_humidity_2m` | Relative humidity (%) |
 | `dew_point_2m` | Dew point (°C) |
 | `apparent_temperature` | Feels-like temperature (°C) |
-| `precipitation` | Total precipitation (mm) |
+| `precipitation` | Total precipitation (mm), preceding hour |
 | `weather_code` | WMO weather code |
 | `surface_pressure` | Surface pressure (hPa) |
 | `pressure_msl` | Sea-level pressure (hPa) |
 | `cloud_cover` | Cloud cover (%) |
 | `wind_speed_10m` | Wind speed at 10m (km/h) |
 | `wind_direction_10m` | Wind direction at 10m (°) |
+
+With `jma_seamless`, `showers` is always 0; pass `columns=[...]` to skip it.
+
+---
+
+## Derived columns
+
+Off by default. Set `derived` to a list of names to add `{name}_d+{i}` alongside the forecast columns, computed per lead from the same vintage (so they carry no extra look-ahead):
+
+| Name | Needs in `columns` | Formula |
+|------|---------------------|---------|
+| `hdd` | `temperature_2m` | `max(hdd_base_c - temperature_2m, 0)`, heating degree-hours |
+| `cdd` | `temperature_2m` | `max(temperature_2m - cdd_base_c, 0)`, cooling degree-hours |
+| `wind_speed_100m_cubed` | `wind_speed_100m` | `(wind_speed_100m / 3.6) ** 3`, a proxy for wind power below rated speed (input is km/h, cubed in m/s) |
+
+```python
+source = OpenMeteoSource(
+    latitude=52.2297,
+    longitude=21.0122,
+    columns=["temperature_2m", "wind_speed_100m"],
+    derived=["hdd", "cdd", "wind_speed_100m_cubed"],
+    hdd_base_c=15.5,
+)
+```
+
+`derived` and, only when used, `hdd_base_c` / `cdd_base_c` are part of the cache key.
 
 ---
 
@@ -132,8 +248,9 @@ for name, (lat, lon) in cities.items():
     pipeline.add_source(OpenMeteoSource(
         latitude=lat,
         longitude=lon,
-        horizon=7,
+        horizon=5,
         prefix=name,
+        timezone="Europe/Warsaw",
     ))
 
 df = pipeline.run(start="2024-01-01", end="2024-06-01", cache=True)
@@ -143,9 +260,13 @@ df = pipeline.run(start="2024-01-01", end="2024-06-01", cache=True)
 
 ## Output
 
-Data is returned with a **UTC DatetimeIndex**:
+Data is returned with a **UTC DatetimeIndex** covering `[start, end)`:
 
 ```python
 print(df.columns[:5].tolist())
 # ['warsaw_temperature_2m_d+1', 'warsaw_temperature_2m_d+2', ...]
 ```
+
+## Caching
+
+The cache key includes the location, `horizon`, `model`, `columns`, `prefix`, `temporal_resolution`, `vintage`, `timezone`, `issue_time`, `publication_delay_h`, `derived` (and `hdd_base_c` / `cdd_base_c` only when `derived` uses them) and a `schema_version`, so caches written by earlier versions are not reused. `strict` and `proxy_url` don't change the data and are not part of the key.

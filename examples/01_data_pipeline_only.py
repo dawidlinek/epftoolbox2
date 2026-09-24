@@ -29,6 +29,7 @@ pipeline = (
             longitude=21.0122,
             horizon=7,
             prefix="warsaw",
+            timezone="Europe/Warsaw",
         )
     )
     .add_source(

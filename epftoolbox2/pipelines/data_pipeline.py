@@ -39,6 +39,8 @@ COMPONENT_REGISTRY = {
     "sources": {
         "EntsoeSource": "epftoolbox2.data.sources.entsoe",
         "OpenMeteoSource": "epftoolbox2.data.sources.open_meteo",
+        "OpenMeteoSingleRunsSource": "epftoolbox2.data.sources.open_meteo_single_runs",
+        "OpenMeteoWeightedSource": "epftoolbox2.data.sources.open_meteo_weighted",
         "CsvSource": "epftoolbox2.data.sources.csv",
         "CalendarSource": "epftoolbox2.data.sources.calendar",
     },
@@ -101,7 +103,7 @@ class DataPipeline:
         >>> pipeline = (
         ...     DataPipeline()
         ...     .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load"]))
-        ...     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
+        ...     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw"))
         ...     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
         ...     .add_validator(NullCheckValidator(columns=["load_actual"]))
         ... )

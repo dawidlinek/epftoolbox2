@@ -139,9 +139,33 @@ class EntsoeSource(DataSource):
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), UTC
 
 class OpenMeteoSource(DataSource):
+    def __init__(self, latitude: float, longitude: float, horizon: int = 5,
+                 model: str = "jma_seamless", columns: Optional[List[str]] = None,
+                 prefix: str = "", proxy_url: Optional[str] = None,
+                 temporal_resolution: Optional[str] = None,
+                 timezone: str = None,  # required: raises if left out, e.g. "Europe/Warsaw"
+                 issue_time: str = "10:00",
+                 publication_delay_h: float = 10, vintage: str = "issue_time",
+                 derived: Optional[List[str]] = None, hdd_base_c: float = 18.0,
+                 cdd_base_c: float = 21.0, strict: bool = False): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
+
+class OpenMeteoSingleRunsSource(DataSource):
     def __init__(self, latitude: float, longitude: float, horizon: int = 7,
-                 model: str = "jma_seamless", columns: List[str] = None,
-                 prefix: str = ""): ...
+                 model: str = "ecmwf_ifs", columns: Optional[List[str]] = None,
+                 prefix: str = "", proxy_url: Optional[str] = None,
+                 timezone: str = None,  # required: raises if left out, e.g. "Europe/Warsaw"
+                 issue_time: str = "10:00",
+                 publication_delay_h: float = 10, run_interval_h: int = 6,
+                 derived: Optional[List[str]] = None, hdd_base_c: float = 18.0,
+                 cdd_base_c: float = 21.0, strict: bool = False): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
+
+class OpenMeteoWeightedSource(DataSource):
+    def __init__(self, locations: Union[str, List[Dict[str, Any]]],
+                 source: str = "OpenMeteoSource",
+                 source_params: Optional[Dict[str, Any]] = None,
+                 prefix: str = "", keep_locations: bool = False): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
 
 class CalendarSource(DataSource):
