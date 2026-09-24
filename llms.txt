@@ -2023,12 +2023,15 @@ class Workflow:
         data_cache: Union[bool, str] = False,
         model_target: str = "price",
         model_horizon: int = 7,
+        model_freq: str = "1h",                             # "1h" or "15min"; must match the data's resolution
         model_forecast_only: bool = False,                  # Skip evaluators/exporters; use report.predictions()
         max_processes: Optional[int] = None,
         threads_per_process: Optional[int] = None,
         cache_path: Optional[str] = None,                   # Overrides data_cache if set
         model_index: Optional[int] = None,                  # Run only models[model_index]; all models if None
         model_save_dir: Optional[str] = None,               # YAML model_pipeline.save_dir; required with model_index
+        model_allow_manifest_mismatch: bool = False,        # Resume into model_save_dir despite a manifest mismatch
+        model_require_manifest: bool = False,               # Refuse (not warn) to resume results with no manifest
     ): ...
 
     def run(self) -> EvaluationReport: ...
@@ -2053,11 +2056,16 @@ class EvaluationReport:
     def by_hour_horizon(self) -> pd.DataFrame: ...
     def by_year(self) -> pd.DataFrame: ...
     def by_year_horizon(self) -> pd.DataFrame: ...
+    def by_run_weekday_horizon(self) -> pd.DataFrame: ...    # grouped by the issue day's weekday × horizon
+    def by_target_weekday_horizon(self) -> pd.DataFrame: ...  # grouped by the target day's weekday × horizon
     def predictions(self) -> pd.DataFrame: ...
     # Returns tidy DataFrame sorted by model→horizon→hour.
     # Columns: run_date, target_date, hour, horizon, prediction, model
     # No "actual" column — use for forecast_only=True runs.
     def iter_details(self) -> Iterator[Tuple[str, pd.DataFrame]]: ...
+    def compute_all(self) -> Dict[str, pd.DataFrame]: ...
+    # {"summary": ..., "hour": ..., "horizon": ..., "hour_horizon": ..., "year": ..., "year_horizon": ...,
+    #  "run_weekday_horizon": ..., "target_weekday_horizon": ...} in one pass; used by ExcelExporter.
 ```
 
 ---

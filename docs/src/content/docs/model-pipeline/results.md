@@ -32,6 +32,17 @@ by_year = report.by_year()
 
 # Combined year × horizon
 by_year_horizon = report.by_year_horizon()
+
+# Combined issue-day weekday × horizon, and target-day weekday × horizon
+by_run_weekday_horizon = report.by_run_weekday_horizon()
+by_target_weekday_horizon = report.by_target_weekday_horizon()
+
+# Iterate (model_name, DataFrame of per-forecast run_date/target_date/hour/horizon/day_in_test/actual/prediction)
+for model_name, details in report.iter_details():
+    ...
+
+# summary() plus every by_*() breakdown above, computed in one pass over the results (what ExcelExporter uses)
+sheets = report.compute_all()  # {"summary": ..., "hour": ..., ..., "target_weekday_horizon": ...}
 ```
 
 ## Example Output

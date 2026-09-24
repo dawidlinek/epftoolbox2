@@ -111,6 +111,8 @@ model_pipeline:
 | `model_index` | int | `None` | Run only `models[model_index]` — all models run if omitted. Requires `model_save_dir` |
 | `model_forecast_only` | bool | `False` | Skip evaluators/exporters; `test_start`/`test_end` default to `"today"` if omitted |
 | `model_save_dir` | str | `None` | Directory for one resumable JSONL per model (YAML: `model_pipeline.save_dir`), resolved from the YAML's directory |
+| `model_allow_manifest_mismatch` | bool | `False` | Resume into `model_save_dir` even if its [manifest](/epftoolbox2/model-pipeline/caching/) disagrees with this run's configuration (overwrites it) (YAML: `model_pipeline.allow_manifest_mismatch`) |
+| `model_require_manifest` | bool | `False` | Refuse to resume from a `model_save_dir` that has results but no manifest, instead of warning (YAML: `model_pipeline.require_manifest`) |
 
 ---
 
