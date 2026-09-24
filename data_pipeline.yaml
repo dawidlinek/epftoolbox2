@@ -1,3 +1,4 @@
+timezone: Europe/Warsaw
 sources:
 - class: EntsoeSource
   params:

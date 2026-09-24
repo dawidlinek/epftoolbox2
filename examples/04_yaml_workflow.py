@@ -51,7 +51,8 @@ predictors = [
 ]
 
 (
-    DataPipeline()
+    # timezone makes data_start/data_end (in experiment.yaml) mean whole local calendar days, not UTC midnight.
+    DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
     .add_source(
         # jma_seamless (default model) is only leak-free up to 5 days ahead at the default issue_time/

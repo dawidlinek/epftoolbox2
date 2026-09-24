@@ -39,7 +39,9 @@ TEST_END = "2024-03-01"
 
 if __name__ == "__main__":
     data_pipeline = (
-        DataPipeline()
+        # timezone makes DATA_START/DATA_END mean whole local calendar days, not UTC midnight, so the last
+        # local day of the fetch isn't left partial once TimezoneTransformer converts to Europe/Berlin below.
+        DataPipeline(timezone="Europe/Berlin")
         .add_source(EntsoeSource(country_code="DE", api_key=ENTSOE_API_KEY, type=["load", "price"], prefer_15min=True))
         .add_source(
             # jma_seamless (default model) is only leak-free up to 5 days ahead at the default issue_time/
