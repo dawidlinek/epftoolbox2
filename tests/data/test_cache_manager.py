@@ -196,6 +196,33 @@ class TestCoverage:
         assert meta["cache_format"] == CACHE_FORMAT_VERSION
         assert meta["cached_ranges"][0]["retrieved_at"].startswith("2030-05-05T12:00")
 
+    def test_provisional_open_meteo_rows_are_never_recorded_as_covered(self, cache_manager, sample_config, frozen_now):
+        """integration check f: an Open-Meteo `{col}_d+i` row is provisional exactly when the issue time of
+        the day the forecast was made (at most `horizon` days before the row) hasn't passed yet — and that
+        issue date is never later than the row's own date, so a provisional row is always dated today or
+        later. That is always inside the 2-day unsettled window below, so it can never be recorded as
+        covered here, regardless of the horizon or how the source itself decides "provisional"."""
+        frozen_now("2024-06-10 08:00")  # before a source's issue time later today
+        key = cache_manager.get_cache_key(sample_config)
+        # A day-ahead weather forecast column, as an Open-Meteo fetch would return it: values through today,
+        # today's own row possibly provisional (built from whatever run has been published so far).
+        df = hourly("2024-06-01", "2024-06-11", temperature_2m_d_plus_1=0.0)
+
+        covered_end = cache_manager.write_cache(key, df, ts("2024-06-01"), ts("2024-06-11"), sample_config)
+
+        assert covered_end == ts("2024-06-08")  # today's floor (06-10) minus the 2-day unsettled period
+        assert cache_manager.read_cached_data(key, ts("2024-06-10"), ts("2024-06-11")) is None
+        assert cache_manager.find_missing_ranges(key, ts("2024-06-01"), ts("2024-06-11")) == [
+            (ts("2024-06-08"), ts("2024-06-11"))
+        ]
+
+        # After the issue time passes, a later fetch for the same range still asks for (and can get a
+        # different, settled value for) today's row instead of being served a stale provisional one.
+        frozen_now("2024-06-10 11:00")
+        assert cache_manager.find_missing_ranges(key, ts("2024-06-01"), ts("2024-06-11")) == [
+            (ts("2024-06-08"), ts("2024-06-11"))
+        ]
+
 
 class TestCoverageGaps:
     """pipelines-integration H4-follow-up: a gap in the middle of a response used to be recorded as covered, so

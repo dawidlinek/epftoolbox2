@@ -1,6 +1,7 @@
 import multiprocessing
 import os
 import time
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -8,6 +9,7 @@ import pandas as pd
 
 from epftoolbox2.data import cache_manager as cache_manager_module
 from epftoolbox2.data.sources.base import DataSource
+from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
 from epftoolbox2.data.transformers.base import Transformer
 from epftoolbox2.data.transformers import TimezoneTransformer
 from epftoolbox2.data.validators.base import Validator
@@ -507,6 +509,43 @@ class TestSourceCache:
         fresh = pipe.run("2024-05-02", "2024-06-19", cache=False)
         pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
         assert cached["load"].last_valid_index() == _utc("2024-06-11 09:00")
+
+    def test_open_meteo_provisional_rows_are_not_cached_as_covered(self, in_tmp, monkeypatch):
+        """integration check f: an Open-Meteo row whose determining issue time hasn't passed yet is
+        provisional (it substitutes "now" for the issue time and uses whatever run has been published so
+        far, see OpenMeteoSource._build_features). Such a row is always within a day or two of "now", so
+        the per-source cache's 2-day unsettled boundary must already keep it from being recorded as
+        covered. Fetch a wide, mostly-old range twice: the old part must be served from cache (the second
+        fetch requests far less than the full range), but the tail around "now" must still be requested
+        again instead of being served a stale, wrongly-covered provisional value."""
+        from tests.data.sources.test_open_meteo import make_archive
+
+        archive = make_archive()
+        before_issue = pd.Timestamp("2024-01-11 08:00", tz="Europe/Warsaw").tz_convert("UTC")
+        after_issue = pd.Timestamp("2024-01-11 11:00", tz="Europe/Warsaw").tz_convert("UTC")
+
+        def fetch(now):
+            source = OpenMeteoSource(
+                latitude=52.23, longitude=21.01, columns=["temperature_2m"], timezone="Europe/Warsaw", horizon=1
+            )
+            source.session = Mock()
+            source.session.get.side_effect = archive
+            source.console.quiet = True
+            source._now = lambda: now
+            monkeypatch.setattr(cache_manager_module, "_now", lambda: now)
+            DataPipeline().add_source(source).run("2023-06-01", "2024-01-12", cache=True)
+            return source
+
+        fetch(before_issue)  # cold cache: everything is fetched once
+        n_calls_before = len(archive.calls)
+        settled_source = fetch(after_issue)  # same wide range, now after the issue time
+
+        second_fetch_calls = archive.calls[n_calls_before:]
+        assert second_fetch_calls  # the tail was requested again, not served from a wrongly-covered cache
+        requested_starts = [pd.Timestamp(c["start_date"], tz="UTC") for c in second_fetch_calls]
+        # Most of 2023-06-01..2024-01-12 was served from cache: only a small tail near "now" was re-requested.
+        assert min(requested_starts) > pd.Timestamp("2023-12-01", tz="UTC")
+        assert settled_source.session.get.called
 
     def test_deleted_cache_file_is_refetched(self, in_tmp):
         """entsoe M4: a deleted data file must not silently drop the source's columns."""
