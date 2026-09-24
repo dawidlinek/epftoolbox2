@@ -21,6 +21,9 @@ from epftoolbox2.pipelines import ModelPipeline, Workflow
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 WARSAW = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
+# Spans 2024-03-31 (spring-forward, 23 rows that day) and 2024-10-27 (fall-back, 25 rows that day).
+DST_SPRING_WARSAW = pd.date_range("2024-03-20", periods=24 * 20, freq="h", tz="Europe/Warsaw")
+DST_FALL_WARSAW = pd.date_range("2024-10-15", periods=24 * 20, freq="h", tz="Europe/Warsaw")
 # Synthetic drivers are known in advance (like calendar data or perfect forecasts); price follows the A44 default.
 SYNTHETIC_RULES = {name: Availability.static() for name in ("load", "wind", "is_weekend", "is_weekday")}
 
@@ -203,6 +206,124 @@ def test_day_ahead_values_are_known_for_the_next_day_only_with_utc_data():
     utc = WARSAW.tz_convert("UTC")
     found, _ = violations(["price", "load_forecast_d+1"], index=utc, horizon=1)
     assert {(name, p) for name, p, _ in found} == {("price", 23), ("load_forecast_d+1", 23)}
+
+
+def test_model_contract_allows_the_bare_target_column_as_a_predictor():
+    """Whether the same-day (lag 0) target column is available at issue time is the information set's call,
+    not the model data contract's: the contract only reserves '{target}_d+<h>' names (the model's own future
+    targets, checked by _contract.check_predictors), never the bare target name itself."""
+    df = make_market_data(days=120)
+    model = OLSModel(["price", "price_d-1"], training_window=30)
+    ref = model.run(df, test_start="2023-04-12", test_end="2023-04-12", target="price", horizon=1)
+    assert ref.produced == ref.count == 24
+
+
+def test_price_d_plus_1_is_rejected_by_the_model_contract_when_target_is_price():
+    """For target 'price', 'price_d+1' names the model's own horizon-1 target: the data contract rejects it
+    as look-ahead purely by name, before the raw data or the information set are even consulted (it would
+    also fail the information-set check on its own merits, see test_price_availability_follows_issue_time
+    below, but this path never gets there)."""
+    df = make_market_data(days=120)
+    assert "price_d+1" not in df.columns
+    model = OLSModel(["price_d-1", "price_d+1"], training_window=30)
+    with pytest.raises(ValueError, match="name the model's own targets"):
+        model.run(df, test_start="2023-04-12", test_end="2023-04-12", target="price", horizon=1)
+
+
+@pytest.mark.parametrize(
+    "index, start, end",
+    [
+        (WARSAW, "2024-01-10", "2024-01-20"),
+        (DST_SPRING_WARSAW, "2024-03-28", "2024-04-02"),  # spans the 2024-03-31 spring-forward day
+        (DST_FALL_WARSAW, "2024-10-24", "2024-10-30"),  # spans the 2024-10-27 fall-back day
+    ],
+)
+def test_price_availability_follows_issue_time(index, start, end):
+    """The convention: a price predictor's availability is decided by publication time (~13:00 Brussels on
+    D-1) versus issue_time, not by a fixed lag cutoff. Target 'price', issued 11:00 Brussels: day D's own
+    price (lag 0) and older prices were already published; tomorrow's price (the value being forecast) was
+    not. Holds on a Europe/Warsaw index across both DST transitions."""
+    info = InformationSet("11:00", "Europe/Brussels")
+    passing, unknown = violations(
+        ["price", "price_d-1", "price_d-7"], info=info, target="price", horizon=1, start=start, end=end, index=index
+    )
+    assert passing == set()
+    assert unknown == set()
+
+    rejected, _ = violations(["price_d+1"], info=info, target="price", horizon=1, start=start, end=end, index=index)
+    assert {name for name, _, _ in rejected} == {"price_d+1"}
+
+
+@pytest.mark.parametrize(
+    "index, start, end, crossing_hours",
+    [
+        (WARSAW.tz_convert("UTC"), "2024-01-10", "2024-01-20", {23}),
+        (DST_SPRING_WARSAW.tz_convert("UTC"), "2024-03-28", "2024-04-02", {22, 23}),
+        (DST_FALL_WARSAW.tz_convert("UTC"), "2024-10-24", "2024-10-30", {22, 23}),
+    ],
+)
+def test_price_availability_follows_issue_time_with_utc_data(index, start, end, crossing_hours):
+    """Same convention, UTC-indexed data. In CET (UTC+1) the last UTC hour(s) of the day already deliver in
+    the *next* local calendar day (two hours in CEST, UTC+2), so bare 'price' at those rows genuinely holds
+    tomorrow's price and is correctly rejected, matching
+    test_day_ahead_values_are_known_for_the_next_day_only_with_utc_data above; every other hour, and every
+    price_d-1/price_d-7 lag, still passes."""
+    info = InformationSet("11:00", "Europe/Brussels")
+    found, unknown = violations(
+        ["price", "price_d-1", "price_d-7"], info=info, target="price", horizon=1, start=start, end=end, index=index
+    )
+    assert {p for name, p, _ in found if name == "price"} == crossing_hours
+    assert {name for name, _, _ in found if name != "price"} == set()
+    assert unknown == set()
+
+
+@pytest.mark.parametrize(
+    "index, start, end",
+    [
+        (WARSAW, "2024-01-10", "2024-01-20"),
+        (DST_SPRING_WARSAW, "2024-03-28", "2024-04-02"),
+        (DST_FALL_WARSAW, "2024-10-24", "2024-10-30"),
+    ],
+)
+def test_non_price_target_may_use_tomorrows_price_only_after_it_is_published(index, start, end):
+    """A non-price target (e.g. load_actual) has no target-boundary exemption for 'price': it may use
+    tomorrow's day-ahead price once, and only once, it is actually published. Issued at 11:00 Brussels
+    (before the ~13:00 publication), price_d+1 is rejected; issued at 14:00 (after), it passes.
+    load_forecast_d+1 (published 10:00 D-1) is available at both times either way."""
+    early, unknown_early = violations(
+        ["price_d+1"],
+        info=InformationSet("11:00", "Europe/Brussels"),
+        target="load_actual",
+        horizon=1,
+        start=start,
+        end=end,
+        index=index,
+    )
+    assert {name for name, _, _ in early} == {"price_d+1"}
+    assert unknown_early == set()
+
+    late, unknown_late = violations(
+        ["price_d+1", "load_forecast_d+1"],
+        info=InformationSet("14:00", "Europe/Brussels"),
+        target="load_actual",
+        horizon=1,
+        start=start,
+        end=end,
+        index=index,
+    )
+    assert late == set()
+    assert unknown_late == set()
+
+    early_load_forecast, _ = violations(
+        ["load_forecast_d+1"],
+        info=InformationSet("11:00", "Europe/Brussels"),
+        target="load_actual",
+        horizon=1,
+        start=start,
+        end=end,
+        index=index,
+    )
+    assert early_load_forecast == set()
 
 
 def test_week_ahead_load_depends_on_the_issue_weekday():
