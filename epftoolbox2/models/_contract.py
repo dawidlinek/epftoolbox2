@@ -11,10 +11,13 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from .._date_utils import is_utc_index
+
 # Columns the model adds to its working frame; data columns with these names would be shadowed.
 RESERVED_COLUMNS = ("hour", "day")
 
 _FREQ_STEPS = {"1h": pd.Timedelta(hours=1), "15min": pd.Timedelta(minutes=15)}
+_DAY_LAG_SUFFIX = re.compile(r"_d-\d+$")
 
 
 def period_index(index: pd.DatetimeIndex, freq: str) -> np.ndarray:
@@ -78,6 +81,30 @@ def check_index(data: pd.DataFrame, freq: str) -> None:
             f"(e.g. {examples}). The data mixes resolutions or is finer than freq; the training cut assumes "
             "one row per day and period, so extra rows would leak the issue day's targets into training. "
             f"Resample the data to {freq} first."
+        )
+
+
+def check_timezone_with_day_lags(data: pd.DataFrame) -> None:
+    """Raise if the data has a UTC index and already carries day-lag (`_d-<k>`) columns.
+
+    UTC days are not local market days. `BaseModel._shift_index_by_calendar_days` only warns for a plain UTC
+    index, because its own `{target}_d+{h}` shift is then at least internally consistent (every day is 24h
+    UTC). A day-lag column built before the index lost its local time zone (e.g. `epf data` writing local
+    time, `epf model` reading it back as UTC) is not: its values were computed against a different set of
+    calendar-day boundaries than the ones the model now derives from this index, so they would silently
+    disagree with the targets around DST. That is worse than the plain UTC case, so it raises instead of warns.
+    """
+    if not is_utc_index(data.index):
+        return
+    day_lag_columns = [c for c in data.columns if isinstance(c, str) and _DAY_LAG_SUFFIX.search(c)]
+    if day_lag_columns:
+        shown = ", ".join(day_lag_columns[:5]) + (", ..." if len(day_lag_columns) > 5 else "")
+        raise ValueError(
+            f"Data has a UTC index and day-lag column(s) {shown} (built from '_d-<k>' suffixes). UTC days are "
+            "not local market days, so a day lag computed before the index lost its time zone would not agree "
+            "with the model's own calendar-day target shift. Keep the market's local time zone all the way "
+            "through (see epftoolbox2._frame_csv for the epf data -> epf model round trip) instead of "
+            "converting to UTC."
         )
 
 

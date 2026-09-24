@@ -68,6 +68,24 @@ def test_duplicate_timestamps_raise():
         run_ols(df)
 
 
+def test_utc_index_with_day_lag_column_raises():
+    """integration check d: a UTC index alone only warns (its own target shift is at least internally
+    consistent, see tests/models/test_target_shift.py); a UTC index with an existing '_d-<k>' predictor
+    must raise instead, since that column's values were computed against a different set of calendar-day
+    boundaries than the ones now derived from the UTC index (e.g. epf data -> epf model losing the zone)."""
+    df = make_market_data(days=120)  # has a price_d-1 column, per tests/synthetic.py
+    df.index = df.index.tz_convert("UTC")
+    with pytest.raises(ValueError, match="UTC"):
+        run_ols(df, predictors=PREDICTORS + ["price_d-1"])
+
+
+def test_utc_index_without_day_lag_column_only_warns():
+    df = make_market_data(days=120).drop(columns=["price_d-1"])
+    df.index = df.index.tz_convert("UTC")
+    with pytest.warns(UserWarning, match="UTC"):
+        run_ols(df)
+
+
 def test_unsorted_rows_give_the_same_forecasts_as_sorted():
     df = make_market_data(days=120, noise=5.0, seed=4)
     shuffled = df.sample(frac=1.0, random_state=0)

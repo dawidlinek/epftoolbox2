@@ -8,8 +8,16 @@ import pytest
 
 from epftoolbox2 import cli
 from epftoolbox2._frame_csv import load_frame_csv, save_frame_csv
+from epftoolbox2.data.sources.base import DataSource
+from epftoolbox2.data.transformers import (
+    DSTNormalizeTransformer,
+    LagTransformer,
+    ResampleTransformer,
+    TimezoneTransformer,
+)
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.pipelines.data_pipeline import DataPipeline
 from tests.synthetic import PREDICTORS, make_market_data
 
 MODEL_PREDICTORS = PREDICTORS + ["price_d-1"]
@@ -87,6 +95,94 @@ def test_cmd_data_writes_the_zone(tmp_path, local_data, monkeypatch):
     cli.cmd_data(args)
 
     assert str(load_frame_csv(out).index.tz) == "Europe/Warsaw"
+
+
+class _UtcPriceSource(DataSource):
+    """Deterministic UTC-indexed source spanning the 2024-03-31 spring DST switch (Europe/Warsaw)."""
+
+    def fetch(self, start, end):
+        index = pd.date_range(start, end, freq="1h", tz="UTC", inclusive="left")
+        hour = index.tz_convert("Europe/Warsaw").hour.to_numpy()
+        price = 40.0 + 10.0 * np.sin(2 * np.pi * hour / 24) + 0.01 * np.arange(len(index))
+        return pd.DataFrame({"price": price}, index=index)
+
+    def _validate_config(self):
+        return True
+
+    def get_cache_config(self):
+        return None
+
+
+def _run_data_pipeline_cli_round_trip(tmp_path, monkeypatch, transformers):
+    """`epf data` (a real DataPipeline: Timezone -> Resample -> ... -> Lag) then `epf model`; returns the
+    loaded local-time frame and the model's forecast records."""
+    pipeline = DataPipeline(sources=[_UtcPriceSource()], transformers=transformers, timezone="Europe/Warsaw")
+    monkeypatch.setattr("epftoolbox2.pipelines.data_pipeline.DataPipeline.load", lambda path: pipeline)
+
+    data_path = tmp_path / "data.csv"
+    data_args = cli.build_parser().parse_args(
+        ["data", "dp.yaml", "--start", "2024-03-29", "--end", "2024-04-05", "--output", str(data_path)]
+    )
+    cli.cmd_data(data_args)
+
+    model_yaml = tmp_path / "mp.yaml"
+    ModelPipeline().add_model(OLSModel(["price_d-1"], training_window=3, name="OLS")).save(model_yaml)
+    parser = cli.build_parser()
+    argv = ["model", str(model_yaml), "--data", str(data_path), "--test-start", "2024-04-01", "--test-end"]
+    argv += ["2024-04-01", "--horizon", "1", "--save-dir", str(tmp_path / "out")]
+    cli.cmd_model(parser.parse_args(argv))
+
+    loaded = load_frame_csv(data_path)
+    records = [json.loads(line) for line in (tmp_path / "out" / "ols.jsonl").read_text().splitlines()]
+    return loaded, records
+
+
+def test_epf_data_then_epf_model_keeps_day_lags_aligned_with_targets(tmp_path, monkeypatch):
+    """integration check d: DataPipeline's own Timezone -> Resample -> Lag chain, round-tripped through
+    `epf data` -> `epf model`, must keep the local time zone so the day-lag predictor and the model's own
+    target agree on the same calendar-day boundary."""
+    loaded, records = _run_data_pipeline_cli_round_trip(
+        tmp_path,
+        monkeypatch,
+        [
+            TimezoneTransformer(target_tz="Europe/Warsaw"),
+            ResampleTransformer(freq="1h"),
+            LagTransformer(columns=["price"], lags=[1], freq="day"),
+        ],
+    )
+    assert str(loaded.index.tz) == "Europe/Warsaw"
+    assert records  # forecasts were produced, not silently skipped
+
+    for r in records:
+        target_ts = pd.Timestamp(r["target_date"], tz="Europe/Warsaw") + pd.Timedelta(hours=r["hour"])
+        assert r["actual"] == pytest.approx(loaded.loc[target_ts, "price"])
+        assert loaded.loc[target_ts, "price_d-1"] == pytest.approx(
+            loaded.loc[target_ts - pd.Timedelta(days=1), "price"]
+        )
+
+
+def test_epf_data_then_epf_model_with_dst_normalize_keeps_day_lags_aligned(tmp_path, monkeypatch):
+    """Same round trip with DSTNormalizeTransformer: its naive wall-clock output must also survive
+    `epf data` -> `epf model` so day lags and targets keep agreeing, including on the old DST switch day."""
+    loaded, records = _run_data_pipeline_cli_round_trip(
+        tmp_path,
+        monkeypatch,
+        [
+            TimezoneTransformer(target_tz="Europe/Warsaw"),
+            ResampleTransformer(freq="1h"),
+            DSTNormalizeTransformer(freq="1h"),
+            LagTransformer(columns=["price"], lags=[1], freq="day"),
+        ],
+    )
+    assert loaded.index.tz is None  # DSTNormalizeTransformer's naive wall-clock output
+    assert records
+
+    for r in records:
+        target_ts = pd.Timestamp(r["target_date"]) + pd.Timedelta(hours=r["hour"])
+        assert r["actual"] == pytest.approx(loaded.loc[target_ts, "price"])
+        assert loaded.loc[target_ts, "price_d-1"] == pytest.approx(
+            loaded.loc[target_ts - pd.Timedelta(days=1), "price"]
+        )
 
 
 def test_old_csv_with_offsets_needs_the_zone(tmp_path, local_data):

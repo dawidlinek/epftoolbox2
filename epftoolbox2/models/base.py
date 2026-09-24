@@ -297,12 +297,13 @@ class BaseModel(ABC):
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
 
         Raises ValueError on a frequency mismatch, duplicate timestamps, reserved or colliding column names,
-        and missing or non-numeric predictors, and InformationSetError (a ValueError) when `information_set`
-        is given and a predictor is not known at issue time. `ModelPipeline` calls it for every model before
-        running any.
+        a UTC index with existing day-lag (`_d-<k>`) columns, and missing or non-numeric predictors, and
+        InformationSetError (a ValueError) when `information_set` is given and a predictor is not known at
+        issue time. `ModelPipeline` calls it for every model before running any.
         """
         self._set_freq(freq)
         _contract.check_index(data, freq)
+        _contract.check_timezone_with_day_lags(data)
         _contract.check_names(data, target, horizon)
         expanded = self._precompute_expanded_predictors(horizon)
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
