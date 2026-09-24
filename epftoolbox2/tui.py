@@ -483,6 +483,64 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "PseSource": [
+        {
+            "name": "series",
+            "description": "PSE series to fetch",
+            "required": True,
+            "default": None,
+            "kind": "multiselect",
+            "choices": [
+                "rce",
+                "csdac",
+                "demand",
+                "wind",
+                "solar",
+                "generation_scheduled",
+                "generation_non_balancing",
+                "exchange_parallel",
+                "exchange_non_parallel",
+            ],
+        },
+        {
+            "name": "issue_time",
+            "description": "Issue time HH:MM (local); values published later are dropped",
+            "required": False,
+            "default": "11:30",
+            "kind": "text",
+        },
+        {
+            "name": "lags",
+            "description": "Day lags, comma-separated (e.g. 0,1,7; -1 = next day as known today)",
+            "required": False,
+            "default": "0",
+            "kind": "lag_list",
+        },
+        {
+            "name": "as_of",
+            "description": "Availability rule",
+            "required": False,
+            "default": "publication",
+            "kind": "select",
+            "choices": ["publication", "schedule"],
+        },
+        {
+            "name": "timezone",
+            "description": "Time zone of the forecast day (match TimezoneTransformer)",
+            "required": False,
+            "default": "Europe/Warsaw",
+            "kind": "text",
+        },
+        {
+            "name": "freq",
+            "description": "Output resolution",
+            "required": False,
+            "default": "1h",
+            "kind": "select",
+            "choices": ["1h", "15min"],
+        },
+        {"name": "prefix", "description": "Column name prefix", "required": False, "default": "pse", "kind": "text"},
+    ],
     "TimezoneTransformer": [
         {
             "name": "target_tz",
@@ -1180,6 +1238,7 @@ _SOURCES = [
     "CsvSource",
     "CalendarSource",
     "SchoolHolidaysSource",
+    "PseSource",
 ]
 _TRANSFORMERS = [
     "TimezoneTransformer",
