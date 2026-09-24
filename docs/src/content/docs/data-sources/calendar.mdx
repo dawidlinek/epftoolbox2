@@ -1,16 +1,19 @@
 ---
 title: CalendarSource
-description: Generate calendar features (holidays, weekday, hour, month)
+description: Generate calendar features (holidays, weekday, hour, month, daylight)
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 # CalendarSource
 
-Generates calendar features including holidays, weekday, hour of day, and month.
+Generates calendar features: holidays, weekday, hour of day (or period of day), month, and sunrise/sunset.
+Every feature is computed from the **local date and wall-clock time** in the country's time zone, while the index
+stays in UTC like every other source. All features are known in advance, so their `_d+k` versions are legal
+predictors.
 
 <Aside>
-  CalendarSource uses the [holidays](https://pypi.org/project/holidays/) Python package for holiday detection. See their documentation for the [complete list of supported countries](https://python-holidays.readthedocs.io/en/latest/index.html#available-countries).
+  CalendarSource uses the [holidays](https://pypi.org/project/holidays/) Python package for holiday detection. See their documentation for the [complete list of supported countries](https://python-holidays.readthedocs.io/en/latest/index.html#available-countries), subdivisions and categories.
 </Aside>
 
 ## Basic Usage
@@ -28,21 +31,37 @@ source = CalendarSource(
 
 df = source.fetch(
     start=pd.Timestamp("2024-01-01", tz="UTC"),
-    end=pd.Timestamp("2024-12-31", tz="UTC"),
+    end=pd.Timestamp("2025-01-01", tz="UTC"),
 )
 ```
+
+`fetch(start, end)` returns the rows of the `freq` grid in **[start, end)**, with a UTC index. A local day
+has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 
 ## Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `country` | str | Required | Country code for holidays |
-| `timezone` | str | Auto | Override default timezone |
+| `country` | str | Required | Country code (see the list below) |
+| `timezone` | str | Auto | Time zone whose local dates and times define the features (default: the country's) |
 | `holidays` | str/bool | `"binary"` | Holiday output format |
 | `weekday` | str/bool | `"number"` | Weekday output format |
-| `hour` | str/bool | `False` | Hour output format |
+| `hour` | str/bool | `False` | Hour (or period) output format |
 | `month` | str/bool | `False` | Month output format |
-| `prefix` | str | `""` | Column name prefix |
+| `daylight` | bool | `False` | Add `sunrise`, `sunset` (local decimal hours) and `daylight_hours` |
+| `lat` | float | Auto | Latitude for daylight (default: the country's capital) |
+| `lon` | float | Auto | Longitude for daylight (default: the country's capital) |
+| `prefix` | str | `""` | Column name prefix, used as is (`"cal_"` gives `cal_is_holiday`) |
+| `freq` | str | `"1h"` | Row spacing: a divisor of one hour (`"15min"`, `"30min"`) or whole hours dividing a day |
+| `subdiv` | str | `None` | Subdivision for regional holidays: `"BY"` or `"DE-BY"` (Bavaria), `"ENG"` (England), `"ZH"` (Zurich) |
+| `categories` | str/List[str] | `None` | Holiday categories of the `holidays` package, e.g. `["public", "bank"]`; `None` means public holidays only |
+| `bridge_days` | bool | `False` | Add `is_bridge_day` (see [Additional features](#additional-features)) |
+| `christmas_period` | bool | `False` | Add `is_christmas_period` (24 December to 1 January) |
+| `holiday_distance` | int | `0` | If N > 0, add `days_to_holiday` and `days_since_holiday`, capped at N |
+| `dst_switch` | bool | `False` | Add `is_dst_switch_day` (local days with 23 or 25 hours) |
+| `fourier_weekly` | int | `0` | Number of weekly Fourier harmonics (`week_sin_k`, `week_cos_k`) |
+| `fourier_annual` | int | `0` | Number of annual Fourier harmonics (`year_sin_k`, `year_cos_k`) |
+| `regimes` | bool/dict | `False` | Market-regime step dummies `regime_{name}`: `True` for the default set, or `{name: "YYYY-MM-DD"}` |
 
 <Aside type="tip">
   The timezone is automatically extracted from the country code. It should match your `TimezoneTransformer` target if you're using one.
@@ -58,8 +77,25 @@ df = source.fetch(
 |-------|---------|---------|
 | `False` | None | - |
 | `"binary"` | `is_holiday` | 0 or 1 |
-| `"name"` | `holiday_name` | "Christmas Day" or None |
-| `"onehot"` | `is_holiday`, `holiday_{name}` | Multiple columns |
+| `"name"` | `holiday_name` | "Christmas Day" or None (two holidays on one day are joined with `"; "`) |
+| `"onehot"` | `is_holiday`, `holiday_{name}` | One 0/1 column per holiday, e.g. `holiday_new_years_day` |
+
+- **Names are in English** (`en_US`) for every country. Without a pinned language the `holidays` package
+  follows the process locale, so the same config gave different column names on machines with different
+  `LANG` settings.
+- One-hot names are lower case ASCII with underscores. The columns cover every holiday of the years touched
+  by `[start, end)`, so the column set does not depend on which holidays fall inside the range.
+- Only **public** holidays are flagged by default, and only national ones. Use `subdiv` for regional holidays
+  (Germany flags 9 days in 2024, Bavaria 12; England adds Easter Monday and the Late Summer Bank Holiday) and
+  `categories` for other kinds, e.g. Swedish Midsummer Eve and Christmas Eve are in the `"bank"` category
+  (which also has afternoon-only days such as "Maundy Thursday (from 2pm)"; they are flagged for the whole
+  day). `categories` replaces the default, so include `"public"` when you want both.
+- Sweden: the `holidays` package lists every Sunday as a Swedish holiday; CalendarSource excludes them.
+
+<Aside type="caution">
+  `"name"` outputs (`holiday_name`, `weekday_name`, `month_name`) are strings, for inspection only. Models
+  convert every column of the frame to numbers, so drop these columns before modelling.
+</Aside>
 
 ### Weekday
 
@@ -72,11 +108,23 @@ df = source.fetch(
 
 ### Hour
 
-| Value | Columns | Example |
-|-------|---------|---------|
-| `False` | None | - |
-| `"number"` | `hour` | 0 to 23 |
-| `"onehot"` | `is_0`, `is_1`, ..., `is_23` | 24 columns |
+The column depends on `freq`:
+
+| `freq` | Value | Columns | Example |
+|--------|-------|---------|---------|
+| hourly or coarser | `"number"` | `hour` | 0 to 23 (local hour of day) |
+| hourly or coarser | `"onehot"` | `is_0`, `is_1`, ..., `is_23` | 24 columns |
+| sub-hourly | `"number"` | `period` | 0 to 95 at `"15min"`, 0 to 47 at `"30min"` |
+| sub-hourly | `"onehot"` | `is_period_0`, ..., `is_period_95` | one column per period of the day |
+
+`period` is the index of the period within the local day on the wall-clock grid (`hour * 4 + minute // 15` at
+15 minutes), the same numbering the models use for their `hour` key. On the fall-back day the repeated hour's
+periods occur twice; on the spring-forward day the missing hour's periods are absent.
+
+<Aside type="note">
+  The models fit one model per period of the day and drop any data column named `hour`, so these columns are
+  mainly useful outside `epftoolbox2` models.
+</Aside>
 
 ### Month
 
@@ -87,6 +135,72 @@ df = source.fetch(
 | `"name"` | `month_name` | "january", "february", ... |
 | `"onehot"` | `is_january`, `is_february`, ... | 12 columns |
 
+### Daylight
+
+With `daylight=True`, `sunrise` and `sunset` are local decimal hours (06:30 is 6.5) and `daylight_hours` is
+their difference, computed with [astral](https://pypi.org/project/astral/) for `lat`/`lon`. On polar days or
+nights (only possible with a far-northern `lat`) the three columns are NaN and a warning is logged.
+
+---
+
+## Additional features
+
+These are off by default. All of them are known in advance, so their `x_d+k` versions (from
+`LagTransformer(lags=[-k])`) are legal predictors. Bridge days and holiday distances use the same holiday
+calendar as `holidays` (country, `subdiv`, `categories`), even when `holidays=False`, and look beyond
+`[start, end)` where needed, so values at the edges of the range are correct.
+
+<Aside type="caution">
+  `LagTransformer` currently shifts by elapsed time, not calendar days, so on a local-time index a `_d+1`
+  calendar column points to the wrong day at one row around each DST switch (a known issue).
+</Aside>
+
+| Parameter | Columns | Definition |
+|-----------|---------|------------|
+| `bridge_days=True` | `is_bridge_day` | A working day (Monday to Friday, not a holiday) whose previous and next days are both a weekend day or a holiday: the Friday after a Thursday holiday, the Monday before a Tuesday holiday, or a day between two holidays (2 May in Poland in 2024) |
+| `christmas_period=True` | `is_christmas_period` | Local dates from 24 December to 1 January inclusive |
+| `holiday_distance=N` | `days_to_holiday`, `days_since_holiday` | Days to the next and since the previous holiday, 0 on a holiday, capped at N (so N means "N or more") |
+| `dst_switch=True` | `is_dst_switch_day` | 1 on every row of a local day with 23 or 25 hours |
+| `fourier_weekly=K` | `week_sin_1`, `week_cos_1`, ..., `week_sin_K`, `week_cos_K` | `sin/cos(2πk·w)`, `w = (weekday + time of day / 24) / 7` |
+| `fourier_annual=K` | `year_sin_1`, `year_cos_1`, ..., `year_sin_K`, `year_cos_K` | `sin/cos(2πk·y)`, `y = (day of year − 1 + time of day / 24) / days in the year` |
+| `regimes=...` | `regime_{name}` | 0 before the regime's first local delivery day, 1 from it on |
+
+The Fourier phases use the **local wall-clock** time, like every other CalendarSource feature: the repeated
+02:00 of the fall-back day gets the same values twice, the missing hour of the spring-forward day is simply
+absent, and the phase neither jumps nor drifts when the UTC offset changes. The annual phase divides by 365 or
+366, so 1 January is always phase 0.
+
+### Regime dummies
+
+`regimes=True` adds the changes below that apply to `country`. The date is the first **delivery** day; the
+first auction was the day before.
+
+| Name | Date | Countries | Change |
+|------|------|-----------|--------|
+| `de_at_split` | 2018-10-01 | DE, AT | Split of the German-Austrian bidding zone |
+| `brexit_decoupling` | 2021-01-01 | GB, IE | GB and the Irish SEM leave implicit day-ahead coupling with SDAC |
+| `core_fb` | 2022-06-09 | AT, BE, CZ, DE, FR, HU, NL, PL, RO, SK | Core flow-based market coupling |
+| `nordic_fb` | 2024-10-30 | DK, FI, NO, SE | Nordic flow-based market coupling |
+| `sdac_15min_mtu` | 2025-10-01 | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | 15-minute market time unit in SDAC |
+| `sem_30min_mtu` | 2025-10-01 | IE | 30-minute market time unit in the SEM day-ahead market |
+
+The set is available as `epftoolbox2.data.sources.calendar.DEFAULT_REGIMES`. A dict replaces it, so list the
+defaults you want to keep:
+
+```python
+source = CalendarSource(
+    country="PL",
+    regimes={"core_fb": "2022-06-09", "sdac_15min_mtu": "2025-10-01", "my_change": "2024-07-01"},
+)
+# Columns: is_holiday, weekday, regime_core_fb, regime_sdac_15min_mtu, regime_my_change
+```
+
+<Aside type="note">
+  A regime dummy only helps once the training window spans the change. While the window lies entirely before
+  it, the column is all zeros and gets no weight, so the first forecasts after the change are made as if nothing
+  had happened. Don't pool data before and after 2025-10-01 without a regime flag or a separate model.
+</Aside>
+
 ---
 
 ## Example: Full Features
@@ -94,11 +208,21 @@ df = source.fetch(
 ```python
 source = CalendarSource(
     country="DE",
+    subdiv="BY",
     holidays="binary",
     weekday="number",
     hour="number",
     month="number",
+    bridge_days=True,
+    fourier_annual=2,
+    regimes=True,
 )
 
-# Output columns: is_holiday, weekday, hour, month
+# Output columns: is_holiday, weekday, hour, month, is_bridge_day,
+# year_sin_1, year_cos_1, year_sin_2, year_cos_2,
+# regime_de_at_split, regime_core_fb, regime_sdac_15min_mtu
 ```
+
+## Supported countries
+
+AT, BE, BG, CH, CZ, DE, DK, ES, FI, FR, GB, GR, HU, IE, IT, NL, NO, PL, PT, RO, SE, SK

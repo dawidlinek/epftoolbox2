@@ -174,14 +174,27 @@ class CalendarSource(DataSource):
                  weekday: Union[str, bool] = "number",
                  hour: Union[str, bool] = False,
                  month: Union[str, bool] = False,
-                 daylight: bool = False, prefix: str = ""): ...
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
+                 daylight: bool = False, lat: float = None, lon: float = None,
+                 prefix: str = "", freq: str = "1h", subdiv: str = None,
+                 categories: Union[str, List[str]] = None,
+                 bridge_days: bool = False, christmas_period: bool = False,
+                 holiday_distance: int = 0, dst_switch: bool = False,
+                 fourier_weekly: int = 0, fourier_annual: int = 0,
+                 regimes: Union[bool, Dict[str, str]] = False): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
+
+class SchoolHolidaysSource(DataSource):
+    def __init__(self, country: str, subdivisions: Union[str, List[str]] = None,
+                 weights: Union[Dict[str, float], List[float]] = None,
+                 timezone: str = None, prefix: str = "", freq: str = "1h"): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 
 class CsvSource(DataSource):
     def __init__(self, file_path: str, datetime_column: str = "datetime",
                  columns: List[str] = None, prefix: str = "",
-                 datetime_format: str = None, separator: str = ","): ...
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
+                 datetime_format: str = None, separator: str = ",",
+                 timezone: str = "UTC"): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 ```
 
 ---

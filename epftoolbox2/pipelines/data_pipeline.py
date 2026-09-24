@@ -43,6 +43,7 @@ COMPONENT_REGISTRY = {
         "OpenMeteoWeightedSource": "epftoolbox2.data.sources.open_meteo_weighted",
         "CsvSource": "epftoolbox2.data.sources.csv",
         "CalendarSource": "epftoolbox2.data.sources.calendar",
+        "SchoolHolidaysSource": "epftoolbox2.data.sources.school_holidays",
     },
     "transformers": {
         "TimezoneTransformer": "epftoolbox2.data.transformers.timezone",

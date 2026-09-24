@@ -7,6 +7,7 @@ from .open_meteo_single_runs import OpenMeteoSingleRunsSource
 from .open_meteo_weighted import OpenMeteoWeightedSource
 from .csv import CsvSource
 from .calendar import CalendarSource
+from .school_holidays import SchoolHolidaysSource
 
 __all__ = [
     "DataSource",
@@ -16,4 +17,5 @@ __all__ = [
     "OpenMeteoWeightedSource",
     "CsvSource",
     "CalendarSource",
+    "SchoolHolidaysSource",
 ]
