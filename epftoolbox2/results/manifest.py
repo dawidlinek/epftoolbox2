@@ -178,6 +178,11 @@ def build_manifest(
     (`BaseModel._precompute_expanded_predictors`); it is what `predictor_layout_hash` is compared on, since
     it (unlike a sorted union of names) is sensitive to predictor order and to per-task differences.
 
+    `model_params` includes `scaler` alongside the model's own `_model_kwargs`: it changes the scale a
+    model fits and predicts in just as much as a hyperparameter would, but `BaseModel` keeps it out of
+    `_model_kwargs` (passed to workers separately, see `base.py`) so a subclass overriding `_model_kwargs`
+    can't accidentally drop it.
+
     Only rows up to `test_end` are hashed: no forecast in `[test_start, test_end]` ever reads a later row,
     so data appended after `test_end` between runs - e.g. a source's own fetch window catching up a little
     between two runs on the same day - doesn't raise a mismatch. The lower bound is deliberately left open
@@ -195,7 +200,7 @@ def build_manifest(
         horizon=horizon,
         freq=freq,
         training_window=model.training_window,
-        model_params=dict(model._model_kwargs),
+        model_params={"scaler": getattr(model, "scaler", "standard"), **dict(model._model_kwargs)},
         data_columns_hash=hash_columns(hashed_rows, used_columns),
         data_timezone=str(data.index.tz),
         information_set=information_set.to_dict() if information_set is not None else None,

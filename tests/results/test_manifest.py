@@ -17,10 +17,16 @@ from epftoolbox2.results.manifest import (
 
 
 class _DummyModel:
-    """Enough of BaseModel's shape for build_manifest: training_window and _model_kwargs."""
+    """Enough of BaseModel's shape for build_manifest: training_window, scaler and _model_kwargs.
 
-    def __init__(self, training_window=30, model_kwargs=None):
+    `scaler` is a separate constructor parameter, not part of `model_kwargs`, matching BaseModel: it is
+    kept out of `_model_kwargs` (passed to workers separately) so a subclass overriding `_model_kwargs`
+    can't accidentally drop it.
+    """
+
+    def __init__(self, training_window=30, scaler="standard", model_kwargs=None):
         self.training_window = training_window
+        self.scaler = scaler
         self._model_kwargs = model_kwargs or {}
 
 
@@ -62,7 +68,7 @@ def test_build_manifest_records_everything_that_defines_a_forecast():
     assert manifest.horizon == 1
     assert manifest.freq == "1h"
     assert manifest.training_window == 45
-    assert manifest.model_params == {"cv": 5}
+    assert manifest.model_params == {"scaler": "standard", "cv": 5}
     assert manifest.data_timezone == "Europe/Warsaw"
     assert manifest.package_version  # recorded
     assert manifest.schema_version == 1
@@ -238,12 +244,31 @@ def test_information_set_is_recorded_but_not_compared():
 
 
 def test_model_params_generically_covers_any_constructor_parameter():
-    """model_params comes from model._model_kwargs generically, so a brand-new constructor parameter (like
-    the `scaler` option feat/vst-scalers adds) is covered by the comparison without any manifest change, as
-    long as the model returns it from _model_kwargs."""
+    """model_params comes from model._model_kwargs generically, so a brand-new constructor parameter is
+    covered by the comparison without any manifest change, as long as the model returns it from
+    _model_kwargs."""
     data = make_data()
-    a = make_manifest(data, model=_DummyModel(model_kwargs={"scaler": "standard"}))
-    b = make_manifest(data, model=_DummyModel(model_kwargs={"scaler": "minmax"}))
+    a = make_manifest(data, model=_DummyModel(model_kwargs={"cv": 5}))
+    b = make_manifest(data, model=_DummyModel(model_kwargs={"cv": 10}))
 
     diffs = a.differences(b)
     assert len(diffs) == 1 and "model_params" in diffs[0]
+
+
+def test_model_params_includes_the_scaler_so_resume_refuses_on_a_change(tmp_path):
+    """integration check e: BaseModel keeps `scaler` out of `_model_kwargs` (passed to workers separately,
+    see base.py) so a subclass overriding `_model_kwargs` can't drop it; build_manifest must add it back
+    itself, or resuming into an existing directory after changing the scaler would silently mix forecasts
+    fit in two different scales."""
+    data = make_data()
+    a = make_manifest(data, model=_DummyModel(scaler="standard"))
+    b = make_manifest(data, model=_DummyModel(scaler="asinh"))
+
+    assert a.model_params == {"scaler": "standard"}
+    assert b.model_params == {"scaler": "asinh"}
+    assert len(a.differences(b)) == 1 and "model_params" in a.differences(b)[0]
+
+    path = tmp_path / "ols.manifest.json"
+    check_and_write(path, a, has_existing_results=False)
+    with pytest.raises(ManifestMismatchError, match="model_params"):
+        check_and_write(path, b, has_existing_results=True)
