@@ -12,6 +12,12 @@ everything that ends up in the historical data. `epftoolbox2.information_set` de
 becomes known and checks every expanded predictor (and the newest training target) against that boundary
 before any model is fitted.
 
+**The convention:** a predictor's availability — including a raw, unshifted (lag 0) column such as `price`
+used to forecast a different target — is decided purely by comparing its publication time to `issue_time`,
+never by a fixed lag cutoff. This is independent of the model's own training-target boundary (the newest
+training target is always `day - 1`, see [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/));
+changing one is not a side effect of changing the other.
+
 ---
 
 ## Quick Start

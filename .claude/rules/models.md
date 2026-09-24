@@ -17,6 +17,13 @@ paths:
 ## Information set (the leakage boundary)
 In `_fit_one_numpy`, rows cover days `[day - training_window - hz, day]`; the last row is the forecast issued on `day`, and training drops the last `1 + hz` rows, so the newest training target is the price of `day - 1`. This is deliberately conservative (it does not assume the day-`day` auction result is known). Moving this boundary changes every published number — only do it when asked, and say so explicitly.
 
+Whether a *predictor* is available — including a raw, unshifted (lag 0) column, such as `price` used to
+forecast a different target — is a separate question, decided by `epftoolbox2.information_set` comparing
+each column's publication time to `issue_time` (e.g. a day-ahead price is published ~13:00 D-1, so it may be
+used from then on, same-day or older, but never for the day it prices). This convention is independent of
+the training-target boundary above: don't conflate the two, and don't move either as a side effect of the
+other.
+
 ## Scaling
 `StandardScaler` is fitted per task on training rows only. Columns that are binary 0/1 are not scaled; the mask is computed once per `(period, horizon)` from the **first** test day's window (`_precompute_scalable_masks`) and reused for all days. The target is standardised, which is why `OLSModel` uses `fit_intercept=False` (centering plus one-hot dummies carry the level).
 
