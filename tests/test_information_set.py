@@ -113,6 +113,19 @@ def test_source_rules_as_of_for_a_weather_source_with_issue_time_vintage():
     assert (rule.kind, rule.time, rule.timezone) == ("as_of", "09:00", "Europe/Brussels")
 
 
+def test_open_meteo_default_vintage_passes_the_issue_time_check_but_valid_time_is_flagged():
+    """integration check c: after merging the weather-sources branch, a real OpenMeteoSource's default
+    (issue_time) vintage is known well before the model's own issue time, so its `_d+{horizon}` columns are
+    not flagged; the deprecated vintage="valid_time" (look-ahead) mapping is."""
+    leak_free = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=leak_free)
+    assert found == set()
+
+    leaky = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source(vintage="valid_time")])
+    found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=leaky)
+    assert found != set()
+
+
 def test_source_rules_weather_run_uses_the_sources_publication_delay():
     # vintage="valid_time" (or a source without a vintage attribute at all) falls back to weather_run;
     # OpenMeteoSource's own default is now the leak-free issue_time vintage, see the as_of test above.
