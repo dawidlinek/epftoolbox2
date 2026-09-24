@@ -26,10 +26,15 @@ SYNTHETIC_RULES = {name: Availability.static() for name in ("load", "wind", "is_
 
 
 def _warsaw_weather_source(**overrides) -> OpenMeteoSource:
-    source = OpenMeteoSource(latitude=52.23, longitude=21.01, prefix="warsaw", columns=["temperature_2m"])
-    for key, value in overrides.items():
-        setattr(source, key, value)
-    return source
+    params = {
+        "latitude": 52.23,
+        "longitude": 21.01,
+        "prefix": "warsaw",
+        "columns": ["temperature_2m"],
+        "timezone": "Europe/Warsaw",
+    }
+    params.update(overrides)
+    return OpenMeteoSource(**params)
 
 
 @pytest.fixture(autouse=True)
@@ -109,14 +114,18 @@ def test_source_rules_as_of_for_a_weather_source_with_issue_time_vintage():
 
 
 def test_source_rules_weather_run_uses_the_sources_publication_delay():
-    source = _warsaw_weather_source(publication_delay_h=3)  # no vintage: falls back to weather_run
+    # vintage="valid_time" (or a source without a vintage attribute at all) falls back to weather_run;
+    # OpenMeteoSource's own default is now the leak-free issue_time vintage, see the as_of test above.
+    source = _warsaw_weather_source(publication_delay_h=3, vintage="valid_time")
     rule = source_rules([source])["warsaw_temperature_2m"]
     assert (rule.kind, rule.delay) == ("weather_run", "3h")
 
 
 def test_source_rules_weather_run_defaults_without_a_publication_delay():
-    rule = source_rules([_warsaw_weather_source()])["warsaw_temperature_2m"]
-    assert (rule.kind, rule.delay) == ("weather_run", "6h")
+    # OpenMeteoSource's own publication_delay_h default (10h) is used; source_rules' getattr fallback of 6h
+    # only fires for a duck-typed source that has no publication_delay_h attribute at all.
+    rule = source_rules([_warsaw_weather_source(vintage="valid_time")])["warsaw_temperature_2m"]
+    assert (rule.kind, rule.delay) == ("weather_run", "10h")
 
 
 def test_user_rules_take_precedence_and_exact_names_beat_suffix_parsing():
@@ -203,10 +212,13 @@ def test_a69_needs_the_explicit_assumption():
 
 
 def test_weather_forecasts_depend_on_the_row_time():
-    info = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    # weather_run (vintage="valid_time") depends on the row's own time; the default issue_time vintage does
+    # not, see test_source_rules_as_of_for_a_weather_source_with_issue_time_vintage.
+    info = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source(vintage="valid_time")])
     found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=info)
-    # Run started about at the row time and published 6 h later: rows up to 05:00 are known by 11:30.
-    assert {p for _, p, _ in found} == set(range(6, 24))
+    # Run started about at the row time and published 10 h later (the source's default): rows up to 01:00
+    # are known by 11:30.
+    assert {p for _, p, _ in found} == set(range(2, 24))
     assert {hz for _, _, hz in found} == set(range(1, 8))
 
 
@@ -244,7 +256,11 @@ def test_unknown_columns_follow_the_policy():
 
 
 def test_shipped_example_predictors_are_flagged():
-    """The predictor list of model_pipeline.yaml / examples 02-05 (as of this change) uses look-ahead inputs."""
+    """The predictor list of model_pipeline.yaml / examples 02-05 (as of this change) uses look-ahead inputs.
+
+    warsaw_temperature_2m_d+{horizon} is not flagged: Open-Meteo's default issue_time vintage is known well
+    before the model's own issue time (see test_source_rules_as_of_for_a_weather_source_with_issue_time_vintage).
+    """
     shipped = [
         "load_actual",
         *[f"is_{d}_d+{{horizon}}" for d in ("monday", "tuesday", "wednesday", "thursday", "friday")],
@@ -261,7 +277,7 @@ def test_shipped_example_predictors_are_flagged():
     info = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
     found, unknown = violations(shipped, info=info)
     assert unknown == set()
-    assert {name for name, _, _ in found} == {"load_actual"} | {f"warsaw_temperature_2m_d+{h}" for h in range(1, 8)}
+    assert {name for name, _, _ in found} == {"load_actual"}
 
 
 # ---------------------------------------------------------------------------

@@ -161,7 +161,13 @@ class TestDataPipelineSerializationFidelity:
         components = {
             "EntsoeSource": EntsoeSource("DE_LU", api_key="dummy", type=["price"], prefer_15min=True),
             "OpenMeteoSource": OpenMeteoSource(
-                50.06, 19.94, horizon=3, model="icon_seamless", columns=["temperature_2m"], prefix="krk"
+                50.06,
+                19.94,
+                horizon=3,
+                model="icon_seamless",
+                columns=["temperature_2m"],
+                prefix="krk",
+                timezone="Europe/Warsaw",
             ),
             "CsvSource": CsvSource(str(csv), datetime_column="ts", columns=["price"], prefix="x", separator=";"),
             "CalendarSource": CalendarSource(
@@ -226,7 +232,9 @@ class TestDataPipelineSerializationFidelity:
         from epftoolbox2.data.sources import OpenMeteoSource
 
         path = tmp_path / "dp.yaml"
-        DataPipeline().add_source(OpenMeteoSource(52.2, 21.0, columns=("temperature_2m", "rain"))).save(path)
+        DataPipeline().add_source(
+            OpenMeteoSource(52.2, 21.0, columns=("temperature_2m", "rain"), timezone="Europe/Warsaw")
+        ).save(path)
         assert DataPipeline.load(path).sources[0].columns == ["temperature_2m", "rain"]
 
 
