@@ -123,8 +123,10 @@ Downloads archived weather forecasts from the Open-Meteo Previous Runs API. No A
 from epftoolbox2.data.sources import OpenMeteoSource
 
 source = OpenMeteoSource(
-    latitude=52.2297,            # Required. Location latitude (-90 to 90)
-    longitude=21.0122,           # Required. Location longitude (-180 to 180)
+    latitude=52.2297,            # Required unless locations is given. Location latitude (-90 to 90)
+    longitude=21.0122,           # Required unless locations is given. Location longitude (-180 to 180)
+    locations=None,              # Optional. Several locations instead of latitude/longitude (default: None); see "Several locations" below
+    keep_locations=False,        # Optional. With several weighted places, also return each one's own series (default: False)
     horizon=5,                   # Optional. Days ahead, 1-7; see "Horizon limit" below (default: 5)
     model="jma_seamless",        # Optional. Weather model (default: "jma_seamless")
     columns=None,                # Optional. Weather variables (default: None = DEFAULT_COLUMNS)
@@ -163,7 +165,19 @@ source = OpenMeteoSource(
 
 **Derived columns (off by default):** set `derived` to add `{name}_d+{i}` computed per lead from the same vintage: `"hdd"` = `max(hdd_base_c - temperature_2m, 0)` (needs `temperature_2m` in `columns`), `"cdd"` = `max(temperature_2m - cdd_base_c, 0)` (needs `temperature_2m`), `"wind_speed_100m_cubed"` = `(wind_speed_100m / 3.6) ** 3` (needs `wind_speed_100m`).
 
-**Caching:** Cache key includes location, horizon, model, columns, prefix, temporal_resolution, vintage, timezone, issue_time, publication_delay_h, derived (and hdd_base_c/cdd_base_c only when derived uses them) and schema_version (bumped for the vintage change, so old caches are not reused).
+**Several locations:** pass `locations` instead of `latitude`/`longitude` to combine several locations into one source, fetched by another `OpenMeteoSource` sharing every other parameter. A dict `{name: {"latitude","longitude","weight"?}}` (also `{name: (latitude,longitude)}` / `(latitude,longitude,weight)` tuples), or the compact string `"name:lat:lon:weight, name:lat:lon:weight, ..."` (weight optional there too, per location). Names use letters, digits, underscores and must be unique; weights, when given, must be positive and given for every location or none, and must be known on D (a reference date before the sample starts, not end-of-sample figures). **With weights:** one weighted series per variable, `{prefix}_{variable}_d+i` (weights normalised; a weighted circular mean for `*direction*` columns; `weather_code` not averaged; NaN wherever any location is NaN); `keep_locations=True` also adds the per-location columns `{prefix}_{name}_{variable}_d+i`. **Without weights:** only the per-location columns are returned.
+```python
+source = OpenMeteoSource(
+    locations={
+        "warsaw": {"latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},
+        "krakow": {"latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
+    },
+    prefix="pl",
+    timezone="Europe/Warsaw",
+)
+```
+
+**Caching:** Cache key includes `latitude`/`longitude` (or `locations`, with `keep_locations` when `True`, instead), horizon, model, columns, prefix, temporal_resolution, vintage, timezone, issue_time, publication_delay_h, derived (and hdd_base_c/cdd_base_c only when derived uses them) and schema_version (bumped for the vintage change, so old caches are not reused).
 
 ---
 
@@ -175,8 +189,10 @@ Downloads archived weather forecasts from the Open-Meteo Single Runs API, which 
 from epftoolbox2.data.sources import OpenMeteoSingleRunsSource
 
 source = OpenMeteoSingleRunsSource(
-    latitude=52.2297,            # Required. Location latitude (-90 to 90)
-    longitude=21.0122,           # Required. Location longitude (-180 to 180)
+    latitude=52.2297,            # Required unless locations is given. Location latitude (-90 to 90)
+    longitude=21.0122,           # Required unless locations is given. Location longitude (-180 to 180)
+    locations=None,              # Optional. Several locations instead of latitude/longitude (default: None); see "Several locations" below
+    keep_locations=False,        # Optional. With several weighted places, also return each one's own series (default: False)
     horizon=7,                   # Optional. Days ahead, 1-14; leads beyond the run's length come back empty (default: 7)
     model="ecmwf_ifs",           # Optional. Weather model, longest single-run archive (default: "ecmwf_ifs")
     columns=None,                # Optional. Weather variables (default: None = DEFAULT_COLUMNS)
@@ -204,34 +220,9 @@ source = OpenMeteoSingleRunsSource(
 
 **Derived columns (off by default):** set `derived` to add `{name}_d+{i}` computed per lead from the same run: `"hdd"` = `max(hdd_base_c - temperature_2m, 0)` (needs `temperature_2m` in `columns`), `"cdd"` = `max(temperature_2m - cdd_base_c, 0)` (needs `temperature_2m`), `"wind_speed_100m_cubed"` = `(wind_speed_100m / 3.6) ** 3` (needs `wind_speed_100m`).
 
-**Caching:** Cache key includes location, horizon, model, columns, prefix, run_interval_h, timezone, issue_time, publication_delay_h, derived (and hdd_base_c/cdd_base_c only when derived uses them) and schema_version.
+**Several locations:** pass `locations` instead of `latitude`/`longitude` to combine several locations into one source, fetched by another `OpenMeteoSingleRunsSource` sharing every other parameter — same rules as `OpenMeteoSource`'s `locations` above (weighted average, per-location columns, or both).
 
----
-
-## OpenMeteoWeightedSource
-
-Fetches several locations with the same underlying Open-Meteo source (OpenMeteoSource or OpenMeteoSingleRunsSource) and `source_params`, and returns one weighted-average series per variable, e.g. population-weighted temperature for a bidding zone. Weights are fixed and must be known on D (use a reference date before the sample starts, not end-of-sample figures).
-
-```python
-from epftoolbox2.data.sources import OpenMeteoWeightedSource
-
-source = OpenMeteoWeightedSource(
-    locations=[                  # Required. list of {"name","latitude","longitude","weight"} or "name:lat:lon:weight, ..."
-        {"name": "warsaw", "latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},
-        {"name": "krakow", "latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
-    ],
-    source="OpenMeteoSource",    # Optional. "OpenMeteoSource" or "OpenMeteoSingleRunsSource" (default: "OpenMeteoSource")
-    source_params=None,          # Optional (default None). Params for the underlying class above, shared by every location; not latitude/longitude/prefix. Its "timezone" entry may be left unset to inherit DataPipeline.timezone, like the underlying class's own timezone parameter.
-    prefix="pl",                 # Optional. Prefix for the weighted columns (default: "")
-    keep_locations=False,        # Optional. Also return each location's own columns (default: False)
-)
-```
-
-**Weighted average:** weights normalise to sum to 1; most variables use `sum(w_l * x_l) / sum(w_l)`; variables whose name contains "direction" use a weighted circular mean; `weather_code` is categorical and is never averaged (dropped unless `keep_locations=True`, which then keeps it per location only). A row is NaN if any location is missing there (weights are never re-normalised over the available ones).
-
-**Output column naming:** `{prefix}_{variable}_d+{i}`; with `keep_locations=True` also `{prefix}_{name}_{variable}_d+{i}` per location.
-
-**Caching:** Cache key includes locations (name, latitude, longitude, weight per location), source, the underlying source's cache config (minus latitude/longitude/prefix), prefix, keep_locations and schema_version.
+**Caching:** Cache key includes `latitude`/`longitude` (or `locations`, with `keep_locations` when `True`, instead), horizon, model, columns, prefix, run_interval_h, timezone, issue_time, publication_delay_h, derived (and hdd_base_c/cdd_base_c only when derived uses them) and schema_version.
 
 ---
 
@@ -1881,7 +1872,7 @@ class DataPipeline:
   `horizon=7` forecast-only run. Naive timestamps passed to `run()` are read as local instants; timezone-aware
   timestamps are used as given.
 - `timezone` is also the single place the market zone needs to be written: `TimezoneTransformer.target_tz`,
-  `CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`/`OpenMeteoWeightedSource`'s own zone may all be
+  `CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`'s own zone may all be
   left unset (`None`) and they then inherit it — checked and bound at construction and again at the start of
   `run()` (so `add_transformer`/`add_source` can't introduce a mismatch unnoticed). An explicitly set, different
   zone still raises `ValueError`: `timezone` decides what a local calendar day is, and a component computing its

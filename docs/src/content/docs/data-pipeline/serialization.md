@@ -81,7 +81,7 @@ days. Without `timezone` (the default), `start`/`end` mean midnight UTC and `end
 before `timezone` existed. See [Date Format Options](/epftoolbox2/data-pipeline/overview/#date-format-options).
 
 It is also the single place the market zone needs to be written: `TimezoneTransformer.target_tz`,
-`CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`/`OpenMeteoWeightedSource`'s own zone may all be
+`CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`'s own zone may all be
 left unset (`None`, the default) and they then inherit it, so `save()` writes the zone once and the components'
 own `timezone`/`target_tz` come back `null`. See
 [Timezone (local calendar days)](/epftoolbox2/data-pipeline/overview/#timezone-local-calendar-days).

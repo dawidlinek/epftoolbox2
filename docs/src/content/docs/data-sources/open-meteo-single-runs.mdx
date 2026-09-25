@@ -38,8 +38,10 @@ df = source.fetch(
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `latitude` | float | Yes | - | Location latitude (-90 to 90) |
-| `longitude` | float | Yes | - | Location longitude (-180 to 180) |
+| `latitude` | float \| None | No\* | `None` | Location latitude (-90 to 90). \*Required unless `locations` is given |
+| `longitude` | float \| None | No\* | `None` | Location longitude (-180 to 180). \*Required unless `locations` is given |
+| `locations` | dict \| str \| None | No | `None` | Several locations instead of `latitude`/`longitude` — see [Several locations](#several-locations) |
+| `keep_locations` | bool | No | `False` | With weighted `locations`, also return each location's own columns — see [Several locations](#several-locations) |
 | `horizon` | int | No | `7` | Days ahead: columns `d+1` .. `d+horizon` (1–14; leads beyond the run's own length come back empty) |
 | `model` | str | No | `"ecmwf_ifs"` | Weather model (see [Choosing a model](#choosing-a-model)) |
 | `columns` | List[str] \| None | No | `None` (= `DEFAULT_COLUMNS`) | Weather variables |
@@ -99,6 +101,39 @@ Off by default. Set `derived` to a list of names to add `{name}_d+{i}` alongside
 
 `ecmwf_ifs` has by far the longest archive and is the default. Prefer it unless you specifically need another model's characteristics; check that model's archive start with a couple of API calls before relying on it for a backtest that reaches further back.
 
+## Several locations
+
+Pass `locations` instead of `latitude`/`longitude` to combine several locations into one source — a weighted
+average, per-location columns, or both — exactly as for [`OpenMeteoSource`'s `locations`
+parameter](/data-sources/openmeteo/#several-locations); every location is fetched by another
+`OpenMeteoSingleRunsSource` here instead, sharing every other parameter, so all locations follow the same
+run-selection rule.
+
+```python
+from epftoolbox2.data.sources import OpenMeteoSingleRunsSource
+
+# weighted average, e.g. population-weighted temperature
+weighted = OpenMeteoSingleRunsSource(
+    locations={
+        "warsaw": {"latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},
+        "krakow": {"latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
+    },
+    columns=["temperature_2m"],
+    prefix="pl",
+    timezone="Europe/Warsaw",
+)
+# pl_temperature_2m_d+1, ...; keep_locations=True also adds pl_warsaw_temperature_2m_d+1, pl_krakow_temperature_2m_d+1
+
+# no weights: one column set per location instead
+per_location = OpenMeteoSingleRunsSource(
+    locations={"warsaw": (52.2297, 21.0122), "krakow": (50.0647, 19.9450)},
+    columns=["temperature_2m"],
+    prefix="pl",
+    timezone="Europe/Warsaw",
+)
+# pl_warsaw_temperature_2m_d+1, pl_krakow_temperature_2m_d+1
+```
+
 ## Rate Limiting
 
 <Aside type="caution">
@@ -121,4 +156,4 @@ Columns are named: `{prefix}_{variable}_d+{i}`
 
 ## Caching
 
-The cache key includes the location, `horizon`, `model`, `columns`, `prefix`, `run_interval_h`, `timezone`, `issue_time`, `publication_delay_h`, `derived` (and `hdd_base_c` / `cdd_base_c` only when `derived` uses them) and a `schema_version`. `strict` and `proxy_url` don't change the data and are not part of the key.
+The cache key includes `latitude`/`longitude` (or `locations`, with `keep_locations` when it's `True`, instead), `horizon`, `model`, `columns`, `prefix`, `run_interval_h`, `timezone`, `issue_time`, `publication_delay_h`, `derived` (and `hdd_base_c` / `cdd_base_c` only when `derived` uses them) and a `schema_version`. `strict` and `proxy_url` don't change the data and are not part of the key.

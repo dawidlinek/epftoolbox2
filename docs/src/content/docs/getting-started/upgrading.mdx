@@ -71,7 +71,7 @@ the old one) rather than resuming them; don't rely on the manifest to catch this
   over-restricted data) for any market outside that zone. Pass the market's zone explicitly, or set it once with
   `DataPipeline(timezone=...)` and leave it unset here (see the next bullet) — fetching without either raises.
 - **The market zone can now be set once, on `DataPipeline(timezone=...)`.** `TimezoneTransformer.target_tz`,
-  `CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`/`OpenMeteoWeightedSource`'s own zone all default
+  `CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`'s own zone all default
   to `None` and then inherit it, instead of each needing the same zone written out again. An explicitly set,
   different zone still raises. This is a drop-in simplification: existing configs that already spell the zone
   out everywhere keep working unchanged.
@@ -96,7 +96,7 @@ the old one) rather than resuming them; don't rely on the manifest to catch this
 
 ## New components
 
-`OpenMeteoSingleRunsSource` and `OpenMeteoWeightedSource` (exact-run and multi-location weather),
+`OpenMeteoSingleRunsSource` (exact-run weather; both it and `OpenMeteoSource` also take several `locations`),
 `EpftoolboxBenchmarkSource` (the Lago et al. 2021 datasets); `DSTNormalizeTransformer`, `DailyProfileTransformer`,
 `DailyStatsTransformer`, `ResidualLoadTransformer`, `SpikeFlagTransformer`, `ImputeTransformer`;
 `CoverageValidator`, `DSTStructureValidator`, `FreshnessValidator`, `PlausibilityValidator`,
