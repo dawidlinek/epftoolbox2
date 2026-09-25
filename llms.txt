@@ -584,14 +584,15 @@ transformer = TimezoneTransformer(
     target_tz="Europe/Warsaw",    # Optional. Target IANA timezone; None (default) inherits DataPipeline.timezone
     daily_columns=None,           # Optional (default: None = ["load_forecast_daily_min", "load_forecast_daily_max"]).
                                   #   Columns with one value per day; absent columns are skipped
-    daily_anchor="UTC+02:00",     # Optional (default: "UTC+02:00"). ENTSO-E A31 anchor; UTC offset or IANA name
+    daily_anchor=None,            # Optional (default: None = the resolved target_tz). UTC offset or IANA name;
+                                  #   pass one only when a daily column's real anchor differs from target_tz
 )
 ```
 
 **Behavior:**
 - If index is timezone-naive, localizes to UTC first, then converts
 - If index has timezone, converts directly; local days have 23/24/25 rows, nothing is added for DST
-- Daily columns: a value at t belongs to the calendar date of t in `daily_anchor` and moves to 00:00 local on that date (works for A31 in any zone UTC-10..UTC+13; use `daily_anchor=target_tz` for data stamped at local midnight east of UTC+2)
+- Daily columns: a value at t belongs to the calendar date of t in `daily_anchor` and moves to 00:00 local on that date. The default anchor is `target_tz` itself, which is right for ENTSO-E's A31 in every zone (it always stamps at the *area's own* local midnight) — a fixed `"UTC+02:00"` anchor gets this wrong in EET/EEST zones every summer and always in a fixed-UTC+3 zone
 - Raises ValueError if a daily column has more than one value per day (e.g. ResampleTransformer ran first)
 - If that local midnight is not in the index the row is added; a UserWarning is emitted when it lies inside the data
 

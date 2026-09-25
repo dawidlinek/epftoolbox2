@@ -129,11 +129,13 @@ class TestTimezoneTransformerDailySnap:
         return df
 
     def test_winter_snap_23xx_to_next_midnight(self):
-        """CET winter: ENTSOE UTC+2 anchor puts daily value at 23:00+01:00.
+        """An explicit UTC+2 anchor (not this data's own zone) puts daily value at 23:00+01:00 CET winter.
         Should snap to 00:00+01:00 of the *next* local day (Wednesday), not Tuesday."""
         # 2025-11-18 22:00 UTC = 2025-11-18 23:00+01:00 CET (1h before Wed midnight)
         df = self._make_df("2025-11-17 00:00", periods=72, daily_utc_ts="2025-11-18 22:00", daily_value=99.0)
-        transformer = TimezoneTransformer(target_tz="Europe/Madrid", daily_columns=["daily_min"])
+        transformer = TimezoneTransformer(
+            target_tz="Europe/Madrid", daily_columns=["daily_min"], daily_anchor="UTC+02:00"
+        )
         result = transformer.transform(df)
 
         # Value must land at Wednesday midnight (2025-11-19 00:00+01:00)
@@ -145,7 +147,7 @@ class TestTimezoneTransformerDailySnap:
         assert pd.isna(result.loc[tuesday_midnight, "daily_min"])
 
     def test_summer_snap_00xx_already_midnight(self):
-        """CEST summer: ENTSOE UTC+2 anchor puts daily value at 00:00+02:00.
+        """CEST summer: the default anchor (target_tz) puts daily value at 00:00+02:00.
         Already at midnight — no shift should occur."""
         # 2025-07-15 22:00 UTC = 2025-07-16 00:00+02:00 CEST (midnight)
         df = self._make_df("2025-07-15 00:00", periods=72, daily_utc_ts="2025-07-15 22:00", daily_value=55.0)
@@ -197,21 +199,26 @@ def _a31_frame(first_utc: str, days: int, stamps: list[str], values: list[float]
 
 
 class TestDailyAnchorRule:
-    """review F7: a daily value belongs to its calendar date in `daily_anchor` (default UTC+02:00, the A31 anchor)."""
+    """review F7: a daily value belongs to its calendar date in `daily_anchor` (default: the resolved `target_tz`
+    itself — ENTSO-E always stamps A31 at the *area's own* local midnight, not a fixed UTC+2 offset; DST/timezone
+    review finding 1). Passing an explicit `daily_anchor` (e.g. a fixed UTC offset shared by several zones) is
+    still supported and exercised below, decoupled from whatever the default happens to be."""
 
     def test_defaults(self):
         transformer = TimezoneTransformer(target_tz="Europe/Warsaw")
         assert transformer.daily_columns == ["load_forecast_daily_min", "load_forecast_daily_max"]
-        assert transformer.daily_anchor == "UTC+02:00"
+        assert transformer.daily_anchor is None
 
     @pytest.mark.parametrize(
         "tz", ["Europe/Warsaw", "Europe/Helsinki", "Europe/Lisbon", "Europe/London", "America/New_York", "Asia/Tokyo"]
     )
     @pytest.mark.parametrize("stamp, day", [("2024-01-09 22:00", "2024-01-10"), ("2024-07-09 22:00", "2024-07-10")])
-    def test_a31_period_start_lands_on_its_local_day(self, tz, stamp, day):
+    def test_explicit_utc_plus_2_anchor_lands_on_its_local_day(self, tz, stamp, day):
+        """A value genuinely anchored to a fixed UTC+2 offset (e.g. a non-ENTSO-E source) belongs to the same
+        calendar date in every target zone, via an explicit `daily_anchor="UTC+02:00"`."""
         first = (pd.Timestamp(stamp) - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
         df = _a31_frame(first, 5, [stamp], [111.0])
-        out = TimezoneTransformer(target_tz=tz).transform(df)
+        out = TimezoneTransformer(target_tz=tz, daily_anchor="UTC+02:00").transform(df)
         landed = out["load_forecast_daily_min"].dropna()
         assert landed.index.tolist() == [pd.Timestamp(day, tz=tz)]
         assert landed.iloc[0] == 111.0
@@ -223,19 +230,69 @@ class TestDailyAnchorRule:
             (["2024-10-25 22:00", "2024-10-26 22:00", "2024-10-27 22:00"], ["2024-10-26", "2024-10-27", "2024-10-28"]),
         ],
     )
-    def test_dst_switch_days(self, stamps, days):
+    def test_dst_switch_days_explicit_anchor(self, stamps, days):
+        """Same explicit-UTC+2-anchor mechanism, exercised across both DST switch directions."""
         df = _a31_frame(stamps[0][:10], 5, stamps, [1.0, 2.0, 3.0])
-        out = TimezoneTransformer(target_tz="Europe/Warsaw").transform(df)
+        out = TimezoneTransformer(target_tz="Europe/Warsaw", daily_anchor="UTC+02:00").transform(df)
         landed = out["load_forecast_daily_min"].dropna()
         assert landed.index.tolist() == [pd.Timestamp(d, tz="Europe/Warsaw") for d in days]
         assert landed.tolist() == [1.0, 2.0, 3.0]
 
     def test_values_stamped_at_local_midnight_east_of_utc_plus_2(self):
-        """Data stamped at local midnight in EEST (UTC+3) needs daily_anchor=target_tz."""
+        """Data stamped at local midnight in EEST (UTC+3) still works with an explicit daily_anchor=target_tz
+        (now also the default — see TestDefaultAnchorIsTargetZone)."""
         df = _a31_frame("2024-07-08", 4, ["2024-07-09 21:00"], [5.0])  # 00:00 EEST on 2024-07-10
         out = TimezoneTransformer(target_tz="Europe/Helsinki", daily_anchor="Europe/Helsinki").transform(df)
         landed = out["load_forecast_daily_min"].dropna()
         assert landed.index.tolist() == [pd.Timestamp("2024-07-10", tz="Europe/Helsinki")]
+
+
+class TestDefaultAnchorIsTargetZone:
+    """DST/timezone review finding 1: ENTSO-E always stamps A31 daily values at the *area's own* local midnight.
+    The default `daily_anchor` (None) must therefore resolve to `target_tz`, not a fixed UTC+2 offset — which
+    silently misplaces every value in EET/EEST zones every summer, and every value, year-round, in a zone with
+    a fixed UTC+3 offset (real FI data: 336/336 hourly rows wrong under the old default, 2024-06-03..16)."""
+
+    @pytest.mark.parametrize(
+        "tz, local_day",
+        [
+            ("Europe/Helsinki", "2024-01-10"),  # EET winter, UTC+2 — coincides with the old fixed anchor
+            ("Europe/Helsinki", "2024-07-10"),  # EEST summer, UTC+3 — the old fixed anchor got this wrong
+            ("Europe/Istanbul", "2024-01-10"),  # fixed UTC+3, no DST — always wrong under the old anchor
+            ("Europe/Istanbul", "2024-07-10"),
+        ],
+    )
+    def test_value_at_the_areas_own_midnight_lands_on_its_own_day(self, tz, local_day):
+        local_midnight = pd.Timestamp(local_day, tz=tz)
+        stamp = local_midnight.tz_convert("UTC").strftime("%Y-%m-%d %H:%M")
+        first = (local_midnight - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+        df = _a31_frame(first, 5, [stamp], [111.0])
+        out = TimezoneTransformer(target_tz=tz).transform(df)  # default daily_anchor
+        landed = out["load_forecast_daily_min"].dropna()
+        assert landed.index.tolist() == [local_midnight]
+        assert landed.iloc[0] == 111.0
+
+    @pytest.mark.parametrize(
+        "tz",
+        ["Europe/Warsaw", "Europe/Helsinki"],  # CET/CEST (correct under the old default too) and EET/EEST
+    )
+    @pytest.mark.parametrize(
+        "local_days",
+        [
+            ["2024-03-30", "2024-03-31", "2024-04-01"],  # spring switch
+            ["2024-10-26", "2024-10-27", "2024-10-28"],  # autumn switch
+        ],
+    )
+    def test_consecutive_days_across_a_dst_switch(self, tz, local_days):
+        midnights = [pd.Timestamp(d, tz=tz) for d in local_days]
+        stamps = [t.tz_convert("UTC").strftime("%Y-%m-%d %H:%M") for t in midnights]
+        values = [float(i) for i in range(1, len(midnights) + 1)]
+        first = (midnights[0] - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+        df = _a31_frame(first, 8, stamps, values)
+        out = TimezoneTransformer(target_tz=tz).transform(df)  # default daily_anchor
+        landed = out["load_forecast_daily_min"].dropna()
+        assert landed.index.tolist() == midnights
+        assert landed.tolist() == values
 
     @pytest.mark.parametrize("anchor", ["UTC+02:00", "+02:00", "UTC+2", "utc+0200", "UTC", "UTC-05:00", "Europe/Paris"])
     def test_accepted_anchor_formats(self, anchor):
@@ -269,7 +326,7 @@ class TestDailyColumnChecks:
         df = _a31_frame("2024-01-01", 6, stamps, [1.0, 2.0, 3.0, 4.0])
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            out = TimezoneTransformer(target_tz="Europe/Warsaw").transform(df)
+            out = TimezoneTransformer(target_tz="Europe/Warsaw", daily_anchor="UTC+02:00").transform(df)
         assert out["load_forecast_daily_min"].notna().sum() == 4
         assert len(out) == len(df)
 
@@ -285,7 +342,7 @@ class TestDailyColumnChecks:
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            out = TimezoneTransformer(target_tz="Europe/Warsaw").transform(df)
+            out = TimezoneTransformer(target_tz="Europe/Warsaw", daily_anchor="UTC+02:00").transform(df)
 
         midnight = pd.Timestamp("2024-01-10 00:00", tz="Europe/Warsaw")
         assert out["load_forecast_daily_min"].dropna().index.tolist() == [midnight]
@@ -296,7 +353,7 @@ class TestDailyColumnChecks:
     def test_first_winter_value_gets_its_own_midnight_row(self):
         """In winter the A31 value for the first local day is stamped 23:00 local, before the first hourly row."""
         df = _a31_frame("2024-01-01", 2, ["2023-12-31 22:00", "2024-01-01 22:00"], [1.0, 2.0])
-        out = TimezoneTransformer(target_tz="Europe/Warsaw").transform(df)
+        out = TimezoneTransformer(target_tz="Europe/Warsaw", daily_anchor="UTC+02:00").transform(df)
         landed = out["load_forecast_daily_min"].dropna()
         assert landed.index.tolist() == [pd.Timestamp(d, tz="Europe/Warsaw") for d in ["2024-01-01", "2024-01-02"]]
         assert len(out) == len(df) + 1  # the row the value came from stays, now empty
@@ -306,7 +363,7 @@ class TestDailyColumnChecks:
         df = df.drop(pd.Timestamp("2024-01-08 23:00", tz="UTC"))  # the local midnight of 2024-01-09
 
         with pytest.warns(UserWarning, match="local midnight"):
-            out = TimezoneTransformer(target_tz="Europe/Warsaw").transform(df)
+            out = TimezoneTransformer(target_tz="Europe/Warsaw", daily_anchor="UTC+02:00").transform(df)
 
         midnight = pd.Timestamp("2024-01-09 00:00", tz="Europe/Warsaw")
         assert out["load_forecast_daily_min"].dropna().index.tolist() == [midnight]

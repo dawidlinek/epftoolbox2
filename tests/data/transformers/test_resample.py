@@ -350,7 +350,7 @@ class TestDailyColumns:
             df.loc[d, "load_forecast_daily_min"] = 100.0 * (i + 1)
         df = df.sort_index()
 
-        out = ResampleTransformer(freq="1h").transform(TimezoneTransformer(TZ).transform(df))
+        out = ResampleTransformer(freq="1h").transform(TimezoneTransformer(TZ, daily_anchor="UTC+02:00").transform(df))
         day2 = out.loc["2024-01-02", "load_forecast_daily_min"]
         assert len(day2) == 24
         assert (day2 == 200.0).all()

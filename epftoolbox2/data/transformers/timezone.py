@@ -21,13 +21,15 @@ class TimezoneTransformer(Transformer):
     Sources return UTC. After conversion, local days have 23, 24 or 25 hours; nothing is added or removed
     (there is no 02:00 on the spring switch day and two 02:00 rows on the autumn one).
 
-    ``daily_columns`` hold one value per day, e.g. ENTSO-E's week-ahead load forecast min/max (A31), whose
-    periods start at 00:00 UTC+2 (22:00 UTC). Such a value sits at 23:00 local time in CET winter and at
-    00:00 in CEST, so a later ``ResampleTransformer`` would give it to the wrong hours. The rule applied:
-    **a value at timestamp t belongs to the calendar date of t in ``daily_anchor``, and is moved to 00:00
-    local time (``target_tz``) on that date.** With the default anchor ``UTC+02:00`` this is right for A31 data
-    in every zone from UTC-10 to UTC+13, and also for values already stamped at local midnight in zones up to
-    UTC+2. For data stamped at local midnight further east (EET summer time), pass ``daily_anchor=target_tz``.
+    ``daily_columns`` hold one value per day, e.g. ENTSO-E's week-ahead load forecast min/max (A31). ENTSO-E
+    always stamps such a value at the *area's own* local midnight, whatever that area's UTC offset is. In CET
+    that instant is 23:00 UTC the day before in winter and 22:00 UTC in summer; a later ``ResampleTransformer``
+    would give it to the wrong hours unless it is snapped first. The rule applied: **a value at timestamp t
+    belongs to the calendar date of t in ``daily_anchor``, and is moved to 00:00 local time (``target_tz``) on
+    that date.** The default anchor is ``target_tz`` itself (None), which is right whenever the daily column
+    comes from the market's own area, in every zone — including EET/EEST and zones with a fixed UTC+3 offset,
+    which a fixed ``"UTC+02:00"`` anchor gets wrong every summer (or every day, for a zone that never observes
+    UTC+2). Pass an explicit ``daily_anchor`` only when the column's real anchor differs from ``target_tz``.
 
     Raises ``ValueError`` if a daily column holds more than one value for a day (it was probably resampled
     before this transformer; run ``TimezoneTransformer`` first). If the local midnight a value belongs to is
@@ -41,7 +43,8 @@ class TimezoneTransformer(Transformer):
         daily_columns: Columns holding one value per day. Defaults to
             ``["load_forecast_daily_min", "load_forecast_daily_max"]``; columns not in the frame are skipped.
         daily_anchor: Time zone whose calendar date a daily value belongs to: a UTC offset such as
-            ``"UTC+02:00"`` (default, ENTSO-E's A31 anchor) or an IANA name.
+            ``"UTC+02:00"`` or an IANA name. None (default) uses the resolved ``target_tz`` itself, matching
+            where ENTSO-E stamps A31 data.
 
     Example:
         >>> transformer = TimezoneTransformer(
@@ -55,13 +58,17 @@ class TimezoneTransformer(Transformer):
     _pipeline_timezone: Optional[str] = None
 
     def __init__(
-        self, target_tz: Optional[str] = None, daily_columns: list[str] | None = None, daily_anchor: str = "UTC+02:00"
+        self,
+        target_tz: Optional[str] = None,
+        daily_columns: list[str] | None = None,
+        daily_anchor: Optional[str] = None,
     ):
         self.target_tz = target_tz
         self.daily_columns = list(daily_columns) if daily_columns is not None else list(DEFAULT_DAILY_COLUMNS)
         self.daily_anchor = daily_anchor
         self._validate_timezone()
-        self._anchor = _parse_anchor(daily_anchor)
+        if daily_anchor is not None:
+            _parse_anchor(daily_anchor)  # validate eagerly; re-parsed per transform() since None tracks target_tz
 
     def _validate_timezone(self) -> None:
         if self.target_tz is None:
@@ -102,7 +109,8 @@ class TimezoneTransformer(Transformer):
         if values.empty:
             return result
 
-        days = values.index.tz_convert(self._anchor).tz_localize(None).normalize()
+        anchor = _parse_anchor(self.daily_anchor) if self.daily_anchor is not None else ZoneInfo(tz)
+        days = values.index.tz_convert(anchor).tz_localize(None).normalize()
         per_day = days.value_counts()
         crowded = per_day[per_day > 1].sort_index()
         if len(crowded):
