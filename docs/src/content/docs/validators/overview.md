@@ -17,9 +17,7 @@ Validators check a DataFrame without changing it. `validate(df)` returns a `Vali
 | A local day with the wrong number of rows (DST days, naive wall-clock index) | [DSTStructureValidator](/epftoolbox2/validators/dst-structure/) |
 | One column missing for a stretch on a complete index; late start or early end | [CoverageValidator](/epftoolbox2/validators/coverage/) |
 | Too many nulls in the columns the model uses | [NullCheckValidator](/epftoolbox2/validators/null-check/) |
-| A source that stopped updating; inputs not yet published for a live forecast | [FreshnessValidator](/epftoolbox2/validators/freshness/) |
 | Prices outside the SDAC limits, zero load, frozen values | [PlausibilityValidator](/epftoolbox2/validators/plausibility/) |
-| `x_d-k` columns built from elapsed hours instead of calendar days | [LagConsistencyValidator](/epftoolbox2/validators/lag-consistency/) |
 | Summary statistics for a first look | [EdaValidator](/epftoolbox2/validators/eda/) |
 
 Data gaps are easiest to see **before** transformers run: resampling with interpolation or forward fill hides them. Validators that work on raw source data (UTC index) take a `tz` parameter where local days matter.

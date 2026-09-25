@@ -883,29 +883,6 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
-    "FreshnessValidator": [
-        {
-            "name": "columns",
-            "description": "Columns to check (blank = all)",
-            "required": False,
-            "default": "",
-            "kind": "column_select",
-        },
-        {
-            "name": "expected_end",
-            "description": "Timestamp of the last value needed (e.g. today_d+1; blank = last row)",
-            "required": False,
-            "default": None,
-            "kind": "text",
-        },
-        {
-            "name": "max_delay",
-            "description": "How far before expected_end the last value may be (e.g. 3h)",
-            "required": False,
-            "default": "0h",
-            "kind": "text",
-        },
-    ],
     # `ranges` (a {pattern: [min, max]} mapping) is set in YAML; the wizard uses the defaults.
     "PlausibilityValidator": [
         {
@@ -931,29 +908,6 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "required": False,
             "default": "",
             "kind": "column_select",
-        },
-    ],
-    "LagConsistencyValidator": [
-        {
-            "name": "columns",
-            "description": "Lag columns to check (blank = every x_d-k / x_d+k with its base column)",
-            "required": False,
-            "default": "",
-            "kind": "column_select",
-        },
-        {
-            "name": "tz",
-            "description": "Time zone of the local days (blank = the index's own)",
-            "required": False,
-            "default": None,
-            "kind": "text",
-        },
-        {
-            "name": "tolerance",
-            "description": "Absolute difference counted as equal",
-            "required": False,
-            "default": 1e-9,
-            "kind": "float",
         },
     ],
     "OLSModel": [
@@ -1294,9 +1248,7 @@ _VALIDATORS = [
     "EdaValidator",
     "DSTStructureValidator",
     "CoverageValidator",
-    "FreshnessValidator",
     "PlausibilityValidator",
-    "LagConsistencyValidator",
 ]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator", "RMSEEvaluator", "rMAEEvaluator"]

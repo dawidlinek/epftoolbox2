@@ -117,6 +117,9 @@ and `epftoolbox2.presets` (ready-made LEAR/expert-model predictor lists).
   A rolling spike flag needs a `func` (there is no drop-in one-liner): write the median/MAD band as a
   callable, following the example on the [LambdaTransformer](/epftoolbox2/transformers/lambda-transformer/)
   page, or keep a copy of the old `SpikeFlagTransformer` source if you rely on it as-is.
+- **`FreshnessValidator` and `LagConsistencyValidator` are gone**, with no replacement. Both were narrow
+  checks (one column against the frame's own last row or `today`; day-lag columns against their base
+  column) that a few lines over the frame you already have can express directly if you still need them.
 
 ## The new information-set check
 

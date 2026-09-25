@@ -261,18 +261,10 @@ class CoverageValidator(Validator):
                  end: Optional[str] = None, freq: Optional[str] = None,
                  min_coverage: float = 1.0, max_gap: Optional[str] = None): ...
 
-class FreshnessValidator(Validator):
-    def __init__(self, columns: Union[str, List[str]] = None, expected_end: Optional[str] = None,
-                 max_delay: str = "0h"): ...
-
 class PlausibilityValidator(Validator):
     def __init__(self, ranges: Optional[Dict[str, List[Optional[float]]]] = None,
                  max_constant_run: Optional[int] = 24,
                  constant_columns: Optional[List[str]] = None): ...
-
-class LagConsistencyValidator(Validator):
-    def __init__(self, columns: Union[str, List[str]] = None, tz: Optional[str] = None,
-                 tolerance: float = 1e-9): ...
 
 class EdaValidator(Validator):
     def __init__(self, columns: List[str] = None, verbose: bool = True): ...

@@ -728,25 +728,6 @@ validator = CoverageValidator(
 
 ---
 
-## FreshnessValidator
-
-Checks that every column has values up to an expected end (live forecasting; a source that stopped updating).
-
-```python
-from epftoolbox2.data.validators import FreshnessValidator
-
-validator = FreshnessValidator(
-    columns=["price", "load_forecast"],  # Optional. Columns to check (default: None = all columns)
-    expected_end="today_d+1",            # Optional. Timestamp of the last value needed (default: None = last row of the frame)
-    max_delay="0h",                      # Optional. How far before the expected end the last value may be (default: "0h")
-)
-```
-
-**Errors:** missing or empty columns; columns whose last value is before `expected_end - max_delay`.
-**Info:** `expected_end`, `last_valid` (per column), `stale_columns`. **Stats:** column, last_valid, behind.
-
----
-
 ## PlausibilityValidator
 
 Range checks per column or glob pattern, and frozen (constant) runs.
@@ -766,28 +747,6 @@ Default ranges: `price*` in [-600, 4000] EUR/MWh (SDAC harmonised min/max; the m
 **Errors:** values out of range. **Warnings:** constant runs longer than `max_constant_run`; a pattern you passed that matches no column.
 **Info:** `out_of_range`, `longest_constant_run`, `checked_columns`.
 **Stats:** column, rule, low, high, min, max, out_of_range, longest_constant_run, constant_value, constant_start.
-
----
-
-## LagConsistencyValidator
-
-Checks that `x_d-k` / `x_d+k` hold `x` from k **local calendar days** earlier / later at the same wall-clock time (the naming contract). A lag built from elapsed 24-h steps is wrong around DST: on a year of hourly Europe/Warsaw data, 49 rows of `price_d-1` and 337 of `price_d-7`.
-
-```python
-from epftoolbox2.data.validators import LagConsistencyValidator
-
-validator = LagConsistencyValidator(
-    columns=None,       # Optional. Lag columns to check (default: None = every x_d±k whose base column x exists)
-    tz=None,            # Optional. Time zone of the local days (default: None = the index's own)
-    tolerance=1e-9,     # Optional. Absolute difference counted as equal (default: 1e-09)
-)
-```
-
-Repeated autumn hour: first occurrence when the source day has it once. Skipped spring hour: the lag must be missing. Rows whose source lies outside the frame are skipped. Columns without a base column (Open-Meteo forecasts) are not checked; hour lags (`x_h-24`) are not checked.
-
-**Errors:** columns with mismatches (first row, actual and expected value); listed columns that aren't day lags or have no base column.
-**Info:** `tz`, `checked`, `mismatch_counts`, `mismatches` (first 10 rows per column).
-**Stats:** column, base, days, checked, unverifiable, mismatches, first_mismatch.
 
 ---
 
