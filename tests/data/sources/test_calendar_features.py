@@ -1,6 +1,5 @@
-"""Opt-in CalendarSource features: bridge days, Christmas period, holiday distance, DST days, Fourier terms, regimes."""
+"""Opt-in CalendarSource features: bridge days, Christmas period, holiday distance, DST days, regimes."""
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -110,47 +109,6 @@ class TestDstSwitchDay:
         assert df["is_dst_switch_day"].eq(0).all()
 
 
-class TestFourier:
-    def test_columns(self):
-        df = CalendarSource(country="PL", fourier_weekly=2, fourier_annual=1, **BARE).fetch(
-            *_range("2024-01-01", "2024-01-01")
-        )
-        assert list(df.columns) == ["week_sin_1", "week_cos_1", "week_sin_2", "week_cos_2", "year_sin_1", "year_cos_1"]
-
-    def test_weekly_phase_uses_local_wall_clock(self):
-        source = CalendarSource(country="PL", fourier_weekly=1, **BARE)
-        df = source.fetch(*_range("2024-01-01", "2024-01-07")).tz_convert("Europe/Warsaw")
-        monday_midnight = df.loc[pd.Timestamp("2024-01-01 00:00", tz="Europe/Warsaw")]  # 2023-12-31 23:00 UTC
-        thursday_noon = df.loc[pd.Timestamp("2024-01-04 12:00", tz="Europe/Warsaw")]  # phase (3 + 0.5) / 7 = 0.5
-        assert monday_midnight["week_sin_1"] == pytest.approx(0.0, abs=1e-12)
-        assert monday_midnight["week_cos_1"] == pytest.approx(1.0)
-        assert thursday_noon["week_sin_1"] == pytest.approx(0.0, abs=1e-12)
-        assert thursday_noon["week_cos_1"] == pytest.approx(-1.0)
-
-    def test_annual_phase_uses_days_in_the_local_year(self):
-        source = CalendarSource(country="PL", fourier_annual=1, **BARE)
-        df = source.fetch(*_range("2024-01-01", "2024-12-31")).tz_convert("Europe/Warsaw")
-        new_year = df.loc[pd.Timestamp("2024-01-01 00:00", tz="Europe/Warsaw")]
-        mid_year = df.loc[pd.Timestamp("2024-07-02 00:00", tz="Europe/Warsaw")]  # day 184: 183 / 366 = 0.5 in 2024
-        assert new_year["year_cos_1"] == pytest.approx(1.0)
-        assert mid_year["year_cos_1"] == pytest.approx(-1.0)
-
-    def test_dst_days_keep_the_wall_clock_phase(self):
-        source = CalendarSource(country="PL", fourier_weekly=1, fourier_annual=1, **BARE)
-        local = source.fetch(*_range("2024-10-26", "2024-10-28")).tz_convert("Europe/Warsaw")
-        # The repeated 02:00 has the same phase twice, and 03:00 on each day matches its wall-clock position.
-        repeated = local[(local.index.day == 27) & (local.index.hour == 2)]
-        assert len(repeated) == 2
-        assert repeated["week_sin_1"].nunique() == 1
-        day = local.index.dayofweek + (local.index.hour + local.index.minute / 60) / 24
-        np.testing.assert_allclose(local["week_sin_1"], np.sin(2 * np.pi * day / 7), atol=1e-12)
-
-    @pytest.mark.parametrize("param", ["fourier_weekly", "fourier_annual"])
-    def test_invalid_values(self, param):
-        with pytest.raises(ValueError, match=param):
-            CalendarSource(country="PL", **{param: -1})
-
-
 class TestRegimes:
     def test_default_set_for_poland(self):
         source = CalendarSource(country="PL", regimes=True, **BARE)
@@ -217,8 +175,6 @@ class TestFeaturesYamlRoundTrip:
             christmas_period=True,
             holiday_distance=5,
             dst_switch=True,
-            fourier_weekly=2,
-            fourier_annual=3,
             regimes={"core_fb": "2022-06-09", "custom": "2023-01-01"},
             freq="15min",
         )

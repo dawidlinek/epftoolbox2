@@ -120,6 +120,11 @@ and `epftoolbox2.presets` (ready-made LEAR/expert-model predictor lists).
 - **`FreshnessValidator` and `LagConsistencyValidator` are gone**, with no replacement. Both were narrow
   checks (one column against the frame's own last row or `today`; day-lag columns against their base
   column) that a few lines over the frame you already have can express directly if you still need them.
+- **`CalendarSource`: `fourier_weekly`/`fourier_annual` are gone**, with their `week_sin_k`/`week_cos_k` and
+  `year_sin_k`/`year_cos_k` columns. There is no drop-in replacement; if you still want Fourier terms, add
+  them with a `LambdaTransformer(func=...)` that computes the phase from the local wall clock (weekday and
+  time of day, or day of year and time of day) the same way `CalendarSource`'s other features do — see
+  [LambdaTransformer](/epftoolbox2/transformers/lambda-transformer/).
 
 ## The new information-set check
 

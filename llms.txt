@@ -261,8 +261,6 @@ source = CalendarSource(
     christmas_period=False,      # Optional. Add is_christmas_period (24 Dec - 1 Jan)
     holiday_distance=0,          # Optional. N > 0: add days_to_holiday, days_since_holiday capped at N
     dst_switch=False,            # Optional. Add is_dst_switch_day (23- or 25-hour local days)
-    fourier_weekly=0,            # Optional. K weekly harmonics: week_sin_k, week_cos_k
-    fourier_annual=0,            # Optional. K annual harmonics: year_sin_k, year_cos_k
     regimes=False,               # Optional. True (DEFAULT_REGIMES for the country) or {name: "YYYY-MM-DD"}
     school_holidays=False,       # Optional. Download school holiday flags from the OpenHolidays API
     school_subdivisions=None,    # Optional. ["PL-MZ", "PL-SL"] or "MZ,SL"; None = country-wide holidays only
@@ -294,8 +292,6 @@ No API key.
 | `christmas_period` | `True` | `is_christmas_period`: local dates 24 Dec - 1 Jan |
 | `holiday_distance` | `N` | `days_to_holiday`, `days_since_holiday` (0 on a holiday, capped at N) |
 | `dst_switch` | `True` | `is_dst_switch_day` (every row of a 23/25-hour local day) |
-| `fourier_weekly` | `K` | `week_sin_k`, `week_cos_k`, phase (weekday + time of day / 24) / 7 on local wall clock |
-| `fourier_annual` | `K` | `year_sin_k`, `year_cos_k`, phase (day of year - 1 + time of day / 24) / days in year |
 | `regimes` | `True`/dict | `regime_{name}`: 0 before the first local delivery day, 1 from it on |
 | `school_holidays` | `True`, no/one `school_subdivisions` | `is_school_holiday` (1.0/0.0/NaN) |
 | `school_holidays` | `True`, several `school_subdivisions` | `is_school_holiday_{code}`, e.g. `is_school_holiday_pl_mz` |

@@ -511,20 +511,6 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "confirm",
         },
         {
-            "name": "fourier_weekly",
-            "description": "Number of weekly Fourier harmonics (0 = off)",
-            "required": False,
-            "default": 0,
-            "kind": "int",
-        },
-        {
-            "name": "fourier_annual",
-            "description": "Number of annual Fourier harmonics (0 = off)",
-            "required": False,
-            "default": 0,
-            "kind": "int",
-        },
-        {
             "name": "regimes",
             "description": "Add market-regime dummies (flow-based go-live, 15-min MTU, ...)",
             "required": False,

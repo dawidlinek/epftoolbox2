@@ -179,8 +179,6 @@ class CalendarSource(DataSource):
         christmas_period: bool = False,
         holiday_distance: int = 0,
         dst_switch: bool = False,
-        fourier_weekly: int = 0,
-        fourier_annual: int = 0,
         regimes: Union[bool, Dict[str, str]] = False,
         school_holidays: bool = False,
         school_subdivisions: Optional[Union[str, List[str]]] = None,
@@ -210,8 +208,6 @@ class CalendarSource(DataSource):
             christmas_period: Add `is_christmas_period`: 24 December to 1 January inclusive.
             holiday_distance: If N > 0, add `days_to_holiday` and `days_since_holiday` (0 on a holiday), capped at N.
             dst_switch: Add `is_dst_switch_day`: local days with 23 or 25 hours.
-            fourier_weekly: Number K of weekly harmonics: `week_sin_k`, `week_cos_k` for k = 1..K.
-            fourier_annual: Number K of annual harmonics: `year_sin_k`, `year_cos_k` for k = 1..K.
             regimes: Step dummies `regime_{name}` (1 from the local date on). True uses DEFAULT_REGIMES for the
                 country; a dict {name: "YYYY-MM-DD"} replaces them.
             school_holidays: Download school holiday flags from the OpenHolidays API (network calls happen only
@@ -246,8 +242,6 @@ class CalendarSource(DataSource):
         self.christmas_period = christmas_period
         self.holiday_distance = self._validate_count("holiday_distance", holiday_distance, maximum=366)
         self.dst_switch = dst_switch
-        self.fourier_weekly = self._validate_count("fourier_weekly", fourier_weekly)
-        self.fourier_annual = self._validate_count("fourier_annual", fourier_annual)
         self.regimes = self._normalise_regimes(regimes)
 
         self.school_holidays = school_holidays
@@ -416,8 +410,6 @@ class CalendarSource(DataSource):
             df[f"{self.prefix}is_christmas_period"] = np.asarray(christmas, dtype=int)[codes]
         if self.dst_switch:
             df = self._add_dst_switch(df, local_dates, codes)
-        if self.fourier_weekly or self.fourier_annual:
-            df = self._add_fourier(df, local_index)
         if self.regimes:
             for name, date in self._resolved_regimes().items():
                 df[f"{self.prefix}regime_{name}"] = np.asarray(local_dates >= pd.Timestamp(date), dtype=int)[codes]
@@ -478,24 +470,6 @@ class CalendarSource(DataSource):
         switch = utc_offset(noon) != utc_offset(noon - pd.Timedelta(days=1))
         df[f"{self.prefix}is_dst_switch_day"] = switch.astype(int)[codes]
         return df
-
-    def _add_fourier(self, df: pd.DataFrame, local_index: pd.DatetimeIndex) -> pd.DataFrame:
-        # Phases use the local wall clock: the repeated fall-back hour gets the same value twice, and nothing
-        # jumps or drifts when the UTC offset changes.
-        day_fraction = np.asarray(local_index.hour * 3600 + local_index.minute * 60 + local_index.second) / 86400
-        terms = {}
-        if self.fourier_weekly:
-            phase = (np.asarray(local_index.dayofweek) + day_fraction) / 7
-            for k in range(1, self.fourier_weekly + 1):
-                terms[f"{self.prefix}week_sin_{k}"] = np.sin(2 * np.pi * k * phase)
-                terms[f"{self.prefix}week_cos_{k}"] = np.cos(2 * np.pi * k * phase)
-        if self.fourier_annual:
-            days_in_year = np.where(np.asarray(local_index.is_leap_year), 366, 365)
-            phase = (np.asarray(local_index.dayofyear) - 1 + day_fraction) / days_in_year
-            for k in range(1, self.fourier_annual + 1):
-                terms[f"{self.prefix}year_sin_{k}"] = np.sin(2 * np.pi * k * phase)
-                terms[f"{self.prefix}year_cos_{k}"] = np.cos(2 * np.pi * k * phase)
-        return pd.concat([df, pd.DataFrame(terms, index=df.index)], axis=1)
 
     def _resolved_regimes(self) -> Dict[str, str]:
         if self.regimes is True:
