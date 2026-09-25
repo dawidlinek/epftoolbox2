@@ -528,51 +528,6 @@ transformer = DailyStatsTransformer(
 
 ---
 
-## ResidualLoadTransformer
-
-Residual load forecast: load forecast minus wind and solar generation forecasts.
-
-```python
-from epftoolbox2.data.transformers import ResidualLoadTransformer
-
-transformer = ResidualLoadTransformer(
-    load="load_forecast",         # Optional. Load forecast column
-    renewables=None,              # Optional. Wind/solar forecast columns; None = whichever ENTSO-E ones are present
-    output="residual_load_forecast",  # Optional. Name of the new column
-)
-```
-
-**Behavior:**
-- Only forecast columns are accepted: a column whose name doesn't contain "forecast" raises `ValueError`, because realised load or generation would make the result look ahead.
-- A missing value in any input gives a missing result (a missing forecast is not treated as zero).
-- `renewables=None` looks for `generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` and uses whichever are present (at least one must be).
-
----
-
-## SpikeFlagTransformer
-
-Flags values far from the same slot's recent history: `{column}_spike` is 1 for a spike, 0 otherwise, NaN when unknown.
-
-```python
-from epftoolbox2.data.transformers import SpikeFlagTransformer
-
-transformer = SpikeFlagTransformer(
-    columns="price",   # Required. Column name(s) to flag; adds `{column}_spike` for each
-    window=28,          # Optional. Number of previous calendar days in the reference band
-    k=3.0,               # Optional. Band half-width in scaled MADs
-    min_periods=None,    # Optional. Past values needed for a flag; None = half the window
-    side="both",         # Optional. "both" | "upper" | "lower"
-)
-```
-
-**Behavior:**
-- For a row at slot s on local day D, the reference band is median +/- k*MAD of the column's values at slot s on the `window` calendar days before D (D itself excluded, like `closed="left"`). MAD is scaled by 1.4826 to estimate the standard deviation of normal data.
-- The flag is NaN when the value is missing or fewer than `min_periods` past values exist (e.g. the first days of the data).
-- On the autumn DST switch day both occurrences of the repeated slot are compared against the same band, built from the first occurrence's history.
-- On a UTC index the "days" are UTC days, and the transformer warns.
-
----
-
 ## LambdaTransformer
 
 Custom columns from an expression or a callable, or a full custom transform. Exactly one of `func` and `columns` is required.

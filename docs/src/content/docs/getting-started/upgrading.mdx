@@ -98,10 +98,25 @@ the old one) rather than resuming them; don't rely on the manifest to catch this
 
 `OpenMeteoSingleRunsSource` and `OpenMeteoWeightedSource` (exact-run and multi-location weather),
 `EpftoolboxBenchmarkSource` (the Lago et al. 2021 datasets); `DSTNormalizeTransformer`, `DailyProfileTransformer`,
-`DailyStatsTransformer`, `ResidualLoadTransformer`, `SpikeFlagTransformer`, `ImputeTransformer`;
-`CoverageValidator`, `DSTStructureValidator`, `FreshnessValidator`, `PlausibilityValidator`,
-`LagConsistencyValidator`; variance-stabilising scalers (`asinh`, N-PIT) alongside the default standardiser;
+`DailyStatsTransformer`, `LambdaTransformer`, `ImputeTransformer`;
+`CoverageValidator`, `DSTStructureValidator`, `PlausibilityValidator`;
+variance-stabilising scalers (`asinh`, N-PIT) alongside the default standardiser;
 and `epftoolbox2.presets` (ready-made LEAR/expert-model predictor lists).
+
+## Removed components
+
+- **`ResidualLoadTransformer` and `SpikeFlagTransformer` are gone.** Both were thin wrappers around
+  arithmetic that `LambdaTransformer` now expresses directly and more flexibly. Rebuild a residual load
+  column with a same-row expression:
+  ```python
+  # before
+  ResidualLoadTransformer(load="load_forecast", renewables=["generation_wind_onshore_forecast"])
+  # after
+  LambdaTransformer(columns={"residual_load_forecast": "load_forecast - generation_wind_onshore_forecast"})
+  ```
+  A rolling spike flag needs a `func` (there is no drop-in one-liner): write the median/MAD band as a
+  callable, following the example on the [LambdaTransformer](/epftoolbox2/transformers/lambda-transformer/)
+  page, or keep a copy of the old `SpikeFlagTransformer` source if you rely on it as-is.
 
 ## The new information-set check
 

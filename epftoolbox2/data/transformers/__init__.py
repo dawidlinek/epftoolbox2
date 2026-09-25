@@ -7,8 +7,6 @@ from .lag import LagTransformer
 from .dst_normalize import DSTNormalizeTransformer
 from .daily_profile import DailyProfileTransformer
 from .daily_stats import DailyStatsTransformer
-from .residual_load import ResidualLoadTransformer
-from .spike_flag import SpikeFlagTransformer
 from .lambda_transformer import LambdaTransformer
 from .impute import ImputeTransformer
 
@@ -20,8 +18,6 @@ __all__ = [
     "DSTNormalizeTransformer",
     "DailyProfileTransformer",
     "DailyStatsTransformer",
-    "ResidualLoadTransformer",
-    "SpikeFlagTransformer",
     "LambdaTransformer",
     "ImputeTransformer",
 ]
