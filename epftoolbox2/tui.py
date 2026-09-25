@@ -734,9 +734,9 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "limit",
-            "description": "Max gap to fill: integer rows, a duration (e.g. 6h, 2D), or blank for none",
+            "description": "Max gap to fill: integer rows, a duration (e.g. 6h, 2D), or blank for no limit",
             "required": False,
-            "default": "1D",
+            "default": None,
             "kind": "text",
         },
         {

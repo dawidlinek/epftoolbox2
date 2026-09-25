@@ -34,7 +34,8 @@ class ImputeTransformer(Transformer):
         method: ``"ffill"`` (default), ``"previous_day"`` or ``"previous_week"``.
         limit: How long a gap may be before it is left unfilled, measured from the last real value seen
             before the gap: a positive integer number of rows, a pandas duration string (e.g. ``"6h"``,
-            ``"2D"``), or ``None`` for no limit. Default ``"1D"``.
+            ``"2D"``), or ``None`` for no limit. Default ``None`` (fill every gap the method can reach,
+            however long).
         flag: Add a ``{column}_imputed`` column (0/1) marking which values were filled. If that column
             already exists (e.g. this is a second `ImputeTransformer` over the same data), the new flags
             are added to it rather than replacing it. Default ``True``.
@@ -50,7 +51,7 @@ class ImputeTransformer(Transformer):
         self,
         columns: list[str] | str | None = None,
         method: str = "ffill",
-        limit: int | str | None = "1D",
+        limit: int | str | None = None,
         flag: bool = True,
         suffix: str = "",
     ):

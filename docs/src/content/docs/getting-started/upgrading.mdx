@@ -93,6 +93,11 @@ the old one) rather than resuming them; don't rely on the manifest to catch this
   (with a `FutureWarning`) and mapped onto the new ones, but under the new, leak-free resampling semantics
   above — not a like-for-like translation of the old behaviour. Prefer `agg="mean", fill="ffill"` (or a
   `{column: ...}` dict for per-column control) going forward.
+- **`ImputeTransformer`: `limit` now defaults to `None`.** It used to default to `"1D"`, silently leaving a
+  gap longer than one day as NaN. The default now fills every gap the chosen method can reach, however long;
+  pass `limit=` explicitly (e.g. `"1D"` for the old behaviour) if you want long outages left unfilled instead
+  of masked. `{column}_imputed` still flags every cell the transformer actually filled, so a longer fill
+  doesn't hide itself — check that column, not just the absence of NaN, if a long-filled stretch matters to you.
 
 ## New components
 
