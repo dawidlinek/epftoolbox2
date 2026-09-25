@@ -9,6 +9,7 @@ from .daily_profile import DailyProfileTransformer
 from .daily_stats import DailyStatsTransformer
 from .residual_load import ResidualLoadTransformer
 from .spike_flag import SpikeFlagTransformer
+from .lambda_transformer import LambdaTransformer
 from .impute import ImputeTransformer
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "DailyStatsTransformer",
     "ResidualLoadTransformer",
     "SpikeFlagTransformer",
+    "LambdaTransformer",
     "ImputeTransformer",
 ]

@@ -758,6 +758,23 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "choices": ["both", "upper", "lower"],
         },
     ],
+    # `func` (a callable df -> df) can only be set in code, not through the wizard or YAML.
+    "LambdaTransformer": [
+        {
+            "name": "columns",
+            "description": 'New/existing column(s), as JSON, e.g. {"residual_load": "load_forecast - wind_forecast"}',
+            "required": True,
+            "default": None,
+            "kind": "json",
+        },
+        {
+            "name": "func",
+            "description": "Full-control callable df -> df (code only; leave blank here)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+    ],
     "DSTNormalizeTransformer": [
         {
             "name": "freq",
@@ -1331,6 +1348,7 @@ _TRANSFORMERS = [
     "DailyStatsTransformer",
     "ResidualLoadTransformer",
     "SpikeFlagTransformer",
+    "LambdaTransformer",
     "ImputeTransformer",
 ]
 _VALIDATORS = [

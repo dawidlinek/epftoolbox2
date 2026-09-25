@@ -1,0 +1,105 @@
+---
+title: LambdaTransformer
+description: Custom column arithmetic or a full custom transform, without writing a new class
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# LambdaTransformer
+
+Builds one-off columns from an expression or a callable, for feature arithmetic that doesn't need its own
+transformer class. Exactly one of `func` and `columns` must be given.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import LambdaTransformer
+
+# columns: {new_or_existing_column: expression}. A string is evaluated with df.eval(...).
+df = LambdaTransformer(
+    columns={"residual_load": "load_forecast - wind_forecast - solar_forecast"}
+).transform(df)
+
+# func: full control, df -> df
+df = LambdaTransformer(func=lambda df: df.assign(spread=df["price"] - df["price_d-1"])).transform(df)
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `func` | Callable[[DataFrame], DataFrame] \| None | `None` | Full control over the output frame |
+| `columns` | dict \| None | `None` | `{new_or_existing_column: expression}`; each expression is a string for `df.eval(...)` or a callable `df -> Series` |
+
+## `columns`: string or callable expressions
+
+Each entry adds or overwrites one column. A string is evaluated with
+[`DataFrame.eval`](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.eval.html), so it can be saved
+to YAML; a callable `df -> Series` gives more control but, like any callable parameter in this library, cannot
+be saved (`DataPipeline.save` raises `TypeError`).
+
+Entries run in the order given, each against the frame as built so far — including the columns earlier entries
+in the same `columns` dict just added:
+
+```python
+LambdaTransformer(columns={
+    "residual_load": "load_forecast - wind_forecast - solar_forecast",
+    "residual_load_per_capacity": "residual_load / installed_capacity",  # uses the column above
+})
+```
+
+Column names that `df.eval` can't parse as a plain identifier — spaces, operators, a name starting with a
+digit — need backticks, exactly as in pandas:
+
+```python
+LambdaTransformer(columns={"spread": "`price (EUR)` - load"})
+```
+
+## `func`: full control
+
+```python
+LambdaTransformer(func=lambda df: df.assign(spread=df["price"] - df["price_d-1"]))
+```
+
+`func` receives the whole frame and returns the whole frame; use it for anything `columns` can't express, such
+as dropping a column or building several columns with a shared intermediate. It cannot be saved to YAML.
+
+## Index guard
+
+The result must have exactly the same index as the input: the same rows, in the same order.
+
+- `columns` mode can't break this — it only ever assigns aligned columns onto a copy of the input frame.
+- A `func` that resamples, filters, sorts or otherwise reorders rows raises `ValueError` instead of silently
+  changing what a later step in the pipeline sees. Row-count or row-order changes belong in a dedicated
+  transformer (`ResampleTransformer`, etc.), not here.
+
+<Aside type="caution">
+  **You are responsible for look-ahead.** `LambdaTransformer` doesn't know which columns are forecasts and
+  which are realised, or what a forecast issued on a row's day could actually have known.
+
+  Same-row arithmetic is safe: it only combines values already sitting on that row, e.g.
+  `"load_forecast - wind_forecast - solar_forecast"`.
+
+  These leak, because they pull in values a forecast issued on the row's own day would not yet have:
+  - `df["price"].shift(-1)` or any negative shift — tomorrow's value, today.
+  - `.bfill()` — a value copied backward from a later row.
+  - A rolling window that reaches past the current row (`.rolling(...).mean()` without excluding the current
+    and later rows, or a centered window).
+  - Normalising with a whole-sample statistic — `(df["price"] - df["price"].mean()) / df["price"].std()`
+    computed once over the whole loaded range uses the mean and std of data that hadn't happened yet for the
+    early rows.
+</Aside>
+
+## Serialization
+
+```python
+from epftoolbox2.pipelines import DataPipeline
+
+# String expressions round-trip through YAML.
+DataPipeline().add_transformer(
+    LambdaTransformer(columns={"residual_load": "load_forecast - wind_forecast - solar_forecast"})
+).save("pipeline.yaml")
+
+# A callable, in `func` or as a `columns` value, raises TypeError instead.
+DataPipeline().add_transformer(LambdaTransformer(func=lambda df: df)).save("pipeline.yaml")  # TypeError
+```

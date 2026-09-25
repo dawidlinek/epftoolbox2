@@ -573,6 +573,27 @@ transformer = SpikeFlagTransformer(
 
 ---
 
+## LambdaTransformer
+
+Custom columns from an expression or a callable, or a full custom transform. Exactly one of `func` and `columns` is required.
+
+```python
+from epftoolbox2.data.transformers import LambdaTransformer
+
+transformer = LambdaTransformer(
+    func=None,     # Optional. Callable df -> df, full control. Exactly one of func/columns
+    columns=None,  # Optional. {new_or_existing_column: expression}; expression is a df.eval(...) string or callable df -> Series
+)
+```
+
+**Behavior:**
+- `columns`: each entry runs in order against the frame as built so far, so a later expression can reference a column an earlier one just added. String expressions use `df.eval(...)`; column names `eval` can't parse as identifiers need backticks, e.g. `` "`price (EUR)` - load" ``.
+- A string expression is YAML-safe. A callable, in `func` or as a `columns` value, raises the same `TypeError` as any other non-YAML-safe parameter when the pipeline is saved.
+- The output must keep exactly the same index (same rows, same order) as the input; `columns` mode can't break this, but a `func` that resamples, filters or reorders rows raises `ValueError`.
+- Nothing here checks for look-ahead: same-row arithmetic is safe, but `shift(-k)`, `bfill()`, a rolling window reaching past the current row, or normalising with a whole-sample statistic all leak.
+
+---
+
 ## TimezoneTransformer
 
 Converts the index timezone and moves daily values to local midnight. Pipeline order: TimezoneTransformer → ResampleTransformer → LagTransformer.
