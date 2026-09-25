@@ -13,6 +13,7 @@ from epftoolbox2.data.sources._open_meteo_common import (
     normalise_derived,
     parse_hourly,
     parse_issue_time,
+    parse_locations,
     shift_local_days,
 )
 
@@ -40,6 +41,8 @@ class _StubSource(OpenMeteoBase):
             hdd_base_c=18.0,
             cdd_base_c=21.0,
             strict=False,
+            locations=None,
+            keep_locations=False,
         )
         params.update(kwargs)
         self.latitude = params["latitude"]
@@ -56,6 +59,8 @@ class _StubSource(OpenMeteoBase):
         self.hdd_base_c = params["hdd_base_c"]
         self.cdd_base_c = params["cdd_base_c"]
         self.strict = params["strict"]
+        self.locations = params["locations"]
+        self.keep_locations = params["keep_locations"]
         self._setup()
         self._validate_config()
 
@@ -119,6 +124,102 @@ class TestShiftLocalDays:
         rows = pd.DatetimeIndex([pd.Timestamp("2024-03-30 02:00", tz=TZ).tz_convert("UTC")])
         shifted = shift_local_days(rows, TZ, 1)
         assert shifted[0] == pd.Timestamp("2024-03-31 03:00", tz=TZ)
+
+
+# ---------------------------------------------------------------------------
+# parse_locations (see OpenMeteoSource/OpenMeteoSingleRunsSource's `locations` parameter)
+# ---------------------------------------------------------------------------
+
+LOCATIONS_DICT = {
+    "warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 3.0},
+    "krakow": {"latitude": 50.06, "longitude": 19.94, "weight": 1.0},
+}
+LOCATIONS_NORMALISED = [
+    {"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": 3.0},
+    {"name": "krakow", "latitude": 50.06, "longitude": 19.94, "weight": 1.0},
+]
+
+
+class TestParseLocations:
+    def test_parses_dict_of_dicts(self):
+        assert parse_locations(LOCATIONS_DICT) == LOCATIONS_NORMALISED
+
+    def test_parses_dict_of_tuples_with_weight(self):
+        parsed = parse_locations({"warsaw": (52.23, 21.01, 3.0), "krakow": (50.06, 19.94, 1.0)})
+        assert parsed == LOCATIONS_NORMALISED
+
+    def test_parses_dict_of_tuples_without_weight(self):
+        parsed = parse_locations({"warsaw": (52.23, 21.01), "krakow": (50.06, 19.94)})
+        assert parsed == [
+            {"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": None},
+            {"name": "krakow", "latitude": 50.06, "longitude": 19.94, "weight": None},
+        ]
+
+    def test_parses_compact_string(self):
+        parsed = parse_locations("warsaw:52.23:21.01:3.0, krakow:50.06:19.94:1.0")
+        assert parsed == LOCATIONS_NORMALISED
+
+    def test_parses_compact_string_without_weight(self):
+        parsed = parse_locations("warsaw:52.23:21.01, krakow:50.06:19.94")
+        assert [loc["weight"] for loc in parsed] == [None, None]
+
+    def test_dict_missing_latitude_or_longitude_raises(self):
+        with pytest.raises(ValueError, match="latitude, longitude and optionally weight"):
+            parse_locations({"warsaw": {"latitude": 52.23}})
+
+    def test_dict_with_unknown_key_raises(self):
+        with pytest.raises(ValueError, match="latitude, longitude and optionally weight"):
+            parse_locations({"warsaw": {"latitude": 52.23, "longitude": 21.01, "extra": 1}})
+
+    def test_tuple_with_wrong_length_raises(self):
+        with pytest.raises(ValueError, match=r"\(latitude, longitude\) or \(latitude, longitude, weight\)"):
+            parse_locations({"warsaw": (52.23,)})
+
+    def test_spec_of_wrong_type_raises(self):
+        with pytest.raises(ValueError, match="dict or a"):
+            parse_locations({"warsaw": "52.23,21.01"})
+
+    def test_string_with_wrong_field_count_raises(self):
+        with pytest.raises(ValueError, match="name:latitude:longitude"):
+            parse_locations("warsaw:52.23")
+
+    def test_string_with_non_numeric_field_raises(self):
+        with pytest.raises(ValueError, match="with numbers"):
+            parse_locations("warsaw:abc:21.01:3.0")
+
+    def test_empty_input_raises(self):
+        with pytest.raises(ValueError, match="non-empty dict"):
+            parse_locations({})
+        with pytest.raises(ValueError, match="non-empty dict"):
+            parse_locations("")
+
+    def test_duplicate_name_in_compact_string_raises(self):
+        with pytest.raises(ValueError, match="duplicate location name"):
+            parse_locations("warsaw:52.23:21.01:3.0, warsaw:50.06:19.94:1.0")
+
+    @pytest.mark.parametrize("name", ["has space", "has-dash", "", "accént"])
+    def test_invalid_name_characters_raise(self, name):
+        with pytest.raises(ValueError, match="letters, digits and underscores"):
+            parse_locations({name: (52.23, 21.01)})
+
+    @pytest.mark.parametrize("latitude", [91.0, -91.0])
+    def test_invalid_latitude_raises(self, latitude):
+        with pytest.raises(ValueError, match="latitude"):
+            parse_locations({"warsaw": (latitude, 21.01)})
+
+    @pytest.mark.parametrize("longitude", [181.0, -181.0])
+    def test_invalid_longitude_raises(self, longitude):
+        with pytest.raises(ValueError, match="longitude"):
+            parse_locations({"warsaw": (52.23, longitude)})
+
+    @pytest.mark.parametrize("weight", [0, -1.0, float("nan"), "1.0", True])
+    def test_invalid_weight_raises(self, weight):
+        with pytest.raises(ValueError, match="weight"):
+            parse_locations({"warsaw": (52.23, 21.01, weight)})
+
+    def test_mixed_weights_raise(self):
+        with pytest.raises(ValueError, match="every location or for none"):
+            parse_locations({"warsaw": (52.23, 21.01, 3.0), "krakow": (50.06, 19.94)})
 
 
 # ---------------------------------------------------------------------------

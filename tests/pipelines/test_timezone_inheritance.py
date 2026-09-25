@@ -1,10 +1,11 @@
 """DataPipeline.timezone as the single place the market zone needs to be written.
 
-TimezoneTransformer.target_tz, CalendarSource.timezone, OpenMeteoSource/OpenMeteoSingleRunsSource.timezone and
-OpenMeteoWeightedSource.source_params['timezone'] may all be left unset and inherit DataPipeline.timezone
-instead. Explicit-and-equal and explicit-and-different-raises are covered in tests/pipelines/test_pipeline.py
-(TestDateSemantics); this file covers inheritance itself, the "missing everywhere" error, YAML round trips and
-the information-set check.
+TimezoneTransformer.target_tz, CalendarSource.timezone and OpenMeteoSource/OpenMeteoSingleRunsSource.timezone
+may all be left unset and inherit DataPipeline.timezone instead — including, for a source built with
+`locations`, through each of its private per-location instances (see
+DataPipeline._bind_component_timezones). Explicit-and-equal and explicit-and-different-raises are covered in
+tests/pipelines/test_pipeline.py (TestDateSemantics); this file covers inheritance itself, the "missing
+everywhere" error, YAML round trips and the information-set check.
 """
 
 from unittest.mock import Mock
@@ -17,7 +18,6 @@ from epftoolbox2.data.sources import (
     CalendarSource,
     OpenMeteoSingleRunsSource,
     OpenMeteoSource,
-    OpenMeteoWeightedSource,
 )
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers import TimezoneTransformer
@@ -84,14 +84,16 @@ class TestInheritance:
         assert source.market_timezone == TZ
         assert source.timezone is None
 
-    def test_open_meteo_weighted_source(self):
-        source = OpenMeteoWeightedSource(
-            locations=[{"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": 1.0}],
-            source_params={"columns": ["temperature_2m"]},
+    def test_open_meteo_source_with_locations(self):
+        source = OpenMeteoSource(
+            locations={"warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 1.0}},
+            columns=["temperature_2m"],
         )
         DataPipeline(sources=[source], timezone=TZ)
-        assert source._sources[0].market_timezone == TZ
-        assert source._sources[0].timezone is None
+        assert source.market_timezone == TZ
+        assert source.timezone is None
+        assert source._location_sources[0].market_timezone == TZ
+        assert source._location_sources[0].timezone is None
 
     def test_timezone_transformer(self):
         transformer = TimezoneTransformer()
@@ -135,10 +137,10 @@ class TestMissingEverywhereRaises:
         with pytest.raises(ValueError, match="timezone is required"):
             pipe.run(*_RANGE)
 
-    def test_open_meteo_weighted_source(self):
-        source = OpenMeteoWeightedSource(
-            locations=[{"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": 1.0}],
-            source_params={"columns": ["temperature_2m"]},
+    def test_open_meteo_source_with_locations(self):
+        source = OpenMeteoSource(
+            locations={"warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 1.0}},
+            columns=["temperature_2m"],
         )
         pipe = DataPipeline(sources=[source])
         with pytest.raises(ValueError, match="timezone is required"):

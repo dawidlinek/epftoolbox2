@@ -269,8 +269,19 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
         elif isinstance(source, OpenMeteoSource):
             prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
             rule = _weather_availability(source)
-            for variable in source.columns:
-                rules[f"{prefix}{variable}"] = rule
+            # A source built with `locations` (see OpenMeteoSource.locations) emits the usual `{prefix}{variable}`
+            # columns only when it produces a weighted series (every location has a weight); it also, or instead,
+            # emits per-location columns `{prefix}{name}_{variable}` — with weights only when `keep_locations`,
+            # always otherwise (they are then the only output). Both column shapes follow the same vintage rule.
+            locations = getattr(source, "_locations", [])
+            weighted = bool(locations) and all(loc.get("weight") is not None for loc in locations)
+            if not locations or weighted:
+                for variable in source.columns:
+                    rules[f"{prefix}{variable}"] = rule
+            if locations and (not weighted or getattr(source, "keep_locations", False)):
+                for location in locations:
+                    for variable in source.columns:
+                        rules[f"{prefix}{location['name']}_{variable}"] = rule
     return rules
 
 

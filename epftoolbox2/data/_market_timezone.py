@@ -2,8 +2,10 @@
 
 `DataPipeline.timezone` is meant to be the single place the market zone is written. Components whose own zone
 decides a local calendar day or an issue time (`CalendarSource.timezone`, `OpenMeteoSource.timezone`,
-`OpenMeteoSingleRunsSource.timezone`, `OpenMeteoWeightedSource.source_params["timezone"]`,
-`TimezoneTransformer.target_tz`) may leave it `None` and inherit `DataPipeline.timezone` instead.
+`OpenMeteoSingleRunsSource.timezone`, `TimezoneTransformer.target_tz`) may leave it `None` and inherit
+`DataPipeline.timezone` instead. A source built with `OpenMeteoSource`/`OpenMeteoSingleRunsSource`'s `locations`
+parameter binds the same way through each of its private per-location instances (see
+`DataPipeline._bind_component_timezones`).
 
 `DataPipeline` resolves this once, before running (`DataPipeline._bind_component_timezones`), and stores the
 result on each component's private `_pipeline_timezone` attribute — never the public one, so

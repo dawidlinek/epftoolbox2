@@ -1,8 +1,9 @@
-"""Shared pieces of the Open-Meteo sources: issue-time helpers, HTTP retries, coverage checks, derived columns."""
+"""Shared pieces of the Open-Meteo sources: issue-time helpers, HTTP retries, coverage checks, derived columns,
+several locations combined into one source."""
 
 import re
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -15,6 +16,16 @@ from .._market_timezone import resolve as _resolve_timezone
 from .base import DataSource
 
 _ISSUE_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+_LOCATION_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+# Variables that cannot be averaged arithmetically when combining several locations (see `_weighted_average`).
+_CIRCULAR_VARIABLE_RE = re.compile(r"direction")
+_CATEGORICAL_VARIABLES = ("weather_code",)
+
+# Attributes every OpenMeteoBase subclass sets at construction time that must not be forwarded when building one
+# instance per location (see `OpenMeteoBase._location_kwargs`): runtime objects, and the parameters `locations`
+# itself replaces.
+_RUNTIME_ATTRIBUTES = {"session", "console", "logger"}
+_NON_LOCATION_KWARGS = {"latitude", "longitude", "locations", "prefix", "keep_locations"}
 
 # Derived columns: name -> input variable. All are deterministic transforms of one forecast column, computed per
 # lead and per location, so they inherit that column's vintage.
@@ -100,12 +111,134 @@ def parse_hourly(response_data: Dict) -> pd.DataFrame:
     return table
 
 
-class OpenMeteoBase(DataSource):
-    """Common behaviour of the single-location Open-Meteo sources.
+# ---------------------------------------------------------------------------
+# Locations: several coordinates combined into one source (see OpenMeteoBase.locations)
+# ---------------------------------------------------------------------------
 
-    Subclasses set their public attributes (latitude, longitude, horizon, model, columns, prefix, proxy_url,
-    timezone, issue_time, publication_delay_h, derived, hdd_base_c, cdd_base_c, strict), then call
-    ``self._setup()`` and ``self._validate_config()``.
+
+def parse_locations(locations: Union[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Normalise `locations` to [{"name", "latitude", "longitude", "weight"}, ...] (weight is None if not given).
+
+    Accepts a dict ``{name: {"latitude", "longitude", "weight"?}}``, a dict ``{name: (latitude, longitude)}`` or
+    ``{name: (latitude, longitude, weight)}`` (list or tuple), or the compact string
+    ``"name:latitude:longitude[:weight], ..."`` used by YAML and the TUI. Names must use letters, digits and
+    underscores and be unique. Weights, when given, must be positive numbers, and must be given for every
+    location or for none — a silent mix would leave some locations out of the weighted average while still
+    fetching them.
+    """
+    if isinstance(locations, str):
+        locations = _parse_compact_string(locations)
+    if not isinstance(locations, dict) or not locations:
+        raise ValueError("locations must be a non-empty dict of {name: {latitude, longitude, weight?}}")
+
+    normalised = []
+    seen = set()
+    for name, spec in locations.items():
+        if not isinstance(name, str) or not _LOCATION_NAME_RE.match(name):
+            raise ValueError(f"location name must use letters, digits and underscores, got {name!r}")
+        if name in seen:
+            raise ValueError(f"duplicate location name {name!r}")
+        seen.add(name)
+        normalised.append({"name": name, **_parse_location_spec(name, spec)})
+
+    weights = [loc["weight"] for loc in normalised]
+    if any(w is not None for w in weights) and not all(w is not None for w in weights):
+        missing = sorted(loc["name"] for loc in normalised if loc["weight"] is None)
+        raise ValueError(f"weight must be given for every location or for none; missing for {missing}")
+
+    return normalised
+
+
+def _parse_compact_string(text: str) -> Dict[str, Any]:
+    """ "name:latitude:longitude[:weight], ..." -> {name: (latitude, longitude) | (latitude, longitude, weight)}."""
+    locations: Dict[str, Any] = {}
+    for item in filter(None, (part.strip() for part in text.split(","))):
+        parts = item.split(":")
+        if len(parts) not in (3, 4):
+            raise ValueError(f'location {item!r} must be "name:latitude:longitude" or "name:latitude:longitude:weight"')
+        name = parts[0].strip()
+        try:
+            numbers = tuple(float(p) for p in parts[1:])
+        except ValueError:
+            raise ValueError(f'location {item!r} must be "name:latitude:longitude[:weight]" with numbers')
+        if name in locations:
+            raise ValueError(f"duplicate location name {name!r}")
+        locations[name] = numbers
+    return locations
+
+
+def _parse_location_spec(name: str, spec: Any) -> Dict[str, Any]:
+    """One location's `{"latitude", "longitude", "weight"}`, from a dict or a `(lat, lon[, weight])` sequence."""
+    if isinstance(spec, dict):
+        allowed = {"latitude", "longitude", "weight"}
+        if not {"latitude", "longitude"} <= set(spec) or not set(spec) <= allowed:
+            raise ValueError(
+                f"location {name!r} must be a dict with latitude, longitude and optionally weight, got {spec!r}"
+            )
+        latitude, longitude, weight = spec["latitude"], spec["longitude"], spec.get("weight")
+    elif isinstance(spec, (list, tuple)):
+        if len(spec) == 2:
+            (latitude, longitude), weight = spec, None
+        elif len(spec) == 3:
+            latitude, longitude, weight = spec
+        else:
+            raise ValueError(
+                f"location {name!r} must be (latitude, longitude) or (latitude, longitude, weight), got {spec!r}"
+            )
+    else:
+        raise ValueError(f"location {name!r} must be a dict or a (latitude, longitude[, weight]) tuple, got {spec!r}")
+
+    if isinstance(latitude, bool) or not isinstance(latitude, (int, float)) or not -90 <= latitude <= 90:
+        raise ValueError(f"latitude of {name!r} must be between -90 and 90, got {latitude!r}")
+    if isinstance(longitude, bool) or not isinstance(longitude, (int, float)) or not -180 <= longitude <= 180:
+        raise ValueError(f"longitude of {name!r} must be between -180 and 180, got {longitude!r}")
+    if weight is not None:
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not np.isfinite(weight) or weight <= 0:
+            raise ValueError(f"weight of {name!r} must be a positive number, got {weight!r}")
+        weight = float(weight)
+
+    return {"latitude": float(latitude), "longitude": float(longitude), "weight": weight}
+
+
+def _weighted_average(frames: List[pd.DataFrame], weights: np.ndarray) -> pd.DataFrame:
+    """Weighted combination of same-columned, same-indexed frames, one row per shared index value.
+
+    Most columns use a plain weighted mean; a column whose variable name (before `_d+i`) contains "direction"
+    uses a weighted circular mean instead, so 350 deg and 10 deg average to about 0, not 180; a categorical
+    variable (`_CATEGORICAL_VARIABLES`, e.g. `weather_code`) is skipped entirely — it has no meaningful average.
+    A row is NaN wherever any location is NaN there: weights are never re-normalised over just the locations
+    that have a value.
+    """
+    weighted = {}
+    for column in frames[0].columns:
+        variable = column.rsplit("_d+", 1)[0]
+        if variable in _CATEGORICAL_VARIABLES:
+            continue
+        stack = np.column_stack([frame[column].to_numpy(dtype=float) for frame in frames])
+        if _CIRCULAR_VARIABLE_RE.search(variable):
+            radians = np.deg2rad(stack)
+            sin = (np.sin(radians) * weights).sum(axis=1)
+            cos = (np.cos(radians) * weights).sum(axis=1)
+            values = np.mod(np.rad2deg(np.arctan2(sin, cos)), 360.0)
+        else:
+            values = (stack * weights).sum(axis=1)
+        values[np.isnan(stack).any(axis=1)] = np.nan
+        weighted[column] = values
+    return pd.DataFrame(weighted, index=frames[0].index)
+
+
+class OpenMeteoBase(DataSource):
+    """Common behaviour of the Open-Meteo sources, for one location or several.
+
+    Subclasses set their public attributes (latitude, longitude, locations, keep_locations, horizon, model,
+    columns, prefix, proxy_url, timezone, issue_time, publication_delay_h, derived, hdd_base_c, cdd_base_c,
+    strict), then call ``self._setup()`` and ``self._validate_config()``, which must call ``_validate_common()``.
+
+    ``locations`` is mutually exclusive with ``latitude``/``longitude`` (see ``parse_locations``) and is resolved
+    by ``_configure_locations()`` into ``self._locations`` (normalised) and ``self._location_sources`` (one
+    instance of the same subclass per location, sharing every other setting — see ``_location_kwargs``).
+    Subclasses whose own ``fetch()`` finds ``self._locations`` non-empty must delegate to ``_fetch_locations()``
+    instead of the single-point path.
     """
 
     DEFAULT_COLUMNS = [
@@ -165,7 +298,13 @@ class OpenMeteoBase(DataSource):
 
     @property
     def _label(self) -> str:
-        return f"Open-Meteo [{self.latitude}, {self.longitude}]"
+        return f"Open-Meteo [{self._location_label()}]"
+
+    def _location_label(self) -> str:
+        if self._locations:
+            names = ", ".join(loc["name"] for loc in self._locations)
+            return f"{len(self._locations)} locations: {names}"
+        return f"{self.latitude}, {self.longitude}"
 
     def _configure_proxy(self):
         if self.proxy_url:
@@ -184,11 +323,14 @@ class OpenMeteoBase(DataSource):
         `max_horizon` is enforced here only when given. A source whose usable horizon depends on the data (e.g.
         ``OpenMeteoSource``'s bucket availability) checks its own bound after calling this, with its own message.
         """
-        if not isinstance(self.latitude, (int, float)) or not -90 <= self.latitude <= 90:
-            raise ValueError(f"Latitude must be between -90 and 90, got {self.latitude}")
+        self._configure_locations()
 
-        if not isinstance(self.longitude, (int, float)) or not -180 <= self.longitude <= 180:
-            raise ValueError(f"Longitude must be between -180 and 180, got {self.longitude}")
+        if not self._locations:
+            if not isinstance(self.latitude, (int, float)) or not -90 <= self.latitude <= 90:
+                raise ValueError(f"Latitude must be between -90 and 90, got {self.latitude}")
+
+            if not isinstance(self.longitude, (int, float)) or not -180 <= self.longitude <= 180:
+                raise ValueError(f"Longitude must be between -180 and 180, got {self.longitude}")
 
         if isinstance(self.horizon, bool) or not isinstance(self.horizon, int) or self.horizon <= 0:
             raise ValueError(f"Horizon must be a positive integer, got {self.horizon}")
@@ -224,6 +366,117 @@ class OpenMeteoBase(DataSource):
         for label, base in (("hdd_base_c", self.hdd_base_c), ("cdd_base_c", self.cdd_base_c)):
             if isinstance(base, bool) or not isinstance(base, (int, float)):
                 raise ValueError(f"{label} must be a number, got {base!r}")
+
+    def _configure_locations(self) -> None:
+        """Parse `locations`, mutually exclusive with `latitude`/`longitude`, and build one instance of this
+        class per location, sharing every other constructor parameter (see `_location_kwargs`).
+
+        A single `latitude`/`longitude` pair keeps working exactly as before: `self._locations` and
+        `self._location_sources` are left empty, `fetch()` takes the single-point path, and the cache key for an
+        existing configuration does not change (see `_common_cache_config`).
+        """
+        lat_given = self.latitude is not None
+        lon_given = self.longitude is not None
+        if lat_given != lon_given:
+            raise ValueError("latitude and longitude must both be set, or both left unset when using locations")
+        has_point = lat_given and lon_given
+        has_locations = self.locations is not None
+
+        if has_point and has_locations:
+            raise ValueError("locations is mutually exclusive with latitude/longitude; set only one of them")
+        if not has_point and not has_locations:
+            raise ValueError("set either latitude and longitude for one location, or locations for several")
+
+        if not has_locations:
+            self._locations = []
+            self._location_sources = []
+            return
+
+        self._locations = parse_locations(self.locations)
+        if not isinstance(self.keep_locations, bool):
+            raise ValueError(f"keep_locations must be True or False, got {self.keep_locations!r}")
+
+        kwargs = self._location_kwargs()
+        self._location_sources = [
+            type(self)(latitude=loc["latitude"], longitude=loc["longitude"], **kwargs) for loc in self._locations
+        ]
+
+    def _location_kwargs(self) -> Dict[str, Any]:
+        """This instance's own constructor parameters, minus the ones `locations` replaces (`latitude`,
+        `longitude`, `locations`, `prefix`, `keep_locations`) and runtime objects — used to build one sibling
+        instance per location that shares every other setting."""
+        return {
+            key: value
+            for key, value in vars(self).items()
+            if not key.startswith("_") and key not in _RUNTIME_ATTRIBUTES and key not in _NON_LOCATION_KWARGS
+        }
+
+    @property
+    def _locations_weighted(self) -> bool:
+        """Whether every location has a weight (see `parse_locations`: it's all locations or none)."""
+        return bool(self._locations) and all(loc["weight"] is not None for loc in self._locations)
+
+    @property
+    def _location_weights(self) -> np.ndarray:
+        weights = np.array([loc["weight"] for loc in self._locations], dtype=float)
+        return weights / weights.sum()
+
+    def _fetch_locations(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        """Fetch every location (built by `_configure_locations`) and combine per weights / `keep_locations`.
+
+        Every location is fetched by another instance of this class sharing every other setting, so all
+        locations follow the same vintage rule. With weights this returns one weighted series per variable,
+        `{prefix}_{variable}_d+i` (see `_weighted_average`); `keep_locations=True` also adds the per-location
+        columns `{prefix}_{name}_{variable}_d+i`. Without weights, only the per-location columns are returned.
+        One shared "now" is used for every location so a live fetch can't settle some locations as final and
+        others as still provisional.
+        """
+        now = self._now()
+        for source in self._location_sources:
+            source._now = lambda now=now: now
+
+        frames = []
+        for location, source in zip(self._locations, self._location_sources):
+            weight_note = f" (weight {location['weight']})" if location["weight"] is not None else ""
+            self.logger.info(f"{self._label}: location {location['name']}{weight_note}")
+            frames.append(source.fetch(start, end))
+        if all(frame.empty for frame in frames):
+            return pd.DataFrame()
+
+        index = frames[0].index
+        for frame in frames[1:]:
+            index = index.union(frame.index)
+        frames = [frame.reindex(index) for frame in frames]
+
+        weighted_mode = self._locations_weighted
+        parts = []
+        if weighted_mode:
+            weighted = _weighted_average(frames, self._location_weights)
+            if self.prefix:
+                weighted.columns = [f"{self.prefix}_{col}" for col in weighted.columns]
+            parts.append(weighted)
+            skipped = {
+                col.rsplit("_d+", 1)[0]
+                for col in frames[0].columns
+                if col.rsplit("_d+", 1)[0] in _CATEGORICAL_VARIABLES
+            }
+            if skipped and not self.keep_locations:
+                self.logger.info(
+                    f"{self._label}: {', '.join(sorted(skipped))} is categorical and is not averaged; "
+                    "use keep_locations=True to keep it per location"
+                )
+        if not weighted_mode or self.keep_locations:
+            base = f"{self.prefix}_" if self.prefix else ""
+            parts.extend(
+                frame.add_prefix(f"{base}{location['name']}_") for location, frame in zip(self._locations, frames)
+            )
+
+        result = pd.concat(parts, axis=1) if len(parts) > 1 else parts[0]
+        filled = result.notna().any(axis=1).to_numpy()
+        keep = int(np.flatnonzero(filled)[-1]) + 1 if filled.any() else 0
+        result = result.iloc[:keep]
+        result.index.name = "datetime"
+        return result
 
     def _backoff(self, attempt: int) -> float:
         return min(self.BACKOFF_CAP_S, self.BACKOFF_BASE_S * 2**attempt)
@@ -374,8 +627,6 @@ class OpenMeteoBase(DataSource):
 
     def _common_cache_config(self) -> Dict:
         config = {
-            "latitude": self.latitude,
-            "longitude": self.longitude,
             "horizon": self.horizon,
             "model": self.model,
             "columns": sorted(self.columns),
@@ -384,6 +635,14 @@ class OpenMeteoBase(DataSource):
             "issue_time": self.issue_time,
             "publication_delay_h": self.publication_delay_h,
         }
+        # Only when used, so a single-point configuration (the common case) keeps its existing cache key.
+        if self._locations:
+            config["locations"] = [{k: v for k, v in loc.items() if v is not None} for loc in self._locations]
+            if self.keep_locations:
+                config["keep_locations"] = True
+        else:
+            config["latitude"] = self.latitude
+            config["longitude"] = self.longitude
         # Only when used, so configurations without derived columns keep their cache key.
         if self.derived:
             config["derived"] = sorted(self.derived)

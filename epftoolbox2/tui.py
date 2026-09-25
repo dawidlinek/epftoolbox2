@@ -76,13 +76,35 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
     ],
     "OpenMeteoSource": [
-        {"name": "latitude", "description": "Latitude (-90 to 90)", "required": True, "default": None, "kind": "float"},
         {
-            "name": "longitude",
-            "description": "Longitude (-180 to 180)",
-            "required": True,
+            "name": "latitude",
+            "description": "Latitude (-90 to 90); leave blank together with longitude if using locations",
+            "required": False,
             "default": None,
             "kind": "float",
+        },
+        {
+            "name": "longitude",
+            "description": "Longitude (-180 to 180); leave blank together with latitude if using locations",
+            "required": False,
+            "default": None,
+            "kind": "float",
+        },
+        {
+            "name": "locations",
+            "description": 'Several locations instead of latitude/longitude, as "name:lat:lon:weight, '
+            'name:lat:lon:weight, ..." (weight optional, but given for all locations or none; population or '
+            "installed capacity, fixed for the whole sample)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "keep_locations",
+            "description": "With weighted locations, also return each location's own columns?",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
         },
         {
             "name": "horizon",
@@ -186,13 +208,35 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
     ],
     "OpenMeteoSingleRunsSource": [
-        {"name": "latitude", "description": "Latitude (-90 to 90)", "required": True, "default": None, "kind": "float"},
         {
-            "name": "longitude",
-            "description": "Longitude (-180 to 180)",
-            "required": True,
+            "name": "latitude",
+            "description": "Latitude (-90 to 90); leave blank together with longitude if using locations",
+            "required": False,
             "default": None,
             "kind": "float",
+        },
+        {
+            "name": "longitude",
+            "description": "Longitude (-180 to 180); leave blank together with latitude if using locations",
+            "required": False,
+            "default": None,
+            "kind": "float",
+        },
+        {
+            "name": "locations",
+            "description": 'Several locations instead of latitude/longitude, as "name:lat:lon:weight, '
+            'name:lat:lon:weight, ..." (weight optional, but given for all locations or none; population or '
+            "installed capacity, fixed for the whole sample)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "keep_locations",
+            "description": "With weighted locations, also return each location's own columns?",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
         },
         {
             "name": "horizon",
@@ -285,48 +329,6 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "required": False,
             "default": None,
             "kind": "text",
-        },
-    ],
-    "OpenMeteoWeightedSource": [
-        {
-            "name": "locations",
-            "description": 'Locations as "name:lat:lon:weight, name:lat:lon:weight, ..." '
-            "(weight = population or installed capacity, fixed for the whole sample)",
-            "required": True,
-            "default": None,
-            "kind": "text",
-        },
-        {
-            "name": "source",
-            "description": "Underlying Open-Meteo source to fetch each location with",
-            "required": False,
-            "default": "OpenMeteoSource",
-            "kind": "select",
-            "choices": ["OpenMeteoSource", "OpenMeteoSingleRunsSource"],
-        },
-        {
-            "name": "source_params",
-            "description": (
-                "Params for the underlying source, as JSON (must include timezone), "
-                'e.g. {"model": "icon_seamless", "horizon": 5, "timezone": "Europe/Warsaw"} (blank = none)'
-            ),
-            "required": False,
-            "default": None,
-            "kind": "json",
-        },
-        {
-            "name": "prefix",
-            "description": "Column name prefix (optional)",
-            "required": False,
-            "default": "",
-            "kind": "text",
-        },
-        {
-            "name": "keep_locations",
-            "description": "Also return each location's own columns, not just the weighted average?",
-            "required": False,
-            "default": False,
-            "kind": "confirm",
         },
     ],
     "CsvSource": [
@@ -1317,7 +1319,6 @@ _SOURCES = [
     "EntsoeSource",
     "OpenMeteoSource",
     "OpenMeteoSingleRunsSource",
-    "OpenMeteoWeightedSource",
     "CsvSource",
     "CalendarSource",
     "EpftoolboxBenchmarkSource",

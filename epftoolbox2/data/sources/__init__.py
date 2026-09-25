@@ -4,7 +4,6 @@ from .base import DataSource
 from .entsoe import EntsoeSource
 from .open_meteo import OpenMeteoSource
 from .open_meteo_single_runs import OpenMeteoSingleRunsSource
-from .open_meteo_weighted import OpenMeteoWeightedSource
 from .csv import CsvSource
 from .calendar import CalendarSource
 from .benchmark import EpftoolboxBenchmarkSource
@@ -14,7 +13,6 @@ __all__ = [
     "EntsoeSource",
     "OpenMeteoSource",
     "OpenMeteoSingleRunsSource",
-    "OpenMeteoWeightedSource",
     "CsvSource",
     "CalendarSource",
     "EpftoolboxBenchmarkSource",

@@ -1,5 +1,5 @@
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -24,6 +24,9 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
     GFS (``icon_seamless``, ``gfs_seamless``, ...) from 2026-04-02 00Z, JMA GSM (``jma_gsm``, ``jma_seamless``)
     from 2026-05-13 00Z. A ``model`` not covered here should be checked the same way before relying on it.
 
+    Pass ``locations`` instead of ``latitude``/``longitude`` to combine several locations into one source (a
+    weighted average, per-location columns, or both) — see the ``locations`` parameter below.
+
     Example:
         >>> source = OpenMeteoSingleRunsSource(
         ...     latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=7, prefix="warsaw"
@@ -39,8 +42,8 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
 
     def __init__(
         self,
-        latitude: float,
-        longitude: float,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
         horizon: int = 7,
         model: str = "ecmwf_ifs",
         columns: Optional[List[str]] = None,
@@ -54,11 +57,14 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
         hdd_base_c: float = 18.0,
         cdd_base_c: float = 21.0,
         strict: bool = False,
+        locations: Optional[Union[str, Dict[str, Any]]] = None,
+        keep_locations: bool = False,
     ):
         """
         Args:
-            latitude: Latitude coordinate
-            longitude: Longitude coordinate
+            latitude: Latitude coordinate. Mutually exclusive with ``locations``; set this (with ``longitude``)
+                for one location, or ``locations`` for several.
+            longitude: Longitude coordinate. See ``latitude``.
             horizon: Days ahead (d+1 .. d+horizon), 1-14; leads beyond the run's length come back empty.
             model: Weather model (default "ecmwf_ifs", the model with the longest single-run archive)
             columns: Weather variables (default: DEFAULT_COLUMNS)
@@ -75,6 +81,22 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
             hdd_base_c: Base temperature of "hdd" (°C)
             cdd_base_c: Base temperature of "cdd" (°C)
             strict: Raise instead of warning when a returned column has missing values
+            locations: Several locations combined into one source, mutually exclusive with ``latitude``/
+                ``longitude``. A dict ``{name: {"latitude", "longitude", "weight"?}}`` (or ``{name: (latitude,
+                longitude)}`` / ``(latitude, longitude, weight)`` tuples), or the compact string
+                ``"name:latitude:longitude[:weight], ..."`` for YAML/the TUI. Names use letters, digits and
+                underscores and must be unique; weights, when given, must be positive and given for every
+                location or none. With weights this returns one weighted series per variable,
+                `{prefix}_{variable}_d+i` (weights normalised; a circular mean for `*direction*` columns;
+                `weather_code` not averaged; NaN wherever any location is NaN). Without weights it returns only
+                the per-location columns, `{prefix}_{name}_{variable}_d+i`. Every location is fetched by
+                another ``OpenMeteoSingleRunsSource`` sharing every other parameter here, so all locations
+                follow the same vintage rule; weights are fixed and must be known at every issue day D (use a
+                reference date before the sample starts, e.g. population or installed capacity, not
+                end-of-sample figures).
+            keep_locations: With weighted ``locations``, also return each location's own columns,
+                `{prefix}_{name}_{variable}_d+i` (default: False). Has no effect without weights, since the
+                per-location columns are then already the only output.
         """
         self.latitude = latitude
         self.longitude = longitude
@@ -91,13 +113,15 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
         self.hdd_base_c = hdd_base_c
         self.cdd_base_c = cdd_base_c
         self.strict = strict
+        self.locations = locations
+        self.keep_locations = keep_locations
 
         self._setup()
         self._validate_config()
 
     @property
     def _label(self) -> str:
-        return f"Open-Meteo single runs [{self.latitude}, {self.longitude}]"
+        return f"Open-Meteo single runs [{self._location_label()}]"
 
     def _validate_config(self) -> bool:
         self._validate_common(max_horizon=self.MAX_HORIZON)
@@ -117,6 +141,9 @@ class OpenMeteoSingleRunsSource(OpenMeteoBase):
         start, end = self._to_utc(start), self._to_utc(end)
         if end <= start:
             raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
+
+        if self._locations:
+            return self._fetch_locations(start, end)
 
         rows = pd.date_range(start.ceil("1h"), end, freq="1h", inclusive="left")
         if rows.empty:

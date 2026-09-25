@@ -1,6 +1,6 @@
 import time
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -111,6 +111,9 @@ class OpenMeteoSource(OpenMeteoBase):
     buckets. ``vintage="valid_time"`` restores the mapping of epftoolbox2 <= 2.2 (bucket i at t + 24 h * i), which
     uses runs published after the issue time; keep it only to reproduce old results.
 
+    Pass ``locations`` instead of ``latitude``/``longitude`` to combine several locations into one source (a
+    weighted average, per-location columns, or both) — see the ``locations`` parameter below.
+
     Example:
         >>> source = OpenMeteoSource(
         ...     latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=5, prefix="warsaw"
@@ -126,8 +129,8 @@ class OpenMeteoSource(OpenMeteoBase):
 
     def __init__(
         self,
-        latitude: float,
-        longitude: float,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
         horizon: int = 5,
         model: str = "jma_seamless",
         columns: Optional[List[str]] = None,
@@ -142,13 +145,16 @@ class OpenMeteoSource(OpenMeteoBase):
         hdd_base_c: float = 18.0,
         cdd_base_c: float = 21.0,
         strict: bool = False,
+        locations: Optional[Union[str, Dict[str, Any]]] = None,
+        keep_locations: bool = False,
     ):
         """
         Initialize Open-Meteo data source
 
         Args:
-            latitude: Latitude coordinate
-            longitude: Longitude coordinate
+            latitude: Latitude coordinate. Mutually exclusive with ``locations``; set this (with ``longitude``)
+                for one location, or ``locations`` for several.
+            longitude: Longitude coordinate. See ``latitude``.
             horizon: Days ahead (d+1 .. d+horizon), 1-7. With ``vintage="issue_time"`` the largest usable horizon
                 depends on the model and issue settings (5 for the default JMA model); larger values raise.
             model: Weather model to use (default: "jma_seamless")
@@ -174,6 +180,22 @@ class OpenMeteoSource(OpenMeteoBase):
             hdd_base_c: Base temperature of "hdd" (°C)
             cdd_base_c: Base temperature of "cdd" (°C)
             strict: Raise instead of warning when a returned column has missing values.
+            locations: Several locations combined into one source, mutually exclusive with ``latitude``/
+                ``longitude``. A dict ``{name: {"latitude", "longitude", "weight"?}}`` (or ``{name: (latitude,
+                longitude)}`` / ``(latitude, longitude, weight)`` tuples), or the compact string
+                ``"name:latitude:longitude[:weight], ..."`` for YAML/the TUI. Names use letters, digits and
+                underscores and must be unique; weights, when given, must be positive and given for every
+                location or none. With weights this returns one weighted series per variable,
+                `{prefix}_{variable}_d+i` (weights normalised; a circular mean for `*direction*` columns;
+                `weather_code` not averaged; NaN wherever any location is NaN). Without weights it returns only
+                the per-location columns, `{prefix}_{name}_{variable}_d+i`. Every location is fetched by
+                another ``OpenMeteoSource`` sharing every other parameter here, so all locations follow the
+                same vintage rule; weights are fixed and must be known at every issue day D (use a reference
+                date before the sample starts, e.g. population or installed capacity, not end-of-sample
+                figures).
+            keep_locations: With weighted ``locations``, also return each location's own columns,
+                `{prefix}_{name}_{variable}_d+i` (default: False). Has no effect without weights, since the
+                per-location columns are then already the only output.
         """
         self.latitude = latitude
         self.longitude = longitude
@@ -191,6 +213,8 @@ class OpenMeteoSource(OpenMeteoBase):
         self.hdd_base_c = hdd_base_c
         self.cdd_base_c = cdd_base_c
         self.strict = strict
+        self.locations = locations
+        self.keep_locations = keep_locations
 
         self._setup()
 
@@ -266,6 +290,9 @@ class OpenMeteoSource(OpenMeteoBase):
 
         if end <= start:
             raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
+
+        if self._locations:
+            return self._fetch_locations(start, end)
 
         # `timezone` may have been unset at construction and inherited from DataPipeline.timezone since (see
         # `market_timezone`); the buckets could not be resolved until now in that case.

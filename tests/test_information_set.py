@@ -144,6 +144,51 @@ def test_source_rules_weather_run_defaults_without_a_publication_delay():
     assert (rule.kind, rule.delay) == ("weather_run", "10h")
 
 
+def test_source_rules_weighted_locations_cover_the_weighted_columns():
+    # A weighted OpenMeteoSource emits `{prefix}_{variable}_d+i`, exactly the single-location column shape.
+    source = _warsaw_weather_source(
+        latitude=None,
+        longitude=None,
+        locations={"warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 1.0}},
+    )
+    rules = source_rules([source])
+    assert "warsaw_temperature_2m" in rules
+    assert "warsaw_warsaw_temperature_2m" not in rules  # no per-location columns without keep_locations
+
+
+def test_source_rules_weighted_locations_with_keep_locations_cover_both_shapes():
+    source = _warsaw_weather_source(
+        latitude=None,
+        longitude=None,
+        locations={
+            "warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 1.0},
+            "krakow": {"latitude": 50.06, "longitude": 19.94, "weight": 1.0},
+        },
+        keep_locations=True,
+    )
+    rules = source_rules([source])
+    assert "warsaw_temperature_2m" in rules
+    assert "warsaw_warsaw_temperature_2m" in rules
+    assert "warsaw_krakow_temperature_2m" in rules
+
+
+def test_source_rules_per_location_only_locations_cover_the_per_location_columns():
+    # Without weights only the per-location columns exist; the base name must not get a rule for a column that
+    # is never actually produced.
+    source = _warsaw_weather_source(
+        latitude=None,
+        longitude=None,
+        locations={
+            "warsaw": {"latitude": 52.23, "longitude": 21.01},
+            "krakow": {"latitude": 50.06, "longitude": 19.94},
+        },
+    )
+    rules = source_rules([source])
+    assert "warsaw_warsaw_temperature_2m" in rules
+    assert "warsaw_krakow_temperature_2m" in rules
+    assert "warsaw_temperature_2m" not in rules
+
+
 def test_user_rules_take_precedence_and_exact_names_beat_suffix_parsing():
     info = InformationSet(
         rules={"price": Availability.realised("0h"), "wind_d+1": Availability.published("09:00", days_before=0)}
