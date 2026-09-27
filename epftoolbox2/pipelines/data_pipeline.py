@@ -236,8 +236,14 @@ class DataPipeline:
                     continue
                 fresh_df = clip_to_range(fresh_df, missing_start, missing_end)
                 # Records only the part the source actually returned and that is settled; the rest is still
-                # returned now and fetched again next time.
-                cache_manager.write_cache(cache_key, fresh_df, missing_start, missing_end, source_config, source_class)
+                # returned now and fetched again next time. `timezone` floors that cap to this pipeline's market
+                # zone's own local midnight (not UTC midnight), so a later resumed fetch starts exactly there
+                # instead of strictly inside a source's one-day period (e.g. ENTSO-E's A31 daily min/max) — a
+                # source that carries such a period's value forward to cover its fetch's own start would
+                # otherwise re-stamp the same day's value a second time on top of the one already cached.
+                cache_manager.write_cache(
+                    cache_key, fresh_df, missing_start, missing_end, source_config, source_class, self.timezone
+                )
                 parts.append(fresh_df)
 
         parts = [p for p in parts if not p.empty]

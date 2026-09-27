@@ -48,11 +48,27 @@ def _now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
 
 
-def unsettled_boundary(period: pd.Timedelta = UNSETTLED_PERIOD) -> pd.Timestamp:
-    """UTC midnight ``period`` before now: the per-source cache never records data past this point as covered,
-    because it may still be published or completed. The single-file cache (``DataPipeline``'s ``cache="path"``)
-    uses the same boundary to decide whether a cached file might now be stale."""
-    return _now().floor("D") - period
+def unsettled_boundary(period: pd.Timedelta = UNSETTLED_PERIOD, timezone: Optional[str] = None) -> pd.Timestamp:
+    """UTC instant ``period`` before now, floored to midnight: the per-source cache never records data past this
+    point as covered, because it may still be published or completed. The single-file cache (``DataPipeline``'s
+    ``cache="path"``) uses the same boundary (UTC, no ``timezone``) to decide whether a cached file might now be
+    stale.
+
+    Floored in UTC by default. Pass the pipeline's market ``timezone`` when capping a per-source cache write
+    (``CacheManager.write_cache``/``covered_ranges``): flooring in UTC almost never lines up with where a source
+    stamps its own daily values (ENTSO-E's A31 sits at the *area's* local midnight), so resuming a fetch there
+    can fall strictly inside a one-day period. A source that carries such a period's value forward to cover its
+    fetch's own start (``EntsoeSource._clip``) would then re-stamp the same day's value a second time, on top of
+    the one already cached at its true local midnight — DST/timezone review finding 2. Flooring in the source's
+    own zone instead lands the boundary exactly on that midnight, so nothing needs to be carried across it.
+    ``period`` must be a whole number of days for this to floor to a local midnight rather than an arbitrary time.
+    """
+    now = _now()
+    if timezone is None:
+        return now.floor("D") - period
+    days, remainder = divmod(period, pd.Timedelta(days=1))
+    local_midnight = now.tz_convert(timezone).floor("D")
+    return (local_midnight - pd.DateOffset(days=int(days)) - remainder).tz_convert("UTC")
 
 
 def atomic_write(path: Path, write: Callable[[Path], None]) -> None:
@@ -260,10 +276,14 @@ class CacheManager:
         return pd.concat(chunks).sort_index(kind="stable")
 
     def covered_ranges(
-        self, df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp
+        self, df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, timezone: Optional[str] = None
     ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
         """Contiguous, disjoint sub-ranges of ``[start, end)`` that ``df`` (fetched for ``[start, end)``) may be
         recorded as covering, each capped at ``end`` and at the start of the unsettled period before now.
+
+        ``timezone``, when given, floors that unsettled-period cap to a local midnight in that zone instead of
+        UTC (see ``unsettled_boundary``), so a later resumed fetch starts exactly at a source's own local
+        midnight rather than strictly inside a one-day period.
 
         A gap between two consecutive returned timestamps ends a run if it is wider than the expected spacing at
         that point in the response, estimated from a small window of neighbouring diffs (``_local_steps``)
@@ -283,7 +303,7 @@ class CacheManager:
         index = clip_to_range(df, start, end).index.unique().sort_values()
         if len(index) == 0:
             return []
-        cap = min(end, unsettled_boundary(self.unsettled_period))
+        cap = min(end, unsettled_boundary(self.unsettled_period, timezone))
 
         if len(index) == 1:
             return [(start, cap)] if cap > start else []
@@ -331,17 +351,21 @@ class CacheManager:
         end: pd.Timestamp,
         source_config: Dict,
         source_class: Optional[str] = None,
+        timezone: Optional[str] = None,
     ) -> Optional[pd.Timestamp]:
         """Store the contiguous run(s) of ``df`` (fetched for ``[start, end)``) that are actually present and
         settled — see ``covered_ranges``. Returns the end of the last (rightmost) range recorded, or ``None`` if
         nothing was recorded; this does not imply contiguous coverage back to ``start`` when ``df`` had a gap, so
         callers rely on ``find_missing_ranges`` for that, not this return value.
 
+        ``timezone`` (typically the owning ``DataPipeline``'s market zone) is passed through to
+        ``covered_ranges`` so the unsettled-period cap lands on that zone's local midnight; see there.
+
         Rows outside a recorded range are not stored. Each new range replaces any overlapping part of older ranges.
         """
         if df is None or df.empty:
             return None
-        ranges = self.covered_ranges(df, start, end)
+        ranges = self.covered_ranges(df, start, end, timezone)
         if not ranges:
             return None
 
