@@ -183,8 +183,51 @@ class TestFormat:
         source = EpftoolboxBenchmarkSource("PJM", cache_dir=str(tmp_path))
         mock_zenodo(source, benchmark_csv("PJM", first="2016-01-05", days=2), dataset="PJM")
         df = source.fetch(pd.Timestamp("2016-01-05 05:00", tz="UTC"), pd.Timestamp("2016-01-05 10:00", tz="UTC"))
-        # 00:00 EST = 05:00 UTC
-        assert list(df["price"]) == [500, 501, 502, 503, 504, 505]
+        # 00:00 EST = 05:00 UTC; half-open [start, end), so 10:00 UTC (05:00 EST) itself is excluded
+        assert list(df["price"]) == [500, 501, 502, 503, 504]
+
+    def test_fetch_excludes_a_row_exactly_at_end(self, tmp_path):
+        """DST/timezone review finding 4: fetch used to include a row exactly at `end` (`df.loc[start:end]`),
+        breaking the source contract's half-open [start, end) that DataPipeline and the per-source cache rely
+        on."""
+        source = EpftoolboxBenchmarkSource("PJM", cache_dir=str(tmp_path))
+        mock_zenodo(source, benchmark_csv("PJM", first="2016-01-05", days=2), dataset="PJM")
+        start, end = pd.Timestamp("2016-01-05 05:00", tz="UTC"), pd.Timestamp("2016-01-05 06:00", tz="UTC")
+        df = source.fetch(start, end)
+        assert list(df["price"]) == [500]
+        assert df.index.max() < end
+
+
+class TestPipelineTimezone:
+    """DST/timezone review finding 4: `index_timezone` is a fixed offset the source always has (derived from
+    `dataset`), never inherited from `DataPipeline.timezone`. A pipeline zone that disagrees with it was never
+    compared, so the mismatch was silent: the same UTC index gets read back as a different (date, hour) once
+    passed through a `TimezoneTransformer(target_tz="Europe/Berlin")` instead of the source's own offset."""
+
+    def test_mismatched_pipeline_timezone_raises(self, tmp_path):
+        source = EpftoolboxBenchmarkSource("DE", cache_dir=str(tmp_path))  # index_timezone == "Etc/GMT-1"
+        with pytest.raises(ValueError, match="Etc/GMT-1"):
+            DataPipeline(sources=[source], timezone="Europe/Berlin")
+
+    def test_mismatch_raised_on_run_too_if_added_after_construction(self, tmp_path):
+        """The check also fires from `run()` (via `_validate_settings`), not only at construction, since a
+        source can be added afterwards with `add_source`."""
+        source = EpftoolboxBenchmarkSource("DE", cache_dir=str(tmp_path))
+        mock_zenodo(source, benchmark_csv("DE"))
+        pipeline = DataPipeline(timezone="Europe/Berlin").add_source(source)
+        with pytest.raises(ValueError, match="Etc/GMT-1"):
+            pipeline.run("2016-03-26", "2016-03-29")
+
+    def test_matching_pipeline_timezone_is_fine(self, tmp_path):
+        source = EpftoolboxBenchmarkSource("DE", cache_dir=str(tmp_path))
+        mock_zenodo(source, benchmark_csv("DE"))
+        pipeline = DataPipeline(sources=[source], timezone=source.index_timezone)
+        assert not pipeline.run("2016-03-26", "2016-03-29").empty
+
+    def test_no_pipeline_timezone_is_fine(self, tmp_path):
+        source = EpftoolboxBenchmarkSource("DE", cache_dir=str(tmp_path))
+        mock_zenodo(source, benchmark_csv("DE"))
+        assert not DataPipeline(sources=[source]).run("2016-03-26", "2016-03-29").empty
 
 
 class TestSerialization:
