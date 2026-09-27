@@ -59,7 +59,7 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 | `christmas_period` | bool | `False` | Add `is_christmas_period` (24 December to 1 January) |
 | `holiday_distance` | int | `0` | If N > 0, add `days_to_holiday` and `days_since_holiday`, capped at N |
 | `dst_switch` | bool | `False` | Add `is_dst_switch_day` (local days with 23 or 25 hours) |
-| `regimes` | bool/dict | `False` | Market-regime step dummies `regime_{name}`: `True` for the default set, or `{name: "YYYY-MM-DD"}` |
+| `regimes` | bool/dict | `False` | Market-regime dummies `regime_{name}`: `True` for the default set, or a dict of periods (see [Regime dummies](#regime-dummies)) |
 | `school_holidays` | bool | `False` | Download school holiday flags from the [OpenHolidays API](https://www.openholidaysapi.org) (see [School holidays](#school-holidays) below) |
 | `school_subdivisions` | str/List[str] | `None` | OpenHolidays subdivision codes, e.g. `["PL-MZ", "PL-SL"]` or `"MZ,SL"` (the country prefix is optional). `None`: only holidays that apply to the whole country |
 | `school_weights` | dict/List[float] | `None` | Weight per subdivision for `school_holiday_share`: `{code: weight}`, or numbers in the order of `school_subdivisions`. With a dict, `school_subdivisions` defaults to its keys |
@@ -164,7 +164,7 @@ calendar as `holidays` (country, `subdiv`, `categories`), even when `holidays=Fa
 | `christmas_period=True` | `is_christmas_period` | Local dates from 24 December to 1 January inclusive |
 | `holiday_distance=N` | `days_to_holiday`, `days_since_holiday` | Days to the next and since the previous holiday, 0 on a holiday, capped at N (so N means "N or more") |
 | `dst_switch=True` | `is_dst_switch_day` | 1 on every row of a local day with 23 or 25 hours |
-| `regimes=...` | `regime_{name}` | 0 before the regime's first local delivery day, 1 from it on |
+| `regimes=...` | `regime_{name}` | 1 on local dates `start <= D <= end`, 0 otherwise; open-ended (no upper bound) unless an `end` is given |
 
 ### Regime dummies
 
@@ -195,6 +195,29 @@ source = CalendarSource(
   A regime dummy only helps once the training window spans the change. While the window lies entirely before
   it, the column is all zeros and gets no weight, so the first forecasts after the change are made as if nothing
   had happened. Don't pool data before and after 2025-10-01 without a regime flag or a separate model.
+</Aside>
+
+#### Bounded periods
+
+Each entry in the `regimes` dict can be a single date (open-ended, as above) or a period with an end, given
+as a `(start, end)` pair or a `{"start": ..., "end": ...}` dict — the two are equivalent:
+
+```python
+regimes = {"eu_price_cap": ("2022-12-01", "2023-01-31")}
+regimes = {"eu_price_cap": {"start": "2022-12-01", "end": "2023-01-31"}}
+```
+
+`regime_{name}` is 1 on local dates `start <= D <= end` and 0 otherwise (`end` is inclusive: the last day it
+still equals 1); with no `end`, the dummy stays 1 from `start` on, as before. `end` must not be before `start`.
+`DEFAULT_REGIMES` entries may also carry an `"end"` key; none of the shipped ones do yet.
+
+<Aside type="caution">
+  **A bounded period is only leak-free if its end date was known in advance** — announced, like a price cap's
+  legislated expiry, or the go-live date of whatever superseded it. A period end you (or anyone) only
+  identified afterwards, from the data, is look-ahead: a forecast issued during the period could not have
+  known when it would end. An ex-post label such as "energy crisis 2021-2023", picked because that is where the
+  data later showed elevated prices, has exactly this problem — don't build one from hindsight and use it in a
+  backtest that spans it.
 </Aside>
 
 ---

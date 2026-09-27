@@ -261,7 +261,7 @@ source = CalendarSource(
     christmas_period=False,      # Optional. Add is_christmas_period (24 Dec - 1 Jan)
     holiday_distance=0,          # Optional. N > 0: add days_to_holiday, days_since_holiday capped at N
     dst_switch=False,            # Optional. Add is_dst_switch_day (23- or 25-hour local days)
-    regimes=False,               # Optional. True (DEFAULT_REGIMES for the country) or {name: "YYYY-MM-DD"}
+    regimes=False,               # Optional. True (DEFAULT_REGIMES for the country) or a dict of periods, see below
     school_holidays=False,       # Optional. Download school holiday flags from the OpenHolidays API
     school_subdivisions=None,    # Optional. ["PL-MZ", "PL-SL"] or "MZ,SL"; None = country-wide holidays only
     school_weights=None,         # Optional. {code: weight} (e.g. population) or numbers in school_subdivisions order
@@ -292,7 +292,7 @@ No API key.
 | `christmas_period` | `True` | `is_christmas_period`: local dates 24 Dec - 1 Jan |
 | `holiday_distance` | `N` | `days_to_holiday`, `days_since_holiday` (0 on a holiday, capped at N) |
 | `dst_switch` | `True` | `is_dst_switch_day` (every row of a 23/25-hour local day) |
-| `regimes` | `True`/dict | `regime_{name}`: 0 before the first local delivery day, 1 from it on |
+| `regimes` | `True`/dict | `regime_{name}`: 1 on local dates start <= D <= end, 0 otherwise; open-ended (no end) unless one is given |
 | `school_holidays` | `True`, no/one `school_subdivisions` | `is_school_holiday` (1.0/0.0/NaN) |
 | `school_holidays` | `True`, several `school_subdivisions` | `is_school_holiday_{code}`, e.g. `is_school_holiday_pl_mz` |
 | `school_holidays` | `True` with `school_weights` | also `school_holiday_share` = sum(weight * flag) / sum(weight) |
@@ -308,6 +308,12 @@ No API key.
 - Default regimes (first delivery day): `de_at_split` 2018-10-01 (DE, AT), `brexit_decoupling` 2021-01-01
   (GB, IE), `core_fb` 2022-06-09 (Core zones), `nordic_fb` 2024-10-30 (DK, FI, NO, SE), `sdac_15min_mtu`
   2025-10-01 (SDAC countries), `sem_30min_mtu` 2025-10-01 (IE). A dict replaces the set.
+- A `regimes` dict entry is a date (open-ended: `{name: "YYYY-MM-DD"}`), a `(start, end)` pair or
+  `{name: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}` ("end" optional, inclusive when given; must not be
+  before "start"). `DEFAULT_REGIMES` entries may also carry an "end" key; none of the shipped ones do yet. A
+  bounded period is only leak-free if its end date was known in advance (e.g. a legislated expiry), not
+  identified afterwards from the data — an ex-post label like "energy crisis 2021-2023" is look-ahead in a
+  backtest.
 - All calendar features are known in advance, so `_d+k` versions are legal predictors.
 - School holiday NaN (with a warning) where the API has no data: any stretch of more than a year without a
   school holiday (before the history starts, or school years not yet published). A NaN flag makes the share NaN.

@@ -182,7 +182,7 @@ class CalendarSource(DataSource):
                  categories: Union[str, List[str]] = None,
                  bridge_days: bool = False, christmas_period: bool = False,
                  holiday_distance: int = 0, dst_switch: bool = False,
-                 regimes: Union[bool, Dict[str, str]] = False,
+                 regimes: Union[bool, Dict[str, Any]] = False,
                  school_holidays: bool = False,
                  school_subdivisions: Union[str, List[str]] = None,
                  school_weights: Union[Dict[str, float], List[float]] = None): ...

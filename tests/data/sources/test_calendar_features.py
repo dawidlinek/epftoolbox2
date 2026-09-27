@@ -163,6 +163,64 @@ class TestRegimes:
         with pytest.raises(ValueError, match="regimes"):
             CalendarSource(country="PL", regimes=regimes)
 
+    def test_string_date_is_open_ended(self):
+        source = CalendarSource(country="PL", regimes={"promo": "2024-01-02"}, **BARE)
+        df = source.fetch(*_range("2024-01-01", "2024-01-05"))
+        assert list(_per_local_date(df, "regime_promo")) == [0, 1, 1, 1, 1]
+
+    def test_tuple_period_is_bounded_and_end_inclusive(self):
+        source = CalendarSource(country="PL", regimes={"promo": ("2024-01-02", "2024-01-03")}, **BARE)
+        df = source.fetch(*_range("2024-01-01", "2024-01-04"))
+        assert list(_per_local_date(df, "regime_promo")) == [0, 1, 1, 0]
+        assert source.regimes == {"promo": {"start": "2024-01-02", "end": "2024-01-03"}}
+
+    def test_dict_period_is_bounded_and_end_inclusive(self):
+        source = CalendarSource(country="PL", regimes={"promo": {"start": "2024-01-02", "end": "2024-01-03"}}, **BARE)
+        df = source.fetch(*_range("2024-01-01", "2024-01-04"))
+        assert list(_per_local_date(df, "regime_promo")) == [0, 1, 1, 0]
+
+    def test_dict_period_without_end_is_open_ended(self):
+        source = CalendarSource(country="PL", regimes={"promo": {"start": "2024-01-02"}}, **BARE)
+        df = source.fetch(*_range("2024-01-01", "2024-01-05"))
+        assert list(_per_local_date(df, "regime_promo")) == [0, 1, 1, 1, 1]
+        assert source.regimes == {"promo": "2024-01-02"}
+
+    def test_bounded_period_end_inclusive_across_a_dst_switch(self):
+        # Autumn switch is 2024-10-27 in Europe/Warsaw; the period ends on the switch day itself.
+        source = CalendarSource(country="PL", regimes={"x": ("2024-10-25", "2024-10-27")}, **BARE)
+        df = source.fetch(*_range("2024-10-24", "2024-10-28"))
+        assert list(_per_local_date(df, "regime_x")) == [0, 1, 1, 1, 0]
+
+    def test_end_before_start_raises(self):
+        with pytest.raises(ValueError, match="before its start"):
+            CalendarSource(country="PL", regimes={"x": ("2024-01-05", "2024-01-01")})
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            ("2024-01-01", "2024-01-02", "2024-01-03"),  # not a pair
+            {"start": "2024-01-01", "middle": "2024-01-02"},  # unknown key
+            {"end": "2024-01-02"},  # missing start
+        ],
+    )
+    def test_malformed_period_raises(self, spec):
+        with pytest.raises(ValueError, match="regimes"):
+            CalendarSource(country="PL", regimes={"x": spec})
+
+    def test_round_trip_open_and_bounded_regimes(self, tmp_path):
+        from epftoolbox2.pipelines import DataPipeline
+
+        source = CalendarSource(
+            country="PL", regimes={"promo": "2024-01-02", "sale": ("2024-06-01", "2024-06-30")}, **BARE
+        )
+        path = tmp_path / "dp.yaml"
+        DataPipeline(sources=[source]).save(path)
+        loaded = DataPipeline.load(path).sources[0]
+
+        assert loaded.regimes == {"promo": "2024-01-02", "sale": {"start": "2024-06-01", "end": "2024-06-30"}}
+        start, end = _range("2024-01-01", "2024-07-02")
+        pd.testing.assert_frame_equal(source.fetch(start, end), loaded.fetch(start, end))
+
 
 class TestFeaturesYamlRoundTrip:
     def test_round_trip(self, tmp_path):

@@ -1,6 +1,6 @@
 import re
 import unicodedata
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import holidays as holidays_lib
 import numpy as np
@@ -63,7 +63,8 @@ MONTH_NAMES = [
 HOLIDAY_LANGUAGE = "en_US"
 
 # Market-structure changes used by `regimes=True`. "date" is the first delivery day (local date); a regime dummy is 1
-# from that date on, for the listed countries only.
+# from that date on, for the listed countries only. An entry may add an "end" (last delivery day, inclusive) to
+# make the dummy a bounded period instead of a step; none of the entries below do yet.
 DEFAULT_REGIMES = {
     "de_at_split": {
         "date": "2018-10-01",
@@ -179,7 +180,7 @@ class CalendarSource(DataSource):
         christmas_period: bool = False,
         holiday_distance: int = 0,
         dst_switch: bool = False,
-        regimes: Union[bool, Dict[str, str]] = False,
+        regimes: Union[bool, Dict[str, Any]] = False,
         school_holidays: bool = False,
         school_subdivisions: Optional[Union[str, List[str]]] = None,
         school_weights: Optional[Union[Dict[str, float], List[float], str]] = None,
@@ -208,8 +209,12 @@ class CalendarSource(DataSource):
             christmas_period: Add `is_christmas_period`: 24 December to 1 January inclusive.
             holiday_distance: If N > 0, add `days_to_holiday` and `days_since_holiday` (0 on a holiday), capped at N.
             dst_switch: Add `is_dst_switch_day`: local days with 23 or 25 hours.
-            regimes: Step dummies `regime_{name}` (1 from the local date on). True uses DEFAULT_REGIMES for the
-                country; a dict {name: "YYYY-MM-DD"} replaces them.
+            regimes: Dummies `regime_{name}`, 1 on local dates start <= D <= end and 0 otherwise (end inclusive;
+                open-ended when there is no end). True uses DEFAULT_REGIMES for the country; a dict replaces
+                them, one entry per name: a date string (open-ended, `{name: "YYYY-MM-DD"}`), a `(start, end)`
+                pair, or `{name: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}` (`"end"` optional). A bounded
+                period is only leak-free if its end date was announced in advance, not identified afterwards
+                from the data (an ex-post label like "energy crisis 2021-2023" is look-ahead in a backtest).
             school_holidays: Download school holiday flags from the OpenHolidays API (network calls happen only
                 when this is True). No or one `school_subdivisions` entry: `is_school_holiday`; several: one
                 `is_school_holiday_{code}` per entry, e.g. `is_school_holiday_pl_mz`.
@@ -293,20 +298,52 @@ class CalendarSource(DataSource):
         return int(value)
 
     @staticmethod
-    def _normalise_regimes(regimes) -> Union[bool, Dict[str, str]]:
+    def _normalise_regimes(regimes) -> Union[bool, Dict[str, Any]]:
         if isinstance(regimes, bool):
             return regimes
         if not isinstance(regimes, dict) or not regimes:
-            raise ValueError(f"regimes must be True, False or a non-empty dict {{name: date}}, got {regimes!r}")
+            raise ValueError(
+                "regimes must be True, False or a non-empty dict of {name: date}, {name: (start, end)} or "
+                f"{{name: {{'start': ..., 'end': ...}}}}, got {regimes!r}"
+            )
         normalised = {}
-        for name, date in regimes.items():
+        for name, spec in regimes.items():
             if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_]+", name):
                 raise ValueError(f"regimes: name {name!r} must contain only letters, digits and underscores")
-            try:
-                normalised[name] = pd.Timestamp(date).date().isoformat()
-            except (ValueError, TypeError) as e:
-                raise ValueError(f"regimes: {name!r} has an invalid date {date!r}") from e
+            start, end = CalendarSource._parse_regime_period(name, spec)
+            normalised[name] = start if end is None else {"start": start, "end": end}
         return normalised
+
+    @staticmethod
+    def _parse_regime_period(name: str, spec) -> tuple:
+        """A regime spec (a date, a `(start, end)` pair, or `{"start": ..., "end": ...}`) as (start, end) ISO
+        date strings; `end` is None when the period is open-ended."""
+        if isinstance(spec, dict):
+            unknown = set(spec) - {"start", "end"}
+            if unknown or "start" not in spec:
+                raise ValueError(
+                    f"regimes: {name!r} as a dict must be {{'start': ..., 'end': ...}} ('end' optional), got {spec!r}"
+                )
+            start, end = spec["start"], spec.get("end")
+        elif isinstance(spec, (tuple, list)):
+            if len(spec) != 2:
+                raise ValueError(f"regimes: {name!r} as a pair must be (start, end), got {spec!r}")
+            start, end = spec
+        else:
+            start, end = spec, None
+
+        start_iso = CalendarSource._regime_date(name, start, "start")
+        end_iso = None if end is None else CalendarSource._regime_date(name, end, "end")
+        if end_iso is not None and end_iso < start_iso:
+            raise ValueError(f"regimes: {name!r} end {end_iso} is before its start {start_iso}")
+        return start_iso, end_iso
+
+    @staticmethod
+    def _regime_date(name: str, value: Any, which: str) -> str:
+        try:
+            return pd.Timestamp(value).date().isoformat()
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"regimes: {name!r} has an invalid {which} date {value!r}") from e
 
     def _validate_country(self):
         if self.country not in COUNTRY_DATA:
@@ -411,8 +448,12 @@ class CalendarSource(DataSource):
         if self.dst_switch:
             df = self._add_dst_switch(df, local_dates, codes)
         if self.regimes:
-            for name, date in self._resolved_regimes().items():
-                df[f"{self.prefix}regime_{name}"] = np.asarray(local_dates >= pd.Timestamp(date), dtype=int)[codes]
+            for name, spec in self._resolved_regimes().items():
+                start, end = (spec, None) if isinstance(spec, str) else (spec["start"], spec["end"])
+                flag = local_dates >= pd.Timestamp(start)
+                if end is not None:
+                    flag &= local_dates <= pd.Timestamp(end)
+                df[f"{self.prefix}regime_{name}"] = np.asarray(flag, dtype=int)[codes]
         if self.school_holidays:
             df = self._add_school_holidays(df, local_dates, codes)
 
@@ -471,9 +512,15 @@ class CalendarSource(DataSource):
         df[f"{self.prefix}is_dst_switch_day"] = switch.astype(int)[codes]
         return df
 
-    def _resolved_regimes(self) -> Dict[str, str]:
+    def _resolved_regimes(self) -> Dict[str, Any]:
+        """Each entry as `_normalise_regimes` would store it: a bare ISO date, or {"start", "end"}."""
         if self.regimes is True:
-            return {name: spec["date"] for name, spec in DEFAULT_REGIMES.items() if self.country in spec["countries"]}
+            result = {}
+            for name, spec in DEFAULT_REGIMES.items():
+                if self.country not in spec["countries"]:
+                    continue
+                result[name] = {"start": spec["date"], "end": spec["end"]} if spec.get("end") else spec["date"]
+            return result
         return dict(self.regimes) if self.regimes else {}
 
     def _add_holidays(self, df: pd.DataFrame, local_dates: pd.DatetimeIndex, codes: np.ndarray) -> pd.DataFrame:
