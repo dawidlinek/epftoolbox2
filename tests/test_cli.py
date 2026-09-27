@@ -73,6 +73,23 @@ def test_csv_round_trip_keeps_the_local_time_zone_and_exact_values(tmp_path, loc
     pd.testing.assert_frame_equal(loaded, local_data, check_names=False, check_freq=False)
 
 
+def test_save_frame_csv_does_not_rename_the_callers_index(tmp_path, local_data):
+    """DST/timezone review finding 5: `save_frame_csv` used to write the zone into the header by renaming
+    `df.index` in place; a shallow `copy(deep=False)` shares the Index object with the original DataFrame, so
+    that rename leaked back onto the caller's own frame. Saving must not mutate `df` at all."""
+    original_name = local_data.index.name
+    save_frame_csv(local_data, tmp_path / "data.csv")
+    assert local_data.index.name == original_name
+
+    # Saving again (e.g. to a second path, or after the zone-naming header was already written once) must give
+    # the same header both times, not a doubled "name[tz][tz]" from renaming an already-renamed shared index.
+    save_frame_csv(local_data, tmp_path / "data2.csv")
+    first_header = (tmp_path / "data.csv").read_text().splitlines()[0]
+    second_header = (tmp_path / "data2.csv").read_text().splitlines()[0]
+    assert first_header == second_header
+    assert first_header.startswith("datetime[Europe/Warsaw],")
+
+
 def test_cli_round_trip_equals_the_in_process_run(tmp_path, local_data):
     path = tmp_path / "data.csv"
     save_frame_csv(local_data, path)
