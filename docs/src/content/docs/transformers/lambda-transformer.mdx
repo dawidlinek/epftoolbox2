@@ -28,15 +28,13 @@ df = LambdaTransformer(func=lambda df: df.assign(spread=df["price"] - df["price_
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `func` | Callable[[DataFrame], DataFrame] \| None | `None` | Full control over the output frame |
-| `columns` | dict \| None | `None` | `{new_or_existing_column: expression}`; each expression is a string for `df.eval(...)` or a callable `df -> Series` |
+| `func` | lambda \| str \| None | `None` | `df -> df` lambda (or its source text) for full control over the output frame |
+| `columns` | dict \| None | `None` | `{new_or_existing_column: expression}`; each expression is a `df -> Series` lambda (or its source text), or a string for `df.eval(...)` |
 
 ## `columns`: string or callable expressions
 
-Each entry adds or overwrites one column. A string is evaluated with
-[`DataFrame.eval`](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.eval.html), so it can be saved
-to YAML; a callable `df -> Series` gives more control but, like any callable parameter in this library, cannot
-be saved (`DataPipeline.save` raises `TypeError`).
+Each entry adds or overwrites one column. A `df -> Series` lambda gives full pandas; any other string is
+evaluated with [`DataFrame.eval`](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.eval.html).
 
 Entries run in the order given, each against the frame as built so far — including the columns earlier entries
 in the same `columns` dict just added:
@@ -62,7 +60,7 @@ LambdaTransformer(func=lambda df: df.assign(spread=df["price"] - df["price_d-1"]
 ```
 
 `func` receives the whole frame and returns the whole frame; use it for anything `columns` can't express, such
-as dropping a column or building several columns with a shared intermediate. It cannot be saved to YAML.
+as dropping a column or building several columns with a shared intermediate.
 
 ## Index guard
 
@@ -95,11 +93,26 @@ The result must have exactly the same index as the input: the same rows, in the 
 ```python
 from epftoolbox2.pipelines import DataPipeline
 
-# String expressions round-trip through YAML.
+# Lambdas are saved as their source text; df.eval strings as they are.
 DataPipeline().add_transformer(
-    LambdaTransformer(columns={"residual_load": "load_forecast - wind_forecast - solar_forecast"})
+    LambdaTransformer(columns={
+        "residual_load": "load_forecast - wind_forecast - solar_forecast",
+        "log_load": lambda df: np.log(df["load_forecast"]),
+    })
 ).save("pipeline.yaml")
+# pipeline.yaml:  log_load: lambda df: np.log(df["load_forecast"])
 
-# A callable, in `func` or as a `columns` value, raises TypeError instead.
-DataPipeline().add_transformer(LambdaTransformer(func=lambda df: df)).save("pipeline.yaml")  # TypeError
+# A lambda that uses an outside variable can't be saved: the text alone wouldn't mean the same thing.
+base = 18.0
+LambdaTransformer(columns={"hdd": lambda df: (base - df["temp"]).clip(lower=0)})    # save() raises TypeError
+LambdaTransformer(columns={"hdd": lambda df: (18.0 - df["temp"]).clip(lower=0)})    # fine
+LambdaTransformer(columns={"hdd": "lambda df: (18.0 - df['temp']).clip(lower=0)"})  # the same, as text
 ```
+
+A lambda is converted to text when it only uses its argument, `pd`, `np` and builtins, and its source can be
+found unambiguously (a file or a notebook cell; not the plain interactive interpreter). Named functions
+(`def`) and lambdas that close over other variables raise `TypeError` on `save()`.
+
+<Aside type="caution">
+  Loading a pipeline YAML evaluates the lambdas in it, so it runs that code. Only load pipeline files you trust.
+</Aside>
