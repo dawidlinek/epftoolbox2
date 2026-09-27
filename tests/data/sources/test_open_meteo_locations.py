@@ -1,8 +1,8 @@
-"""OpenMeteoSource/OpenMeteoSingleRunsSource's `locations` parameter: several locations fetched by another
-instance of the same class and combined into one weighted series, per-location columns, or both.
+"""OpenMeteoSource's `locations` parameter: several locations fetched by another instance of the same class
+(sharing `api`/`run`) and combined into one weighted series, per-location columns, or both.
 
 Behaviour tests here were carried over from the removed OpenMeteoWeightedSource (its multi-location logic moved
-into OpenMeteoBase, shared by both sources — see `epftoolbox2/data/sources/_open_meteo_common.py`).
+into OpenMeteoBase, shared across both `api` modes — see `epftoolbox2/data/sources/_open_meteo_common.py`).
 """
 
 import numpy as np
@@ -10,7 +10,6 @@ import pandas as pd
 import pytest
 
 from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
-from epftoolbox2.data.sources.open_meteo_single_runs import OpenMeteoSingleRunsSource
 from epftoolbox2.pipelines import DataPipeline
 
 TZ = "Europe/Warsaw"
@@ -29,12 +28,12 @@ def _frame(index, **columns):
     return pd.DataFrame(columns, index=index)
 
 
-def make_source(cls=OpenMeteoSource, locations=None, fetch_returns=None, **kwargs):
+def make_source(locations=None, fetch_returns=None, **kwargs):
     """Build a source with `locations` and stub each underlying instance's `fetch` with `fetch_returns[i]`."""
     kwargs.setdefault("columns", ["temperature_2m"])
     kwargs.setdefault("horizon", 1)
     kwargs.setdefault("timezone", TZ)
-    source = cls(locations=locations or LOCATIONS, **kwargs)
+    source = OpenMeteoSource(locations=locations or LOCATIONS, **kwargs)
     if fetch_returns is not None:
         for underlying, frame in zip(source._location_sources, fetch_returns):
             underlying.fetch = lambda *a, _f=frame, **k: _f
@@ -46,23 +45,25 @@ def make_source(cls=OpenMeteoSource, locations=None, fetch_returns=None, **kwarg
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("cls", [OpenMeteoSource, OpenMeteoSingleRunsSource])
+@pytest.mark.parametrize("api", ["previous_runs", "single_runs"])
 class TestMutualExclusivity:
-    def test_locations_and_point_together_raise(self, cls):
+    def test_locations_and_point_together_raise(self, api):
         with pytest.raises(ValueError, match="mutually exclusive"):
-            cls(latitude=52.23, longitude=21.01, locations=LOCATIONS, timezone=TZ, columns=["temperature_2m"])
+            OpenMeteoSource(
+                latitude=52.23, longitude=21.01, locations=LOCATIONS, timezone=TZ, columns=["temperature_2m"], api=api
+            )
 
-    def test_neither_given_raises(self, cls):
+    def test_neither_given_raises(self, api):
         with pytest.raises(ValueError, match="either latitude and longitude"):
-            cls(timezone=TZ, columns=["temperature_2m"])
+            OpenMeteoSource(timezone=TZ, columns=["temperature_2m"], api=api)
 
-    def test_only_latitude_given_raises(self, cls):
+    def test_only_latitude_given_raises(self, api):
         with pytest.raises(ValueError, match="both be set"):
-            cls(latitude=52.23, timezone=TZ, columns=["temperature_2m"])
+            OpenMeteoSource(latitude=52.23, timezone=TZ, columns=["temperature_2m"], api=api)
 
-    def test_only_longitude_given_raises(self, cls):
+    def test_only_longitude_given_raises(self, api):
         with pytest.raises(ValueError, match="both be set"):
-            cls(longitude=21.01, timezone=TZ, columns=["temperature_2m"])
+            OpenMeteoSource(longitude=21.01, timezone=TZ, columns=["temperature_2m"], api=api)
 
 
 # ---------------------------------------------------------------------------
@@ -79,12 +80,14 @@ class TestInit:
         assert all(isinstance(s, OpenMeteoSource) for s in source._location_sources)
 
     def test_settings_reach_the_underlying_sources(self):
-        source = make_source(columns=["temperature_2m"], horizon=3, model="icon_seamless")
+        source = make_source(columns=["temperature_2m"], horizon=3, model="icon_seamless", api="single_runs", run="06")
         for underlying, name in zip(source._location_sources, ("warsaw", "krakow")):
             assert underlying.latitude == LOCATIONS[name]["latitude"]
             assert underlying.longitude == LOCATIONS[name]["longitude"]
             assert underlying.horizon == 3
             assert underlying.model == "icon_seamless"
+            assert underlying.api == "single_runs"
+            assert underlying.run == "06"
             assert underlying.prefix == ""  # locations carry their own name-based prefixing instead
 
     def test_rejects_non_bool_keep_locations(self):
@@ -300,8 +303,8 @@ class TestPerLocationOnly:
 class TestSharedNow:
     def test_every_location_fetches_against_the_same_now(self):
         # Fetching locations one after another can let wall-clock time advance between them; if each location
-        # resolved "now" independently, live rows near the issue-time boundary could end up on different sides
-        # of it for different locations, mixing vintages within what should be one consistent row.
+        # resolved "now" independently, live rows near the cutoff could end up on different sides of it for
+        # different locations, mixing vintages within what should be one consistent row.
         source = make_source()
         seen_now = []
         for underlying in source._location_sources:
@@ -425,15 +428,15 @@ class TestCacheConfigAndSerialization:
 
 
 # ---------------------------------------------------------------------------
-# OpenMeteoSingleRunsSource: the same locations logic, inherited from OpenMeteoBase
+# api="single_runs": the same locations logic, inherited from OpenMeteoBase
 # ---------------------------------------------------------------------------
 
 
-class TestOpenMeteoSingleRunsSourceLocations:
+class TestSingleRunsApiLocations:
     def test_weighted_average(self):
         index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
         source = make_source(
-            cls=OpenMeteoSingleRunsSource,
+            api="single_runs",
             fetch_returns=[
                 _frame(index, **{"temperature_2m_d+1": [10.0]}),
                 _frame(index, **{"temperature_2m_d+1": [30.0]}),
@@ -445,7 +448,7 @@ class TestOpenMeteoSingleRunsSourceLocations:
     def test_per_location_columns_without_weights(self):
         index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
         source = make_source(
-            cls=OpenMeteoSingleRunsSource,
+            api="single_runs",
             locations=LOCATIONS_NO_WEIGHT,
             fetch_returns=[
                 _frame(index, **{"temperature_2m_d+1": [10.0]}),
@@ -456,7 +459,8 @@ class TestOpenMeteoSingleRunsSourceLocations:
         assert list(df.columns) == ["warsaw_temperature_2m_d+1", "krakow_temperature_2m_d+1"]
 
     def test_cache_config_contains_locations(self):
-        source = OpenMeteoSingleRunsSource(locations=LOCATIONS, columns=["temperature_2m"], timezone=TZ)
+        source = OpenMeteoSource(locations=LOCATIONS, columns=["temperature_2m"], timezone=TZ, api="single_runs")
         config = source.get_cache_config()
         assert "locations" in config
         assert "latitude" not in config
+        assert config["api"] == "single_runs"

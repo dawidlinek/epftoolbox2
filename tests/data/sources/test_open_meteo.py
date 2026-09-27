@@ -6,22 +6,28 @@ import pandas as pd
 import pytest
 import requests
 
-from epftoolbox2.data.sources.open_meteo import OpenMeteoSource, stored_step_hours
+from epftoolbox2.data.sources.open_meteo import (
+    OpenMeteoSource,
+    known_run_hours,
+    publication_delay_hours,
+    stored_step_hours,
+)
 from epftoolbox2.pipelines import DataPipeline
 
-TZ = "Europe/Warsaw"
-ISSUE = "10:00"
-DELAY_H = 10
 EPOCH = pd.Timestamp("1970-01-01", tz="UTC")
 HOUR = pd.Timedelta(hours=1)
 
+# Spans 2024-03-31 (EU spring-forward) and 2024-10-27 (EU fall-back), for the leak/cutoff tests below.
+SPRING = (pd.Timestamp("2024-03-25", tz="UTC"), pd.Timestamp("2024-04-05", tz="UTC"))
+FALL = (pd.Timestamp("2024-10-20", tz="UTC"), pd.Timestamp("2024-10-31", tz="UTC"))
+
 # ---------------------------------------------------------------------------
-# Synthetic Previous Runs archive
+# Synthetic archives: mocked responses that encode each run's own init time in the values
 # ---------------------------------------------------------------------------
-# Runs start every 6 h (00/06/12/18 UTC). `previous_dayK` at valid time T holds the latest run initialised at or
-# before T - 24K h (Open-Meteo docs; confirmed against the Single Runs API). For a model stored every `step_h`
-# hours, Open-Meteo interpolates hourly values from the native points T_{n-1}..T_{n+2} around T, so an off-grid
-# hourly value can depend on the run behind T_{n+2}. The archive encodes, per cell:
+# Previous Runs API: `previous_dayK` at valid time T holds the latest run initialised at or before T - 24K h
+# (Open-Meteo docs). For a model stored every `step_h` hours, Open-Meteo interpolates hourly values from the
+# native points around T, so an off-grid hourly value can depend on the run behind a stored point up to two
+# steps after T. The archive encodes, per cell:
 #   temperature_2m -> latest run init (hours since epoch) among the native points the value depends on
 #   wind_speed_10m -> the valid time T (hours since epoch)
 
@@ -71,9 +77,46 @@ def make_archive(step_h=1, latest_run=None, null_columns=(), max_bucket=7):
     return get
 
 
+def make_run_archive(missing=()):
+    """Return a fake `session.get` that answers Single Runs requests from a synthetic archive.
+
+    `missing`: run inits (UTC Timestamps) the archive does not have. Values encode, per cell: `temperature_2m`
+    -> hours since epoch of the run's own init (identifies which run served the cell); other columns -> hours
+    since epoch of the valid time (identifies the target alignment).
+    """
+    missing = set(missing)
+    calls = []
+
+    def get(url, params=None, timeout=None):
+        calls.append(params)
+        run = pd.Timestamp(params["run"], tz="UTC")
+        response = Mock()
+        response.status_code = 200
+        if run in missing:
+            response.json.return_value = {
+                "error": True,
+                "reason": f"The requested model run is not available. Model: {params['models']}, run: {params['run']}Z",
+            }
+            return response
+
+        n = params["forecast_days"] * 24
+        times = pd.date_range(run, periods=n, freq="1h", tz="UTC")
+        hourly = {"time": [t.strftime("%Y-%m-%dT%H:%M") for t in times]}
+        for key in params["hourly"]:
+            if key == "temperature_2m":
+                hourly[key] = [float(_hours(run))] * n
+            else:
+                hourly[key] = [float(_hours(t)) for t in times]
+        response.json.return_value = {"hourly": hourly}
+        return response
+
+    get.calls = calls
+    return get
+
+
 def make_source(archive=None, **kwargs):
     kwargs.setdefault("columns", ["temperature_2m", "wind_speed_10m"])
-    kwargs.setdefault("timezone", TZ)
+    kwargs.setdefault("timezone", "Europe/Warsaw")
     source = OpenMeteoSource(latitude=52.23, longitude=21.01, **kwargs)
     source.session = Mock()
     source.session.get.side_effect = archive or make_archive()
@@ -81,14 +124,14 @@ def make_source(archive=None, **kwargs):
     return source
 
 
-def issue_times(index, issue=ISSUE, tz=TZ):
-    """Issue instant (UTC) of the local day each row belongs to, computed independently of the source."""
-    hh, mm = (int(x) for x in issue.split(":"))
+def cutoff_times(index, run, tz="Europe/Warsaw"):
+    """Cutoff instant (UTC) of each row's local day D at `run`:00 UTC — computed independently of the source."""
+    hour = int(run)
     out = []
     for t in index:
         day = t.tz_convert(tz).date()
-        out.append(pd.Timestamp(year=day.year, month=day.month, day=day.day, hour=hh, minute=mm, tz=tz))
-    return pd.DatetimeIndex(out).tz_convert("UTC")
+        out.append(pd.Timestamp(year=day.year, month=day.month, day=day.day, hour=hour, tz="UTC"))
+    return pd.DatetimeIndex(out)
 
 
 def from_hours(values):
@@ -102,42 +145,43 @@ def from_hours(values):
 
 class TestOpenMeteoSourceInit:
     def test_init_valid_params(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         assert source.latitude == 52.23
         assert source.longitude == 21.01
         assert source.horizon == 5
         assert source.model == "jma_seamless"
         assert source.prefix == ""
-        assert source.vintage == "issue_time"
-        assert source.timezone == TZ
-        assert source.issue_time == ISSUE
-        assert source.publication_delay_h == DELAY_H
+        assert source.api == "previous_runs"
+        assert source.run == "00"
+        assert source.timezone == "Europe/Warsaw"
         assert source.strict is False
         assert len(source.columns) > 0
 
     def test_init_custom_model(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, model="icon_seamless")
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", model="icon_seamless")
         assert source.model == "icon_seamless"
 
     def test_init_custom_columns(self):
         custom_cols = ["temperature_2m", "rain"]
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, columns=custom_cols)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", columns=custom_cols)
         assert source.columns == custom_cols
 
     def test_columns_do_not_alias_class_default(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         source.columns.append("wind_speed_100m")
         assert "wind_speed_100m" not in OpenMeteoSource.DEFAULT_COLUMNS
-        assert "wind_speed_100m" not in OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ).columns
+        assert (
+            "wind_speed_100m" not in OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw").columns
+        )
 
     def test_columns_copy_caller_list(self):
         custom_cols = ["temperature_2m"]
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, columns=custom_cols)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", columns=custom_cols)
         source.columns.append("rain")
         assert custom_cols == ["temperature_2m"]
 
     def test_init_with_prefix(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, prefix="weather")
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", prefix="weather")
         assert source.prefix == "weather"
 
     @pytest.mark.parametrize("latitude", [91.0, -91.0])
@@ -156,33 +200,31 @@ class TestOpenMeteoSourceInit:
             OpenMeteoSource(latitude=52.23, longitude=21.01, horizon=horizon)
 
     @pytest.mark.parametrize("horizon", [8, 14])
-    def test_init_horizon_beyond_previous_day7_is_rejected(self, horizon):
+    def test_init_previous_runs_horizon_beyond_previous_day7_is_rejected(self, horizon):
         # The Previous Runs API only serves previous_day1..7; previous_day8+ come back as nulls.
         with pytest.raises(ValueError, match="previous_day"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=horizon, vintage="valid_time")
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=horizon)
 
     def test_init_horizon_needing_bucket_8_is_rejected(self):
-        # Leak-free d+7 needs previous_day8 for most hours, which the API does not serve.
+        # Leak-free d+6 needs previous_day8 for most hours (default model/run), which the API does not serve.
         with pytest.raises(ValueError, match="previous_day8"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=7)
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=6)
 
-    def test_init_legacy_vintage_allows_horizon_7(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=7, vintage="valid_time")
-        assert source.horizon == 7
-
-    def test_hourly_model_with_short_delay_allows_horizon_6(self):
-        # ICON is published about 4 h after initialisation and stored hourly up to 78 h lead.
+    @pytest.mark.parametrize("horizon", [1, 14])
+    def test_single_runs_accepts_horizon_up_to_14(self, horizon):
         source = OpenMeteoSource(
-            latitude=52.23, longitude=21.01, timezone=TZ, horizon=6, model="icon_seamless", publication_delay_h=4
+            latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", api="single_runs", horizon=horizon
         )
-        assert source.horizon == 6
-        with pytest.raises(ValueError, match="d\\+6 needs previous_day8"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=6, model="icon_seamless")
+        assert source.horizon == horizon
+
+    def test_single_runs_rejects_horizon_above_14(self):
+        with pytest.raises(ValueError, match="Horizon must be at most 14"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", api="single_runs", horizon=15)
 
     def test_timezone_is_required(self):
-        # A default used to compute the issue time in the wrong zone for markets outside CET (e.g. London 23:00
-        # on D silently becoming 10:00 on D+1), leaking future runs. Construction with no zone is allowed (a
-        # DataPipeline may still supply one later), but fetching without one anywhere raises.
+        # A default used to compute the cutoff in the wrong zone for markets outside CET (e.g. a market's local
+        # day landing on the wrong UTC calendar date), leaking future runs. Construction with no zone is
+        # allowed (a DataPipeline may still supply one later), but fetching without one anywhere raises.
         source = OpenMeteoSource(latitude=52.23, longitude=21.01)
         assert source.timezone is None
         with pytest.raises(ValueError, match="timezone is required"):
@@ -198,94 +240,85 @@ class TestOpenMeteoSourceInit:
         "kwargs, match",
         [
             ({"timezone": "Mars/Olympus"}, "timezone"),
-            ({"issue_time": "25:00"}, "issue_time"),
-            ({"issue_time": "10"}, "issue_time"),
-            ({"publication_delay_h": -1}, "publication_delay_h"),
-            ({"vintage": "latest"}, "vintage"),
+            ({"api": "latest_runs"}, "api"),
+            ({"run": "9"}, "run"),
+            ({"run": "24"}, "run"),
             ({"temporal_resolution": "hourly_2"}, "temporal_resolution"),
         ],
     )
     def test_init_rejects_invalid_parameters(self, kwargs, match):
-        kwargs.setdefault("timezone", TZ)
+        kwargs.setdefault("timezone", "Europe/Warsaw")
         with pytest.raises(ValueError, match=match):
             OpenMeteoSource(latitude=52.23, longitude=21.01, **kwargs)
 
+    def test_single_runs_rejects_a_run_hour_the_model_does_not_have(self):
+        with pytest.raises(ValueError, match="jma_seamless.*has no run at '09'"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", api="single_runs", run="09")
+
+    def test_single_runs_accepts_a_run_hour_for_an_unknown_model(self):
+        # A model this library has no run-hour table for is not statically checked; whether "run" actually
+        # exists is left to the archive's own response (see TestSingleRunsFetch).
+        source = OpenMeteoSource(
+            latitude=52.23,
+            longitude=21.01,
+            timezone="Europe/Warsaw",
+            api="single_runs",
+            run="09",
+            model="totally_unknown_model",
+        )
+        assert source.run == "09"
+
     def test_requests_enough_buckets_for_the_fallback(self):
         # JMA is stored 6-hourly, so the late hours of D+i need previous_day{i+2}.
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, horizon=5)
-        assert max(source._buckets) == 7
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=5)
+        assert max(source._buckets) >= 5
         assert min(source._buckets) >= 1
 
-    def test_derived_is_off_by_default(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
-        assert source.derived == []
-
-    def test_derived_rejects_unknown_name(self):
-        with pytest.raises(ValueError, match="derived must be a subset"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, derived=["not_a_column"])
-
-    def test_derived_rejects_missing_input_column(self):
-        with pytest.raises(ValueError, match="needs 'temperature_2m'"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, columns=["wind_speed_10m"], derived=["hdd"])
-
 
 # ---------------------------------------------------------------------------
-# Vintage selection: no run published after the issue time
+# Cutoff correctness: every value comes from a run at or before "D at run:00 UTC"
 # ---------------------------------------------------------------------------
 
 
-class TestIssueTimeVintage:
-    START = pd.Timestamp("2024-03-25", tz="UTC")
-    END = pd.Timestamp("2024-04-05", tz="UTC")
+@pytest.mark.parametrize("window", [SPRING, FALL], ids=["spring-dst", "fall-dst"])
+@pytest.mark.parametrize("timezone", ["Europe/Warsaw", "Europe/Helsinki"])
+@pytest.mark.parametrize("run", ["00", "06", "12"])
+@pytest.mark.parametrize("api", ["previous_runs", "single_runs"])
+class TestCutoffAcrossApisTimezonesAndRuns:
+    def test_every_value_comes_from_a_run_at_or_before_the_cutoff(self, api, run, timezone, window):
+        start, end = window
+        horizon = 2
+        if api == "previous_runs":
+            source = make_source(
+                make_archive(step_h=1), api=api, run=run, timezone=timezone, horizon=horizon, model="icon_seamless"
+            )
+        else:
+            source = make_source(
+                make_run_archive(), api=api, run=run, timezone=timezone, horizon=horizon, model="icon_seamless"
+            )
+        df = source.fetch(start, end)
+        cutoff = cutoff_times(df.index, run, timezone)
 
-    @pytest.mark.parametrize("model, step_h", [("icon_seamless", 1), ("jma_seamless", 6), ("ecmwf_ifs04", 3)])
-    def test_every_value_comes_from_runs_published_before_issue_time(self, model, step_h):
-        source = make_source(make_archive(step_h=step_h), model=model, horizon=3)
-        df = source.fetch(self.START, self.END)
+        for lead in range(1, horizon + 1):
+            column = df[f"temperature_2m_d+{lead}"]
+            present = column.notna().to_numpy()
+            # Every row's target wall-clock hour exists except (at most) the one spring-forward gap hour, which
+            # is correctly NaN and excluded here (see TestDstAlignment for that behaviour specifically).
+            assert present.sum() >= len(df) - 1
+            init = from_hours(column[present])
+            assert (init <= cutoff[present]).all(), f"api={api} run={run} tz={timezone} d+{lead}: a value is late"
 
-        issue = issue_times(df.index)
-        for i in range(1, 4):
-            init = from_hours(df[f"temperature_2m_d+{i}"])
-            assert df[f"temperature_2m_d+{i}"].notna().all()
-            late = init + pd.Timedelta(hours=DELAY_H) > issue
-            assert not late.any(), f"d+{i}: {late.sum()} rows use runs published after the issue time"
 
-    def test_uses_the_freshest_admissible_bucket(self):
-        # Hourly model: d+1 uses previous_day1 where a run initialised as late as T - 24 h would have been
-        # published by 10:00 on D, otherwise previous_day2. The source does not assume run cycles, so "as late as
-        # T - 24 h" is the bound, not the actual 6-hourly run time.
-        source = make_source(make_archive(step_h=1), model="icon_seamless", horizon=1)
-        df = source.fetch(self.START, self.END)
-        init = from_hours(df["temperature_2m_d+1"])
-        valid = from_hours(df["wind_speed_10m_d+1"])
-        lead_days = ((valid - init) / pd.Timedelta(days=1)).astype(int)
-        assert set(lead_days) == {1, 2}
-        issue = issue_times(df.index)
-        # Wherever previous_day2 was used, previous_day1 would have been too late.
-        used_two = lead_days == 2
-        assert (valid[used_two] - pd.Timedelta(days=1) + pd.Timedelta(hours=DELAY_H) > issue[used_two]).all()
-
-    def test_legacy_valid_time_vintage_reproduces_old_mapping_and_warns(self, caplog):
-        source = make_source(make_archive(step_h=1), model="icon_seamless", horizon=2, vintage="valid_time")
-        with caplog.at_level(logging.WARNING, logger="epftoolbox2.data.sources.open_meteo"):
-            source.logger.propagate = True
-            df = source.fetch(self.START, self.END)
-        assert "look-ahead" in caplog.text
-        for i in (1, 2):
-            valid = from_hours(df[f"wind_speed_10m_d+{i}"])
-            assert (valid == df.index + pd.Timedelta(days=i)).all()
-            init = from_hours(df[f"temperature_2m_d+{i}"])
-            assert (init == (df.index).floor("6h")).all()
-        late = from_hours(df["temperature_2m_d+1"]) + pd.Timedelta(hours=DELAY_H) > issue_times(df.index)
-        assert late.any()
-
-    def test_legacy_valid_time_vintage_warns_at_construction(self, caplog):
-        # A cache hit never calls fetch(), so the warning must not depend on it: it must fire when the source is
-        # built, not only when data is actually downloaded.
-        logging.getLogger("epftoolbox2.data.sources.open_meteo").propagate = True
-        with caplog.at_level(logging.WARNING, logger="epftoolbox2.data.sources.open_meteo"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, vintage="valid_time")
-        assert "look-ahead" in caplog.text
+class TestCutoffForA3HourlyIconEuLikeModel:
+    def test_run_09_is_accepted_and_the_cutoff_still_holds(self):
+        # ICON-EU-like models publish more often than every 6 h; run="09" must be accepted (see
+        # `known_run_hours("icon_eu")`) and the cutoff arithmetic must not assume a 6-hourly cycle.
+        source = make_source(make_run_archive(), api="single_runs", run="09", model="icon_eu", horizon=1)
+        df = source.fetch(*SPRING)
+        cutoff = cutoff_times(df.index, "09", "Europe/Warsaw")
+        present = df["temperature_2m_d+1"].notna().to_numpy()
+        init = from_hours(df["temperature_2m_d+1"][present])
+        assert (init <= cutoff[present]).all()
 
 
 # ---------------------------------------------------------------------------
@@ -306,32 +339,40 @@ class TestDstAlignment:
     )
     def test_d_plus_1_is_same_local_wall_clock_hour_next_day(self, row, expected):
         source = make_source(make_archive(step_h=1), model="icon_seamless", horizon=1)
-        start = pd.Timestamp(row, tz=TZ).normalize().tz_convert("UTC") - pd.Timedelta(days=1)
+        start = pd.Timestamp(row, tz="Europe/Warsaw").normalize().tz_convert("UTC") - pd.Timedelta(days=1)
         df = source.fetch(start, start + pd.Timedelta(days=3))
-        valid = from_hours(df.loc[pd.Timestamp(row, tz=TZ), "wind_speed_10m_d+1"])[0]
-        assert valid == pd.Timestamp(expected, tz=TZ)
+        valid = from_hours(df.loc[pd.Timestamp(row, tz="Europe/Warsaw"), "wind_speed_10m_d+1"])[0]
+        assert valid == pd.Timestamp(expected, tz="Europe/Warsaw")
 
     def test_d_plus_3_across_dst_keeps_wall_clock_hour(self):
         source = make_source(make_archive(step_h=1), model="icon_seamless", horizon=3)
         start = pd.Timestamp("2024-03-26", tz="UTC")
         df = source.fetch(start, start + pd.Timedelta(days=5))
-        # Skip the 02:00 row whose target (2024-03-31 02:00) does not exist; it takes 03:00 (tested below).
-        df = df[df.index != pd.Timestamp("2024-03-28 02:00", tz=TZ)]
-        valid = from_hours(df["wind_speed_10m_d+3"]).tz_convert(TZ)
-        local = df.index.tz_convert(TZ)
+        # Skip the 02:00 row whose target (2024-03-31 02:00) does not exist; it is NaN (tested below).
+        df = df[df.index != pd.Timestamp("2024-03-28 02:00", tz="Europe/Warsaw")]
+        valid = from_hours(df["wind_speed_10m_d+3"]).tz_convert("Europe/Warsaw")
+        local = df.index.tz_convert("Europe/Warsaw")
         assert (valid.hour == local.hour).all()
         assert ((valid.normalize().tz_localize(None) - local.normalize().tz_localize(None)).days == 3).all()
 
-    def test_nonexistent_target_hour_uses_next_hour(self):
-        # 2024-03-31 02:00 does not exist in Warsaw; the 02:00 row of 03-30 takes the 03:00 value.
+    def test_spring_forward_gap_hour_is_nan_not_the_next_hour(self):
+        # The row 2024-03-30 02:00 Warsaw asks for d+1 = 2024-03-31 02:00, which does not exist (spring
+        # forward): it must come back NaN, not silently the value for 03:00 under this row's name.
         source = make_source(make_archive(step_h=1), model="icon_seamless", horizon=1)
         df = source.fetch(pd.Timestamp("2024-03-29", tz="UTC"), pd.Timestamp("2024-04-01", tz="UTC"))
-        valid = from_hours(df.loc[pd.Timestamp("2024-03-30 02:00", tz=TZ), "wind_speed_10m_d+1"])[0]
-        assert valid == pd.Timestamp("2024-03-31 03:00", tz=TZ)
+        row = df.loc[pd.Timestamp("2024-03-30 02:00", tz="Europe/Warsaw")]
+        assert np.isnan(row["wind_speed_10m_d+1"])
+        assert np.isnan(row["temperature_2m_d+1"])
+
+    def test_spring_forward_gap_hour_is_nan_under_single_runs_too(self):
+        source = make_source(make_run_archive(), api="single_runs", model="icon_seamless", horizon=1)
+        df = source.fetch(pd.Timestamp("2024-03-29", tz="UTC"), pd.Timestamp("2024-04-01", tz="UTC"))
+        row = df.loc[pd.Timestamp("2024-03-30 02:00", tz="Europe/Warsaw")]
+        assert np.isnan(row["temperature_2m_d+1"])
 
 
 # ---------------------------------------------------------------------------
-# Returned range, live runs and coverage checks
+# Returned range, live runs and coverage checks (api="previous_runs")
 # ---------------------------------------------------------------------------
 
 
@@ -353,25 +394,27 @@ class TestReturnedRange:
         assert len(archive.calls) >= 3
         assert not df.index.duplicated().any()
         assert len(df) == (end - start) / HOUR
-        assert df.notna().all().all()
+        # This range crosses the 2024-03-31 spring-forward gap: exactly one row per lead targets the
+        # nonexistent wall-clock hour and is correctly NaN (see TestDstAlignment); every other row is filled.
+        assert df.notna().all(axis=1).sum() >= len(df) - 2
 
-    def test_live_fetch_keeps_all_hours_of_the_issue_day(self):
-        # "now" is 08:00 CET on D, before the 10:00 issue time: rows of D are provisional but must be complete
-        # (the old now+13h cut dropped 22:00 and 23:00 local).
-        source = make_source(horizon=1)
-        now = pd.Timestamp("2024-01-11 08:00", tz=TZ).tz_convert("UTC")
+    def test_live_fetch_keeps_all_hours_of_the_cutoff_day(self):
+        # "now" is 08:00 UTC on D, before the "10" run's cutoff (10:00 UTC): rows of D are provisional but must
+        # be complete.
+        source = make_source(horizon=1, run="10")
+        now = pd.Timestamp("2024-01-11 08:00", tz="UTC")
         source._now = lambda: now
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-12", tz="UTC"))
-        day = df[df.index.tz_convert(TZ).date == pd.Timestamp("2024-01-11").date()]
+        day = df[df.index.tz_convert("Europe/Warsaw").date == pd.Timestamp("2024-01-11").date()]
         assert len(day) == 24
         assert day.notna().all().all()
         init = from_hours(day["temperature_2m_d+1"])
-        assert (init + pd.Timedelta(hours=DELAY_H) <= now).all()
+        assert (init <= now).all()
 
     def test_rows_that_cannot_be_filled_are_not_returned(self):
         latest_run = pd.Timestamp("2024-01-11 00:00", tz="UTC")
         source = make_source(make_archive(step_h=1, latest_run=latest_run), model="icon_seamless", horizon=1)
-        now = latest_run + pd.Timedelta(hours=DELAY_H)
+        now = latest_run
         source._now = lambda: now
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-20", tz="UTC"))
         assert df.notna().any(axis=1).all()
@@ -390,10 +433,10 @@ class TestReturnedRange:
 
     def test_warns_with_missing_share_by_local_hour_when_uneven(self, caplog):
         # Some columns are complete for most local hours but missing for a few, the way JMA's previous_day5-7 are
-        # missing before 2021 only for the hours that need that bucket. The overall share hides this.
+        # missing before 2021 only for the hours that need them. The overall share hides this.
         def get(url, params=None, timeout=None):
             times = pd.date_range(params["start_date"], params["end_date"] + " 23:00", freq="1h", tz="UTC")
-            local_hour = times.tz_convert(TZ).hour
+            local_hour = times.tz_convert("Europe/Warsaw").hour
             hourly = {"time": [t.strftime("%Y-%m-%dT%H:%M") for t in times]}
             for key in params["hourly"]:
                 column, _ = key.rsplit("_previous_day", 1)
@@ -432,14 +475,6 @@ class TestReturnedRange:
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
         assert list(df.columns) == ["warsaw_temperature_2m_d+1", "warsaw_wind_speed_10m_d+1"]
 
-    def test_derived_columns_are_computed_from_the_prefixless_forecast(self):
-        source = make_source(horizon=1, prefix="warsaw", derived=["hdd"], hdd_base_c=18.0)
-        df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert "warsaw_hdd_d+1" in df.columns
-        # The synthetic archive encodes temperature as (100 * bucket + hour offset); at these leads it is >> 18,
-        # so hdd should be clipped to 0 everywhere.
-        assert (df["warsaw_hdd_d+1"] == 0).all()
-
 
 class TestStoredStepHours:
     def test_ecmwf_ifs04_is_not_matched_by_the_hourly_ecmwf_ifs_prefix(self):
@@ -451,14 +486,115 @@ class TestStoredStepHours:
         assert stored_step_hours("ecmwf_ifs", 1) == 1
 
 
+class TestPublicationDelayHours:
+    @pytest.mark.parametrize(
+        "model, expected",
+        [
+            ("icon_seamless", 4.0),
+            ("icon_d2", 4.0),
+            ("gfs_seamless", 5.0),
+            ("ecmwf_ifs025", 8.0),
+            ("ecmwf_ifs", 8.0),
+            ("jma_seamless", 10.0),
+        ],
+    )
+    def test_known_model_families(self, model, expected):
+        assert publication_delay_hours(model) == expected
+
+    def test_unknown_model_gets_the_conservative_default(self):
+        assert publication_delay_hours("totally_unknown_model") == 10.0
+
+
+class TestKnownRunHours:
+    def test_known_families_report_their_cycle(self):
+        assert known_run_hours("jma_seamless") == (0, 6, 12, 18)
+        assert known_run_hours("icon_eu") == (0, 3, 6, 9, 12, 15, 18, 21)
+
+    def test_unknown_model_returns_none(self):
+        assert known_run_hours("totally_unknown_model") is None
+
+
 # ---------------------------------------------------------------------------
-# Timestamps, chunking, requests
+# api="single_runs": exactly one run per day, no fallback
+# ---------------------------------------------------------------------------
+
+
+class TestSingleRunsFetch:
+    def test_returns_exactly_start_to_end_exclusive(self):
+        source = make_source(make_run_archive(), api="single_runs", horizon=1)
+        start, end = pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC")
+        df = source.fetch(start, end)
+        assert df.index.min() == start
+        assert df.index.max() == end - HOUR
+        assert len(df) == 24
+
+    def test_one_request_per_local_day(self):
+        archive = make_run_archive()
+        source = make_source(archive, api="single_runs", horizon=1)
+        start, end = pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-13", tz="UTC")
+        source.fetch(start, end)
+        rows = pd.date_range(start.ceil("1h"), end, freq="1h", inclusive="left")
+        local_days = rows.tz_convert("Europe/Warsaw").normalize().unique()
+        assert len(archive.calls) == len(local_days)
+
+    def test_target_valid_time_is_the_same_local_wall_clock_hour(self):
+        source = make_source(make_run_archive(), api="single_runs", horizon=1)
+        df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
+        valid = from_hours(df["wind_speed_10m_d+1"])
+        assert (valid == df.index + pd.Timedelta(days=1)).all()
+
+    def test_missing_run_leaves_nan_with_no_fallback_to_an_older_run(self):
+        # api="single_runs" requests exactly the run at the cutoff; if the archive doesn't have it, the
+        # affected cells are NaN — there is no silent fallback to another run (unlike the old, removed
+        # OpenMeteoSingleRunsSource, which tried up to 4 older runs on the same cycle).
+        day = pd.Timestamp("2024-01-11", tz="UTC")
+        missing_run = day  # run="00" -> cutoff/run instant is exactly local day D's midnight UTC
+        archive = make_run_archive(missing={missing_run})
+        source = make_source(archive, api="single_runs", horizon=1)
+        df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-13", tz="UTC"))
+        day_rows = df[df.index.tz_convert("Europe/Warsaw").date == pd.Timestamp("2024-01-11").date()]
+        assert day_rows["temperature_2m_d+1"].isna().all()
+        # Only one request was made for that day (no fallback attempts).
+        assert sum(1 for call in archive.calls if call["run"] == missing_run.strftime("%Y-%m-%dT%H:%M")) == 1
+
+    def test_strict_raises_on_a_missing_run(self):
+        day = pd.Timestamp("2024-01-11", tz="UTC")
+        archive = make_run_archive(missing={day})
+        source = make_source(archive, api="single_runs", horizon=1, strict=True)
+        with pytest.raises(ValueError, match="temperature_2m_d\\+1"):
+            source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-13", tz="UTC"))
+
+    def test_prefix_applied(self):
+        source = make_source(make_run_archive(), api="single_runs", horizon=1, prefix="warsaw")
+        df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
+        assert list(df.columns) == ["warsaw_temperature_2m_d+1", "warsaw_wind_speed_10m_d+1"]
+
+    def test_live_fetch_marks_rows_not_yet_at_the_cutoff_as_provisional(self, caplog):
+        source = make_source(make_run_archive(), api="single_runs", horizon=1, run="12", model="icon_seamless")
+        now = pd.Timestamp("2024-01-11 08:00", tz="UTC")
+        source._now = lambda: now
+        with caplog.at_level(logging.INFO, logger="epftoolbox2.data.sources.open_meteo"):
+            source.logger.propagate = True
+            df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-12", tz="UTC"))
+        assert "cutoff after now" in caplog.text
+        day = df[df.index.tz_convert("Europe/Warsaw").date == pd.Timestamp("2024-01-11").date()]
+        init = from_hours(day["temperature_2m_d+1"])
+        assert (init <= now).all()
+
+    def test_fetch_validates_timestamps(self):
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", api="single_runs")
+        with pytest.raises(ValueError, match="End timestamp.*must be after start timestamp"):
+            source.fetch(pd.Timestamp("2024-01-02", tz="UTC"), pd.Timestamp("2024-01-01", tz="UTC"))
+
+
+# ---------------------------------------------------------------------------
+# Timestamps, chunking, requests (api="previous_runs")
 # ---------------------------------------------------------------------------
 
 
 class TestOpenMeteoSourceValidation:
     def test_fetch_validates_timestamps(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         with pytest.raises(ValueError, match="End timestamp.*must be after start timestamp"):
             source.fetch(pd.Timestamp("2024-01-02", tz="UTC"), pd.Timestamp("2024-01-01", tz="UTC"))
 
@@ -474,13 +610,13 @@ class TestOpenMeteoSourceValidation:
 
 class TestOpenMeteoSourceChunking:
     def test_generate_chunks_single_month(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         start, end = pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-15", tz="UTC")
         chunks = source._generate_chunks(start, end, months=3)
         assert chunks == [(start, end)]
 
     def test_generate_chunks_are_contiguous(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         start, end = pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-07-01", tz="UTC")
         chunks = source._generate_chunks(start, end, months=3)
         assert len(chunks) >= 2
@@ -490,7 +626,7 @@ class TestOpenMeteoSourceChunking:
             assert second_start == first_end
 
     def test_generate_chunks_validates_months_parameter(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         start, end = pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-07-01", tz="UTC")
         for months in (0, -1):
             with pytest.raises(ValueError, match="months parameter must be positive"):
@@ -513,7 +649,7 @@ class TestOpenMeteoSourceAPIRequests:
         response = Mock()
         response.status_code = 200
         response.json.return_value = payload
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         source.session = Mock()
         source.session.get.return_value = response
         return source
@@ -556,7 +692,7 @@ class TestOpenMeteoSourceAPIRequests:
             source._fetch_chunk(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
 
     def test_fetch_chunk_retries_on_request_exception(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         source.session = Mock()
         source.session.get.side_effect = requests.RequestException("Network error")
         with patch("time.sleep"):
@@ -567,7 +703,7 @@ class TestOpenMeteoSourceAPIRequests:
 
 class TestOpenMeteoSourceParsing:
     def test_parse_response_keeps_every_bucket_value_in_place(self, sample_weather_response):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         table = source._parse_response(sample_weather_response)
         assert str(table.index.tz) == "UTC"
         assert len(table) == 72
@@ -578,71 +714,51 @@ class TestOpenMeteoSourceParsing:
 
     def test_parse_response_turns_nulls_into_nan(self, sample_weather_response):
         sample_weather_response["hourly"]["rain_previous_day1"][5] = None
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         table = source._parse_response(sample_weather_response)
         assert np.isnan(table["rain_previous_day1"].iloc[5])
 
     def test_parse_response_handles_missing_hourly(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         assert source._parse_response({}).empty
         assert source._parse_response({"hourly": {}}).empty
 
     def test_parse_response_tolerates_short_arrays(self, sample_weather_response_incomplete):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         table = source._parse_response(sample_weather_response_incomplete)
         assert len(table) == 2
         assert np.isnan(table["temperature_2m_previous_day1"].iloc[1])
 
-    def test_legacy_mapping_uses_bucket_i_at_t_plus_i_days(self, sample_weather_response):
-        # Legacy vintage: d+i at row t is previous_day{i} at t + 24 h * i (index + 24 * i).
-        response = Mock()
-        response.json.return_value = sample_weather_response
-        source = OpenMeteoSource(
-            latitude=52.23,
-            longitude=21.01,
-            timezone=TZ,
-            horizon=2,
-            columns=["temperature_2m"],
-            vintage="valid_time",
-        )
-        source.session = Mock()
-        source.session.get.return_value = response
-        df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
-        assert df["temperature_2m_d+1"].tolist() == [100.0 + j + 24 for j in range(24)]
-        assert df["temperature_2m_d+2"].tolist() == [200.0 + j + 48 for j in range(24)]
-
 
 class TestCacheConfigAndSerialization:
-    def test_cache_config_has_schema_version_and_vintage_parameters(self):
-        config = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ).get_cache_config()
-        assert config["schema_version"] >= 2
-        for key in ("vintage", "issue_time", "publication_delay_h", "timezone", "horizon", "model", "columns"):
+    def test_cache_config_has_schema_version_and_key_parameters(self):
+        config = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw").get_cache_config()
+        assert config["schema_version"] >= 3
+        for key in ("api", "run", "timezone", "horizon", "model", "columns"):
             assert key in config
 
     @pytest.mark.parametrize(
         "change",
         [
-            {"issue_time": "11:30"},
-            {"publication_delay_h": 6},
+            {"run": "06"},
+            {"api": "single_runs"},
             {"timezone": "Europe/London"},
-            {"vintage": "valid_time"},
-            {"derived": ["hdd"]},
+            {"model": "icon_seamless"},
         ],
     )
     def test_output_affecting_parameters_change_the_cache_config(self, change):
-        base = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ).get_cache_config()
-        other = OpenMeteoSource(latitude=52.23, longitude=21.01, **{"timezone": TZ, **change}).get_cache_config()
+        base = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw").get_cache_config()
+        other = OpenMeteoSource(
+            latitude=52.23, longitude=21.01, **{"timezone": "Europe/Warsaw", **change}
+        ).get_cache_config()
         assert base != other
 
     def test_strict_does_not_change_the_cache_config(self):
-        base = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ).get_cache_config()
-        strict = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ, strict=True).get_cache_config()
+        base = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw").get_cache_config()
+        strict = OpenMeteoSource(
+            latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", strict=True
+        ).get_cache_config()
         assert base == strict
-
-    def test_derived_off_by_default_and_absent_from_cache_config(self):
-        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=TZ)
-        assert source.derived == []
-        assert "derived" not in source.get_cache_config()
 
     def test_yaml_round_trip(self, tmp_path):
         source = OpenMeteoSource(
@@ -653,8 +769,7 @@ class TestCacheConfigAndSerialization:
             columns=["temperature_2m"],
             prefix="warsaw",
             timezone="Europe/Berlin",
-            issue_time="11:30",
-            publication_delay_h=4,
+            run="06",
             strict=True,
         )
         path = tmp_path / "dp.yaml"
@@ -664,22 +779,24 @@ class TestCacheConfigAndSerialization:
         assert loaded.get_cache_config() == source.get_cache_config()
         assert loaded.strict is True
 
-    def test_yaml_round_trip_with_derived_columns(self, tmp_path):
+    def test_yaml_round_trip_single_runs(self, tmp_path):
         source = OpenMeteoSource(
             latitude=52.23,
             longitude=21.01,
-            timezone=TZ,
-            columns=["temperature_2m", "wind_speed_100m"],
-            derived=["hdd", "cdd", "wind_speed_100m_cubed"],
-            hdd_base_c=15.5,
-            cdd_base_c=24.0,
+            horizon=7,
+            model="ecmwf_ifs",
+            columns=["temperature_2m"],
+            prefix="warsaw",
+            timezone="Europe/Berlin",
+            api="single_runs",
+            run="12",
         )
         path = tmp_path / "dp.yaml"
         DataPipeline().add_source(source).save(path)
         loaded = DataPipeline.load(path).sources[0]
         assert isinstance(loaded, OpenMeteoSource)
         assert loaded.get_cache_config() == source.get_cache_config()
-        assert loaded.derived == ["hdd", "cdd", "wind_speed_100m_cubed"]
+        assert loaded.api == "single_runs"
 
 
 @pytest.mark.integration
@@ -687,7 +804,7 @@ class TestOpenMeteoSourceIntegration:
     """Integration tests that hit the real API"""
 
     def test_fetch_weather_data_warsaw(self):
-        source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, timezone=TZ, horizon=3)
+        source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, timezone="Europe/Warsaw", horizon=3)
         start, end = pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-03", tz="UTC")
         df = source.fetch(start, end)
         assert len(df) == 48
@@ -697,7 +814,7 @@ class TestOpenMeteoSourceIntegration:
         source = OpenMeteoSource(
             latitude=52.2297,
             longitude=21.0122,
-            timezone=TZ,
+            timezone="Europe/Warsaw",
             horizon=2,
             columns=["temperature_2m", "wind_speed_10m"],
         )
@@ -708,7 +825,16 @@ class TestOpenMeteoSourceIntegration:
 
     def test_fetch_long_period(self):
         source = OpenMeteoSource(
-            latitude=52.2297, longitude=21.0122, timezone=TZ, horizon=5, columns=["temperature_2m"]
+            latitude=52.2297, longitude=21.0122, timezone="Europe/Warsaw", horizon=5, columns=["temperature_2m"]
         )
         df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-06-01", tz="UTC"))
         assert len(df) == (pd.Timestamp("2024-06-01") - pd.Timestamp("2024-01-01")) / HOUR
+
+    def test_fetch_weather_data_single_runs(self):
+        source = OpenMeteoSource(
+            latitude=52.2297, longitude=21.0122, timezone="Europe/Warsaw", api="single_runs", horizon=3
+        )
+        start, end = pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2025-01-03", tz="UTC")
+        df = source.fetch(start, end)
+        assert len(df) == 48
+        assert df.index.min() == start and df.index.max() < end

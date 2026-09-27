@@ -40,7 +40,6 @@ COMPONENT_REGISTRY = {
     "sources": {
         "EntsoeSource": "epftoolbox2.data.sources.entsoe",
         "OpenMeteoSource": "epftoolbox2.data.sources.open_meteo",
-        "OpenMeteoSingleRunsSource": "epftoolbox2.data.sources.open_meteo_single_runs",
         "CsvSource": "epftoolbox2.data.sources.csv",
         "CalendarSource": "epftoolbox2.data.sources.calendar",
         "EpftoolboxBenchmarkSource": "epftoolbox2.data.sources.benchmark",
@@ -88,7 +87,7 @@ class DataPipeline:
             covers its whole local day; naive timestamps are local times. If ``None``, date strings are midnight
             UTC, ``end`` is exclusive and naive timestamps are UTC. Components whose own zone decides a local
             calendar day or an issue time — ``TimezoneTransformer.target_tz``,
-            ``OpenMeteoSource``/``OpenMeteoSingleRunsSource.timezone`` and
+            ``OpenMeteoSource.timezone`` and
             ``CalendarSource.timezone`` (but not ``CsvSource.timezone``, which is the input file's own zone, not
             the market's) — may leave it unset (``None``) and inherit ``timezone`` instead; an explicitly set,
             different zone still raises ``ValueError``, since a component computing its own local time in a
@@ -149,7 +148,7 @@ class DataPipeline:
     def _bind_component_timezones(self) -> None:
         """Make ``self.timezone`` the single place the market zone needs to be written.
 
-        Every ``TimezoneTransformer``/``CalendarSource``/``OpenMeteoSource``/``OpenMeteoSingleRunsSource`` whose
+        Every ``TimezoneTransformer``/``CalendarSource``/``OpenMeteoSource`` whose
         own zone (``target_tz`` / ``timezone``) is left unset inherits ``self.timezone`` instead, resolved
         through ``_market_timezone.bind``: the component's private ``_pipeline_timezone`` attribute is set
         (never the public one, so ``save()`` keeps writing the value the user gave, and a YAML round trip
@@ -158,7 +157,6 @@ class DataPipeline:
         """
         from epftoolbox2.data.sources.calendar import CalendarSource
         from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
-        from epftoolbox2.data.sources.open_meteo_single_runs import OpenMeteoSingleRunsSource
 
         for transformer in self.transformers:
             if isinstance(transformer, TimezoneTransformer):
@@ -167,7 +165,7 @@ class DataPipeline:
                 )
 
         for source in self.sources:
-            if isinstance(source, (OpenMeteoSource, OpenMeteoSingleRunsSource, CalendarSource)):
+            if isinstance(source, (OpenMeteoSource, CalendarSource)):
                 _bind_timezone(source, source.timezone, self.timezone, f"{type(source).__name__}.timezone", owner=self)
                 # A source built with `locations` fetches through its own private per-location instances (see
                 # OpenMeteoBase._configure_locations); their own `timezone` was copied from this source's at

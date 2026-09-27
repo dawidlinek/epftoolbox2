@@ -1,11 +1,10 @@
 """DataPipeline.timezone as the single place the market zone needs to be written.
 
-TimezoneTransformer.target_tz, CalendarSource.timezone and OpenMeteoSource/OpenMeteoSingleRunsSource.timezone
-may all be left unset and inherit DataPipeline.timezone instead — including, for a source built with
-`locations`, through each of its private per-location instances (see
-DataPipeline._bind_component_timezones). Explicit-and-equal and explicit-and-different-raises are covered in
-tests/pipelines/test_pipeline.py (TestDateSemantics); this file covers inheritance itself, the "missing
-everywhere" error, YAML round trips and the information-set check.
+TimezoneTransformer.target_tz, CalendarSource.timezone and OpenMeteoSource.timezone may all be left unset and
+inherit DataPipeline.timezone instead — including, for a source built with `locations`, through each of its
+private per-location instances (see DataPipeline._bind_component_timezones). Explicit-and-equal and
+explicit-and-different-raises are covered in tests/pipelines/test_pipeline.py (TestDateSemantics); this file
+covers inheritance itself, the "missing everywhere" error, YAML round trips and the information-set check.
 """
 
 from unittest.mock import Mock
@@ -16,7 +15,6 @@ import yaml
 
 from epftoolbox2.data.sources import (
     CalendarSource,
-    OpenMeteoSingleRunsSource,
     OpenMeteoSource,
 )
 from epftoolbox2.data.sources.base import DataSource
@@ -78,8 +76,8 @@ class TestInheritance:
         assert source.market_timezone == TZ
         assert source.timezone is None
 
-    def test_open_meteo_single_runs_source(self):
-        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, columns=["temperature_2m"])
+    def test_open_meteo_source_single_runs_api(self):
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, columns=["temperature_2m"], api="single_runs")
         DataPipeline(sources=[source], timezone=TZ)
         assert source.market_timezone == TZ
         assert source.timezone is None
@@ -131,8 +129,8 @@ class TestMissingEverywhereRaises:
         with pytest.raises(ValueError, match="timezone is required"):
             pipe.run(*_RANGE)
 
-    def test_open_meteo_single_runs_source(self):
-        source = OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, columns=["temperature_2m"])
+    def test_open_meteo_source_single_runs_api(self):
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, columns=["temperature_2m"], api="single_runs")
         pipe = DataPipeline(sources=[source])
         with pytest.raises(ValueError, match="timezone is required"):
             pipe.run(*_RANGE)
@@ -213,13 +211,16 @@ class TestLoadAndRerun:
 
 
 class TestInformationSetSeesTheInheritedZone:
-    def test_source_rules_uses_the_inherited_timezone(self):
-        source = _open_meteo(issue_time="09:00")
+    def test_source_rules_resolves_even_with_an_inherited_timezone(self):
+        # weather_cutoff is anchored to run:00 UTC, not to the source's own market zone, so source_rules must
+        # not need `market_timezone` (and therefore a bound DataPipeline) to resolve a rule at all.
+        source = _open_meteo(run="09")
         dp = DataPipeline(sources=[source], timezone=TZ)
 
         rules = source_rules(dp.sources)
 
-        assert rules["temperature_2m"].timezone == TZ
+        assert rules["temperature_2m"].kind == "weather_cutoff"
+        assert rules["temperature_2m"].time == "09:00"
 
 
 # ---------------------------------------------------------------------------

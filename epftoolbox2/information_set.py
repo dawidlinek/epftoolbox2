@@ -26,7 +26,7 @@ from .logging import get_logger
 
 logger = get_logger(__name__)
 
-KINDS = ("static", "realised", "published", "weekly", "weather_run", "as_of")
+KINDS = ("static", "realised", "published", "weekly", "weather_run", "as_of", "weather_cutoff")
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 _UNKNOWN_POLICIES = ("raise", "warn", "ignore")
 _SUFFIX = re.compile(r"^(?P<base>.+)_(?P<unit>d|h|min|s)(?P<sign>[+-])(?P<n>\d+)$")
@@ -85,6 +85,9 @@ class Availability:
         as_of:       known at a fixed `time` (in `timezone`) on the issue day D, regardless of a leading `_d+k`
                      (a value fixed as of the source's own issue time, e.g. a reanalysis snapshot rather than a
                      rolling forecast run).
+        weather_cutoff: an OpenMeteoSource column. Known `delay` after `run`:00 UTC on the issue day D itself,
+                     regardless of a leading `_d+k` — the source's own leak-free cutoff is fixed to D's run, not
+                     to the delivery day (see OpenMeteoSource and `publication_delay_hours`).
     """
 
     kind: str
@@ -139,6 +142,13 @@ class Availability:
         """Known at a fixed `time` on the issue day D; a leading `_d+k` doesn't change that."""
         return cls("as_of", time=time, timezone=timezone, note=note)
 
+    @classmethod
+    def weather_cutoff(cls, run: str, delay: str, note: str = "") -> "Availability":
+        """An OpenMeteoSource column: known `delay` after `run` (a UTC hour "HH") on the issue day D, regardless
+        of a leading `_d+k` — like `as_of`, but the fixed time is expressed as a UTC run hour plus a delay that
+        may push it past 24:00 (into the next UTC calendar day), rather than a local "HH:MM" clock time."""
+        return cls("weather_cutoff", time=f"{run}:00", delay=delay, timezone="UTC", note=note)
+
     def to_dict(self) -> Dict[str, Any]:
         keys = {
             "static": [],
@@ -147,6 +157,7 @@ class Availability:
             "weekly": ["weekday", "time", "timezone"],
             "weather_run": ["delay"],
             "as_of": ["time", "timezone"],
+            "weather_cutoff": ["time", "delay", "timezone"],
         }[self.kind]
         out: Dict[str, Any] = {"kind": self.kind}
         out.update({k: getattr(self, k) for k in keys})
@@ -176,6 +187,9 @@ class Availability:
             return f"published {self.weekday.capitalize()} {self.time}{zone} for the following week"
         if self.kind == "as_of":
             return f"known {self.time}{zone} on the issue day"
+        if self.kind == "weather_cutoff":
+            run = self.time.split(":", 1)[0]
+            return f"known {self.delay} after the {run} UTC run on the issue day"
         return f"weather model run published {self.delay} after its start (about the row time)"
 
 
@@ -272,7 +286,7 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             # A source built with `locations` (see OpenMeteoSource.locations) emits the usual `{prefix}{variable}`
             # columns only when it produces a weighted series (every location has a weight); it also, or instead,
             # emits per-location columns `{prefix}{name}_{variable}` — with weights only when `keep_locations`,
-            # always otherwise (they are then the only output). Both column shapes follow the same vintage rule.
+            # always otherwise (they are then the only output). Both column shapes follow the same cutoff rule.
             locations = getattr(source, "_locations", [])
             weighted = bool(locations) and all(loc.get("weight") is not None for loc in locations)
             if not locations or weighted:
@@ -286,20 +300,21 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
 
 
 def _weather_availability(source: Any) -> Availability:
-    """A weather source's own vintage decides its rule.
+    """An OpenMeteoSource column is available `delay` after `D` at `run`:00 UTC (the source's own leak-free
+    cutoff, see OpenMeteoSource), regardless of `api` or a leading `_d+k`. `delay` is a conservative, model-side
+    estimate of the real-world publication lag (see `publication_delay_hours`): the source itself has no notion
+    of it, only of the nominal run instant.
 
-    `vintage`, `issue_time`, `timezone` and `publication_delay_h` are read with `getattr` and default when a
-    source doesn't set them (they are added to `OpenMeteoSource` on another branch), so this works with any
-    `OpenMeteoSource`-like object. `timezone` reads the resolved `market_timezone` when the source has one (it
-    may have inherited it from `DataPipeline.timezone` rather than setting its own `timezone`), falling back to
-    the raw `timezone` attribute for anything that only has that.
+    `run` and `model` are read with `getattr` and default when a source doesn't set them, so this works with
+    any `OpenMeteoSource`-like object.
     """
-    if getattr(source, "vintage", None) == "issue_time":
-        issue_time = getattr(source, "issue_time", "11:30")
-        timezone = getattr(source, "market_timezone", None) or getattr(source, "timezone", None) or "Europe/Brussels"
-        return Availability.as_of(issue_time, timezone, note="Open-Meteo: known as of the source's issue time")
-    delay_h = getattr(source, "publication_delay_h", 6)
-    return Availability.weather_run(f"{delay_h}h", note="Open-Meteo previous-runs forecast")
+    from .data.sources.open_meteo import publication_delay_hours
+
+    run = getattr(source, "run", "00")
+    delay_h = publication_delay_hours(getattr(source, "model", ""))
+    return Availability.weather_cutoff(
+        run, f"{delay_h}h", note="Open-Meteo: known after the model run's typical publication delay"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +552,7 @@ class InformationSet:
                     if avail > issue and (worst is None or avail - issue > worst[0] - worst[1]):
                         worst = (avail, issue, ctx)
                 if worst is not None:
-                    hint = self._assumption_hint(col, day, row_minute, step, worst[2])
+                    hint = self._assumption_hint(col, day, row_minute, step, worst[2]) or self._weather_cutoff_hint(col)
                     out.append(Violation(name, period, hz, col, worst[0], worst[1], role, hint))
         return out, unknown
 
@@ -548,6 +563,17 @@ class InformationSet:
             if _available(col, rule, day, row_minute, step, ctx) <= ctx.issue_minute:
                 return f"known in time if you accept assumption '{name}': {description}"
         return ""
+
+    @staticmethod
+    def _weather_cutoff_hint(col: ResolvedColumn) -> str:
+        """An OpenMeteoSource column's own cutoff is a source-side setting, not a data fact: point at it."""
+        if col.rule is None or col.rule.kind != "weather_cutoff":
+            return ""
+        run = col.rule.time.split(":", 1)[0]
+        return (
+            f"OpenMeteoSource(run={run!r}, ...) is known {col.rule.delay} after that UTC run; suggest an "
+            "earlier run or a later issue time"
+        )
 
     def _contexts(self, index, test_start, test_end) -> List["_Context"]:
         """Distinct (issue weekday, zone offsets) combinations over the test period."""
@@ -784,6 +810,11 @@ def _available_array(
         # Fixed to a time on the issue day D itself: independent of the row's own day/minute or any shift,
         # so a leading `_d+k` doesn't change it.
         return np.full(len(day), _minutes(rule.time) + _zone_shift(rule.timezone, ctx))
+    if rule.kind == "weather_cutoff":
+        # Fixed to `run`:00 UTC plus `delay` on the issue day D itself, same independence as `as_of` above. The
+        # run+delay total is minutes after UTC midnight of D and may exceed 1440 (a late run plus its delay can
+        # land on D+1 in UTC); that is fine here, this is a plain offset, not a wall-clock time to re-parse.
+        return np.full(len(day), _minutes(rule.time) + _parse_delay(rule.delay) + _zone_shift(rule.timezone, ctx))
     shifts = list(col.shifts)
     if rule.kind == "weather_run" and shifts and shifts[0].unit == "d" and shifts[0].offset > 0:
         shifts = shifts[1:]

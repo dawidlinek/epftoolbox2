@@ -1,9 +1,9 @@
-"""Shared pieces of the Open-Meteo sources: issue-time helpers, HTTP retries, coverage checks, derived columns,
-several locations combined into one source."""
+"""Shared pieces of OpenMeteoSource: the leak-free cutoff, HTTP retries, coverage checks, several locations
+combined into one source."""
 
 import re
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -15,79 +15,50 @@ from epftoolbox2.logging import get_logger
 from .._market_timezone import resolve as _resolve_timezone
 from .base import DataSource
 
-_ISSUE_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+_RUN_RE = re.compile(r"^([01]\d|2[0-3])$")
 _LOCATION_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 # Variables that cannot be averaged arithmetically when combining several locations (see `_weighted_average`).
 _CIRCULAR_VARIABLE_RE = re.compile(r"direction")
 _CATEGORICAL_VARIABLES = ("weather_code",)
 
-# Attributes every OpenMeteoBase subclass sets at construction time that must not be forwarded when building one
+# Attributes every OpenMeteoSource instance sets at construction time that must not be forwarded when building one
 # instance per location (see `OpenMeteoBase._location_kwargs`): runtime objects, and the parameters `locations`
 # itself replaces.
 _RUNTIME_ATTRIBUTES = {"session", "console", "logger"}
 _NON_LOCATION_KWARGS = {"latitude", "longitude", "locations", "prefix", "keep_locations"}
 
-# Derived columns: name -> input variable. All are deterministic transforms of one forecast column, computed per
-# lead and per location, so they inherit that column's vintage.
-DERIVED_INPUTS = {
-    "hdd": "temperature_2m",
-    "cdd": "temperature_2m",
-    "wind_speed_100m_cubed": "wind_speed_100m",
-}
+
+def parse_run(value: str) -> int:
+    """Parse a model-run hour "HH" (a UTC hour, "00".."23")."""
+    if not isinstance(value, str) or not _RUN_RE.match(value):
+        raise ValueError(f'run must be a UTC hour "HH" between "00" and "23", got {value!r}')
+    return int(value)
 
 
-def parse_issue_time(value: str) -> Tuple[int, int]:
-    """Parse "HH:MM" (local wall-clock time) into (hour, minute)."""
-    match = _ISSUE_TIME_RE.match(value) if isinstance(value, str) else None
-    if not match or int(match.group(1)) > 23 or int(match.group(2)) > 59:
-        raise ValueError(f'issue_time must be "HH:MM" between "00:00" and "23:59", got {value!r}')
-    return int(match.group(1)), int(match.group(2))
+def run_cutoff(rows: pd.DatetimeIndex, timezone: str, run: str) -> pd.DatetimeIndex:
+    """The leak-free cutoff for each row: "D at `run`:00 UTC", D being the row's local calendar day in `timezone`.
 
-
-def local_issue_times(rows: pd.DatetimeIndex, timezone: str, issue_time: str) -> pd.DatetimeIndex:
-    """UTC instant of the issue time on the local calendar day of each row.
-
-    An issue time that falls into a DST gap or overlap resolves to the earlier instant (the conservative choice).
+    A value on D's rows (any `{variable}_d+i` column) may come only from a model run initialised at or before
+    this instant (see ``OpenMeteoSource``). Unlike a local wall-clock issue time, combining a UTC hour with D's
+    calendar date needs no DST resolution: D is a plain calendar date once found, and adding a UTC offset to it
+    is unambiguous.
     """
-    hour, minute = parse_issue_time(issue_time)
+    hour = parse_run(run)
     local_days = rows.tz_convert(timezone).tz_localize(None).normalize()
-    issue = local_days + pd.Timedelta(hours=hour, minutes=minute)
-    earlier = np.ones(len(issue), dtype=bool)
-    return issue.tz_localize(timezone, ambiguous=earlier, nonexistent="shift_backward").tz_convert("UTC")
+    return (local_days + pd.Timedelta(hours=hour)).tz_localize("UTC")
 
 
 def shift_local_days(rows: pd.DatetimeIndex, timezone: str, days: int) -> pd.DatetimeIndex:
     """Same local wall-clock time `days` calendar days later, in UTC.
 
-    A time that does not exist on the target day (spring forward) moves to the next valid hour; an ambiguous one
-    (fall back) takes its first occurrence.
+    A time that does not exist on the target day (spring forward) has no valid wall-clock value: it comes back
+    ``NaT`` rather than silently moving to the next hour (that would give a different variable's value the
+    target row's name). An ambiguous one (fall back) takes its first occurrence, matching the rest of the
+    library's calendar-day conventions.
     """
     shifted = rows.tz_convert(timezone).tz_localize(None) + pd.Timedelta(days=days)
     first = np.ones(len(shifted), dtype=bool)
-    return shifted.tz_localize(timezone, ambiguous=first, nonexistent="shift_forward").tz_convert("UTC")
-
-
-def add_derived_columns(
-    df: pd.DataFrame, derived: Sequence[str], horizon: int, hdd_base_c: float, cdd_base_c: float
-) -> pd.DataFrame:
-    """Append `{name}_d+{i}` for each derived name, computed from the unprefixed `{input}_d+{i}` columns.
-
-    hdd/cdd are hourly heating/cooling degrees (degree-hours per hour) against the given base temperature;
-    wind_speed_100m_cubed is (wind speed in m/s)^3, a proxy for wind power below rated speed.
-    """
-    new = {}
-    for name in derived:
-        for lead in range(1, horizon + 1):
-            source = df[f"{DERIVED_INPUTS[name]}_d+{lead}"]
-            if name == "hdd":
-                new[f"{name}_d+{lead}"] = (hdd_base_c - source).clip(lower=0)
-            elif name == "cdd":
-                new[f"{name}_d+{lead}"] = (source - cdd_base_c).clip(lower=0)
-            else:
-                new[f"{name}_d+{lead}"] = (source / 3.6) ** 3
-    if not new:
-        return df
-    return pd.concat([df, pd.DataFrame(new, index=df.index)], axis=1)
+    return shifted.tz_localize(timezone, ambiguous=first, nonexistent="NaT").tz_convert("UTC")
 
 
 def parse_hourly(response_data: Dict) -> pd.DataFrame:
@@ -112,7 +83,7 @@ def parse_hourly(response_data: Dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Locations: several coordinates combined into one source (see OpenMeteoBase.locations)
+# Locations: several coordinates combined into one source (see OpenMeteoSource.locations)
 # ---------------------------------------------------------------------------
 
 
@@ -228,11 +199,11 @@ def _weighted_average(frames: List[pd.DataFrame], weights: np.ndarray) -> pd.Dat
 
 
 class OpenMeteoBase(DataSource):
-    """Common behaviour of the Open-Meteo sources, for one location or several.
+    """Common behaviour of OpenMeteoSource, for one location or several.
 
-    Subclasses set their public attributes (latitude, longitude, locations, keep_locations, horizon, model,
-    columns, prefix, proxy_url, timezone, issue_time, publication_delay_h, derived, hdd_base_c, cdd_base_c,
-    strict), then call ``self._setup()`` and ``self._validate_config()``, which must call ``_validate_common()``.
+    Subclasses set their public attributes (latitude, longitude, locations, keep_locations, columns, horizon,
+    model, temporal_resolution, api, run, timezone, prefix, strict, proxy_url), then call ``self._setup()`` and
+    ``self._validate_config()``, which must call ``_validate_common()``.
 
     ``locations`` is mutually exclusive with ``latitude``/``longitude`` (see ``parse_locations``) and is resolved
     by ``_configure_locations()`` into ``self._locations`` (normalised) and ``self._location_sources`` (one
@@ -257,7 +228,6 @@ class OpenMeteoBase(DataSource):
         "wind_speed_10m",
         "wind_direction_10m",
     ]
-    VALID_DERIVED = tuple(DERIVED_INPUTS)
 
     MAX_RETRIES = 5
     BACKOFF_BASE_S = 2.0
@@ -279,10 +249,9 @@ class OpenMeteoBase(DataSource):
         raise ValueError(
             "timezone is required: set it to your market's zone, e.g. 'Europe/Warsaw' for PL, 'Europe/London' "
             "for GB, 'Europe/Berlin' for DE — either directly on this source, or once via "
-            "DataPipeline(timezone=...). It defines the local day and the issue time used to pick a leak-free "
-            "forecast vintage; a market outside CET that left it unset used to silently fall back to "
-            "Europe/Warsaw, computing the issue time in the wrong zone (e.g. London 23:00 on D became 10:00 on "
-            "D+1)."
+            "DataPipeline(timezone=...). It defines the local day D that the leak-free cutoff (D at run:00 UTC) "
+            "is anchored to; a market outside CET that left it unset used to silently fall back to "
+            "Europe/Warsaw, computing that cutoff in the wrong zone."
         )
 
     def _setup(self):
@@ -318,10 +287,10 @@ class OpenMeteoBase(DataSource):
         return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
 
     def _validate_common(self, max_horizon: Optional[int] = None) -> None:
-        """Checks shared by all Open-Meteo sources (everything except the API-specific parameters).
+        """Checks shared by both `api` modes (everything except bucket/run selection).
 
-        `max_horizon` is enforced here only when given. A source whose usable horizon depends on the data (e.g.
-        ``OpenMeteoSource``'s bucket availability) checks its own bound after calling this, with its own message.
+        `max_horizon` is enforced here only when given. `api="previous_runs"`'s usable horizon depends on the
+        data (bucket availability under the cutoff) and is checked by the caller instead, with its own message.
         """
         self._configure_locations()
 
@@ -348,24 +317,9 @@ class OpenMeteoBase(DataSource):
             except (KeyError, ValueError, TypeError):
                 raise ValueError(f"Invalid timezone: {self.timezone!r}")
 
-        parse_issue_time(self.issue_time)
-
-        delay = self.publication_delay_h
-        if isinstance(delay, bool) or not isinstance(delay, (int, float)) or not 0 <= delay <= 48:
-            raise ValueError(f"publication_delay_h must be a number of hours between 0 and 48, got {delay!r}")
-
-        self._validate_derived()
-
-    def _validate_derived(self) -> None:
-        unknown = [name for name in self.derived if name not in DERIVED_INPUTS]
-        if unknown:
-            raise ValueError(f"derived must be a subset of {list(DERIVED_INPUTS)}, got {unknown}")
-        for name in self.derived:
-            if DERIVED_INPUTS[name] not in self.columns:
-                raise ValueError(f"derived column {name!r} needs {DERIVED_INPUTS[name]!r} in columns")
-        for label, base in (("hdd_base_c", self.hdd_base_c), ("cdd_base_c", self.cdd_base_c)):
-            if isinstance(base, bool) or not isinstance(base, (int, float)):
-                raise ValueError(f"{label} must be a number, got {base!r}")
+        if self.api not in ("previous_runs", "single_runs"):
+            raise ValueError(f'api must be "previous_runs" or "single_runs", got {self.api!r}')
+        parse_run(self.run)
 
     def _configure_locations(self) -> None:
         """Parse `locations`, mutually exclusive with `latitude`/`longitude`, and build one instance of this
@@ -425,7 +379,7 @@ class OpenMeteoBase(DataSource):
         """Fetch every location (built by `_configure_locations`) and combine per weights / `keep_locations`.
 
         Every location is fetched by another instance of this class sharing every other setting, so all
-        locations follow the same vintage rule. With weights this returns one weighted series per variable,
+        locations follow the same cutoff. With weights this returns one weighted series per variable,
         `{prefix}_{variable}_d+i` (see `_weighted_average`); `keep_locations=True` also adds the per-location
         columns `{prefix}_{name}_{variable}_d+i`. Without weights, only the per-location columns are returned.
         One shared "now" is used for every location so a live fetch can't settle some locations as final and
@@ -519,27 +473,25 @@ class OpenMeteoBase(DataSource):
 
         raise RuntimeError(f"Failed to fetch data after {self.MAX_RETRIES} retries")
 
-    def _issue_instants(self, rows: pd.DatetimeIndex) -> Tuple[pd.DatetimeIndex, np.ndarray]:
-        """Issue instant per row and a mask of final rows (issue time passed).
+    def _cutoff_instants(self, rows: pd.DatetimeIndex) -> Tuple[pd.DatetimeIndex, np.ndarray]:
+        """Cutoff instant per row (D's run:00 UTC) and a mask of final rows (the cutoff has passed).
 
-        Rows whose issue time is still in the future (live runs) get "now" instead: they use the runs published so
+        Rows whose cutoff is still in the future (live runs) get "now" instead: they use the runs published so
         far, are provisional and change when fetched again later.
         """
-        issue = local_issue_times(rows, self._require_market_timezone(), self.issue_time)
+        cutoff = run_cutoff(rows, self._require_market_timezone(), self.run)
         now = self._now()
-        final = np.asarray(issue <= now)
+        final = np.asarray(cutoff <= now)
         if not final.all():
             self.logger.info(
-                f"{self._label}: {int((~final).sum())} rows from {rows[~final][0]} have an issue time after now; "
-                "they use runs published by now and will change when fetched again later"
+                f"{self._label}: {int((~final).sum())} rows from {rows[~final][0]} have a cutoff after now; they "
+                "use runs published so far and will change when fetched again later"
             )
-            issue = issue.where(final, now)
-        return issue, final
+            cutoff = cutoff.where(final, now)
+        return cutoff, final
 
     def _finish(self, result: pd.DataFrame, final: np.ndarray) -> pd.DataFrame:
-        """Derived columns, trailing-row trim, prefix and coverage report, in that order."""
-        if self.derived:
-            result = add_derived_columns(result, self.derived, self.horizon, self.hdd_base_c, self.cdd_base_c)
+        """Trailing-row trim, prefix and coverage report, in that order."""
         result, final, dropped_final = self._drop_unfilled_tail(result, final)
         if self.prefix:
             result.columns = [f"{self.prefix}_{col}" for col in result.columns]
@@ -549,7 +501,7 @@ class OpenMeteoBase(DataSource):
     def _drop_unfilled_tail(self, result: pd.DataFrame, final: np.ndarray):
         """Drop trailing rows without any value (runs that do not exist yet, or the end of the archive).
 
-        Returns the kept rows, their `final` flags and the number of dropped rows whose issue time has passed.
+        Returns the kept rows, their `final` flags and the number of dropped rows whose cutoff has passed.
         """
         filled = result.notna().any(axis=1).to_numpy()
         keep = int(np.flatnonzero(filled)[-1]) + 1 if filled.any() else 0
@@ -561,7 +513,7 @@ class OpenMeteoBase(DataSource):
     def _report_coverage(self, result: pd.DataFrame, final: np.ndarray, dropped_final: int):
         """Log per-column coverage and raise under `strict`.
 
-        Only final rows count: provisional rows (issue time in the future) are expected to be incomplete. Final
+        Only final rows count: provisional rows (cutoff still in the future) are expected to be incomplete. Final
         rows dropped because they had no value at all (`_drop_unfilled_tail`) count as missing but, having no
         timestamp, aren't part of the per-hour breakdown below.
 
@@ -594,7 +546,7 @@ class OpenMeteoBase(DataSource):
 
         message = (
             f"{self._label} model={self.model!r}: {len(incomplete)} of {len(missing)} columns have missing values "
-            f"in {total} rows whose issue time has passed:\n" + "\n".join(lines)
+            f"in {total} rows whose cutoff has passed:\n" + "\n".join(lines)
         )
         if self.strict:
             raise ValueError(message)
@@ -632,8 +584,8 @@ class OpenMeteoBase(DataSource):
             "columns": sorted(self.columns),
             "prefix": self.prefix,
             "timezone": self._require_market_timezone(),
-            "issue_time": self.issue_time,
-            "publication_delay_h": self.publication_delay_h,
+            "api": self.api,
+            "run": self.run,
         }
         # Only when used, so a single-point configuration (the common case) keeps its existing cache key.
         if self._locations:
@@ -643,15 +595,4 @@ class OpenMeteoBase(DataSource):
         else:
             config["latitude"] = self.latitude
             config["longitude"] = self.longitude
-        # Only when used, so configurations without derived columns keep their cache key.
-        if self.derived:
-            config["derived"] = sorted(self.derived)
-        if "hdd" in self.derived:
-            config["hdd_base_c"] = self.hdd_base_c
-        if "cdd" in self.derived:
-            config["cdd_base_c"] = self.cdd_base_c
         return config
-
-
-def normalise_derived(derived: Optional[List[str]]) -> List[str]:
-    return list(derived) if derived else []
