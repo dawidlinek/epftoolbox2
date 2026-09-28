@@ -894,26 +894,26 @@ class TestDateSemantics:
                 timezone="America/New_York",
             )
 
-    def test_timezone_mismatched_with_open_meteo_single_runs_source_raises(self):
-        from epftoolbox2.data.sources import OpenMeteoSingleRunsSource
+    def test_timezone_mismatched_with_open_meteo_single_runs_api_raises(self):
+        from epftoolbox2.data.sources import OpenMeteoSource
 
         with pytest.raises(ValueError, match="America/New_York.*Europe/Warsaw|Europe/Warsaw.*America/New_York"):
             DataPipeline(
-                sources=[OpenMeteoSingleRunsSource(52.23, 21.01, timezone="Europe/Warsaw")],
+                sources=[OpenMeteoSource(52.23, 21.01, timezone="Europe/Warsaw", api="single_runs")],
                 timezone="America/New_York",
             )
 
-    def test_timezone_mismatched_with_open_meteo_weighted_source_raises(self):
-        from epftoolbox2.data.sources import OpenMeteoWeightedSource
+    def test_timezone_mismatched_with_open_meteo_source_locations_raises(self):
+        """A source built with `locations` still has its own `timezone`, checked at the parent level."""
+        from epftoolbox2.data.sources import OpenMeteoSource
 
         with pytest.raises(ValueError, match="America/New_York.*Europe/Warsaw|Europe/Warsaw.*America/New_York"):
             DataPipeline(
                 sources=[
-                    OpenMeteoWeightedSource(
-                        locations=[
-                            {"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": 1.0},
-                        ],
-                        source_params={"timezone": "Europe/Warsaw", "columns": ["temperature_2m"]},
+                    OpenMeteoSource(
+                        locations={"warsaw": {"latitude": 52.23, "longitude": 21.01}},
+                        columns=["temperature_2m"],
+                        timezone="Europe/Warsaw",
                     )
                 ],
                 timezone="America/New_York",

@@ -23,11 +23,12 @@ changed, why, and what you need to do before trusting new results.
   ENTSO-E omits under curve type A03 because they repeat the previous point are now forward-filled instead
   of left missing. DE_LU/AT day-ahead prices no longer mix the main SDAC auction with the separate EXAA
   auction. Pumped-storage generation and consumption are no longer merged into one series.
-- **Open-Meteo vintage.** `OpenMeteoSource`/`OpenMeteoSingleRunsSource` used to serve whichever forecast run
-  Open-Meteo's API returns for a `previous_dayK`/`previous_runs` bucket, which can be a run published
-  *after* the forecast's own issue time — look-ahead. They now select, per row and lead time, the latest run
-  that was actually published in time (`vintage="issue_time"`, the new default). Every `*_d+i` weather
-  value can change.
+- **Open-Meteo cutoff.** `OpenMeteoSource` used to serve whichever forecast run Open-Meteo's API returns for a
+  `previous_dayK`/`previous_runs` bucket, which can be a run published *after* the forecast's own issue time —
+  look-ahead. It now selects, per row and lead time, only runs initialised at or before a cutoff (`D` at
+  `run`:00 UTC, `run` defaulting to `"00"`). Every `*_d+i` weather value can change. See
+  [Open-Meteo redesign](#open-meteo-redesign-one-class-apirun-instead-of-issue_timepublication_delay_hvintage)
+  below for the full parameter mapping (this folds in and supersedes the original issue-time-vintage change).
 - **Calendar-day lags.** `LagTransformer` and the target-shifting in `ModelPipeline` used to shift by a
   fixed 24-hour offset; DST days have 23 or 25 hours, so a day lag landed on the wrong wall-clock hour
   around a spring/autumn switch. Lags now shift by local calendar days. Only the days near each DST switch
@@ -66,12 +67,12 @@ the old one) rather than resuming them; don't rely on the manifest to catch this
 
 ## Required and renamed parameters
 
-- **`OpenMeteoSource`/`OpenMeteoSingleRunsSource`: `timezone` is now required (directly or inherited).** It used
-  to default to `"Europe/Warsaw"`, which silently mis-timed the issue-time cutoff (and therefore leaked or
+- **`OpenMeteoSource`: `timezone` is now required (directly or inherited).** It used
+  to default to `"Europe/Warsaw"`, which silently mis-timed the cutoff (and therefore leaked or
   over-restricted data) for any market outside that zone. Pass the market's zone explicitly, or set it once with
   `DataPipeline(timezone=...)` and leave it unset here (see the next bullet) — fetching without either raises.
 - **The market zone can now be set once, on `DataPipeline(timezone=...)`.** `TimezoneTransformer.target_tz`,
-  `CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`/`OpenMeteoWeightedSource`'s own zone all default
+  `CalendarSource`/`OpenMeteoSource`'s own zone all default
   to `None` and then inherit it, instead of each needing the same zone written out again. An explicitly set,
   different zone still raises. This is a drop-in simplification: existing configs that already spell the zone
   out everywhere keep working unchanged.
@@ -96,12 +97,42 @@ the old one) rather than resuming them; don't rely on the manifest to catch this
 
 ## New components
 
-`OpenMeteoSingleRunsSource` and `OpenMeteoWeightedSource` (exact-run and multi-location weather),
 `EpftoolboxBenchmarkSource` (the Lago et al. 2021 datasets); `DSTNormalizeTransformer`, `DailyProfileTransformer`,
 `DailyStatsTransformer`, `ResidualLoadTransformer`, `SpikeFlagTransformer`, `ImputeTransformer`;
 `CoverageValidator`, `DSTStructureValidator`, `FreshnessValidator`, `PlausibilityValidator`,
 `LagConsistencyValidator`; variance-stabilising scalers (`asinh`, N-PIT) alongside the default standardiser;
-and `epftoolbox2.presets` (ready-made LEAR/expert-model predictor lists).
+and `epftoolbox2.presets` (ready-made LEAR/expert-model predictor lists). `OpenMeteoSource` also takes several
+`locations`.
+
+## Open-Meteo redesign: one class, `api`/`run` instead of `issue_time`/`publication_delay_h`/`vintage`
+
+`OpenMeteoSource` and the former `OpenMeteoSingleRunsSource` are now **one class**. Which API it uses is now a
+parameter, `api="previous_runs"` (default, the old `OpenMeteoSource`'s long lead-time-bucket archive) or
+`api="single_runs"` (the old `OpenMeteoSingleRunsSource`'s one-exact-run-per-day archive), and the leak-free
+cutoff is now anchored to a UTC run hour, `run` (default `"00"`), instead of a local `issue_time` plus a
+`publication_delay_h`: a value on local day D's rows may come only from a model run initialised at or before
+`D` at `run`:00 UTC. The old `vintage="valid_time"` look-ahead mapping, and the `derived`/`hdd_base_c`/
+`cdd_base_c` computed columns, are removed entirely — nothing replaces them.
+
+| Old | New |
+|---|---|
+| `OpenMeteoSource(...)` | `OpenMeteoSource(api="previous_runs", ...)` (or omit `api`, it's the default) |
+| `OpenMeteoSingleRunsSource(...)` | `OpenMeteoSource(api="single_runs", ...)` |
+| `issue_time="10:00"` / `publication_delay_h=10` | `run="00"` (a UTC hour). See the table in [Data Sources > OpenMeteoSource > Choosing `run`](/epftoolbox2/data-sources/openmeteo/#choosing-run) for typical delays per model family, now built into `epftoolbox2.information_set.source_rules` instead of a source parameter. |
+| `vintage="issue_time"` (the leak-free default) | nothing to pass — this is now the only behaviour |
+| `vintage="valid_time"` (look-ahead) | removed entirely, no replacement |
+| `run_interval_h=6` (old `OpenMeteoSingleRunsSource`) | removed; `run` names one exact UTC hour instead of a cycle |
+| `derived=["hdd", "cdd", "wind_speed_100m_cubed"]`, `hdd_base_c`, `cdd_base_c` | removed entirely; compute these yourself from the fetched columns if you need them |
+
+```diff
+- OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", issue_time="11:30", publication_delay_h=4)
+- OpenMeteoSingleRunsSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", issue_time="11:30", run_interval_h=6)
++ OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", run="06")
++ OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", api="single_runs", run="06")
+```
+
+A spring-forward target wall-clock hour that doesn't exist (e.g. 2024-03-31 02:00 in `Europe/Warsaw`) now comes
+back `NaN` instead of silently shifting to the next hour under that row's name.
 
 ## The new information-set check
 

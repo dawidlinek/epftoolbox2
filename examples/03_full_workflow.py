@@ -34,9 +34,9 @@ if __name__ == "__main__":
         DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
         .add_source(
-            # jma_seamless (default model) is only leak-free up to 5 days ahead at the default issue_time/
-            # publication_delay_h; a longer horizon needs a different model or publication_delay_h. timezone is
-            # left unset: it inherits DataPipeline(timezone=...) above.
+            # jma_seamless (default model) is only leak-free up to 5 days ahead at the default
+            # api="previous_runs"/run="00"; a longer horizon needs a different model or api="single_runs".
+            # timezone is left unset: it inherits DataPipeline(timezone=...) above.
             OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw")
         )
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
@@ -88,7 +88,7 @@ if __name__ == "__main__":
     ]
 
     # issue_time is 30 min before the 12:00 CET day-ahead gate closure. with_source_rules() teaches the check
-    # that "warsaw_temperature_2m" is an Open-Meteo issue-time vintage column (see docs/model-pipeline/
+    # that "warsaw_temperature_2m" is an OpenMeteoSource weather_cutoff column (see docs/model-pipeline/
     # information-set); Workflow does this automatically, but a standalone ModelPipeline needs it spelled out.
     information_set = InformationSet("11:30", "Europe/Warsaw").with_source_rules(data_pipeline.sources)
 

@@ -108,40 +108,83 @@ def test_as_of_rule_ignores_a_leading_day_shift():
     assert {name for name, _, _ in late} == {"x", "x_d+1", "x_d+3"}  # all fail identically (12:00 > 11:30 issue)
 
 
-def test_source_rules_as_of_for_a_weather_source_with_issue_time_vintage():
-    """`vintage`/`issue_time`/`timezone`/`publication_delay_h` are added to `OpenMeteoSource` on another
-    branch; source_rules reads them with getattr so this works with a stub that has them."""
-    source = _warsaw_weather_source(vintage="issue_time", issue_time="09:00", timezone="Europe/Brussels")
+def test_source_rules_weather_cutoff_for_a_weather_source():
+    """`run`/`model` are read with `getattr`, so this works with a stub that has them."""
+    source = _warsaw_weather_source(run="09", model="ecmwf_ifs")
     rule = source_rules([source])["warsaw_temperature_2m"]
-    assert (rule.kind, rule.time, rule.timezone) == ("as_of", "09:00", "Europe/Brussels")
+    assert (rule.kind, rule.time, rule.delay, rule.timezone) == ("weather_cutoff", "09:00", "8.0h", "UTC")
 
 
-def test_open_meteo_default_vintage_passes_the_issue_time_check_but_valid_time_is_flagged():
-    """integration check c: after merging the weather-sources branch, a real OpenMeteoSource's default
-    (issue_time) vintage is known well before the model's own issue time, so its `_d+{horizon}` columns are
-    not flagged; the deprecated vintage="valid_time" (look-ahead) mapping is."""
-    leak_free = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
-    found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=leak_free)
+def test_source_rules_weather_cutoff_uses_the_models_publication_delay():
+    # ICON ~4h, unknown models the conservative 10h default (see publication_delay_hours).
+    icon = source_rules([_warsaw_weather_source(model="icon_seamless")])["warsaw_temperature_2m"]
+    assert icon.delay == "4.0h"
+    unknown = source_rules([_warsaw_weather_source(model="some_unpublished_model")])["warsaw_temperature_2m"]
+    assert unknown.delay == "10.0h"
+
+
+def test_default_run_passes_the_cutoff_check_at_1130_but_not_1000_brussels():
+    """JMA's default publication delay (10h, see publication_delay_hours) makes the default run="00" cutoff
+    (00:00 UTC + 10h = 10:00 UTC = 11:00 Brussels in winter) known in time for an 11:30 Brussels issue but not
+    for a 10:00 one; the error must then suggest an earlier run or a later issue time."""
+    source = _warsaw_weather_source()  # model="jma_seamless", run="00" (both defaults)
+
+    late_issue = InformationSet("11:30", "Europe/Brussels").with_source_rules([source])
+    found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=late_issue)
     assert found == set()
 
-    leaky = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source(vintage="valid_time")])
-    found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=leaky)
+    early_issue = InformationSet("10:00", "Europe/Brussels").with_source_rules([source])
+    found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=early_issue)
     assert found != set()
+    with pytest.raises(InformationSetError, match="earlier run or a later issue time"):
+        early_issue.check(
+            expand(["warsaw_temperature_2m_d+{horizon}"]), "price", "1h", WARSAW, "2024-01-10", "2024-01-10"
+        )
 
 
-def test_source_rules_weather_run_uses_the_sources_publication_delay():
-    # vintage="valid_time" (or a source without a vintage attribute at all) falls back to weather_run;
-    # OpenMeteoSource's own default is now the leak-free issue_time vintage, see the as_of test above.
-    source = _warsaw_weather_source(publication_delay_h=3, vintage="valid_time")
-    rule = source_rules([source])["warsaw_temperature_2m"]
-    assert (rule.kind, rule.delay) == ("weather_run", "3h")
+def test_source_rules_weighted_locations_cover_the_weighted_columns():
+    # A weighted OpenMeteoSource emits `{prefix}_{variable}_d+i`, exactly the single-location column shape.
+    source = _warsaw_weather_source(
+        latitude=None,
+        longitude=None,
+        locations={"warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 1.0}},
+    )
+    rules = source_rules([source])
+    assert "warsaw_temperature_2m" in rules
+    assert "warsaw_warsaw_temperature_2m" not in rules  # no per-location columns without keep_locations
 
 
-def test_source_rules_weather_run_defaults_without_a_publication_delay():
-    # OpenMeteoSource's own publication_delay_h default (10h) is used; source_rules' getattr fallback of 6h
-    # only fires for a duck-typed source that has no publication_delay_h attribute at all.
-    rule = source_rules([_warsaw_weather_source(vintage="valid_time")])["warsaw_temperature_2m"]
-    assert (rule.kind, rule.delay) == ("weather_run", "10h")
+def test_source_rules_weighted_locations_with_keep_locations_cover_both_shapes():
+    source = _warsaw_weather_source(
+        latitude=None,
+        longitude=None,
+        locations={
+            "warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 1.0},
+            "krakow": {"latitude": 50.06, "longitude": 19.94, "weight": 1.0},
+        },
+        keep_locations=True,
+    )
+    rules = source_rules([source])
+    assert "warsaw_temperature_2m" in rules
+    assert "warsaw_warsaw_temperature_2m" in rules
+    assert "warsaw_krakow_temperature_2m" in rules
+
+
+def test_source_rules_per_location_only_locations_cover_the_per_location_columns():
+    # Without weights only the per-location columns exist; the base name must not get a rule for a column that
+    # is never actually produced.
+    source = _warsaw_weather_source(
+        latitude=None,
+        longitude=None,
+        locations={
+            "warsaw": {"latitude": 52.23, "longitude": 21.01},
+            "krakow": {"latitude": 50.06, "longitude": 19.94},
+        },
+    )
+    rules = source_rules([source])
+    assert "warsaw_warsaw_temperature_2m" in rules
+    assert "warsaw_krakow_temperature_2m" in rules
+    assert "warsaw_temperature_2m" not in rules
 
 
 def test_user_rules_take_precedence_and_exact_names_beat_suffix_parsing():
@@ -345,13 +388,13 @@ def test_a69_needs_the_explicit_assumption():
     assert violations(predictors, info=accepted, horizon=1)[0] == set()
 
 
-def test_weather_forecasts_depend_on_the_row_time():
-    # weather_run (vintage="valid_time") depends on the row's own time; the default issue_time vintage does
-    # not, see test_source_rules_as_of_for_a_weather_source_with_issue_time_vintage.
-    info = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source(vintage="valid_time")])
+def test_weather_run_availability_depends_on_the_row_time():
+    """`Availability.weather_run` is still available for a user-defined rule (e.g. a custom rolling-forecast
+    source), even though no built-in source produces it through `source_rules` any more — OpenMeteoSource's own
+    rule is always `weather_cutoff`, see the tests above."""
+    info = InformationSet("11:30", "Europe/Brussels", rules={"warsaw_temperature_2m": Availability.weather_run("10h")})
     found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=info)
-    # Run started about at the row time and published 10 h later (the source's default): rows up to 01:00
-    # are known by 11:30.
+    # Run started about at the row time and published 10 h later: rows up to 01:00 are known by 11:30.
     assert {p for _, p, _ in found} == set(range(2, 24))
     assert {hz for _, _, hz in found} == set(range(1, 8))
 
@@ -392,8 +435,9 @@ def test_unknown_columns_follow_the_policy():
 def test_shipped_example_predictors_are_flagged():
     """The predictor list of model_pipeline.yaml / examples 02-05 (as of this change) uses look-ahead inputs.
 
-    warsaw_temperature_2m_d+{horizon} is not flagged: Open-Meteo's default issue_time vintage is known well
-    before the model's own issue time (see test_source_rules_as_of_for_a_weather_source_with_issue_time_vintage).
+    warsaw_temperature_2m_d+{horizon} is not flagged: OpenMeteoSource's default cutoff (run="00" plus JMA's
+    typical 10h publication delay) is known well before the model's own issue time, see
+    test_default_run_passes_the_cutoff_check_at_1130_but_not_1000_brussels above.
     """
     shipped = [
         "load_actual",

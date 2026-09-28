@@ -55,7 +55,9 @@ pipeline = (
     .add_source(OpenMeteoSource(
         latitude=52.2297,
         longitude=21.0122,
-        horizon=7,
+        # 5 is the largest horizon jma_seamless (the default model) can serve leak-free at the default
+        # api="previous_runs"/run="00".
+        horizon=5,
         prefix="warsaw",
         # timezone is left unset: it inherits DataPipeline.timezone above.
     ))
@@ -88,7 +90,7 @@ for name, (lat, lon) in cities.items():
     pipeline.add_source(OpenMeteoSource(
         latitude=lat,
         longitude=lon,
-        horizon=7,
+        horizon=5,
         prefix=name,
     ))
 

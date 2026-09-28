@@ -32,9 +32,9 @@ pipeline = (
         OpenMeteoSource(
             latitude=52.2297,
             longitude=21.0122,
-            # jma_seamless (default model) is only leak-free up to 5 days ahead at the default issue_time/
-            # publication_delay_h; a longer horizon needs a different model (e.g. icon_seamless) or a
-            # shorter publication_delay_h, and 7 isn't reachable leak-free with any current model.
+            # jma_seamless (default model) is only leak-free up to 5 days ahead at the default
+            # api="previous_runs"/run="00"; a longer horizon needs a different model (e.g. icon_seamless) or
+            # api="single_runs" (horizon up to 14, leads beyond the run's own length come back NaN).
             horizon=5,
             prefix="warsaw",
             # timezone is left unset: it inherits DataPipeline(timezone=...) above.

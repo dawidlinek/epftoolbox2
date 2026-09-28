@@ -18,7 +18,7 @@ Key patterns:
   appear as `_d-k` and load_forecast only as `_d+1` below (see docs/model-pipeline/information-set).
 - report.predictions() returns a clean DataFrame with no "actual" column.
 - The forecast horizon is capped at 5 days because warsaw_temperature_2m (jma_seamless, the default Open-Meteo
-  model) is only leak-free up to d+5 at the default issue_time/publication_delay_h.
+  model) is only leak-free up to d+5 at the default api="previous_runs"/run="00".
 
 Output: 120 rows per model (24 hours × 5 horizons).
 """
@@ -95,7 +95,7 @@ if __name__ == "__main__":
     ]
 
     # issue_time is 30 min before the 12:00 CET day-ahead gate closure. with_source_rules() teaches the check
-    # that "warsaw_temperature_2m" is an Open-Meteo issue-time vintage column; Workflow does this
+    # that "warsaw_temperature_2m" is an OpenMeteoSource weather_cutoff column; Workflow does this
     # automatically, but a standalone ModelPipeline needs it spelled out.
     information_set = InformationSet("11:30", "Europe/Warsaw").with_source_rules(data_pipeline.sources)
 

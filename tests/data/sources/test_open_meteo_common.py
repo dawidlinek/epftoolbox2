@@ -8,11 +8,10 @@ import requests
 
 from epftoolbox2.data.sources._open_meteo_common import (
     OpenMeteoBase,
-    add_derived_columns,
-    local_issue_times,
-    normalise_derived,
     parse_hourly,
-    parse_issue_time,
+    parse_locations,
+    parse_run,
+    run_cutoff,
     shift_local_days,
 )
 
@@ -34,12 +33,11 @@ class _StubSource(OpenMeteoBase):
             prefix="",
             proxy_url=None,
             timezone=TZ,
-            issue_time="10:00",
-            publication_delay_h=10,
-            derived=None,
-            hdd_base_c=18.0,
-            cdd_base_c=21.0,
+            api="previous_runs",
+            run="00",
             strict=False,
+            locations=None,
+            keep_locations=False,
         )
         params.update(kwargs)
         self.latitude = params["latitude"]
@@ -50,12 +48,11 @@ class _StubSource(OpenMeteoBase):
         self.prefix = params["prefix"]
         self.proxy_url = params["proxy_url"]
         self.timezone = params["timezone"]
-        self.issue_time = params["issue_time"]
-        self.publication_delay_h = params["publication_delay_h"]
-        self.derived = normalise_derived(params["derived"])
-        self.hdd_base_c = params["hdd_base_c"]
-        self.cdd_base_c = params["cdd_base_c"]
+        self.api = params["api"]
+        self.run = params["run"]
         self.strict = params["strict"]
+        self.locations = params["locations"]
+        self.keep_locations = params["keep_locations"]
         self._setup()
         self._validate_config()
 
@@ -71,40 +68,41 @@ class _StubSource(OpenMeteoBase):
 
 
 # ---------------------------------------------------------------------------
-# Issue-time helpers
+# Cutoff helpers
 # ---------------------------------------------------------------------------
 
 
-class TestParseIssueTime:
-    def test_parses_valid_time(self):
-        assert parse_issue_time("10:30") == (10, 30)
-        assert parse_issue_time("00:00") == (0, 0)
-        assert parse_issue_time("23:59") == (23, 59)
+class TestParseRun:
+    def test_parses_valid_hours(self):
+        assert parse_run("00") == 0
+        assert parse_run("09") == 9
+        assert parse_run("23") == 23
 
-    @pytest.mark.parametrize("value", ["25:00", "10:60", "10", "abc", None, 10.0])
-    def test_rejects_invalid_time(self, value):
-        with pytest.raises(ValueError, match="issue_time"):
-            parse_issue_time(value)
+    @pytest.mark.parametrize("value", ["24", "1", "9", "abc", None, 9, "9:00", "-1"])
+    def test_rejects_invalid_run(self, value):
+        with pytest.raises(ValueError, match="run"):
+            parse_run(value)
 
 
-class TestLocalIssueTimes:
-    def test_resolves_local_wall_clock_time_to_utc(self):
+class TestRunCutoff:
+    def test_resolves_local_day_at_run_hour_to_utc(self):
+        # The row (2024-01-10 00:00 UTC = 01:00 CET) belongs to local day D = 2024-01-10; `run` is already a
+        # UTC hour, so the cutoff is exactly D's date at that UTC hour, no zone conversion involved.
         rows = pd.DatetimeIndex([pd.Timestamp("2024-01-10 00:00", tz="UTC")])
-        issue = local_issue_times(rows, TZ, "10:00")
-        assert issue[0] == pd.Timestamp("2024-01-10 09:00", tz="UTC")
+        cutoff = run_cutoff(rows, TZ, "10")
+        assert cutoff[0] == pd.Timestamp("2024-01-10 10:00", tz="UTC")
 
-    def test_nonexistent_time_resolves_just_before_the_gap(self):
-        # 2024-03-31 02:00-03:00 does not exist in Warsaw (spring forward); shift_backward keeps it from raising
-        # and lands just before the gap (01:59:59.999999999 CET = 00:59:59.999999999 UTC).
-        rows = pd.DatetimeIndex([pd.Timestamp("2024-03-31 00:00", tz=TZ).tz_convert("UTC")])
-        issue = local_issue_times(rows, TZ, "02:30")
-        assert issue[0] == pd.Timestamp("2024-03-31 00:59:59.999999999", tz="UTC")
+    def test_needs_no_dst_resolution_since_run_is_already_utc(self):
+        # A row that falls in the local DST gap day still resolves cleanly: `run` is a UTC hour, so combining it
+        # with D's calendar date never hits an ambiguous/nonexistent local instant.
+        rows = pd.DatetimeIndex([pd.Timestamp("2024-03-31 10:00", tz=TZ).tz_convert("UTC")])
+        cutoff = run_cutoff(rows, TZ, "00")
+        assert cutoff[0] == pd.Timestamp("2024-03-31 00:00", tz="UTC")
 
-    def test_ambiguous_time_resolves_to_the_earlier_occurrence(self):
-        # 2024-10-27 02:00-03:00 occurs twice in Warsaw (fall back); the earlier (CEST, UTC+2) one is used.
-        rows = pd.DatetimeIndex([pd.Timestamp("2024-10-27 00:00", tz=TZ).tz_convert("UTC")])
-        issue = local_issue_times(rows, TZ, "02:30")
-        assert issue[0] == pd.Timestamp("2024-10-27 00:30", tz="UTC")
+    def test_late_run_can_land_on_the_next_utc_calendar_day(self):
+        rows = pd.DatetimeIndex([pd.Timestamp("2024-01-10 00:00", tz="UTC")])
+        cutoff = run_cutoff(rows, TZ, "23")
+        assert cutoff[0] == pd.Timestamp("2024-01-10 23:00", tz="UTC")
 
 
 class TestShiftLocalDays:
@@ -115,69 +113,116 @@ class TestShiftLocalDays:
         assert shifted[0] == pd.Timestamp("2024-03-31 10:00", tz=TZ)
         assert shifted[0] - rows[0] == pd.Timedelta(hours=23)
 
-    def test_nonexistent_target_hour_shifts_forward(self):
+    def test_nonexistent_target_hour_is_nat_not_the_next_hour(self):
+        # 2024-03-31 02:00 does not exist in Warsaw (spring forward): a row asking for that wall-clock hour
+        # gets NaN, not silently the next hour's value under a different row's name.
         rows = pd.DatetimeIndex([pd.Timestamp("2024-03-30 02:00", tz=TZ).tz_convert("UTC")])
         shifted = shift_local_days(rows, TZ, 1)
-        assert shifted[0] == pd.Timestamp("2024-03-31 03:00", tz=TZ)
+        assert shifted.isna().all()
+
+    def test_ambiguous_target_hour_takes_the_first_occurrence(self):
+        # 2024-10-27 02:00 occurs twice in Warsaw (fall back); the first (CEST, UTC+2) occurrence is used.
+        rows = pd.DatetimeIndex([pd.Timestamp("2024-10-26 02:00", tz=TZ).tz_convert("UTC")])
+        shifted = shift_local_days(rows, TZ, 1)
+        expected = pd.Timestamp("2024-10-27 02:00").tz_localize(TZ, ambiguous=True)
+        assert shifted[0] == expected.tz_convert("UTC")
+        assert shifted[0].tz_convert(TZ).utcoffset() == pd.Timedelta(hours=2)
 
 
 # ---------------------------------------------------------------------------
-# Derived columns
+# parse_locations (see OpenMeteoSource's `locations` parameter)
 # ---------------------------------------------------------------------------
 
-
-class TestAddDerivedColumns:
-    def _frame(self):
-        index = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
-        return pd.DataFrame(
-            {
-                "temperature_2m_d+1": [10.0, 20.0, np.nan],
-                "wind_speed_100m_d+1": [3.6, 7.2, 10.8],
-            },
-            index=index,
-        )
-
-    def test_hdd_is_clipped_at_zero(self):
-        df = add_derived_columns(self._frame(), ["hdd"], horizon=1, hdd_base_c=18.0, cdd_base_c=21.0)
-        assert df["hdd_d+1"].tolist()[:2] == [8.0, 0.0]
-        assert np.isnan(df["hdd_d+1"].iloc[2])
-
-    def test_cdd_is_clipped_at_zero(self):
-        df = add_derived_columns(self._frame(), ["cdd"], horizon=1, hdd_base_c=18.0, cdd_base_c=21.0)
-        assert df["cdd_d+1"].tolist()[:2] == [0.0, 0.0]
-
-    def test_cdd_positive_above_base(self):
-        df = add_derived_columns(self._frame(), ["cdd"], horizon=1, hdd_base_c=18.0, cdd_base_c=5.0)
-        assert df["cdd_d+1"].tolist()[:2] == [5.0, 15.0]
-
-    def test_wind_speed_cubed_converts_kmh_to_ms(self):
-        df = add_derived_columns(self._frame(), ["wind_speed_100m_cubed"], horizon=1, hdd_base_c=18.0, cdd_base_c=21.0)
-        # 3.6 km/h = 1 m/s, 7.2 km/h = 2 m/s, 10.8 km/h = 3 m/s.
-        np.testing.assert_allclose(df["wind_speed_100m_cubed_d+1"].tolist(), [1.0, 8.0, 27.0])
-
-    def test_no_derived_names_returns_the_same_frame(self):
-        frame = self._frame()
-        assert add_derived_columns(frame, [], horizon=1, hdd_base_c=18.0, cdd_base_c=21.0) is frame
-
-    def test_multiple_leads(self):
-        df = self._frame()
-        df["temperature_2m_d+2"] = [0.0, 30.0, 18.0]
-        out = add_derived_columns(df, ["hdd"], horizon=2, hdd_base_c=18.0, cdd_base_c=21.0)
-        assert out["hdd_d+2"].tolist() == [18.0, 0.0, 0.0]
+LOCATIONS_DICT = {
+    "warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 3.0},
+    "krakow": {"latitude": 50.06, "longitude": 19.94, "weight": 1.0},
+}
+LOCATIONS_NORMALISED = [
+    {"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": 3.0},
+    {"name": "krakow", "latitude": 50.06, "longitude": 19.94, "weight": 1.0},
+]
 
 
-class TestNormaliseDerived:
-    def test_none_becomes_empty_list(self):
-        assert normalise_derived(None) == []
+class TestParseLocations:
+    def test_parses_dict_of_dicts(self):
+        assert parse_locations(LOCATIONS_DICT) == LOCATIONS_NORMALISED
 
-    def test_empty_list_stays_empty(self):
-        assert normalise_derived([]) == []
+    def test_parses_dict_of_tuples_with_weight(self):
+        parsed = parse_locations({"warsaw": (52.23, 21.01, 3.0), "krakow": (50.06, 19.94, 1.0)})
+        assert parsed == LOCATIONS_NORMALISED
 
-    def test_copies_the_input_list(self):
-        source = ["hdd"]
-        result = normalise_derived(source)
-        result.append("cdd")
-        assert source == ["hdd"]
+    def test_parses_dict_of_tuples_without_weight(self):
+        parsed = parse_locations({"warsaw": (52.23, 21.01), "krakow": (50.06, 19.94)})
+        assert parsed == [
+            {"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": None},
+            {"name": "krakow", "latitude": 50.06, "longitude": 19.94, "weight": None},
+        ]
+
+    def test_parses_compact_string(self):
+        parsed = parse_locations("warsaw:52.23:21.01:3.0, krakow:50.06:19.94:1.0")
+        assert parsed == LOCATIONS_NORMALISED
+
+    def test_parses_compact_string_without_weight(self):
+        parsed = parse_locations("warsaw:52.23:21.01, krakow:50.06:19.94")
+        assert [loc["weight"] for loc in parsed] == [None, None]
+
+    def test_dict_missing_latitude_or_longitude_raises(self):
+        with pytest.raises(ValueError, match="latitude, longitude and optionally weight"):
+            parse_locations({"warsaw": {"latitude": 52.23}})
+
+    def test_dict_with_unknown_key_raises(self):
+        with pytest.raises(ValueError, match="latitude, longitude and optionally weight"):
+            parse_locations({"warsaw": {"latitude": 52.23, "longitude": 21.01, "extra": 1}})
+
+    def test_tuple_with_wrong_length_raises(self):
+        with pytest.raises(ValueError, match=r"\(latitude, longitude\) or \(latitude, longitude, weight\)"):
+            parse_locations({"warsaw": (52.23,)})
+
+    def test_spec_of_wrong_type_raises(self):
+        with pytest.raises(ValueError, match="dict or a"):
+            parse_locations({"warsaw": "52.23,21.01"})
+
+    def test_string_with_wrong_field_count_raises(self):
+        with pytest.raises(ValueError, match="name:latitude:longitude"):
+            parse_locations("warsaw:52.23")
+
+    def test_string_with_non_numeric_field_raises(self):
+        with pytest.raises(ValueError, match="with numbers"):
+            parse_locations("warsaw:abc:21.01:3.0")
+
+    def test_empty_input_raises(self):
+        with pytest.raises(ValueError, match="non-empty dict"):
+            parse_locations({})
+        with pytest.raises(ValueError, match="non-empty dict"):
+            parse_locations("")
+
+    def test_duplicate_name_in_compact_string_raises(self):
+        with pytest.raises(ValueError, match="duplicate location name"):
+            parse_locations("warsaw:52.23:21.01:3.0, warsaw:50.06:19.94:1.0")
+
+    @pytest.mark.parametrize("name", ["has space", "has-dash", "", "accént"])
+    def test_invalid_name_characters_raise(self, name):
+        with pytest.raises(ValueError, match="letters, digits and underscores"):
+            parse_locations({name: (52.23, 21.01)})
+
+    @pytest.mark.parametrize("latitude", [91.0, -91.0])
+    def test_invalid_latitude_raises(self, latitude):
+        with pytest.raises(ValueError, match="latitude"):
+            parse_locations({"warsaw": (latitude, 21.01)})
+
+    @pytest.mark.parametrize("longitude", [181.0, -181.0])
+    def test_invalid_longitude_raises(self, longitude):
+        with pytest.raises(ValueError, match="longitude"):
+            parse_locations({"warsaw": (52.23, longitude)})
+
+    @pytest.mark.parametrize("weight", [0, -1.0, float("nan"), "1.0", True])
+    def test_invalid_weight_raises(self, weight):
+        with pytest.raises(ValueError, match="weight"):
+            parse_locations({"warsaw": (52.23, 21.01, weight)})
+
+    def test_mixed_weights_raise(self):
+        with pytest.raises(ValueError, match="every location or for none"):
+            parse_locations({"warsaw": (52.23, 21.01, 3.0), "krakow": (50.06, 19.94)})
 
 
 # ---------------------------------------------------------------------------
@@ -223,22 +268,10 @@ class TestValidateCommon:
         source = _StubSource(horizon=100)
         source._validate_common()  # no max_horizon: does not raise
 
-    def test_rejects_unknown_derived_name(self):
-        with pytest.raises(ValueError, match="derived must be a subset"):
-            _StubSource(derived=["not_a_real_column"])
-
-    def test_rejects_derived_missing_its_input_column(self):
-        with pytest.raises(ValueError, match="needs 'temperature_2m'"):
-            _StubSource(columns=["wind_speed_100m"], derived=["hdd"])
-
-    def test_rejects_non_numeric_base_temperature(self):
-        with pytest.raises(ValueError, match="hdd_base_c"):
-            _StubSource(hdd_base_c="warm")
-
     def test_timezone_is_required(self):
-        # A default used to compute the issue time in the wrong zone for markets outside CET (e.g. London 23:00
-        # on D silently becoming 10:00 on D+1), leaking future runs. Construction with no zone is allowed (a
-        # DataPipeline may still supply one later), but using the source without one anywhere raises.
+        # A default used to compute the cutoff in the wrong zone for markets outside CET (e.g. London's local
+        # day landing on the wrong UTC calendar date), leaking future runs. Construction with no zone is
+        # allowed (a DataPipeline may still supply one later), but using the source without one anywhere raises.
         source = _StubSource(timezone=None)
         assert source.timezone is None
         with pytest.raises(ValueError, match="timezone is required"):
@@ -248,27 +281,35 @@ class TestValidateCommon:
         with pytest.raises(ValueError, match="Invalid timezone: 'Mars/Olympus'"):
             _StubSource(timezone="Mars/Olympus")
 
+    def test_rejects_invalid_api(self):
+        with pytest.raises(ValueError, match="api must be"):
+            _StubSource(api="latest_runs")
 
-class TestIssueInstants:
-    def test_past_issue_times_are_final(self):
-        source = _StubSource(issue_time="10:00")
+    def test_rejects_invalid_run(self):
+        with pytest.raises(ValueError, match="run"):
+            _StubSource(run="9")
+
+
+class TestCutoffInstants:
+    def test_past_cutoffs_are_final(self):
+        source = _StubSource(run="10")
         source._now = lambda: pd.Timestamp("2030-01-01", tz="UTC")
         rows = pd.date_range("2024-01-10", periods=3, freq="1h", tz="UTC")
-        issue, final = source._issue_instants(rows)
+        cutoff, final = source._cutoff_instants(rows)
         assert final.all()
-        assert (issue <= source._now()).all()
+        assert (cutoff <= source._now()).all()
 
-    def test_future_issue_times_use_now_and_are_not_final(self, caplog):
-        source = _StubSource(issue_time="10:00")
+    def test_future_cutoffs_use_now_and_are_not_final(self, caplog):
+        source = _StubSource(run="10")
         now = pd.Timestamp("2024-01-10 05:00", tz=TZ).tz_convert("UTC")
         source._now = lambda: now
         rows = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
         with caplog.at_level(logging.INFO, logger="epftoolbox2.data.sources.open_meteo"):
             source.logger.propagate = True
-            issue, final = source._issue_instants(rows)
+            cutoff, final = source._cutoff_instants(rows)
         assert not final.any()
-        assert issue[0] == now
-        assert "issue time after now" in caplog.text
+        assert cutoff[0] == now
+        assert "cutoff after now" in caplog.text
 
 
 class TestFinish:
@@ -276,10 +317,10 @@ class TestFinish:
         index = pd.date_range("2024-01-01", periods=2, freq="1h", tz="UTC")
         return pd.DataFrame({"temperature_2m_d+1": [10.0, 12.0], "wind_speed_100m_d+1": [3.6, 7.2]}, index=index)
 
-    def test_derived_columns_added_before_prefix(self):
-        source = _StubSource(prefix="pl", derived=["hdd"], horizon=1)
+    def test_prefix_applied(self):
+        source = _StubSource(prefix="pl", horizon=1)
         result = source._finish(self._frame(), np.ones(2, dtype=bool))
-        assert "pl_hdd_d+1" in result.columns
+        assert list(result.columns) == ["pl_temperature_2m_d+1", "pl_wind_speed_100m_d+1"]
 
     def test_no_prefix_by_default(self):
         source = _StubSource(horizon=1)
@@ -373,17 +414,20 @@ class TestCoverageHelpers:
 
 
 class TestCommonCacheConfig:
-    def test_derived_key_omitted_when_unused(self):
+    def test_api_and_run_are_in_the_cache_config(self):
         config = _StubSource().get_cache_config()
-        assert "derived" not in config
-        assert "hdd_base_c" not in config
-        assert "cdd_base_c" not in config
+        assert config["api"] == "previous_runs"
+        assert config["run"] == "00"
 
-    def test_derived_key_present_and_bases_included_only_when_used(self):
-        config = _StubSource(derived=["hdd"]).get_cache_config()
-        assert config["derived"] == ["hdd"]
-        assert config["hdd_base_c"] == 18.0
-        assert "cdd_base_c" not in config
+    def test_changing_run_changes_the_cache_config(self):
+        base = _StubSource().get_cache_config()
+        other = _StubSource(run="06").get_cache_config()
+        assert base != other
+
+    def test_changing_api_changes_the_cache_config(self):
+        base = _StubSource().get_cache_config()
+        other = _StubSource(api="single_runs").get_cache_config()
+        assert base != other
 
     def test_columns_are_sorted(self):
         config = _StubSource(columns=["wind_speed_100m", "temperature_2m"]).get_cache_config()

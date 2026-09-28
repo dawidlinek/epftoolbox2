@@ -117,38 +117,40 @@ Omitted points under curveType A03 are forward-filled; daily values follow the l
 
 ## OpenMeteoSource
 
-Downloads archived weather forecasts from the Open-Meteo Previous Runs API. No API key required. Each `{variable}_d+i` value on a row of local day D is the forecast for the same local wall-clock hour on D+i, taken only from model runs published before `issue_time` on D (leak-free by default).
+Downloads archived weather forecasts from Open-Meteo's Previous Runs API (`api="previous_runs"`, default) or Single Runs API (`api="single_runs"`). No API key required. Each `{variable}_d+i` value on a row of local day D is the forecast for the same local wall-clock hour on D+i, taken only from model runs initialised at or before a cutoff: `D` at `run`:00 UTC (`run` is a UTC hour, not a local issue time — the source has no notion of a market's real issue time or a model's publication delay; see `publication_delay_hours`/`epftoolbox2.information_set.source_rules` for that).
 
 ```python
 from epftoolbox2.data.sources import OpenMeteoSource
 
 source = OpenMeteoSource(
-    latitude=52.2297,            # Required. Location latitude (-90 to 90)
-    longitude=21.0122,           # Required. Location longitude (-180 to 180)
-    horizon=5,                   # Optional. Days ahead, 1-7; see "Horizon limit" below (default: 5)
-    model="jma_seamless",        # Optional. Weather model (default: "jma_seamless")
+    latitude=52.2297,            # Required unless locations is given. Location latitude (-90 to 90)
+    longitude=21.0122,           # Required unless locations is given. Location longitude (-180 to 180)
+    locations=None,              # Optional. Several locations instead of latitude/longitude (default: None); see "Several locations" below
+    keep_locations=False,        # Optional. With several weighted places, also return each one's own series (default: False)
     columns=None,                # Optional. Weather variables (default: None = DEFAULT_COLUMNS)
-    prefix="warsaw",             # Optional. Prefix for column names (default: "")
-    proxy_url=None,              # Optional. HTTP(S) proxy URL, saved to YAML as is (default: None)
+    horizon=5,                   # Optional. Days ahead; see "Horizon limit" below (default: 5)
+    model="jma_seamless",        # Optional. Weather model (default: "jma_seamless")
     temporal_resolution=None,    # Optional. None|"hourly_3"|"hourly_6"|"native" (default: None = 1 h)
-    timezone="Europe/Warsaw",    # Optional (default None). Market time zone of local days and the issue time; inherits DataPipeline.timezone when left unset; fetching without either raises
-    issue_time="10:00",          # Optional. Local "HH:MM" on D when the forecast is issued (default: "10:00")
-    publication_delay_h=10,      # Optional. Hours from run initialisation to availability (default: 10)
-    vintage="issue_time",        # Optional. "issue_time" is the leak-free default; "valid_time" is the look-ahead mapping of <= 2.2
-    derived=None,                # Optional. Names of extra computed columns: "hdd", "cdd", "wind_speed_100m_cubed" (default: None = off)
-    hdd_base_c=18.0,             # Optional. Base temperature (°C) for "hdd" (default: 18.0)
-    cdd_base_c=21.0,             # Optional. Base temperature (°C) for "cdd" (default: 21.0)
+    api="previous_runs",         # Optional. "previous_runs" (default, long archive) or "single_runs" (one exact run per day)
+    run="00",                    # Optional. UTC hour "HH" the cutoff is anchored to: D's cutoff is D at run:00 UTC (default: "00")
+    timezone="Europe/Warsaw",    # Optional (default None). Market time zone of local days; inherits DataPipeline.timezone when left unset; fetching without either raises
+    prefix="warsaw",             # Optional. Prefix for column names (default: "")
     strict=False,                # Optional. Raise instead of warning when a column has missing values (default: False)
+    proxy_url=None,              # Optional. HTTP(S) proxy URL, saved to YAML as is (default: None)
 )
 ```
 
-**Vintage rule:** `previous_dayK` at valid time T comes from the latest run initialised at least 24K h before T. For each row and lead i the source uses the smallest K >= i whose runs were all published (init + `publication_delay_h`) by the issue instant; for models stored every 3-6 h (JMA, ICON beyond 78 h, ECMWF IFS 0.25) it also accounts for Open-Meteo interpolating across stored points from later runs. Most D+1 hours come from a run of D-1 or D-2.
+**`api="previous_runs"` bucket rule:** `previous_dayK` at valid time T comes from the latest run initialised at or before T - 24K h. For each row and lead i the source uses the smallest K >= i whose runs were all initialised at or before the cutoff (`D` at `run`:00 UTC — no delay term: that only matters model-side, see below); for models stored every 3-6 h (JMA, ICON beyond 78 h, ECMWF IFS 0.25) it also accounts for Open-Meteo interpolating across stored points from later runs. Most D+1 hours come from a run of D-1 or D-2.
 
-**Horizon limit:** the API serves previous_day1..7 only. With the default settings the largest horizon is 5 (6 for `icon_seamless`/`gfs_seamless` with `publication_delay_h=4`); a larger one raises `ValueError`.
+**`api="single_runs"` rule:** requests exactly the run initialised at the cutoff and uses it for every row/lead of D. If the archive lacks that run, the affected cells are NaN (reported, see `strict`) — there is no fallback to another run. If `model` is one this library has a known run-hour table for and `run` isn't one of its hours, construction raises immediately naming the valid hours.
 
-**Returned rows:** exactly `[start, end)`, UTC index. Rows whose issue time is still in the future use runs published by now (provisional); trailing rows without any value are not returned. Missing values per column are logged with their share, the timestamp the column is complete from, and the missing share by local hour when it's uneven across hours; `strict=True` raises.
+**Horizon limit:** under `previous_runs` the API serves previous_day1..7 only; with the defaults (`run="00"`) the largest horizon is 5 for `jma_seamless`, `icon_seamless`, ECMWF IFS and GFS, a larger one raises `ValueError` naming the limit. Under `single_runs`, 1-14; leads beyond the run's own length come back NaN.
 
-**Model notes:** `jma_seamless` (default) is JMA GSM over Europe: ~55 km, stored 6-hourly, archive from 2018 (at Warsaw only d+1/d+2 before 2021). `ecmwf_ifs025` from 2024-02-04, `icon_seamless` from 2024-01-19 (sub-models mixed by lead), `ecmwf_ifs` from 2025-10-01. `rain`, `showers`, `snowfall`, `precipitation` and radiation are preceding-hour values.
+**Publication delay (model-side, not enforced by the source):** ICON ~4h, GFS ~5h, ECMWF IFS ~8h, JMA ~10h, unknown models a conservative 10h (`epftoolbox2.data.sources.open_meteo.publication_delay_hours`). `run="00"` (default) is known in time for an 11:30 CET issue for every model above. `epftoolbox2.information_set.source_rules` uses this table to flag a `run`/issue-time combination that is too tight.
+
+**Returned rows:** exactly `[start, end)`, UTC index. Rows whose cutoff is still in the future use runs published by now (provisional); trailing rows without any value are not returned. Missing values per column are logged with their share, the timestamp the column is complete from, and the missing share by local hour when it's uneven across hours; `strict=True` raises.
+
+**Model notes:** `jma_seamless` (default) is JMA GSM over Europe: ~55 km, stored 6-hourly, `previous_runs` archive from 2018 (at Warsaw only d+1/d+2 before 2021), `single_runs` from 2026-05-13 00Z. `ecmwf_ifs025` (`previous_runs` only) from 2024-02-04, `icon_seamless` `previous_runs` from 2024-01-19 (sub-models mixed by lead)/`single_runs` from 2026-04-02 00Z, `ecmwf_ifs` `previous_runs` from 2025-10-01/`single_runs` (longest archive) from 2024-03-14 00Z. `rain`, `showers`, `snowfall`, `precipitation` and radiation are preceding-hour values.
 
 **Default columns:** `temperature_2m`, `rain`, `showers`, `snowfall`, `relative_humidity_2m`, `dew_point_2m`, `apparent_temperature`, `precipitation`, `weather_code`, `surface_pressure`, `pressure_msl`, `cloud_cover`, `wind_speed_10m`, `wind_direction_10m`
 
@@ -161,77 +163,19 @@ source = OpenMeteoSource(
 **Output column naming:** `{prefix}_{variable}_d+{i}`
 - Example: `warsaw_temperature_2m_d+1`, `warsaw_temperature_2m_d+2`, ..., `warsaw_temperature_2m_d+5`
 
-**Derived columns (off by default):** set `derived` to add `{name}_d+{i}` computed per lead from the same vintage: `"hdd"` = `max(hdd_base_c - temperature_2m, 0)` (needs `temperature_2m` in `columns`), `"cdd"` = `max(temperature_2m - cdd_base_c, 0)` (needs `temperature_2m`), `"wind_speed_100m_cubed"` = `(wind_speed_100m / 3.6) ** 3` (needs `wind_speed_100m`).
-
-**Caching:** Cache key includes location, horizon, model, columns, prefix, temporal_resolution, vintage, timezone, issue_time, publication_delay_h, derived (and hdd_base_c/cdd_base_c only when derived uses them) and schema_version (bumped for the vintage change, so old caches are not reused).
-
----
-
-## OpenMeteoSingleRunsSource
-
-Downloads archived weather forecasts from the Open-Meteo Single Runs API, which stores every model run separately (unlike OpenMeteoSource's Previous Runs API buckets). No API key required. Each `{variable}_d+i` value on a row of local day D comes from one exact model run: the latest run on the `run_interval_h` cycle whose initialisation, plus `publication_delay_h`, is at or before `issue_time` on D. Runs published after the issue instant are never used.
-
+**Several locations:** pass `locations` instead of `latitude`/`longitude` to combine several locations into one source, fetched by another `OpenMeteoSource` sharing every other parameter (including `api`/`run`). A dict `{name: {"latitude","longitude","weight"?}}` (also `{name: (latitude,longitude)}` / `(latitude,longitude,weight)` tuples), or the compact string `"name:lat:lon:weight, name:lat:lon:weight, ..."` (weight optional there too, per location). Names use letters, digits, underscores and must be unique; weights, when given, must be positive and given for every location or none, and must be known on D (a reference date before the sample starts, not end-of-sample figures). **With weights:** one weighted series per variable, `{prefix}_{variable}_d+i` (weights normalised; a weighted circular mean for `*direction*` columns; `weather_code` not averaged; NaN wherever any location is NaN); `keep_locations=True` also adds the per-location columns `{prefix}_{name}_{variable}_d+i`. **Without weights:** only the per-location columns are returned.
 ```python
-from epftoolbox2.data.sources import OpenMeteoSingleRunsSource
-
-source = OpenMeteoSingleRunsSource(
-    latitude=52.2297,            # Required. Location latitude (-90 to 90)
-    longitude=21.0122,           # Required. Location longitude (-180 to 180)
-    horizon=7,                   # Optional. Days ahead, 1-14; leads beyond the run's length come back empty (default: 7)
-    model="ecmwf_ifs",           # Optional. Weather model, longest single-run archive (default: "ecmwf_ifs")
-    columns=None,                # Optional. Weather variables (default: None = DEFAULT_COLUMNS)
-    prefix="warsaw",             # Optional. Prefix for column names (default: "")
-    proxy_url=None,              # Optional. HTTP(S) proxy URL, saved to YAML as is (default: None)
-    timezone="Europe/Warsaw",    # Optional (default None). Market time zone of local days and the issue time; inherits DataPipeline.timezone when left unset; fetching without either raises
-    issue_time="10:00",          # Optional. Local "HH:MM" on D when the forecast is issued (default: "10:00")
-    publication_delay_h=10,      # Optional. Hours from run initialisation to availability (default: 10)
-    run_interval_h=6,            # Optional. Hours between forecast runs, must divide 24 (default: 6)
-    derived=None,                # Optional. Names of extra computed columns: "hdd", "cdd", "wind_speed_100m_cubed" (default: None = off)
-    hdd_base_c=18.0,             # Optional. Base temperature (°C) for "hdd" (default: 18.0)
-    cdd_base_c=21.0,             # Optional. Base temperature (°C) for "cdd" (default: 21.0)
-    strict=False,                # Optional. Raise instead of warning when a column has missing values (default: False)
+source = OpenMeteoSource(
+    locations={
+        "warsaw": {"latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},
+        "krakow": {"latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
+    },
+    prefix="pl",
+    timezone="Europe/Warsaw",
 )
 ```
 
-**Run selection:** the ideal run is the latest one on the `run_interval_h` cycle (00, 06, 12, 18 UTC by default) initialised at least `publication_delay_h` hours before the issue instant. If that run is missing from the archive or too short for a lead, up to 4 older runs on the same cycle fill the remaining leads; a run that is available settles every valid time it covers even where one variable is null there (no silent backfill from an older forecast for just that gap).
-
-**Archive start** (probed against the API, September 2026): `ecmwf_ifs` (default) from 2024-03-14 00Z (only 00/12 UTC runs at first); `icon_seamless`, `gfs_seamless` and most other seamless models from 2026-04-02 00Z; `jma_gsm`/`jma_seamless` from 2026-05-13 00Z. Check any other model the same way before relying on it.
-
-**Returned rows:** exactly `[start, end)`, UTC hourly index. Rows whose issue time is still in the future use runs published by now (provisional); trailing rows without any value are not returned. Missing values per column are logged with their share, the timestamp the column is complete from, and the missing share by local hour when it's uneven across hours; `strict=True` raises.
-
-**Output column naming:** `{prefix}_{variable}_d+{i}`
-- Example: `warsaw_temperature_2m_d+1`, `warsaw_temperature_2m_d+2`, ..., `warsaw_temperature_2m_d+7`
-
-**Derived columns (off by default):** set `derived` to add `{name}_d+{i}` computed per lead from the same run: `"hdd"` = `max(hdd_base_c - temperature_2m, 0)` (needs `temperature_2m` in `columns`), `"cdd"` = `max(temperature_2m - cdd_base_c, 0)` (needs `temperature_2m`), `"wind_speed_100m_cubed"` = `(wind_speed_100m / 3.6) ** 3` (needs `wind_speed_100m`).
-
-**Caching:** Cache key includes location, horizon, model, columns, prefix, run_interval_h, timezone, issue_time, publication_delay_h, derived (and hdd_base_c/cdd_base_c only when derived uses them) and schema_version.
-
----
-
-## OpenMeteoWeightedSource
-
-Fetches several locations with the same underlying Open-Meteo source (OpenMeteoSource or OpenMeteoSingleRunsSource) and `source_params`, and returns one weighted-average series per variable, e.g. population-weighted temperature for a bidding zone. Weights are fixed and must be known on D (use a reference date before the sample starts, not end-of-sample figures).
-
-```python
-from epftoolbox2.data.sources import OpenMeteoWeightedSource
-
-source = OpenMeteoWeightedSource(
-    locations=[                  # Required. list of {"name","latitude","longitude","weight"} or "name:lat:lon:weight, ..."
-        {"name": "warsaw", "latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},
-        {"name": "krakow", "latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
-    ],
-    source="OpenMeteoSource",    # Optional. "OpenMeteoSource" or "OpenMeteoSingleRunsSource" (default: "OpenMeteoSource")
-    source_params=None,          # Optional (default None). Params for the underlying class above, shared by every location; not latitude/longitude/prefix. Its "timezone" entry may be left unset to inherit DataPipeline.timezone, like the underlying class's own timezone parameter.
-    prefix="pl",                 # Optional. Prefix for the weighted columns (default: "")
-    keep_locations=False,        # Optional. Also return each location's own columns (default: False)
-)
-```
-
-**Weighted average:** weights normalise to sum to 1; most variables use `sum(w_l * x_l) / sum(w_l)`; variables whose name contains "direction" use a weighted circular mean; `weather_code` is categorical and is never averaged (dropped unless `keep_locations=True`, which then keeps it per location only). A row is NaN if any location is missing there (weights are never re-normalised over the available ones).
-
-**Output column naming:** `{prefix}_{variable}_d+{i}`; with `keep_locations=True` also `{prefix}_{name}_{variable}_d+{i}` per location.
-
-**Caching:** Cache key includes locations (name, latitude, longitude, weight per location), source, the underlying source's cache config (minus latitude/longitude/prefix), prefix, keep_locations and schema_version.
+**Caching:** Cache key includes `latitude`/`longitude` (or `locations`, with `keep_locations` when `True`, instead), horizon, model, columns, prefix, temporal_resolution, api, run, timezone and schema_version (bumped for this redesign, so old caches are not reused).
 
 ---
 
@@ -1046,16 +990,18 @@ pipeline = ModelPipeline(information_set=info)  # equivalent to passing issue_ti
 
 Weather columns have no default rule (a `*_temperature_2m`-style name alone doesn't mean "forecast timing" —
 it could be an observed value too): `source_rules(sources)` / `InformationSet.with_source_rules(sources)`
-(called automatically by `Workflow`) assigns one only to the columns an `OpenMeteoSource` actually emits, using
-`source.vintage` if set: `as_of(source.issue_time, source.timezone)` when `vintage == "issue_time"` (known as of
-a fixed time on the issue day, unaffected by a leading `_d+k`), else `weather_run(f"{source.publication_delay_h}h")`
-(default "6h").
+(called automatically by `Workflow`) assigns one only to the columns an `OpenMeteoSource` actually emits:
+`weather_cutoff(source.run, f"{delay}h")`, `delay` from `publication_delay_hours(source.model)` (ICON ~4h, GFS
+~5h, ECMWF IFS ~8h, JMA ~10h, 10h for an unknown model) — known `delay` after `source.run`:00 UTC on the issue
+day itself, unaffected by a leading `_d+k`. `run`/`model` are read with `getattr`, so this works with any
+`OpenMeteoSource`-like object; the source itself has no notion of issue time or delay, only of `run`.
 
 **Availability kinds** (`Availability.<kind>(...)`): `static()`, `realised(delay="1h")`,
 `published(time, days_before=1, timezone="Europe/Brussels")`, `daily_close(time)` (= `published(time, days_before=0)`),
-`weekly(weekday="friday", time="10:00")`, `weather_run(delay="6h")`,
+`weekly(weekday="friday", time="10:00")`, `weather_run(delay="6h")` (a user-defined rolling-forecast rule),
 `as_of(time, timezone="Europe/Brussels")` (known at a fixed time on the issue day D; a leading `_d+k` doesn't
-change that).
+change that), `weather_cutoff(run, delay)` (like `as_of`, but a UTC run hour plus a delay that may push past
+24:00 — used by `source_rules` for `OpenMeteoSource`).
 
 **Unknown columns:** a predictor whose base column has no rule anywhere raises by default (`unknown="raise"`);
 pass `"warn"` to log instead, or `"ignore"` to skip it silently once you've reviewed which columns that affects.
@@ -1882,7 +1828,7 @@ class DataPipeline:
   `horizon=7` forecast-only run. Naive timestamps passed to `run()` are read as local instants; timezone-aware
   timestamps are used as given.
 - `timezone` is also the single place the market zone needs to be written: `TimezoneTransformer.target_tz`,
-  `CalendarSource`/`OpenMeteoSource`/`OpenMeteoSingleRunsSource`/`OpenMeteoWeightedSource`'s own zone may all be
+  `CalendarSource`/`OpenMeteoSource`'s own zone may all be
   left unset (`None`) and they then inherit it — checked and bound at construction and again at the start of
   `run()` (so `add_transformer`/`add_source` can't introduce a mismatch unnoticed). An explicitly set, different
   zone still raises `ValueError`: `timezone` decides what a local calendar day is, and a component computing its

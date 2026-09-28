@@ -142,33 +142,19 @@ class EntsoeSource(DataSource):
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), UTC
 
 class OpenMeteoSource(DataSource):
-    def __init__(self, latitude: float, longitude: float, horizon: int = 5,
-                 model: str = "jma_seamless", columns: Optional[List[str]] = None,
-                 prefix: str = "", proxy_url: Optional[str] = None,
+    def __init__(self, latitude: Optional[float] = None, longitude: Optional[float] = None,
+                 # locations: mutually exclusive with latitude/longitude — several locations combined into one
+                 # source, weighted average and/or per-location columns; see Data Sources > OpenMeteoSource
+                 locations: Optional[Union[str, Dict[str, Any]]] = None,
+                 keep_locations: bool = False,
+                 columns: Optional[List[str]] = None,
+                 horizon: int = 5,
+                 model: str = "jma_seamless",
                  temporal_resolution: Optional[str] = None,
+                 api: str = "previous_runs",  # "previous_runs" | "single_runs"
+                 run: str = "00",  # UTC hour "HH": the cutoff is D at run:00 UTC
                  timezone: Optional[str] = None,  # inherits DataPipeline.timezone; fetching w/o either raises
-                 issue_time: str = "10:00",
-                 publication_delay_h: float = 10, vintage: str = "issue_time",
-                 derived: Optional[List[str]] = None, hdd_base_c: float = 18.0,
-                 cdd_base_c: float = 21.0, strict: bool = False): ...
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
-
-class OpenMeteoSingleRunsSource(DataSource):
-    def __init__(self, latitude: float, longitude: float, horizon: int = 7,
-                 model: str = "ecmwf_ifs", columns: Optional[List[str]] = None,
-                 prefix: str = "", proxy_url: Optional[str] = None,
-                 timezone: Optional[str] = None,  # inherits DataPipeline.timezone; fetching w/o either raises
-                 issue_time: str = "10:00",
-                 publication_delay_h: float = 10, run_interval_h: int = 6,
-                 derived: Optional[List[str]] = None, hdd_base_c: float = 18.0,
-                 cdd_base_c: float = 21.0, strict: bool = False): ...
-    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
-
-class OpenMeteoWeightedSource(DataSource):
-    def __init__(self, locations: Union[str, List[Dict[str, Any]]],
-                 source: str = "OpenMeteoSource",
-                 source_params: Optional[Dict[str, Any]] = None,
-                 prefix: str = "", keep_locations: bool = False): ...
+                 prefix: str = "", strict: bool = False, proxy_url: Optional[str] = None): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...
 
 class CalendarSource(DataSource):
