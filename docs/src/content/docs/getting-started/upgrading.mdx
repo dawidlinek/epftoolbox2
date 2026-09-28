@@ -98,6 +98,16 @@ the old one) rather than resuming them; don't rely on the manifest to catch this
   pass `limit=` explicitly (e.g. `"1D"` for the old behaviour) if you want long outages left unfilled instead
   of masked. `{column}_imputed` still flags every cell the transformer actually filled, so a longer fill
   doesn't hide itself — check that column, not just the absence of NaN, if a long-filled stretch matters to you.
+- **`CalendarSource`: `regimes=True` now adds a much larger, differently-sourced set of columns.** The
+  6-entry `DEFAULT_REGIMES` (market coupling and MTU go-lives) is replaced by a 31-entry catalog covering
+  bidding-zone and coupling go-lives, harmonised SDAC price limits, named policy interventions (nuclear
+  phase-outs, price caps, capacity markets) and open-ended shocks, each carrying `ex_ante`, `description` and
+  `source`. `regimes=True` still means "the on-by-default subset for this country", but that subset is bigger
+  and its dates come from more entries — an existing pipeline using `regimes=True` gets new `regime_*` columns
+  on its next run, changing predictor counts (and therefore fitted models) even though no code changed. Pass
+  `regimes=[...]` with the old names if you need the previous, smaller set reproduced exactly; the catalog is
+  otherwise unchanged for entries it already had (dates and default-on status are the same). See [Regime
+  dummies](/epftoolbox2/data-sources/calendar/#regime-dummies).
 
 ## New components
 

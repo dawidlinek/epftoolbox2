@@ -1,9 +1,12 @@
 """Opt-in CalendarSource features: bridge days, Christmas period, holiday distance, DST days, regimes."""
 
+from unittest.mock import patch
+
 import pandas as pd
 import pytest
 
-from epftoolbox2.data.sources.calendar import DEFAULT_REGIMES, CalendarSource
+import epftoolbox2.data.sources.calendar as calendar_module
+from epftoolbox2.data.sources.calendar import DEFAULT_REGIMES, CalendarSource, list_regimes
 
 BARE = {"holidays": False, "weekday": False}
 
@@ -111,13 +114,36 @@ class TestDstSwitchDay:
 
 class TestRegimes:
     def test_default_set_for_poland(self):
+        # Pinned by the task that added this catalog: if a PL entry is later added to or dropped from
+        # DEFAULT_REGIMES, this test should fail and be updated deliberately, not silently pass.
+        expected = {
+            "nwe_price_coupling",
+            "interim_coupling_project",
+            "core_fb",
+            "sdac_15min_mtu",
+            "hmmcp_4000",
+            "hmmcp_min600",
+            "pl_capacity_market",
+        }
         source = CalendarSource(country="PL", regimes=True, **BARE)
-        df = source.fetch(*_range("2022-06-08", "2022-06-09"))
-        assert list(df.columns) == ["regime_core_fb", "regime_sdac_15min_mtu"]
-        per_date = _per_local_date(df, "regime_core_fb")
-        assert per_date["2022-06-08"] == 0
-        assert per_date["2022-06-09"] == 1  # first delivery day of Core flow-based market coupling
-        assert df["regime_sdac_15min_mtu"].eq(0).all()
+        df = source.fetch(*_range("2027-01-01", "2027-01-01"))
+        assert {c[len("regime_") :] for c in df.columns} == expected
+
+    def test_default_set_for_spain(self):
+        expected = {"sdac_15min_mtu", "swe_market_coupling", "hmmcp_4000", "hmmcp_min600"}
+        source = CalendarSource(country="ES", regimes=True, **BARE)
+        df = source.fetch(*_range("2027-01-01", "2027-01-01"))
+        assert {c[len("regime_") :] for c in df.columns} == expected
+
+    def test_default_set_excludes_ex_post_and_by_name_only_entries(self):
+        # iberian_exception/bg_dam_launch/war_ukraine (ex_ante False) and baltic_sync (ex_ante True but
+        # excluded by name) must never appear under regimes=True, for any country in their list.
+        excluded = {"iberian_exception", "bg_dam_launch", "war_ukraine", "baltic_sync"}
+        for name in excluded:
+            assert DEFAULT_REGIMES[name]["default"] is False
+        for country in {"ES", "PT", "BG", "GB", "IE", "DE", "PL"}:
+            df = CalendarSource(country=country, regimes=True, **BARE).fetch(*_range("2027-01-01", "2027-01-01"))
+            assert not excluded & {c[len("regime_") :] for c in df.columns}
 
     def test_step_starts_at_local_midnight(self):
         df = CalendarSource(country="DE", regimes=True, **BARE).fetch(
@@ -130,20 +156,49 @@ class TestRegimes:
     @pytest.mark.parametrize(
         "country, expected",
         [
-            ("DE", ["regime_de_at_split", "regime_core_fb", "regime_sdac_15min_mtu"]),
-            ("SE", ["regime_nordic_fb", "regime_sdac_15min_mtu"]),
-            ("GB", ["regime_brexit_decoupling"]),
-            ("IE", ["regime_brexit_decoupling", "regime_sem_30min_mtu"]),
-            ("CH", []),
+            (
+                "DE",
+                {
+                    "de_at_split",
+                    "core_fb",
+                    "sdac_15min_mtu",
+                    "cwe_market_coupling",
+                    "nwe_price_coupling",
+                    "cwe_flow_based",
+                    "interim_coupling_project",
+                    "hmmcp_4000",
+                    "hmmcp_min600",
+                    "de_nuclear_phaseout",
+                },
+            ),
+            (
+                "SE",
+                {"nordic_fb", "sdac_15min_mtu", "nwe_price_coupling", "hmmcp_4000", "hmmcp_min600", "se_bidding_zones"},
+            ),
+            ("GB", {"brexit_decoupling", "gb_nwe_coupling"}),
+            ("IE", {"brexit_decoupling", "sem_30min_mtu", "isem_start"}),
+            ("CH", set()),
         ],
     )
     def test_defaults_depend_on_country(self, country, expected):
-        df = CalendarSource(country=country, regimes=True, **BARE).fetch(*_range("2024-01-01", "2024-01-01"))
-        assert list(df.columns) == expected
+        df = CalendarSource(country=country, regimes=True, **BARE).fetch(*_range("2027-01-01", "2027-01-01"))
+        assert {c[len("regime_") :] for c in df.columns} == expected
 
-    def test_defaults_are_documented_dates(self):
-        assert DEFAULT_REGIMES["core_fb"]["date"] == "2022-06-09"
-        assert DEFAULT_REGIMES["sdac_15min_mtu"]["date"] == "2025-10-01"
+    def test_catalog_entries_are_well_formed(self):
+        required_keys = {"start", "countries", "ex_ante", "default", "description", "source"}
+        for name, spec in DEFAULT_REGIMES.items():
+            assert required_keys <= set(spec), f"{name} is missing keys: {required_keys - set(spec)}"
+            assert isinstance(spec["countries"], list) and spec["countries"], name
+            assert isinstance(spec["ex_ante"], bool) and isinstance(spec["default"], bool), name
+            pd.Timestamp(spec["start"])  # raises if not a valid date
+            if spec.get("end") is not None:
+                pd.Timestamp(spec["end"])
+            # `default` is True exactly when `ex_ante` is True, except the documented by-name-only entries.
+            by_name_only = {"iberian_exception", "bg_dam_launch", "war_ukraine", "baltic_sync"}
+            if name in by_name_only:
+                assert spec["default"] is False, name
+            else:
+                assert spec["default"] == spec["ex_ante"], name
 
     def test_user_regimes_replace_the_defaults(self):
         source = CalendarSource(country="PL", regimes={"new_tariff": "2024-01-02"}, **BARE)
@@ -220,6 +275,71 @@ class TestRegimes:
         assert loaded.regimes == {"promo": "2024-01-02", "sale": {"start": "2024-06-01", "end": "2024-06-30"}}
         start, end = _range("2024-01-01", "2024-07-02")
         pd.testing.assert_frame_equal(source.fetch(start, end), loaded.fetch(start, end))
+
+
+class TestRegimesList:
+    def test_list_selects_exactly_those_entries(self):
+        source = CalendarSource(country="PL", regimes=["iberian_exception", "swe_market_coupling"], **BARE)
+        assert source.regimes == ["iberian_exception", "swe_market_coupling"]
+        df = source.fetch(*_range("2027-01-01", "2027-01-01"))
+        assert set(df.columns) == {"regime_iberian_exception", "regime_swe_market_coupling"}
+
+    def test_list_uses_catalog_dates(self):
+        # swe_market_coupling starts 2014-05-14; the flag turns on that local date.
+        source = CalendarSource(country="ES", regimes=["swe_market_coupling"], **BARE)
+        df = source.fetch(*_range("2014-05-13", "2014-05-14"))
+        assert list(_per_local_date(df, "regime_swe_market_coupling")) == [0, 1]
+
+    def test_list_entry_not_in_countries_warns_but_still_adds_the_column(self):
+        source = CalendarSource(country="PL", regimes=["iberian_exception"], **BARE)
+        with patch.object(calendar_module.logger, "warning") as warning:
+            df = source.fetch(*_range("2027-01-01", "2027-01-01"))
+        assert "regime_iberian_exception" in df.columns
+        warning.assert_called_once()
+        assert "iberian_exception" in warning.call_args.args[0] and "PL" in warning.call_args.args[0]
+
+    def test_list_end_inclusive_bounded_period(self):
+        # cee_4m_coupling: 2014-11-20 to 2021-06-17 inclusive (from the catalog, not a user-given period).
+        source = CalendarSource(country="CZ", regimes=["cee_4m_coupling"], **BARE)
+        df = source.fetch(*_range("2021-06-16", "2021-06-18"))
+        assert list(_per_local_date(df, "regime_cee_4m_coupling")) == [1, 1, 0]
+
+    def test_unknown_name_raises_and_lists_known_names(self):
+        with pytest.raises(ValueError, match="core_fb"):
+            CalendarSource(country="PL", regimes=["not_a_real_regime"])
+
+    def test_empty_list_raises(self):
+        with pytest.raises(ValueError, match="regimes"):
+            CalendarSource(country="PL", regimes=[])
+
+    def test_round_trip(self, tmp_path):
+        from epftoolbox2.pipelines import DataPipeline
+
+        source = CalendarSource(country="PL", regimes=["core_fb", "sdac_15min_mtu"], **BARE)
+        path = tmp_path / "dp.yaml"
+        DataPipeline(sources=[source]).save(path)
+        loaded = DataPipeline.load(path).sources[0]
+
+        assert loaded.regimes == ["core_fb", "sdac_15min_mtu"]
+        start, end = _range("2022-06-08", "2022-06-09")
+        pd.testing.assert_frame_equal(source.fetch(start, end), loaded.fetch(start, end))
+
+
+class TestListRegimes:
+    def test_returns_every_catalog_entry_without_a_country(self):
+        df = list_regimes()
+        assert set(df["name"]) == set(DEFAULT_REGIMES)
+        assert list(df.columns) == ["name", "start", "end", "countries", "ex_ante", "default", "description", "source"]
+
+    def test_filters_by_country(self):
+        df = list_regimes(country="pl")
+        assert set(df["name"]) == {n for n, s in DEFAULT_REGIMES.items() if "PL" in s["countries"]}
+
+    def test_row_matches_the_catalog(self):
+        row = list_regimes(country="PL").set_index("name").loc["core_fb"]
+        assert row["start"] == "2022-06-09"
+        assert bool(row["ex_ante"]) is True
+        assert bool(row["default"]) is True
 
 
 class TestFeaturesYamlRoundTrip:

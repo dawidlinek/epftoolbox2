@@ -62,41 +62,320 @@ MONTH_NAMES = [
 # depend on the process locale (without it, `holidays` falls back to LANG/LC_ALL) or the country's own language.
 HOLIDAY_LANGUAGE = "en_US"
 
-# Market-structure changes used by `regimes=True`. "date" is the first delivery day (local date); a regime dummy is 1
-# from that date on, for the listed countries only. An entry may add an "end" (last delivery day, inclusive) to
-# make the dummy a bounded period instead of a step; none of the entries below do yet.
+# Market-structure changes, policy interventions and shocks catalogued for `regimes=`. "start" is the first
+# delivery day (local date); a regime dummy is 1 from that date on (through "end", inclusive, when given) for the
+# listed countries only. "ex_ante" records whether the *end* date (open-ended entries: the date itself) was known
+# in advance, at the time it would have been used by a forecaster — not identified afterwards from the data.
+# "default" controls `regimes=True`: only entries with `default: True` whose `countries` include this source's
+# `country` are added. It's `True` exactly when `ex_ante` is `True`, except for a few entries that are ex ante
+# but still excluded from the default set by name below (`baltic_sync`: a system/frequency change with only an
+# indirect link to day-ahead prices). Every entry is reachable by name regardless of `default`, via
+# `regimes=["name", ...]` or `list_regimes()`.
 DEFAULT_REGIMES = {
+    # --- already shipped ---
     "de_at_split": {
-        "date": "2018-10-01",
+        "start": "2018-10-01",
         "countries": ["DE", "AT"],
+        "ex_ante": True,
+        "default": True,
         "description": "Split of the German-Austrian bidding zone (DE-LU and AT)",
+        "source": "https://www.entsoe.eu/",
     },
     "brexit_decoupling": {
-        "date": "2021-01-01",
+        "start": "2021-01-01",
         "countries": ["GB", "IE"],
+        "ex_ante": True,
+        "default": True,
         "description": "GB and the Irish SEM leave implicit day-ahead coupling with SDAC",
+        "source": "https://www.ofgem.gov.uk/",
     },
     "core_fb": {
-        "date": "2022-06-09",
-        "countries": ["AT", "BE", "CZ", "DE", "FR", "HU", "NL", "PL", "RO", "SK"],
+        "start": "2022-06-09",
+        "countries": "AT BE HR CZ FR DE HU LU NL PL RO SK SI".split(),
+        "ex_ante": True,
+        "default": True,
         "description": "Core flow-based day-ahead market coupling (first auction 2022-06-08)",
+        "source": "https://www.jao.eu/news/core-flow-based-market-coupling-project-go-live",
     },
     "nordic_fb": {
-        "date": "2024-10-30",
+        "start": "2024-10-30",
         "countries": ["DK", "FI", "NO", "SE"],
+        "ex_ante": True,
+        "default": True,
         "description": "Nordic flow-based day-ahead market coupling (first auction 2024-10-29)",
+        "source": "https://www.nordpoolgroup.com/",
     },
     "sdac_15min_mtu": {
-        "date": "2025-10-01",
+        "start": "2025-10-01",
         "countries": "AT BE BG CZ DE DK ES FI FR GR HU IT NL NO PL PT RO SE SK".split(),
+        "ex_ante": True,
+        "default": True,
         "description": "15-minute market time unit in SDAC (first auction 2025-09-30)",
+        "source": "https://www.nemo-committee.eu/assets/files/successful-implementation-of-15-minute-market-time-unit-(mtu)-in-sdac.pdf",
     },
     "sem_30min_mtu": {
-        "date": "2025-10-01",
+        "start": "2025-10-01",
         "countries": ["IE"],
+        "ex_ante": True,
+        "default": True,
         "description": "30-minute market time unit in the Irish SEM day-ahead market",
+        "source": "https://www.semopx.com/market-messages/mcsc-confirms-sdac-15min-mtusem-30min-mtu-go-live-30-sept-2025",
+    },
+    # --- NWE/CWE/SWE/Nordic coupling, GB, I-SEM ---
+    "cwe_market_coupling": {
+        "start": "2010-11-09",
+        "countries": ["BE", "FR", "DE", "NL"],
+        "ex_ante": True,
+        "default": True,
+        "description": "Central Western Europe day-ahead coupling go-live (Trilateral FR-BE-NL coupling extended to DE)",
+        "source": "https://www.epexspot.com/en/news/10-years-first-market-coupling-initiative-tlc",
+    },
+    "nwe_price_coupling": {
+        "start": "2014-02-05",
+        "countries": ["BE", "FR", "DE", "NL", "DK", "SE", "NO", "FI", "PL"],
+        "ex_ante": True,
+        "default": True,
+        "description": (
+            "North-Western Europe day-ahead price coupling go-live (first live PCR/Euphemia run); "
+            "PL included only via the SwePol HVDC link"
+        ),
+        "source": "https://www.nordpoolgroup.com/en/message-center-container/newsroom/exchange-message-list/2014/Q1/No-052014---/",
+    },
+    "gb_nwe_coupling": {
+        "start": "2014-02-05",
+        "end": "2020-12-31",
+        "countries": ["GB"],
+        "ex_ante": True,
+        "default": True,
+        "description": "GB implicitly coupled to NWE/SDAC via IFA/BritNed/Moyle, ending with Brexit (see brexit_decoupling)",
+        "source": "https://www.nordpoolgroup.com/en/message-center-container/newsroom/exchange-message-list/2014/Q1/No-052014---/",
+    },
+    "swe_market_coupling": {
+        "start": "2014-05-14",
+        "countries": ["ES", "PT", "FR"],
+        "ex_ante": True,
+        "default": True,
+        "description": "South-Western Europe day-ahead market coupling go-live (Iberia joins via the FR border)",
+        "source": "https://www.epexspot.com/en/news/launch-full-swe-coupling-13-may-2014",
+    },
+    "cwe_flow_based": {
+        "start": "2015-05-21",
+        "countries": ["BE", "FR", "DE", "NL"],
+        "ex_ante": True,
+        "default": True,
+        "description": "Flow-based (rather than ATC/NTC) day-ahead capacity allocation on CWE-internal borders",
+        "source": "https://www.transnetbw.de/en/newsroom/press-releases/flow-based-methodology-for-cwe-market-coupling-successfully-launched",
+    },
+    "isem_start": {
+        "start": "2018-10-01",
+        "countries": ["IE"],
+        "ex_ante": True,
+        "default": True,
+        "description": "I-SEM go-live: Integrated Single Electricity Market replaces SEM, couples to SDAC via interconnectors",
+        "source": "https://www.semcommittee.com/news/new-all-island-wholesale-electricity-market-goes-live",
+    },
+    "baltic_sync": {
+        "start": "2025-02-09",
+        "countries": ["EE", "LV", "LT"],
+        "ex_ante": True,
+        "default": False,
+        "description": (
+            "Baltic states desynchronise from the Russia/Belarus BRELL ring and synchronise with the Continental "
+            "European grid; primarily a frequency/system change, not a day-ahead coupling change (the Baltics "
+            "were already SDAC-coupled). Not in COUNTRY_DATA yet, so name-only"
+        ),
+        "source": "https://www.entsoe.eu/news/2025/02/09/entso-e-confirms-successful-synchronization-of-the-continental-european-electricity-system-with-the-systems-of-the-baltic-countries/",
+    },
+    # --- CEE/SEE coupling and market launches ---
+    "cz_sk_hu_coupling_2012": {
+        "start": "2012-09-12",
+        "countries": ["CZ", "SK", "HU"],
+        "ex_ante": True,
+        "default": True,
+        "description": "Hungary joins the CZ-SK day-ahead coupling (new SK-HU border)",
+        "source": "https://www.okte.sk/media/27706/20120816_%20mc%20sg%20meeting%20press%20release_final.pdf",
+    },
+    "cee_4m_coupling": {
+        "start": "2014-11-20",
+        "end": "2021-06-17",
+        "countries": ["CZ", "SK", "HU", "RO"],
+        "ex_ante": True,
+        "default": True,
+        "description": (
+            "4M Market Coupling (RO joins CZ/SK/HU): own PCR session, gate closure 11:00 CET, limits -500/+3000; "
+            "ends when it merges into the single SDAC session (interim_coupling_project)"
+        ),
+        "source": "https://old.okte.sk/en/information/news/2014/11/14/4m-market-coupling-launch/",
+    },
+    "gr_dam_launch": {
+        "start": "2020-11-01",
+        "countries": ["GR"],
+        "ex_ante": True,
+        "default": True,
+        "description": "HEnEx day-ahead market replaces the DAS mandatory pool run since 2005",
+        "source": "https://www.enexgroup.gr/web/guest/dam-idm-archive",
+    },
+    "it_gr_coupling": {
+        "start": "2020-12-16",
+        "countries": ["GR", "IT"],
+        "ex_ante": True,
+        "default": True,
+        "description": "Greece joins SDAC through its only coupled border (500 MW IT-GR HVDC)",
+        "source": "https://www.nemo-committee.eu/assets/files/extension-of-single-day-ahead-coupling-(sdac)-to-greece-.pdf",
+    },
+    "bg_dam_launch": {
+        "start": "2016-01-20",
+        "end": "2021-05-11",
+        "countries": ["BG"],
+        "ex_ante": False,
+        "default": False,
+        "description": "First Bulgarian day-ahead market (isolated, MRC tools but no coupled border) until GR-BG coupling",
+        "source": "http://umm.ibex.bg/en/announcements/news/first-successful-real-trading-session.html",
+    },
+    "gr_bg_coupling": {
+        "start": "2021-05-12",
+        "countries": ["BG", "GR"],
+        "ex_ante": True,
+        "default": True,
+        "description": "Bulgaria's isolation ends; GR-BG becomes implicit NTC",
+        "source": "https://www.nemo-committee.eu/assets/files/210511%20Press%20release%20successful%20go-live%20BG-GR%20coupling-3b29443c09f164416f6b8bd9eda896e2.pdf",
+    },
+    "interim_coupling_project": {
+        "start": "2021-06-18",
+        "countries": ["PL", "CZ", "SK", "HU", "AT", "DE", "RO"],
+        "ex_ante": True,
+        "default": True,
+        "description": "Poland's synchronous borders coupled for the first time; 4M MC merges into one SDAC session",
+        "source": "https://www.entsoe.eu/news/2021/06/18/successful-go-live-of-interim-coupling-reaching-the-sdac-enduring-phase/",
+    },
+    "bg_ro_coupling": {
+        "start": "2021-10-28",
+        "countries": ["BG", "RO"],
+        "ex_ante": True,
+        "default": True,
+        "description": "Closes the SEE coupling loop (NTC)",
+        "source": "https://www.nemo-committee.eu/assets/files/211027%20PR%20successful%20go-live%20BG-RO%20border-281d241324d5ce9a4049381c71f4021d.pdf",
+    },
+    # --- bidding zones ---
+    "se_bidding_zones": {
+        "start": "2011-11-01",
+        "countries": ["SE"],
+        "ex_ante": True,
+        "default": True,
+        "description": "Sweden split into four bidding zones SE1-SE4",
+        "source": "https://www.nordpoolgroup.com/4a7b04/globalassets/download-center/day-ahead/elspot-area-change-log.pdf",
+    },
+    "it_zone_calabria": {
+        "start": "2021-01-01",
+        "countries": ["IT"],
+        "ex_ante": True,
+        "default": True,
+        "description": "New Calabria (IT-CALA) bidding zone split from South; first Terna zonal review since 2009",
+        "source": "https://lightbox.terna.it/en/insight/new-electricity-market-zones",
+    },
+    # --- harmonised SDAC price limits ---
+    "hmmcp_4000": {
+        "start": "2022-05-11",
+        "countries": "AT BE BG CZ DE DK ES FI FR GR HU IT NL NO PL PT RO SE SK".split(),
+        "ex_ante": True,
+        "default": True,
+        "description": "Harmonised maximum clearing price for SDAC raised from 3000 to 4000 EUR/MWh",
+        "source": "https://www.epexspot.com/en/news/harmonised-maximum-clearing-price-sdac-be-set-4000-eurmwh-10th-may-2022",
+    },
+    "hmmcp_min600": {
+        "start": "2026-05-29",
+        "countries": "AT BE BG CZ DE DK ES FI FR GR HU IT NL NO PL PT RO SE SK".split(),
+        "ex_ante": True,
+        "default": True,
+        "description": "Harmonised minimum clearing price for SDAC lowered from -500 to -600 EUR/MWh",
+        "source": "https://www.nemo-committee.eu/assets/files/harmonised-minimum-clearing-price-for-sdac-to-be-set-to-600-eur-per-mwh-starting-from-the-28th-may-2026-(trading-date).pdf",
+    },
+    # --- policy interventions ---
+    "iberian_exception": {
+        "start": "2022-06-15",
+        "end": "2023-12-31",
+        "countries": ["ES", "PT"],
+        "ex_ante": False,
+        "default": False,
+        "description": (
+            "Gas-price cap on the marginal fuel entering the Iberian wholesale market (RDL 10/2022); the final "
+            "end date was only fixed by RDL 3/2023 on 2023-03-28, well after the mechanism started"
+        ),
+        "source": "https://www.energiaysociedad.es/regulaciones/en-que-consiste-la-excepcion-iberica-real-decreto-ley-rdl-10-2022/",
+    },
+    "de_nuclear_phaseout": {
+        "start": "2023-04-15",
+        "countries": ["DE"],
+        "ex_ante": True,
+        "default": True,
+        "description": (
+            "Last 3 German nuclear reactors (Isar 2, Neckarwestheim 2, Emsland) shut down for good; extension "
+            "from 2022-12-31 decided by the Bundestag 2022-11-11"
+        ),
+        "source": "https://www.base.bund.de/en/nuclear-safety/nuclear-phase-out/nuclear-phase-out.html",
+    },
+    "be_nuclear_doel3_tihange2": {
+        "start": "2023-02-01",
+        "countries": ["BE"],
+        "ex_ante": True,
+        "default": True,
+        "description": "Doel 3 (closed 2022-09-23) and Tihange 2 (closed 2023-01-31) permanently shut down, ~2 GW leaves the mix",
+        "source": "https://afcn.fgov.be/",
+    },
+    "arenh": {
+        "start": "2011-07-01",
+        "end": "2025-12-31",
+        "countries": ["FR"],
+        "ex_ante": True,
+        "default": True,
+        "description": (
+            "Regulated Access to Incumbent Nuclear Electricity: EDF sells nuclear output to competitors at a "
+            "regulated price, capping the effective wholesale price; replaced 2026-01-01 by the Versement "
+            "Nucleaire Universel/CAPN mechanism"
+        ),
+        "source": "https://www.8advisory.com/en/2026/03/31/nuclear-power-navigating-frances-post-arenh-market-transformation/",
+    },
+    "pl_capacity_market": {
+        "start": "2021-01-01",
+        "countries": ["PL"],
+        "ex_ante": True,
+        "default": True,
+        "description": "Polish capacity market (Act of 2017-12-08): first capacity delivery year",
+        "source": "https://www.forum-energii.eu/en/the-capacity-market-in-poland-more-expensive-than-ever",
+    },
+    # --- shocks (open-ended only) ---
+    "war_ukraine": {
+        "start": "2022-02-24",
+        "countries": "AT BE BG CZ DE DK ES FI FR GR HU IT NL NO PL PT RO SE SK GB IE CH".split(),
+        "ex_ante": False,
+        "default": False,
+        "description": "Russian invasion of Ukraine; open-ended shock marker for the European gas/power crisis onset",
+        "source": "well-known date, not from a single citable market document",
     },
 }
+
+
+def list_regimes(country: Optional[str] = None) -> pd.DataFrame:
+    """`DEFAULT_REGIMES` as a DataFrame (name, start, end, countries, ex_ante, default, description, source), one
+    row per catalog entry, in catalog order. With `country`, only entries whose `countries` include it (case
+    insensitive)."""
+    country = country.upper() if country is not None else None
+    rows = [
+        {
+            "name": name,
+            "start": spec["start"],
+            "end": spec.get("end"),
+            "countries": list(spec["countries"]),
+            "ex_ante": spec["ex_ante"],
+            "default": spec["default"],
+            "description": spec["description"],
+            "source": spec["source"],
+        }
+        for name, spec in DEFAULT_REGIMES.items()
+        if country is None or country in spec["countries"]
+    ]
+    columns = ["name", "start", "end", "countries", "ex_ante", "default", "description", "source"]
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _sanitise_name(name: str) -> str:
@@ -180,7 +459,7 @@ class CalendarSource(DataSource):
         christmas_period: bool = False,
         holiday_distance: int = 0,
         dst_switch: bool = False,
-        regimes: Union[bool, Dict[str, Any]] = False,
+        regimes: Union[bool, List[str], Dict[str, Any]] = False,
         school_holidays: bool = False,
         school_subdivisions: Optional[Union[str, List[str]]] = None,
         school_weights: Optional[Union[Dict[str, float], List[float], str]] = None,
@@ -210,11 +489,16 @@ class CalendarSource(DataSource):
             holiday_distance: If N > 0, add `days_to_holiday` and `days_since_holiday` (0 on a holiday), capped at N.
             dst_switch: Add `is_dst_switch_day`: local days with 23 or 25 hours.
             regimes: Dummies `regime_{name}`, 1 on local dates start <= D <= end and 0 otherwise (end inclusive;
-                open-ended when there is no end). True uses DEFAULT_REGIMES for the country; a dict replaces
-                them, one entry per name: a date string (open-ended, `{name: "YYYY-MM-DD"}`), a `(start, end)`
-                pair, or `{name: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}` (`"end"` optional). A bounded
-                period is only leak-free if its end date was announced in advance, not identified afterwards
-                from the data (an ex-post label like "energy crisis 2021-2023" is look-ahead in a backtest).
+                open-ended when there is no end). False: none. True: every `DEFAULT_REGIMES` entry with
+                `default: True` whose `countries` include `country`. A list of names: exactly those catalog
+                entries (an unknown name raises, listing the known ones; a country not in an entry's
+                `countries` only logs a warning, the column is still added). A dict replaces the catalog
+                entirely with custom periods, one entry per name: a date string (open-ended,
+                `{name: "YYYY-MM-DD"}`), a `(start, end)` pair, or `{name: {"start": ..., "end": ...}}`
+                (`"end"` optional). A bounded period is only leak-free if its end date was announced in
+                advance, not identified afterwards from the data (an ex-post label like "energy crisis
+                2021-2023" is look-ahead in a backtest). `DEFAULT_REGIMES` also carries this per entry as
+                `ex_ante`; see `list_regimes()` to inspect the catalog.
             school_holidays: Download school holiday flags from the OpenHolidays API (network calls happen only
                 when this is True). No or one `school_subdivisions` entry: `is_school_holiday`; several: one
                 `is_school_holiday_{code}` per entry, e.g. `is_school_holiday_pl_mz`.
@@ -298,13 +582,21 @@ class CalendarSource(DataSource):
         return int(value)
 
     @staticmethod
-    def _normalise_regimes(regimes) -> Union[bool, Dict[str, Any]]:
+    def _normalise_regimes(regimes) -> Union[bool, List[str], Dict[str, Any]]:
         if isinstance(regimes, bool):
             return regimes
+        if isinstance(regimes, (list, tuple)):
+            names = list(regimes)
+            if not names:
+                raise ValueError("regimes: a list must name at least one DEFAULT_REGIMES entry")
+            unknown = [n for n in names if n not in DEFAULT_REGIMES]
+            if unknown:
+                raise ValueError(f"regimes: unknown name(s) {unknown}. Known: {sorted(DEFAULT_REGIMES)}")
+            return names
         if not isinstance(regimes, dict) or not regimes:
             raise ValueError(
-                "regimes must be True, False or a non-empty dict of {name: date}, {name: (start, end)} or "
-                f"{{name: {{'start': ..., 'end': ...}}}}, got {regimes!r}"
+                "regimes must be True, False, a non-empty list of DEFAULT_REGIMES names, or a non-empty dict of "
+                f"{{name: date}}, {{name: (start, end)}} or {{name: {{'start': ..., 'end': ...}}}}, got {regimes!r}"
             )
         normalised = {}
         for name, spec in regimes.items():
@@ -513,15 +805,29 @@ class CalendarSource(DataSource):
         return df
 
     def _resolved_regimes(self) -> Dict[str, Any]:
-        """Each entry as `_normalise_regimes` would store it: a bare ISO date, or {"start", "end"}."""
+        """Each entry as `_normalise_regimes` would store a custom one: a bare ISO date, or {"start", "end"}."""
         if self.regimes is True:
+            return {
+                name: self._catalog_period(spec)
+                for name, spec in DEFAULT_REGIMES.items()
+                if spec["default"] and self.country in spec["countries"]
+            }
+        if isinstance(self.regimes, list):
             result = {}
-            for name, spec in DEFAULT_REGIMES.items():
+            for name in self.regimes:
+                spec = DEFAULT_REGIMES[name]
                 if self.country not in spec["countries"]:
-                    continue
-                result[name] = {"start": spec["date"], "end": spec["end"]} if spec.get("end") else spec["date"]
+                    logger.warning(
+                        f"regimes: {name!r} does not list {self.country} among its countries "
+                        f"({spec['countries']}); adding the column anyway"
+                    )
+                result[name] = self._catalog_period(spec)
             return result
         return dict(self.regimes) if self.regimes else {}
+
+    @staticmethod
+    def _catalog_period(spec: dict) -> Any:
+        return {"start": spec["start"], "end": spec["end"]} if spec.get("end") else spec["start"]
 
     def _add_holidays(self, df: pd.DataFrame, local_dates: pd.DatetimeIndex, codes: np.ndarray) -> pd.DataFrame:
         years = list(range(local_dates.min().year, local_dates.max().year + 1)) if len(local_dates) else []

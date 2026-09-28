@@ -512,10 +512,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "regimes",
-            "description": "Add market-regime dummies (flow-based go-live, 15-min MTU, ...)",
+            "description": (
+                "Market-regime dummies: true (default catalog for the country), false, a JSON list of "
+                'catalog names (e.g. ["core_fb", "sdac_15min_mtu"]), or a JSON dict of custom periods'
+            ),
             "required": False,
             "default": False,
-            "kind": "confirm",
+            "kind": "json",
         },
         {
             "name": "prefix",
