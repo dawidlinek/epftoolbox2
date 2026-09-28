@@ -235,3 +235,26 @@ def test_data_pipeline_integration():
     df = pipeline.run("2024-01-01", "2024-01-08")
     assert "weekend" in df.columns
     assert (df["weekend"] == (df["weekday"] >= 5)).all()
+
+
+def test_lambda_calling_an_imported_module_is_saved_as_source_text(tmp_path):
+    # CPython 3.14 compiles `np.log(...)` differently when `np` is imported in the same file, so the source
+    # text must be matched on more than raw bytecode.
+    transformer = LambdaTransformer(columns={"log_load": lambda df: np.log(df["load_forecast"])})
+    path, loaded = _round_trip(transformer, tmp_path)
+
+    assert loaded.columns == {"log_load": 'lambda df: np.log(df["load_forecast"])'}
+    pd.testing.assert_frame_equal(loaded.transform(frame()), transformer.transform(frame()))
+
+
+def test_two_similar_lambdas_on_one_line_keep_their_own_text(tmp_path):
+    transformer = LambdaTransformer(
+        columns={
+            "a": lambda df: df["load_forecast"] - df["wind_forecast"],
+            "b": lambda df: df["load_forecast"] + df["wind_forecast"],
+        }
+    )
+    _, loaded = _round_trip(transformer, tmp_path)
+
+    assert loaded.columns["a"].endswith('df["load_forecast"] - df["wind_forecast"]')
+    assert loaded.columns["b"].endswith('df["load_forecast"] + df["wind_forecast"]')

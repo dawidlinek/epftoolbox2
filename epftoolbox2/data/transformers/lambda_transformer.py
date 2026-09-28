@@ -134,7 +134,7 @@ def _lambda_source(fn: Callable) -> Optional[str]:
     """Source text of a self-contained lambda, or None if it can't be recovered unambiguously.
 
     The lambda is found by parsing the file (or notebook cell) it was defined in and keeping the only lambda
-    node on its first line whose compiled bytecode matches `fn`. It must not close over local variables and
+    node on its first line that compiles to the same code as `fn`. It must not close over local variables and
     may only use `pd`, `np` and builtins as globals, so that the text means the same thing when reloaded.
     """
     code = getattr(fn, "__code__", None)
@@ -153,16 +153,28 @@ def _lambda_source(fn: Callable) -> Optional[str]:
         tree = ast.parse(source)
     except SyntaxError:
         return None
-    matches = []
+    exact, similar = set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Lambda) and node.lineno == code.co_firstlineno:
             text = ast.get_source_segment(source, node)
             if text is None:
                 continue
             try:
-                candidate = eval(compile(text, "<lambda>", "eval"), dict(_NAMESPACE))
+                other = eval(compile(text, "<lambda>", "eval"), dict(_NAMESPACE)).__code__
             except Exception:
                 continue
-            if candidate.__code__.co_code == code.co_code and candidate.__code__.co_names == code.co_names:
-                matches.append(text)
-    return matches[0] if len(set(matches)) == 1 else None
+            # Bytecode can differ for the same source (e.g. CPython 3.14 compiles `np.log(...)` differently when
+            # `np` comes from an import in the same file), so fall back to names, constants and arguments, and
+            # give up rather than guess when two different lambdas on the line both fit.
+            if _signature(other) == _signature(code):
+                similar.add(text)
+                if other.co_code == code.co_code:
+                    exact.add(text)
+    for found in (exact, similar):
+        if len(found) == 1:
+            return found.pop()
+    return None
+
+
+def _signature(code) -> tuple:
+    return code.co_names, code.co_consts, code.co_varnames, code.co_argcount
