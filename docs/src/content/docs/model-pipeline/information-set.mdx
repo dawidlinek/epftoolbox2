@@ -70,13 +70,14 @@ name alone doesn't say whether it's a forecast or an observed value. A `DataPipe
 check — `with_source_rules()` (called automatically by `Workflow`) teaches it about a `CalendarSource(prefix=...)`
 and assigns a rule to exactly the columns an `OpenMeteoSource` emits:
 
-- `as_of(source.issue_time, source.timezone)` when `source.vintage == "issue_time"` — known as of a fixed time
-  on the issue day, unaffected by a leading `_d+k` (e.g. a reanalysis snapshot, not a rolling forecast run);
-- otherwise `weather_run(f"{source.publication_delay_h}h")` (default `"6h"` if the source doesn't set one) —
-  the previous-runs model run started about at the row's own time, published that many hours later.
+- `weather_cutoff(source.run, f"{delay}h")`, `delay` coming from `publication_delay_hours(source.model)` — known
+  `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading `_d+k`. This is a
+  conservative, model-side estimate of the run's real-world publication lag (ICON ~4h, GFS ~5h, ECMWF IFS ~8h,
+  JMA ~10h, 10h for an unknown model): `OpenMeteoSource` itself has no notion of issue time or delay, only of
+  the nominal cutoff `run`.
 
-`vintage`, `issue_time` and `publication_delay_h` are read with `getattr` and default when a source doesn't
-set them, so this works with any `OpenMeteoSource`-like object.
+`run` and `model` are read with `getattr` and default when a source doesn't set them, so this works with any
+`OpenMeteoSource`-like object.
 
 ---
 
@@ -105,9 +106,11 @@ pipeline = ModelPipeline(information_set=info)
     Availability.published("13:00", days_before=1)           # published at a fixed local time, days_before delivery
     Availability.daily_close("18:00")                        # published(time, days_before=0)
     Availability.weekly(weekday="friday", time="10:00")       # published once for the whole next week
-    Availability.weather_run(delay="6h")                      # Open-Meteo previous-runs: run ~ row time + delay
+    Availability.weather_run(delay="6h")                      # a rolling forecast run ~ row time + delay
     Availability.as_of("09:00", "Europe/Brussels")             # known at a fixed time on the issue day D;
                                                                 # a leading `_d+k` doesn't change that
+    Availability.weather_cutoff(run="00", delay="10h")         # OpenMeteoSource: known `delay` after `run`:00
+                                                                # UTC on the issue day D; used by source_rules
     ```
   </TabItem>
   <TabItem label="Rule keys">
