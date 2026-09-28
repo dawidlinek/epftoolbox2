@@ -609,6 +609,75 @@ def test_as_of_perturbation_ignores_a_rows_own_dst_offset():
     assert counts["snap"] == len(idx)
 
 
+@pytest.mark.parametrize("data_zone", ["UTC", "Etc/GMT-1", "Asia/Tokyo"])
+@pytest.mark.parametrize("issue_time", ["11:30", "12:30", "13:30"])
+@pytest.mark.parametrize(
+    "run_day", ["2024-03-29", "2024-03-30", "2024-03-31", "2024-10-26", "2024-10-27", "2025-10-25", "2025-10-26"]
+)
+def test_perturbation_uses_the_delivery_and_publication_instants_own_offsets(data_zone, issue_time, run_day):
+    """Follow-up to test_perturbation_uses_each_rows_own_offset_near_a_dst_switch. On a frame whose zone has no
+    DST (UTC, a benchmark source's fixed offset) checked against Brussels-anchored rules, the Brussels offset moves
+    at the switch but the data zone's doesn't, so each conversion must use the offset at the instant it converts:
+    the shifted delivery instant (for its Brussels calendar day) and the publication instant (back to the data
+    zone). Taking both from the row's own, unshifted date misjudged cells near every switch, both ways. Run day
+    2024-03-30 perturbed `price_d-1` at 2024-03-31 22:00Z (delivered 2024-03-30 23:00 CET, published the day
+    before) and kept `load_forecast_d+1` at 2024-03-30 22:00Z (delivered 2024-04-01 00:00 CEST, published 10:00 on
+    2024-03-31); issued 12:30, it kept every 2024-03-31 `price` (published 13:00 CET = 12:00Z, after the 11:30Z
+    issue). The expected verdict is computed independently, from real instants."""
+    idx = pd.date_range(pd.Timestamp(run_day) - pd.Timedelta(days=6), periods=24 * 12, freq="1h", tz=data_zone)
+    columns = {  # name: (published time Brussels, days_before or "weekly", day shift)
+        "price": ("13:00", 1, 0),
+        "price_d-1": ("13:00", 1, -1),
+        "price_d+1": ("13:00", 1, 1),
+        "load_forecast_d+1": ("10:00", 1, 1),
+        "load_forecast_d+2": ("10:00", 1, 2),
+        "load_forecast_daily_max_d+2": ("10:00", "weekly", 2),
+        "load_forecast_daily_max_d+3": ("10:00", "weekly", 3),
+    }
+    df = pd.DataFrame(0.0, index=idx, columns=list(columns))
+    perturbed, _, _ = perturb_unknown(df, run_day, InformationSet(issue_time, "Europe/Brussels"))
+
+    issue = pd.Timestamp(f"{run_day} {issue_time}", tz="Europe/Brussels")
+    for name, (time, days_before, shift) in columns.items():
+        delivery = idx + pd.Timedelta(days=shift)  # no DST in the data zone: a calendar day is 24 h
+        delivery_day = delivery.tz_convert("Europe/Brussels").normalize().tz_localize(None)
+        if days_before == "weekly":  # Friday of the week before the delivery's Monday-Sunday week
+            published_day = delivery_day - pd.to_timedelta(delivery_day.weekday + 3, unit="D")
+        else:
+            published_day = delivery_day - pd.Timedelta(days=days_before)
+        published = (published_day + pd.Timedelta(f"{time}:00")).tz_localize("Europe/Brussels")
+        wrong = idx[(perturbed[name] != 0).to_numpy() != (published > issue)]
+        assert list(wrong) == [], f"{name}: wrong verdict at {list(wrong)}"
+
+
+def test_perturbation_converts_the_issue_time_at_its_own_instant():
+    """Issued 00:30 Brussels on the autumn switch day 2024-10-27, the issue is still CEST (22:30Z on 2024-10-26),
+    not CET like the rest of the day: a value known 01:30 Brussels (23:30Z) is not known yet."""
+    idx = pd.date_range("2024-10-26", "2024-10-29", freq="1h", tz="UTC", inclusive="left")
+    df = pd.DataFrame({"snap": 1.0}, index=idx)
+    info = InformationSet("00:30", "Europe/Brussels", rules={"snap": Availability.as_of("01:30", "Europe/Brussels")})
+
+    _, counts, _ = perturb_unknown(df, "2024-10-27", info)
+
+    assert counts["snap"] == len(idx)
+
+
+def test_perturbation_keeps_a_repeated_hours_own_occurrence():
+    """New York's repeated hour 01:00-02:00 on 2024-11-03 straddles midnight in Mexico City (UTC-6 all year):
+    01:00 EDT (05:00Z) delivers on 2024-11-02 there, 01:00 EST (06:00Z) on 2024-11-03, published 13:00 Mexico
+    City the day before (19:00Z on 2024-11-02, after the 11:30 Brussels = 10:30Z issue)."""
+    idx = pd.date_range("2024-10-30", "2024-11-06", freq="1h", tz="America/New_York", inclusive="left")
+    df = pd.DataFrame({"px": 1.0}, index=idx)
+    info = InformationSet(
+        "11:30", "Europe/Brussels", rules={"px": Availability.published("13:00", 1, "America/Mexico_City")}
+    )
+
+    perturbed, _, _ = perturb_unknown(df, "2024-11-02", info)
+
+    assert perturbed["px"].loc[pd.Timestamp("2024-11-03 05:00", tz="UTC")] == 1.0
+    assert perturbed["px"].loc[pd.Timestamp("2024-11-03 06:00", tz="UTC")] != 1.0
+
+
 def test_probe_passes_for_the_models_information_set():
     df = make_market_data(noise=5.0, seed=7)
     info = InformationSet(rules=PRICE_KNOWN_AFTER_DELIVERY)
