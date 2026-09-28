@@ -28,7 +28,7 @@ result = PlausibilityValidator(
 |-----------|------|---------|-------------|
 | `ranges` | dict or None | `None` | `{column or glob pattern: [min, max]}`, bounds inclusive, `None` for no bound. `None` uses the defaults below; `{}` turns the range check off. |
 | `max_constant_run` | int or None | `24` | Longest run of identical consecutive values allowed, in rows. `None` turns the check off. |
-| `constant_columns` | List[str] or None | `None` | Columns or glob patterns checked for constant runs. `None` uses `price*` and `load_actual*`. |
+| `constant_columns` | List[str] or None | `None` | Columns or glob patterns checked for constant runs. `None` uses `price*` and `load_actual*`. `ImputeTransformer` flag columns (`*_imputed`) are always skipped. |
 
 A column uses the **first** pattern in `ranges` it matches, so put specific patterns before general ones. Only numeric columns are checked. A pattern you pass that matches no column gives a warning.
 

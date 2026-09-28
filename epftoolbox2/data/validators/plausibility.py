@@ -30,7 +30,8 @@ class PlausibilityValidator(Validator):
         max_constant_run: Longest run of identical consecutive values allowed (in rows) before a warning. None turns
             the check off.
         constant_columns: Columns or glob patterns checked for constant runs. None uses `price*` and
-            `load_actual*`; calendar dummies and daily values upsampled to hours are constant by design.
+            `load_actual*`; calendar dummies, daily values upsampled to hours and `ImputeTransformer`'s
+            `*_imputed` flags (always skipped) are constant by design.
 
     Values out of range are errors. Long constant runs are warnings: they are typical of a filled outage or a
     frozen feed, but a price can genuinely repeat for hours. Only numeric columns are checked.
@@ -110,6 +111,8 @@ class PlausibilityValidator(Validator):
             patterns = DEFAULT_CONSTANT_COLUMNS if self.constant_columns is None else self.constant_columns
             longest = {}
             for column in matching_columns(numeric, patterns):
+                if column.endswith("_imputed"):  # ImputeTransformer's 0/1 flags are constant by design
+                    continue
                 series = column_values(df, column)
                 if not series.index.is_monotonic_increasing:
                     series = series.sort_index(kind="stable")

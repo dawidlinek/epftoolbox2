@@ -136,3 +136,10 @@ def test_nullable_integer_columns(frame):
     result = PlausibilityValidator().validate(frame)
 
     assert result.info["out_of_range"] == {"load_actual": 1}
+
+
+def test_imputed_flag_columns_are_not_checked_for_constant_runs(frame):
+    frame = frame.copy()
+    frame["price_imputed"] = 0  # ImputeTransformer's flag: all zeros when nothing needed filling
+    result = PlausibilityValidator().validate(frame)
+    assert not any("price_imputed" in w for w in result.warnings + result.errors)
