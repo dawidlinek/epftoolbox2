@@ -16,7 +16,7 @@ import fnmatch
 import math
 import re
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -738,14 +738,28 @@ def perturb_unknown(
     out = data.copy()
     counts: Dict[str, int] = {}
     unchecked: List[str] = []
-    for name in columns if columns is not None else data.columns:
+    names = list(columns) if columns is not None else list(data.columns)
+    resolved = {name: information_set.resolve(name) for name in names}
+
+    # `ctx.offsets` (and the zone shifts derived from it) are a single snapshot at run_day's own noon. Using it
+    # for every row is wrong once a row's real calendar date has crossed a DST switch relative to run_day: e.g.
+    # perturbing `load_forecast_d+1` for a run_day right before a spring-forward switch would apply run_day's
+    # (pre-switch) offset to a row that is actually already past the switch, silently leaving up to an hour of
+    # cells unperturbed (or perturbing cells that were in fact already known). Recompute each zone's offset per
+    # row, from that row's own calendar date, instead of reusing run_day's (DST/timezone review finding 3).
+    row_zones = {ctx.data_zone} | {c.rule.timezone for c in resolved.values() if c.rule is not None} - {None}
+    row_noon = local.normalize() + pd.Timedelta(hours=12)
+    row_offsets = {zone: np.asarray(_offsets(row_noon, zone), dtype=float) for zone in row_zones}
+    row_ctx = replace(ctx, offsets=row_offsets)
+
+    for name in names:
         if not pd.api.types.is_numeric_dtype(data[name]) or pd.api.types.is_bool_dtype(data[name]):
             continue
-        col = information_set.resolve(name)
+        col = resolved[name]
         if col.rule is None:
             unchecked.append(name)
             continue
-        available = _available_array(col, col.rule, day, minute, step, ctx)
+        available = _available_array(col, col.rule, day, minute, step, row_ctx, issue_ctx=ctx)
         mask = available > ctx.issue_minute
         if target_from_issue is not None and name == target_from_issue:
             mask = mask | (day >= 0)
@@ -764,15 +778,28 @@ def perturb_unknown(
 
 
 def _available_array(
-    col: ResolvedColumn, rule: Availability, day: np.ndarray, minute: np.ndarray, step: int, ctx: _Context
+    col: ResolvedColumn,
+    rule: Availability,
+    day: np.ndarray,
+    minute: np.ndarray,
+    step: int,
+    ctx: _Context,
+    issue_ctx: Optional[_Context] = None,
 ) -> np.ndarray:
-    """Vectorised `_available` for rows at (D + day, minute); the value is `col` read through `rule`."""
+    """Vectorised `_available` for rows at (D + day, minute); the value is `col` read through `rule`.
+
+    `ctx` supplies the zone offsets used for the row's *own* delivery day (may hold per-row offset arrays
+    instead of the scalar per-context ones, see `perturb_unknown`). `issue_ctx` (defaults to `ctx`) supplies the
+    offset for the ``as_of`` rule, which is fixed to a time on the issue day D itself regardless of the row.
+    """
+    issue_ctx = ctx if issue_ctx is None else issue_ctx
     if rule.kind == "static":
         return np.full(len(day), -np.inf)
     if rule.kind == "as_of":
         # Fixed to a time on the issue day D itself: independent of the row's own day/minute or any shift,
-        # so a leading `_d+k` doesn't change it.
-        return np.full(len(day), _minutes(rule.time) + _zone_shift(rule.timezone, ctx))
+        # so a leading `_d+k` doesn't change it. The offset used is therefore the issue day's own, not the
+        # row's (they can differ once the row's real calendar date has crossed a DST switch relative to D).
+        return np.full(len(day), _minutes(rule.time), dtype=float) + _zone_shift(rule.timezone, issue_ctx)
     shifts = list(col.shifts)
     if rule.kind == "weather_run" and shifts and shifts[0].unit == "d" and shifts[0].offset > 0:
         shifts = shifts[1:]

@@ -519,6 +519,52 @@ def test_perturbation_follows_each_columns_delivery_time():
     assert "load" not in counts and unchecked == []
 
 
+@pytest.mark.parametrize(
+    "run_day, first_changed_utc",
+    [
+        ("2024-03-30", "2024-03-31 22:00"),  # spring-forward the next day (2024-03-31)
+        ("2024-10-26", "2024-10-27 23:00"),  # fall-back the next day (2024-10-27)
+    ],
+)
+def test_perturbation_uses_each_rows_own_offset_near_a_dst_switch(run_day, first_changed_utc):
+    """DST/timezone review finding 3: `perturb_unknown` used to apply the issue day's own noon UTC offset to
+    every row, instead of each row's own. On a UTC-indexed frame, `load_forecast` (published 10:00 Brussels on
+    D-1) is delivered on the local calendar day, in Brussels, of the row itself; once that day has crossed a
+    DST switch relative to run_day, the stale issue-day offset put some rows on the wrong side of the
+    publication boundary. Before the fix, run day 2024-03-30 left `load_forecast` at 2024-03-31 22:00Z
+    unperturbed (it should not be, since 2024-03-31 is delivered in CEST, one hour further from UTC than
+    run_day's own CET offset); the mirror case near the autumn switch is off by an hour the other way."""
+    idx = pd.date_range("2024-03-20", "2024-11-05", freq="1h", tz="UTC", inclusive="left")
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({"load_forecast": rng.normal(1000, 10, len(idx))}, index=idx)
+    info = InformationSet("11:30", "Europe/Brussels")
+
+    perturbed, counts, _ = perturb_unknown(df, run_day, info)
+    changed = _changed(perturbed["load_forecast"], df["load_forecast"])
+
+    row = pd.Timestamp(first_changed_utc, tz="UTC")
+    assert changed.loc[row]
+    assert not changed.loc[row - pd.Timedelta(hours=1)]
+    assert df.index[changed].min() == row
+    assert counts["load_forecast"] > 0
+
+
+def test_as_of_perturbation_ignores_a_rows_own_dst_offset():
+    """Companion to the test above: `as_of` is fixed to a time on the issue day D itself (DST/timezone review
+    finding 3's fix must not make it vary by the row's own date). Every row gets the same verdict even though
+    the index spans a DST switch, because run_day's own offset — not each row's — decides it."""
+    idx = pd.date_range("2024-03-25", "2024-04-05", freq="1h", tz="UTC", inclusive="left")
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({"snap": rng.normal(0, 1, len(idx))}, index=idx)
+    info = InformationSet("11:30", "Europe/Brussels", rules={"snap": Availability.as_of("14:00", "Europe/Brussels")})
+
+    perturbed, counts, _ = perturb_unknown(df, "2024-03-30", info)
+    changed = _changed(perturbed["snap"], df["snap"])
+
+    assert changed.all()  # 14:00 Brussels on run_day is after the 11:30 issue: unknown for every row alike
+    assert counts["snap"] == len(idx)
+
+
 def test_probe_passes_for_the_models_information_set():
     df = make_market_data(noise=5.0, seed=7)
     info = InformationSet(rules=PRICE_KNOWN_AFTER_DELIVERY)

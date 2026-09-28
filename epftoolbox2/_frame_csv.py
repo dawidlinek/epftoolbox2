@@ -22,7 +22,11 @@ def save_frame_csv(df: pd.DataFrame, path: Union[str, Path]) -> None:
     out = df.copy(deep=False)
     name = df.index.name or "datetime"
     tz = getattr(df.index, "tz", None)
-    out.index.name = f"{name}[{tz}]" if tz is not None else name
+    new_name = f"{name}[{tz}]" if tz is not None else name
+    # `out.index.name = ...` would mutate the Index object in place, and a shallow copy shares it with `df`
+    # (`copy(deep=False)` copies the DataFrame wrapper, not its index), renaming the caller's own index as a
+    # side effect. `rename` returns a new Index instead, leaving `df.index` untouched.
+    out.index = out.index.rename(new_name)
     out.to_csv(path)
 
 

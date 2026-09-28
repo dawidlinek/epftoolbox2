@@ -31,31 +31,31 @@ pipeline = DataPipeline(timezone="Europe/Warsaw").add_transformer(TimezoneTransf
 |-----------|------|---------|-------------|
 | `target_tz` | str | `None` | Target IANA time zone, e.g. `"Europe/Warsaw"`. `None` inherits `DataPipeline.timezone` when part of a pipeline; transforming without either raises |
 | `daily_columns` | list[str] \| None | `None` | Columns holding one value per day. `None` means `["load_forecast_daily_min", "load_forecast_daily_max"]` (ENTSO-E week-ahead forecast); columns not in the frame are skipped |
-| `daily_anchor` | str | `"UTC+02:00"` | Time zone whose calendar date a daily value belongs to: a UTC offset (`"UTC+02:00"`, `"+01:00"`, `"UTC"`) or an IANA name |
+| `daily_anchor` | str \| None | `None` | Time zone whose calendar date a daily value belongs to: a UTC offset (`"UTC+02:00"`, `"+01:00"`, `"UTC"`) or an IANA name. `None` uses the resolved `target_tz` itself |
 
 ---
 
 ## Daily columns
 
-ENTSO-E's week-ahead load forecast (A31) has one value per day, but its periods start at 00:00 **UTC+2** (22:00 UTC) all year. In Warsaw that is 00:00 in summer and 23:00 **of the previous day** in winter, so without correction a later `ResampleTransformer` would give each winter value to the wrong hours.
+ENTSO-E's week-ahead load forecast (A31) has one value per day, but its periods start at 00:00 local time **of the market's own area** — whatever that area's UTC offset is, in every zone. In CET (Warsaw) that instant is 00:00 UTC+2 in summer and 23:00 UTC the day before in winter; without correction a later `ResampleTransformer` would give each winter value to the wrong hours. Further east it is a different offset again: 00:00 EEST (UTC+3) in Helsinki in summer, 00:00 UTC+3 all year in a zone with a fixed offset (e.g. Europe/Istanbul).
 
 The rule `TimezoneTransformer` applies:
 
 > A value at timestamp *t* belongs to the calendar date of *t* in `daily_anchor`. It is moved to 00:00 local time (`target_tz`) on that date.
 
-With the default anchor `UTC+02:00`:
+The default anchor (`daily_anchor=None`) is `target_tz` itself, which is right for A31 data in every zone, because that is where ENTSO-E actually anchors it:
 
-| Zone | A31 period start (22:00 UTC) in local time | Moved to |
+| Zone | A31 period start, in local time | Moved to |
 |------|------|------|
-| Europe/Warsaw, winter | 23:00 on D-1 | 00:00 on D |
-| Europe/Warsaw, summer | 00:00 on D | 00:00 on D (unchanged) |
-| Europe/Helsinki, summer | 01:00 on D | 00:00 on D |
-| Europe/Lisbon, winter | 22:00 on D-1 | 00:00 on D |
+| Europe/Warsaw, winter | 23:00 on D-1 (UTC) → already 00:00 CET on D | 00:00 on D (no-op) |
+| Europe/Warsaw, summer | 22:00 on D-1 (UTC) → already 00:00 CEST on D | 00:00 on D (no-op) |
+| Europe/Helsinki, summer (EEST, UTC+3) | 21:00 on D-1 (UTC) → already 00:00 EEST on D | 00:00 on D (no-op) |
+| Europe/Istanbul (fixed UTC+3) | 21:00 on D-1 (UTC) → already 00:00 on D | 00:00 on D (no-op) |
 
-This is right for A31 data in every zone from UTC-10 to UTC+13. Values that are already stamped at local midnight are also kept on their day in zones up to UTC+2. For data stamped at local midnight further east (e.g. EET in summer, UTC+3), pass `daily_anchor=target_tz`:
+A fixed `daily_anchor="UTC+02:00"` (the old default) gets this wrong for any zone whose actual offset isn't UTC+2 at that moment: it silently misplaces every value in EET/EEST zones (FI, EE, LV, LT, BG, GR) every summer, and every value, year-round, in a zone with a fixed UTC+3 offset. Pass an explicit `daily_anchor` only when a daily column's real anchor genuinely differs from `target_tz` — for example a source that anchors to a fixed offset regardless of the pipeline's own zone:
 
 ```python
-TimezoneTransformer(target_tz="Europe/Helsinki", daily_columns=["my_daily_value"], daily_anchor="Europe/Helsinki")
+TimezoneTransformer(target_tz="Europe/Warsaw", daily_columns=["my_daily_value"], daily_anchor="UTC+02:00")
 ```
 
 After the move, `ResampleTransformer` spreads each daily value over exactly its own local day (23, 24 or 25 hours).

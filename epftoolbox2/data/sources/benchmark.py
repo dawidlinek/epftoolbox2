@@ -220,12 +220,14 @@ class EpftoolboxBenchmarkSource(DataSource):
         return df
 
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        """Rows with ``start <= index < end`` (the source contract's half-open range; ``df.loc[start:end]``
+        would also include a row exactly at ``end``)."""
         start = start.tz_convert("UTC") if start.tzinfo else start.tz_localize("UTC")
         end = end.tz_convert("UTC") if end.tzinfo else end.tz_localize("UTC")
         if end <= start:
             raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
         df = self._load()
-        result = df.loc[start:end].copy()
+        result = df[(df.index >= start) & (df.index < end)].copy()
         if result.empty:
             self.logger.warning(
                 f"Benchmark: {self.dataset} covers {df.index[0]} to {df.index[-1]} (UTC); nothing in {start} to {end}"

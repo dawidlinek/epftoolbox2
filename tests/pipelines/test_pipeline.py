@@ -440,6 +440,44 @@ class EntsoeLikeSource(DataSource):
         return {"source_type": "entsoe_like"}
 
 
+class EntsoeLikeClippingSource(DataSource):
+    """Like `EntsoeLikeSource`, but also mimics `EntsoeSource._clip`: a daily value whose (one-local-day) period
+    covers `start` — i.e. it started before `start` — is carried forward and re-stamped at `start`, unless
+    `start` already is that value's own stamp. Real ENTSO-E daily values sit at the source's own local midnight,
+    so this only bites when `start` falls strictly inside a local day, e.g. a per-source cache resuming at a
+    boundary that isn't the area's own midnight (DST/timezone review finding 2)."""
+
+    def __init__(self, tz="Europe/Warsaw"):
+        self.tz = tz
+
+    def fetch(self, start, end):
+        daily = _SERIES["load"].tz_convert(self.tz).resample("D").min().tz_convert("UTC")  # one value per local day
+        df = pd.DataFrame({"load_actual": _SERIES["load"], "load_forecast_daily_min": daily})
+        df = df.truncate(before=start - pd.Timedelta(days=1), after=end)
+
+        values = df["load_forecast_daily_min"].dropna()
+        before = values[values.index < start]
+        carried = None
+        if not before.empty:
+            period_start = before.index[-1]
+            period_end = (period_start.tz_convert(self.tz) + pd.Timedelta(days=1)).tz_convert("UTC")
+            if period_end > start:
+                carried = before.iloc[-1]
+
+        df = df[(df.index >= start) & (df.index < end)].copy()
+        if carried is not None and start not in values.index:
+            if start not in df.index:
+                df = df.reindex(df.index.union([start]))
+            df.loc[start, "load_forecast_daily_min"] = carried
+        return df
+
+    def _validate_config(self):
+        return True
+
+    def get_cache_config(self):
+        return {"source_type": "entsoe_like_clipping", "tz": self.tz}
+
+
 def _utc(s):
     return pd.Timestamp(s, tz="UTC")
 
@@ -493,6 +531,29 @@ class TestSourceCache:
             DataPipeline().add_source(EntsoeLikeSource()).run(s, e, cache=True)
         cached = DataPipeline().add_source(EntsoeLikeSource()).run("2024-01-01", "2024-01-20", cache=True)
         fresh = DataPipeline().add_source(EntsoeLikeSource()).run("2024-01-01", "2024-01-20", cache=False)
+        pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
+
+    @pytest.mark.parametrize("tz", ["Europe/Warsaw", "Europe/Helsinki"])
+    def test_second_cached_run_does_not_double_stamp_a_daily_value(self, in_tmp, monkeypatch, tz):
+        """DST/timezone review finding 2: the per-source cache's unsettled boundary used to be floored at UTC
+        midnight, which (almost) never lines up with a source's own local midnight. Resuming a fetch there made
+        EntsoeSource._clip carry the day's already-cached daily value forward again, re-stamped at that
+        non-local-midnight boundary — a second value for the same local day, which TimezoneTransformer rejects.
+        A cached, split run must equal a fresh one, including daily columns, in PL and in an EET zone."""
+        start, end = _utc("2024-10-25"), _utc("2024-10-29")
+
+        def pipe():
+            return DataPipeline(
+                sources=[EntsoeLikeClippingSource(tz)], transformers=[TimezoneTransformer()], timezone=tz
+            )
+
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: _utc("2024-10-30 12:00"))
+        pipe().run(start, end, cache=True)  # first piece: cached only up to the unsettled boundary
+
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: _utc("2024-11-15 12:00"))
+        cached = pipe().run(start, end, cache=True)  # resumes from that boundary
+
+        fresh = pipe().run(start, end, cache=False)
         pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
 
     def test_unpublished_tail_is_fetched_again_next_day(self, in_tmp, monkeypatch):

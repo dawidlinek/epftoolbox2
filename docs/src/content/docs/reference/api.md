@@ -233,7 +233,7 @@ class TimezoneTransformer(Transformer):
         self,
         target_tz: str,
         daily_columns: Optional[List[str]] = None,  # None = ["load_forecast_daily_min", "load_forecast_daily_max"]
-        daily_anchor: str = "UTC+02:00",
+        daily_anchor: Optional[str] = None,  # None = the resolved target_tz
     ): ...
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 ```

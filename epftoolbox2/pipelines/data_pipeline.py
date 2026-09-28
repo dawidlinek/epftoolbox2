@@ -157,7 +157,14 @@ class DataPipeline:
         writing the value the user gave, and a YAML round trip re-resolves the same way given the same
         ``DataPipeline.timezone``); an explicitly set, different zone still raises. ``CsvSource.timezone`` is the
         input file's own zone, not the market's, and is not touched.
+
+        ``EpftoolboxBenchmarkSource.index_timezone`` is different again: it is a fixed offset the source always
+        has (derived from its ``dataset``, never inherited), so it can't be left unset to agree with
+        ``self.timezone``. A mismatch there is never intentional — the source's UTC index already encodes the
+        benchmark file's local wall-clock time through that exact offset, and re-interpreting it through a
+        different (DST-observing) pipeline zone silently shifts every row's (date, hour) — so it raises too.
         """
+        from epftoolbox2.data.sources.benchmark import EpftoolboxBenchmarkSource
         from epftoolbox2.data.sources.calendar import CalendarSource
         from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
         from epftoolbox2.data.sources.open_meteo_single_runs import OpenMeteoSingleRunsSource
@@ -178,6 +185,16 @@ class DataPipeline:
                     _bind_timezone(child, child.timezone, self.timezone, where, owner=self)
             elif isinstance(source, (OpenMeteoSource, OpenMeteoSingleRunsSource, CalendarSource)):
                 _bind_timezone(source, source.timezone, self.timezone, f"{type(source).__name__}.timezone", owner=self)
+            elif isinstance(source, EpftoolboxBenchmarkSource):
+                if self.timezone is not None and self.timezone != source.index_timezone:
+                    raise ValueError(
+                        f"DataPipeline.timezone={self.timezone!r} does not match "
+                        f"EpftoolboxBenchmarkSource({source.dataset!r}).index_timezone={source.index_timezone!r}. "
+                        "That source's UTC index already encodes its file's local wall-clock time through this "
+                        "fixed offset (see EpftoolboxBenchmarkSource's docs); a DataPipeline.timezone that "
+                        "observes DST reads every row as a different (date, hour). Use "
+                        f"timezone={source.index_timezone!r} for this pipeline."
+                    )
 
     def add_source(self, source: DataSource) -> "DataPipeline":
         if not isinstance(source, DataSource):
@@ -236,8 +253,14 @@ class DataPipeline:
                     continue
                 fresh_df = clip_to_range(fresh_df, missing_start, missing_end)
                 # Records only the part the source actually returned and that is settled; the rest is still
-                # returned now and fetched again next time.
-                cache_manager.write_cache(cache_key, fresh_df, missing_start, missing_end, source_config, source_class)
+                # returned now and fetched again next time. `timezone` floors that cap to this pipeline's market
+                # zone's own local midnight (not UTC midnight), so a later resumed fetch starts exactly there
+                # instead of strictly inside a source's one-day period (e.g. ENTSO-E's A31 daily min/max) — a
+                # source that carries such a period's value forward to cover its fetch's own start would
+                # otherwise re-stamp the same day's value a second time on top of the one already cached.
+                cache_manager.write_cache(
+                    cache_key, fresh_df, missing_start, missing_end, source_config, source_class, self.timezone
+                )
                 parts.append(fresh_df)
 
         parts = [p for p in parts if not p.empty]
