@@ -26,7 +26,7 @@ df = transformer.transform(df)
 |-----------|------|---------|-------------|
 | `columns` | list[str] \| str | required | Column(s) to impute |
 | `method` | str | `"ffill"` | `"ffill"`, `"previous_day"` or `"previous_week"` |
-| `limit` | int \| str \| None | `"1D"` | How long a gap may be before it is left unfilled: a positive integer number of rows, a pandas duration string (`"6h"`, `"2D"`, ...), or `None` for no limit |
+| `limit` | int \| str \| None | `None` | How long a gap may be before it is left unfilled: a positive integer number of rows, a pandas duration string (`"6h"`, `"2D"`, ...), or `None` to fill every gap the method can reach |
 | `flag` | bool | `True` | Add a `{column}_imputed` column (0/1) marking filled values |
 | `suffix` | str | `""` | Write the filled series to `{column}{suffix}` instead of overwriting `{column}` |
 
@@ -42,7 +42,9 @@ one more day or week at a time until it finds a real value.
 
 **`limit`** bounds how long an outage may be before it is left unfilled, measured from the last real value
 seen before the gap started — not from how far back a seasonal source had to be searched. A gap longer than
-`limit` is only partially filled, starting from its first missing row.
+`limit` is only partially filled, starting from its first missing row. The default, `None`, fills every gap
+the method can reach (a value between two real observations, however far apart); pass a limit to leave long
+outages as NaN instead of masking them.
 
 A value is only ever filled between two real observations of its own column: nothing is invented before the
 column's first observed value, and nothing after its last one, since later rows may simply not have

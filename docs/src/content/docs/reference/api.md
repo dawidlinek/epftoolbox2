@@ -168,11 +168,8 @@ class CalendarSource(DataSource):
                  categories: Union[str, List[str]] = None,
                  bridge_days: bool = False, christmas_period: bool = False,
                  holiday_distance: int = 0, dst_switch: bool = False,
-                 fourier_weekly: int = 0, fourier_annual: int = 0,
-                 regimes: Union[bool, Dict[str, str]] = False,
-                 school_holidays: bool = False,
-                 school_subdivisions: Union[str, List[str]] = None,
-                 school_weights: Union[Dict[str, float], List[float]] = None): ...
+                 regimes: Union[bool, List[str], Dict[str, Any]] = False,
+                 school_holidays: Union[bool, str] = False): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 
 class CsvSource(DataSource):
@@ -247,18 +244,10 @@ class CoverageValidator(Validator):
                  end: Optional[str] = None, freq: Optional[str] = None,
                  min_coverage: float = 1.0, max_gap: Optional[str] = None): ...
 
-class FreshnessValidator(Validator):
-    def __init__(self, columns: Union[str, List[str]] = None, expected_end: Optional[str] = None,
-                 max_delay: str = "0h"): ...
-
 class PlausibilityValidator(Validator):
     def __init__(self, ranges: Optional[Dict[str, List[Optional[float]]]] = None,
                  max_constant_run: Optional[int] = 24,
                  constant_columns: Optional[List[str]] = None): ...
-
-class LagConsistencyValidator(Validator):
-    def __init__(self, columns: Union[str, List[str]] = None, tz: Optional[str] = None,
-                 tolerance: float = 1e-9): ...
 
 class EdaValidator(Validator):
     def __init__(self, columns: List[str] = None, verbose: bool = True): ...

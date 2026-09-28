@@ -205,17 +205,13 @@ source = CalendarSource(
     christmas_period=False,      # Optional. Add is_christmas_period (24 Dec - 1 Jan)
     holiday_distance=0,          # Optional. N > 0: add days_to_holiday, days_since_holiday capped at N
     dst_switch=False,            # Optional. Add is_dst_switch_day (23- or 25-hour local days)
-    fourier_weekly=0,            # Optional. K weekly harmonics: week_sin_k, week_cos_k
-    fourier_annual=0,            # Optional. K annual harmonics: year_sin_k, year_cos_k
-    regimes=False,               # Optional. True (DEFAULT_REGIMES for the country) or {name: "YYYY-MM-DD"}
-    school_holidays=False,       # Optional. Download school holiday flags from the OpenHolidays API
-    school_subdivisions=None,    # Optional. ["PL-MZ", "PL-SL"] or "MZ,SL"; None = country-wide holidays only
-    school_weights=None,         # Optional. {code: weight} (e.g. population) or numbers in school_subdivisions order
+    regimes=False,               # Optional. False | True (default DEFAULT_REGIMES subset) | list of names | dict of custom periods
+    school_holidays=False,       # Optional. False | True (= "national") | "national" | "all"
 )
 ```
 
-`school_holidays=True` is the only case where CalendarSource makes network calls (to the OpenHolidays API,
-https://www.openholidaysapi.org); it stays offline and deterministic otherwise. Data under ODbL 1.0: credit
+`school_holidays` not `False` is the only case where CalendarSource makes network calls (to the OpenHolidays
+API, https://www.openholidaysapi.org); it stays offline and deterministic otherwise. Data under ODbL 1.0: credit
 "School holidays: OpenHolidays API (www.openholidaysapi.org), ODbL 1.0" when you publish results built from it.
 No API key.
 
@@ -238,12 +234,9 @@ No API key.
 | `christmas_period` | `True` | `is_christmas_period`: local dates 24 Dec - 1 Jan |
 | `holiday_distance` | `N` | `days_to_holiday`, `days_since_holiday` (0 on a holiday, capped at N) |
 | `dst_switch` | `True` | `is_dst_switch_day` (every row of a 23/25-hour local day) |
-| `fourier_weekly` | `K` | `week_sin_k`, `week_cos_k`, phase (weekday + time of day / 24) / 7 on local wall clock |
-| `fourier_annual` | `K` | `year_sin_k`, `year_cos_k`, phase (day of year - 1 + time of day / 24) / days in year |
-| `regimes` | `True`/dict | `regime_{name}`: 0 before the first local delivery day, 1 from it on |
-| `school_holidays` | `True`, no/one `school_subdivisions` | `is_school_holiday` (1.0/0.0/NaN) |
-| `school_holidays` | `True`, several `school_subdivisions` | `is_school_holiday_{code}`, e.g. `is_school_holiday_pl_mz` |
-| `school_holidays` | `True` with `school_weights` | also `school_holiday_share` = sum(weight * flag) / sum(weight) |
+| `regimes` | `True`/list/dict | `regime_{name}`: 1 on local dates start <= D <= end, 0 otherwise; open-ended (no end) unless one is given |
+| `school_holidays` | `True`/`"national"` | `is_school_holiday`: 1.0 on a nationwide school-holiday day, 0.0 otherwise, NaN before history starts |
+| `school_holidays` | `"all"` | `school_holiday_share`: unweighted fraction of the country's top-level regions on school holiday that day |
 
 **Notes:**
 - Holiday names are pinned to English (`en_US`), so one-hot column names don't depend on the machine's locale.
@@ -253,17 +246,30 @@ No API key.
   (`categories` replaces the default, so include "public").
 - `period` = index of the period in the local day (`hour * 4 + minute // 15` at 15 min), as in the models.
 - `"name"` outputs are strings: drop them before modelling (models convert every column to float).
-- Default regimes (first delivery day): `de_at_split` 2018-10-01 (DE, AT), `brexit_decoupling` 2021-01-01
-  (GB, IE), `core_fb` 2022-06-09 (Core zones), `nordic_fb` 2024-10-30 (DK, FI, NO, SE), `sdac_15min_mtu`
-  2025-10-01 (SDAC countries), `sem_30min_mtu` 2025-10-01 (IE). A dict replaces the set.
+- `regimes` draws on a 31-entry catalog (`epftoolbox2.data.sources.calendar.DEFAULT_REGIMES`) of market-structure
+  changes, policy interventions and shocks, each with `start`, optional `end`, `countries`, `ex_ante`,
+  `description`, `source` and `default`. `regimes=True` adds every entry with `default: True` whose `countries`
+  include `country` (`default` is `True` exactly when `ex_ante` is `True`, except `baltic_sync`, which is ex
+  ante but excluded by name). `regimes=["name", ...]` adds exactly those entries regardless of `default` (an
+  unknown name raises, listing the known ones; a country missing from an entry's `countries` only warns).
+  Inspect the catalog with `list_regimes(country=None)` -> DataFrame(name, start, end, countries, ex_ante,
+  default, description, source).
+- A `regimes` dict entry is a date (open-ended: `{name: "YYYY-MM-DD"}`), a `(start, end)` pair or
+  `{name: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}` ("end" optional, inclusive when given; must not be
+  before "start"). A bounded period is only leak-free if its end date was known in advance (e.g. a legislated
+  expiry), not identified afterwards from the data — an ex-post label like "energy crisis 2021-2023" is
+  look-ahead in a backtest; this is what `ex_ante` records for catalog entries.
 - All calendar features are known in advance, so `_d+k` versions are legal predictors.
-- School holiday NaN (with a warning) where the API has no data: any stretch of more than a year without a
-  school holiday (before the history starts, or school years not yet published). A NaN flag makes the share NaN.
+- `school_holidays=True` is an alias for `"national"`. School holiday NaN (with a warning) where the API has no
+  data: any stretch of more than a year without a school holiday (before the history starts, or school years
+  not yet published). In `"all"` mode a NaN in any one region's flag makes that day's share NaN.
+- `"all"` uses top-level OpenHolidays subdivisions only (e.g. Poland's 16 voivodeships), not their nested
+  children; an entry recorded only against a child code is not rolled up into its parent's flag.
 - School holiday history starts: DE 2012; HU, RO 2015; AT 2017; FR 2018; BE, BG, CH, CZ, ES, IE, IT, NL, PL, PT,
   SK 2020 (PL from the 2019/20 Christmas break). No school holidays for SE, DK, FI, GB, GR, NO.
-- Parent school holidays apply to children (DE-BY to DE-BY-AU); school-type groups are merged (any group on
-  holiday); half-day entries are ignored. Without `school_subdivisions` only country-wide entries count (none
-  in DE).
+- School-type groups are merged (a day is flagged when any group is on holiday); half-day entries are ignored.
+  `"national"` (and the nationwide entries `"all"` also uses) only count holidays marked as country-wide;
+  Germany has none, so `is_school_holiday` is always 0.0/NaN there.
 
 **Caching:** Returns None (not cached - deterministic generation without `school_holidays`; a few small
 requests per run with it, and a cache would keep the NaN of school years published after it was written).
@@ -472,48 +478,24 @@ transformer = DailyStatsTransformer(
 
 ---
 
-## ResidualLoadTransformer
+## LambdaTransformer
 
-Residual load forecast: load forecast minus wind and solar generation forecasts.
+Custom columns from an expression or a lambda, or a full custom transform. Exactly one of `func` and `columns` is required.
 
 ```python
-from epftoolbox2.data.transformers import ResidualLoadTransformer
+from epftoolbox2.data.transformers import LambdaTransformer
 
-transformer = ResidualLoadTransformer(
-    load="load_forecast",         # Optional. Load forecast column
-    renewables=None,              # Optional. Wind/solar forecast columns; None = whichever ENTSO-E ones are present
-    output="residual_load_forecast",  # Optional. Name of the new column
+transformer = LambdaTransformer(
+    func=None,     # Optional. Lambda df -> df (or its source text), full control. Exactly one of func/columns
+    columns=None,  # Optional. {new_or_existing_column: expression}; a lambda df -> Series (or its text), or a df.eval(...) string
 )
 ```
 
 **Behavior:**
-- Only forecast columns are accepted: a column whose name doesn't contain "forecast" raises `ValueError`, because realised load or generation would make the result look ahead.
-- A missing value in any input gives a missing result (a missing forecast is not treated as zero).
-- `renewables=None` looks for `generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` and uses whichever are present (at least one must be).
-
----
-
-## SpikeFlagTransformer
-
-Flags values far from the same slot's recent history: `{column}_spike` is 1 for a spike, 0 otherwise, NaN when unknown.
-
-```python
-from epftoolbox2.data.transformers import SpikeFlagTransformer
-
-transformer = SpikeFlagTransformer(
-    columns="price",   # Required. Column name(s) to flag; adds `{column}_spike` for each
-    window=28,          # Optional. Number of previous calendar days in the reference band
-    k=3.0,               # Optional. Band half-width in scaled MADs
-    min_periods=None,    # Optional. Past values needed for a flag; None = half the window
-    side="both",         # Optional. "both" | "upper" | "lower"
-)
-```
-
-**Behavior:**
-- For a row at slot s on local day D, the reference band is median +/- k*MAD of the column's values at slot s on the `window` calendar days before D (D itself excluded, like `closed="left"`). MAD is scaled by 1.4826 to estimate the standard deviation of normal data.
-- The flag is NaN when the value is missing or fewer than `min_periods` past values exist (e.g. the first days of the data).
-- On the autumn DST switch day both occurrences of the repeated slot are compared against the same band, built from the first occurrence's history.
-- On a UTC index the "days" are UTC days, and the transformer warns.
+- `columns`: each entry runs in order against the frame as built so far, so a later expression can reference a column an earlier one just added. String expressions use `df.eval(...)`; column names `eval` can't parse as identifiers need backticks, e.g. `` "`price (EUR)` - load" ``.
+- Lambdas are saved to YAML as their source text (and `"lambda df: ..."` strings are accepted directly); they may use `pd`, `np` and builtins. A lambda that closes over other variables, or a named function, raises `TypeError` on save. Loading a YAML runs the lambdas in it: only load trusted files.
+- The output must keep exactly the same index (same rows, same order) as the input; `columns` mode can't break this, but a `func` that resamples, filters or reorders rows raises `ValueError`.
+- Nothing here checks for look-ahead: same-row arithmetic is safe, but `shift(-k)`, `bfill()`, a rolling window reaching past the current row, or normalising with a whole-sample statistic all leak.
 
 ---
 
@@ -553,7 +535,7 @@ from epftoolbox2.data.transformers import ImputeTransformer
 transformer = ImputeTransformer(
     columns=["price"],  # Required. Column(s) to impute
     method="ffill",     # Optional (default: "ffill"). "ffill" | "previous_day" | "previous_week"
-    limit="1D",          # Optional (default: "1D"). Positive int (rows), a pandas duration string, or None
+    limit=None,          # Optional (default: None). Positive int (rows), a pandas duration string, or None = no limit
     flag=True,           # Optional (default: True). Add a {column}_imputed 0/1 column
     suffix="",           # Optional (default: ""). Write to {column}{suffix} instead of overwriting {column}
 )
@@ -564,7 +546,7 @@ transformer = ImputeTransformer(
   wall-clock hour 1 calendar day/week earlier (DST-safe: 23/24/25-hour days), walking further back through
   the *original* series if that source day is itself missing.
 - `limit` bounds how long an outage may be, measured from the last real value before the gap; it does not
-  bound how far back a seasonal source is searched.
+  bound how far back a seasonal source is searched. Default `None` fills every gap the method can reach.
 - Never fills before a column's first observed value or after its last one.
 - `flag=True` adds `{column}{suffix}_imputed`; if that column already exists (e.g. running it twice), the
   new flags are OR'd into it instead of replacing it.
@@ -697,25 +679,6 @@ validator = CoverageValidator(
 
 ---
 
-## FreshnessValidator
-
-Checks that every column has values up to an expected end (live forecasting; a source that stopped updating).
-
-```python
-from epftoolbox2.data.validators import FreshnessValidator
-
-validator = FreshnessValidator(
-    columns=["price", "load_forecast"],  # Optional. Columns to check (default: None = all columns)
-    expected_end="today_d+1",            # Optional. Timestamp of the last value needed (default: None = last row of the frame)
-    max_delay="0h",                      # Optional. How far before the expected end the last value may be (default: "0h")
-)
-```
-
-**Errors:** missing or empty columns; columns whose last value is before `expected_end - max_delay`.
-**Info:** `expected_end`, `last_valid` (per column), `stale_columns`. **Stats:** column, last_valid, behind.
-
----
-
 ## PlausibilityValidator
 
 Range checks per column or glob pattern, and frozen (constant) runs.
@@ -735,28 +698,6 @@ Default ranges: `price*` in [-600, 4000] EUR/MWh (SDAC harmonised min/max; the m
 **Errors:** values out of range. **Warnings:** constant runs longer than `max_constant_run`; a pattern you passed that matches no column.
 **Info:** `out_of_range`, `longest_constant_run`, `checked_columns`.
 **Stats:** column, rule, low, high, min, max, out_of_range, longest_constant_run, constant_value, constant_start.
-
----
-
-## LagConsistencyValidator
-
-Checks that `x_d-k` / `x_d+k` hold `x` from k **local calendar days** earlier / later at the same wall-clock time (the naming contract). A lag built from elapsed 24-h steps is wrong around DST: on a year of hourly Europe/Warsaw data, 49 rows of `price_d-1` and 337 of `price_d-7`.
-
-```python
-from epftoolbox2.data.validators import LagConsistencyValidator
-
-validator = LagConsistencyValidator(
-    columns=None,       # Optional. Lag columns to check (default: None = every x_d±k whose base column x exists)
-    tz=None,            # Optional. Time zone of the local days (default: None = the index's own)
-    tolerance=1e-9,     # Optional. Absolute difference counted as equal (default: 1e-09)
-)
-```
-
-Repeated autumn hour: first occurrence when the source day has it once. Skipped spring hour: the lag must be missing. Rows whose source lies outside the frame are skipped. Columns without a base column (Open-Meteo forecasts) are not checked; hour lags (`x_h-24`) are not checked.
-
-**Errors:** columns with mismatches (first row, actual and expected value); listed columns that aren't day lags or have no base column.
-**Info:** `tz`, `checked`, `mismatch_counts`, `mismatches` (first 10 rows per column).
-**Stats:** column, base, days, checked, unverifiable, mismatches, first_mismatch.
 
 ---
 

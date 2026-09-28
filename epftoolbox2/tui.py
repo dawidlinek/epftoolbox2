@@ -361,25 +361,14 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "confirm",
         },
         {
-            "name": "fourier_weekly",
-            "description": "Number of weekly Fourier harmonics (0 = off)",
-            "required": False,
-            "default": 0,
-            "kind": "int",
-        },
-        {
-            "name": "fourier_annual",
-            "description": "Number of annual Fourier harmonics (0 = off)",
-            "required": False,
-            "default": 0,
-            "kind": "int",
-        },
-        {
             "name": "regimes",
-            "description": "Add market-regime dummies (flow-based go-live, 15-min MTU, ...)",
+            "description": (
+                "Market-regime dummies: true (default catalog for the country), false, a JSON list of "
+                'catalog names (e.g. ["core_fb", "sdac_15min_mtu"]), or a JSON dict of custom periods'
+            ),
             "required": False,
             "default": False,
-            "kind": "confirm",
+            "kind": "json",
         },
         {
             "name": "prefix",
@@ -392,22 +381,9 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "name": "school_holidays",
             "description": "Download school holiday flags from the OpenHolidays API",
             "required": False,
-            "default": False,
-            "kind": "confirm",
-        },
-        {
-            "name": "school_subdivisions",
-            "description": "Subdivision codes, comma-separated (e.g. PL-MZ,PL-SL; empty = country-wide only)",
-            "required": False,
-            "default": None,
-            "kind": "comma_list",
-        },
-        {
-            "name": "school_weights",
-            "description": "Weights in the order of school_subdivisions, comma-separated (empty = no share column)",
-            "required": False,
-            "default": None,
-            "kind": "comma_list",
+            "default": "false",
+            "kind": "select",
+            "choices": ["false", "national", "all"],
         },
     ],
     "EpftoolboxBenchmarkSource": [
@@ -547,65 +523,21 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {"name": "freq", "description": "Slot length of the data", "required": False, "default": "1h", "kind": "text"},
     ],
-    "ResidualLoadTransformer": [
-        {
-            "name": "load",
-            "description": "Load forecast column",
-            "required": False,
-            "default": "load_forecast",
-            "kind": "text",
-        },
-        {
-            "name": "renewables",
-            "description": "Wind/solar forecast columns (blank = the ENTSO-E ones present)",
-            "required": False,
-            "default": None,
-            "kind": "column_select",
-        },
-        {
-            "name": "output",
-            "description": "Name of the new column",
-            "required": False,
-            "default": "residual_load_forecast",
-            "kind": "text",
-        },
-    ],
-    "SpikeFlagTransformer": [
+    # `func` (a callable df -> df) can only be set in code, not through the wizard or YAML.
+    "LambdaTransformer": [
         {
             "name": "columns",
-            "description": "Columns to flag",
+            "description": 'New/existing column(s), as JSON, e.g. {"residual_load": "load_forecast - wind_forecast"}',
             "required": True,
             "default": None,
-            "kind": "column_select",
+            "kind": "json",
         },
         {
-            "name": "window",
-            "description": "Previous days in the reference band",
-            "required": False,
-            "default": 28,
-            "kind": "int",
-        },
-        {
-            "name": "k",
-            "description": "Band half-width in scaled MADs",
-            "required": False,
-            "default": 3.0,
-            "kind": "float",
-        },
-        {
-            "name": "min_periods",
-            "description": "Past values needed for a flag (blank = half the window)",
+            "name": "func",
+            "description": "Full-control callable df -> df (code only; leave blank here)",
             "required": False,
             "default": None,
-            "kind": "int",
-        },
-        {
-            "name": "side",
-            "description": "Which spikes to flag",
-            "required": False,
-            "default": "both",
-            "kind": "select",
-            "choices": ["both", "upper", "lower"],
+            "kind": "text",
         },
     ],
     "DSTNormalizeTransformer": [
@@ -642,9 +574,9 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "limit",
-            "description": "Max gap to fill: integer rows, a duration (e.g. 6h, 2D), or blank for none",
+            "description": "Max gap to fill: integer rows, a duration (e.g. 6h, 2D), or blank for no limit",
             "required": False,
-            "default": "1D",
+            "default": None,
             "kind": "text",
         },
         {
@@ -777,29 +709,6 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
-    "FreshnessValidator": [
-        {
-            "name": "columns",
-            "description": "Columns to check (blank = all)",
-            "required": False,
-            "default": "",
-            "kind": "column_select",
-        },
-        {
-            "name": "expected_end",
-            "description": "Timestamp of the last value needed (e.g. today_d+1; blank = last row)",
-            "required": False,
-            "default": None,
-            "kind": "text",
-        },
-        {
-            "name": "max_delay",
-            "description": "How far before expected_end the last value may be (e.g. 3h)",
-            "required": False,
-            "default": "0h",
-            "kind": "text",
-        },
-    ],
     # `ranges` (a {pattern: [min, max]} mapping) is set in YAML; the wizard uses the defaults.
     "PlausibilityValidator": [
         {
@@ -825,29 +734,6 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "required": False,
             "default": "",
             "kind": "column_select",
-        },
-    ],
-    "LagConsistencyValidator": [
-        {
-            "name": "columns",
-            "description": "Lag columns to check (blank = every x_d-k / x_d+k with its base column)",
-            "required": False,
-            "default": "",
-            "kind": "column_select",
-        },
-        {
-            "name": "tz",
-            "description": "Time zone of the local days (blank = the index's own)",
-            "required": False,
-            "default": None,
-            "kind": "text",
-        },
-        {
-            "name": "tolerance",
-            "description": "Absolute difference counted as equal",
-            "required": False,
-            "default": 1e-9,
-            "kind": "float",
         },
     ],
     "OLSModel": [
@@ -1177,8 +1063,7 @@ _TRANSFORMERS = [
     "DSTNormalizeTransformer",
     "DailyProfileTransformer",
     "DailyStatsTransformer",
-    "ResidualLoadTransformer",
-    "SpikeFlagTransformer",
+    "LambdaTransformer",
     "ImputeTransformer",
 ]
 _VALIDATORS = [
@@ -1187,9 +1072,7 @@ _VALIDATORS = [
     "EdaValidator",
     "DSTStructureValidator",
     "CoverageValidator",
-    "FreshnessValidator",
     "PlausibilityValidator",
-    "LagConsistencyValidator",
 ]
 _MODELS = ["OLSModel", "LassoCVModel"]
 _EVALUATORS = ["MAEEvaluator", "RMSEEvaluator", "rMAEEvaluator"]

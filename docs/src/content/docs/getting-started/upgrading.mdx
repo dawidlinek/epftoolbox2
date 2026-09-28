@@ -94,13 +94,35 @@ the old one) rather than resuming them; don't rely on the manifest to catch this
   (with a `FutureWarning`) and mapped onto the new ones, but under the new, leak-free resampling semantics
   above — not a like-for-like translation of the old behaviour. Prefer `agg="mean", fill="ffill"` (or a
   `{column: ...}` dict for per-column control) going forward.
+- **`ImputeTransformer`: `limit` now defaults to `None`.** It used to default to `"1D"`, silently leaving a
+  gap longer than one day as NaN. The default now fills every gap the chosen method can reach, however long;
+  pass `limit=` explicitly (e.g. `"1D"` for the old behaviour) if you want long outages left unfilled instead
+  of masked. `{column}_imputed` still flags every cell the transformer actually filled, so a longer fill
+  doesn't hide itself — check that column, not just the absence of NaN, if a long-filled stretch matters to you.
+- **`CalendarSource`: `school_subdivisions`/`school_weights` are gone.** `school_holidays` now takes `False`
+  (default), `True` (same as before: a single nationwide `is_school_holiday` flag), `"national"` (spelled out),
+  or `"all"` — a new mode that replaces per-subdivision flags and a weighted share with one
+  `school_holiday_share` column: the unweighted fraction of the country's top-level regions (e.g. Poland's 16
+  voivodeships) on school holiday that day. If you relied on per-subdivision columns
+  (`is_school_holiday_{code}`) or a population-weighted share, there is no direct replacement; `"all"` gives an
+  unweighted regional share instead. See [School holidays](/epftoolbox2/data-sources/calendar/#school-holidays).
+- **`CalendarSource`: `regimes=True` now adds a much larger, differently-sourced set of columns.** The
+  6-entry `DEFAULT_REGIMES` (market coupling and MTU go-lives) is replaced by a 31-entry catalog covering
+  bidding-zone and coupling go-lives, harmonised SDAC price limits, named policy interventions (nuclear
+  phase-outs, price caps, capacity markets) and open-ended shocks, each carrying `ex_ante`, `description` and
+  `source`. `regimes=True` still means "the on-by-default subset for this country", but that subset is bigger
+  and its dates come from more entries — an existing pipeline using `regimes=True` gets new `regime_*` columns
+  on its next run, changing predictor counts (and therefore fitted models) even though no code changed. Pass
+  `regimes=[...]` with the old names if you need the previous, smaller set reproduced exactly; the catalog is
+  otherwise unchanged for entries it already had (dates and default-on status are the same). See [Regime
+  dummies](/epftoolbox2/data-sources/calendar/#regime-dummies).
 
 ## New components
 
 `EpftoolboxBenchmarkSource` (the Lago et al. 2021 datasets); `DSTNormalizeTransformer`, `DailyProfileTransformer`,
-`DailyStatsTransformer`, `ResidualLoadTransformer`, `SpikeFlagTransformer`, `ImputeTransformer`;
-`CoverageValidator`, `DSTStructureValidator`, `FreshnessValidator`, `PlausibilityValidator`,
-`LagConsistencyValidator`; variance-stabilising scalers (`asinh`, N-PIT) alongside the default standardiser;
+`DailyStatsTransformer`, `LambdaTransformer`, `ImputeTransformer`;
+`CoverageValidator`, `DSTStructureValidator`, `PlausibilityValidator`;
+variance-stabilising scalers (`asinh`, N-PIT) alongside the default standardiser;
 and `epftoolbox2.presets` (ready-made LEAR/expert-model predictor lists). `OpenMeteoSource` also takes several
 `locations`.
 
@@ -133,6 +155,29 @@ cutoff is now anchored to a UTC run hour, `run` (default `"00"`), instead of a l
 
 A spring-forward target wall-clock hour that doesn't exist (e.g. 2024-03-31 02:00 in `Europe/Warsaw`) now comes
 back `NaN` instead of silently shifting to the next hour under that row's name.
+
+## Removed components
+
+- **`ResidualLoadTransformer` and `SpikeFlagTransformer` are gone.** Both were thin wrappers around
+  arithmetic that `LambdaTransformer` now expresses directly and more flexibly. Rebuild a residual load
+  column with a same-row expression:
+  ```python
+  # before
+  ResidualLoadTransformer(load="load_forecast", renewables=["generation_wind_onshore_forecast"])
+  # after
+  LambdaTransformer(columns={"residual_load_forecast": "load_forecast - generation_wind_onshore_forecast"})
+  ```
+  A rolling spike flag needs a `func` (there is no drop-in one-liner): write the median/MAD band as a
+  callable, following the example on the [LambdaTransformer](/epftoolbox2/transformers/lambda-transformer/)
+  page, or keep a copy of the old `SpikeFlagTransformer` source if you rely on it as-is.
+- **`FreshnessValidator` and `LagConsistencyValidator` are gone**, with no replacement. Both were narrow
+  checks (one column against the frame's own last row or `today`; day-lag columns against their base
+  column) that a few lines over the frame you already have can express directly if you still need them.
+- **`CalendarSource`: `fourier_weekly`/`fourier_annual` are gone**, with their `week_sin_k`/`week_cos_k` and
+  `year_sin_k`/`year_cos_k` columns. There is no drop-in replacement; if you still want Fourier terms, add
+  them with a `LambdaTransformer(func=...)` that computes the phase from the local wall clock (weekday and
+  time of day, or day of year and time of day) the same way `CalendarSource`'s other features do — see
+  [LambdaTransformer](/epftoolbox2/transformers/lambda-transformer/).
 
 ## The new information-set check
 

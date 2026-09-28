@@ -13,7 +13,7 @@ strings with a `{horizon}` template, so they can be saved in a model pipeline YA
 ```python
 from epftoolbox2.presets import expert_predictors, lear_predictors, profile_columns, WEEKDAYS
 
-lear = lear_predictors(exogenous=["load_forecast", "residual_load_forecast"])  # 247 inputs
+lear = lear_predictors(exogenous=["load_forecast", "residual_load"])  # 247 inputs
 expert = expert_predictors(exogenous=["load_forecast"])
 ```
 
@@ -62,13 +62,13 @@ d-1 and d-7, and seven weekday dummies of d. With hourly data and two exogenous 
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.data.sources import EntsoeSource, CalendarSource
 from epftoolbox2.data.transformers import (
-    TimezoneTransformer, ResampleTransformer, DSTNormalizeTransformer, ResidualLoadTransformer,
+    TimezoneTransformer, ResampleTransformer, DSTNormalizeTransformer, LambdaTransformer,
     DailyProfileTransformer, LagTransformer,
 )
 from epftoolbox2.models import LassoCVModel
 from epftoolbox2.presets import WEEKDAYS, lear_predictors, profile_columns
 
-EXOGENOUS = ["load_forecast", "residual_load_forecast"]
+EXOGENOUS = ["load_forecast", "residual_load"]
 H = 1  # day-ahead
 
 data = (
@@ -78,7 +78,9 @@ data = (
     .add_transformer(TimezoneTransformer())
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(DSTNormalizeTransformer(freq="1h"))  # 24 slots a day, so every profile is complete
-    .add_transformer(ResidualLoadTransformer())
+    .add_transformer(LambdaTransformer(
+        columns={"residual_load": "load_forecast - generation_wind_onshore_forecast - generation_solar_forecast"}
+    ))
     .add_transformer(DailyProfileTransformer(columns=["price", *EXOGENOUS]))
     .add_transformer(LagTransformer(columns=profile_columns("price"), lags=[1, 2, 6], freq="day"))
     .add_transformer(

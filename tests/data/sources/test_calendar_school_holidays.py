@@ -1,5 +1,5 @@
-"""CalendarSource(school_holidays=True, ...) with the OpenHolidays API mocked by recorded Polish responses
-(tests/fixtures/openholidays)."""
+"""CalendarSource(school_holidays="national"/"all") with the OpenHolidays API mocked by recorded Polish
+responses (tests/fixtures/openholidays)."""
 
 import json
 from pathlib import Path
@@ -16,7 +16,7 @@ from epftoolbox2.data.sources import CalendarSource
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "openholidays"
 PL_ENTRIES = json.loads((FIXTURES / "pl_school_holidays.json").read_text())  # 2019-12-23 .. 2027-02-28
-PL_SUBDIVISIONS = json.loads((FIXTURES / "pl_subdivisions.json").read_text())
+PL_SUBDIVISIONS = json.loads((FIXTURES / "pl_subdivisions.json").read_text())  # 16 top-level voivodeships
 TZ = "Europe/Warsaw"
 BARE = {"holidays": False, "weekday": False}
 
@@ -52,8 +52,8 @@ class FakeApi:
         return _response(overlapping)
 
 
-def _source(api=None, country="PL", **kwargs):
-    source = CalendarSource(country=country, school_holidays=True, **BARE, **kwargs)
+def _source(api=None, country="PL", school_holidays="national", **kwargs):
+    source = CalendarSource(country=country, school_holidays=school_holidays, **BARE, **kwargs)
     source.session = api or FakeApi()
     return source
 
@@ -72,36 +72,13 @@ def _per_local_date(df: pd.DataFrame, column: str) -> pd.Series:
 
 
 class TestInit:
-    def test_codes_are_normalised(self):
-        source = CalendarSource(country="pl".upper(), school_holidays=True, school_subdivisions="mz, PL-SL")
-        assert source.country == "PL"
-        assert source.school_subdivisions == ["PL-MZ", "PL-SL"]
+    def test_true_is_an_alias_for_national(self):
+        assert CalendarSource(country="PL", school_holidays=True).school_holidays == "national"
 
-    def test_weights_dict_defines_subdivisions(self):
-        source = CalendarSource(country="PL", school_holidays=True, school_weights={"MZ": 5.5, "PL-SL": 4.4})
-        assert source.school_subdivisions == ["PL-MZ", "PL-SL"]
-        assert source.school_weights == {"PL-MZ": 5.5, "PL-SL": 4.4}
-
-    def test_weights_list_follows_subdivisions(self):
-        source = CalendarSource(
-            country="PL", school_holidays=True, school_subdivisions=["MZ", "SL"], school_weights="5.5, 4.4"
-        )
-        assert source.school_weights == {"PL-MZ": 5.5, "PL-SL": 4.4}
-
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            {"school_subdivisions": ["MZ"], "school_weights": {"SL": 1.0}},
-            {"school_subdivisions": ["MZ", "SL"], "school_weights": [1.0]},
-            {"school_weights": {"MZ": 0.0}},
-            {"school_weights": {"MZ": "many"}},
-            {"school_subdivisions": ["MZ", "mz"]},
-            {"school_subdivisions": []},
-        ],
-    )
-    def test_invalid_config(self, kwargs):
-        with pytest.raises(ValueError):
-            CalendarSource(country="PL", school_holidays=True, **kwargs)
+    @pytest.mark.parametrize("value", ["regional", "ALL", "nationwide", 1, ["national"]])
+    def test_invalid_value_raises(self, value):
+        with pytest.raises(ValueError, match="school_holidays"):
+            CalendarSource(country="PL", school_holidays=value)
 
     def test_school_holidays_off_by_default_and_stays_offline(self):
         source = CalendarSource(country="PL")
@@ -112,127 +89,150 @@ class TestInit:
         source.session.get.assert_not_called()
 
     def test_not_cached(self):
-        assert CalendarSource(country="PL", school_holidays=True).get_cache_config() is None
+        assert CalendarSource(country="PL", school_holidays="national").get_cache_config() is None
+        assert CalendarSource(country="PL", school_holidays="all").get_cache_config() is None
 
 
-class TestFlags:
-    def test_single_subdivision_winter_break(self):
-        # Mazovia's 2024 winter break: 15-28 January.
-        df = _source(school_subdivisions="MZ").fetch(*_range("2024-01-13", "2024-01-30"))
+class TestNationalFlags:
+    def test_country_wide_holidays_only(self):
+        df = _source().fetch(*_range("2024-01-01", "2024-12-31"))
         assert list(df.columns) == ["is_school_holiday"]
         flags = _per_local_date(df, "is_school_holiday")
-        assert list(flags.index[flags == 1]) == [f"2024-01-{d:02d}" for d in range(15, 29)]
-
-    def test_flags_follow_local_dates_not_utc_dates(self):
-        df = _source(school_subdivisions="MZ").fetch(*_range("2024-01-14", "2024-01-15"))
-        flag = df["is_school_holiday"]
-        assert flag[pd.Timestamp("2024-01-14 22:00", tz="UTC")] == 0  # 23:00 on the 14th in Warsaw
-        assert flag[pd.Timestamp("2024-01-14 23:00", tz="UTC")] == 1  # 00:00 on the 15th
-
-    def test_rows_and_range_follow_calendar_source(self):
-        df = _source(school_subdivisions="MZ", freq="15min").fetch(*_range("2024-10-27", "2024-10-27"))
-        assert len(df) == 100  # 25-hour day at 15 minutes, [start, end)
-        assert str(df.index.tz) == "UTC"
-
-    def test_country_wide_holidays_only_without_subdivisions(self):
-        df = _source().fetch(*_range("2024-01-01", "2024-12-31"))
-        flags = _per_local_date(df, "is_school_holiday")
-        assert flags["2024-01-20"] == 0  # regional winter breaks are not country-wide
+        assert flags["2024-01-20"] == 0  # regional winter break, not country-wide
         assert flags["2024-03-28"] == 1  # spring break
         assert flags["2024-07-15"] == 1  # summer
         assert flags["2024-12-23"] == 1  # Christmas break
 
-    def test_several_subdivisions_and_weighted_share(self):
-        source = _source(school_weights={"MZ": 3.0, "SL": 1.0})
-        df = source.fetch(*_range("2024-01-20", "2024-02-20"))
-        assert list(df.columns) == ["is_school_holiday_pl_mz", "is_school_holiday_pl_sl", "school_holiday_share"]
-        share = _per_local_date(df, "school_holiday_share")
-        assert share["2024-01-20"] == pytest.approx(0.75)  # Mazovia only
-        assert share["2024-02-01"] == pytest.approx(0.0)  # neither
-        assert share["2024-02-15"] == pytest.approx(0.25)  # Silesia only (12-25 February)
+    def test_true_behaves_as_national(self):
+        national = _source(school_holidays="national").fetch(*_range("2024-01-01", "2024-12-31"))
+        via_true = _source(school_holidays=True).fetch(*_range("2024-01-01", "2024-12-31"))
+        pd.testing.assert_frame_equal(national, via_true)
 
-    def test_prefix_applies_to_school_holiday_columns(self):
-        df = _source(school_subdivisions="MZ", prefix="cal_").fetch(*_range("2024-01-15", "2024-01-15"))
+    def test_flags_follow_local_dates_not_utc_dates(self):
+        # Christmas break (country-wide) starts 23 December; Warsaw is UTC+1 in December.
+        df = _source().fetch(*_range("2024-12-22", "2024-12-23"))
+        flag = df["is_school_holiday"]
+        assert flag[pd.Timestamp("2024-12-22 22:00", tz="UTC")] == 0  # 23:00 on the 22nd in Warsaw
+        assert flag[pd.Timestamp("2024-12-22 23:00", tz="UTC")] == 1  # 00:00 on the 23rd
+
+    def test_rows_and_range_follow_calendar_source(self):
+        df = _source(freq="15min").fetch(*_range("2024-10-27", "2024-10-27"))
+        assert len(df) == 100  # 25-hour day at 15 minutes, [start, end)
+        assert str(df.index.tz) == "UTC"
+
+    def test_prefix_applies_to_the_column(self):
+        df = _source(prefix="cal_").fetch(*_range("2024-01-15", "2024-01-15"))
         assert list(df.columns) == ["cal_is_school_holiday"]
 
-    def test_chunks_long_ranges_within_the_api_limit(self):
+
+class TestAllShare:
+    def test_staggered_winter_breaks_give_the_expected_share(self):
+        # PL-like staggered regional winter breaks: four overlapping groups of Poland's 16 voivodeships.
+        df = _source(school_holidays="all").fetch(*_range("2024-01-10", "2024-02-29"))
+        assert list(df.columns) == ["school_holiday_share"]
+        share = _per_local_date(df, "school_holiday_share")
+        assert share["2024-01-14"] == pytest.approx(0.0)  # before any winter break
+        assert share["2024-01-20"] == pytest.approx(0.25)  # 4 of 16 voivodeships (one group)
+        assert share["2024-01-25"] == pytest.approx(0.375)  # two overlapping groups: 6 of 16
+        assert share["2024-02-01"] == pytest.approx(0.4375)  # three overlapping groups: 7 of 16
+        assert share["2024-02-20"] == pytest.approx(0.3125)  # last group only: 5 of 16
+        assert share["2024-02-26"] == pytest.approx(0.0)  # winter break over everywhere
+
+    def test_nationwide_period_gives_one_in_both_modes(self):
+        national = _source(school_holidays="national").fetch(*_range("2024-07-15", "2024-07-15"))
+        share = _source(school_holidays="all").fetch(*_range("2024-07-15", "2024-07-15"))
+        assert national["is_school_holiday"].eq(1.0).all()
+        assert share["school_holiday_share"].eq(1.0).all()
+
+    def test_flags_follow_local_dates_not_utc_dates(self):
+        df = _source(school_holidays="all").fetch(*_range("2024-12-22", "2024-12-23"))
+        share = df["school_holiday_share"]
+        assert share[pd.Timestamp("2024-12-22 22:00", tz="UTC")] == 0
+        assert share[pd.Timestamp("2024-12-22 23:00", tz="UTC")] == 1
+
+    def test_prefix_applies_to_the_column(self):
+        df = _source(school_holidays="all", prefix="cal_").fetch(*_range("2024-01-15", "2024-01-15"))
+        assert list(df.columns) == ["cal_school_holiday_share"]
+
+    def test_fetches_the_region_list_once(self):
         api = FakeApi()
-        df = _source(api=api, school_subdivisions="MZ").fetch(*_range("2020-06-01", "2026-06-01"))
-        holiday_calls = [params for url, params in api.calls if url.endswith("/SchoolHolidays")]
-        assert len(holiday_calls) >= 3
-        for params in holiday_calls:
-            assert (pd.Timestamp(params["validTo"]) - pd.Timestamp(params["validFrom"])).days < 1095
-        # The first chunk ends on 2022-01-21, inside Mazovia's winter break (14-27 January 2022).
-        assert holiday_calls[0]["validTo"] == "2022-01-21"
-        flags = _per_local_date(df, "is_school_holiday")
-        assert flags["2022-01-14":"2022-01-27"].eq(1).all()
-        assert flags["2022-01-28"] == 0
+        _source(api=api, school_holidays="all").fetch(*_range("2024-01-15", "2024-01-15"))
+        subdivision_calls = [url for url, _ in api.calls if url.endswith("/Subdivisions")]
+        assert len(subdivision_calls) == 1
 
-    def test_unknown_subdivision_raises(self):
-        with pytest.raises(ValueError, match="Unknown subdivisions"):
-            _source(school_subdivisions="XX").fetch(*_range("2024-01-01", "2024-01-02"))
+    def test_raises_if_the_country_has_no_subdivisions(self):
+        api = FakeApi(subdivisions=[])
+        with pytest.raises(ValueError, match="subdivisions"):
+            _source(api=api, school_holidays="all").fetch(*_range("2024-01-15", "2024-01-15"))
 
-    def test_children_inherit_holidays_of_their_parent(self):
+    def test_nested_children_are_not_rolled_up_into_the_parent(self):
+        # A holiday recorded only against a child code (BY-AU) must not count toward its top-level parent
+        # (BY) in "all" mode: `top_level_subdivisions` only lists BY, and `daily_flags(..., "BY", ...)` only
+        # matches entries naming BY itself (or nationwide ones) - a child-only entry doesn't cascade upward.
         entries = [
-            {"id": "a", "startDate": "2024-02-01", "endDate": "2024-02-02", "nationwide": False,
-             "regionalScope": "Regional", "temporalScope": "FullDay", "subdivisions": [{"code": "DE-BY"}]},
-            {"id": "b", "startDate": "2024-02-05", "endDate": "2024-02-05", "nationwide": False,
+            {"id": "a", "startDate": "2024-02-05", "endDate": "2024-02-05", "nationwide": False,
              "regionalScope": "Local", "temporalScope": "FullDay", "subdivisions": [{"code": "DE-BY-AU"}]},
         ]  # fmt: skip
         subdivisions = [{"code": "DE-BY", "children": [{"code": "DE-BY-AU"}]}]
-        tz = "Europe/Berlin"
-        start = pd.Timestamp("2024-02-01", tz=tz).tz_convert("UTC")
-        end = pd.Timestamp("2024-02-06", tz=tz).tz_convert("UTC")
-
-        def flagged(code):
-            source = _source(
-                country="DE", school_subdivisions=code, api=FakeApi(entries=entries, subdivisions=subdivisions)
-            )
-            with patch.object(openholidays_module, "MAX_GAP_DAYS", 10_000):  # tiny fixture: no coverage check
-                local = source.fetch(start, end)["is_school_holiday"].tz_convert(tz)
-            return sorted({ts.date().isoformat() for ts in local.index[local == 1]})
-
-        assert flagged("BY") == ["2024-02-01", "2024-02-02"]
-        assert flagged("BY-AU") == ["2024-02-01", "2024-02-02", "2024-02-05"]
+        source = _source(country="DE", school_holidays="all", api=FakeApi(entries=entries, subdivisions=subdivisions))
+        with patch.object(openholidays_module, "MAX_GAP_DAYS", 10_000):  # tiny fixture: no coverage check
+            df = source.fetch(*_range("2024-02-05", "2024-02-05"))
+        assert df["school_holiday_share"].eq(0.0).all()
 
 
 class TestCoverage:
     def test_dates_before_the_data_starts_are_nan(self):
-        # The recorded Polish data starts with the 2019/20 Christmas break (23 December 2019).
+        # The recorded Polish data starts with the 2019/20 Christmas break (23 December 2019), a country-wide
+        # entry, so both modes see the same boundary.
         with patch.object(CalendarSource, "_warn_missing_school_holidays") as warn:
-            df = _source(school_subdivisions="MZ").fetch(*_range("2019-11-01", "2020-01-31"))
+            df = _source().fetch(*_range("2019-11-01", "2020-01-31"))
         flags = _per_local_date(df, "is_school_holiday")
         assert flags[:"2019-12-22"].isna().all()
         assert flags["2019-12-23"] == 1
         assert flags["2020-01-05"] == 0
         warn.assert_called_once()
 
-    def test_school_years_not_yet_published_are_nan(self):
+    def test_all_mode_before_the_data_starts_is_nan(self):
         with patch.object(CalendarSource, "_warn_missing_school_holidays"):
-            df = _source(school_subdivisions="MZ").fetch(*_range("2027-02-01", "2027-06-30"))
-        flags = _per_local_date(df, "is_school_holiday")
-        # Mazovia's last recorded break is its 2027 winter break (1-14 February); nothing later is published.
-        assert flags["2027-02-02"] == 1
-        assert flags["2027-02-14"] == 1
-        assert flags["2027-02-15":].isna().all()
-
-    def test_ordinary_gaps_between_holidays_are_zero(self):
-        df = _source(school_subdivisions="MZ").fetch(*_range("2023-09-01", "2023-12-22"))  # no holidays, data exists
-        assert df["is_school_holiday"].eq(0).all()
-
-    def test_nan_flag_makes_the_share_nan(self):
-        with patch.object(CalendarSource, "_warn_missing_school_holidays"):
-            df = _source(school_weights={"MZ": 1.0, "SL": 1.0}).fetch(*_range("2019-12-01", "2019-12-31"))
+            df = _source(school_holidays="all").fetch(*_range("2019-12-01", "2019-12-31"))
         share = _per_local_date(df, "school_holiday_share")
         assert share[:"2019-12-22"].isna().all()
         assert share["2019-12-23"] == 1
 
+    def test_school_years_not_yet_published_are_nan(self):
+        # No country-wide entry is recorded after the 2026 summer break (ends 2026-08-31); the gap beyond
+        # it is longer than a year, so it's treated as not-yet-published rather than "no holiday".
+        with patch.object(CalendarSource, "_warn_missing_school_holidays"):
+            df = _source().fetch(*_range("2026-09-01", "2026-09-05"))
+        assert _per_local_date(df, "is_school_holiday").isna().all()
+
+    def test_ordinary_gaps_between_holidays_are_zero(self):
+        df = _source().fetch(*_range("2023-09-01", "2023-12-22"))  # no country-wide holidays, data exists
+        assert df["is_school_holiday"].eq(0).all()
+
     def test_warning_names_the_missing_dates(self):
-        source = _source(school_subdivisions="MZ")
+        source = _source()
         with patch.object(calendar_module.logger, "warning") as warning:
             source.fetch(*_range("2019-11-01", "2020-01-31"))
         message = warning.call_args.args[0]
         assert "2019-11-01" in message and "2019-12-22" in message
+
+
+class TestChunking:
+    def test_chunks_long_ranges_within_the_api_limit(self):
+        api = FakeApi()
+        df = _source(api=api, school_holidays="all").fetch(*_range("2020-06-01", "2026-06-01"))
+        holiday_calls = [params for url, params in api.calls if url.endswith("/SchoolHolidays")]
+        assert len(holiday_calls) >= 3
+        for params in holiday_calls:
+            assert (pd.Timestamp(params["validTo"]) - pd.Timestamp(params["validFrom"])).days < 1095
+        # The first chunk ends on 2022-01-21, inside a regional winter-break entry (14-27 January 2022) that
+        # itself spans the chunk boundary: its contribution to the share must survive the split, not be lost
+        # or double-counted (`fetch_entries` de-duplicates by id across overlapping chunks).
+        assert holiday_calls[0]["validTo"] == "2022-01-21"
+        share = _per_local_date(df, "school_holiday_share")
+        assert share["2022-01-13"] == pytest.approx(0.0)
+        assert share["2022-01-21"] == pytest.approx(0.5625)
 
 
 class TestHttp:
@@ -249,10 +249,10 @@ class TestHttp:
                     pass
             return api.get(url, **kwargs)
 
-        source = _source(school_subdivisions="MZ")
+        source = _source()
         source.session = MagicMock()
         source.session.get.side_effect = flaky_get
-        df = source.fetch(*_range("2024-01-15", "2024-01-15"))
+        df = source.fetch(*_range("2024-07-15", "2024-07-15"))
         assert df["is_school_holiday"].eq(1).all()
 
     def test_gives_up_after_three_attempts(self, monkeypatch):
@@ -274,25 +274,30 @@ class TestHttp:
 
 
 class TestYamlRoundTrip:
-    def test_round_trip(self, tmp_path):
+    def test_round_trip_national(self, tmp_path):
         from epftoolbox2.pipelines import DataPipeline
 
-        source = CalendarSource(
-            country="PL",
-            school_holidays=True,
-            school_weights={"MZ": 5.5, "SL": 4.4},
-            prefix="sh_",
-            freq="15min",
-            **BARE,
-        )
+        source = CalendarSource(country="PL", school_holidays=True, prefix="sh_", freq="15min", **BARE)
         path = tmp_path / "dp.yaml"
         DataPipeline(sources=[source]).save(path)
         loaded = DataPipeline.load(path).sources[0]
 
         assert isinstance(loaded, CalendarSource)
-        assert loaded.school_holidays is True
-        assert loaded.school_subdivisions == ["PL-MZ", "PL-SL"]
-        assert loaded.school_weights == {"PL-MZ": 5.5, "PL-SL": 4.4}
+        assert loaded.school_holidays == "national"  # True normalises to "national" before it's ever saved
+        loaded.session = FakeApi()
+        source.session = FakeApi()
+        start, end = _range("2024-01-10", "2024-02-20")
+        pd.testing.assert_frame_equal(source.fetch(start, end), loaded.fetch(start, end))
+
+    def test_round_trip_all(self, tmp_path):
+        from epftoolbox2.pipelines import DataPipeline
+
+        source = CalendarSource(country="PL", school_holidays="all", prefix="sh_", freq="15min", **BARE)
+        path = tmp_path / "dp.yaml"
+        DataPipeline(sources=[source]).save(path)
+        loaded = DataPipeline.load(path).sources[0]
+
+        assert loaded.school_holidays == "all"
         loaded.session = FakeApi()
         source.session = FakeApi()
         start, end = _range("2024-01-10", "2024-02-20")
@@ -301,9 +306,12 @@ class TestYamlRoundTrip:
 
 @pytest.mark.integration
 def test_live_api_poland():
-    source = CalendarSource(country="PL", school_holidays=True, school_subdivisions="MZ", **BARE)
-    df = source.fetch(*_range("2024-01-10", "2024-01-31"))
-    flags = _per_local_date(df, "is_school_holiday")
-    assert flags["2024-01-15"] == 1
-    assert flags["2024-01-12"] == 0
-    assert not np.isnan(df["is_school_holiday"]).any()
+    all_mode = CalendarSource(country="PL", school_holidays="all", **BARE)
+    df = all_mode.fetch(*_range("2024-01-15", "2024-01-15"))
+    share = df["school_holiday_share"].iloc[0]
+    assert 0 < share <= 1  # a regional winter break is active somewhere in Poland on this date
+    assert not np.isnan(df["school_holiday_share"]).any()
+
+    national = CalendarSource(country="PL", school_holidays="national", **BARE)
+    summer = national.fetch(*_range("2024-07-15", "2024-07-15"))
+    assert summer["is_school_holiday"].eq(1.0).all()  # nationwide summer break

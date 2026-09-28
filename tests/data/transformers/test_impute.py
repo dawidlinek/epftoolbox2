@@ -30,7 +30,7 @@ def assert_same(actual, expected):
 class TestInit:
     def test_defaults(self):
         t = ImputeTransformer(columns="price")
-        assert (t.columns, t.method, t.limit, t.flag, t.suffix) == (["price"], "ffill", "1D", True, "")
+        assert (t.columns, t.method, t.limit, t.flag, t.suffix) == (["price"], "ffill", None, True, "")
         assert isinstance(t, Transformer)
 
     @pytest.mark.parametrize("columns", [None, [], ""])

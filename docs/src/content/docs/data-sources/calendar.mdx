@@ -59,12 +59,8 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 | `christmas_period` | bool | `False` | Add `is_christmas_period` (24 December to 1 January) |
 | `holiday_distance` | int | `0` | If N > 0, add `days_to_holiday` and `days_since_holiday`, capped at N |
 | `dst_switch` | bool | `False` | Add `is_dst_switch_day` (local days with 23 or 25 hours) |
-| `fourier_weekly` | int | `0` | Number of weekly Fourier harmonics (`week_sin_k`, `week_cos_k`) |
-| `fourier_annual` | int | `0` | Number of annual Fourier harmonics (`year_sin_k`, `year_cos_k`) |
-| `regimes` | bool/dict | `False` | Market-regime step dummies `regime_{name}`: `True` for the default set, or `{name: "YYYY-MM-DD"}` |
-| `school_holidays` | bool | `False` | Download school holiday flags from the [OpenHolidays API](https://www.openholidaysapi.org) (see [School holidays](#school-holidays) below) |
-| `school_subdivisions` | str/List[str] | `None` | OpenHolidays subdivision codes, e.g. `["PL-MZ", "PL-SL"]` or `"MZ,SL"` (the country prefix is optional). `None`: only holidays that apply to the whole country |
-| `school_weights` | dict/List[float] | `None` | Weight per subdivision for `school_holiday_share`: `{code: weight}`, or numbers in the order of `school_subdivisions`. With a dict, `school_subdivisions` defaults to its keys |
+| `regimes` | bool/list/dict | `False` | Market-regime dummies `regime_{name}`: `False` for none, `True` for the default catalog subset, a list of catalog names, or a dict of custom periods (see [Regime dummies](#regime-dummies)) |
+| `school_holidays` | bool/str | `False` | `False` (default), `True` (same as `"national"`), `"national"` or `"all"`: download school holiday flags from the [OpenHolidays API](https://www.openholidaysapi.org) (see [School holidays](#school-holidays) below) |
 
 <Aside type="tip">
   Inside a `DataPipeline`, leave `timezone` unset: it inherits `DataPipeline.timezone`, the single place the
@@ -166,39 +162,72 @@ calendar as `holidays` (country, `subdiv`, `categories`), even when `holidays=Fa
 | `christmas_period=True` | `is_christmas_period` | Local dates from 24 December to 1 January inclusive |
 | `holiday_distance=N` | `days_to_holiday`, `days_since_holiday` | Days to the next and since the previous holiday, 0 on a holiday, capped at N (so N means "N or more") |
 | `dst_switch=True` | `is_dst_switch_day` | 1 on every row of a local day with 23 or 25 hours |
-| `fourier_weekly=K` | `week_sin_1`, `week_cos_1`, ..., `week_sin_K`, `week_cos_K` | `sin/cos(2πk·w)`, `w = (weekday + time of day / 24) / 7` |
-| `fourier_annual=K` | `year_sin_1`, `year_cos_1`, ..., `year_sin_K`, `year_cos_K` | `sin/cos(2πk·y)`, `y = (day of year − 1 + time of day / 24) / days in the year` |
-| `regimes=...` | `regime_{name}` | 0 before the regime's first local delivery day, 1 from it on |
-
-The Fourier phases use the **local wall-clock** time, like every other CalendarSource feature: the repeated
-02:00 of the fall-back day gets the same values twice, the missing hour of the spring-forward day is simply
-absent, and the phase neither jumps nor drifts when the UTC offset changes. The annual phase divides by 365 or
-366, so 1 January is always phase 0.
+| `regimes=...` | `regime_{name}` | 1 on local dates `start <= D <= end`, 0 otherwise; open-ended (no upper bound) unless an `end` is given |
 
 ### Regime dummies
 
-`regimes=True` adds the changes below that apply to `country`. The date is the first **delivery** day; the
-first auction was the day before.
+`regimes` draws on a catalog of market-structure changes, policy interventions and shocks,
+`epftoolbox2.data.sources.calendar.DEFAULT_REGIMES`. The date is the first **delivery** day; the first auction
+was the day before.
 
-| Name | Date | Countries | Change |
-|------|------|-----------|--------|
-| `de_at_split` | 2018-10-01 | DE, AT | Split of the German-Austrian bidding zone |
-| `brexit_decoupling` | 2021-01-01 | GB, IE | GB and the Irish SEM leave implicit day-ahead coupling with SDAC |
-| `core_fb` | 2022-06-09 | AT, BE, CZ, DE, FR, HU, NL, PL, RO, SK | Core flow-based market coupling |
-| `nordic_fb` | 2024-10-30 | DK, FI, NO, SE | Nordic flow-based market coupling |
-| `sdac_15min_mtu` | 2025-10-01 | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | 15-minute market time unit in SDAC |
-| `sem_30min_mtu` | 2025-10-01 | IE | 30-minute market time unit in the SEM day-ahead market |
-
-The set is available as `epftoolbox2.data.sources.calendar.DEFAULT_REGIMES`. A dict replaces it, so list the
-defaults you want to keep:
+| `False` (default) | none |
+|---|---|
+| `True` | every catalog entry marked **on by default** below whose countries include `country` |
+| `["name", ...]` | exactly those catalog entries, by name (an unknown name raises and lists the known ones) |
+| `{"name": ...}` | custom periods, replacing the catalog entirely (see [Bounded periods](#bounded-periods)) |
 
 ```python
-source = CalendarSource(
-    country="PL",
-    regimes={"core_fb": "2022-06-09", "sdac_15min_mtu": "2025-10-01", "my_change": "2024-07-01"},
-)
-# Columns: is_holiday, weekday, regime_core_fb, regime_sdac_15min_mtu, regime_my_change
+source = CalendarSource(country="PL", regimes=True)
+# PL's on-by-default subset: regime_nwe_price_coupling, regime_interim_coupling_project, regime_core_fb,
+# regime_sdac_15min_mtu, regime_hmmcp_4000, regime_hmmcp_min600, regime_pl_capacity_market
+
+source = CalendarSource(country="PL", regimes=["core_fb", "iberian_exception"])
+# regime_core_fb, regime_iberian_exception (opted in by name; a warning notes ES/PT aren't in `country`)
 ```
+
+Inspect the catalog (and filter it by country) with `list_regimes()`:
+
+```python
+from epftoolbox2.data.sources.calendar import list_regimes
+
+list_regimes(country="PL")  # DataFrame: name, start, end, countries, ex_ante, default, description, source
+```
+
+#### Catalog
+
+| Name | From → To | Countries | On by default? | Source |
+|------|-----------|-----------|-----------------|--------|
+| `de_at_split` | 2018-10-01 → — | DE, AT | yes | [source](https://www.entsoe.eu/) |
+| `brexit_decoupling` | 2021-01-01 → — | GB, IE | yes | [source](https://www.ofgem.gov.uk/) |
+| `core_fb` | 2022-06-09 → — | AT, BE, HR, CZ, FR, DE, HU, LU, NL, PL, RO, SK, SI | yes | [source](https://www.jao.eu/news/core-flow-based-market-coupling-project-go-live) |
+| `nordic_fb` | 2024-10-30 → — | DK, FI, NO, SE | yes | [source](https://www.nordpoolgroup.com/) |
+| `sdac_15min_mtu` | 2025-10-01 → — | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | yes | [source](https://www.nemo-committee.eu/assets/files/successful-implementation-of-15-minute-market-time-unit-%28mtu%29-in-sdac.pdf) |
+| `sem_30min_mtu` | 2025-10-01 → — | IE | yes | [source](https://www.semopx.com/market-messages/mcsc-confirms-sdac-15min-mtusem-30min-mtu-go-live-30-sept-2025) |
+| `cwe_market_coupling` | 2010-11-09 → — | BE, FR, DE, NL | yes | [source](https://www.epexspot.com/en/news/10-years-first-market-coupling-initiative-tlc) |
+| `nwe_price_coupling` | 2014-02-05 → — | BE, FR, DE, NL, DK, SE, NO, FI, PL | yes | [source](https://www.nordpoolgroup.com/en/message-center-container/newsroom/exchange-message-list/2014/Q1/No-052014---/) |
+| `gb_nwe_coupling` | 2014-02-05 → 2020-12-31 | GB | yes | [source](https://www.nordpoolgroup.com/en/message-center-container/newsroom/exchange-message-list/2014/Q1/No-052014---/) |
+| `swe_market_coupling` | 2014-05-14 → — | ES, PT, FR | yes | [source](https://www.epexspot.com/en/news/launch-full-swe-coupling-13-may-2014) |
+| `cwe_flow_based` | 2015-05-21 → — | BE, FR, DE, NL | yes | [source](https://www.transnetbw.de/en/newsroom/press-releases/flow-based-methodology-for-cwe-market-coupling-successfully-launched) |
+| `isem_start` | 2018-10-01 → — | IE | yes | [source](https://www.semcommittee.com/news/new-all-island-wholesale-electricity-market-goes-live) |
+| `baltic_sync` | 2025-02-09 → — | EE, LV, LT | no | [source](https://www.entsoe.eu/news/2025/02/09/entso-e-confirms-successful-synchronization-of-the-continental-european-electricity-system-with-the-systems-of-the-baltic-countries/) |
+| `cz_sk_hu_coupling_2012` | 2012-09-12 → — | CZ, SK, HU | yes | [source](https://www.okte.sk/media/27706/20120816_%20mc%20sg%20meeting%20press%20release_final.pdf) |
+| `cee_4m_coupling` | 2014-11-20 → 2021-06-17 | CZ, SK, HU, RO | yes | [source](https://old.okte.sk/en/information/news/2014/11/14/4m-market-coupling-launch/) |
+| `gr_dam_launch` | 2020-11-01 → — | GR | yes | [source](https://www.enexgroup.gr/web/guest/dam-idm-archive) |
+| `it_gr_coupling` | 2020-12-16 → — | GR, IT | yes | [source](https://www.nemo-committee.eu/assets/files/extension-of-single-day-ahead-coupling-%28sdac%29-to-greece-.pdf) |
+| `bg_dam_launch` | 2016-01-20 → 2021-05-11 | BG | no | [source](http://umm.ibex.bg/en/announcements/news/first-successful-real-trading-session.html) |
+| `gr_bg_coupling` | 2021-05-12 → — | BG, GR | yes | [source](https://www.nemo-committee.eu/assets/files/210511%20Press%20release%20successful%20go-live%20BG-GR%20coupling-3b29443c09f164416f6b8bd9eda896e2.pdf) |
+| `interim_coupling_project` | 2021-06-18 → — | PL, CZ, SK, HU, AT, DE, RO | yes | [source](https://www.entsoe.eu/news/2021/06/18/successful-go-live-of-interim-coupling-reaching-the-sdac-enduring-phase/) |
+| `bg_ro_coupling` | 2021-10-28 → — | BG, RO | yes | [source](https://www.nemo-committee.eu/assets/files/211027%20PR%20successful%20go-live%20BG-RO%20border-281d241324d5ce9a4049381c71f4021d.pdf) |
+| `se_bidding_zones` | 2011-11-01 → — | SE | yes | [source](https://www.nordpoolgroup.com/4a7b04/globalassets/download-center/day-ahead/elspot-area-change-log.pdf) |
+| `it_zone_calabria` | 2021-01-01 → — | IT | yes | [source](https://lightbox.terna.it/en/insight/new-electricity-market-zones) |
+| `hmmcp_4000` | 2022-05-11 → — | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | yes | [source](https://www.epexspot.com/en/news/harmonised-maximum-clearing-price-sdac-be-set-4000-eurmwh-10th-may-2022) |
+| `hmmcp_min600` | 2026-05-29 → — | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | yes | [source](https://www.nemo-committee.eu/assets/files/harmonised-minimum-clearing-price-for-sdac-to-be-set-to-600-eur-per-mwh-starting-from-the-28th-may-2026-%28trading-date%29.pdf) |
+| `iberian_exception` | 2022-06-15 → 2023-12-31 | ES, PT | no | [source](https://www.energiaysociedad.es/regulaciones/en-que-consiste-la-excepcion-iberica-real-decreto-ley-rdl-10-2022/) |
+| `de_nuclear_phaseout` | 2023-04-15 → — | DE | yes | [source](https://www.base.bund.de/en/nuclear-safety/nuclear-phase-out/nuclear-phase-out.html) |
+| `be_nuclear_doel3_tihange2` | 2023-02-01 → — | BE | yes | [source](https://afcn.fgov.be/) |
+| `arenh` | 2011-07-01 → 2025-12-31 | FR | yes | [source](https://www.8advisory.com/en/2026/03/31/nuclear-power-navigating-frances-post-arenh-market-transformation/) |
+| `pl_capacity_market` | 2021-01-01 → — | PL | yes | [source](https://www.forum-energii.eu/en/the-capacity-market-in-poland-more-expensive-than-ever) |
+| `war_ukraine` | 2022-02-24 → — | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK, GB, IE, CH | no | not from a single citable market document |
 
 <Aside type="note">
   A regime dummy only helps once the training window spans the change. While the window lies entirely before
@@ -206,15 +235,38 @@ source = CalendarSource(
   had happened. Don't pool data before and after 2025-10-01 without a regime flag or a separate model.
 </Aside>
 
+<Aside type="caution" title="Look-ahead">
+  **A regime's `end` (or, for an open-ended shock, its date) is only leak-free if it was known in advance** —
+  announced, like a price cap's legislated expiry, or the go-live date of whatever superseded it. An end
+  identified afterwards, from the data, is look-ahead: a forecast issued during the period could not have known
+  when it would end. This is what the catalog's `ex_ante` field records, and why `default: False` entries
+  (`iberian_exception`, `bg_dam_launch`, `war_ukraine`, `baltic_sync`) are excluded from `regimes=True` — pass
+  them by name only after reading why they're flagged. An ex-post label such as "energy crisis 2021-2023",
+  picked because that is where the data later showed elevated prices, has exactly this problem — don't build
+  one from hindsight and use it in a backtest that spans it.
+</Aside>
+
+#### Bounded periods
+
+A `regimes` dict entry can be a single date (open-ended) or a period with an end, given as a `(start, end)`
+pair or a `{"start": ..., "end": ...}` dict — the two are equivalent:
+
+```python
+regimes = {"eu_price_cap": ("2022-12-01", "2023-01-31")}
+regimes = {"eu_price_cap": {"start": "2022-12-01", "end": "2023-01-31"}}
+```
+
+`regime_{name}` is 1 on local dates `start <= D <= end` and 0 otherwise (`end` is inclusive: the last day it
+still equals 1); with no `end`, the dummy stays 1 from `start` on. `end` must not be before `start`.
+
 ---
 
 ## School holidays
 
-With `school_holidays=True`, CalendarSource additionally downloads school holidays from the
-[OpenHolidays API](https://www.openholidaysapi.org) and turns them into flags on the same local-date grid as
-every other feature. With several `school_subdivisions` and `school_weights` (e.g. population) it also gives the
-weighted share of the population on school holidays. **No API key required.** This is the only case where
-CalendarSource makes network calls; without it, it stays offline and deterministic.
+With `school_holidays="national"` or `"all"`, CalendarSource additionally downloads school holidays from the
+[OpenHolidays API](https://www.openholidaysapi.org) and turns them into a flag or a share on the same local-date
+grid as every other feature. `True` is accepted as an alias for `"national"`. **No API key required.** This is
+the only case where CalendarSource makes network calls; without it, it stays offline and deterministic.
 
 <Aside type="caution" title="Licence and attribution">
   The data is published under the [Open Database License (ODbL 1.0)](https://opendatacommons.org/licenses/odbl/1-0/).
@@ -224,36 +276,38 @@ CalendarSource makes network calls; without it, it stays offline and determinist
 </Aside>
 
 ```python
-# One region: a single flag
-source = CalendarSource(country="PL", school_holidays=True, school_subdivisions="PL-MZ")
+# "national": a single nationwide flag, today's default behaviour
+source = CalendarSource(country="PL", school_holidays="national")  # or school_holidays=True
 
-# Several regions weighted by population (millions): one flag per region plus the weighted share
-source = CalendarSource(
-    country="PL",
-    school_holidays=True,
-    school_weights={"PL-MZ": 5.5, "PL-SL": 4.4, "PL-WP": 3.5},
-)
+# "all": the unweighted share of the country's top-level regions on school holiday that day
+source = CalendarSource(country="PL", school_holidays="all")
 ```
-
-Subdivision codes are listed by the API, e.g. `https://openholidaysapi.org/Subdivisions?countryIsoCode=PL`
-(Poland uses `PL-DS`, `PL-KP`, ..., `PL-ZP`; Germany `DE-BW`, `DE-BY`, ...). An unknown code raises an error.
 
 ### Output
 
-| Configuration | Columns |
-|---------------|---------|
-| no or one `school_subdivisions` entry | `is_school_holiday` |
-| several `school_subdivisions` entries | `is_school_holiday_{code}`, e.g. `is_school_holiday_pl_mz` |
-| with `school_weights` | also `school_holiday_share` = Σ weight × flag / Σ weight |
+| `school_holidays` | Column | Meaning |
+|--------------------|--------|---------|
+| `True` / `"national"` | `is_school_holiday` | 1.0 on a day covered by a nationwide school-holiday period, 0.0 otherwise |
+| `"all"` | `school_holiday_share` | The unweighted fraction of the country's top-level regions on school holiday that day (a nationwide period counts for every region) |
 
-Values are `1.0` on a school holiday and `0.0` otherwise (weekends outside holidays are `0.0`); CalendarSource's
-`prefix` applies to these columns like to every other feature.
+Values are `1.0`/`0.0` (or a fraction in `[0, 1]` for `"all"`); weekends outside holidays are `0.0`.
+CalendarSource's `prefix` applies to these columns like to every other feature. For Poland (16 voivodeships),
+`school_holiday_share` is `0.25` on a day when 4 of them are on their staggered winter break, and `1.0` during
+the (nationwide) summer break.
 
-- A holiday of a subdivision also counts for its children (a `DE-BY` holiday applies to `DE-BY-AU`), not the other way round.
-- In subdivisions whose holidays differ by school type (e.g. general and vocational schools in `DE-MV`), a day is flagged when any group is on holiday.
+- **Regions**: `"all"` takes its region list from the OpenHolidays [Subdivisions
+  endpoint](https://openholidaysapi.org/Subdivisions?countryIsoCode=PL) and uses **top-level subdivisions
+  only** (e.g. Poland's 16 voivodeships), never their nested children. A holiday entry that names a top-level
+  code (or is nationwide) counts for that region; an entry that names only a *child* of a top-level region
+  (e.g. a city or district code nested under it) is **not** rolled up into its parent's flag — it is invisible
+  to `"all"`. This matters for countries whose OpenHolidays data is recorded below the top level; Poland's and
+  Germany's regional entries are recorded at the top level, so this doesn't affect them.
+- In regions whose holidays differ by school type (e.g. general and vocational schools), a day is flagged when
+  any group is on holiday.
 - Entries marked as half days are ignored.
-- Without `school_subdivisions`, only holidays marked as country-wide count. In Poland that is the spring, summer
-  and Christmas breaks but not the regional winter breaks; Germany has no country-wide school holidays at all.
+- `"national"` (and the nationwide entries `"all"` also uses) only count holidays marked as country-wide. In
+  Poland that is the spring, summer and Christmas breaks but not the regional winter breaks; Germany has no
+  country-wide school holidays at all, so `is_school_holiday` is always `0.0`/`NaN` there — use `"all"` instead.
 
 ### Missing data is NaN, not 0
 
@@ -284,19 +338,16 @@ dates are NaN.
 ### Look-ahead
 
 School holiday calendars are set by regulation months or years ahead, so the flags and their `_d+k` versions
-are legal predictors. Two caveats:
-
-- The API serves today's version of each calendar. A change decided at short notice (an extra day off) appears
-  as if it had been known in advance, and gaps in the data (e.g. a break not yet entered) are not detected when
-  shorter than a year.
-- Use weights known at the start of your sample (e.g. the census before it), not end-of-sample figures.
+are legal predictors. One caveat: the API serves today's version of each calendar. A change decided at short
+notice (an extra day off) appears as if it had been known in advance, and gaps in the data (e.g. a break not
+yet entered) are not detected when shorter than a year.
 
 ### Caching
 
-Not cached: a run with `school_holidays=True` makes one request for the subdivisions plus one per 1,000 days,
-and a cache would keep the NaN of school years published after it was written. The API's data can be corrected
-over time, so keep the pipeline output (e.g. `DataPipeline.run(..., cache="data.csv")`) if you need to reproduce
-a run exactly.
+Not cached: a run with `school_holidays="national"` makes one request per 1,000 days; `"all"` makes one more
+request for the region list. A cache would keep the NaN of school years published after it was written. The
+API's data can be corrected over time, so keep the pipeline output (e.g. `DataPipeline.run(..., cache="data.csv")`)
+if you need to reproduce a run exactly.
 
 ---
 
@@ -311,13 +362,12 @@ source = CalendarSource(
     hour="number",
     month="number",
     bridge_days=True,
-    fourier_annual=2,
-    regimes=True,
+    regimes=["de_at_split", "core_fb", "sdac_15min_mtu"],
+    school_holidays="all",
 )
 
 # Output columns: is_holiday, weekday, hour, month, is_bridge_day,
-# year_sin_1, year_cos_1, year_sin_2, year_cos_2,
-# regime_de_at_split, regime_core_fb, regime_sdac_15min_mtu
+# regime_de_at_split, regime_core_fb, regime_sdac_15min_mtu, school_holiday_share
 ```
 
 ## Supported countries
