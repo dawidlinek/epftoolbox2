@@ -98,6 +98,13 @@ the old one) rather than resuming them; don't rely on the manifest to catch this
   pass `limit=` explicitly (e.g. `"1D"` for the old behaviour) if you want long outages left unfilled instead
   of masked. `{column}_imputed` still flags every cell the transformer actually filled, so a longer fill
   doesn't hide itself — check that column, not just the absence of NaN, if a long-filled stretch matters to you.
+- **`CalendarSource`: `school_subdivisions`/`school_weights` are gone.** `school_holidays` now takes `False`
+  (default), `True` (same as before: a single nationwide `is_school_holiday` flag), `"national"` (spelled out),
+  or `"all"` — a new mode that replaces per-subdivision flags and a weighted share with one
+  `school_holiday_share` column: the unweighted fraction of the country's top-level regions (e.g. Poland's 16
+  voivodeships) on school holiday that day. If you relied on per-subdivision columns
+  (`is_school_holiday_{code}`) or a population-weighted share, there is no direct replacement; `"all"` gives an
+  unweighted regional share instead. See [School holidays](/epftoolbox2/data-sources/calendar/#school-holidays).
 - **`CalendarSource`: `regimes=True` now adds a much larger, differently-sourced set of columns.** The
   6-entry `DEFAULT_REGIMES` (market coupling and MTU go-lives) is replaced by a 31-entry catalog covering
   bidding-zone and coupling go-lives, harmonised SDAC price limits, named policy interventions (nuclear

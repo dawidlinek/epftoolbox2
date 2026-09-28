@@ -262,14 +262,12 @@ source = CalendarSource(
     holiday_distance=0,          # Optional. N > 0: add days_to_holiday, days_since_holiday capped at N
     dst_switch=False,            # Optional. Add is_dst_switch_day (23- or 25-hour local days)
     regimes=False,               # Optional. False | True (default DEFAULT_REGIMES subset) | list of names | dict of custom periods
-    school_holidays=False,       # Optional. Download school holiday flags from the OpenHolidays API
-    school_subdivisions=None,    # Optional. ["PL-MZ", "PL-SL"] or "MZ,SL"; None = country-wide holidays only
-    school_weights=None,         # Optional. {code: weight} (e.g. population) or numbers in school_subdivisions order
+    school_holidays=False,       # Optional. False | True (= "national") | "national" | "all"
 )
 ```
 
-`school_holidays=True` is the only case where CalendarSource makes network calls (to the OpenHolidays API,
-https://www.openholidaysapi.org); it stays offline and deterministic otherwise. Data under ODbL 1.0: credit
+`school_holidays` not `False` is the only case where CalendarSource makes network calls (to the OpenHolidays
+API, https://www.openholidaysapi.org); it stays offline and deterministic otherwise. Data under ODbL 1.0: credit
 "School holidays: OpenHolidays API (www.openholidaysapi.org), ODbL 1.0" when you publish results built from it.
 No API key.
 
@@ -293,9 +291,8 @@ No API key.
 | `holiday_distance` | `N` | `days_to_holiday`, `days_since_holiday` (0 on a holiday, capped at N) |
 | `dst_switch` | `True` | `is_dst_switch_day` (every row of a 23/25-hour local day) |
 | `regimes` | `True`/list/dict | `regime_{name}`: 1 on local dates start <= D <= end, 0 otherwise; open-ended (no end) unless one is given |
-| `school_holidays` | `True`, no/one `school_subdivisions` | `is_school_holiday` (1.0/0.0/NaN) |
-| `school_holidays` | `True`, several `school_subdivisions` | `is_school_holiday_{code}`, e.g. `is_school_holiday_pl_mz` |
-| `school_holidays` | `True` with `school_weights` | also `school_holiday_share` = sum(weight * flag) / sum(weight) |
+| `school_holidays` | `True`/`"national"` | `is_school_holiday`: 1.0 on a nationwide school-holiday day, 0.0 otherwise, NaN before history starts |
+| `school_holidays` | `"all"` | `school_holiday_share`: unweighted fraction of the country's top-level regions on school holiday that day |
 
 **Notes:**
 - Holiday names are pinned to English (`en_US`), so one-hot column names don't depend on the machine's locale.
@@ -319,13 +316,16 @@ No API key.
   expiry), not identified afterwards from the data — an ex-post label like "energy crisis 2021-2023" is
   look-ahead in a backtest; this is what `ex_ante` records for catalog entries.
 - All calendar features are known in advance, so `_d+k` versions are legal predictors.
-- School holiday NaN (with a warning) where the API has no data: any stretch of more than a year without a
-  school holiday (before the history starts, or school years not yet published). A NaN flag makes the share NaN.
+- `school_holidays=True` is an alias for `"national"`. School holiday NaN (with a warning) where the API has no
+  data: any stretch of more than a year without a school holiday (before the history starts, or school years
+  not yet published). In `"all"` mode a NaN in any one region's flag makes that day's share NaN.
+- `"all"` uses top-level OpenHolidays subdivisions only (e.g. Poland's 16 voivodeships), not their nested
+  children; an entry recorded only against a child code is not rolled up into its parent's flag.
 - School holiday history starts: DE 2012; HU, RO 2015; AT 2017; FR 2018; BE, BG, CH, CZ, ES, IE, IT, NL, PL, PT,
   SK 2020 (PL from the 2019/20 Christmas break). No school holidays for SE, DK, FI, GB, GR, NO.
-- Parent school holidays apply to children (DE-BY to DE-BY-AU); school-type groups are merged (any group on
-  holiday); half-day entries are ignored. Without `school_subdivisions` only country-wide entries count (none
-  in DE).
+- School-type groups are merged (a day is flagged when any group is on holiday); half-day entries are ignored.
+  `"national"` (and the nationwide entries `"all"` also uses) only count holidays marked as country-wide;
+  Germany has none, so `is_school_holiday` is always 0.0/NaN there.
 
 **Caching:** Returns None (not cached - deterministic generation without `school_holidays`; a few small
 requests per run with it, and a cache would keep the NaN of school years published after it was written).

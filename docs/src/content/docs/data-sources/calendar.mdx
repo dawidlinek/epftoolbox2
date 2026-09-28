@@ -60,9 +60,7 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 | `holiday_distance` | int | `0` | If N > 0, add `days_to_holiday` and `days_since_holiday`, capped at N |
 | `dst_switch` | bool | `False` | Add `is_dst_switch_day` (local days with 23 or 25 hours) |
 | `regimes` | bool/list/dict | `False` | Market-regime dummies `regime_{name}`: `False` for none, `True` for the default catalog subset, a list of catalog names, or a dict of custom periods (see [Regime dummies](#regime-dummies)) |
-| `school_holidays` | bool | `False` | Download school holiday flags from the [OpenHolidays API](https://www.openholidaysapi.org) (see [School holidays](#school-holidays) below) |
-| `school_subdivisions` | str/List[str] | `None` | OpenHolidays subdivision codes, e.g. `["PL-MZ", "PL-SL"]` or `"MZ,SL"` (the country prefix is optional). `None`: only holidays that apply to the whole country |
-| `school_weights` | dict/List[float] | `None` | Weight per subdivision for `school_holiday_share`: `{code: weight}`, or numbers in the order of `school_subdivisions`. With a dict, `school_subdivisions` defaults to its keys |
+| `school_holidays` | bool/str | `False` | `False` (default), `True` (same as `"national"`), `"national"` or `"all"`: download school holiday flags from the [OpenHolidays API](https://www.openholidaysapi.org) (see [School holidays](#school-holidays) below) |
 
 <Aside type="tip">
   Inside a `DataPipeline`, leave `timezone` unset: it inherits `DataPipeline.timezone`, the single place the
@@ -265,11 +263,10 @@ still equals 1); with no `end`, the dummy stays 1 from `start` on. `end` must no
 
 ## School holidays
 
-With `school_holidays=True`, CalendarSource additionally downloads school holidays from the
-[OpenHolidays API](https://www.openholidaysapi.org) and turns them into flags on the same local-date grid as
-every other feature. With several `school_subdivisions` and `school_weights` (e.g. population) it also gives the
-weighted share of the population on school holidays. **No API key required.** This is the only case where
-CalendarSource makes network calls; without it, it stays offline and deterministic.
+With `school_holidays="national"` or `"all"`, CalendarSource additionally downloads school holidays from the
+[OpenHolidays API](https://www.openholidaysapi.org) and turns them into a flag or a share on the same local-date
+grid as every other feature. `True` is accepted as an alias for `"national"`. **No API key required.** This is
+the only case where CalendarSource makes network calls; without it, it stays offline and deterministic.
 
 <Aside type="caution" title="Licence and attribution">
   The data is published under the [Open Database License (ODbL 1.0)](https://opendatacommons.org/licenses/odbl/1-0/).
@@ -279,36 +276,38 @@ CalendarSource makes network calls; without it, it stays offline and determinist
 </Aside>
 
 ```python
-# One region: a single flag
-source = CalendarSource(country="PL", school_holidays=True, school_subdivisions="PL-MZ")
+# "national": a single nationwide flag, today's default behaviour
+source = CalendarSource(country="PL", school_holidays="national")  # or school_holidays=True
 
-# Several regions weighted by population (millions): one flag per region plus the weighted share
-source = CalendarSource(
-    country="PL",
-    school_holidays=True,
-    school_weights={"PL-MZ": 5.5, "PL-SL": 4.4, "PL-WP": 3.5},
-)
+# "all": the unweighted share of the country's top-level regions on school holiday that day
+source = CalendarSource(country="PL", school_holidays="all")
 ```
-
-Subdivision codes are listed by the API, e.g. `https://openholidaysapi.org/Subdivisions?countryIsoCode=PL`
-(Poland uses `PL-DS`, `PL-KP`, ..., `PL-ZP`; Germany `DE-BW`, `DE-BY`, ...). An unknown code raises an error.
 
 ### Output
 
-| Configuration | Columns |
-|---------------|---------|
-| no or one `school_subdivisions` entry | `is_school_holiday` |
-| several `school_subdivisions` entries | `is_school_holiday_{code}`, e.g. `is_school_holiday_pl_mz` |
-| with `school_weights` | also `school_holiday_share` = Σ weight × flag / Σ weight |
+| `school_holidays` | Column | Meaning |
+|--------------------|--------|---------|
+| `True` / `"national"` | `is_school_holiday` | 1.0 on a day covered by a nationwide school-holiday period, 0.0 otherwise |
+| `"all"` | `school_holiday_share` | The unweighted fraction of the country's top-level regions on school holiday that day (a nationwide period counts for every region) |
 
-Values are `1.0` on a school holiday and `0.0` otherwise (weekends outside holidays are `0.0`); CalendarSource's
-`prefix` applies to these columns like to every other feature.
+Values are `1.0`/`0.0` (or a fraction in `[0, 1]` for `"all"`); weekends outside holidays are `0.0`.
+CalendarSource's `prefix` applies to these columns like to every other feature. For Poland (16 voivodeships),
+`school_holiday_share` is `0.25` on a day when 4 of them are on their staggered winter break, and `1.0` during
+the (nationwide) summer break.
 
-- A holiday of a subdivision also counts for its children (a `DE-BY` holiday applies to `DE-BY-AU`), not the other way round.
-- In subdivisions whose holidays differ by school type (e.g. general and vocational schools in `DE-MV`), a day is flagged when any group is on holiday.
+- **Regions**: `"all"` takes its region list from the OpenHolidays [Subdivisions
+  endpoint](https://openholidaysapi.org/Subdivisions?countryIsoCode=PL) and uses **top-level subdivisions
+  only** (e.g. Poland's 16 voivodeships), never their nested children. A holiday entry that names a top-level
+  code (or is nationwide) counts for that region; an entry that names only a *child* of a top-level region
+  (e.g. a city or district code nested under it) is **not** rolled up into its parent's flag — it is invisible
+  to `"all"`. This matters for countries whose OpenHolidays data is recorded below the top level; Poland's and
+  Germany's regional entries are recorded at the top level, so this doesn't affect them.
+- In regions whose holidays differ by school type (e.g. general and vocational schools), a day is flagged when
+  any group is on holiday.
 - Entries marked as half days are ignored.
-- Without `school_subdivisions`, only holidays marked as country-wide count. In Poland that is the spring, summer
-  and Christmas breaks but not the regional winter breaks; Germany has no country-wide school holidays at all.
+- `"national"` (and the nationwide entries `"all"` also uses) only count holidays marked as country-wide. In
+  Poland that is the spring, summer and Christmas breaks but not the regional winter breaks; Germany has no
+  country-wide school holidays at all, so `is_school_holiday` is always `0.0`/`NaN` there — use `"all"` instead.
 
 ### Missing data is NaN, not 0
 
@@ -339,19 +338,16 @@ dates are NaN.
 ### Look-ahead
 
 School holiday calendars are set by regulation months or years ahead, so the flags and their `_d+k` versions
-are legal predictors. Two caveats:
-
-- The API serves today's version of each calendar. A change decided at short notice (an extra day off) appears
-  as if it had been known in advance, and gaps in the data (e.g. a break not yet entered) are not detected when
-  shorter than a year.
-- Use weights known at the start of your sample (e.g. the census before it), not end-of-sample figures.
+are legal predictors. One caveat: the API serves today's version of each calendar. A change decided at short
+notice (an extra day off) appears as if it had been known in advance, and gaps in the data (e.g. a break not
+yet entered) are not detected when shorter than a year.
 
 ### Caching
 
-Not cached: a run with `school_holidays=True` makes one request for the subdivisions plus one per 1,000 days,
-and a cache would keep the NaN of school years published after it was written. The API's data can be corrected
-over time, so keep the pipeline output (e.g. `DataPipeline.run(..., cache="data.csv")`) if you need to reproduce
-a run exactly.
+Not cached: a run with `school_holidays="national"` makes one request per 1,000 days; `"all"` makes one more
+request for the region list. A cache would keep the NaN of school years published after it was written. The
+API's data can be corrected over time, so keep the pipeline output (e.g. `DataPipeline.run(..., cache="data.csv")`)
+if you need to reproduce a run exactly.
 
 ---
 
@@ -367,10 +363,11 @@ source = CalendarSource(
     month="number",
     bridge_days=True,
     regimes=["de_at_split", "core_fb", "sdac_15min_mtu"],
+    school_holidays="all",
 )
 
 # Output columns: is_holiday, weekday, hour, month, is_bridge_day,
-# regime_de_at_split, regime_core_fb, regime_sdac_15min_mtu
+# regime_de_at_split, regime_core_fb, regime_sdac_15min_mtu, school_holiday_share
 ```
 
 ## Supported countries

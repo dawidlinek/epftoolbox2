@@ -5,7 +5,7 @@ Data: OpenHolidays API (https://www.openholidaysapi.org), made available under t
 """
 
 import time
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -41,14 +41,10 @@ def get(session: requests.Session, path: str, params: dict) -> list:
     raise RuntimeError(f"OpenHolidays API request to {path} failed after 3 attempts: {error}") from error
 
 
-def known_subdivisions(session: requests.Session, country: str) -> set:
-    known = set()
-    stack = list(get(session, "Subdivisions", {"countryIsoCode": country}))
-    while stack:
-        item = stack.pop()
-        known.add(item["code"].upper())
-        stack.extend(item.get("children") or [])
-    return known
+def top_level_subdivisions(session: requests.Session, country: str) -> List[str]:
+    """`country`'s own entries from the Subdivisions endpoint, not the nested `children` of each one (e.g.
+    Poland's 16 voivodeships, not any finer level some countries report)."""
+    return sorted({item["code"].upper() for item in get(session, "Subdivisions", {"countryIsoCode": country})})
 
 
 def fetch_entries(session: requests.Session, country: str, first: pd.Timestamp, last: pd.Timestamp) -> list:
