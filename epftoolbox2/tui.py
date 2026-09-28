@@ -427,9 +427,9 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "daily_anchor",
-            "description": "Zone whose calendar date a daily value belongs to (UTC offset or IANA name)",
+            "description": "Zone whose calendar date a daily value belongs to (empty = target_tz, the market zone)",
             "required": False,
-            "default": "UTC+02:00",
+            "default": None,
             "kind": "text",
         },
     ],
