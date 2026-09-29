@@ -423,6 +423,96 @@ def test_issue_time_is_converted_to_the_data_zone():
     assert min(p for _, p, _ in found) == 8
 
 
+@pytest.mark.parametrize("data_zone", ["UTC", "Etc/GMT-1", "Asia/Tokyo"])
+@pytest.mark.parametrize("issue_time", ["11:30", "12:30", "13:30"])
+def test_violations_use_the_delivery_and_publication_instants_own_offsets(data_zone, issue_time):
+    """The pre-fit check's counterpart of test_perturbation_uses_the_delivery_and_publication_instants_own_offsets.
+    On a frame whose zone has no DST (UTC, a benchmark source's fixed offset) checked against Brussels-anchored rules,
+    each conversion must use the offset at the instant it converts, on every issue day. Converting every delivery and
+    publication time with the offsets at noon of the issue day D, and letting an earlier day with the same weekday
+    and noon offsets stand for a day just before a switch, misjudged predictors near every switch, both ways. Issued
+    on 2024-03-30, `load_forecast_d+1` at 22:00Z (delivered 2024-04-01 00:00 CEST, published 10:00 on 2024-03-31)
+    passed: a leak. Issued on Thursday 2024-10-24, `load_forecast_daily_max_d+3` at 22:00Z (delivered Sunday
+    2024-10-27 23:00 CET, published the Friday before that week) was rejected. The expected verdict is computed
+    independently, from real instants, for test ranges ending two days before to one day after each switch."""
+    columns = {  # name: (published time Brussels, days_before or "weekly", day shift)
+        "price": ("13:00", 1, 0),
+        "price_d-1": ("13:00", 1, -1),
+        "price_d+1": ("13:00", 1, 1),
+        "load_forecast_d+1": ("10:00", 1, 1),
+        "load_forecast_d+2": ("10:00", 1, 2),
+        "load_forecast_daily_max_d+2": ("10:00", "weekly", 2),
+        "load_forecast_daily_max_d+3": ("10:00", "weekly", 3),
+    }
+    info = InformationSet(issue_time, "Europe/Brussels")
+    expanded = {(period, 1): list(columns) for period in range(24)}
+
+    wrong = {}
+    for switch in ["2024-03-31", "2024-10-27", "2025-10-26"]:
+        for end in pd.date_range(pd.Timestamp(switch) - pd.Timedelta(days=2), periods=4, freq="D"):
+            days = pd.date_range(end - pd.Timedelta(days=9), end, freq="D")
+            index = pd.date_range(days[0] - pd.Timedelta(days=7), end + pd.Timedelta(days=7), freq="h", tz=data_zone)
+            found, _ = info.violations(expanded, "price", "1h", index, str(days[0].date()), str(end.date()))
+            got = {(v.predictor, v.period) for v in found if v.role == "predictor"}
+
+            expected = set()
+            for day in days:
+                rows = pd.date_range(day, periods=24, freq="h").tz_localize(data_zone)
+                issue = pd.Timestamp(f"{day.date()} {issue_time}", tz="Europe/Brussels")
+                for name, (time, days_before, shift) in columns.items():
+                    delivery = rows + pd.Timedelta(days=shift)  # no DST in the data zone: a calendar day is 24 h
+                    delivery_day = delivery.tz_convert("Europe/Brussels").normalize().tz_localize(None)
+                    if days_before == "weekly":  # Friday of the week before the delivery's Monday-Sunday week
+                        published_day = delivery_day - pd.to_timedelta(delivery_day.weekday + 3, unit="D")
+                    else:
+                        published_day = delivery_day - pd.Timedelta(days=days_before)
+                    published = (published_day + pd.Timedelta(f"{time}:00")).tz_localize("Europe/Brussels")
+                    expected |= {(name, int(period)) for period in np.flatnonzero(published > issue)}
+            if got != expected:
+                wrong[str(end.date())] = {"missed": sorted(expected - got), "extra": sorted(got - expected)}
+    assert wrong == {}
+
+
+def test_violations_convert_the_issue_time_at_its_own_instant():
+    """Issued 00:30 Brussels on the autumn switch day 2024-10-27, the issue is still CEST (22:30Z on 2024-10-26), not
+    CET like noon of that day. The newest training target, load_actual on 2024-10-26 at 21:00Z, is known at 23:00Z:
+    after the issue."""
+    utc = pd.date_range("2024-10-20", "2024-11-03", freq="h", tz="UTC", inclusive="left")
+    info = InformationSet("00:30", "Europe/Brussels")
+    found, _ = violations(
+        [], info=info, target="load_actual", horizon=1, index=utc, start="2024-10-27", end="2024-10-27"
+    )
+    assert {p for _, p, _ in found} == {21, 22, 23}
+
+
+@pytest.mark.parametrize("issue_timezone", ["Europe/Brussels", "Europe/Warsaw"])
+@pytest.mark.parametrize("data_zone", ["UTC", "Europe/Warsaw"])
+def test_an_issue_time_skipped_by_the_spring_switch_is_read_at_its_earliest(issue_timezone, data_zone):
+    """02:30 doesn't exist in Brussels or Warsaw on 2024-03-31. Read with the offset after the switch it is 00:30Z,
+    its earliest reading, so the issue is never later than asked: a value known at 00:45Z is not known yet, for the
+    check and the perturbation alike, also when the issue zone is the data zone. Moved forward to the switch (01:00Z),
+    or just before it (00:59:59Z), the issue would come after that value."""
+    index = pd.date_range("2024-03-25", "2024-04-05", freq="h", tz=data_zone)
+    info = InformationSet("02:30", issue_timezone, rules={"x": Availability.as_of("00:45", "UTC")})
+    found, _ = violations(["x"], info=info, horizon=1, index=index, start="2024-03-31", end="2024-03-31")
+    assert {p for _, p, _ in found} == set(range(24))
+
+    perturbed, _, _ = perturb_unknown(pd.DataFrame({"x": 1.0}, index=index), "2024-03-31", info)
+    assert (perturbed["x"] != 1.0).all()
+
+
+@pytest.mark.parametrize("rule", [Availability.as_of("09:00", "UTC"), Availability.weather_cutoff("00", "9h")])
+def test_as_of_and_cutoff_rules_are_anchored_to_each_issue_day(rule):
+    """Known 09:00Z on each issue day: before the 10:30 Brussels issue in CET (09:30Z), after it in CEST (08:30Z).
+    A test range from winter into summer must be checked on its summer days too, not with the first day's cutoff."""
+    info = InformationSet("10:30", "Europe/Brussels", rules={"x": rule})
+    utc = pd.date_range("2024-03-20", "2024-04-10", freq="h", tz="UTC")
+    winter, _ = violations(["x"], info=info, horizon=1, index=utc, start="2024-03-25", end="2024-03-30")
+    spanning, _ = violations(["x"], info=info, horizon=1, index=utc, start="2024-03-25", end="2024-04-02")
+    assert winter == set()
+    assert {p for _, p, _ in spanning} == set(range(24))
+
+
 def test_unknown_columns_follow_the_policy():
     expanded = expand(["load_d+{horizon}"], horizon=1)
     with pytest.raises(InformationSetError, match="no availability rule.*'load'"):
