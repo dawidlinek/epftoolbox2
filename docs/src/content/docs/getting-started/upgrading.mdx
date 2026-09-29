@@ -39,8 +39,12 @@ changed, why, and what you need to do before trusting new results.
 - **The cache.** Per-source caching now writes atomically and locks around fetch+write (concurrent SLURM
   array tasks used to be able to read a half-written file), records coverage from the data actually
   returned rather than the whole requested range, and never caches the part of a range that isn't settled
-  yet (today's still-provisional weather, tomorrow's not-yet-published price). The cache key format changed
-  to match (`CACHE_FORMAT_VERSION` 2 → 3): old cache entries are never read by the new code, so old and new
+  yet (today's still-provisional weather, tomorrow's not-yet-published price). A multi-column source's
+  outer join used to let a column that stopped early (e.g. `load_actual` during a TSO outage) hide behind
+  one that kept going (`price`), so the outage's gap was recorded as covered and never refetched; the
+  recorded range is now additionally capped at one step past the last value of any column still being
+  published (its last value newer than 14 days before now). The cache key format changed to match
+  (`CACHE_FORMAT_VERSION` 2 → 3 → 4): old cache entries are never read by the new code, so old and new
   values can't get mixed silently.
 
 ## `.cache/sources/` should be cleared

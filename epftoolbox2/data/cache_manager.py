@@ -30,11 +30,19 @@ from epftoolbox2.logging import get_logger
 # Bump when the on-disk layout or the meaning of cached ranges changes: every existing cache is then ignored.
 # 1: CSV files, whole requested range recorded. 2: Parquet, only returned and settled data recorded. 3: gaps are
 # detected against the local resolution instead of one step for the whole response, and a response with fewer
-# than three timestamps no longer has a lone diff trusted as the step for it — see ``covered_ranges``.
-CACHE_FORMAT_VERSION = 3
+# than three timestamps no longer has a lone diff trusted as the step for it — see ``covered_ranges``. 4: a
+# column that stops early is no longer masked by a longer column sharing the same merged row index — see
+# ``_still_published_tail_cap``.
+CACHE_FORMAT_VERSION = 4
 
 # Data newer than this (relative to now, floored to UTC midnight) is returned but never recorded as cached.
 UNSETTLED_PERIOD = pd.Timedelta(days=2)
+
+# A column whose last valid (non-null) value is older than this, relative to now, is treated as discontinued
+# (e.g. a PsrType ENTSO-E no longer reports) rather than still being published, and does not cap
+# ``covered_ranges``' tail — see ``_still_published_tail_cap``. Without this cutoff, a column that will never
+# publish again would force every future fetch to re-request its tail forever.
+DISCONTINUED_AFTER = pd.Timedelta(days=14)
 
 # Diffs looked at on either side of a point to estimate the expected step there (see ``covered_ranges``): local,
 # not one mode for the whole response, so a resolution change partway through a fetch does not make one side's
@@ -139,6 +147,42 @@ def _local_steps(diffs: List[pd.Timedelta], window: int = _STEP_WINDOW) -> List[
         counts = Counter(neighbours)
         steps.append(min(counts, key=lambda d: (-counts[d], d)))
     return steps
+
+
+def _still_published_tail_cap(df: pd.DataFrame, now: pd.Timestamp) -> Optional[pd.Timestamp]:
+    """One step past the last valid (non-null) value of any column in ``df`` that is still being published,
+    or ``None`` if no column restricts the tail.
+
+    A multi-column source (``EntsoeSource`` concatenating its document types) joins its columns on an outer
+    index, so the merged row index runs as far as the longest column even when a shorter one stopped early —
+    for example ``load_actual`` during a multi-day TSO outage while ``price`` keeps publishing day-ahead rows.
+    Judging coverage from that merged index alone (as ``covered_ranges`` otherwise does) would record the
+    outage's NaN cells as covered, and they would never be refetched once the source backfills them. Capping
+    the whole recorded range at one step past each still-published column's own last value fixes that, at the
+    cost of re-requesting the other columns' already-correct data over that same short tail too — the cache
+    only ever records whole time slices across every column, not per-column cells.
+
+    A column counts as still published when its last valid value is newer than ``DISCONTINUED_AFTER`` before
+    ``now``; an older one is discontinued (e.g. a PsrType ENTSO-E no longer reports) and is excluded, so it
+    can't force a refetch forever. "One step" is that column's own local resolution — estimated the same way
+    as ``covered_ranges``' row-level gaps, from a window of that column's own recent diffs — not the merged
+    frame's, so a coarser column (e.g. a weekly value) alongside a finer one is not capped as if it shared the
+    finer column's spacing.
+    """
+    caps = []
+    for _, series in df.items():
+        valid_index = series.dropna().index
+        if len(valid_index) == 0:
+            continue
+        last_valid = valid_index[-1]
+        if now - last_valid > DISCONTINUED_AFTER:
+            continue
+        if len(valid_index) == 1:
+            continue  # no diff to estimate this column's own step from; it can't tighten the cap
+        diffs = list(valid_index[1:] - valid_index[:-1])
+        step = _local_steps(diffs)[-1]
+        caps.append(last_valid + step)
+    return min(caps) if caps else None
 
 
 class CacheManager:
@@ -279,9 +323,10 @@ class CacheManager:
         self, df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, timezone: Optional[str] = None
     ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
         """Contiguous, disjoint sub-ranges of ``[start, end)`` that ``df`` (fetched for ``[start, end)``) may be
-        recorded as covering, each capped at ``end`` and at the start of the unsettled period before now.
+        recorded as covering, each capped at ``end``, at the start of the unsettled period before now, and at
+        one step past the last value of any column that is still being published (``_still_published_tail_cap``).
 
-        ``timezone``, when given, floors that unsettled-period cap to a local midnight in that zone instead of
+        ``timezone``, when given, floors the unsettled-period cap to a local midnight in that zone instead of
         UTC (see ``unsettled_boundary``), so a later resumed fetch starts exactly at a source's own local
         midnight rather than strictly inside a one-day period.
 
@@ -294,16 +339,24 @@ class CacheManager:
         — a genuine hole in an otherwise regular response (one missing hour out of a day of hourly data) is
         fetched again next time instead of being silently treated as covered and then lost for good.
 
+        That row-level gap check works on the merged index across every column, so it cannot by itself see a
+        column that stopped early while another kept going (the merged index still runs as far as the longer
+        column) — the per-column tail cap below covers that case.
+
         Fewer than three returned timestamps give fewer than two diffs, so there is nothing to compare a lone
         diff against — it could be the real step, or it could itself be hiding a gap — and no step is inferred:
         a single timestamp still covers the whole range up to the cap (e.g. a source that returns exactly one
         row for any requested range, such as a weekly aggregate); exactly two timestamps cover only themselves,
         not the span between or beyond them.
         """
-        index = clip_to_range(df, start, end).index.unique().sort_values()
+        clipped = clip_to_range(df, start, end)
+        index = clipped.index.unique().sort_values()
         if len(index) == 0:
             return []
         cap = min(end, unsettled_boundary(self.unsettled_period, timezone))
+        tail_cap = _still_published_tail_cap(clipped, _now())
+        if tail_cap is not None:
+            cap = min(cap, tail_cap)
 
         if len(index) == 1:
             return [(start, cap)] if cap > start else []

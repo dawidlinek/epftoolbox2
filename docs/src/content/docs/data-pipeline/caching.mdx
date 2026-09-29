@@ -73,6 +73,14 @@ A gap in an otherwise regular response — one missing hour in a day of hourly d
 only the contiguous run(s) of timestamps actually present are cached, so the hole is fetched again on the next run
 instead of silently being treated as covered and then lost for good.
 
+A multi-column source joins its columns on an outer index, so the merged rows run as far as the longest column
+even when a shorter one stopped early — for example `load_actual` during a multi-day TSO outage, while `price`
+keeps publishing day-ahead rows. To stop that outage's cells from being recorded as covered (and then never
+refetched once the source backfills them), the recorded range is additionally capped at one step past the last
+value of any column that is still being published — one whose last value is newer than 14 days before now. A
+column whose last value is older than that is treated as discontinued (e.g. a PsrType ENTSO-E no longer reports)
+and does not cap coverage, so it can't force a refetch forever.
+
 Each recorded range stores when it was retrieved (`retrieved_at` in `metadata.json`). ENTSO-E sometimes revises
 data long after publication; the cache keeps the version it downloaded. Clear it to pick up revisions.
 

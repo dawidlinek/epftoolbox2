@@ -295,6 +295,91 @@ class TestCoverageGaps:
         assert covered_end == ts("2024-06-10 09:30").floor("D") - cache_manager.unsettled_period
 
 
+class TestPerColumnTailCoverage:
+    """entsoe-cache follow-up: `covered_ranges` judged coverage from the merged row index only, so a
+    multi-column source (EntsoeSource's outer join of its document types) let a column that stopped early
+    (e.g. `load_actual` during a multi-day TSO outage) hide behind one that kept going (`price`, day-ahead) --
+    the outage's NaN cells were recorded as covered and never refetched, even once the source backfilled them."""
+
+    def test_outage_column_caps_coverage_and_is_refetched_once_backfilled(
+        self, cache_manager, sample_config, frozen_now
+    ):
+        frozen_now("2026-10-01")
+        key = cache_manager.get_cache_key(sample_config)
+        # price keeps publishing day-ahead rows; load_actual stops on 09-24 (a multi-day TSO outage).
+        df = pd.concat(
+            [hourly("2026-09-01", "2026-09-30", price=0.0), hourly("2026-09-01", "2026-09-24", load_actual=1.0)],
+            axis=1,
+        )
+
+        covered_end = cache_manager.write_cache(key, df, ts("2026-09-01"), ts("2026-09-30"), sample_config)
+
+        assert covered_end == ts("2026-09-24")  # one step past load_actual's last value, not price's
+        assert cache_manager.find_missing_ranges(key, ts("2026-09-01"), ts("2026-09-30")) == [
+            (ts("2026-09-24"), ts("2026-09-30"))
+        ]
+
+        # A week later the source has backfilled the outage.
+        frozen_now("2026-10-08")
+        backfill = hourly("2026-09-24", "2026-09-30", price=0.0, load_actual=2.0)
+        cache_manager.write_cache(key, backfill, ts("2026-09-24"), ts("2026-09-30"), sample_config)
+
+        assert cache_manager.find_missing_ranges(key, ts("2026-09-01"), ts("2026-09-30")) == []
+        result = cache_manager.read_cached_data(key, ts("2026-09-01"), ts("2026-09-30"))
+        assert result["load_actual"].notna().all()
+
+    def test_discontinued_column_does_not_cap_coverage(self, cache_manager, sample_config, frozen_now):
+        """A column whose last value is older than DISCONTINUED_AFTER (e.g. a PsrType ENTSO-E no longer
+        reports) must not force a refetch of an otherwise fully covered range forever."""
+        frozen_now("2026-10-01")
+        key = cache_manager.get_cache_key(sample_config)
+        df = pd.concat(
+            [hourly("2026-09-01", "2026-09-30", price=0.0), hourly("2026-09-01", "2026-09-05", old_psr_type=1.0)],
+            axis=1,
+        )
+
+        covered_end = cache_manager.write_cache(key, df, ts("2026-09-01"), ts("2026-09-30"), sample_config)
+
+        # capped only by the 2-day unsettled window, not by old_psr_type's long-stopped tail
+        assert covered_end == ts("2026-09-29")
+        assert cache_manager.find_missing_ranges(key, ts("2026-09-01"), ts("2026-09-30")) == [
+            (ts("2026-09-29"), ts("2026-09-30"))
+        ]
+
+    def test_single_column_source_is_unchanged(self, cache_manager, sample_config, frozen_now):
+        frozen_now("2024-01-12")  # within DISCONTINUED_AFTER of the data below, so the new code path runs
+        key = cache_manager.get_cache_key(sample_config)
+        df = hourly("2024-01-01", "2024-01-10", price=0.0)  # source had data only up to 01-09 23:00
+
+        covered_end = cache_manager.write_cache(key, df, ts("2024-01-01"), ts("2024-02-01"), sample_config)
+
+        assert covered_end == ts("2024-01-10")  # same result the row-level gap logic alone already gave
+        assert cache_manager.find_missing_ranges(key, ts("2024-01-01"), ts("2024-02-01")) == [
+            (ts("2024-01-10"), ts("2024-02-01"))
+        ]
+
+    def test_cache_split_on_a_dst_day_equals_a_fresh_fetch(self, tmp_path, sample_config, monkeypatch):
+        """Splitting a write across Europe/Warsaw's 2024-03-31 spring-forward must give the same cached data as
+        one fresh fetch of the whole range -- the new per-column tail cap must not add a DST-sensitive seam."""
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: ts("2024-04-05 10:00"))
+        df = hourly("2024-03-25", "2024-04-05", price=0.0, load_actual=1000.0)
+        start, end = ts("2024-03-25"), ts("2024-04-05")
+        split = pd.Timestamp("2024-03-31", tz="Europe/Warsaw").tz_convert("UTC")  # local midnight, spring-forward day
+
+        fresh = CacheManager(cache_dir=str(tmp_path / "fresh"))
+        fresh_key = fresh.get_cache_key(sample_config)
+        fresh.write_cache(fresh_key, df, start, end, sample_config, timezone="Europe/Warsaw")
+        fresh_result = fresh.read_cached_data(fresh_key, start, end)
+
+        split_cm = CacheManager(cache_dir=str(tmp_path / "split"))
+        split_key = split_cm.get_cache_key(sample_config)
+        split_cm.write_cache(split_key, df[df.index < split], start, split, sample_config, timezone="Europe/Warsaw")
+        split_cm.write_cache(split_key, df[df.index >= split], split, end, sample_config, timezone="Europe/Warsaw")
+        split_result = split_cm.read_cached_data(split_key, start, end)
+
+        pd.testing.assert_frame_equal(fresh_result, split_result, check_freq=False)
+
+
 class TestResolutionChangeGaps:
     """entsoe-cache/pipelines review, finding 1: `covered_ranges` used to pick one "most common step" for the
     whole response. A fetch that changes resolution partway through (e.g. the ENTSO-E 15-minute go-live) made
