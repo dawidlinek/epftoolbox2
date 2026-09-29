@@ -302,6 +302,29 @@ class TestOtherAggregations:
         assert df["temperature_2m_max_d+1"].iloc[0] == 30.0  # not weight-adjusted
         assert df["temperature_2m_mean_d+1"].iloc[0] == 0.75 * 10 + 0.25 * 30  # weighted
 
+    def test_weighted_mean_and_median_together(self):
+        # Same combination as above, with "median" standing in for every unweighted aggregation: it must stay
+        # the plain (unweighted) median of the three locations' values even though "mean" in the same call is
+        # weighted.
+        index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
+        source = make_source(
+            locations={
+                "warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 3.0},
+                "krakow": {"latitude": 50.06, "longitude": 19.94, "weight": 1.0},
+                "gdansk": {"latitude": 54.35, "longitude": 18.65, "weight": 1.0},
+            },
+            agg=["mean", "median"],
+            fetch_returns=[
+                _frame(index, **{"temperature_2m_d+1": [10.0]}),
+                _frame(index, **{"temperature_2m_d+1": [20.0]}),
+                _frame(index, **{"temperature_2m_d+1": [30.0]}),
+            ],
+        )
+        df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
+        # weights normalise to [0.6, 0.2, 0.2]: 0.6*10 + 0.2*20 + 0.2*30 = 16
+        assert df["temperature_2m_mean_d+1"].iloc[0] == pytest.approx(16.0)
+        assert df["temperature_2m_median_d+1"].iloc[0] == 20.0  # plain median of [10, 20, 30], not weight-adjusted
+
 
 class TestAggListNaming:
     def test_list_suffixes_every_entry_even_with_one(self):
