@@ -188,6 +188,39 @@ class TestTimezoneTransformerDailySnap:
         assert list(result["price"]) == list(range(48))
 
 
+class TestDailyColumnPrefixMatching:
+    """`daily_columns` matches a column by its exact name or by a `f"_{name}"` suffix, so a prefixed neighbour's
+    column (e.g. `EntsoeSource(country_code="FI", prefix="fi")`'s `fi_load_forecast_daily_min`) is recognised
+    under the default `daily_columns` without listing every prefix by name."""
+
+    def test_prefixed_column_is_snapped_like_the_bare_one(self):
+        idx = pd.date_range("2025-01-13 00:00", periods=48, freq="h", tz="UTC")
+        df = pd.DataFrame({"load": range(48)}, index=idx)
+        df["fi_load_forecast_daily_min"] = float("nan")
+        df.loc[pd.Timestamp("2025-01-13 23:00", tz="UTC"), "fi_load_forecast_daily_min"] = 10.0
+        transformer = TimezoneTransformer(target_tz="Europe/Warsaw")  # default daily_columns
+        result = transformer.transform(df)
+        value = result["fi_load_forecast_daily_min"].dropna()
+        assert list(value.index) == [pd.Timestamp("2025-01-14 00:00", tz="Europe/Warsaw")]
+        assert value.iloc[0] == 10.0
+
+    def test_unrelated_column_with_the_same_ending_is_not_matched(self):
+        # only an exact name or one ending in "_<daily column>" counts, not merely containing the substring
+        idx = pd.date_range("2025-01-13 00:00", periods=24, freq="h", tz="UTC")
+        df = pd.DataFrame({"xload_forecast_daily_min": range(24)}, index=idx)
+        transformer = TimezoneTransformer(target_tz="Europe/Warsaw")
+        result = transformer.transform(df)
+        assert list(result["xload_forecast_daily_min"]) == list(range(24))
+
+    def test_custom_daily_columns_also_match_by_suffix(self):
+        idx = pd.date_range("2025-01-13 00:00", periods=24, freq="h", tz="UTC")
+        df = pd.DataFrame({"a_custom_daily": [1.0] + [float("nan")] * 23}, index=idx)
+        transformer = TimezoneTransformer(target_tz="Europe/Warsaw", daily_columns=["custom_daily"])
+        result = transformer.transform(df)
+        value = result["a_custom_daily"].dropna()
+        assert list(value.index) == [pd.Timestamp("2025-01-13 00:00", tz="Europe/Warsaw")]
+
+
 def _a31_frame(first_utc: str, days: int, stamps: list[str], values: list[float], col="load_forecast_daily_min"):
     """Hourly UTC frame plus a sparse daily column holding ENTSO-E A31-style values at the given UTC stamps."""
     idx = pd.date_range(first_utc, periods=24 * days, freq="1h", tz="UTC")

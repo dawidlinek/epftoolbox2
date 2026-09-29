@@ -94,6 +94,17 @@ class TestInheritance:
         assert source._location_sources[0].market_timezone == TZ
         assert source._location_sources[0].timezone is None
 
+    def test_entsoe_source(self):
+        # EntsoeSource has no zone parameter of its own (nothing to leave unset); it only uses the bound zone
+        # to anchor a neighbouring area's week-ahead daily value (A31) onto the market's own local day — see
+        # EntsoeSource._daily_zone and tests/data/sources/test_entsoe.py::TestWeekAheadDailyMarketZone.
+        from epftoolbox2.data.sources import EntsoeSource
+
+        source = EntsoeSource("FI", "test-key", type=["load"])
+        assert source.market_timezone is None
+        DataPipeline(sources=[source], timezone=TZ)
+        assert source.market_timezone == TZ
+
     def test_timezone_transformer(self):
         transformer = TimezoneTransformer()
         DataPipeline(sources=[_RangeSource()], transformers=[transformer], timezone=TZ)

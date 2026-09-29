@@ -90,7 +90,7 @@ source = EntsoeSource(
 - `prefix` (str): Defaults to "". Prepended to every column (`"cz"` -> `cz_price`), so several zones can be combined in one pipeline without collisions.
 
 **Output columns by type:**
-- `type=["load"]`: `load_actual` (A65/A16), `load_forecast` (A65/A01, day-ahead), `load_forecast_daily_min`, `load_forecast_daily_max` (A65/A31 week-ahead; one value at local midnight per day, fill with `ResampleTransformer(method="ffill", columns=[...])`)
+- `type=["load"]`: `load_actual` (A65/A16), `load_forecast` (A65/A01, day-ahead), `load_forecast_daily_min`, `load_forecast_daily_max` (A65/A31 week-ahead; one value per this area's own local day D, fill with `ResampleTransformer(method="ffill", columns=[...])`). Stamped at the *market's* local midnight of D when this source is part of a `DataPipeline` (so a neighbour's value lands on the market's own local day, not the neighbour's — see `_daily_zone`); at this area's own midnight otherwise (unchanged, and a no-op when this area already is the market's own).
 - `type=["price"]`: `price` (EUR/MWh), the SDAC day-ahead price only (classificationSequence 1; the second 15-minute DE_LU/AT auction is ignored)
 - `type=["generation"]`: actual generation per production type `generation_<type>` (A75), e.g. `generation_biomass`, `generation_fossil_gas`, `generation_hydro_run_of_river_and_pondage`, `generation_nuclear`, `generation_solar`, `generation_wind_onshore`, `generation_energy_storage`; consumption of a type (pumped-storage pumping etc.) as `generation_<type>_consumption`; day-ahead wind/solar forecasts `generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` (A69). Unknown production types become `generation_<code>`.
 - `type=["transfer_capacity"]`: `transfer_capacity_export_<neighbour>` and `transfer_capacity_import_<neighbour>` (A61 day-ahead forecasted transfer capacity, MW), e.g. `transfer_capacity_export_es`. Borders without NTC publication (e.g. inside flow-based Core, all PL borders in 2024) return no data and the column is absent.
@@ -513,7 +513,8 @@ from epftoolbox2.data.transformers import TimezoneTransformer
 transformer = TimezoneTransformer(
     target_tz="Europe/Warsaw",    # Optional. Target IANA timezone; None (default) inherits DataPipeline.timezone
     daily_columns=None,           # Optional (default: None = ["load_forecast_daily_min", "load_forecast_daily_max"]).
-                                  #   Columns with one value per day; absent columns are skipped
+                                  #   Columns with one value per day, matched by exact name or a "_{name}" suffix
+                                  #   (so a prefixed neighbour's column is recognised too); absent names are skipped
     daily_anchor=None,            # Optional (default: None = the resolved target_tz). UTC offset or IANA name;
                                   #   pass one only when a daily column's real anchor differs from target_tz
 )
@@ -522,7 +523,7 @@ transformer = TimezoneTransformer(
 **Behavior:**
 - If index is timezone-naive, localizes to UTC first, then converts
 - If index has timezone, converts directly; local days have 23/24/25 rows, nothing is added for DST
-- Daily columns: a value at t belongs to the calendar date of t in `daily_anchor` and moves to 00:00 local on that date. The default anchor is `target_tz` itself, which is right for ENTSO-E's A31 in every zone (it always stamps at the *area's own* local midnight) — a fixed `"UTC+02:00"` anchor gets this wrong in EET/EEST zones every summer and always in a fixed-UTC+3 zone
+- Daily columns: a value at t belongs to the calendar date of t in `daily_anchor` and moves to 00:00 local on that date. The default anchor is `target_tz` itself, which is right for ENTSO-E's A31 in every zone (it always stamps at the *area's own* local midnight) — a fixed `"UTC+02:00"` anchor gets this wrong in EET/EEST zones every summer and always in a fixed-UTC+3 zone. `EntsoeSource` inside the same `DataPipeline` now anchors a neighbouring area's A31 value to the market's own midnight already, so this snap is a no-op for it too; an explicit `daily_anchor` is only needed for a column whose real anchor still differs (e.g. a standalone `EntsoeSource`, not part of that `DataPipeline`)
 - Raises ValueError if a daily column has more than one value per day (e.g. ResampleTransformer ran first)
 - If that local midnight is not in the index the row is added; a UserWarning is emitted when it lies inside the data
 

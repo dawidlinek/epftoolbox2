@@ -152,6 +152,11 @@ class DataPipeline:
         same way given the same ``DataPipeline.timezone``); an explicitly set, different zone still raises.
         ``CsvSource.timezone`` is the input file's own zone, not the market's, and is not touched.
 
+        ``EntsoeSource`` has no zone parameter of its own (nothing to conflict with, so ``own=None`` always):
+        it only uses the bound zone to anchor a week-ahead daily value (A31, ``load_forecast_daily_min/max``)
+        onto the market's own local day rather than this area's own — see ``EntsoeSource._daily_zone`` — which
+        matters only when it is combined with another area in the same pipeline.
+
         ``EpftoolboxBenchmarkSource.index_timezone`` is different again: it is a fixed offset the source always
         has (derived from its ``dataset``, never inherited), so it can't be left unset to agree with
         ``self.timezone``. A mismatch there is never intentional — the source's UTC index already encodes the
@@ -160,6 +165,7 @@ class DataPipeline:
         """
         from epftoolbox2.data.sources.benchmark import EpftoolboxBenchmarkSource
         from epftoolbox2.data.sources.calendar import CalendarSource
+        from epftoolbox2.data.sources.entsoe import EntsoeSource
         from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
 
         for transformer in self.transformers:
@@ -177,6 +183,10 @@ class DataPipeline:
                 for child in getattr(source, "_location_sources", []):
                     where = f"{type(source).__name__}.timezone (via locations)"
                     _bind_timezone(child, child.timezone, self.timezone, where, owner=self)
+            elif isinstance(source, EntsoeSource):
+                _bind_timezone(
+                    source, None, self.timezone, "EntsoeSource (for its week-ahead daily values)", owner=self
+                )
             elif isinstance(source, EpftoolboxBenchmarkSource):
                 if self.timezone is not None and self.timezone != source.index_timezone:
                     raise ValueError(

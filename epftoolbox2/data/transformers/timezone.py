@@ -21,15 +21,21 @@ class TimezoneTransformer(Transformer):
     Sources return UTC. After conversion, local days have 23, 24 or 25 hours; nothing is added or removed
     (there is no 02:00 on the spring switch day and two 02:00 rows on the autumn one).
 
-    ``daily_columns`` hold one value per day, e.g. ENTSO-E's week-ahead load forecast min/max (A31). ENTSO-E
-    always stamps such a value at the *area's own* local midnight, whatever that area's UTC offset is. In CET
-    that instant is 23:00 UTC the day before in winter and 22:00 UTC in summer; a later ``ResampleTransformer``
-    would give it to the wrong hours unless it is snapped first. The rule applied: **a value at timestamp t
-    belongs to the calendar date of t in ``daily_anchor``, and is moved to 00:00 local time (``target_tz``) on
-    that date.** The default anchor is ``target_tz`` itself (None), which is right whenever the daily column
-    comes from the market's own area, in every zone — including EET/EEST and zones with a fixed UTC+3 offset,
-    which a fixed ``"UTC+02:00"`` anchor gets wrong every summer (or every day, for a zone that never observes
-    UTC+2). Pass an explicit ``daily_anchor`` only when the column's real anchor differs from ``target_tz``.
+    ``daily_columns`` hold one value per day, e.g. ENTSO-E's week-ahead load forecast min/max (A31). Each entry
+    matches a column of that exact name *or* one ending in ``f"_{name}"``, so a prefixed neighbour's column
+    (``EntsoeSource(..., prefix="fi")`` gives ``fi_load_forecast_daily_min``) is recognised without listing
+    every prefix. ENTSO-E always stamps such a value at the *area's own* local midnight, whatever that area's
+    UTC offset is. In CET that instant is 23:00 UTC the day before in winter and 22:00 UTC in summer; a later
+    ``ResampleTransformer`` would give it to the wrong hours unless it is snapped first. The rule applied: **a
+    value at timestamp t belongs to the calendar date of t in ``daily_anchor``, and is moved to 00:00 local
+    time (``target_tz``) on that date.** The default anchor is ``target_tz`` itself (None), which is right
+    whenever the daily column comes from the market's own area, in every zone — including EET/EEST and zones
+    with a fixed UTC+3 offset, which a fixed ``"UTC+02:00"`` anchor gets wrong every summer (or every day, for a
+    zone that never observes UTC+2). ``EntsoeSource`` itself now anchors a *neighbouring* area's daily value to
+    the market's own local midnight already, when it is part of the same ``DataPipeline`` (see
+    ``EntsoeSource._daily_zone``), so this snap is then already a no-op for it too; pass an explicit
+    ``daily_anchor`` only for a column whose real anchor still differs from ``target_tz`` (e.g. a standalone
+    ``EntsoeSource`` not bound through a ``DataPipeline``).
 
     Raises ``ValueError`` if a daily column holds more than one value for a day (it was probably resampled
     before this transformer; run ``TimezoneTransformer`` first). If the local midnight a value belongs to is
@@ -40,11 +46,13 @@ class TimezoneTransformer(Transformer):
     Args:
         target_tz: Target IANA time zone, e.g. ``"Europe/Warsaw"``. None (default) inherits
             ``DataPipeline.timezone``; transforming without either raises.
-        daily_columns: Columns holding one value per day. Defaults to
-            ``["load_forecast_daily_min", "load_forecast_daily_max"]``; columns not in the frame are skipped.
+        daily_columns: Column names holding one value per day, matched exactly or by a ``f"_{name}"`` suffix
+            (see above). Defaults to ``["load_forecast_daily_min", "load_forecast_daily_max"]``; a name that
+            matches nothing in the frame is skipped.
         daily_anchor: Time zone whose calendar date a daily value belongs to: a UTC offset such as
             ``"UTC+02:00"`` or an IANA name. None (default) uses the resolved ``target_tz`` itself, matching
-            where ENTSO-E stamps A31 data.
+            where ENTSO-E stamps A31 data for the market's own area (and, now, for any other area combined
+            into the same pipeline — see above).
 
     Example:
         >>> transformer = TimezoneTransformer(
@@ -98,11 +106,16 @@ class TimezoneTransformer(Transformer):
         else:
             result.index = result.index.tz_convert(tz)
 
-        for col in self.daily_columns:
-            if col in result.columns:
-                result = self._snap_to_local_midnight(result, col, tz)
+        for col in self._matching_daily_columns(result.columns):
+            result = self._snap_to_local_midnight(result, col, tz)
 
         return result
+
+    def _matching_daily_columns(self, columns) -> list[str]:
+        """Columns of `columns` matching `self.daily_columns`: an exact name, or one ending in `f"_{name}"` —
+        so a prefixed neighbour's column (e.g. `fi_load_forecast_daily_min`) is recognised without listing
+        every prefix by name (see the class docstring)."""
+        return [c for c in columns if any(c == name or c.endswith(f"_{name}") for name in self.daily_columns)]
 
     def _snap_to_local_midnight(self, result: pd.DataFrame, col: str, tz: str) -> pd.DataFrame:
         values = result[col].dropna()

@@ -15,11 +15,14 @@ from epftoolbox2.data.sources.entsoe import (
     lookup_area,
     AREAS,
 )
+from epftoolbox2.pipelines import DataPipeline
 
 KEY = "test-key-0000-secret"
 PL = AREAS["PL"]
 AT = AREAS["AT"]
 DE_LU = AREAS["DE_LU"]
+FI = AREAS["FI"]
+LT = AREAS["LT"]
 FIXTURES = Path(__file__).parent / "fixtures" / "entsoe"
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -126,6 +129,16 @@ def _utc(ts):
 
 def _hours(start, n):
     return {p: float(start + p) for p in range(1, n + 1)}
+
+
+def _week_period(zone, first_day, values, resolution="P1D"):
+    """A P1D Period covering `len(values)` consecutive local calendar days of `zone` starting `first_day` (an
+    ISO date string), exactly as ENTSO-E reports a week-ahead series: one Point per local day."""
+    days = pd.date_range(first_day, periods=len(values) + 1, freq="D", tz=zone)
+    start = days[0].tz_convert("UTC").strftime("%Y-%m-%dT%H:%MZ")
+    end = days[-1].tz_convert("UTC").strftime("%Y-%m-%dT%H:%MZ")
+    points = {i: v for i, v in enumerate(values, start=1)}
+    return _period(start, end, resolution, points)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -395,6 +408,105 @@ class TestCurveTypeA03:
         assert (local == local.normalize()).all()
         assert list(local.day) == [21, 22, 23, 24, 25, 26, 27]
         assert values.tolist() == [100, 200, 200, 200, 200, 600, 700]
+
+
+class TestWeekAheadDailyMarketZone:
+    """A neighbouring area's week-ahead daily value (A31) must land on the *market*'s local day when this
+    source is combined with another area in a DataPipeline, not on the neighbour's own local day (finding: a
+    Finnish or Lithuanian (EET) neighbour of a Polish (CET) market pipeline used to be off by one hour, and
+    around a DST switch even lands on the wrong calendar day). See EntsoeSource._daily_zone."""
+
+    def _bound_neighbour(self, area, zone, first_day, values, market="Europe/Warsaw"):
+        week = _doc(_series(_week_period(zone, first_day, values), business_type="A60", out_bz=AREAS[area]))
+        source = _source(_route_by_document({("A65", "A31"): week}), country=area, type=["load"], prefix=area.lower())
+        DataPipeline(sources=[source], timezone=market)
+        days = pd.date_range(first_day, periods=len(values) + 1, freq="D", tz=zone)
+        df = source.fetch(days[0].tz_convert("UTC"), days[-1].tz_convert("UTC"))
+        column = f"{area.lower()}_load_forecast_daily_min"
+        return df[column].dropna(), days[:-1]
+
+    def _assert_lands_on_the_markets_own_day(self, values, local_days, market, expected):
+        local = values.index.tz_convert(market)
+        assert (local == local.normalize()).all(), "value is not at the market's own local midnight"
+        assert list(local.date) == [d.date() for d in local_days]
+        assert values.tolist() == expected
+
+    def test_finnish_neighbour_normal_week(self):
+        values, days = self._bound_neighbour("FI", "Europe/Helsinki", "2024-01-15", list(range(101, 108)))
+        self._assert_lands_on_the_markets_own_day(values, days, "Europe/Warsaw", list(range(101, 108)))
+
+    def test_lithuanian_neighbour_normal_week(self):
+        values, days = self._bound_neighbour("LT", "Europe/Vilnius", "2024-01-15", list(range(201, 208)))
+        self._assert_lands_on_the_markets_own_day(values, days, "Europe/Warsaw", list(range(201, 208)))
+
+    def test_finnish_neighbour_around_the_spring_dst_switch(self):
+        # 2024-03-31: EU-wide spring-forward at 01:00 UTC; the same calendar date in every EU zone.
+        values, days = self._bound_neighbour("FI", "Europe/Helsinki", "2024-03-28", list(range(301, 308)))
+        self._assert_lands_on_the_markets_own_day(values, days, "Europe/Warsaw", list(range(301, 308)))
+
+    def test_finnish_neighbour_around_the_autumn_dst_switch(self):
+        # 2024-10-27: EU-wide fall-back at 01:00 UTC.
+        values, days = self._bound_neighbour("FI", "Europe/Helsinki", "2024-10-24", list(range(401, 408)))
+        self._assert_lands_on_the_markets_own_day(values, days, "Europe/Warsaw", list(range(401, 408)))
+
+    def test_unbound_neighbour_keeps_its_own_area_midnight(self):
+        # Without a DataPipeline there is no market zone to anchor to; behaviour is unchanged (FI's own midnight).
+        week = _doc(
+            _series(
+                _week_period("Europe/Helsinki", "2024-01-15", list(range(101, 108))), business_type="A60", out_bz=FI
+            )
+        )
+        source = _source(_route_by_document({("A65", "A31"): week}), country="FI", type=["load"])
+        days = pd.date_range("2024-01-15", periods=8, freq="D", tz="Europe/Helsinki")
+        df = source.fetch(days[0].tz_convert("UTC"), days[-1].tz_convert("UTC"))
+        values = df["load_forecast_daily_min"].dropna()
+        local = values.index.tz_convert("Europe/Helsinki")
+        assert (local == local.normalize()).all()
+        assert list(local.date) == [d.date() for d in days[:-1]]
+
+    def test_same_zone_source_in_a_matching_pipeline_is_unchanged(self):
+        # PL's own AREA_TIMEZONES fallback ("Europe/Brussels") and the market zone ("Europe/Warsaw") are
+        # offset-identical (same CET/CEST rule) but different zone *names*; binding must not move the value.
+        week = _doc(
+            _series(_week_period("Europe/Warsaw", "2024-01-15", list(range(1, 8))), business_type="A60", out_bz=PL)
+        )
+        route = _route_by_document({("A65", "A31"): week})
+        days = pd.date_range("2024-01-15", periods=8, freq="D", tz="Europe/Warsaw")
+        start, end = days[0].tz_convert("UTC"), days[-1].tz_convert("UTC")
+
+        unbound = _source(route, country="PL", type=["load"])
+        bound = _source(route, country="PL", type=["load"])
+        DataPipeline(sources=[bound], timezone="Europe/Warsaw")
+
+        pd.testing.assert_series_equal(
+            unbound.fetch(start, end)["load_forecast_daily_min"], bound.fetch(start, end)["load_forecast_daily_min"]
+        )
+
+    def test_cache_key_reflects_the_bound_market_zone(self):
+        source_pl = _source(lambda p: NO_DATA, country="FI", type=["load"])
+        source_de = _source(lambda p: NO_DATA, country="FI", type=["load"])
+        DataPipeline(sources=[source_pl], timezone="Europe/Warsaw")
+        DataPipeline(sources=[source_de], timezone="Europe/Berlin")
+        unbound = EntsoeSource("FI", KEY, type=["load"]).get_cache_config()
+
+        assert source_pl.get_cache_config()["daily_zone"] == "Europe/Warsaw"
+        assert source_de.get_cache_config()["daily_zone"] == "Europe/Berlin"
+        assert unbound["daily_zone"] == "Europe/Helsinki"
+        assert (
+            len(
+                {
+                    source_pl.get_cache_config()["daily_zone"],
+                    source_de.get_cache_config()["daily_zone"],
+                    unbound["daily_zone"],
+                }
+            )
+            == 3
+        )
+
+    def test_cache_key_omits_daily_zone_without_load(self):
+        source = _source(lambda p: NO_DATA, country="FI", type=["generation"])
+        DataPipeline(sources=[source], timezone="Europe/Warsaw")
+        assert "daily_zone" not in source.get_cache_config()
 
 
 class TestPrices:

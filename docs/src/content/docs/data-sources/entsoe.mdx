@@ -52,9 +52,11 @@ df = source.fetch(
 `fetch(start, end)` returns the half-open range `[start, end)` with a **UTC** index. Data is requested in 3-month
 chunks; a chunk that keeps failing raises an error instead of leaving a gap.
 
-Daily values (`load_forecast_daily_min/max`) are stamped at local midnight of the day they describe. When that
-midnight lies before `start` (for example a Warsaw day starts at 23:00 UTC the evening before), the value that
-covers `start` is reported at `start`, so the first day is not lost.
+Daily values (`load_forecast_daily_min/max`) are stamped at local midnight of the day they describe: **the
+market's** local midnight when this source is part of a `DataPipeline`, and this area's own otherwise (see
+[Week-ahead daily values and neighbouring areas](#week-ahead-daily-values-and-neighbouring-areas) below). When
+that midnight lies before `start` (for example a Warsaw day starts at 23:00 UTC the evening before), the value
+that covers `start` is reported at `start`, so the first day is not lost.
 
 ---
 
@@ -72,6 +74,34 @@ covers `start` is reported at `start`, so the first day is not lost.
 Load keeps the resolution ENTSO-E publishes (15 minutes for PL and DE_LU in 2024–2025). The daily columns hold
 one value at local midnight and are empty in between; fill them with
 `ResampleTransformer(method="ffill", columns=[...])` after `TimezoneTransformer`.
+
+#### Week-ahead daily values and neighbouring areas
+
+`load_forecast_daily_min/max` (A31) holds one value per **this area's own** local calendar day D. Combining
+this source with another area's in one market pipeline needs that value on the *market's* local day D, not
+necessarily this area's — a Finnish (EET) neighbour's day starts an hour before a Polish (CET) market's, so
+without correcting for that, its daily value would land an hour into the wrong side of midnight, and around a
+DST switch even on the wrong calendar day.
+
+`EntsoeSource` fixes this automatically when it is part of a `DataPipeline`: it stamps the value at the
+*market's* local midnight of its own day D, instead of this area's own midnight, so the row already sits
+where `TimezoneTransformer`'s default snap (anchored to the market zone) expects it — a no-op for this column.
+Used standalone, or when this area already *is* the market's own, the value is stamped at this area's own
+midnight, exactly as before.
+
+```python
+# FI's week-ahead daily min/max land on Warsaw's own local days, not Helsinki's
+pipeline = (
+    DataPipeline(timezone="Europe/Warsaw")
+    .add_source(EntsoeSource("PL", api_key=api_key, type=["load"]))
+    .add_source(EntsoeSource("FI", api_key=api_key, type=["load"], prefix="fi"))
+    .add_transformer(TimezoneTransformer())
+)
+```
+
+`TimezoneTransformer`'s default `daily_columns` recognise a prefixed neighbour's column
+(`fi_load_forecast_daily_min`) automatically too — see
+[TimezoneTransformer](/epftoolbox2/transformers/timezone/).
 
 ### Price Data (`type=["price"]`)
 

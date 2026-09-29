@@ -18,12 +18,15 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from epftoolbox2.logging import get_logger
+from .._market_timezone import resolve as _resolve_timezone
 from .base import DataSource
 
 # Bump whenever the output for the same parameters changes, so that cached frames from older parsers are not served.
 # 2: every price period kept on a uniform grid, SDAC sequence only, curveType A03 filled, A75 consumption split,
 #    daily values on the local calendar, [start, end) range, PsrType names.
-SCHEMA_VERSION = 2
+# 3: a week-ahead daily value (A31, load_forecast_daily_min/max) is anchored to the market zone bound onto this
+#    source by DataPipeline, not always this area's own (see _daily_zone); the cache key now includes it too.
+SCHEMA_VERSION = 3
 
 
 class NoMatchingDataError(Exception):
@@ -322,6 +325,14 @@ class EntsoeSource(DataSource):
     hourly (quarter-hours averaged into hours) with ``prefer_15min=False``, 15-minute (hourly periods step-filled)
     with ``prefer_15min=True``. Other series keep the resolution ENTSO-E publishes.
 
+    The week-ahead daily columns (``load_forecast_daily_min/max``, A31) hold one value per **this area's own**
+    local day D. When this source is part of a ``DataPipeline``, that value is stamped at the *market's* local
+    midnight of the same day D (see ``_daily_zone``), not this area's own midnight — so a neighbouring area
+    combined into a market pipeline (``EntsoeSource("FI", ..., prefix="fi")`` inside
+    ``DataPipeline(timezone="Europe/Warsaw")``) lands on the market's own local day, matching every other
+    column. Used standalone, or when this area is already the market's own, the value is stamped at this
+    area's own midnight as before (a no-op in the second case).
+
     Example:
         >>> source = EntsoeSource('PL', api_key='your-api-key', type=['load', 'generation', 'price'])
         >>> df = source.fetch(start=pd.Timestamp('2024-01-01', tz='Europe/Warsaw'),
@@ -334,6 +345,11 @@ class EntsoeSource(DataSource):
     MAX_RETRIES = 5
     RETRY_BACKOFF_SECONDS = 2.0
     MAX_RETRY_WAIT_SECONDS = 120.0
+
+    # Set by DataPipeline._bind_component_timezones() when this source is part of a pipeline; never written by
+    # users. Unlike CalendarSource/OpenMeteoSource this source has no zone parameter of its own to conflict with
+    # it — see `market_timezone`/`_daily_zone`.
+    _pipeline_timezone: Optional[str] = None
 
     def __init__(
         self,
@@ -365,6 +381,32 @@ class EntsoeSource(DataSource):
         """Cleanup session on object destruction"""
         if hasattr(self, "session") and self.session:
             self.session.close()
+
+    @property
+    def market_timezone(self) -> Optional[str]:
+        """The zone a `DataPipeline` bound onto this source, or `None` when used standalone.
+
+        Unlike `CalendarSource`/`OpenMeteoSource`, this source has no zone parameter of its own: every value it
+        returns is timestamped in UTC from ENTSO-E's own data, and only the week-ahead daily columns need a
+        zone at all, to decide which local day they belong to when this area is combined with others in one
+        market pipeline (see `_daily_zone`).
+        """
+        return _resolve_timezone(None, self)
+
+    def _daily_zone(self) -> str:
+        """Zone a week-ahead daily value's (`load_forecast_daily_min/max`, A31, resolution "P1D") local midnight
+        is stamped at: the zone bound by `DataPipeline.timezone` (see `market_timezone`) when this source is
+        part of one, else this area's own zone (`_timezone`) — unchanged for standalone use, and a no-op
+        whenever this area already *is* the market's (e.g. `EntsoeSource("PL", ...)` in a
+        `DataPipeline(timezone="Europe/Warsaw")`).
+
+        ENTSO-E reports a week-ahead value at *this area's* own local midnight of its own local day D. Stamping
+        it here instead at the *market's* midnight of the same day D means a later `TimezoneTransformer` (whose
+        own default `daily_anchor` is the market zone) does not need to know this source's area at all — its
+        snap for this column is then already a no-op, and the value lands on the market's own local day like
+        every other column, not the neighbour's.
+        """
+        return self.market_timezone or self._timezone
 
     def _validate_config(self):
         if not self.api_key:
@@ -882,7 +924,14 @@ class EntsoeSource(DataSource):
 
     def _period_index(self, start: pd.Timestamp, end: pd.Timestamp, resolution: str) -> pd.DatetimeIndex:
         """UTC start of every position of a Period. Daily and longer resolutions follow the local calendar of the
-        area (a week with the autumn DST switch lasts 169 hours but still has 7 daily positions)."""
+        area (a week with the autumn DST switch lasts 169 hours but still has 7 daily positions).
+
+        A "P1D" period (week-ahead load min/max, A31 — the only daily resolution this source parses) is
+        additionally re-anchored from this area's own local midnight of day D to `_daily_zone()`'s midnight of
+        that same day D, so a neighbouring area's value lands on the market's own local day, not the
+        neighbour's (see `_daily_zone`). Other non-Timedelta resolutions (P1Y installed capacity) are
+        unaffected and keep this area's own zone.
+        """
         start = start.tz_convert("UTC").as_unit("ns")
         end = end.tz_convert("UTC").as_unit("ns")
         step = parse_resolution(resolution)
@@ -896,7 +945,13 @@ class EntsoeSource(DataSource):
             while current < local_end:
                 stamps.append(current)
                 current = current + step
-            return pd.DatetimeIndex(stamps).tz_convert("UTC")
+            index = pd.DatetimeIndex(stamps)
+            if resolution == "P1D":
+                dates = index.tz_localize(None)
+                index = dates.tz_localize(
+                    self._daily_zone(), ambiguous=np.ones(len(dates), dtype=bool), nonexistent="shift_forward"
+                )
+            return index.tz_convert("UTC")
 
         # Not aligned with local midnight of the assumed timezone: step in UTC, rounding the number of positions
         nominal = (start + step) - start
@@ -930,4 +985,8 @@ class EntsoeSource(DataSource):
             config["neighbours"] = sorted(lookup_area(n)[0] for n in self.neighbours)
         if self.prefix:
             config["prefix"] = self.prefix
+        # Only "load" fetches week-ahead daily values (A31), whose local-midnight anchor depends on this (see
+        # _daily_zone): a pipeline bound to a different market zone must not share a cache entry with another.
+        if "load" in self.type:
+            config["daily_zone"] = self._daily_zone()
         return config

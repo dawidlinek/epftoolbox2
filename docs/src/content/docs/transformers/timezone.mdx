@@ -30,14 +30,28 @@ pipeline = DataPipeline(timezone="Europe/Warsaw").add_transformer(TimezoneTransf
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `target_tz` | str | `None` | Target IANA time zone, e.g. `"Europe/Warsaw"`. `None` inherits `DataPipeline.timezone` when part of a pipeline; transforming without either raises |
-| `daily_columns` | list[str] \| None | `None` | Columns holding one value per day. `None` means `["load_forecast_daily_min", "load_forecast_daily_max"]` (ENTSO-E week-ahead forecast); columns not in the frame are skipped |
+| `daily_columns` | list[str] \| None | `None` | Column names holding one value per day, matched by exact name or a `f"_{name}"` suffix (so a prefixed neighbour's column, e.g. `fi_load_forecast_daily_min`, is recognised too). `None` means `["load_forecast_daily_min", "load_forecast_daily_max"]` (ENTSO-E week-ahead forecast); a name matching nothing in the frame is skipped |
 | `daily_anchor` | str \| None | `None` | Time zone whose calendar date a daily value belongs to: a UTC offset (`"UTC+02:00"`, `"+01:00"`, `"UTC"`) or an IANA name. `None` uses the resolved `target_tz` itself |
 
 ---
 
 ## Daily columns
 
-ENTSO-E's week-ahead load forecast (A31) has one value per day, but its periods start at 00:00 local time **of the market's own area** — whatever that area's UTC offset is, in every zone. In CET (Warsaw) that instant is 00:00 UTC+2 in summer and 23:00 UTC the day before in winter; without correction a later `ResampleTransformer` would give each winter value to the wrong hours. Further east it is a different offset again: 00:00 EEST (UTC+3) in Helsinki in summer, 00:00 UTC+3 all year in a zone with a fixed offset (e.g. Europe/Istanbul).
+Each `daily_columns` entry matches a column of that exact name, or one ending in `f"_{name}"` — so a prefixed
+neighbour's column (`EntsoeSource(..., prefix="fi")` gives `fi_load_forecast_daily_min`) is recognised under
+the default list without adding every prefix by name.
+
+ENTSO-E's week-ahead load forecast (A31) has one value per day, but its periods start at 00:00 local time **of the area that published it** — whatever that area's UTC offset is, in every zone. In CET (Warsaw) that instant is 00:00 UTC+2 in summer and 23:00 UTC the day before in winter; without correction a later `ResampleTransformer` would give each winter value to the wrong hours. Further east it is a different offset again: 00:00 EEST (UTC+3) in Helsinki in summer, 00:00 UTC+3 all year in a zone with a fixed offset (e.g. Europe/Istanbul).
+
+<Aside type="tip">
+  `EntsoeSource` already anchors its week-ahead daily value to the **market's own** local midnight, not
+  necessarily the publishing area's, whenever it is part of the same `DataPipeline` (see
+  [EntsoeSource > Week-ahead daily values and neighbouring areas](/epftoolbox2/data-sources/entsoe/#week-ahead-daily-values-and-neighbouring-areas)).
+  The table below (anchored to the market's own zone in every case) therefore already describes this
+  transformer's snap for such a column too — it is a no-op, because the value already sits there. A column from
+  a source that isn't part of that `DataPipeline` (or that anchors to some other, fixed zone regardless of the
+  pipeline) still needs its own `daily_anchor`.
+</Aside>
 
 The rule `TimezoneTransformer` applies:
 

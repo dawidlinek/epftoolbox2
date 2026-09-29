@@ -6,6 +6,10 @@ decides a local calendar day or a leak-free cutoff (`CalendarSource.timezone`, `
 with `OpenMeteoSource`'s `locations` parameter binds the same way through each of its private per-location
 instances (see `DataPipeline._bind_component_timezones`).
 
+`EntsoeSource` binds too, but has no zone parameter of its own to resolve against `own` (always `None`): it only
+uses the bound zone to anchor its week-ahead daily columns (A31) onto the market's own local day when combined
+with another area, not to decide anything about its own output otherwise (see `EntsoeSource._daily_zone`).
+
 `DataPipeline` resolves this once, before running (`DataPipeline._bind_component_timezones`), and stores the
 result on each component's private `_pipeline_timezone` attribute — never the public one, so
 `DataPipeline.save()` keeps writing the value the user actually gave (often `None`) and a YAML round trip
