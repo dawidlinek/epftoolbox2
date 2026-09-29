@@ -85,6 +85,7 @@ class TestInheritance:
     def test_open_meteo_source_with_locations(self):
         source = OpenMeteoSource(
             locations={"warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 1.0}},
+            agg="mean",
             columns=["temperature_2m"],
         )
         DataPipeline(sources=[source], timezone=TZ)
@@ -138,6 +139,7 @@ class TestMissingEverywhereRaises:
     def test_open_meteo_source_with_locations(self):
         source = OpenMeteoSource(
             locations={"warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 1.0}},
+            agg="mean",
             columns=["temperature_2m"],
         )
         pipe = DataPipeline(sources=[source])

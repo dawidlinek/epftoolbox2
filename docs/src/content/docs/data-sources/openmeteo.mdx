@@ -45,7 +45,8 @@ df = source.fetch(
 | `latitude` | float \| None | No\* | `None` | Location latitude (-90 to 90). \*Required unless `locations` is given |
 | `longitude` | float \| None | No\* | `None` | Location longitude (-180 to 180). \*Required unless `locations` is given |
 | `locations` | dict \| str \| None | No | `None` | Several locations instead of `latitude`/`longitude` — see [Several locations](#several-locations) |
-| `keep_locations` | bool | No | `False` | With weighted `locations`, also return each location's own columns — see [Several locations](#several-locations) |
+| `agg` | str \| List[str] \| None | No | `None` | Aggregate `locations` across space — see [Several locations](#several-locations) |
+| `keep_locations` | bool | No | `False` | With `agg` set, also return each location's own columns — see [Several locations](#several-locations) |
 | `columns` | List[str] \| None | No | `None` (= `DEFAULT_COLUMNS`) | Weather variables |
 | `horizon` | int | No | `5` | Days ahead: columns `d+1` .. `d+horizon`. Under `api="previous_runs"` the largest usable horizon depends on the model, `timezone` and `run` (5 for the default JMA model at `run="00"`; see [Horizon](#horizon)); a larger value raises. Under `api="single_runs"`, 1-14; leads beyond the run's own length come back NaN (reported, see `strict`) |
 | `model` | str | No | `"jma_seamless"` | Weather model (see [Choosing a model](#choosing-a-model)) |
@@ -205,68 +206,79 @@ With `jma_seamless`, `showers` is always 0; pass `columns=[...]` to skip it.
 
 Pass `locations` instead of `latitude`/`longitude` to combine several locations into one source — for example a
 population- or capacity-weighted series for a whole bidding zone, or a plain multi-city dataset. It is a dict
-`{name: {"latitude", "longitude", "weight"?}}` (also accepting `{name: (latitude, longitude)}` /
-`(latitude, longitude, weight)` tuples), or the compact string `"name:lat:lon:weight, name:lat:lon:weight, ..."`
-handy for YAML or the TUI (the weight can also be left out there, per location). Names must use letters, digits
-and underscores and be unique; weights, when given, must be positive numbers, and must be given for **every**
-location or for **none**.
+`{name: {"latitude", "longitude", "weight"?}}`, or the compact string `"name:lat:lon:weight, name:lat:lon:weight,
+..."` handy for YAML or the TUI (the weight can also be left out there, per location). Names must use letters,
+digits and underscores and be unique; weights, when given, must be positive numbers, and must be given for
+**every** location or for **none**.
 
 Every location is fetched by another `OpenMeteoSource` sharing every other parameter here (including `api` and
 `run`), so all locations follow the same cutoff.
 
+### `agg`: combining locations into one series
+
+`agg` controls what `fetch()` returns for several `locations`:
+
+| `agg` | Output |
+|-------|--------|
+| `None` *(default)* | Only the per-location columns, `{prefix}_{name}_{variable}_d+i` — a plain multi-city dataset |
+| `"mean"` \| `"median"` \| `"min"` \| `"max"` \| `"sum"` | One aggregated series per variable, `{prefix}_{variable}_d+i` |
+| A list, e.g. `["mean", "max"]` | One series per variable **and** entry, `{prefix}_{variable}_{agg}_d+i` — even with a single entry, unlike the bare-string form |
+
+`keep_locations=True` additionally returns the per-location columns alongside whatever `agg` produces; it raises
+if `agg` is `None` (the per-location columns are then already the only output).
+
+```python
+# one point, as today
+OpenMeteoSource(latitude=52.2297, longitude=21.0122, prefix="warsaw")
+
+# several points, no agg -> per-location columns only
+OpenMeteoSource(prefix="pl", locations={
+    "warsaw": {"latitude": 52.2297, "longitude": 21.0122},
+    "krakow": {"latitude": 50.0647, "longitude": 19.9450},
+})
+# pl_warsaw_temperature_2m_d+1, pl_krakow_temperature_2m_d+1, ...
+
+# one averaged series per variable (plain mean: no weights given)
+OpenMeteoSource(prefix="pl", locations={...}, agg="mean")
+# pl_temperature_2m_d+1, ...
+
+# weighted mean
+OpenMeteoSource(prefix="pl", locations={
+    "warsaw": {"latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},   # millions
+    "krakow": {"latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
+}, agg="mean")
+# pl_temperature_2m_d+1, ... (weighted)
+
+# aggregate and keep the per-location columns too
+OpenMeteoSource(prefix="pl", locations={...}, agg="max", keep_locations=True)
+# pl_temperature_2m_d+1, pl_warsaw_temperature_2m_d+1, pl_krakow_temperature_2m_d+1, ...
+
+# several aggregates at once
+OpenMeteoSource(prefix="pl", locations={...}, agg=["mean", "max"])
+# pl_temperature_2m_mean_d+1, pl_temperature_2m_max_d+1, ...
+```
+
 <Aside type="caution" title="Weights must be known on D">
-  Weights are fixed constructor parameters and apply to the whole sample. Use population or installed-capacity
-  figures from a reference date **before the sample starts** (e.g. the start of the backtest, or the
-  census/registry date closest to it before that). Using end-of-sample figures for the whole history is
-  look-ahead: the model would see population or capacity growth that had not happened yet on earlier forecast
-  days.
+  Weights apply only to `"mean"` (which then becomes a weighted mean, `sum(w_l * x_l) / sum(w_l)` with weights
+  normalised to sum to 1); giving them when `agg` doesn't include `"mean"` raises. In a list, only `"mean"` is
+  weighted — the other aggregations are always unweighted, even with weights given. Weights are fixed
+  constructor parameters and apply to the whole sample: use population or installed-capacity figures from a
+  reference date **before the sample starts** (e.g. the start of the backtest, or the census/registry date
+  closest to it before that). Using end-of-sample figures for the whole history is look-ahead: the model would
+  see population or capacity growth that had not happened yet on earlier forecast days.
 </Aside>
 
-### With weights: one combined series per variable
+### Special columns
 
-```python
-from epftoolbox2.data.sources import OpenMeteoSource
-
-source = OpenMeteoSource(
-    locations={
-        "warsaw": {"latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},   # millions
-        "krakow": {"latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
-        "gdansk": {"latitude": 54.3520, "longitude": 18.6466, "weight": 0.47},
-    },
-    columns=["temperature_2m", "wind_speed_10m"],
-    horizon=5,
-    prefix="pl",
-    timezone="Europe/Warsaw",
-)
-
-df = source.fetch(start="2024-01-01", end="2024-06-01")
-```
-
-For each output column `{prefix}_{variable}_d+{i}`: weights are normalised to sum to 1; most variables use a
-plain weighted mean, `sum(w_l * x_l) / sum(w_l)`; variables whose name contains `direction` (e.g.
-`wind_direction_10m`) use a **weighted circular mean**, so 350° and 10° average to about 0°, not 180°;
-`weather_code` is categorical and is **never averaged** — it is dropped from the combined output unless
-`keep_locations=True`. A row is missing (`NaN`) if **any** location is missing at that row: weights are never
-re-normalised over just the available locations. Locations are unioned on their index first, and trailing rows
-with no value at all are dropped, as elsewhere in the Open-Meteo source.
-
-Columns: `pl_temperature_2m_d+1`, `pl_wind_speed_10m_d+1`, ... With `keep_locations=True`, per-location columns
-are also returned, `{prefix}_{name}_{variable}_d+{i}` (including `weather_code`, which has no weighted
-equivalent):
-
-```python
-# Example output columns (keep_locations=True):
-# pl_temperature_2m_d+1
-# pl_warsaw_temperature_2m_d+1
-# pl_krakow_temperature_2m_d+1
-# pl_gdansk_temperature_2m_d+1
-```
-
-### Without weights: one column set per location
-
-Leave `weight` out of every location to skip the weighted average and get only the per-location columns,
-`{prefix}_{name}_{variable}_d+{i}` — a plain multi-city dataset, e.g. for a per-city model or a feature per
-delivery area:
+- **`*direction*` columns** (e.g. `wind_direction_10m`): `"mean"` uses the **weighted circular mean**, so 350°
+  and 10° average to about 0°, not 180°. Every other aggregation **skips** direction columns entirely — there is
+  no meaningful min/max/median/sum for a circular quantity. `keep_locations=True` still returns them per
+  location.
+- **`weather_code`** is categorical and is **never aggregated**, for any `agg` value — it is dropped from the
+  aggregated output unless `keep_locations=True` returns it per location.
+- A row is missing (`NaN`) if **any** location is missing at that row: weights are never re-normalised over just
+  the available locations, and this is unaffected by `agg`. Locations are unioned on their index first, and
+  trailing rows with no value at all are dropped, as elsewhere in the Open-Meteo source.
 
 ```python
 from epftoolbox2.pipelines import DataPipeline
@@ -274,9 +286,9 @@ from epftoolbox2.data.sources import OpenMeteoSource
 
 pipeline = DataPipeline(timezone="Europe/Warsaw").add_source(OpenMeteoSource(
     locations={
-        "warsaw": (52.2297, 21.0122),
-        "krakow": (50.0647, 19.9450),
-        "gdansk": (54.3520, 18.6466),
+        "warsaw": {"latitude": 52.2297, "longitude": 21.0122},
+        "krakow": {"latitude": 50.0647, "longitude": 19.9450},
+        "gdansk": {"latitude": 54.3520, "longitude": 18.6466},
     },
     horizon=5,
 ))
@@ -286,8 +298,8 @@ print(df.columns[:2].tolist())
 # ['warsaw_temperature_2m_d+1', 'krakow_temperature_2m_d+1']
 ```
 
-`locations` (with each location's latitude, longitude and weight) and, when used, `keep_locations` are part of
-the cache key; `latitude`/`longitude` are omitted from it in this mode.
+`locations` (with each location's latitude, longitude and weight), and, when used, `agg` and `keep_locations`,
+are part of the cache key; `latitude`/`longitude` are omitted from it in this mode.
 
 ---
 
@@ -302,4 +314,4 @@ print(df.columns[:5].tolist())
 
 ## Caching
 
-The cache key includes `latitude`/`longitude` (or `locations`, with `keep_locations` when it's `True`, instead), `horizon`, `model`, `columns`, `prefix`, `temporal_resolution`, `api`, `run`, `timezone` and a `schema_version`, so caches written by earlier versions are not reused. `strict` and `proxy_url` don't change the data and are not part of the key.
+The cache key includes `latitude`/`longitude` (or `locations`, with `agg` and `keep_locations` when they're set, instead), `horizon`, `model`, `columns`, `prefix`, `temporal_resolution`, `api`, `run`, `timezone` and a `schema_version`, so caches written by earlier versions are not reused. `strict` and `proxy_url` don't change the data and are not part of the key.

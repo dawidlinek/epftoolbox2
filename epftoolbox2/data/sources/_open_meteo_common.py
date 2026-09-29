@@ -17,15 +17,18 @@ from .base import DataSource
 
 _RUN_RE = re.compile(r"^([01]\d|2[0-3])$")
 _LOCATION_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
-# Variables that cannot be averaged arithmetically when combining several locations (see `_weighted_average`).
+# Variables that cannot be averaged arithmetically when combining several locations (see `_combine_locations`).
 _CIRCULAR_VARIABLE_RE = re.compile(r"direction")
 _CATEGORICAL_VARIABLES = ("weather_code",)
+
+# Valid `agg` values (see OpenMeteoSource.agg): a bare string or a non-empty list of these.
+AGGREGATIONS = ("mean", "median", "min", "max", "sum")
 
 # Attributes every OpenMeteoSource instance sets at construction time that must not be forwarded when building one
 # instance per location (see `OpenMeteoBase._location_kwargs`): runtime objects, and the parameters `locations`
 # itself replaces.
 _RUNTIME_ATTRIBUTES = {"session", "console", "logger"}
-_NON_LOCATION_KWARGS = {"latitude", "longitude", "locations", "prefix", "keep_locations"}
+_NON_LOCATION_KWARGS = {"latitude", "longitude", "locations", "prefix", "keep_locations", "agg"}
 
 
 def parse_run(value: str) -> int:
@@ -90,12 +93,12 @@ def parse_hourly(response_data: Dict) -> pd.DataFrame:
 def parse_locations(locations: Union[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Normalise `locations` to [{"name", "latitude", "longitude", "weight"}, ...] (weight is None if not given).
 
-    Accepts a dict ``{name: {"latitude", "longitude", "weight"?}}``, a dict ``{name: (latitude, longitude)}`` or
-    ``{name: (latitude, longitude, weight)}`` (list or tuple), or the compact string
+    Accepts a dict ``{name: {"latitude", "longitude", "weight"?}}``, or the compact string
     ``"name:latitude:longitude[:weight], ..."`` used by YAML and the TUI. Names must use letters, digits and
     underscores and be unique. Weights, when given, must be positive numbers, and must be given for every
-    location or for none — a silent mix would leave some locations out of the weighted average while still
-    fetching them.
+    location or for none — a silent mix would leave some locations out of the weighted mean while still
+    fetching them. Weights are only meaningful for ``agg="mean"`` (see ``OpenMeteoSource.agg``); that is
+    validated by the caller, not here, since this function has no notion of ``agg``.
     """
     if isinstance(locations, str):
         locations = _parse_compact_string(locations)
@@ -121,7 +124,7 @@ def parse_locations(locations: Union[str, Dict[str, Any]]) -> List[Dict[str, Any
 
 
 def _parse_compact_string(text: str) -> Dict[str, Any]:
-    """ "name:latitude:longitude[:weight], ..." -> {name: (latitude, longitude) | (latitude, longitude, weight)}."""
+    """ "name:latitude:longitude[:weight], ..." -> {name: {"latitude", "longitude", "weight"?}}."""
     locations: Dict[str, Any] = {}
     for item in filter(None, (part.strip() for part in text.split(","))):
         parts = item.split(":")
@@ -129,35 +132,30 @@ def _parse_compact_string(text: str) -> Dict[str, Any]:
             raise ValueError(f'location {item!r} must be "name:latitude:longitude" or "name:latitude:longitude:weight"')
         name = parts[0].strip()
         try:
-            numbers = tuple(float(p) for p in parts[1:])
+            numbers = [float(p) for p in parts[1:]]
         except ValueError:
             raise ValueError(f'location {item!r} must be "name:latitude:longitude[:weight]" with numbers')
         if name in locations:
             raise ValueError(f"duplicate location name {name!r}")
-        locations[name] = numbers
+        spec = {"latitude": numbers[0], "longitude": numbers[1]}
+        if len(numbers) == 3:
+            spec["weight"] = numbers[2]
+        locations[name] = spec
     return locations
 
 
 def _parse_location_spec(name: str, spec: Any) -> Dict[str, Any]:
-    """One location's `{"latitude", "longitude", "weight"}`, from a dict or a `(lat, lon[, weight])` sequence."""
-    if isinstance(spec, dict):
-        allowed = {"latitude", "longitude", "weight"}
-        if not {"latitude", "longitude"} <= set(spec) or not set(spec) <= allowed:
-            raise ValueError(
-                f"location {name!r} must be a dict with latitude, longitude and optionally weight, got {spec!r}"
-            )
-        latitude, longitude, weight = spec["latitude"], spec["longitude"], spec.get("weight")
-    elif isinstance(spec, (list, tuple)):
-        if len(spec) == 2:
-            (latitude, longitude), weight = spec, None
-        elif len(spec) == 3:
-            latitude, longitude, weight = spec
-        else:
-            raise ValueError(
-                f"location {name!r} must be (latitude, longitude) or (latitude, longitude, weight), got {spec!r}"
-            )
-    else:
-        raise ValueError(f"location {name!r} must be a dict or a (latitude, longitude[, weight]) tuple, got {spec!r}")
+    """One location's `{"latitude", "longitude", "weight"}`, from a dict with those keys."""
+    if not isinstance(spec, dict):
+        raise ValueError(
+            f"location {name!r} must be a dict with latitude, longitude and optionally weight, got {spec!r}"
+        )
+    allowed = {"latitude", "longitude", "weight"}
+    if not {"latitude", "longitude"} <= set(spec) or not set(spec) <= allowed:
+        raise ValueError(
+            f"location {name!r} must be a dict with latitude, longitude and optionally weight, got {spec!r}"
+        )
+    latitude, longitude, weight = spec["latitude"], spec["longitude"], spec.get("weight")
 
     if isinstance(latitude, bool) or not isinstance(latitude, (int, float)) or not -90 <= latitude <= 90:
         raise ValueError(f"latitude of {name!r} must be between -90 and 90, got {latitude!r}")
@@ -171,45 +169,126 @@ def _parse_location_spec(name: str, spec: Any) -> Dict[str, Any]:
     return {"latitude": float(latitude), "longitude": float(longitude), "weight": weight}
 
 
-def _weighted_average(frames: List[pd.DataFrame], weights: np.ndarray) -> pd.DataFrame:
-    """Weighted combination of same-columned, same-indexed frames, one row per shared index value.
+def parse_agg(agg: Optional[Union[str, List[str], Tuple[str, ...]]]) -> Optional[Tuple[str, ...]]:
+    """Normalise `agg` (see `OpenMeteoSource.agg`) to a tuple of `AGGREGATIONS` names, or `None`.
 
-    Most columns use a plain weighted mean; a column whose variable name (before `_d+i`) contains "direction"
-    uses a weighted circular mean instead, so 350 deg and 10 deg average to about 0, not 180; a categorical
-    variable (`_CATEGORICAL_VARIABLES`, e.g. `weather_code`) is skipped entirely — it has no meaningful average.
-    A row is NaN wherever any location is NaN there: weights are never re-normalised over just the locations
-    that have a value.
+    A bare string and a one-element list both normalise to a length-1 tuple; callers that need to tell them
+    apart for column naming (`{variable}_d+i` for a string, `{variable}_{agg}_d+i` for a list — see
+    `_combine_locations`/`aggregated_variable_names`) must check `isinstance(agg, (list, tuple))` on the
+    original value themselves, not on what this function returns.
     """
-    weighted = {}
+    if agg is None:
+        return None
+    if isinstance(agg, str):
+        values: Tuple[str, ...] = (agg,)
+    elif isinstance(agg, (list, tuple)) and agg:
+        values = tuple(agg)
+    else:
+        raise ValueError(f"agg must be None, one of {AGGREGATIONS}, or a non-empty list of them, got {agg!r}")
+    unknown = [a for a in values if a not in AGGREGATIONS]
+    if unknown:
+        raise ValueError(f"agg must be one of {AGGREGATIONS}, got {unknown!r} in {agg!r}")
+    if len(set(values)) != len(values):
+        raise ValueError(f"agg must not repeat an aggregation, got {agg!r}")
+    return values
+
+
+def _is_categorical(variable: str) -> bool:
+    return variable in _CATEGORICAL_VARIABLES
+
+
+def _is_direction(variable: str) -> bool:
+    return bool(_CIRCULAR_VARIABLE_RE.search(variable))
+
+
+def aggregated_variable_names(columns: List[str], agg: Optional[Tuple[str, ...]], suffixed: bool) -> List[str]:
+    """Base variable names (before `_d+i`) that `_combine_locations` actually emits for `columns`, given a
+    normalised `agg` (as `parse_agg` returns it) and whether the caller names by a list of aggregations
+    (`suffixed`: `{variable}_{kind}` for each entry) rather than one bare string (`{variable}`, un-suffixed).
+
+    Mirrors `_combine_locations`'s own skip rules, so callers such as `information_set.source_rules` can find
+    the exact columns without recomputing anything: `weather_code` (`_CATEGORICAL_VARIABLES`) never appears; a
+    `*direction*` column only appears for `kind="mean"` (see `_CIRCULAR_VARIABLE_RE`). `agg` of `None` (or
+    empty) gives an empty list, since no aggregated column is emitted at all then.
+    """
+    if not agg:
+        return []
+    names = []
+    for column in columns:
+        if _is_categorical(column):
+            continue
+        direction = _is_direction(column)
+        for kind in agg:
+            if direction and kind != "mean":
+                continue
+            names.append(f"{column}_{kind}" if suffixed else column)
+    return names
+
+
+def _combine_locations(frames: List[pd.DataFrame], kind: str, weights: np.ndarray) -> pd.DataFrame:
+    """Combine same-columned, same-indexed frames into one series per variable using aggregation `kind`
+    (one of `AGGREGATIONS`), one row per shared index value.
+
+    `kind="mean"` is a weighted mean (`weights`, already normalised to sum to 1 — uniform when the source has
+    no location weights); the other kinds are plain (unweighted) NumPy reductions, which already propagate NaN
+    correctly (`np.min`/`max`/`median`/`sum` of a slice containing NaN is NaN). A column whose variable name
+    (before `_d+i`) contains "direction" uses a weighted circular mean for `kind="mean"` (350 deg and 10 deg
+    average to about 0, not 180) and is skipped entirely for every other `kind`: min/max/median/sum have no
+    meaningful value for a circular quantity. A categorical variable (`_CATEGORICAL_VARIABLES`, e.g.
+    `weather_code`) is skipped entirely for every `kind` — it has no meaningful aggregate. A row is NaN
+    wherever any location is NaN there: weights are never re-normalised over just the locations that have a
+    value. See `aggregated_variable_names` for the same skip rules without the computation.
+    """
+    combined = {}
     for column in frames[0].columns:
         variable = column.rsplit("_d+", 1)[0]
-        if variable in _CATEGORICAL_VARIABLES:
+        if _is_categorical(variable):
+            continue
+        direction = _is_direction(variable)
+        if direction and kind != "mean":
             continue
         stack = np.column_stack([frame[column].to_numpy(dtype=float) for frame in frames])
-        if _CIRCULAR_VARIABLE_RE.search(variable):
+        if direction:
             radians = np.deg2rad(stack)
             sin = (np.sin(radians) * weights).sum(axis=1)
             cos = (np.cos(radians) * weights).sum(axis=1)
             values = np.mod(np.rad2deg(np.arctan2(sin, cos)), 360.0)
-        else:
+            values[np.isnan(stack).any(axis=1)] = np.nan
+        elif kind == "mean":
             values = (stack * weights).sum(axis=1)
-        values[np.isnan(stack).any(axis=1)] = np.nan
-        weighted[column] = values
-    return pd.DataFrame(weighted, index=frames[0].index)
+            values[np.isnan(stack).any(axis=1)] = np.nan
+        elif kind == "median":
+            values = np.median(stack, axis=1)
+        elif kind == "min":
+            values = np.min(stack, axis=1)
+        elif kind == "max":
+            values = np.max(stack, axis=1)
+        elif kind == "sum":
+            values = np.sum(stack, axis=1)
+        else:
+            raise ValueError(f"agg must be one of {AGGREGATIONS}, got {kind!r}")
+        combined[column] = values
+    return pd.DataFrame(combined, index=frames[0].index)
+
+
+def _agg_suffixed(column: str, kind: str) -> str:
+    """`"temperature_2m_d+1"`, `"mean"` -> `"temperature_2m_mean_d+1"` (suffix inserted before the lead)."""
+    variable, sep, lead = column.rpartition("_d+")
+    return f"{variable}_{kind}_d+{lead}" if sep else f"{column}_{kind}"
 
 
 class OpenMeteoBase(DataSource):
     """Common behaviour of OpenMeteoSource, for one location or several.
 
-    Subclasses set their public attributes (latitude, longitude, locations, keep_locations, columns, horizon,
-    model, temporal_resolution, api, run, timezone, prefix, strict, proxy_url), then call ``self._setup()`` and
-    ``self._validate_config()``, which must call ``_validate_common()``.
+    Subclasses set their public attributes (latitude, longitude, locations, keep_locations, agg, columns,
+    horizon, model, temporal_resolution, api, run, timezone, prefix, strict, proxy_url), then call
+    ``self._setup()`` and ``self._validate_config()``, which must call ``_validate_common()``.
 
     ``locations`` is mutually exclusive with ``latitude``/``longitude`` (see ``parse_locations``) and is resolved
-    by ``_configure_locations()`` into ``self._locations`` (normalised) and ``self._location_sources`` (one
-    instance of the same subclass per location, sharing every other setting — see ``_location_kwargs``).
-    Subclasses whose own ``fetch()`` finds ``self._locations`` non-empty must delegate to ``_fetch_locations()``
-    instead of the single-point path.
+    by ``_configure_locations()`` into ``self._locations`` (normalised), ``self._agg`` (``agg`` normalised by
+    ``parse_agg``) and ``self._location_sources`` (one instance of the same subclass per location, sharing
+    every other setting — see ``_location_kwargs``). Subclasses whose own ``fetch()`` finds ``self._locations``
+    non-empty must delegate to ``_fetch_locations()`` instead of the single-point path.
     """
 
     DEFAULT_COLUMNS = [
@@ -326,8 +405,9 @@ class OpenMeteoBase(DataSource):
         class per location, sharing every other constructor parameter (see `_location_kwargs`).
 
         A single `latitude`/`longitude` pair keeps working exactly as before: `self._locations` and
-        `self._location_sources` are left empty, `fetch()` takes the single-point path, and the cache key for an
-        existing configuration does not change (see `_common_cache_config`).
+        `self._location_sources` are left empty, `fetch()` takes the single-point path, `agg`/`keep_locations`
+        are rejected (they have nothing to combine), and the cache key for an existing configuration does not
+        change (see `_common_cache_config`).
         """
         lat_given = self.latitude is not None
         lon_given = self.longitude is not None
@@ -341,14 +421,38 @@ class OpenMeteoBase(DataSource):
         if not has_point and not has_locations:
             raise ValueError("set either latitude and longitude for one location, or locations for several")
 
-        if not has_locations:
+        if has_point:
+            if self.agg is not None:
+                raise ValueError(
+                    "agg is only valid with locations (several points combined into one source), not a single "
+                    "latitude/longitude point"
+                )
+            if self.keep_locations:
+                raise ValueError(
+                    "keep_locations is only valid with locations (several points combined into one source), not "
+                    "a single latitude/longitude point"
+                )
             self._locations = []
             self._location_sources = []
+            self._agg = None
             return
 
         self._locations = parse_locations(self.locations)
         if not isinstance(self.keep_locations, bool):
             raise ValueError(f"keep_locations must be True or False, got {self.keep_locations!r}")
+
+        agg = parse_agg(self.agg)
+        if self.keep_locations and agg is None:
+            raise ValueError(
+                "keep_locations=True requires agg to be set: without an aggregation, the per-location columns "
+                "are already the only output"
+            )
+        if self._locations_weighted and (agg is None or "mean" not in agg):
+            raise ValueError(
+                f'weight is only used by the "mean" aggregation; agg={self.agg!r} does not include "mean". Drop '
+                'the weights, or add "mean" to agg.'
+            )
+        self._agg = agg
 
         kwargs = self._location_kwargs()
         self._location_sources = [
@@ -357,8 +461,8 @@ class OpenMeteoBase(DataSource):
 
     def _location_kwargs(self) -> Dict[str, Any]:
         """This instance's own constructor parameters, minus the ones `locations` replaces (`latitude`,
-        `longitude`, `locations`, `prefix`, `keep_locations`) and runtime objects — used to build one sibling
-        instance per location that shares every other setting."""
+        `longitude`, `locations`, `prefix`, `keep_locations`, `agg`) and runtime objects — used to build one
+        sibling instance per location that shares every other setting."""
         return {
             key: value
             for key, value in vars(self).items()
@@ -376,14 +480,16 @@ class OpenMeteoBase(DataSource):
         return weights / weights.sum()
 
     def _fetch_locations(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-        """Fetch every location (built by `_configure_locations`) and combine per weights / `keep_locations`.
+        """Fetch every location (built by `_configure_locations`) and combine per `agg` / `keep_locations`.
 
         Every location is fetched by another instance of this class sharing every other setting, so all
-        locations follow the same cutoff. With weights this returns one weighted series per variable,
-        `{prefix}_{variable}_d+i` (see `_weighted_average`); `keep_locations=True` also adds the per-location
-        columns `{prefix}_{name}_{variable}_d+i`. Without weights, only the per-location columns are returned.
-        One shared "now" is used for every location so a live fetch can't settle some locations as final and
-        others as still provisional.
+        locations follow the same cutoff. With `agg` set, this returns one aggregated series per variable and
+        aggregation (see `_combine_locations`): `{prefix}_{variable}_d+i` for a bare string, or
+        `{prefix}_{variable}_{kind}_d+i` per entry for a list; `keep_locations=True` also adds the per-location
+        columns `{prefix}_{name}_{variable}_d+i`. With `agg=None`, only the per-location columns are returned
+        (`_configure_locations` requires `agg` to be set before `keep_locations` can be `True`, so this is the
+        only way to reach this branch). One shared "now" is used for every location so a live fetch can't
+        settle some locations as final and others as still provisional.
         """
         now = self._now()
         for source in self._location_sources:
@@ -402,24 +508,20 @@ class OpenMeteoBase(DataSource):
             index = index.union(frame.index)
         frames = [frame.reindex(index) for frame in frames]
 
-        weighted_mode = self._locations_weighted
+        agg = self._agg
         parts = []
-        if weighted_mode:
-            weighted = _weighted_average(frames, self._location_weights)
-            if self.prefix:
-                weighted.columns = [f"{self.prefix}_{col}" for col in weighted.columns]
-            parts.append(weighted)
-            skipped = {
-                col.rsplit("_d+", 1)[0]
-                for col in frames[0].columns
-                if col.rsplit("_d+", 1)[0] in _CATEGORICAL_VARIABLES
-            }
-            if skipped and not self.keep_locations:
-                self.logger.info(
-                    f"{self._label}: {', '.join(sorted(skipped))} is categorical and is not averaged; "
-                    "use keep_locations=True to keep it per location"
-                )
-        if not weighted_mode or self.keep_locations:
+        if agg is not None:
+            suffixed = isinstance(self.agg, (list, tuple))
+            weights = self._location_weights if self._locations_weighted else np.full(len(frames), 1.0 / len(frames))
+            for kind in agg:
+                combined = _combine_locations(frames, kind, weights)
+                if suffixed:
+                    combined.columns = [_agg_suffixed(col, kind) for col in combined.columns]
+                if self.prefix:
+                    combined.columns = [f"{self.prefix}_{col}" for col in combined.columns]
+                parts.append(combined)
+            self._log_skipped_aggregates(frames[0].columns, agg)
+        if agg is None or self.keep_locations:
             base = f"{self.prefix}_" if self.prefix else ""
             parts.extend(
                 frame.add_prefix(f"{base}{location['name']}_") for location, frame in zip(self._locations, frames)
@@ -431,6 +533,27 @@ class OpenMeteoBase(DataSource):
         result = result.iloc[:keep]
         result.index.name = "datetime"
         return result
+
+    def _log_skipped_aggregates(self, columns, agg: Tuple[str, ...]) -> None:
+        """Note columns `_combine_locations` skips for every requested `agg`, unless `keep_locations` keeps
+        them per location anyway."""
+        if self.keep_locations:
+            return
+        variables = [col.rsplit("_d+", 1)[0] for col in columns]
+        categorical = sorted({v for v in variables if _is_categorical(v)})
+        if categorical:
+            self.logger.info(
+                f"{self._label}: {', '.join(categorical)} is categorical and is not aggregated; use "
+                "keep_locations=True to keep it per location"
+            )
+        if any(kind != "mean" for kind in agg):
+            directional = sorted({v for v in variables if _is_direction(v)})
+            if directional:
+                skipped_kinds = ", ".join(kind for kind in agg if kind != "mean")
+                self.logger.info(
+                    f"{self._label}: {', '.join(directional)} is circular and has no meaningful {skipped_kinds}; "
+                    'use keep_locations=True to keep it per location, or agg="mean" for a circular mean'
+                )
 
     def _backoff(self, attempt: int) -> float:
         return min(self.BACKOFF_CAP_S, self.BACKOFF_BASE_S * 2**attempt)
@@ -592,6 +715,10 @@ class OpenMeteoBase(DataSource):
             config["locations"] = [{k: v for k, v in loc.items() if v is not None} for loc in self._locations]
             if self.keep_locations:
                 config["keep_locations"] = True
+            if self._agg is not None:
+                # `self.agg` (not the normalised `self._agg` tuple) so a bare string and a one-element list —
+                # different output column names, see `_fetch_locations` — hash to different cache keys too.
+                config["agg"] = self.agg
         else:
             config["latitude"] = self.latitude
             config["longitude"] = self.longitude

@@ -281,21 +281,28 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
                 if rule.kind == "static":
                     rules[f"{prefix}{key}"] = rule
         elif isinstance(source, OpenMeteoSource):
+            from .data.sources._open_meteo_common import aggregated_variable_names
+
             prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
             rule = _weather_availability(source)
-            # A source built with `locations` (see OpenMeteoSource.locations) emits the usual `{prefix}{variable}`
-            # columns only when it produces a weighted series (every location has a weight); it also, or instead,
-            # emits per-location columns `{prefix}{name}_{variable}` — with weights only when `keep_locations`,
-            # always otherwise (they are then the only output). Both column shapes follow the same cutoff rule.
+            # A source built with `locations` (see OpenMeteoSource.locations) emits aggregated columns
+            # (`{prefix}{variable}` for a bare `agg` string, `{prefix}{variable}_{kind}` per entry for a list
+            # of them — see `aggregated_variable_names`) only when `agg` is set; it also, or instead, emits
+            # per-location columns `{prefix}{name}_{variable}` — with `agg` only when `keep_locations`, always
+            # otherwise (they are then the only output). Both column shapes follow the same cutoff rule.
             locations = getattr(source, "_locations", [])
-            weighted = bool(locations) and all(loc.get("weight") is not None for loc in locations)
-            if not locations or weighted:
+            agg = getattr(source, "_agg", None)
+            if not locations:
                 for variable in source.columns:
                     rules[f"{prefix}{variable}"] = rule
-            if locations and (not weighted or getattr(source, "keep_locations", False)):
-                for location in locations:
-                    for variable in source.columns:
-                        rules[f"{prefix}{location['name']}_{variable}"] = rule
+            else:
+                suffixed = isinstance(getattr(source, "agg", None), (list, tuple))
+                for variable in aggregated_variable_names(source.columns, agg, suffixed):
+                    rules[f"{prefix}{variable}"] = rule
+                if agg is None or getattr(source, "keep_locations", False):
+                    for location in locations:
+                        for variable in source.columns:
+                            rules[f"{prefix}{location['name']}_{variable}"] = rule
     return rules
 
 

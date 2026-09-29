@@ -37,6 +37,7 @@ class _StubSource(OpenMeteoBase):
             run="00",
             strict=False,
             locations=None,
+            agg=None,
             keep_locations=False,
         )
         params.update(kwargs)
@@ -52,6 +53,7 @@ class _StubSource(OpenMeteoBase):
         self.run = params["run"]
         self.strict = params["strict"]
         self.locations = params["locations"]
+        self.agg = params["agg"]
         self.keep_locations = params["keep_locations"]
         self._setup()
         self._validate_config()
@@ -147,12 +149,10 @@ class TestParseLocations:
     def test_parses_dict_of_dicts(self):
         assert parse_locations(LOCATIONS_DICT) == LOCATIONS_NORMALISED
 
-    def test_parses_dict_of_tuples_with_weight(self):
-        parsed = parse_locations({"warsaw": (52.23, 21.01, 3.0), "krakow": (50.06, 19.94, 1.0)})
-        assert parsed == LOCATIONS_NORMALISED
-
-    def test_parses_dict_of_tuples_without_weight(self):
-        parsed = parse_locations({"warsaw": (52.23, 21.01), "krakow": (50.06, 19.94)})
+    def test_parses_dict_without_weight(self):
+        parsed = parse_locations(
+            {"warsaw": {"latitude": 52.23, "longitude": 21.01}, "krakow": {"latitude": 50.06, "longitude": 19.94}}
+        )
         assert parsed == [
             {"name": "warsaw", "latitude": 52.23, "longitude": 21.01, "weight": None},
             {"name": "krakow", "latitude": 50.06, "longitude": 19.94, "weight": None},
@@ -174,12 +174,10 @@ class TestParseLocations:
         with pytest.raises(ValueError, match="latitude, longitude and optionally weight"):
             parse_locations({"warsaw": {"latitude": 52.23, "longitude": 21.01, "extra": 1}})
 
-    def test_tuple_with_wrong_length_raises(self):
-        with pytest.raises(ValueError, match=r"\(latitude, longitude\) or \(latitude, longitude, weight\)"):
-            parse_locations({"warsaw": (52.23,)})
-
     def test_spec_of_wrong_type_raises(self):
-        with pytest.raises(ValueError, match="dict or a"):
+        with pytest.raises(ValueError, match="must be a dict"):
+            parse_locations({"warsaw": (52.23, 21.01)})
+        with pytest.raises(ValueError, match="must be a dict"):
             parse_locations({"warsaw": "52.23,21.01"})
 
     def test_string_with_wrong_field_count_raises(self):
@@ -203,26 +201,31 @@ class TestParseLocations:
     @pytest.mark.parametrize("name", ["has space", "has-dash", "", "accént"])
     def test_invalid_name_characters_raise(self, name):
         with pytest.raises(ValueError, match="letters, digits and underscores"):
-            parse_locations({name: (52.23, 21.01)})
+            parse_locations({name: {"latitude": 52.23, "longitude": 21.01}})
 
     @pytest.mark.parametrize("latitude", [91.0, -91.0])
     def test_invalid_latitude_raises(self, latitude):
         with pytest.raises(ValueError, match="latitude"):
-            parse_locations({"warsaw": (latitude, 21.01)})
+            parse_locations({"warsaw": {"latitude": latitude, "longitude": 21.01}})
 
     @pytest.mark.parametrize("longitude", [181.0, -181.0])
     def test_invalid_longitude_raises(self, longitude):
         with pytest.raises(ValueError, match="longitude"):
-            parse_locations({"warsaw": (52.23, longitude)})
+            parse_locations({"warsaw": {"latitude": 52.23, "longitude": longitude}})
 
     @pytest.mark.parametrize("weight", [0, -1.0, float("nan"), "1.0", True])
     def test_invalid_weight_raises(self, weight):
         with pytest.raises(ValueError, match="weight"):
-            parse_locations({"warsaw": (52.23, 21.01, weight)})
+            parse_locations({"warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": weight}})
 
     def test_mixed_weights_raise(self):
         with pytest.raises(ValueError, match="every location or for none"):
-            parse_locations({"warsaw": (52.23, 21.01, 3.0), "krakow": (50.06, 19.94)})
+            parse_locations(
+                {
+                    "warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 3.0},
+                    "krakow": {"latitude": 50.06, "longitude": 19.94},
+                }
+            )
 
 
 # ---------------------------------------------------------------------------

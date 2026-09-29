@@ -170,8 +170,9 @@ class OpenMeteoSource(OpenMeteoBase):
     exactly the run initialised at the cutoff and uses it for every row and lead of D. If the archive lacks that
     run, the affected cells are NaN and the coverage report warns — there is no fallback to another run.
 
-    Pass ``locations`` instead of ``latitude``/``longitude`` to combine several locations into one source (a
-    weighted average, per-location columns, or both) — see the ``locations`` parameter below.
+    Pass ``locations`` instead of ``latitude``/``longitude`` to combine several locations into one source:
+    per-location columns, one or more aggregated series per variable (``agg``), or both (``keep_locations``) —
+    see the ``locations`` and ``agg`` parameters below.
 
     Example:
         >>> source = OpenMeteoSource(
@@ -187,13 +188,14 @@ class OpenMeteoSource(OpenMeteoBase):
     UNAVAILABLE_RUN = "requested model run is not available"
 
     VALID_TEMPORAL_RESOLUTIONS = {None, "native", "hourly_3", "hourly_6"}
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(
         self,
         latitude: Optional[float] = None,
         longitude: Optional[float] = None,
         locations: Optional[Union[str, Dict[str, Any]]] = None,
+        agg: Optional[Union[str, List[str]]] = None,
         keep_locations: bool = False,
         columns: Optional[List[str]] = None,
         horizon: int = 5,
@@ -214,19 +216,29 @@ class OpenMeteoSource(OpenMeteoBase):
                 for one location, or ``locations`` for several.
             longitude: Longitude coordinate. See ``latitude``.
             locations: Several locations combined into one source, mutually exclusive with ``latitude``/
-                ``longitude``. A dict ``{name: {"latitude", "longitude", "weight"?}}`` (or ``{name: (latitude,
-                longitude)}`` / ``(latitude, longitude, weight)`` tuples), or the compact string
+                ``longitude``. A dict ``{name: {"latitude", "longitude", "weight"?}}``, or the compact string
                 ``"name:latitude:longitude[:weight], ..."`` for YAML/the TUI. Names use letters, digits and
                 underscores and must be unique; weights, when given, must be positive and given for every
-                location or none. With weights this returns one weighted series per variable,
-                `{prefix}_{variable}_d+i` (weights normalised; a circular mean for `*direction*` columns;
-                `weather_code` not averaged; NaN wherever any location is NaN). Without weights it returns only
-                the per-location columns, `{prefix}_{name}_{variable}_d+i`. Every location is fetched by
-                another ``OpenMeteoSource`` sharing every other parameter here, so all locations follow the
-                same cutoff; weights are fixed and must be known at every issue day D (use a reference date
-                before the sample starts, e.g. population or installed capacity, not end-of-sample figures).
-            keep_locations: With weighted ``locations``, also return each location's own columns,
-                `{prefix}_{name}_{variable}_d+i` (default: False). Has no effect without weights, since the
+                location or none, and are only meaningful with ``agg="mean"`` (or a list containing it) — see
+                ``agg``. With ``agg=None`` (default), only the per-location columns are returned,
+                `{prefix}_{name}_{variable}_d+i`. Every location is fetched by another ``OpenMeteoSource``
+                sharing every other parameter here, so all locations follow the same cutoff; weights are fixed
+                and must be known at every issue day D (use a reference date before the sample starts, e.g.
+                population or installed capacity, not end-of-sample figures).
+            agg: Only with ``locations`` (several points); raises with a single ``latitude``/``longitude``
+                point. ``None`` (default), ``"mean"``, ``"median"``, ``"min"``, ``"max"``, ``"sum"``, or a list
+                of these. ``None``: no aggregation, only the per-location columns (see ``locations``). A bare
+                string: one aggregated series per variable, `{prefix}_{variable}_d+i`. A list: one series per
+                variable *and* entry, `{prefix}_{variable}_{agg}_d+i` (even with one entry — the bare-string
+                and one-element-list forms name their output differently). ``"mean"`` is a weighted mean when
+                every location has a ``weight`` (normalised to sum to 1), else a plain mean; giving weights
+                when ``agg`` doesn't include ``"mean"`` raises, and in a list only ``"mean"`` is weighted, the
+                rest are always unweighted. A `*direction*` column (e.g. `wind_direction_10m`) uses the
+                circular (weighted) mean for ``"mean"`` and is skipped entirely for every other aggregation,
+                which has no meaningful min/max/median/sum for a circular quantity; `weather_code` is never
+                aggregated. A row is NaN wherever any location is NaN there.
+            keep_locations: With ``agg`` set, also return each location's own columns,
+                `{prefix}_{name}_{variable}_d+i` (default: False). Raises if ``agg`` is ``None``: the
                 per-location columns are then already the only output.
             columns: List of weather variables to fetch (default: DEFAULT_COLUMNS)
             horizon: Days ahead (d+1 .. d+horizon). Under ``api="previous_runs"`` the largest usable horizon
@@ -255,6 +267,7 @@ class OpenMeteoSource(OpenMeteoBase):
         self.latitude = latitude
         self.longitude = longitude
         self.locations = locations
+        self.agg = agg
         self.keep_locations = keep_locations
         self.columns = list(columns) if columns else list(self.DEFAULT_COLUMNS)
         self.horizon = horizon

@@ -126,7 +126,8 @@ source = OpenMeteoSource(
     latitude=52.2297,            # Required unless locations is given. Location latitude (-90 to 90)
     longitude=21.0122,           # Required unless locations is given. Location longitude (-180 to 180)
     locations=None,              # Optional. Several locations instead of latitude/longitude (default: None); see "Several locations" below
-    keep_locations=False,        # Optional. With several weighted places, also return each one's own series (default: False)
+    agg=None,                    # Optional. None|"mean"|"median"|"min"|"max"|"sum"|list of these: combine locations (default: None)
+    keep_locations=False,        # Optional. With aggregation on, also return each location's own series (default: False)
     columns=None,                # Optional. Weather variables (default: None = DEFAULT_COLUMNS)
     horizon=5,                   # Optional. Days ahead; see "Horizon limit" below (default: 5)
     model="jma_seamless",        # Optional. Weather model (default: "jma_seamless")
@@ -163,19 +164,22 @@ source = OpenMeteoSource(
 **Output column naming:** `{prefix}_{variable}_d+{i}`
 - Example: `warsaw_temperature_2m_d+1`, `warsaw_temperature_2m_d+2`, ..., `warsaw_temperature_2m_d+5`
 
-**Several locations:** pass `locations` instead of `latitude`/`longitude` to combine several locations into one source, fetched by another `OpenMeteoSource` sharing every other parameter (including `api`/`run`). A dict `{name: {"latitude","longitude","weight"?}}` (also `{name: (latitude,longitude)}` / `(latitude,longitude,weight)` tuples), or the compact string `"name:lat:lon:weight, name:lat:lon:weight, ..."` (weight optional there too, per location). Names use letters, digits, underscores and must be unique; weights, when given, must be positive and given for every location or none, and must be known on D (a reference date before the sample starts, not end-of-sample figures). **With weights:** one weighted series per variable, `{prefix}_{variable}_d+i` (weights normalised; a weighted circular mean for `*direction*` columns; `weather_code` not averaged; NaN wherever any location is NaN); `keep_locations=True` also adds the per-location columns `{prefix}_{name}_{variable}_d+i`. **Without weights:** only the per-location columns are returned.
+**Several locations:** pass `locations` instead of `latitude`/`longitude` to combine several locations into one source, fetched by another `OpenMeteoSource` sharing every other parameter (including `api`/`run`). A dict `{name: {"latitude","longitude","weight"?}}`, or the compact string `"name:lat:lon:weight, name:lat:lon:weight, ..."` (weight optional there too, per location). Names use letters, digits, underscores and must be unique; weights, when given, must be positive and given for every location or none, and must be known on D (a reference date before the sample starts, not end-of-sample figures).
+
+**`agg`** controls the output: `None` (default) — only the per-location columns, `{prefix}_{name}_{variable}_d+i`; a bare string (`"mean"`/`"median"`/`"min"`/`"max"`/`"sum"`) — one aggregated series per variable, `{prefix}_{variable}_d+i`; a list, e.g. `["mean", "max"]` — one series per variable *and* entry, `{prefix}_{variable}_{agg}_d+i` (even with a single entry, unlike the bare-string form). `keep_locations=True` also adds the per-location columns; it raises if `agg` is `None`. Weights apply only to `"mean"` (a weighted mean, weights normalised to sum to 1); giving weights when `agg` doesn't include `"mean"` raises, and in a list only `"mean"` is weighted, the rest are unweighted. `*direction*` columns (e.g. `wind_direction_10m`) use a weighted circular mean for `"mean"` and are skipped for every other aggregation (no meaningful min/max/median/sum for a circular quantity); `weather_code` is never aggregated. NaN wherever any location is NaN. `agg` and `keep_locations` raise with a single `latitude`/`longitude` point.
 ```python
 source = OpenMeteoSource(
     locations={
         "warsaw": {"latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},
         "krakow": {"latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
     },
+    agg="mean",
     prefix="pl",
     timezone="Europe/Warsaw",
 )
 ```
 
-**Caching:** Cache key includes `latitude`/`longitude` (or `locations`, with `keep_locations` when `True`, instead), horizon, model, columns, prefix, temporal_resolution, api, run, timezone and schema_version (bumped for this redesign, so old caches are not reused).
+**Caching:** Cache key includes `latitude`/`longitude` (or `locations`, with `agg` and `keep_locations` when set, instead), horizon, model, columns, prefix, temporal_resolution, api, run, timezone and schema_version (bumped for this change, so old caches are not reused).
 
 ---
 

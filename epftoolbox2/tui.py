@@ -93,15 +93,24 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         {
             "name": "locations",
             "description": 'Several locations instead of latitude/longitude, as "name:lat:lon:weight, '
-            'name:lat:lon:weight, ..." (weight optional, but given for all locations or none; population or '
-            "installed capacity, fixed for the whole sample)",
+            'name:lat:lon:weight, ..." (weight optional, but given for all locations or none, and only used by '
+            'the "mean" aggregation below; population or installed capacity, fixed for the whole sample)',
             "required": False,
             "default": None,
             "kind": "text",
         },
         {
+            "name": "agg",
+            "description": "Aggregate locations with these (blank = per-location columns only; one pick = "
+            '"{variable}_d+i"; several = "{variable}_{agg}_d+i" each; weight above needs "mean" among them)',
+            "required": False,
+            "default": None,
+            "kind": "multiselect",
+            "choices": ["mean", "median", "min", "max", "sum"],
+        },
+        {
             "name": "keep_locations",
-            "description": "With weighted locations, also return each location's own columns?",
+            "description": "With agg set, also return each location's own columns?",
             "required": False,
             "default": False,
             "kind": "confirm",

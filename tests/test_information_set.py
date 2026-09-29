@@ -142,19 +142,20 @@ def test_default_run_passes_the_cutoff_check_at_1130_but_not_1000_brussels():
         )
 
 
-def test_source_rules_weighted_locations_cover_the_weighted_columns():
-    # A weighted OpenMeteoSource emits `{prefix}_{variable}_d+i`, exactly the single-location column shape.
+def test_source_rules_agg_mean_locations_cover_the_aggregated_columns():
+    # agg="mean" emits `{prefix}_{variable}_d+i`, exactly the single-location column shape.
     source = _warsaw_weather_source(
         latitude=None,
         longitude=None,
         locations={"warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 1.0}},
+        agg="mean",
     )
     rules = source_rules([source])
     assert "warsaw_temperature_2m" in rules
     assert "warsaw_warsaw_temperature_2m" not in rules  # no per-location columns without keep_locations
 
 
-def test_source_rules_weighted_locations_with_keep_locations_cover_both_shapes():
+def test_source_rules_agg_with_keep_locations_cover_both_shapes():
     source = _warsaw_weather_source(
         latitude=None,
         longitude=None,
@@ -162,6 +163,7 @@ def test_source_rules_weighted_locations_with_keep_locations_cover_both_shapes()
             "warsaw": {"latitude": 52.23, "longitude": 21.01, "weight": 1.0},
             "krakow": {"latitude": 50.06, "longitude": 19.94, "weight": 1.0},
         },
+        agg="mean",
         keep_locations=True,
     )
     rules = source_rules([source])
@@ -171,7 +173,7 @@ def test_source_rules_weighted_locations_with_keep_locations_cover_both_shapes()
 
 
 def test_source_rules_per_location_only_locations_cover_the_per_location_columns():
-    # Without weights only the per-location columns exist; the base name must not get a rule for a column that
+    # Without `agg` only the per-location columns exist; the base name must not get a rule for a column that
     # is never actually produced.
     source = _warsaw_weather_source(
         latitude=None,
@@ -185,6 +187,36 @@ def test_source_rules_per_location_only_locations_cover_the_per_location_columns
     assert "warsaw_warsaw_temperature_2m" in rules
     assert "warsaw_krakow_temperature_2m" in rules
     assert "warsaw_temperature_2m" not in rules
+
+
+def test_source_rules_agg_list_covers_the_suffixed_columns_and_skips_what_isnt_emitted():
+    # A list of aggregations names each output column `{prefix}_{variable}_{kind}` (see
+    # OpenMeteoSource.agg / aggregated_variable_names); weather_code is never aggregated (categorical) and
+    # wind_direction_10m only gets a rule for "mean" (the other aggregations skip circular columns).
+    source = _warsaw_weather_source(
+        latitude=None,
+        longitude=None,
+        columns=["temperature_2m", "wind_direction_10m", "weather_code"],
+        locations={
+            "warsaw": {"latitude": 52.23, "longitude": 21.01},
+            "krakow": {"latitude": 50.06, "longitude": 19.94},
+        },
+        agg=["mean", "max"],
+        keep_locations=True,
+    )
+    rules = source_rules([source])
+    assert "warsaw_temperature_2m_mean" in rules
+    assert "warsaw_temperature_2m_max" in rules
+    assert "warsaw_wind_direction_10m_mean" in rules
+    assert "warsaw_wind_direction_10m_max" not in rules  # circular: no meaningful max
+    assert "warsaw_weather_code_mean" not in rules  # categorical: never aggregated
+    assert "warsaw_weather_code_max" not in rules
+    # keep_locations=True: the per-location columns are still there too, for every column including the ones
+    # skipped above.
+    for name in ("warsaw", "krakow"):
+        assert f"warsaw_{name}_temperature_2m" in rules
+        assert f"warsaw_{name}_wind_direction_10m" in rules
+        assert f"warsaw_{name}_weather_code" in rules
 
 
 def test_user_rules_take_precedence_and_exact_names_beat_suffix_parsing():
