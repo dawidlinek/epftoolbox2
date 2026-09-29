@@ -330,7 +330,7 @@ source.test_period               # paper's test period (delivery days), e.g. ("2
 **Output columns:** `price` + two exogenous day-ahead forecasts (value at (d, h) = forecast for (d, h), available on d-1):
 - NP: `load_forecast`, `wind_forecast`; PJM: `load_forecast`, `zonal_load_forecast`; FR: `load_forecast`, `generation_forecast`; BE: `load_forecast_fr`, `generation_forecast_fr` (French series); DE: `load_forecast_amprion`, `wind_solar_forecast`
 
-**Index:** files are local wall-clock time with 24 values per day (DST hours interpolated/averaged). Mapped to UTC through the fixed standard-time offset, so every day keeps 24 rows. Use `TimezoneTransformer(target_tz=source.index_timezone)`, never a DST zone; day lags then equal calendar-day lags. Summer UTC timestamps are labels (1 h off real time): don't mix with real-time sources (ENTSO-E, Open-Meteo, PSE).
+**Index:** files are local wall-clock time with 24 values per day (DST hours interpolated/averaged). Mapped to UTC through the fixed standard-time offset, so every day keeps 24 rows. Use `TimezoneTransformer(target_tz=source.index_timezone)`, never a DST zone; day lags then equal calendar-day lags. Summer UTC timestamps are labels (1 h off real time): don't mix with real-time sources (ENTSO-E, Open-Meteo).
 
 **Like the paper:** row D forecasts D+1 with `horizon=1` (`x_d+2`+ would be look-ahead: day-ahead forecasts only). Paper inputs for delivery d: `price`, `price_d-1`, `price_d-2`, `price_d-6`, `x_d+1`, `x`, `x_d-6`. Issue days start one day before the test period's delivery days.
 
@@ -677,7 +677,7 @@ validator = PlausibilityValidator(
 )
 ```
 
-Default ranges: `price*` in [-600, 4000] EUR/MWh (SDAC harmonised min/max; the min was -500 until trading day 2026-05-28), `load*` >= 1 MW. `ranges={}` turns range checks off.
+Default ranges: `price*` in [-600, 4000] EUR/MWh (SDAC harmonised min/max; the min was -500 until trading day 2026-05-28), `load*` >= 1 MW. `ranges={}` turns range checks off. `ImputeTransformer`'s `*_imputed` flag columns are always skipped by the constant-run check (they are 0 for the whole column whenever nothing needed filling).
 
 **Errors:** values out of range. **Warnings:** constant runs longer than `max_constant_run`; a pattern you passed that matches no column.
 **Info:** `out_of_range`, `longest_constant_run`, `checked_columns`.
@@ -853,9 +853,12 @@ For each (hour, horizon, day) combination:
 5. Store result with metadata
 
 **Checks before any fit** (ValueError): rows `freq` apart with one row per local day and period (only the
-repeated fall-back DST hour may repeat), no duplicate timestamps, no data columns named `hour`/`day` or
-`{target}_d+1..{target}_d+{horizon}`, every expanded predictor present, numeric and not a target. Only the target
-and the predictors are used, so unused text columns are fine. Model names must be unique.
+repeated fall-back DST hour may repeat), no duplicate timestamps, a UTC index that already carries `_d-<k>`
+day-lag columns raises (those lags were computed against different calendar-day boundaries than the ones now
+derived from a UTC index — a plain UTC index with no such columns only warns, see `LagTransformer`), no data
+columns named `hour`/`day` or `{target}_d+1..{target}_d+{horizon}`, every expanded predictor present, numeric
+and not a target. Only the target and the predictors are used, so unused text columns are fine. Model names
+must be unique.
 
 **Tasks without a forecast** are counted per reason on the `ModelResultRef` (`produced`, `skipped`) and in
 `report.forecast_counts()`: `missing_test_predictors`, `missing_test_row` (gap on the issue day), `too_few_rows`,
@@ -1352,6 +1355,7 @@ df = pipeline.run(start, end, cache=False)
 - Each source gets a cache key hashing the cache format version, the source class and `get_cache_config()`
 - Only fetches missing date ranges from the API; each cached file is only read inside its own recorded range
 - Records only what the source actually returned, and never the last 2 days before now (data may still be published); that tail is fetched again on the next run
+- A multi-column source (e.g. `EntsoeSource`) outer-joins its columns, so the merged row index can run past where a shorter column actually stopped (e.g. `load_actual` mid-outage while `price` keeps publishing); the recorded range is additionally capped at one step past the last value of any column still being published (its last value newer than 14 days before now), so that outage's cells aren't cached as covered and lost for good
 - Deleted or unreadable cache files count as missing and are fetched again
 - Atomic writes and a per-source file lock: parallel processes (SLURM arrays) on a cold cache fetch once and get identical data
 - Single-file cache stores `<file>.meta.json` with a fingerprint (sources and their parameters without `api_key`, input file size/mtime, start, end, package version); a mismatch rebuilds the file
@@ -1371,8 +1375,8 @@ report = pipeline.report("results", test_start="2024-02-01", test_end="2024-03-0
 
 **The manifest** (`epftoolbox2.results.manifest`) records what produced a results file — a hash of the
 predictors' ordered per-(period, horizon) layout (not just a set of names: order and per-task differences
-both matter), target, horizon, freq, training_window, model class and all hyperparameters (whatever the
-model's `_model_kwargs` returns), a content hash of the data columns used up to `test_end` (rows after
+both matter), target, horizon, freq, training_window, model class and all hyperparameters (the model's
+`scaler` plus whatever `_model_kwargs` returns), a content hash of the data columns used up to `test_end` (rows after
 `test_end` don't count, so appending them between runs isn't a mismatch), and the data's own time zone —
 and compares it before resuming. The information_set settings and provenance (package version, git SHA,
 timestamps) are recorded but not compared. A disagreement raises `ManifestMismatchError`:
@@ -1395,7 +1399,10 @@ report = pipeline.run(..., save_dir="results", require_manifest=True)          #
 Package version and git SHA are recorded for provenance but not compared, so a version bump or a new commit
 does not by itself invalidate a results directory. Extending `test_start`/`test_end` is not a mismatch either:
 the resume key is `(hour, horizon, run_date)` — the calendar date, not the `day_in_test` offset from
-`test_start` — so growing the test period is the normal way to extend a resumable run.
+`test_start` — so growing the test period is the normal way to extend a resumable run. A saved JSONL keeps
+every row ever written to it, so `pipeline.report(...)`/`summary()`/`forecast_counts()`/`predictions()`/the
+`by_*` breakdowns filter to the current call's own `test_start`/`test_end` — narrowing the window between
+runs into the same `save_dir` is scored only on that narrower window, not on an earlier, wider run's rows too.
 
 ---
 
@@ -1415,7 +1422,9 @@ ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 pipeline = (
     DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+    # jma_seamless (default model) is only leak-free up to 5 days ahead at the default run="00"; see "Horizon
+    # limit" under OpenMeteoSource above.
+    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual"], lags=[1, 2, 7], freq="day"))
@@ -1458,7 +1467,6 @@ seasonal_indicators = [
 ]
 
 predictors = [
-    "load_actual",
     *seasonal_indicators,
     "load_actual_d-1",
     "load_actual_d-7",
@@ -1482,7 +1490,7 @@ report = pipeline.run(
     test_start="2024-02-01",
     test_end="2024-03-01",
     target="price",
-    horizon=7,
+    horizon=5,  # matches warsaw_temperature_2m's leak-free horizon (see the OpenMeteoSource in Example 1)
     save_dir="results",
 )
 
@@ -1514,10 +1522,23 @@ ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 data_pipeline = (
     DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+    # jma_seamless (default model) is only leak-free up to 5 days ahead at the default run="00"; see "Horizon
+    # limit" under OpenMeteoSource above.
+    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
+    # Calendar features are known arbitrarily far in advance, so d+0..d+7 is safe.
+    .add_transformer(
+        LagTransformer(
+            lags=range(-7, 1),
+            freq="day",
+            columns=[
+                "is_monday", "is_tuesday", "is_wednesday", "is_thursday",
+                "is_friday", "is_saturday", "is_sunday", "is_holiday", "daylight_hours",
+            ],
+        )
+    )
     .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
 )
 
@@ -1536,7 +1557,6 @@ seasonal_indicators = [
 ]
 
 predictors = [
-    "load_actual",
     *seasonal_indicators,
     "load_actual_d-1",
     "load_actual_d-2",
@@ -1559,7 +1579,7 @@ report = model_pipeline.run(
     test_start="2024-06-01",
     test_end="2024-06-30",
     target="price",
-    horizon=7,
+    horizon=5,  # matches warsaw_temperature_2m's leak-free horizon (see the OpenMeteoSource above)
     save_dir="results",
 )
 
@@ -1587,7 +1607,6 @@ ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 
 # Phase 1: build and save config (run once)
 predictors = [
-    "load_actual",
     "is_monday_d+{horizon}", "is_tuesday_d+{horizon}", "is_wednesday_d+{horizon}",
     "is_thursday_d+{horizon}", "is_friday_d+{horizon}", "is_saturday_d+{horizon}",
     "is_sunday_d+{horizon}", "is_holiday_d+{horizon}", "daylight_hours_d+{horizon}",
@@ -1598,11 +1617,25 @@ predictors = [
 (
     DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+    # jma_seamless (default model) is only leak-free up to 5 days ahead at the default run="00"; see "Horizon
+    # limit" under OpenMeteoSource above.
+    .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary", daylight=True, weekday="onehot"))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
-    .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "daylight_hours", "load_forecast", "is_holiday"]))
+    # Calendar features are known arbitrarily far in advance, so d+0..d+7 is safe.
+    .add_transformer(
+        LagTransformer(
+            lags=range(-7, 1),
+            freq="day",
+            columns=[
+                "is_monday", "is_tuesday", "is_wednesday", "is_thursday",
+                "is_friday", "is_saturday", "is_sunday", "is_holiday", "daylight_hours",
+            ],
+        )
+    )
+    # load_forecast (A65/A01) is published 10:00 CET the day before delivery: only d+1 is ever safe.
+    .add_transformer(LagTransformer(lags=range(-1, 0), freq="day", columns=["load_forecast"]))
     .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
     .save("data_pipeline.yaml")
 )
@@ -1626,7 +1659,7 @@ Workflow(
     model_test_start="2024-06-01",
     model_test_end="2024-07-01",
     model_target="price",
-    model_horizon=7,
+    model_horizon=5,  # matches warsaw_temperature_2m's leak-free horizon (see the OpenMeteoSource above)
     max_processes=4,
     threads_per_process=8,
 ).save("experiment.yaml")
@@ -1656,30 +1689,34 @@ ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 
 if __name__ == "__main__":
     # Date keywords resolve at runtime — run this script every day without changing anything.
-    # "now_d-730" → 2 years ago; "today_d+7" → 7 days from now.
+    # "now_d-730" → 2 years ago; "today_d+5" → 5 days from now.
     # Adjust the -N offset to cover your largest model's training_window.
-    # timezone="Europe/Warsaw" makes "end" cover the *whole local day* it names, so "today_d+7"
+    # timezone="Europe/Warsaw" makes "end" cover the *whole local day* it names, so "today_d+5"
     # includes all 24 hours of the last horizon day. Without it, "end" is exclusive UTC midnight
-    # and the last horizon day would need "today_d+8" instead.
+    # and the last horizon day would need "today_d+6" instead.
     df = (
         DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-        .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+        # jma_seamless (default model) is only leak-free up to 5 days ahead at the default run="00"; see
+        # "Horizon limit" under OpenMeteoSource above.
+        .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw"))
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
         .add_transformer(TimezoneTransformer())
         .add_transformer(ResampleTransformer(freq="1h"))
         .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
+        # Calendar features are known arbitrarily far in advance, so d+0..d+7 is safe.
         .add_transformer(LagTransformer(
             lags=range(-7, 1), freq="day",
             columns=["is_monday", "is_tuesday", "is_wednesday", "is_thursday",
                      "is_friday", "is_saturday", "is_sunday", "is_holiday",
-                     "daylight_hours", "load_forecast"],
+                     "daylight_hours"],
         ))
-        .run(start="now_d-730", end="today_d+7", cache=True)
+        # load_forecast (A65/A01) is published 10:00 CET the day before delivery: only d+1 is ever safe.
+        .add_transformer(LagTransformer(lags=range(-1, 0), freq="day", columns=["load_forecast"]))
+        .run(start="now_d-730", end="today_d+5", cache=True)
     )
 
     predictors = [
-        "load_actual",
         "is_monday_d+{horizon}", "is_tuesday_d+{horizon}", "is_wednesday_d+{horizon}",
         "is_thursday_d+{horizon}", "is_friday_d+{horizon}", "is_saturday_d+{horizon}",
         "is_sunday_d+{horizon}", "is_holiday_d+{horizon}", "daylight_hours_d+{horizon}",
@@ -1696,12 +1733,12 @@ if __name__ == "__main__":
             test_start="today",   # resolve_date("today") → today's ISO date at runtime
             test_end="today",
             target="price",
-            horizon=7,
+            horizon=5,  # matches warsaw_temperature_2m's leak-free horizon (see the OpenMeteoSource above)
             forecast_only=True,   # skips evaluators and exporters
         )
     )
 
-    # 168 rows per model (24h × 7 horizons), sorted by model → horizon → hour
+    # 120 rows per model (24h × 5 horizons), sorted by model → horizon → hour
     forecast = report.predictions()
     print(forecast)
 ```
@@ -1772,7 +1809,12 @@ class DataPipeline:
 
 ```python
 class ModelPipeline:
-    def __init__(self): ...
+    def __init__(
+        self,
+        information_set: Optional[InformationSet] = None,   # Overrides issue_time/issue_timezone below
+        issue_time: Optional[str] = None,                    # Shortcut: builds InformationSet(issue_time, issue_timezone)
+        issue_timezone: str = "Europe/Brussels",              # Zone of issue_time, ignored if information_set is given
+    ): ...
 
     def add_model(self, model: BaseModel) -> "ModelPipeline": ...
     def add_evaluator(self, evaluator: Evaluator) -> "ModelPipeline": ...
@@ -1781,13 +1823,15 @@ class ModelPipeline:
     def run(
         self,
         data: pd.DataFrame,              # DataFrame with DatetimeIndex
-        test_start: str,                  # Test period start ("YYYY-MM-DD" or "today", "now_d-7")
-        test_end: str,                    # Test period end
+        test_start: Optional[str] = None,  # Test period start ("YYYY-MM-DD" or "today", "now_d-7"); required unless forecast_only=True
+        test_end: Optional[str] = None,    # Test period end; required unless forecast_only=True
         target: str = "price",            # Target column name
         horizon: int = 7,                 # Max forecast horizon (days)
         freq: str = "1h",                 # "1h" or "15min"; must match the data
         save_dir: Optional[str] = None,   # Directory for incremental results
         forecast_only: bool = False,      # Skip evaluators and exporters; use report.predictions()
+        allow_manifest_mismatch: bool = False,  # Overwrite and resume despite a manifest disagreement
+        require_manifest: bool = False,   # Refuse (not warn) to resume results with no manifest
     ) -> EvaluationReport: ...
 
     def report(                           # Report from the JSONL files in save_dir, runs evaluators/exporters
@@ -1816,8 +1860,8 @@ class Workflow:
         self,
         data_start: str,
         data_end: str,
-        model_test_start: str,
-        model_test_end: str,
+        model_test_start: Optional[str] = None,   # Required unless model_forecast_only=True
+        model_test_end: Optional[str] = None,     # Required unless model_forecast_only=True
         data_pipeline: Optional[Union[str, Path]] = None,   # Path to data_pipeline.yaml
         model_pipeline: Optional[Union[str, Path]] = None,  # Path to model_pipeline.yaml
         data_cache: Union[bool, str] = False,
