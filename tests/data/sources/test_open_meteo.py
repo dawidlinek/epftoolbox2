@@ -831,8 +831,14 @@ class TestOpenMeteoSourceIntegration:
         assert len(df) == (pd.Timestamp("2024-06-01") - pd.Timestamp("2024-01-01")) / HOUR
 
     def test_fetch_weather_data_single_runs(self):
+        # The Single Runs archive starts per model: ECMWF IFS from 2024-03-14, JMA (the default) only from 2026-05-13.
         source = OpenMeteoSource(
-            latitude=52.2297, longitude=21.0122, timezone="Europe/Warsaw", api="single_runs", horizon=3
+            latitude=52.2297,
+            longitude=21.0122,
+            timezone="Europe/Warsaw",
+            api="single_runs",
+            model="ecmwf_ifs",
+            horizon=3,
         )
         start, end = pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2025-01-03", tz="UTC")
         df = source.fetch(start, end)
