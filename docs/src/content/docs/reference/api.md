@@ -164,7 +164,7 @@ class CalendarSource(DataSource):
                  hour: Union[str, bool] = False,
                  month: Union[str, bool] = False,
                  daylight: bool = False, lat: float = None, lon: float = None,
-                 prefix: str = "", freq: str = "1h", subdiv: str = None,
+                 prefix: str = "", freq: str = "1h", region: str = None,
                  categories: Union[str, List[str]] = None,
                  bridge_days: bool = False, christmas_period: bool = False,
                  holiday_distance: int = 0, dst_switch: bool = False,

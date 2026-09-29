@@ -331,25 +331,25 @@ class TestHolidayCalendar:
         )
         assert not {c.lower() for c in df.columns} & {"holiday_sunday", "holiday_söndag", "holiday_sondag"}
 
-    @pytest.mark.parametrize("subdiv", ["BY", "DE-BY", "by"])
-    def test_subdivision_adds_regional_holidays(self, subdiv):
+    @pytest.mark.parametrize("region", ["BY", "DE-BY", "by"])
+    def test_region_adds_regional_holidays(self, region):
         start, end = _local_day("2024-05-30", "Europe/Berlin")  # Corpus Christi: a holiday in Bavaria only
         national = CalendarSource(country="DE").fetch(start, end)
-        bavaria = CalendarSource(country="DE", subdiv=subdiv).fetch(start, end)
+        bavaria = CalendarSource(country="DE", region=region).fetch(start, end)
         assert national["is_holiday"].eq(0).all()
         assert bavaria["is_holiday"].eq(1).all()
 
-    def test_subdivision_is_normalised(self):
-        assert CalendarSource(country="GB", subdiv="gb-eng").subdiv == "ENG"
+    def test_region_is_normalised(self):
+        assert CalendarSource(country="GB", region="gb-eng").region == "ENG"
 
     def test_gb_england_easter_monday(self):
         start, end = _local_day("2024-04-01", "Europe/London")
         assert CalendarSource(country="GB").fetch(start, end)["is_holiday"].eq(0).all()
-        assert CalendarSource(country="GB", subdiv="ENG").fetch(start, end)["is_holiday"].eq(1).all()
+        assert CalendarSource(country="GB", region="ENG").fetch(start, end)["is_holiday"].eq(1).all()
 
-    def test_invalid_subdivision_raises(self):
-        with pytest.raises(ValueError, match="subdiv"):
-            CalendarSource(country="DE", subdiv="XX")
+    def test_invalid_region_raises(self):
+        with pytest.raises(ValueError, match="region"):
+            CalendarSource(country="DE", region="XX")
 
     def test_categories_add_holidays(self):
         start, end = _local_day("2024-06-21", "Europe/Stockholm")  # Midsummer Eve is not a public holiday
@@ -435,13 +435,13 @@ class TestYamlRoundTrip:
         from epftoolbox2.pipelines import DataPipeline
 
         source = CalendarSource(
-            country="DE", subdiv="DE-BY", categories=["public", "catholic"], holidays="onehot", freq="15min"
+            country="DE", region="DE-BY", categories=["public", "catholic"], holidays="onehot", freq="15min"
         )
         path = tmp_path / "dp.yaml"
         DataPipeline(sources=[source]).save(path)
         loaded = DataPipeline.load(path).sources[0]
 
-        assert loaded.subdiv == "BY"
+        assert loaded.region == "BY"
         assert loaded.categories == ["public", "catholic"]
         start, end = _local_day("2024-08-15", "Europe/Berlin")
         pd.testing.assert_frame_equal(source.fetch(start, end), loaded.fetch(start, end))

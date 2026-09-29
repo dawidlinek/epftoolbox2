@@ -40,7 +40,7 @@ class TestBridgeDays:
     def test_uses_the_configured_holiday_calendar(self):
         tz = "Europe/Berlin"
         national = CalendarSource(country="DE", bridge_days=True, **BARE).fetch(*_range("2024-05-27", "2024-06-02", tz))
-        bavaria = CalendarSource(country="DE", subdiv="BY", bridge_days=True, **BARE).fetch(
+        bavaria = CalendarSource(country="DE", region="BY", bridge_days=True, **BARE).fetch(
             *_range("2024-05-27", "2024-06-02", tz)
         )
         assert _flagged(national, "is_bridge_day", tz) == []
@@ -348,7 +348,7 @@ class TestFeaturesYamlRoundTrip:
 
         source = CalendarSource(
             country="DE",
-            subdiv="BY",
+            region="BY",
             bridge_days=True,
             christmas_period=True,
             holiday_distance=5,

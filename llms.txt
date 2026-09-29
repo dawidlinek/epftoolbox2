@@ -199,7 +199,7 @@ source = CalendarSource(
     lon=None,                    # Optional. Longitude for daylight (None = the country's capital)
     prefix="",                   # Optional. Prefix for column names (used as is, no "_" added)
     freq="1h",                   # Optional. Row spacing: divisor of 1 hour ("15min") or whole hours dividing a day
-    subdiv=None,                 # Optional. Subdivision for regional holidays: "BY"/"DE-BY", "ENG", "ZH"
+    region=None,                 # Optional. Subdivision for regional holidays: "BY"/"DE-BY", "ENG", "ZH"
     categories=None,             # Optional. holidays categories, e.g. ["public", "bank"] (None = public only)
     bridge_days=False,           # Optional. Add is_bridge_day
     christmas_period=False,      # Optional. Add is_christmas_period (24 Dec - 1 Jan)
@@ -242,7 +242,7 @@ No API key.
 - Holiday names are pinned to English (`en_US`), so one-hot column names don't depend on the machine's locale.
   One-hot columns cover every holiday of the years in range.
 - Sweden: Sundays are not flagged (the `holidays` package lists every Sunday as a Swedish holiday).
-- Only national public holidays by default; `subdiv` adds regional ones, `categories` other kinds
+- Only national public holidays by default; `region` adds regional ones, `categories` other kinds
   (`categories` replaces the default, so include "public").
 - `period` = index of the period in the local day (`hour * 4 + minute // 15` at 15 min), as in the models.
 - `"name"` outputs are strings: drop them before modelling (models convert every column to float).

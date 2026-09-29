@@ -426,7 +426,7 @@ class CalendarSource(DataSource):
     affected dates; entries marked as half days are ignored (not counted as a holiday).
 
     Example:
-        >>> source = CalendarSource(country="DE", subdiv="BY", holidays="binary", weekday="onehot")
+        >>> source = CalendarSource(country="DE", region="BY", holidays="binary", weekday="onehot")
         >>> df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2025-01-01", tz="UTC"))
 
     Example:
@@ -450,7 +450,7 @@ class CalendarSource(DataSource):
         lon: Optional[float] = None,
         prefix: str = "",
         freq: str = "1h",
-        subdiv: Optional[str] = None,
+        region: Optional[str] = None,
         categories: Optional[Union[str, List[str]]] = None,
         bridge_days: bool = False,
         christmas_period: bool = False,
@@ -475,7 +475,8 @@ class CalendarSource(DataSource):
             lat, lon: Location for daylight (default: the country's capital).
             prefix: Prefix for column names (no separator is added).
             freq: Row spacing. Must divide one hour, or be a whole number of hours that divides one day.
-            subdiv: Subdivision for regional holidays, e.g. "BY" or "DE-BY" (Bavaria), "ENG" (England), "ZH".
+            region: Subdivision code passed to the `holidays` package for regional public holidays, e.g. "BY"
+                or "DE-BY" (Bavaria), "ENG" (England), "ZH" (Zurich).
             categories: Holiday categories of the `holidays` package, e.g. ["public", "bank"]
                 (default: the package default, public holidays only).
             bridge_days: Add `is_bridge_day`: a working day whose previous and next days are both a weekend
@@ -515,7 +516,7 @@ class CalendarSource(DataSource):
         self.daylight = daylight
         self.prefix = prefix
         self.freq = freq
-        self.subdiv = self._normalise_subdiv(subdiv)
+        self.region = self._normalise_region(region)
         self.categories = [categories] if isinstance(categories, str) else categories
         if self.categories is not None:
             self.categories = list(self.categories)
@@ -612,10 +613,10 @@ class CalendarSource(DataSource):
         if self.country not in COUNTRY_DATA:
             raise ValueError(f"Unsupported country: {self.country}. Supported: {list(COUNTRY_DATA.keys())}")
 
-    def _normalise_subdiv(self, subdiv: Optional[str]) -> Optional[str]:
-        if subdiv is None:
+    def _normalise_region(self, region: Optional[str]) -> Optional[str]:
+        if region is None:
             return None
-        code = str(subdiv).strip()
+        code = str(region).strip()
         if code.upper().startswith(f"{self.country}-"):
             code = code[len(self.country) + 1 :]
         known = getattr(type(holidays_lib.country_holidays(self.country)), "subdivisions", ())
@@ -639,12 +640,12 @@ class CalendarSource(DataSource):
         self._step = _grid_step(self.freq)
 
         cls = type(holidays_lib.country_holidays(self.country))
-        if self.subdiv is not None:
+        if self.region is not None:
             try:
-                holidays_lib.country_holidays(self.country, subdiv=self.subdiv)
+                holidays_lib.country_holidays(self.country, subdiv=self.region)
             except NotImplementedError as e:
                 raise ValueError(
-                    f"Invalid subdiv {self.subdiv!r} for {self.country}. Valid: {list(getattr(cls, 'subdivisions', ()))}"
+                    f"Invalid region {self.region!r} for {self.country}. Valid: {list(getattr(cls, 'subdivisions', ()))}"
                 ) from e
         if self.categories is not None:
             supported = set(getattr(cls, "supported_categories", ()))
@@ -662,7 +663,7 @@ class CalendarSource(DataSource):
         return HOLIDAY_LANGUAGE if HOLIDAY_LANGUAGE in (getattr(cls, "supported_languages", ()) or ()) else None
 
     def _holiday_calendar(self, years: List[int]) -> holidays_lib.HolidayBase:
-        kwargs = {"years": years, "subdiv": self.subdiv, "language": self._holiday_language()}
+        kwargs = {"years": years, "subdiv": self.region, "language": self._holiday_language()}
         if self.categories is not None:
             kwargs["categories"] = tuple(self.categories)
         if self.country == "SE":
@@ -709,7 +710,7 @@ class CalendarSource(DataSource):
         return df
 
     def _holiday_flags(self, dates: pd.DatetimeIndex) -> np.ndarray:
-        """True where the local date is a holiday of the configured calendar (country, subdiv, categories)."""
+        """True where the local date is a holiday of the configured calendar (country, region, categories)."""
         if not len(dates):
             return np.zeros(0, dtype=bool)
         calendar = self._holiday_calendar(list(range(dates.min().year, dates.max().year + 1)))

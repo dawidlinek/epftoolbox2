@@ -304,7 +304,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "float",
         },
         {
-            "name": "subdiv",
+            "name": "region",
             "description": "Subdivision for regional holidays, e.g. BY, ENG (empty = national only)",
             "required": False,
             "default": None,

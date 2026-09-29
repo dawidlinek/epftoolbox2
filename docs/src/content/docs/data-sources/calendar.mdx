@@ -53,7 +53,7 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 | `lon` | float | Auto | Longitude for daylight (default: the country's capital) |
 | `prefix` | str | `""` | Column name prefix, used as is (`"cal_"` gives `cal_is_holiday`) |
 | `freq` | str | `"1h"` | Row spacing: a divisor of one hour (`"15min"`, `"30min"`) or whole hours dividing a day |
-| `subdiv` | str | `None` | Subdivision for regional holidays: `"BY"` or `"DE-BY"` (Bavaria), `"ENG"` (England), `"ZH"` (Zurich) |
+| `region` | str | `None` | Subdivision code passed to the `holidays` package for regional public holidays: `"BY"` or `"DE-BY"` (Bavaria), `"ENG"` (England), `"ZH"` (Zurich) |
 | `categories` | str/List[str] | `None` | Holiday categories of the `holidays` package, e.g. `["public", "bank"]`; `None` means public holidays only |
 | `bridge_days` | bool | `False` | Add `is_bridge_day` (see [Additional features](#additional-features)) |
 | `christmas_period` | bool | `False` | Add `is_christmas_period` (24 December to 1 January) |
@@ -86,7 +86,7 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
   `LANG` settings.
 - One-hot names are lower case ASCII with underscores. The columns cover every holiday of the years touched
   by `[start, end)`, so the column set does not depend on which holidays fall inside the range.
-- Only **public** holidays are flagged by default, and only national ones. Use `subdiv` for regional holidays
+- Only **public** holidays are flagged by default, and only national ones. Use `region` for regional holidays
   (Germany flags 9 days in 2024, Bavaria 12; England adds Easter Monday and the Late Summer Bank Holiday) and
   `categories` for other kinds, e.g. Swedish Midsummer Eve and Christmas Eve are in the `"bank"` category
   (which also has afternoon-only days such as "Maundy Thursday (from 2pm)"; they are flagged for the whole
@@ -148,7 +148,7 @@ nights (only possible with a far-northern `lat`) the three columns are NaN and a
 
 These are off by default. All of them are known in advance, so their `x_d+k` versions (from
 `LagTransformer(lags=[-k])`) are legal predictors. Bridge days and holiday distances use the same holiday
-calendar as `holidays` (country, `subdiv`, `categories`), even when `holidays=False`, and look beyond
+calendar as `holidays` (country, `region`, `categories`), even when `holidays=False`, and look beyond
 `[start, end)` where needed, so values at the edges of the range are correct.
 
 <Aside type="caution">
@@ -351,12 +351,90 @@ if you need to reproduce a run exactly.
 
 ---
 
+## Public and school holidays: use cases
+
+A few short, self-contained examples of the holiday-related parameters above.
+
+**National public holidays:**
+
+```python
+source = CalendarSource(country="DE", holidays="binary")
+# is_holiday: 1 on each of Germany's 9 nationwide public holidays, 0 otherwise
+```
+
+**One-hot holiday names**, one column per holiday of the years in range:
+
+```python
+source = CalendarSource(country="DE", holidays="onehot")
+# is_holiday, holiday_new_years_day, holiday_christmas_day, holiday_german_unity_day, ...
+```
+
+**Region-specific holidays of a federal country.** `region` adds that subdivision's own holidays on top of the
+national ones; Bavaria (`DE-BY`) observes Epiphany and Corpus Christi, which the rest of Germany does not:
+
+```python
+germany = CalendarSource(country="DE", holidays="binary")
+bavaria = CalendarSource(country="DE", region="BY", holidays="binary")
+# 2024-01-06 (Epiphany): germany.is_holiday == 0, bavaria.is_holiday == 1
+```
+
+**Holiday categories** other than `"public"`. GB's bank holidays (the `holidays` package's own category name for
+the UK) are not in the `"public"` default:
+
+```python
+gb_public = CalendarSource(country="GB", categories=["public"])
+gb_bank = CalendarSource(country="GB", categories=["public", "bank"])
+# categories replaces the default, so "public" must be listed explicitly to keep it
+```
+
+**Bridge days and distance to a holiday**, around a long weekend:
+
+```python
+source = CalendarSource(country="PL", bridge_days=True, holiday_distance=3)
+# is_bridge_day: 1 on a working day sandwiched between a holiday and a weekend
+# days_to_holiday, days_since_holiday: 0 on a holiday, capped at 3
+```
+
+**The Christmas period** (24 December to 1 January inclusive), useful as a separate demand regime:
+
+```python
+source = CalendarSource(country="PL", christmas_period=True)
+# is_christmas_period: 1 from 24 Dec through 1 Jan, 0 the rest of the year
+```
+
+**School holidays: `"national"` vs `"all"`.** `"national"` only flags nationwide breaks; `"all"` also picks up
+regional ones as a share of the country's top-level regions. Poland's winter break is staggered by voivodeship,
+so it is invisible to `"national"` but shows up as a fraction with `"all"`:
+
+```python
+national = CalendarSource(country="PL", school_holidays="national")
+regional = CalendarSource(country="PL", school_holidays="all")
+# during PL's staggered winter break: national.is_school_holiday == 0.0 (not nationwide)
+#                                     regional.school_holiday_share == 0.25 (4 of 16 voivodeships)
+# during the (nationwide) summer break, both flag every day
+```
+
+**Combining with `LagTransformer`** so the model sees the *target* day's calendar, not just the issue day's.
+Calendar features are known in advance, so a `d+1` version (lag `-1`, since `LagTransformer`'s negative lags
+look forward) is a legal predictor:
+
+```python
+from epftoolbox2.data.transformers import LagTransformer
+
+pipeline = (
+    DataPipeline(timezone="Europe/Warsaw")
+    .add_source(CalendarSource(country="PL", holidays="binary", bridge_days=True))
+    .add_transformer(LagTransformer(columns=["is_holiday", "is_bridge_day"], lags=[-1], freq="day"))
+)
+# adds is_holiday_d+1, is_bridge_day_d+1: the target delivery day's own calendar, forecastable from day D
+```
+
 ## Example: Full Features
 
 ```python
 source = CalendarSource(
     country="DE",
-    subdiv="BY",
+    region="BY",
     holidays="binary",
     weekday="number",
     hour="number",
