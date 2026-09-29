@@ -195,6 +195,16 @@ back `NaN` instead of silently shifting to the next hour under that row's name.
   time of day, or day of year and time of day) the same way `CalendarSource`'s other features do — see
   [LambdaTransformer](/epftoolbox2/transformers/lambda-transformer/).
 
+## Also renamed or removed before release
+
+A few names existed only on the development line between the previous release and this one, and never
+shipped: `PseSource` (a source for the Polish TSO's own API; the package targets European markets in
+general, not one country's TSO), `SettlementPriceSource` (a fixed-schema CSV reader, redundant once
+`CsvSource` covers reading your own files), `SchoolHolidaysSource` (folded into `CalendarSource`'s
+`school_holidays`, see above), `OpenMeteoWeightedSource` (superseded by `OpenMeteoSource`'s
+`locations`/`agg`), and `CalendarSource`'s `subdiv` parameter (renamed to `region`). None of them need a
+migration step — they are named here only so the history stays easy to search.
+
 ## The new information-set check
 
 `epftoolbox2.information_set` can check, before any model is fit, that every predictor (and the newest

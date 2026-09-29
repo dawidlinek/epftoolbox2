@@ -146,6 +146,7 @@ class OpenMeteoSource(DataSource):
                  # locations: mutually exclusive with latitude/longitude — several locations combined into one
                  # source, weighted average and/or per-location columns; see Data Sources > OpenMeteoSource
                  locations: Optional[Union[str, Dict[str, Any]]] = None,
+                 agg: Optional[Union[str, List[str]]] = None,  # aggregate several locations; see Data Sources
                  keep_locations: bool = False,
                  columns: Optional[List[str]] = None,
                  horizon: int = 5,
@@ -218,6 +219,29 @@ class TimezoneTransformer(Transformer):
         daily_columns: Optional[List[str]] = None,  # None = ["load_forecast_daily_min", "load_forecast_daily_max"]
         daily_anchor: Optional[str] = None,  # None = the resolved target_tz
     ): ...
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
+
+class DSTNormalizeTransformer(Transformer):
+    def __init__(self, freq: str = "1h", tz: Optional[str] = None): ...  # naive wall clock, 24/96 slots a day
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
+
+class DailyProfileTransformer(Transformer):
+    def __init__(self, columns: Union[str, List[str]], freq: str = "1h"): ...  # {column}_h00 .. _h23
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
+
+class DailyStatsTransformer(Transformer):
+    def __init__(self, columns: Union[str, List[str]],
+                 stats: List[str] = ["min", "max", "mean", "last"], freq: str = "1h"): ...
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
+
+class ImputeTransformer(Transformer):
+    def __init__(self, columns: Union[str, List[str]], method: str = "ffill",  # "ffill" | "previous_day" | "previous_week"
+                 limit: Union[int, str, None] = None, flag: bool = True, suffix: str = ""): ...
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
+
+class LambdaTransformer(Transformer):
+    def __init__(self, func: Union[Callable, str, None] = None,  # exactly one of func/columns
+                 columns: Optional[dict] = None): ...
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 ```
 

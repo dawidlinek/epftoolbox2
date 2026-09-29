@@ -151,11 +151,6 @@ These are off by default. All of them are known in advance, so their `x_d+k` ver
 calendar as `holidays` (country, `region`, `categories`), even when `holidays=False`, and look beyond
 `[start, end)` where needed, so values at the edges of the range are correct.
 
-<Aside type="caution">
-  `LagTransformer` currently shifts by elapsed time, not calendar days, so on a local-time index a `_d+1`
-  calendar column points to the wrong day at one row around each DST switch (a known issue).
-</Aside>
-
 | Parameter | Columns | Definition |
 |-----------|---------|------------|
 | `bridge_days=True` | `is_bridge_day` | A working day (Monday to Friday, not a holiday) whose previous and next days are both a weekend day or a holiday: the Friday after a Thursday holiday, the Monday before a Tuesday holiday, or a day between two holidays (2 May in Poland in 2024) |
