@@ -529,38 +529,64 @@ class InformationSet:
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
     ) -> Tuple[List[Violation], set]:
-        """All (predictor, period, horizon) uses of values not known at issue time, and unknown base columns."""
+        """All (predictor, period, horizon) uses of values not known at issue time, and unknown base columns.
+
+        Every issue day D of the test period is checked, and each zone conversion uses the UTC offsets at the instant
+        it converts: when the data zone and a rule's zone don't switch DST together (a UTC or fixed-offset index
+        against Brussels rules), a value delivered or published across a switch from D has other offsets than D.
+        A violation reports the issue day on which its value comes latest after the issue time.
+        """
         step = _STEP_MINUTES[freq]
-        contexts = self._contexts(index, test_start, test_end)
         resolved: Dict[str, ResolvedColumn] = {}
         unknown = set()
-        out: List[Violation] = []
-
-        def get(name):
+        # The newest training target is the value delivered on D-1 in the same period.
+        uses = {"predictor": 0, "training target": -1}  # role -> the row's day relative to D
+        periods: Dict[Tuple[str, str], set] = {}  # the periods reading each (name, role); the horizon doesn't matter
+        for (period, _), predictors in expanded.items():
+            for name in predictors:
+                periods.setdefault((name, "predictor"), set()).add(period)
+            periods.setdefault((target, "training target"), set()).add(period)
+        for name in [target] + [name for name, _ in periods]:
             if name not in resolved:
                 resolved[name] = self.resolve(name)
                 if resolved[name].rule is None:
                     unknown.add(resolved[name].base)
-            return resolved[name]
 
-        target_col = get(target)
-        for (period, hz), predictors in sorted(expanded.items()):
-            row_minute = period * step
-            uses = [(p, get(p), "predictor", 0) for p in predictors]
-            # The newest training target is the value delivered on D-1 in the same period.
-            uses.append((target, target_col, "training target", -1))
-            for name, col, role, day in uses:
-                if col.rule is None:
+        days = self._issue_days(index, test_start, test_end)
+        if not len(days):
+            return [], unknown
+        ctx = _Context(days[0], self._data_zone(index))
+        # Each issue day as days after the first, and its issue time in data-zone minutes after the first's midnight.
+        offset = np.asarray((days - days[0]) // pd.Timedelta(days=1), dtype=np.int64)
+        issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), self.issue_timezone, ctx)
+
+        late: Dict[Tuple[str, str, int], Tuple[float, float, str]] = {}  # (name, role, period) -> its worst day
+        for (name, role), rows in periods.items():
+            col = resolved[name]
+            if col.rule is None:
+                continue
+            rows = np.array(sorted(rows))
+            issue_day = np.tile(offset, len(rows))
+            minute = np.repeat(rows * step, len(days)).astype(float)
+            avail = _available_array(col, col.rule, issue_day + uses[role], minute, step, ctx, issue_day=issue_day)
+            avail = avail.reshape(len(rows), len(days))
+            worst = (avail - issue).argmax(axis=1)
+            for period, i, known in zip(rows.tolist(), worst, avail[np.arange(len(rows)), worst]):
+                if known <= issue[i]:
                     continue
-                worst = None
-                for ctx in contexts:
-                    avail = _available(col, col.rule, day, row_minute, step, ctx)
-                    issue = ctx.issue_minute
-                    if avail > issue and (worst is None or avail - issue > worst[0] - worst[1]):
-                        worst = (avail, issue, ctx)
-                if worst is not None:
-                    hint = self._assumption_hint(col, day, row_minute, step, worst[2]) or self._weather_cutoff_hint(col)
-                    out.append(Violation(name, period, hz, col, worst[0], worst[1], role, hint))
+                # Minutes after midnight of that issue day, as a context for that day alone would give them.
+                day_ctx = _Context(days[i], ctx.data_zone, float(issue[i] - offset[i] * 1440.0))
+                hint = self._assumption_hint(col, uses[role], period * step, step, day_ctx)
+                late[(name, role, period)] = (float(known - offset[i] * 1440.0), day_ctx.issue_minute, hint)
+
+        out: List[Violation] = []
+        for (period, hz), predictors in sorted(expanded.items()):
+            for name, role in [(p, "predictor") for p in predictors] + [(target, "training target")]:
+                if (name, role, period) in late:
+                    known, issue_minute, hint = late[(name, role, period)]
+                    col = resolved[name]
+                    hint = hint or self._weather_cutoff_hint(col)
+                    out.append(Violation(name, period, hz, col, known, issue_minute, role, hint))
         return out, unknown
 
     def _assumption_hint(self, col, day, row_minute, step, ctx) -> str:
@@ -582,30 +608,18 @@ class InformationSet:
             "earlier run or a later issue time"
         )
 
-    def _contexts(self, index, test_start, test_end) -> List["_Context"]:
-        """Distinct (issue weekday, zone offsets) combinations over the test period."""
+    @staticmethod
+    def _issue_days(index, test_start, test_end) -> pd.DatetimeIndex:
+        """The issue days D (naive midnights) of the test period, else of the whole index."""
         if test_start is not None and test_end is not None:
-            days = pd.date_range(pd.Timestamp(test_start), pd.Timestamp(test_end), freq="D")
-        elif len(index):
+            return pd.date_range(pd.Timestamp(test_start), pd.Timestamp(test_end), freq="D")
+        if len(index):
             local = index.tz_localize(None) if index.tz is not None else index
-            days = pd.date_range(local.min().normalize(), local.max().normalize(), freq="D")
-        else:
-            days = pd.date_range("2024-01-01", periods=7, freq="D")
-        data_zone = str(index.tz) if getattr(index, "tz", None) is not None else self.issue_timezone
-        zones = {data_zone, self.issue_timezone} | {r.timezone for _, rules in self._layers() for r in rules.values()}
-        zones.discard(None)
-        noon = days + pd.Timedelta(hours=12)
-        offsets = {z: _offsets(noon, z) for z in zones}
-        seen, out = set(), []
-        for i, day in enumerate(days):
-            key = (day.weekday(),) + tuple(offsets[z][i] for z in sorted(zones))
-            if key in seen:
-                continue
-            seen.add(key)
-            zone_offsets = {z: offsets[z][i] for z in zones}
-            issue_minute = _minutes(self.issue_time) + zone_offsets[data_zone] - zone_offsets[self.issue_timezone]
-            out.append(_Context(day.weekday(), data_zone, zone_offsets, issue_minute))
-        return out
+            return pd.date_range(local.min().normalize(), local.max().normalize(), freq="D")
+        return pd.date_range("2024-01-01", periods=7, freq="D")
+
+    def _data_zone(self, index) -> str:
+        return str(index.tz) if getattr(index, "tz", None) is not None else self.issue_timezone
 
     def _format(self, violations: List[Violation], model_name: str) -> str:
         # One line per base column and rule, listing the predictors that read it.
@@ -641,10 +655,16 @@ class InformationSet:
 
 @dataclass(frozen=True)
 class _Context:
-    weekday: int  # weekday of the issue day D
+    """Times are wall-clock minutes of `data_zone` after the naive midnight `day`; converting them to or from another
+    zone uses the UTC offsets at the very instant converted (see `_to_zone`), not a fixed offset of `day`."""
+
+    day: pd.Timestamp  # the issue day D, or (in `violations`) the first issue day of the test period
     data_zone: str
-    offsets: Dict[str, int] = field(hash=False, compare=False)
-    issue_minute: float = 0.0
+    issue_minute: float = 0.0  # the issue time on `day`; `violations` keeps one per issue day instead
+
+    @property
+    def weekday(self) -> int:
+        return self.day.weekday()
 
 
 def _available(col: ResolvedColumn, rule: Availability, day: int, row_minute: float, step: int, ctx: _Context) -> float:
@@ -652,10 +672,35 @@ def _available(col: ResolvedColumn, rule: Availability, day: int, row_minute: fl
     return float(_available_array(col, rule, np.array([day]), np.array([row_minute], dtype=float), step, ctx)[0])
 
 
-def _zone_shift(zone: Optional[str], ctx: _Context) -> int:
-    if zone is None:
-        return 0
-    return ctx.offsets[ctx.data_zone] - ctx.offsets[zone]
+def _to_zone(minutes: np.ndarray, zone: Optional[str], ctx: _Context, first: Optional[np.ndarray] = None) -> np.ndarray:
+    """Data-zone wall-clock minutes after midnight of `ctx.day` -> the same instants' wall clock in `zone`.
+
+    `first` says, per value, which occurrence a repeated autumn wall time is (see `_convert_wall_clock`).
+    """
+    if zone is None or zone == ctx.data_zone:
+        return minutes
+    return _convert_wall_clock(minutes, ctx.day, ctx.data_zone, zone, first)
+
+
+def _from_zone(minutes: np.ndarray, zone: Optional[str], ctx: _Context) -> np.ndarray:
+    """Inverse of `_to_zone`: wall-clock minutes after midnight of `ctx.day` in `zone` -> the data zone's."""
+    if zone is None or zone == ctx.data_zone:
+        return minutes
+    return _convert_wall_clock(minutes, ctx.day, zone, ctx.data_zone)
+
+
+def _issue_minutes(minutes: np.ndarray, zone: str, ctx: _Context) -> np.ndarray:
+    """Issue times, wall-clock minutes after midnight of `ctx.day` in `zone` -> the data zone's.
+
+    Unlike a publication time, which a skipped wall time moves forward to the switch, an issue time skipped by a
+    spring switch is read with the offset after it: 02:30 Brussels on 2024-03-31 is 00:30Z (01:30 CET), its earliest
+    reading, so the issue is never later than asked. This holds within one zone too; a repeated autumn issue time
+    is its first occurrence.
+    """
+    naive = pd.DatetimeIndex(ctx.day + pd.to_timedelta(np.asarray(minutes, dtype=float), unit="min"))
+    forward = naive.tz_localize(zone, ambiguous=np.ones(len(naive), dtype=bool), nonexistent="shift_forward")
+    earliest = forward - (forward.tz_localize(None) - naive)  # back by as much as the switch moved it forward
+    return np.asarray((earliest.tz_convert(ctx.data_zone).tz_localize(None) - ctx.day) / pd.Timedelta(minutes=1))
 
 
 # ---------------------------------------------------------------------------
@@ -773,37 +818,33 @@ def perturb_unknown(
     """
     index = data.index
     step = _STEP_MINUTES[freq]
-    ctx = information_set._contexts(index, run_day, run_day)[0]
+    # Every zone conversion reads the UTC offsets at the instant it converts (a value's own shifted delivery instant
+    # for its delivery day, its publication instant for the way back), not at run_day's noon or at the row's own
+    # date. They differ across a DST switch whenever the data zone and a rule's zone don't switch together, e.g. a
+    # UTC or fixed-offset (benchmark source) index against Europe/Brussels rules.
+    ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index))
+    issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), information_set.issue_timezone, ctx)
+    ctx = replace(ctx, issue_minute=float(issue[0]))
     local = index.tz_localize(None) if index.tz is not None else index
     day = np.asarray((local.normalize() - pd.Timestamp(run_day)) // pd.Timedelta(days=1), dtype=np.int64)
     minute = np.asarray(local.hour * 60 + local.minute + local.second / 60.0, dtype=float)
+    # Which occurrence of a repeated autumn wall time each row is; a day shift keeps it, like shift_calendar_days.
+    first = np.ones(len(index), dtype=bool)
+    if index.tz is not None:
+        first = index.asi8 == local.tz_localize(index.tz, ambiguous=first, nonexistent="NaT").asi8
     rng = np.random.default_rng(seed)
 
     out = data.copy()
     counts: Dict[str, int] = {}
     unchecked: List[str] = []
-    names = list(columns) if columns is not None else list(data.columns)
-    resolved = {name: information_set.resolve(name) for name in names}
-
-    # `ctx.offsets` (and the zone shifts derived from it) are a single snapshot at run_day's own noon. Using it
-    # for every row is wrong once a row's real calendar date has crossed a DST switch relative to run_day: e.g.
-    # perturbing `load_forecast_d+1` for a run_day right before a spring-forward switch would apply run_day's
-    # (pre-switch) offset to a row that is actually already past the switch, silently leaving up to an hour of
-    # cells unperturbed (or perturbing cells that were in fact already known). Recompute each zone's offset per
-    # row, from that row's own calendar date, instead of reusing run_day's (DST/timezone review finding 3).
-    row_zones = {ctx.data_zone} | {c.rule.timezone for c in resolved.values() if c.rule is not None} - {None}
-    row_noon = local.normalize() + pd.Timedelta(hours=12)
-    row_offsets = {zone: np.asarray(_offsets(row_noon, zone), dtype=float) for zone in row_zones}
-    row_ctx = replace(ctx, offsets=row_offsets)
-
-    for name in names:
+    for name in columns if columns is not None else data.columns:
         if not pd.api.types.is_numeric_dtype(data[name]) or pd.api.types.is_bool_dtype(data[name]):
             continue
-        col = resolved[name]
+        col = information_set.resolve(name)
         if col.rule is None:
             unchecked.append(name)
             continue
-        available = _available_array(col, col.rule, day, minute, step, row_ctx, issue_ctx=ctx)
+        available = _available_array(col, col.rule, day, minute, step, ctx, first)
         mask = available > ctx.issue_minute
         if target_from_issue is not None and name == target_from_issue:
             mask = mask | (day >= 0)
@@ -828,30 +869,29 @@ def _available_array(
     minute: np.ndarray,
     step: int,
     ctx: _Context,
-    issue_ctx: Optional[_Context] = None,
+    first: Optional[np.ndarray] = None,
+    issue_day: Union[int, np.ndarray] = 0,
 ) -> np.ndarray:
-    """Vectorised `_available` for rows at (D + day, minute); the value is `col` read through `rule`.
+    """Vectorised `_available` for rows at (ctx.day + day, minute); the value is `col` read through `rule`.
 
-    `ctx` supplies the zone offsets used for the row's *own* delivery day (may hold per-row offset arrays
-    instead of the scalar per-context ones, see `perturb_unknown`). `issue_ctx` (defaults to `ctx`) supplies the
-    offset for the ``as_of`` rule, which is fixed to a time on the issue day D itself regardless of the row.
+    Every time is in data-zone minutes after midnight of `ctx.day`, and times in a rule's own zone are converted
+    exactly, at each converted instant (`_to_zone`/`_from_zone`). `issue_day` is each row's issue day D in days
+    after `ctx.day` (`violations` checks many issue days at once; `perturb_unknown` one, `ctx.day` itself).
+    `first` marks rows that are not the second occurrence of a repeated autumn wall time (default: all).
     """
-    issue_ctx = ctx if issue_ctx is None else issue_ctx
     if rule.kind == "static":
         return np.full(len(day), -np.inf)
     if rule.kind == "as_of":
         # Fixed to a time on the issue day D itself: independent of the row's own day/minute or any shift,
-        # so a leading `_d+k` doesn't change it. The offset used is therefore the issue day's own, not the
-        # row's (they can differ once the row's real calendar date has crossed a DST switch relative to D).
-        return np.full(len(day), _minutes(rule.time), dtype=float) + _zone_shift(rule.timezone, issue_ctx)
+        # so a leading `_d+k` doesn't change it.
+        known = np.full(len(day), _minutes(rule.time), dtype=float) + issue_day * 1440.0
+        return _from_zone(known, rule.timezone, ctx)
     if rule.kind == "weather_cutoff":
-        # Fixed to `run`:00 UTC plus `delay` on the issue day D itself, same independence as `as_of` above, so
-        # it also uses the issue day's own offset, not the row's. The run+delay total is minutes after UTC
-        # midnight of D and may exceed 1440 (a late run plus its delay can land on D+1 in UTC); that is fine
-        # here, this is a plain offset, not a wall-clock time to re-parse.
-        return np.full(len(day), _minutes(rule.time) + _parse_delay(rule.delay), dtype=float) + _zone_shift(
-            rule.timezone, issue_ctx
-        )
+        # Fixed to `run`:00 UTC plus `delay` on the issue day D itself, same independence as `as_of` above. The
+        # run+delay total is minutes after UTC midnight of D and may exceed 1440 (a late run plus its delay can
+        # land on D+1 in UTC); that is fine here, this is a plain offset, not a wall-clock time to re-parse.
+        cutoff = np.full(len(day), _minutes(rule.time) + _parse_delay(rule.delay), dtype=float) + issue_day * 1440.0
+        return _from_zone(cutoff, rule.timezone, ctx)
     shifts = list(col.shifts)
     if rule.kind == "weather_run" and shifts and shifts[0].unit == "d" and shifts[0].offset > 0:
         shifts = shifts[1:]
@@ -862,17 +902,16 @@ def _available_array(
         return point + step + _parse_delay(rule.delay)
     if rule.kind == "weather_run":
         return point + _parse_delay(rule.delay)
-    local_time = _minutes(rule.time) + _zone_shift(rule.timezone, ctx)
     # The delivery day is a calendar day in the rule's own (market) zone, not in the data's: a value at
     # 23:00 UTC in winter (CET, UTC+1) delivers at 00:00 CET the next day, even though `point` (the data
     # zone's own wall clock) hasn't crossed midnight yet.
-    delivery_day = np.floor((point - _zone_shift(rule.timezone, ctx)) / 1440.0)
+    delivery_day = np.floor(_to_zone(point, rule.timezone, ctx, first) / 1440.0)
     if rule.kind == "published":
-        return (delivery_day - rule.days_before) * 1440.0 + local_time
-    # weekly: published on `weekday` of the week before the delivery week
-    delivery_weekday = np.mod(ctx.weekday + delivery_day, 7)
-    publication_day = delivery_day - delivery_weekday - 7 + _WEEKDAYS.index(rule.weekday)
-    return publication_day * 1440.0 + local_time
+        publication_day = delivery_day - rule.days_before
+    else:  # weekly: published on `weekday` of the week before the delivery week
+        delivery_weekday = np.mod(ctx.weekday + delivery_day, 7)
+        publication_day = delivery_day - delivery_weekday - 7 + _WEEKDAYS.index(rule.weekday)
+    return _from_zone(publication_day * 1440.0 + _minutes(rule.time), rule.timezone, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -880,9 +919,18 @@ def _available_array(
 # ---------------------------------------------------------------------------
 
 
-def _offsets(times: pd.DatetimeIndex, zone: str) -> List[int]:
-    localized = times.tz_localize(zone, ambiguous=True, nonexistent="shift_forward")
-    return [int(ts.utcoffset().total_seconds() // 60) for ts in localized]
+def _convert_wall_clock(
+    minutes: np.ndarray, day: pd.Timestamp, from_zone: str, to_zone: str, first: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """Wall-clock minutes after midnight of `day` in `from_zone` -> the same instants' wall clock in `to_zone`.
+
+    A wall time skipped by a spring switch moves forward to the switch; a repeated autumn one is read as its
+    first occurrence, or as its second where `first` is False.
+    """
+    naive = pd.DatetimeIndex(day + pd.to_timedelta(np.asarray(minutes, dtype=float), unit="min"))
+    first = np.ones(len(naive), dtype=bool) if first is None else first
+    local = naive.tz_localize(from_zone, ambiguous=first, nonexistent="shift_forward")
+    return np.asarray((local.tz_convert(to_zone).tz_localize(None) - day) / pd.Timedelta(minutes=1), dtype=float)
 
 
 def _fmt_minute(value: float) -> str:
