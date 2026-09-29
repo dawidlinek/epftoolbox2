@@ -36,7 +36,7 @@ epftoolbox2.verify()
 - **Models**: OLS, LassoCV
 - **Scalers**: standardisation (default) or variance-stabilising transformations for spiky prices (asinh, N-PIT), fitted per forecast on training data only
 - **Evaluators**: MAE, RMSE, rMAE (relative to a base model)
-- **Exporters**: Excel with conditional formatting, Terminal output
+- **Exporters**: Excel with conditional formatting, Terminal output, CSV
 - **Caching**: Built-in per-source Parquet cache that fetches only missing ranges, refetches not-yet-published data and is safe for parallel jobs
 - **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files; an optional market timezone makes dates mean local calendar days, duplicate column names across sources raise instead of colliding silently, and `api_key` is written to YAML as an `${ENV_VAR}` reference instead of plain text
 - **Multiprocessing**: Process-based parallelism with inner thread pools; SLURM array mode (one model per task) with `epf report` to merge the results
