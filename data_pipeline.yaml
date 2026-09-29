@@ -92,9 +92,9 @@ transformers:
     - -1
     freq: day
 validators:
-- class: NullCheckValidator
+- class: CoverageValidator
   params:
     columns:
     - load_actual
     - price
-    allow_nulls: false
+    min_coverage: 1.0

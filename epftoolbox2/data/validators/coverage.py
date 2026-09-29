@@ -22,8 +22,8 @@ from .result import ValidationResult
 class CoverageValidator(Validator):
     """Checks per column that a value exists at every expected timestamp of a range.
 
-    Unlike `ContinuityValidator` (the index) and `NullCheckValidator` (the rows present), coverage is measured on the
-    full `freq` grid, so it catches an outage of one column on a complete index and rows missing from the index.
+    Unlike `ContinuityValidator` (the index alone), coverage is measured on the full `freq` grid, so it catches
+    both an outage of one column on an otherwise complete index and rows missing from the index entirely.
 
     Args:
         columns: Columns to check. None checks every column.

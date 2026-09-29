@@ -15,7 +15,7 @@ import os
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer, TimezoneTransformer
-from epftoolbox2.data.validators import NullCheckValidator, ContinuityValidator
+from epftoolbox2.data.validators import CoverageValidator, ContinuityValidator
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_API_KEY_HERE")
 
@@ -87,7 +87,7 @@ pipeline = (
     )
     # load_forecast (A65/A01) is published 10:00 CET the day before delivery: only d+1 is ever safe.
     .add_transformer(LagTransformer(lags=range(-1, 0), freq="day", columns=["load_forecast"]))
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
     .add_validator(ContinuityValidator())
 )
 

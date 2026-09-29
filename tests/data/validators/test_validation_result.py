@@ -22,11 +22,11 @@ def test_str_truncates_long_info_lists():
 
 
 def test_str_names_the_validator_and_mentions_stats():
-    result = ValidationResult(validator="NullCheckValidator", stats=pd.DataFrame({"column": ["a", "b"]}))
+    result = ValidationResult(validator="CoverageValidator", stats=pd.DataFrame({"column": ["a", "b"]}))
 
     text = str(result)
 
-    assert text.startswith("NullCheckValidator: VALID")
+    assert text.startswith("CoverageValidator: VALID")
     assert "Stats: 2 rows" in text
 
 
@@ -40,16 +40,16 @@ def test_add_error_marks_result_invalid():
 
 def test_results_to_frame_one_row_per_message():
     ok = ValidationResult(validator="ContinuityValidator")
-    bad = ValidationResult(is_valid=False, errors=["e1", "e2"], warnings=["w1"], validator="NullCheckValidator")
+    bad = ValidationResult(is_valid=False, errors=["e1", "e2"], warnings=["w1"], validator="CoverageValidator")
 
     table = results_to_frame([ok, bad])
 
     assert list(table.columns) == ["validator", "valid", "level", "message"]
     assert table.to_dict("records") == [
         {"validator": "ContinuityValidator", "valid": True, "level": "ok", "message": ""},
-        {"validator": "NullCheckValidator", "valid": False, "level": "error", "message": "e1"},
-        {"validator": "NullCheckValidator", "valid": False, "level": "error", "message": "e2"},
-        {"validator": "NullCheckValidator", "valid": False, "level": "warning", "message": "w1"},
+        {"validator": "CoverageValidator", "valid": False, "level": "error", "message": "e1"},
+        {"validator": "CoverageValidator", "valid": False, "level": "error", "message": "e2"},
+        {"validator": "CoverageValidator", "valid": False, "level": "warning", "message": "w1"},
     ]
 
 

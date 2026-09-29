@@ -175,9 +175,10 @@ transformers:
       target_tz: Europe/Warsaw
 
 validators:
-  - class: NullCheckValidator
+  - class: CoverageValidator
     params:
       columns: [price]
+      min_coverage: 1.0
 """
 
 _MODEL_PIPELINE_TEMPLATE = """\

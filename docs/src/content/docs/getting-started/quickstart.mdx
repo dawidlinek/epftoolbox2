@@ -30,7 +30,7 @@ This guide shows you how to download electricity data and run a simple forecast 
    from epftoolbox2.pipelines import DataPipeline
    from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
    from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
-   from epftoolbox2.data.validators import NullCheckValidator
+   from epftoolbox2.data.validators import CoverageValidator
 
    pipeline = (
        DataPipeline(timezone="Europe/Warsaw")
@@ -57,7 +57,7 @@ This guide shows you how to download electricity data and run a simple forecast 
            lags=[1, 2, 7],
            freq="day"
        ))
-       .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+       .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
    )
 
    df = pipeline.run(start="2023-01-01", end="2024-04-01", cache=True)

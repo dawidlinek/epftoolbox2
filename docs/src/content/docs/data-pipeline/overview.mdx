@@ -28,7 +28,7 @@ The pipeline consists of three types of components:
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, TimezoneTransformer
-from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.data.validators import CoverageValidator
 
 pipeline = (
     DataPipeline(timezone="Europe/Warsaw")
@@ -37,7 +37,7 @@ pipeline = (
     .add_transformer(ResampleTransformer(freq="1h"))
     # target_tz is left unset: it inherits DataPipeline.timezone above.
     .add_transformer(TimezoneTransformer())
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
 )
 
 df = pipeline.run(start="2024-01-01", end="2024-06-01", cache=True)
@@ -159,7 +159,6 @@ exclusive, and naive timestamps are UTC.
 ### Validators
 
 <CardGrid>
-  <LinkCard title="NullCheckValidator" description="Check for nulls" href="/epftoolbox2/validators/null-check/" />
   <LinkCard title="ContinuityValidator" description="Check for gaps" href="/epftoolbox2/validators/continuity/" />
   <LinkCard title="DSTStructureValidator" description="Rows per local day" href="/epftoolbox2/validators/dst-structure/" />
   <LinkCard title="CoverageValidator" description="Per-column outages" href="/epftoolbox2/validators/coverage/" />

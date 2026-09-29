@@ -174,6 +174,17 @@ back `NaN` instead of silently shifting to the next hour under that row's name.
 - **`FreshnessValidator` and `LagConsistencyValidator` are gone**, with no replacement. Both were narrow
   checks (one column against the frame's own last row or `today`; day-lag columns against their base
   column) that a few lines over the frame you already have can express directly if you still need them.
+- **`NullCheckValidator` is gone; `CoverageValidator` replaces it.** `max_null_frac=f` becomes
+  `min_coverage=1 - f` (`allow_nulls=True` becomes `min_coverage=0.0`); `columns` carries over unchanged.
+  `CoverageValidator` additionally counts timestamps **missing from the index entirely**, not only null
+  values on the rows present, so a column with the same null share can now report lower coverage — the
+  errors and warnings it raises are not a strict subset of what `NullCheckValidator` raised.
+  ```python
+  # before
+  NullCheckValidator(columns=["load_actual", "price"], max_null_frac=0.05)
+  # after
+  CoverageValidator(columns=["load_actual", "price"], min_coverage=0.95)
+  ```
 - **`CalendarSource`: `fourier_weekly`/`fourier_annual` are gone**, with their `week_sin_k`/`week_cos_k` and
   `year_sin_k`/`year_cos_k` columns. There is no drop-in replacement; if you still want Fourier terms, add
   them with a `LambdaTransformer(func=...)` that computes the phase from the local wall clock (weekday and

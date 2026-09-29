@@ -7,7 +7,7 @@ from pathlib import Path
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
 from epftoolbox2.data.sources import CalendarSource, CsvSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
-from epftoolbox2.data.validators import NullCheckValidator, ContinuityValidator
+from epftoolbox2.data.validators import CoverageValidator, ContinuityValidator
 from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.exporters import TerminalExporter, ExcelExporter
@@ -30,7 +30,7 @@ class TestDataPipelineSerialization:
             DataPipeline()
             .add_source(CalendarSource(country="PL", holidays="binary"))
             .add_transformer(ResampleTransformer(freq="1h"))
-            .add_validator(NullCheckValidator(columns=["is_holiday"]))
+            .add_validator(CoverageValidator(columns=["is_holiday"]))
         )
         path = tmp_path / "dp.yaml"
         pipeline.save(path)
@@ -40,7 +40,7 @@ class TestDataPipelineSerialization:
         assert "validators" in config
         assert config["sources"][0]["class"] == "CalendarSource"
         assert config["transformers"][0]["class"] == "ResampleTransformer"
-        assert config["validators"][0]["class"] == "NullCheckValidator"
+        assert config["validators"][0]["class"] == "CoverageValidator"
 
     def test_round_trip_calendar_source(self, tmp_path):
         original = DataPipeline().add_source(
@@ -90,16 +90,16 @@ class TestDataPipelineSerialization:
         t = loaded.transformers[0]
         assert t.lags == list(range(-7, 1))
 
-    def test_round_trip_null_check_validator(self, tmp_path):
-        original = DataPipeline().add_validator(NullCheckValidator(columns=["price"], allow_nulls=True))
+    def test_round_trip_coverage_validator(self, tmp_path):
+        original = DataPipeline().add_validator(CoverageValidator(columns=["price"], min_coverage=0.0))
         path = tmp_path / "dp.yaml"
         original.save(path)
         loaded = DataPipeline.load(path)
 
         v = loaded.validators[0]
-        assert isinstance(v, NullCheckValidator)
+        assert isinstance(v, CoverageValidator)
         assert v.columns == ["price"]
-        assert v.allow_nulls is True
+        assert v.min_coverage == 0.0
 
     def test_round_trip_multiple_components(self, tmp_path):
         original = (
@@ -108,7 +108,7 @@ class TestDataPipelineSerialization:
             .add_source(CalendarSource(country="DE", prefix="de"))
             .add_transformer(ResampleTransformer(freq="1h"))
             .add_transformer(LagTransformer(columns=["price"], lags=[1, 7], freq="day"))
-            .add_validator(NullCheckValidator(columns=["price"]))
+            .add_validator(CoverageValidator(columns=["price"]))
             .add_validator(ContinuityValidator(freq="1h"))
         )
         path = tmp_path / "dp.yaml"
@@ -184,7 +184,7 @@ class TestDataPipelineSerializationFidelity:
             "ResampleTransformer": ResampleTransformer("15min", method="ffill", columns=["a"]),
             "LagTransformer": LagTransformer(["a"], [1, -2], "15min"),
             "ContinuityValidator": ContinuityValidator("15min"),
-            "NullCheckValidator": NullCheckValidator(["a"], allow_nulls=True),
+            "CoverageValidator": CoverageValidator(["a"], min_coverage=0.9),
             "EdaValidator": EdaValidator(["a"]),
         }
         kind = {name: section for section, names in COMPONENT_REGISTRY.items() for name in names}
@@ -243,7 +243,7 @@ class TestDataPipelineSettingsInYaml:
         original = DataPipeline(
             sources=[CalendarSource("PL")],
             source_validators=[ContinuityValidator("1h")],
-            validators=[NullCheckValidator(["is_holiday"])],
+            validators=[CoverageValidator(["is_holiday"])],
             timezone="Europe/Warsaw",
             on_invalid="raise",
         )
@@ -258,7 +258,7 @@ class TestDataPipelineSettingsInYaml:
         assert loaded.timezone == "Europe/Warsaw"
         assert loaded.on_invalid == "raise"
         assert isinstance(loaded.source_validators[0], ContinuityValidator)
-        assert isinstance(loaded.validators[0], NullCheckValidator)
+        assert isinstance(loaded.validators[0], CoverageValidator)
 
     def test_yaml_without_settings_keeps_defaults(self, tmp_path):
         path = tmp_path / "dp.yaml"

@@ -186,9 +186,10 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
         - class: ResampleTransformer
           params: {freq: 1h}
       validators:
-        - class: NullCheckValidator
+        - class: CoverageValidator
           params:
             columns: [load_actual, price]
+            min_coverage: 1.0
     ```
   </TabItem>
 </Tabs>
@@ -210,7 +211,7 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
    from epftoolbox2.pipelines import DataPipeline, ModelPipeline
    from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
    from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
-   from epftoolbox2.data.validators import NullCheckValidator
+   from epftoolbox2.data.validators import CoverageValidator
    from epftoolbox2.models import OLSModel, LassoCVModel
    from epftoolbox2.evaluators import MAEEvaluator
    from epftoolbox2.exporters import ExcelExporter, TerminalExporter
@@ -235,7 +236,7 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
        .add_transformer(ResampleTransformer(freq="1h"))
        .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
        .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "daylight_hours", "load_forecast", "is_holiday"]))
-       .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+       .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
        .save("data_pipeline.yaml")
    )
 

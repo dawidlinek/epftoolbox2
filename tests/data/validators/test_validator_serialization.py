@@ -7,14 +7,12 @@ from epftoolbox2.data.validators import (
     CoverageValidator,
     DSTStructureValidator,
     EdaValidator,
-    NullCheckValidator,
     PlausibilityValidator,
 )
 from epftoolbox2.pipelines import DataPipeline
 
 VALIDATORS = [
     ContinuityValidator(freq="15min"),
-    NullCheckValidator(columns=["price"], allow_nulls=False, max_null_frac=0.05),
     EdaValidator(columns=["price"], verbose=False),
     DSTStructureValidator(tz="Europe/Warsaw", freq="1h", allow_partial_edges=False),
     CoverageValidator(

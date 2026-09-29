@@ -228,10 +228,6 @@ class TimezoneTransformer(Transformer):
 ```python
 # Every validator: validate(df: pd.DataFrame) -> ValidationResult
 
-class NullCheckValidator(Validator):
-    def __init__(self, columns: Union[str, List[str]] = None, allow_nulls: bool = False,
-                 max_null_frac: float = 0.0): ...
-
 class ContinuityValidator(Validator):
     def __init__(self, freq: Optional[str] = None): ...  # None = infer
 

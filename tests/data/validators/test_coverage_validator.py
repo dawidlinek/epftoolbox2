@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.data.validators import ContinuityValidator, CoverageValidator, NullCheckValidator
+from epftoolbox2.data.validators import ContinuityValidator, CoverageValidator
 from tests.synthetic import make_market_data
 
 TZ = "Europe/Warsaw"
@@ -33,7 +33,7 @@ def test_single_column_outage_on_a_continuous_index(hourly):
 
 def test_rows_missing_from_the_index_count_as_missing(hourly):
     thinned = hourly.drop(hourly.index[100:105])
-    assert NullCheckValidator(columns=["price"]).validate(thinned).is_valid
+    assert thinned["price"].notna().all()  # a null check on the rows present would see nothing wrong here
 
     result = CoverageValidator(columns=["price"]).validate(thinned)
 

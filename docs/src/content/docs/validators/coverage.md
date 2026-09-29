@@ -8,7 +8,7 @@ description: Per-column coverage, longest missing run and first/last value over 
 Measures, per column, which timestamps of a regular grid carry a value: coverage, the longest run of missing timestamps and the first and last value. It finds what the other checks can't:
 
 - an **outage of one column on a complete index** (for example three days without prices while load keeps coming), which `ContinuityValidator` can't see;
-- **rows missing from the index**, which `NullCheckValidator` can't see;
+- **rows missing from the index entirely**, which a null check on the rows present can't see;
 - a column that **starts late or ends early** compared with the range you asked for.
 
 ## Basic Usage

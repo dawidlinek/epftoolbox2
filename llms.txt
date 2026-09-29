@@ -596,27 +596,6 @@ table = results_to_frame([v.validate(df) for v in validators])
 print(table.to_string(index=False))   # columns: validator, valid, level (error/warning/ok), message
 ```
 
-## NullCheckValidator
-
-Checks that columns exist and have few enough null values. Only the listed columns are null-checked (lag columns such as `price_d-7` are empty at the start of the frame by construction, so list the columns that matter).
-
-```python
-from epftoolbox2.data.validators import NullCheckValidator
-
-validator = NullCheckValidator(
-    columns=["load_actual", "price"],  # Optional. Columns to check (default: None = all columns)
-    allow_nulls=False,                 # Optional. If True, nulls are warnings only (default: False)
-    max_null_frac=0.0,                 # Optional. Largest share of nulls allowed per column, 0-1 (default: 0.0)
-)
-```
-
-**Errors:** missing columns; columns whose null share is above `max_null_frac`.
-**Warnings:** columns with nulls within the limit (or any nulls with `allow_nulls=True`).
-**Info:** `missing_columns`, `null_counts`, `null_fraction`, `longest_null_run` (rows).
-**Stats:** column, rows, null_count, null_frac, longest_null_run, longest_null_run_start, longest_null_run_end.
-
----
-
 ## ContinuityValidator
 
 Checks that the index is a sorted grid with one step, no duplicates and no missing timestamps. Steps are measured in elapsed time, so a tz-aware local index is continuous across DST; day-or-longer steps on a tz-aware index follow the local calendar. A naive local wall-clock index shows DST switches as a gap and a duplicate.
@@ -1165,9 +1144,10 @@ transformers:
     lags: [1, 2, 7]
     freq: day
 validators:                      # run on the final (post-transformer) frame
-- class: NullCheckValidator
+- class: CoverageValidator
   params:
     columns: [load_actual, price]
+    min_coverage: 1.0
 ```
 
 ## ModelPipeline YAML
@@ -1423,7 +1403,7 @@ import os
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
-from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.data.validators import CoverageValidator
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 
@@ -1434,7 +1414,7 @@ pipeline = (
     .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual"], lags=[1, 2, 7], freq="day"))
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
 )
 
 df = pipeline.run(start="2023-01-01", end="2024-04-01", cache=True)
@@ -1519,7 +1499,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
-from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.exporters import ExcelExporter, TerminalExporter
@@ -1533,7 +1513,7 @@ data_pipeline = (
     .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
 )
 
 df = data_pipeline.run(start="2023-05-01", end="2024-07-01", cache=True)
@@ -1593,7 +1573,7 @@ os.environ["PYTHON_GIL"] = "0"
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
-from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.exporters import ExcelExporter, TerminalExporter
@@ -1618,7 +1598,7 @@ predictors = [
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
     .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "daylight_hours", "load_forecast", "is_holiday"]))
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
     .save("data_pipeline.yaml")
 )
 
@@ -1917,7 +1897,7 @@ AT, BE, BG, CH, CZ, DE, DK, ES, FI, FR, GB, GR, HU, IE, IT, NL, NO, PL, PT, RO, 
 Models will fail with `ValueError: Input X contains NaN` if predictors have null values. Solutions:
 1. Ensure sufficient lag data exists (check training window)
 2. Choose predictors that exist for all rows
-3. Use `NullCheckValidator` to catch issues early
+3. Use `CoverageValidator` to catch issues early
 
 ## Callable Predictors and YAML
 Callable predictors cannot be serialized to YAML. Use `"{horizon}"` string templates instead:

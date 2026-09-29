@@ -12,7 +12,7 @@ import os
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
-from epftoolbox2.data.validators import NullCheckValidator, EdaValidator
+from epftoolbox2.data.validators import CoverageValidator, EdaValidator
 
 pipeline = (
     DataPipeline()
@@ -33,7 +33,7 @@ pipeline = (
         lags=[1, 7],
         freq="day",
     ))
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
     .add_validator(EdaValidator())
 )
 

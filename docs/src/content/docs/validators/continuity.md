@@ -59,4 +59,4 @@ print(result.info["gap_count"], result.info["missing_periods"])
 - On raw source data, to find missing rows and mixed resolutions (for example around the 15-minute SDAC switch on 2025-10-01).
 - After timezone conversion and resampling, to confirm a regular grid.
 
-It only sees rows that are missing from the index. A column that is empty on a complete index needs [CoverageValidator](/epftoolbox2/validators/coverage/) or [NullCheckValidator](/epftoolbox2/validators/null-check/); rows per local day are checked by [DSTStructureValidator](/epftoolbox2/validators/dst-structure/).
+It only sees rows that are missing from the index. A column that is empty on a complete index needs [CoverageValidator](/epftoolbox2/validators/coverage/); rows per local day are checked by [DSTStructureValidator](/epftoolbox2/validators/dst-structure/).

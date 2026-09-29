@@ -15,8 +15,7 @@ Validators check a DataFrame without changing it. `validate(df)` returns a `Vali
 |---------|-----------|
 | Duplicate, unsorted or missing timestamps; mixed resolutions | [ContinuityValidator](/epftoolbox2/validators/continuity/) |
 | A local day with the wrong number of rows (DST days, naive wall-clock index) | [DSTStructureValidator](/epftoolbox2/validators/dst-structure/) |
-| One column missing for a stretch on a complete index; late start or early end | [CoverageValidator](/epftoolbox2/validators/coverage/) |
-| Too many nulls in the columns the model uses | [NullCheckValidator](/epftoolbox2/validators/null-check/) |
+| One column missing for a stretch on a complete index; late start or early end; too many nulls in the columns the model uses | [CoverageValidator](/epftoolbox2/validators/coverage/) |
 | Prices outside the SDAC limits, zero load, frozen values | [PlausibilityValidator](/epftoolbox2/validators/plausibility/) |
 | Summary statistics for a first look | [EdaValidator](/epftoolbox2/validators/eda/) |
 
@@ -48,11 +47,10 @@ class ValidationResult:
 from epftoolbox2.data.validators import (
     ContinuityValidator,
     CoverageValidator,
-    NullCheckValidator,
     results_to_frame,
 )
 
-validators = [ContinuityValidator(), CoverageValidator(columns=["price"]), NullCheckValidator(columns=["price"])]
+validators = [ContinuityValidator(), CoverageValidator(columns=["price"], min_coverage=1.0)]
 results = [v.validate(df) for v in validators]
 print(results_to_frame(results).to_string(index=False))
 ```
@@ -61,7 +59,6 @@ print(results_to_frame(results).to_string(index=False))
           validator  valid   level  message
 ContinuityValidator   True      ok
   CoverageValidator  False   error  Column 'price' has values at 168 of 240 expected 1h timestamps ...
- NullCheckValidator  False   error  Column 'price' has 72 null values (30.00% of 240 rows, max 0.00%) ...
 ```
 
 `results_to_frame` takes a list of results, a list of `(name, result)` pairs or a dict `{name: result}`, and returns one row per error and warning (columns `validator`, `valid`, `level`, `message`); a result without messages gets one `ok` row.

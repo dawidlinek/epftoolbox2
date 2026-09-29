@@ -32,7 +32,7 @@ epftoolbox2.verify()
 - **Data Sources**: ENTSOE (load, generation, day-ahead prices on an hourly or 15-minute grid, cross-border transfer capacity, installed capacity; `prefix` to combine zones), Open-Meteo (`OpenMeteoSource`, archived weather forecasts as known at a UTC cutoff — `api="previous_runs"` for a long lead-time-bucket archive or `api="single_runs"` for one exact model run per day; takes a `locations` dict to combine several locations into per-location columns, one or more aggregated series per variable via `agg` (mean, optionally population- or capacity-weighted; median, min, max, sum), or both), Calendar (national and regional holidays, bridge days, weekday, hour, month, daylight, a 31-entry market-regime catalog with ex-ante dates and sources, opt-in national or regional-share school holidays via the OpenHolidays API), CSV files (CsvSource), EpftoolboxBenchmark (the Lago et al. 2021 datasets NP, PJM, FR, BE, DE, downloaded on demand)
 - **Transformers**: Resample, Timezone conversion, Lag features (local calendar days), DST normalisation to 24 slots a day (DSTNormalize), daily profile and daily min/max/mean/last stats (DailyProfile, DailyStats), custom column arithmetic (Lambda), Impute (leak-safe gap filling)
 - **Presets**: `epftoolbox2.presets` — ready-made predictor lists for the LEAR and expert-model benchmarks from the literature
-- **Validators**: Null checks, Continuity (duplicates, gaps, mixed resolutions), DSTStructure (rows per local day), Coverage (per-column outages), Plausibility (SDAC price limits, frozen values), EDA statistics
+- **Validators**: Continuity (duplicates, gaps, mixed resolutions), DSTStructure (rows per local day), Coverage (per-column outages, missing timestamps and nulls), Plausibility (SDAC price limits, frozen values), EDA statistics
 - **Models**: OLS, LassoCV
 - **Scalers**: standardisation (default) or variance-stabilising transformations for spiky prices (asinh, N-PIT), fitted per forecast on training data only
 - **Evaluators**: MAE, RMSE, rMAE (relative to a base model)
@@ -69,9 +69,9 @@ df = ResampleTransformer(freq="1h").transform(df)  # aggregates or step-fills; n
 ### Standalone validator use
 
 ```python
-from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.data.validators import CoverageValidator
 
-validator = NullCheckValidator(columns=["load_actual", "price"])
+validator = CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0)
 result = validator.validate(df)
 print(result)  # VALID/INVALID with errors, warnings and details; result.stats has one row per column
 ```
@@ -123,7 +123,7 @@ Download and process electricity market data from ENTSOE, weather forecasts from
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
 from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, LagTransformer
-from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.data.validators import CoverageValidator
 
 pipeline = (
     # timezone is the single place the market zone needs to be written: sources/transformers below that
@@ -154,7 +154,7 @@ pipeline = (
             ],
         )
     )
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
 )
 
 df = pipeline.run("2024-01-01", "2024-06-01", cache=True)

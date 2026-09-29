@@ -1,7 +1,6 @@
 import pandas as pd
 from epftoolbox2.data.validators import (
     ContinuityValidator,
-    NullCheckValidator,
     EdaValidator,
     ValidationResult,
 )
@@ -45,45 +44,6 @@ class TestContinuityValidator:
 
         assert not result.is_valid
         assert "DatetimeIndex" in result.errors[0]
-
-
-class TestNullCheckValidator:
-    def test_valid_no_nulls(self):
-        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
-
-        validator = NullCheckValidator(columns=["a", "b"])
-        result = validator.validate(df)
-
-        assert result.is_valid
-
-    def test_missing_columns(self):
-        df = pd.DataFrame({"a": [1, 2, 3]})
-
-        validator = NullCheckValidator(columns=["a", "b", "c"])
-        result = validator.validate(df)
-
-        assert not result.is_valid
-        assert "missing_columns" in result.info
-        assert set(result.info["missing_columns"]) == {"b", "c"}
-
-    def test_null_values_detected(self):
-        df = pd.DataFrame({"a": [1, None, 3], "b": [4, 5, None]})
-
-        validator = NullCheckValidator()
-        result = validator.validate(df)
-
-        assert not result.is_valid
-        assert "null_counts" in result.info
-        assert result.info["null_counts"]["a"] == 1
-        assert result.info["null_counts"]["b"] == 1
-
-    def test_allow_nulls(self):
-        df = pd.DataFrame({"a": [1, None, 3]})
-
-        validator = NullCheckValidator(allow_nulls=True)
-        result = validator.validate(df)
-
-        assert result.is_valid
 
 
 class TestEdaValidator:

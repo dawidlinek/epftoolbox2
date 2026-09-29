@@ -56,7 +56,6 @@ COMPONENT_REGISTRY = {
     },
     "validators": {
         "ContinuityValidator": "epftoolbox2.data.validators.continuity",
-        "NullCheckValidator": "epftoolbox2.data.validators.null_check",
         "EdaValidator": "epftoolbox2.data.validators.eda",
         "DSTStructureValidator": "epftoolbox2.data.validators.dst_structure",
         "CoverageValidator": "epftoolbox2.data.validators.coverage",
@@ -107,7 +106,7 @@ class DataPipeline:
         ...     .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load"]))
         ...     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
         ...     .add_transformer(TimezoneTransformer())
-        ...     .add_validator(NullCheckValidator(columns=["load_actual"]))
+        ...     .add_validator(CoverageValidator(columns=["load_actual"], min_coverage=1.0))
         ... )
         >>> df = pipeline.run(start, end)
     """

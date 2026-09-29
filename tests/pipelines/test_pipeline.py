@@ -1145,13 +1145,13 @@ class TestDataPipelineSerialization:
 
     def test_to_dict_with_validator(self):
         """Test serializing pipeline with validator to dict"""
-        from epftoolbox2.data.validators import NullCheckValidator
+        from epftoolbox2.data.validators import CoverageValidator
 
-        pipeline = DataPipeline().add_validator(NullCheckValidator(columns=["test"]))
+        pipeline = DataPipeline().add_validator(CoverageValidator(columns=["test"]))
         config = pipeline.to_dict()
 
         assert len(config["validators"]) == 1
-        assert config["validators"][0]["class"] == "NullCheckValidator"
+        assert config["validators"][0]["class"] == "CoverageValidator"
         assert config["validators"][0]["params"]["columns"] == ["test"]
 
     def test_save_and_load(self, tmp_path):

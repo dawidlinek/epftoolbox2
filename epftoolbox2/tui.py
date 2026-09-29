@@ -612,29 +612,6 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
-    "NullCheckValidator": [
-        {
-            "name": "columns",
-            "description": "Columns to check (comma-separated, blank = all)",
-            "required": False,
-            "default": "",
-            "kind": "column_select",
-        },
-        {
-            "name": "allow_nulls",
-            "description": "Allow nulls (just warn)?",
-            "required": False,
-            "default": False,
-            "kind": "confirm",
-        },
-        {
-            "name": "max_null_frac",
-            "description": "Largest share of nulls allowed per column (0-1)",
-            "required": False,
-            "default": 0.0,
-            "kind": "float",
-        },
-    ],
     "EdaValidator": [
         {
             "name": "columns",
@@ -1077,7 +1054,6 @@ _TRANSFORMERS = [
 ]
 _VALIDATORS = [
     "ContinuityValidator",
-    "NullCheckValidator",
     "EdaValidator",
     "DSTStructureValidator",
     "CoverageValidator",

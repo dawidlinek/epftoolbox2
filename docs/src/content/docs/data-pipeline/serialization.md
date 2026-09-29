@@ -13,7 +13,7 @@ Save and load pipeline configurations for reproducibility and version control.
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
-from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.data.validators import CoverageValidator
 
 pipeline = (
     DataPipeline()
@@ -21,7 +21,7 @@ pipeline = (
     .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
 )
 
 pipeline.save("data_pipeline.yaml")
@@ -65,9 +65,10 @@ transformers:
     lags: [1, 2, 7]
     freq: day
 validators:                 # run on the final (post-transformer) frame
-- class: NullCheckValidator
+- class: CoverageValidator
   params:
     columns: [load_actual, price]
+    min_coverage: 1.0
 ```
 
 `DataPipeline.load()` raises `ValueError` on an unknown top-level key (e.g. a typo'd `timezon:`), and on an
