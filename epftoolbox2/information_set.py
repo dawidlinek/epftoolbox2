@@ -270,6 +270,7 @@ def default_rules() -> Dict[str, Availability]:
 def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     """Rules for the columns a DataPipeline's sources emit, following their prefixes and column choices."""
     from .data.sources.calendar import CalendarSource
+    from .data.sources.entsoe import EntsoeSource
     from .data.sources.open_meteo import OpenMeteoSource
 
     rules: Dict[str, Availability] = {}
@@ -280,6 +281,21 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             for key, rule in defaults.items():
                 if rule.kind == "static":
                     rules[f"{prefix}{key}"] = rule
+        elif isinstance(source, EntsoeSource) and "load" in source.type:
+            # A31 week-ahead daily values are stamped at the market's own local midnight (EntsoeSource's
+            # bound zone, see `_daily_zone`), not necessarily Brussels', and not necessarily this area's own
+            # when it is a neighbour combined into another market's pipeline. `default_rules()`'s weekly rule
+            # for these columns assumes Brussels, which is wrong for any other market — see `_daily_zone`.
+            prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
+            rule = Availability.weekly(
+                "friday",
+                "10:00",
+                timezone=source._daily_zone(),
+                note="A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6(2)(c)), anchored to "
+                "the market's own local day",
+            )
+            for name in ("load_forecast_daily_min", "load_forecast_daily_max"):
+                rules[f"{prefix}{name}"] = rule
         elif isinstance(source, OpenMeteoSource):
             from .data.sources._open_meteo_common import aggregated_variable_names
 

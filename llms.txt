@@ -908,18 +908,23 @@ pipeline = ModelPipeline(information_set=info)  # equivalent to passing issue_ti
 - `price` (A44): published ~13:00 Brussels on D-1
 - `load_actual` (A65/A16), `generation_*` (A75): known 1h after the delivery period ends
 - `load_forecast` (A65/A01): published 10:00 Brussels on D-1
-- `load_forecast_daily_min`/`_max` (A65/A31): published Friday 10:00 Brussels for the whole next week
+- `load_forecast_daily_min`/`_max` (A65/A31): published Friday 10:00 for the whole next week, in Brussels by
+  default — a bound `EntsoeSource` overrides this with the market's own zone, see below
 - `generation_*_forecast` (A69 wind/solar): published 18:00 Brussels on D-1 (legal deadline; accept the
   `entsoe_a69_by_10` assumption to instead treat it as 10:00, like the load forecast)
 - Calendar columns (holiday/weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`): static, known in advance
 
 Weather columns have no default rule (a `*_temperature_2m`-style name alone doesn't mean "forecast timing" —
 it could be an observed value too): `source_rules(sources)` / `InformationSet.with_source_rules(sources)`
-(called automatically by `Workflow`) assigns one only to the columns an `OpenMeteoSource` actually emits:
-`weather_cutoff(source.run, f"{delay}h")`, `delay` from `publication_delay_hours(source.model)` (ICON ~4h, GFS
-~5h, ECMWF IFS ~8h, JMA ~10h, 10h for an unknown model) — known `delay` after `source.run`:00 UTC on the issue
-day itself, unaffected by a leading `_d+k`. `run`/`model` are read with `getattr`, so this works with any
-`OpenMeteoSource`-like object; the source itself has no notion of issue time or delay, only of `run`.
+(called automatically by `Workflow`) assigns one only to the columns an `OpenMeteoSource` actually emits, plus
+overrides the week-ahead rule for an `EntsoeSource`'s own `load_forecast_daily_min`/`_max` (prefixed the same
+way as its other columns) with `weekly("friday", "10:00", timezone=source._daily_zone())` — the source's own
+bound market zone (or its area's own zone standalone), matching where A31's local midnight is actually
+anchored, instead of the `Europe/Brussels` default. For weather: `weather_cutoff(source.run, f"{delay}h")`,
+`delay` from `publication_delay_hours(source.model)` (ICON ~4h, GFS ~5h, ECMWF IFS ~8h, JMA ~10h, 10h for an
+unknown model) — known `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading
+`_d+k`. `run`/`model` are read with `getattr`, so this works with any `OpenMeteoSource`-like object; the
+source itself has no notion of issue time or delay, only of `run`.
 
 **Availability kinds** (`Availability.<kind>(...)`): `static()`, `realised(delay="1h")`,
 `published(time, days_before=1, timezone="Europe/Brussels")`, `daily_close(time)` (= `published(time, days_before=0)`),

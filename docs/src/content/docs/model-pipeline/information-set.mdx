@@ -52,7 +52,7 @@ are unaffected until you opt in.
 | `price` (ENTSO-E A44) | published ~13:00 Brussels on D-1 (within about 1h of the 12:00 gate closure) |
 | `load_actual` (A65/A16) | 1h after the end of the delivery period |
 | `load_forecast` (A65/A01) | published 10:00 Brussels on D-1 |
-| `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00 Brussels, for the whole following week |
+| `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00, for the whole following week (Brussels by default; a bound `EntsoeSource` overrides this with the market's own zone, see below) |
 | `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) |
 | `generation_*` (A75 actual generation) | 1h after the end of the delivery period |
 | Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static — known in advance |
@@ -67,9 +67,16 @@ are unaffected until you opt in.
 Column names are parsed the same way predictors are: `price_d-1` resolves to the base column `price` shifted
 one calendar day back. There is no built-in default rule for weather columns — a `*_temperature_2m`-style
 name alone doesn't say whether it's a forecast or an observed value. A `DataPipeline`'s sources refine the
-check — `with_source_rules()` (called automatically by `Workflow`) teaches it about a `CalendarSource(prefix=...)`
-and assigns a rule to exactly the columns an `OpenMeteoSource` emits:
+check — `with_source_rules()` (called automatically by `Workflow`) teaches it about a `CalendarSource(prefix=...)`,
+overrides the default week-ahead rule for an `EntsoeSource`'s own columns, and assigns a rule to exactly the
+columns an `OpenMeteoSource` emits:
 
+- An `EntsoeSource` with `"load"` in `type` gets its own `load_forecast_daily_min`/`_max` rule (prefixed the
+  same way as its other columns), evaluated in the source's own bound market zone (`EntsoeSource._daily_zone`)
+  instead of the `Europe/Brussels` default — the zone the value's local midnight is actually anchored to. A
+  neighbouring area combined into another market's `DataPipeline` (e.g. `EntsoeSource("FI", ..., prefix="fi")`
+  inside `DataPipeline(timezone="Europe/Warsaw")`) is checked in the market's zone, not Finland's own, matching
+  where the value is stamped.
 - `weather_cutoff(source.run, f"{delay}h")`, `delay` coming from `publication_delay_hours(source.model)` — known
   `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading `_d+k`. This is a
   conservative, model-side estimate of the run's real-world publication lag (ICON ~4h, GFS ~5h, ECMWF IFS ~8h,

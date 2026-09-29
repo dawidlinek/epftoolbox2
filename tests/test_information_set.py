@@ -15,9 +15,10 @@ from epftoolbox2.information_set import (
     perturb_unknown,
     source_rules,
 )
+from epftoolbox2.data.sources.entsoe import EntsoeSource
 from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
 from epftoolbox2.models import OLSModel
-from epftoolbox2.pipelines import ModelPipeline, Workflow
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 WARSAW = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
@@ -217,6 +218,53 @@ def test_source_rules_agg_list_covers_the_suffixed_columns_and_skips_what_isnt_e
         assert f"warsaw_{name}_temperature_2m" in rules
         assert f"warsaw_{name}_wind_direction_10m" in rules
         assert f"warsaw_{name}_weather_code" in rules
+
+
+def test_source_rules_week_ahead_uses_the_markets_own_zone_for_a_helsinki_index():
+    """entsoe/information-set: `default_rules()`'s weekly rule for load_forecast_daily_min/max is evaluated in
+    Europe/Brussels regardless of the actual market. For a Helsinki index issued Thursday 2024-01-11,
+    `load_forecast_daily_max_d+4` delivers on Monday 2024-01-15, whose controlling Friday (2024-01-12) hasn't
+    published yet -- every period must be flagged alike. Period 0 used to be missed because Monday 00:00 EET
+    is still Sunday 23:00 in Brussels (UTC+2 vs UTC+1 in January), landing the value in the wrong ISO week."""
+    source = EntsoeSource("FI", api_key="test-key", type=["load"])
+    DataPipeline(sources=[source], timezone="Europe/Helsinki")
+    info = InformationSet("11:30", "Europe/Helsinki").with_source_rules([source])
+    index = pd.date_range("2024-01-01", periods=24 * 30, freq="h", tz="Europe/Helsinki")
+
+    found, unknown = violations(
+        ["load_forecast_daily_max_d+{horizon}"],
+        info=info,
+        horizon=4,
+        start="2024-01-11",
+        end="2024-01-11",
+        index=index,
+    )
+
+    assert unknown == set()
+    flagged_periods = {period for _, period, hz in found if hz == 4}
+    assert flagged_periods == set(range(24))  # period 0 alongside periods 1-23, not missing
+
+
+def test_source_rules_week_ahead_uses_the_markets_own_zone_for_a_warsaw_control():
+    """Control: Warsaw (CET) and Brussels (CET) share the same UTC offset in January, so this scenario was
+    never broken there -- binding the market's own zone must not change an already-correct result."""
+    source = EntsoeSource("PL", api_key="test-key", type=["load"])
+    DataPipeline(sources=[source], timezone="Europe/Warsaw")
+    info = InformationSet("11:30", "Europe/Warsaw").with_source_rules([source])
+    index = pd.date_range("2024-01-01", periods=24 * 30, freq="h", tz="Europe/Warsaw")
+
+    found, unknown = violations(
+        ["load_forecast_daily_max_d+{horizon}"],
+        info=info,
+        horizon=4,
+        start="2024-01-11",
+        end="2024-01-11",
+        index=index,
+    )
+
+    assert unknown == set()
+    flagged_periods = {period for _, period, hz in found if hz == 4}
+    assert flagged_periods == set(range(24))
 
 
 def test_user_rules_take_precedence_and_exact_names_beat_suffix_parsing():
