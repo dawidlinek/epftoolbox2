@@ -121,6 +121,14 @@ again.
 | `session`, `console`, `logger` | Excluded (runtime objects, not configuration) |
 | Anything else (`set`, callable, arbitrary object) | Raises `TypeError` naming the parameter. Nothing is dropped silently |
 
+## YAML files from older versions
+
+`ResampleTransformer` no longer has the `method` and `columns` parameters. Files saved while it had them contain
+`method: null` and `columns: null`, and those two keys are ignored on load, so the files keep working. A file
+that set a value (for example `method: ffill`) raises a `ValueError` that names the key and points to `agg`
+and `fill`. Edit it by hand, because the old `method` also interpolated and back-filled and has no exact
+equivalent. See [ResampleTransformer](/epftoolbox2/transformers/resample/).
+
 ## Registering Custom Sources/Transformers/Validators
 
 Add to `COMPONENT_REGISTRY` in `data_pipeline.py`:

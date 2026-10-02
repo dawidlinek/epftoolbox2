@@ -366,6 +366,7 @@ ResampleTransformer(freq="1h", agg={"default": "mean", "energy_mwh": "sum"})
 - **Downsampling** (15min → 1h): `agg` over the values inside each target period. Incomplete periods are NaN (no partial sums, no zeros for empty periods). Non-numeric columns use "first" for numeric-only aggregations.
 - Missing values from the source are never filled and nothing is extrapolated past a column's last value (no look-ahead). No rounding.
 - DST: on a local index the spring day keeps 23 hours (no 02:00 row is created) and the autumn day 25.
+- `method` and `columns` were removed. YAML saved with `method: null` and `columns: null` still loads (both keys are ignored). A file that set either raises a ValueError that points to `agg` and `fill`.
 
 ---
 
