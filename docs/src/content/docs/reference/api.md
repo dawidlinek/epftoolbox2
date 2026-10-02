@@ -198,8 +198,6 @@ class ResampleTransformer(Transformer):
         freq: str = "1h",
         agg: Union[str, Dict[str, str]] = "mean",  # dict: {column: agg}, "default" key for the rest
         fill: Union[str, None, Dict[str, Optional[str]]] = "ffill",  # "ffill" | None
-        method: Optional[str] = None,  # deprecated
-        columns: Union[str, List[str], None] = None,  # deprecated
     ): ...
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 

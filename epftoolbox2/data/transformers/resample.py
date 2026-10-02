@@ -1,5 +1,4 @@
 import math
-import warnings
 from dataclasses import dataclass
 from functools import reduce
 
@@ -15,8 +14,6 @@ FILLS = ("ffill", None)
 DEFAULT_KEY = "default"
 
 _NUMERIC_ONLY = {"mean", "sum", "median"}
-# Deprecated `method` values → the aggregation they selected. Their fill part (linear, bfill) looked ahead.
-_LEGACY_METHODS = {"linear": "mean", "ffill": "first", "bfill": "last", "sum": "sum", "first": "first", "last": "last"}
 # Number of spacings on each side of an observation used to find the period it covers (see _periods).
 _PERIOD_WINDOW = 4
 _HOUR_NS = 3_600_000_000_000
@@ -64,10 +61,6 @@ class ResampleTransformer(Transformer):
             given an aggregation that works for them.
         fill: How slots created by upsampling are filled: ``"ffill"`` (step fill inside the value's own period)
             or ``None`` (leave them empty); a dict ``{column: fill}`` works like ``agg``.
-        method: Deprecated. The old combined setting; only its aggregation is kept (``linear``→``mean``,
-            ``ffill``/``first``→``first``, ``bfill``/``last``→``last``, ``sum``→``sum``).
-        columns: Deprecated. Limits ``method`` to these columns; the others use ``agg="mean"`` and are not
-            filled.
 
     Example:
         >>> ResampleTransformer(freq="1h", agg={"default": "mean", "energy_mwh": "sum"}).transform(df)
@@ -78,46 +71,14 @@ class ResampleTransformer(Transformer):
         freq: str = "1h",
         agg: str | dict[str, str] = "mean",
         fill: str | dict[str, str | None] | None = "ffill",
-        method: str | None = None,
-        columns: list[str] | str | None = None,
     ):
         self.freq = freq
         self.agg = agg
         self.fill = _normalise_fill(fill)
-        self.method = method
-        self.columns = [columns] if isinstance(columns, str) else columns
         self._offset = _parse_freq(freq)
         _validate_agg(agg)
-        self._agg_default, self._agg_by_column, self._fill_default, self._fill_by_column = self._resolve()
-
-    def _resolve(self) -> tuple[str, dict, str | None, dict]:
-        if self.method is None and self.columns is None:
-            agg_default, agg_by_column = _split(self.agg, "mean")
-            fill_default, fill_by_column = _split(self.fill, "ffill")
-            return agg_default, agg_by_column, fill_default, fill_by_column
-
-        if self.agg != "mean" or self.fill != "ffill":
-            raise ValueError("ResampleTransformer: use either the deprecated method/columns or agg/fill, not both")
-        method = "linear" if self.method is None else self.method
-        if method not in _LEGACY_METHODS:
-            raise ValueError(f"Invalid method: '{method}'. Must be one of: {sorted(_LEGACY_METHODS)}")
-        agg = _LEGACY_METHODS[method]
-        if self.columns is None:
-            agg_default, agg_by_column, fill_default, fill_by_column = agg, {}, "ffill", {}
-            new_agg, new_fill = repr(agg), "'ffill'"
-        else:
-            agg_default, agg_by_column = "mean", {col: agg for col in self.columns}
-            fill_default, fill_by_column = None, {col: "ffill" for col in self.columns}
-            new_agg = repr({DEFAULT_KEY: "mean", **agg_by_column})
-            new_fill = repr({DEFAULT_KEY: None, **fill_by_column})
-        warnings.warn(
-            f"ResampleTransformer(method={self.method!r}, columns={self.columns!r}) is deprecated; it is read as "
-            f"agg={new_agg}, fill={new_fill}. Missing values in the source are no longer interpolated or "
-            "back-filled; only slots created by upsampling are filled, from their own period.",
-            FutureWarning,
-            stacklevel=3,
-        )
-        return agg_default, agg_by_column, fill_default, fill_by_column
+        self._agg_default, self._agg_by_column = _split(self.agg, "mean")
+        self._fill_default, self._fill_by_column = _split(self.fill, "ffill")
 
     def _check_columns(self, df: pd.DataFrame) -> None:
         named = set(self._agg_by_column) | set(self._fill_by_column)

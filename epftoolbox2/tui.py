@@ -466,20 +466,6 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "select",
             "choices": ["ffill", "none"],
         },
-        {
-            "name": "method",
-            "description": "Deprecated legacy interpolation method (use agg/fill instead); blank = not set",
-            "required": False,
-            "default": None,
-            "kind": "text",
-        },
-        {
-            "name": "columns",
-            "description": "Deprecated: columns the legacy method applies to (use agg/fill instead); blank = all",
-            "required": False,
-            "default": None,
-            "kind": "column_select",
-        },
     ],
     "LagTransformer": [
         {

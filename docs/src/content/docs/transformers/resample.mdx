@@ -3,10 +3,6 @@ title: ResampleTransformer
 description: Bring every column to one regular frequency without inventing data
 ---
 
-import { Aside } from '@astrojs/starlight/components';
-
-# ResampleTransformer
-
 Brings every column of a frame to one regular frequency. It aggregates when a column is finer than the target (15 min → 1 h) and repeats a value over its own period when the column is coarser (1 h → 15 min). It does **not** fill missing data and never uses a later value to fill an earlier slot.
 
 ## Basic Usage
@@ -25,8 +21,6 @@ df = transformer.transform(df)
 | `freq` | str | `"1h"` | Target pandas frequency (`"15min"`, `"1h"`, `"1D"`, ...) |
 | `agg` | str \| dict | `"mean"` | Aggregation used when downsampling: `mean`, `sum`, `first`, `last`, `min`, `max`, `median`, or a dict `{column: aggregation}` |
 | `fill` | str \| None \| dict | `"ffill"` | How slots created by upsampling are filled: `"ffill"` (repeat the value inside its own period) or `None` (leave them empty), or a dict `{column: fill}` |
-| `method` | str \| None | `None` | **Deprecated**, see [Migrating](#migrating-from-method-and-columns) |
-| `columns` | list[str] \| str \| None | `None` | **Deprecated**, see [Migrating](#migrating-from-method-and-columns) |
 
 In a dict, columns that are not listed use the `"default"` entry, or `"mean"` / `"ffill"` when there is none:
 
@@ -50,10 +44,6 @@ Every value is the value of a **period** that starts at its timestamp and lasts 
 
 **Nothing else is filled.** A value missing in the source (an outage, a price that isn't published yet) stays missing, and nothing is extrapolated past a column's last value. Gaps therefore stay visible to validators and are dropped by the models instead of being scored against invented actuals.
 
-<Aside type="caution">
-  Earlier versions interpolated linearly across every gap and past the end of the data by default. That moved values from later days into earlier rows: features for day D and training targets could depend on prices of D+1. If you need gap filling, fill the gaps explicitly with a method that only uses earlier values.
-</Aside>
-
 ## Pipeline order: Timezone → Resample → Lag
 
 ```python
@@ -70,38 +60,17 @@ pipeline = (
 )
 ```
 
-1. **`TimezoneTransformer` first**, so that daily bins (`freq="1D"`) and daily columns follow local calendar days and daily values sit on local midnight. Resampling a UTC frame to `"1D"` aggregates UTC days; resampling daily columns before the timezone step makes `TimezoneTransformer` raise.
+1. **`TimezoneTransformer` first**, so that daily bins (`freq="1D"`) and daily columns follow local calendar days and daily values sit on local midnight. Resampling a UTC frame to `"1D"` aggregates UTC days, and resampling daily columns before the timezone step makes `TimezoneTransformer` raise.
 2. **`ResampleTransformer`** next, to put every column on the same grid.
 3. **`LagTransformer`** last, on the regular local grid.
 
 ### What happens on DST days
 
-After `TimezoneTransformer`, a local day has 23 hours on the spring switch day and 25 on the autumn one. `ResampleTransformer` keeps that: the spring day has 23 hourly rows (92 quarter-hours) and **no 02:00 row**, because that local time doesn't exist; the autumn day has 25 hourly rows (100 quarter-hours) with 02:00 twice. Nothing is filled in for the "missing" hour, and a daily value covers all 23 or 25 hours of its day.
-
-## Migrating from `method` and `columns`
-
-`method` used to pick an aggregation and a fill at once, and `columns` only limited the fill while the aggregation still hit every column. Both still work but emit a `FutureWarning`, and are read as follows:
-
-| Old | New |
-|-----|-----|
-| `method="linear"` (old default) | `agg="mean"` |
-| `method="ffill"` or `"first"` | `agg="first"` |
-| `method="bfill"` or `"last"` | `agg="last"` |
-| `method="sum"` | `agg="sum"` |
-| `method=m, columns=[c]` | `agg={"default": "mean", c: <agg of m>}`, `fill={"default": None, c: "ffill"}` |
-
-In every case upsampled slots are step-filled from their own period; linear interpolation, backward fill and filling of source gaps are gone. The old two-step pattern for daily columns
-
-```python
-ResampleTransformer(freq="1h", columns=["load_forecast_daily_min", "load_forecast_daily_max"], method="ffill")
-ResampleTransformer(freq="1h")
-```
-
-is now a single `ResampleTransformer(freq="1h")`: daily values are spread over their own local day, and 15-minute series are averaged instead of keeping only the :00 value.
+After `TimezoneTransformer`, a local day has 23 hours on the spring switch day and 25 on the autumn one. `ResampleTransformer` keeps that: the spring day has 23 hourly rows (92 quarter-hours) and **no 02:00 row**, because that local time doesn't exist. The autumn day has 25 hourly rows (100 quarter-hours) with 02:00 twice. Nothing is filled in for the "missing" hour, and a daily value covers all 23 or 25 hours of its day.
 
 ## Notes
 
-- The input must have a `DatetimeIndex` without duplicate timestamps; an unsorted index is sorted.
+- The input must have a `DatetimeIndex` without duplicate timestamps. An unsorted index is sorted.
 - Timestamps are period starts (ENTSO-E convention).
 - Output values are not rounded.
 - Numeric columns come out as `float64`.

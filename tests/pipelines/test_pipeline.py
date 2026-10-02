@@ -1244,7 +1244,7 @@ class TestDataPipelineSerialization:
         pipeline = (
             DataPipeline()
             .add_source(CalendarSource(country="DE", holidays="onehot", weekday="name", month="number"))
-            .add_transformer(ResampleTransformer(freq="1h", method="ffill"))
+            .add_transformer(ResampleTransformer(freq="1h", agg="sum"))
         )
 
         yaml_path = tmp_path / "pipeline.yaml"
@@ -1256,4 +1256,4 @@ class TestDataPipelineSerialization:
         assert loaded.sources[0].weekday == "name"
         assert loaded.sources[0].month == "number"
         assert loaded.transformers[0].freq == "1h"
-        assert loaded.transformers[0].method == "ffill"
+        assert loaded.transformers[0].agg == "sum"

@@ -58,7 +58,9 @@ class TestDataPipelineSerialization:
         assert src.daylight is True
 
     def test_round_trip_resample_transformer(self, tmp_path):
-        original = DataPipeline().add_transformer(ResampleTransformer(freq="15min", method="ffill"))
+        original = DataPipeline().add_transformer(
+            ResampleTransformer(freq="15min", agg={"default": "mean", "energy": "sum"}, fill={"price": None})
+        )
         path = tmp_path / "dp.yaml"
         original.save(path)
         loaded = DataPipeline.load(path)
@@ -66,7 +68,8 @@ class TestDataPipelineSerialization:
         t = loaded.transformers[0]
         assert isinstance(t, ResampleTransformer)
         assert t.freq == "15min"
-        assert t.method == "ffill"
+        assert t.agg == {"default": "mean", "energy": "sum"}
+        assert t.fill == {"price": None}
 
     def test_round_trip_lag_transformer_list(self, tmp_path):
         original = DataPipeline().add_transformer(LagTransformer(columns=["price", "load"], lags=[1, 2, 7], freq="day"))
@@ -181,7 +184,7 @@ class TestDataPipelineSerializationFidelity:
                 freq="15min",
             ),
             "TimezoneTransformer": TimezoneTransformer("Europe/Berlin", daily_columns=["a"]),
-            "ResampleTransformer": ResampleTransformer("15min", method="ffill", columns=["a"]),
+            "ResampleTransformer": ResampleTransformer("15min", agg={"a": "sum"}, fill=None),
             "LagTransformer": LagTransformer(["a"], [1, -2], "15min"),
             "ContinuityValidator": ContinuityValidator("15min"),
             "CoverageValidator": CoverageValidator(["a"], min_coverage=0.9),
@@ -641,7 +644,7 @@ class TestWorkflowSerialization:
         # Manually inject inline transformer override
         config = yaml.safe_load(out.read_text())
         config["data_pipeline"]["transformers"] = [
-            {"class": "ResampleTransformer", "params": {"freq": "1h", "method": "ffill"}}
+            {"class": "ResampleTransformer", "params": {"freq": "1h", "agg": "sum"}}
         ]
         out.write_text(yaml.dump(config, default_flow_style=False))
 
@@ -650,6 +653,7 @@ class TestWorkflowSerialization:
         assert len(dp.transformers) == 1
         assert isinstance(dp.transformers[0], ResampleTransformer)
         assert dp.transformers[0].freq == "1h"
+        assert dp.transformers[0].agg == "sum"
 
     def test_inline_model_override(self, tmp_path, pipeline_yamls):
         dp_path, mp_path = pipeline_yamls

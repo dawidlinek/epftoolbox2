@@ -72,8 +72,8 @@ that covers `start` is reported at `start`, so the first day is not lost.
 | `load_forecast_daily_max` | A65 / A31 | Week-ahead forecast of the day's maximum load (MW), one value per local day |
 
 Load keeps the resolution ENTSO-E publishes (15 minutes for PL and DE_LU in 2024–2025). The daily columns hold
-one value at local midnight and are empty in between; fill them with
-`ResampleTransformer(method="ffill", columns=[...])` after `TimezoneTransformer`.
+one value at local midnight and are empty in between. A `ResampleTransformer(freq="1h")` after
+`TimezoneTransformer` spreads each value over its own local day.
 
 #### Week-ahead daily values and neighbouring areas
 
@@ -197,7 +197,7 @@ source = EntsoeSource("FR", api_key=key, type=["transfer_capacity"], neighbours=
 Installed generation capacity per production type (A68, year-ahead) in MW, as `installed_capacity_<type>` with the
 same type names as generation (e.g. `installed_capacity_solar`, `installed_capacity_wind_onshore`). There is one
 value per year, stamped at local midnight of 1 January; if that lies before `start`, the value is reported at
-`start`. Fill it forward with `ResampleTransformer(method="ffill", columns=[...])`.
+`start`. A `ResampleTransformer(freq="1h")` after `TimezoneTransformer` carries each value forward over its year.
 
 ### Combining zones with `prefix`
 

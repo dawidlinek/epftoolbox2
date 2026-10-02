@@ -90,11 +90,11 @@ source = EntsoeSource(
 - `prefix` (str): Defaults to "". Prepended to every column (`"cz"` -> `cz_price`), so several zones can be combined in one pipeline without collisions.
 
 **Output columns by type:**
-- `type=["load"]`: `load_actual` (A65/A16), `load_forecast` (A65/A01, day-ahead), `load_forecast_daily_min`, `load_forecast_daily_max` (A65/A31 week-ahead; one value per this area's own local day D, fill with `ResampleTransformer(method="ffill", columns=[...])`). Stamped at the *market's* local midnight of D when this source is part of a `DataPipeline` (so a neighbour's value lands on the market's own local day, not the neighbour's — see `_daily_zone`); at this area's own midnight otherwise (unchanged, and a no-op when this area already is the market's own).
+- `type=["load"]`: `load_actual` (A65/A16), `load_forecast` (A65/A01, day-ahead), `load_forecast_daily_min`, `load_forecast_daily_max` (A65/A31 week-ahead; one value per this area's own local day D, spread over the day by `ResampleTransformer(freq="1h")`). Stamped at the *market's* local midnight of D when this source is part of a `DataPipeline` (so a neighbour's value lands on the market's own local day, not the neighbour's — see `_daily_zone`); at this area's own midnight otherwise (unchanged, and a no-op when this area already is the market's own).
 - `type=["price"]`: `price` (EUR/MWh), the SDAC day-ahead price only (classificationSequence 1; the second 15-minute DE_LU/AT auction is ignored)
 - `type=["generation"]`: actual generation per production type `generation_<type>` (A75), e.g. `generation_biomass`, `generation_fossil_gas`, `generation_hydro_run_of_river_and_pondage`, `generation_nuclear`, `generation_solar`, `generation_wind_onshore`, `generation_energy_storage`; consumption of a type (pumped-storage pumping etc.) as `generation_<type>_consumption`; day-ahead wind/solar forecasts `generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` (A69). Unknown production types become `generation_<code>`.
 - `type=["transfer_capacity"]`: `transfer_capacity_export_<neighbour>` and `transfer_capacity_import_<neighbour>` (A61 day-ahead forecasted transfer capacity, MW), e.g. `transfer_capacity_export_es`. Borders without NTC publication (e.g. inside flow-based Core, all PL borders in 2024) return no data and the column is absent.
-- `type=["installed_capacity"]`: `installed_capacity_<type>` (A68, MW), one value per year at local midnight of 1 January (reported at `start` if the year began earlier); fill with `ResampleTransformer(method="ffill", columns=[...])`.
+- `type=["installed_capacity"]`: `installed_capacity_<type>` (A68, MW), one value per year at local midnight of 1 January (reported at `start` if the year began earlier), carried over its year by `ResampleTransformer(freq="1h")`.
 - Unavailability of generation units (A77/A80) is not offered: the API cannot give the revision known at issue time.
 
 Omitted points under curveType A03 are forward-filled; daily values follow the local calendar across DST.
@@ -356,8 +356,6 @@ transformer = ResampleTransformer(
                         #   or a dict {column: agg}; unlisted columns use the "default" key, else "mean"
     fill="ffill",       # Optional (default: "ffill"). Upsampled slots: "ffill" (repeat the value within its own period) | None,
                         #   or a dict {column: fill}
-    method=None,        # Deprecated (default: None). Old combined setting; only its aggregation is kept
-    columns=None,       # Deprecated (default: None). Limits `method` to these columns
 )
 
 ResampleTransformer(freq="1h", agg={"default": "mean", "energy_mwh": "sum"})
@@ -369,7 +367,6 @@ ResampleTransformer(freq="1h", agg={"default": "mean", "energy_mwh": "sum"})
 - **Downsampling** (15min → 1h): `agg` over the values inside each target period; incomplete periods are NaN (no partial sums, no zeros for empty periods). Non-numeric columns use "first" for numeric-only aggregations.
 - Missing values from the source are never filled and nothing is extrapolated past a column's last value (no look-ahead). No rounding.
 - DST: on a local index the spring day keeps 23 hours (no 02:00 row is created) and the autumn day 25.
-- Migration: `method="linear"` → `agg="mean"`; `"ffill"`/`"first"` → `agg="first"`; `"bfill"`/`"last"` → `agg="last"`; `"sum"` → `agg="sum"`. `method=m, columns=[c]` → `agg={"default": "mean", c: agg(m)}, fill={"default": None, c: "ffill"}`. Both emit a FutureWarning. Linear interpolation and back-fill are gone.
 
 ---
 

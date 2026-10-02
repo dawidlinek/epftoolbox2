@@ -18,8 +18,6 @@ class TestResampleTransformerInit:
         assert transformer.freq == "1h"
         assert transformer.agg == "mean"
         assert transformer.fill == "ffill"
-        assert transformer.method is None
-        assert transformer.columns is None
 
     def test_is_transformer(self):
         assert isinstance(ResampleTransformer(), Transformer)
@@ -46,72 +44,34 @@ class TestResampleTransformerInit:
         with pytest.raises(ValueError, match="freq"):
             ResampleTransformer(freq="every tuesday")
 
-    def test_method_and_agg_together_raise(self):
-        with pytest.raises(ValueError, match="method"):
-            ResampleTransformer(method="sum", agg="first")
+    @pytest.mark.parametrize("name", ["method", "columns"])
+    def test_removed_parameters_are_rejected(self, name):
+        with pytest.raises(TypeError, match=name):
+            ResampleTransformer(**{name: "price"})
 
 
-class TestLegacyParameters:
-    """`method` and `columns` still work, translated to per-column agg/fill with a FutureWarning."""
-
-    def test_invalid_method(self):
-        with pytest.raises(ValueError, match="Invalid method"):
-            ResampleTransformer(method="invalid")
-
-    @pytest.mark.parametrize(
-        "method, agg", [("linear", "mean"), ("ffill", "first"), ("bfill", "last"), ("sum", "sum"), ("last", "last")]
-    )
-    def test_method_selects_aggregation(self, method, agg):
-        idx = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
-        df = pd.DataFrame({"x": np.arange(8.0)}, index=idx)
-        with pytest.warns(FutureWarning, match="method"):
-            legacy = ResampleTransformer(freq="1h", method=method)
-        expected = ResampleTransformer(freq="1h", agg=agg).transform(df)
-        pd.testing.assert_frame_equal(legacy.transform(df), expected)
-
-    def test_legacy_attributes_survive(self):
-        with pytest.warns(FutureWarning):
-            transformer = ResampleTransformer(freq="15min", method="ffill", columns="price")
-        assert transformer.method == "ffill"
-        assert transformer.columns == ["price"]
-
-    def test_columns_limit_the_method_to_those_columns(self):
-        """review F6: method='sum', columns=['energy_mwh'] used to sum the price too (100 -> 400)."""
-        idx = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
-        df = pd.DataFrame({"energy_mwh": 10.0, "price": 100.0}, index=idx)
-        with pytest.warns(FutureWarning):
-            transformer = ResampleTransformer(freq="1h", method="sum", columns=["energy_mwh"])
-        out = transformer.transform(df)
-        assert out["energy_mwh"].tolist() == [40.0, 40.0]
-        assert out["price"].tolist() == [100.0, 100.0]
-
-    def test_unlisted_columns_are_not_filled(self):
+class TestPerColumnFill:
+    def test_default_none_fills_only_the_named_columns(self):
         idx = pd.date_range("2024-01-01", periods=3, freq="D", tz="UTC")
         df = pd.DataFrame({"price": [10.0, 20.0, 30.0], "load": [100.0, 200.0, 300.0]}, index=idx)
-        with pytest.warns(FutureWarning):
-            out = ResampleTransformer(freq="12h", method="ffill", columns=["price"]).transform(df)
+        out = ResampleTransformer(freq="12h", fill={"default": None, "price": "ffill"}).transform(df)
         assert out["price"].tolist() == [10.0, 10.0, 20.0, 20.0, 30.0, 30.0]
         assert out["load"].iloc[[0, 2, 4]].tolist() == [100.0, 200.0, 300.0]
         assert out["load"].iloc[[1, 3, 5]].isna().all()
 
-    def test_two_step_example_pattern_equals_one_step(self):
-        """Examples 01/06 resampled daily columns with method='ffill' first; that must not change other columns."""
+    def test_two_step_pattern_equals_one_step(self):
+        """Spreading the daily columns first and resampling everything afterwards must not change other columns."""
         raw = _raw_source_frame()
         local = TimezoneTransformer(TZ).transform(raw)
-        with pytest.warns(FutureWarning):
-            first = ResampleTransformer(
-                freq="1h", columns=["load_forecast_daily_min", "load_forecast_daily_max"], method="ffill"
-            )
+        daily = ["load_forecast_daily_min", "load_forecast_daily_max"]
+        first = ResampleTransformer(
+            freq="1h",
+            agg={"default": "mean", **dict.fromkeys(daily, "first")},
+            fill={"default": None, **dict.fromkeys(daily, "ffill")},
+        )
         two_step = ResampleTransformer(freq="1h").transform(first.transform(local))
         one_step = ResampleTransformer(freq="1h").transform(local)
         pd.testing.assert_frame_equal(two_step, one_step)
-
-    def test_missing_legacy_column_raises(self):
-        idx = pd.date_range("2024-01-01", periods=4, freq="h", tz="UTC")
-        with pytest.warns(FutureWarning):
-            transformer = ResampleTransformer(columns=["non_existent"])
-        with pytest.raises(ValueError, match="Columns not found"):
-            transformer.transform(pd.DataFrame({"value": 1.0}, index=idx))
 
 
 def _raw_source_frame(start="2024-01-01", days=12, gap=None) -> pd.DataFrame:
