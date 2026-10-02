@@ -99,7 +99,7 @@ import os
 # Enable free-threading (Python 3.13t+)
 os.environ["PYTHON_GIL"] = "0"
 
-# Pin BLAS to 1 thread per process — prevents oversubscription
+# Pin BLAS to 1 thread per process, prevents oversubscription
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"

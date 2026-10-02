@@ -141,7 +141,7 @@ class EntsoeSource(DataSource):
 
 class OpenMeteoSource(DataSource):
     def __init__(self, latitude: Optional[float] = None, longitude: Optional[float] = None,
-                 # locations: mutually exclusive with latitude/longitude — several locations combined into one
+                 # locations: mutually exclusive with latitude/longitude, several locations combined into one
                  # source, weighted average and/or per-location columns; see Data Sources > OpenMeteoSource
                  locations: Optional[Union[str, Dict[str, Any]]] = None,
                  agg: Optional[Union[str, List[str]]] = None,  # aggregate several locations; see Data Sources

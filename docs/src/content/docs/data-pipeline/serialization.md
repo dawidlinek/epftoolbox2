@@ -41,7 +41,7 @@ sources:
 - class: EntsoeSource
   params:
     country_code: PL
-    api_key: ${ENTSOE_API_KEY}   # written by save() by default — see Secrets below
+    api_key: ${ENTSOE_API_KEY}   # written by save() by default, see Secrets below
     type: [load, price]
 - class: CalendarSource
   params:

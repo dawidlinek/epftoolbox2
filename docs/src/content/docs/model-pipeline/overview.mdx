@@ -98,7 +98,7 @@ Predictors can be specified in four ways:
         lambda horizon: f"weather_d+{horizon}",
     ]
 
-    # horizon + hour — different feature per hour of day
+    # horizon + hour: different feature per hour of day
     predictors = [
         lambda horizon, hour: f"load_h{hour:02d}_d+{horizon}",
     ]

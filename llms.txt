@@ -720,7 +720,7 @@ predictors = [
     # 3. Callable receiving horizon (int 1-7)
     lambda h: f"weather_d+{h}",
 
-    # 4. Callable receiving (horizon, hour) — different feature per hour of day
+    # 4. Callable receiving (horizon, hour): different feature per hour of day
     lambda h, hour: f"load_h{hour:02d}_d+{h}",
 ]
 ```
@@ -1174,7 +1174,7 @@ models:
     scaler: standard     # or asinh / npit, or {name: asinh, params: {apply_to: target}}
 - class: LassoCVModel
   params:
-    predictors: *id001   # YAML alias if same list object — valid, loads correctly
+    predictors: *id001   # YAML alias if same list object, valid and loads correctly
     training_window: 365
     cv: 5
     name: LassoCV
@@ -1660,7 +1660,7 @@ Workflow(
     threads_per_process=8,
 ).save("experiment.yaml")
 
-# Phase 2: load and run (cluster job — only this line needed)
+# Phase 2: load and run (cluster job, only this line needed)
 if __name__ == "__main__":
     report = Workflow.load("experiment.yaml").run()
     print(report.summary())
@@ -1899,7 +1899,7 @@ class EvaluationReport:
     def predictions(self) -> pd.DataFrame: ...
     # Returns tidy DataFrame sorted by model→horizon→hour.
     # Columns: run_date, target_date, hour, horizon, prediction, model
-    # No "actual" column — use for forecast_only=True runs.
+    # No "actual" column: use for forecast_only=True runs.
     def iter_details(self) -> Iterator[Tuple[str, pd.DataFrame]]: ...
     def compute_all(self) -> Dict[str, pd.DataFrame]: ...
     # {"summary": ..., "hour": ..., "horizon": ..., "hour_horizon": ..., "year": ..., "year_horizon": ...,
