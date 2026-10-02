@@ -88,9 +88,16 @@ class TestInit:
         source.fetch(*_range("2024-01-01", "2024-01-02"))
         source.session.get.assert_not_called()
 
-    def test_not_cached(self):
-        assert CalendarSource(country="PL", school_holidays="national").get_cache_config() is None
-        assert CalendarSource(country="PL", school_holidays="all").get_cache_config() is None
+    def test_school_holidays_is_part_of_the_cache_key(self):
+        """CalendarSource is cacheable, so school_holidays must be in get_cache_config() or it would be served
+        from an unrelated config's cache entry."""
+        national = CalendarSource(country="PL", school_holidays="national").get_cache_config()
+        all_regions = CalendarSource(country="PL", school_holidays="all").get_cache_config()
+        off = CalendarSource(country="PL").get_cache_config()
+        assert national["school_holidays"] == "national"
+        assert all_regions["school_holidays"] == "all"
+        assert off["school_holidays"] is False
+        assert len({str(national), str(all_regions), str(off)}) == 3
 
 
 class TestNationalFlags:

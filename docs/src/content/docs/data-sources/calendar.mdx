@@ -44,23 +44,23 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 |-----------|------|---------|-------------|
 | `country` | str | Required | Country code (see the list below) |
 | `timezone` | str \| None | `None` | Time zone whose local dates and times define the features. `None` inherits `DataPipeline.timezone` when part of a pipeline; standalone, it falls back to the country's own zone |
-| `holidays` | str/bool | `"binary"` | Holiday output format |
-| `weekday` | str/bool | `"number"` | Weekday output format |
-| `hour` | str/bool | `False` | Hour (or period) output format |
-| `month` | str/bool | `False` | Month output format |
-| `daylight` | bool | `False` | Add `sunrise`, `sunset` (local decimal hours) and `daylight_hours` |
+| [`holidays`](#holidays) | str/bool | `"binary"` | Holiday output format |
+| [`weekday`](#weekday) | str/bool | `"number"` | Weekday output format |
+| [`hour`](#hour) | str/bool | `False` | Hour (or period) output format |
+| [`month`](#month) | str/bool | `False` | Month output format |
+| [`daylight`](#daylight) | bool | `False` | Add `sunrise`, `sunset` (local decimal hours) and `daylight_hours` |
 | `lat` | float | Auto | Latitude for daylight (default: the country's capital) |
 | `lon` | float | Auto | Longitude for daylight (default: the country's capital) |
 | `prefix` | str | `""` | Column name prefix, used as is (`"cal_"` gives `cal_is_holiday`) |
 | `freq` | str | `"1h"` | Row spacing: a divisor of one hour (`"15min"`, `"30min"`) or whole hours dividing a day |
 | `region` | str | `None` | Subdivision code passed to the `holidays` package for regional public holidays: `"BY"` or `"DE-BY"` (Bavaria), `"ENG"` (England), `"ZH"` (Zurich) |
-| `categories` | str/List[str] | `None` | Holiday categories of the `holidays` package, e.g. `["public", "bank"]`; `None` means public holidays only |
-| `bridge_days` | bool | `False` | Add `is_bridge_day` (see [Additional features](#additional-features)) |
-| `christmas_period` | bool | `False` | Add `is_christmas_period` (24 December to 1 January) |
-| `holiday_distance` | int | `0` | If N > 0, add `days_to_holiday` and `days_since_holiday`, capped at N |
-| `dst_switch` | bool | `False` | Add `is_dst_switch_day` (local days with 23 or 25 hours) |
-| `regimes` | bool/list/dict | `False` | Market-regime dummies `regime_{name}`: `False` for none, `True` for the default catalog subset, a list of catalog names, or a dict of custom periods (see [Regime dummies](#regime-dummies)) |
-| `school_holidays` | bool/str | `False` | `False` (default), `True` (same as `"national"`), `"national"` or `"all"`: download school holiday flags from the [OpenHolidays API](https://www.openholidaysapi.org) (see [School holidays](#school-holidays) below) |
+| `categories` | str/List[str] | `None` | Holiday categories of the `holidays` package, e.g. `["public", "bank"]`. `None` means public holidays only |
+| [`bridge_days`](#additional-features) | bool | `False` | Add `is_bridge_day` |
+| [`christmas_period`](#additional-features) | bool | `False` | Add `is_christmas_period` (24 December to 1 January) |
+| [`holiday_distance`](#additional-features) | int | `0` | If N > 0, add `days_to_holiday` and `days_since_holiday`, capped at N |
+| [`dst_switch`](#additional-features) | bool | `False` | Add `is_dst_switch_day` (local days with 23 or 25 hours) |
+| [`regimes`](#regime-dummies) | bool/list/dict | `False` | Market-regime dummies `regime_{name}`: `False` for none, `True` for the default catalog subset, a list of catalog names, or a dict of custom periods |
+| [`school_holidays`](#school-holidays) | bool/str | `False` | `False` (default), `True` (same as `"national"`), `"national"` or `"all"`: download school holiday flags from the [OpenHolidays API](https://www.openholidaysapi.org) |
 
 <Aside type="tip">
   Inside a `DataPipeline`, leave `timezone` unset: it inherits `DataPipeline.timezone`, the single place the
@@ -325,11 +325,6 @@ History start by country (from the [OpenHolidays data repository](https://github
 For Poland the first recorded school holiday is the 2019/20 Christmas break (from 23 December 2019), so earlier
 dates are NaN.
 
-<Aside type="caution">
-  Models drop forecasts whose predictors are NaN, so a range reaching before the history start silently loses
-  forecasts. Start the range after it, or leave the column out for earlier periods.
-</Aside>
-
 ### Look-ahead
 
 School holiday calendars are set by regulation months or years ahead, so the flags and their `_d+k` versions
@@ -339,10 +334,15 @@ yet entered) are not detected when shorter than a year.
 
 ### Caching
 
-Not cached: a run with `school_holidays="national"` makes one request per 1,000 days; `"all"` makes one more
-request for the region list. A cache would keep the NaN of school years published after it was written. The
-API's data can be corrected over time, so keep the pipeline output (e.g. `DataPipeline.run(..., cache="data.csv")`)
-if you need to reproduce a run exactly.
+`CalendarSource` is cacheable like any other source (`DataPipeline.run(..., cache=True)`), including
+`school_holidays`: `get_cache_config()` includes it, so a different `school_holidays` value, or the installed
+`holidays` package version, gets its own cache entry (see [Data Caching](/epftoolbox2/data-pipeline/caching/)).
+
+<Aside type="caution">
+  The OpenHolidays API can correct its data over time, the same way ENTSO-E does. The cache keeps the version it
+  downloaded, including a school year that was `NaN` because it was not published yet. Clear the cache to pick
+  up revisions or newly published school years.
+</Aside>
 
 ---
 

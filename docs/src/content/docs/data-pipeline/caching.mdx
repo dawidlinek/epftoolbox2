@@ -81,8 +81,12 @@ value of any column that is still being published — one whose last value is ne
 column whose last value is older than that is treated as discontinued (e.g. a PsrType ENTSO-E no longer reports)
 and does not cap coverage, so it can't force a refetch forever.
 
-Each recorded range stores when it was retrieved (`retrieved_at` in `metadata.json`). ENTSO-E sometimes revises
-data long after publication; the cache keeps the version it downloaded. Clear it to pick up revisions.
+Each recorded range stores when it was retrieved (`retrieved_at` in `metadata.json`).
+
+<Aside type="caution">
+  ENTSO-E sometimes revises data long after publication. The cache keeps the version it downloaded. Clear it to
+  pick up revisions.
+</Aside>
 
 ### Several processes
 
@@ -149,9 +153,20 @@ processes pointed at the same file download the data once.
 |--------|--------------|
 | `EntsoeSource` | ✅ Yes |
 | `OpenMeteoSource` | ✅ Yes |
-| `CalendarSource` | ❌ No (generated locally; with `school_holidays=True`, a few small requests, and a cache would keep unpublished school years as NaN) |
+| `CalendarSource` | ✅ Yes (including `school_holidays`, downloaded from the OpenHolidays API, see below) |
 | `CsvSource` | ❌ No (reads from file) |
 | `EpftoolboxBenchmarkSource` | ❌ No (keeps its own verified copy of the file instead) |
+
+`CalendarSource.get_cache_config()` includes every constructor parameter that affects its output, plus the
+resolved market time zone, the installed `holidays` package version (its holiday data changes between releases)
+and a `schema_version`. A change to any of them, including upgrading the `holidays` package, gives a different
+cache key, so stale values are never served.
+
+<Aside type="caution">
+  The OpenHolidays API (used by `school_holidays`) can also correct its data over time, the same way ENTSO-E
+  does. The cache keeps the version it downloaded; clear it to pick up revisions, and a school year that was
+  `NaN` because it had not been published yet stays `NaN` until you do.
+</Aside>
 
 ## Clearing Cache
 

@@ -243,9 +243,35 @@ class TestCountryData:
 
 
 class TestCacheConfig:
-    def test_cache_config_returns_none(self):
+    def test_same_config_gives_the_same_key(self):
+        a = CalendarSource(country="PL", holidays="binary", weekday="onehot")
+        b = CalendarSource(country="PL", holidays="binary", weekday="onehot")
+        assert a.get_cache_config() == b.get_cache_config()
+
+    def test_a_parameter_change_gives_a_different_key(self):
+        base = CalendarSource(country="PL", holidays="binary")
+        changed = CalendarSource(country="PL", holidays="onehot")
+        assert base.get_cache_config() != changed.get_cache_config()
+
+    def test_a_holidays_package_version_change_gives_a_different_key(self, monkeypatch):
         source = CalendarSource(country="PL")
-        assert source.get_cache_config() is None
+        before = source.get_cache_config()
+        monkeypatch.setattr(calendar_module.holidays_lib, "__version__", "0.0.0-test")
+        after = source.get_cache_config()
+        assert before != after
+        assert after["holidays_version"] == "0.0.0-test"
+
+    def test_config_includes_schema_version_and_resolved_timezone(self):
+        source = CalendarSource(country="DE")
+        config = source.get_cache_config()
+        assert config["schema_version"] >= 1
+        assert config["timezone"] == "Europe/Berlin"
+
+    def test_school_holidays_is_part_of_the_key(self):
+        national = CalendarSource(country="PL", school_holidays="national")
+        all_regions = CalendarSource(country="PL", school_holidays="all")
+        off = CalendarSource(country="PL")
+        assert len({str(c.get_cache_config()) for c in (national, all_regions, off)}) == 3
 
 
 def _local_day(day: str, tz: str = "Europe/Warsaw") -> tuple:

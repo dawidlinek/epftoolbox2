@@ -62,6 +62,11 @@ MONTH_NAMES = [
 # depend on the process locale (without it, `holidays` falls back to LANG/LC_ALL) or the country's own language.
 HOLIDAY_LANGUAGE = "en_US"
 
+# Bump when this source's own computation changes (parsing, column layout, ...): every existing cache entry is
+# then ignored. The installed `holidays` package's own version is part of the cache key too (see
+# get_cache_config), since its holiday data changes between releases independently of this source's code.
+SCHEMA_VERSION = 1
+
 # Market-structure changes, policy interventions and shocks catalogued for `regimes=`. "start" is the first
 # delivery day (local date); a regime dummy is 1 from that date on (through "end", inclusive, when given) for the
 # listed countries only. "ex_ante" records whether the *end* date (open-ended entries: the date itself) was known
@@ -927,5 +932,35 @@ class CalendarSource(DataSource):
             f"from {missing.min().date()} to {missing.max().date()}; {column} is NaN there"
         )
 
-    def get_cache_config(self) -> Optional[dict]:
-        return None
+    def get_cache_config(self) -> dict:
+        """Every output-affecting parameter, the resolved market time zone, the installed `holidays` package
+        version (its holiday data changes between releases, independently of this source's own code) and a
+        `schema_version`. This also makes `school_holidays` output (downloaded from the OpenHolidays API)
+        cached like any other source; see the Caching docs for the same revision caution that applies to
+        ENTSO-E data."""
+        config = {
+            "source_type": "calendar",
+            "schema_version": SCHEMA_VERSION,
+            "holidays_version": holidays_lib.__version__,
+            "country": self.country,
+            "timezone": self.market_timezone,
+            "holidays": self.holidays,
+            "weekday": self.weekday,
+            "hour": self.hour,
+            "month": self.month,
+            "daylight": self.daylight,
+            "lat": self.lat,
+            "lon": self.lon,
+            "freq": self.freq,
+            "region": self.region,
+            "categories": self.categories,
+            "bridge_days": self.bridge_days,
+            "christmas_period": self.christmas_period,
+            "holiday_distance": self.holiday_distance,
+            "dst_switch": self.dst_switch,
+            "regimes": self.regimes,
+            "school_holidays": self.school_holidays,
+        }
+        if self.prefix:
+            config["prefix"] = self.prefix
+        return config
