@@ -743,8 +743,8 @@ class CalendarSource(DataSource):
         if self.dst_switch:
             df = self._add_dst_switch(df, local_dates, codes)
         if self.regimes:
-            for name, spec in self._resolved_regimes().items():
-                start, end = (spec, None) if isinstance(spec, str) else (spec["start"], spec["end"])
+            self._warn_unlisted_regimes()
+            for name, start, end in self._regime_periods():
                 flag = local_dates >= pd.Timestamp(start)
                 if end is not None:
                     flag &= local_dates <= pd.Timestamp(end)
@@ -816,17 +816,26 @@ class CalendarSource(DataSource):
                 if spec["default"] and self.country in spec["countries"]
             }
         if isinstance(self.regimes, list):
-            result = {}
-            for name in self.regimes:
-                spec = DEFAULT_REGIMES[name]
-                if self.country not in spec["countries"]:
-                    logger.warning(
-                        f"regimes: {name!r} does not list {self.country} among its countries "
-                        f"({spec['countries']}); adding the column anyway"
-                    )
-                result[name] = self._catalog_period(spec)
-            return result
+            return {name: self._catalog_period(DEFAULT_REGIMES[name]) for name in self.regimes}
         return dict(self.regimes) if self.regimes else {}
+
+    def _regime_periods(self) -> List[tuple]:
+        """`(name, start, end)` of every regime column in column order, as ISO dates (`end` None when open-ended)."""
+        return [
+            (name, *((spec, None) if isinstance(spec, str) else (spec["start"], spec["end"])))
+            for name, spec in self._resolved_regimes().items()
+        ]
+
+    def _warn_unlisted_regimes(self) -> None:
+        if not isinstance(self.regimes, list):
+            return
+        for name in self.regimes:
+            countries = DEFAULT_REGIMES[name]["countries"]
+            if self.country not in countries:
+                logger.warning(
+                    f"regimes: {name!r} does not list {self.country} among its countries "
+                    f"({countries}); adding the column anyway"
+                )
 
     @staticmethod
     def _catalog_period(spec: dict) -> Any:
@@ -983,7 +992,7 @@ class CalendarSource(DataSource):
     def get_cache_config(self) -> Optional[dict]:
         """Every output-affecting parameter, the resolved market time zone, the installed `holidays` package
         version (its holiday data changes between releases, independently of this source's own code) and a
-        `schema_version`.
+        `schema_version`. `regimes` is keyed by the periods it resolves to (name, start, end), not by its raw value.
 
         None (not cached) with `school_holidays`: the OpenHolidays API publishes school years ahead over time, and
         a cached run would keep the NaN it returned for a school year that was not published yet, never refetching
@@ -1010,7 +1019,9 @@ class CalendarSource(DataSource):
             "christmas_period": self.christmas_period,
             "holiday_distance": self.holiday_distance,
             "dst_switch": self.dst_switch,
-            "regimes": self.regimes,
+            # The catalog (DEFAULT_REGIMES) defines the columns of `regimes=True` and of a list of names, so the key
+            # holds what they resolve to: an edited catalog entry gives a new key instead of serving stale columns.
+            "regimes": [list(period) for period in self._regime_periods()],
         }
         if self.prefix:
             config["prefix"] = self.prefix

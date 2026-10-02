@@ -341,7 +341,8 @@ yet entered) are not detected when shorter than a year.
 Without `school_holidays`, `CalendarSource` is cacheable like any other source (`DataPipeline.run(..., cache=True)`).
 `get_cache_config()` includes every parameter that affects the output, so a different parameter, or a different
 installed `holidays` package version, gets its own cache entry (see
-[Data Caching](/epftoolbox2/data-pipeline/caching/)).
+[Data Caching](/epftoolbox2/data-pipeline/caching/)). `regimes` is keyed by the periods it resolves to (name, start
+and end), not by `True` or the list of names, so editing a `DEFAULT_REGIMES` entry gives a new cache entry too.
 
 With `school_holidays` on, the source is **not cached** and downloads from the OpenHolidays API on every run.
 The API publishes school years ahead over time, and the values for a year it has not published yet are `NaN`.

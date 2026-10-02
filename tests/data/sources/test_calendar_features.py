@@ -325,6 +325,81 @@ class TestRegimesList:
         pd.testing.assert_frame_equal(source.fetch(start, end), loaded.fetch(start, end))
 
 
+class TestRegimesCacheKey:
+    """The output comes from the DEFAULT_REGIMES catalog in code, so the cache key must follow the resolved
+    definitions, not the raw `regimes=True` or list of names, or a catalog edit would serve stale columns."""
+
+    @staticmethod
+    def _key(**kwargs):
+        return CalendarSource(country="PL", **kwargs, **BARE).get_cache_config()
+
+    def test_a_catalog_start_change_changes_the_key_for_a_list(self, monkeypatch):
+        before = self._key(regimes=["core_fb"])
+        monkeypatch.setitem(DEFAULT_REGIMES["core_fb"], "start", "2023-01-01")
+        assert self._key(regimes=["core_fb"]) != before
+
+    def test_a_catalog_start_change_changes_the_key_for_true(self, monkeypatch):
+        before = self._key(regimes=True)
+        monkeypatch.setitem(DEFAULT_REGIMES["core_fb"], "start", "2023-01-01")
+        assert self._key(regimes=True) != before
+
+    def test_a_catalog_end_change_changes_the_key(self, monkeypatch):
+        before = self._key(regimes=["core_fb"])
+        monkeypatch.setitem(DEFAULT_REGIMES["core_fb"], "end", "2024-01-01")
+        assert self._key(regimes=["core_fb"]) != before
+
+    def test_changing_which_entries_are_default_changes_the_key_for_true(self, monkeypatch):
+        before = self._key(regimes=True)
+        monkeypatch.setitem(DEFAULT_REGIMES["core_fb"], "default", False)
+        assert self._key(regimes=True) != before
+
+    def test_an_edit_to_an_entry_that_is_not_selected_keeps_the_key(self, monkeypatch):
+        before = self._key(regimes=["core_fb"])
+        monkeypatch.setitem(DEFAULT_REGIMES["sdac_15min_mtu"], "start", "2026-01-01")
+        assert self._key(regimes=["core_fb"]) == before
+
+    def test_description_edits_do_not_change_the_key(self, monkeypatch):
+        before = self._key(regimes=True)
+        monkeypatch.setitem(DEFAULT_REGIMES["core_fb"], "description", "reworded")
+        assert self._key(regimes=True) == before
+
+    def test_the_key_depends_only_on_the_resolved_definitions(self):
+        resolved = CalendarSource(country="PL", regimes=True, **BARE)._resolved_regimes()
+        assert self._key(regimes=True) == self._key(regimes=dict(resolved))
+
+    def test_the_column_order_is_part_of_the_key(self):
+        assert self._key(regimes=["core_fb", "sdac_15min_mtu"]) != self._key(regimes=["sdac_15min_mtu", "core_fb"])
+
+    def test_custom_periods_are_part_of_the_key(self):
+        assert self._key(regimes={"x": "2024-01-01"}) != self._key(regimes={"x": "2024-02-01"})
+        assert self._key(regimes={"x": "2024-01-01"}) != self._key(regimes={"x": ("2024-01-01", "2024-03-01")})
+
+    def test_no_regimes_is_the_same_whatever_the_spelling(self):
+        # A country with no default entries gives the same output (no columns) for True and False.
+        none_for_country = CalendarSource(country="CH", regimes=True, **BARE).get_cache_config()
+        assert none_for_country == CalendarSource(country="CH", regimes=False, **BARE).get_cache_config()
+
+    def test_building_the_key_does_not_warn(self):
+        source = CalendarSource(country="PL", regimes=["iberian_exception"], **BARE)
+        with patch.object(calendar_module.logger, "warning") as warning:
+            source.get_cache_config()
+        warning.assert_not_called()
+
+    def test_a_cached_run_follows_a_catalog_edit(self, tmp_path, monkeypatch):
+        from epftoolbox2.pipelines import DataPipeline
+
+        monkeypatch.chdir(tmp_path)
+
+        def run():
+            source = CalendarSource(country="PL", regimes=["core_fb"], **BARE)
+            return DataPipeline(timezone="Europe/Warsaw").add_source(source).run("2022-06-07", "2022-06-12", cache=True)
+
+        before = run()
+        assert list(_per_local_date(before, "regime_core_fb")) == [0, 0, 1, 1, 1, 1]  # starts 2022-06-09
+        monkeypatch.setitem(DEFAULT_REGIMES["core_fb"], "start", "2022-06-11")
+        assert list(_per_local_date(run(), "regime_core_fb")) == [0, 0, 0, 0, 1, 1]
+
+
 class TestListRegimes:
     def test_returns_every_catalog_entry_without_a_country(self):
         df = list_regimes()

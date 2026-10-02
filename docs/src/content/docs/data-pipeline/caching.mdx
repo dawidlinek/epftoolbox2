@@ -158,6 +158,8 @@ processes pointed at the same file download the data once.
 `CalendarSource.get_cache_config()` includes every constructor parameter that affects its output, plus the
 resolved market time zone, the installed `holidays` package version (its holiday data changes between releases)
 and a `schema_version`. A change to any of them gives a different cache key, so stale values are never served.
+`regimes` is keyed by the periods it resolves to (name, start and end), so a change to the regime catalog gives a
+different key as well.
 
 With `school_holidays` on, `CalendarSource` returns no cache config and is downloaded from the OpenHolidays API on
 every run. The API publishes school years ahead over time and returns `NaN` for a year it has not published yet,
