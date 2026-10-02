@@ -43,8 +43,8 @@ class MyApiSource(DataSource):
 ```
 
 `get_cache_config()` must contain every parameter that changes the output (not the API key). The pipeline drops
-rows outside `[start, end)`, and a fetch for a sub-range must give the same values as a fetch for a larger range;
-otherwise a run assembled from cached pieces differs from a fresh one.
+rows outside `[start, end)`, and a fetch for a sub-range must give the same values as a fetch for a larger range.
+Otherwise a run assembled from cached pieces differs from a fresh one.
 
 ---
 
@@ -153,10 +153,10 @@ class sMAPEEvaluator(Evaluator):
 
 Every evaluator must implement:
 
-- **`name`** — class attribute used as the column header in reports
-- **`compute(self, df, **kwargs) -> float`** — aggregate metric over a DataFrame with `prediction` and `actual` columns
+- **`name`**: class attribute used as the column header in reports
+- **`compute(self, df, **kwargs) -> float`**: aggregate metric over a DataFrame with `prediction` and `actual` columns
 
-The `**kwargs` may include `model_dfs` — a dict of all model DataFrames for the current data slice, used by cross-model evaluators like `rMAEEvaluator`.
+The `**kwargs` may include `model_dfs`: a dict of all model DataFrames for the current data slice, used by cross-model evaluators like `rMAEEvaluator`.
 
 ### Using Custom Evaluators
 

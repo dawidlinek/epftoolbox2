@@ -48,7 +48,7 @@ df = source.fetch(
 ## Returned range
 
 `fetch(start, end)` returns the half-open range `[start, end)` with a **UTC** index. Data is requested in 3-month
-chunks; a chunk that keeps failing raises an error instead of leaving a gap.
+chunks. A chunk that keeps failing raises an error instead of leaving a gap.
 
 Daily values (`load_forecast_daily_min/max`) are stamped at local midnight of the day they describe: **the
 market's** local midnight when this source is part of a `DataPipeline`, and this area's own otherwise (see
@@ -77,15 +77,15 @@ one value at local midnight and are empty in between. A `ResampleTransformer(fre
 
 `load_forecast_daily_min/max` (A31) holds one value per **this area's own** local calendar day D. Combining
 this source with another area's in one market pipeline needs that value on the *market's* local day D, not
-necessarily this area's — a Finnish (EET) neighbour's day starts an hour before a Polish (CET) market's, so
+necessarily this area's: a Finnish (EET) neighbour's day starts an hour before a Polish (CET) market's, so
 without correcting for that, its daily value would land an hour into the wrong side of midnight, and around a
 DST switch even on the wrong calendar day.
 
 `EntsoeSource` fixes this automatically when it is part of a `DataPipeline`: it stamps the value at the
 *market's* local midnight of its own day D, instead of this area's own midnight, so the row already sits
-where `TimezoneTransformer`'s default snap (anchored to the market zone) expects it — a no-op for this column.
+where `TimezoneTransformer`'s default snap (anchored to the market zone) expects it, a no-op for this column.
 Used standalone, or when this area already *is* the market's own, the value is stamped at this area's own
-midnight, exactly as before.
+midnight.
 
 ```python
 # FI's week-ahead daily min/max land on Warsaw's own local days, not Helsinki's
@@ -98,7 +98,7 @@ pipeline = (
 ```
 
 `TimezoneTransformer`'s default `daily_columns` recognise a prefixed neighbour's column
-(`fi_load_forecast_daily_min`) automatically too — see
+(`fi_load_forecast_daily_min`) automatically too. See
 [TimezoneTransformer](/epftoolbox2/transformers/timezone/).
 
 ### Price Data (`type=["price"]`)
@@ -109,7 +109,7 @@ pipeline = (
 
 #### Price resolution
 
-The day-ahead market moved from 60-minute to 15-minute products on 2025-10-01; before that date most zones publish
+The day-ahead market moved from 60-minute to 15-minute products on 2025-10-01. Before that date most zones publish
 hourly prices, after it 15-minute prices. `EntsoeSource` keeps every period and returns one uniform grid:
 
 | `prefer_15min` | Grid | Hourly periods | 15-minute periods |
@@ -128,7 +128,7 @@ are treated the same way.
 </Aside>
 
 <Aside type="caution">
-  **Bidding zones:** prices are published per bidding zone. For Germany use `"DE_LU"` (since 2018-10-01;
+  **Bidding zones:** prices are published per bidding zone. For Germany use `"DE_LU"` (since 2018-10-01,
   `"DE_AT_LU"` before). Codes that are not bidding zones (`"DE"`, `"DK"`, `"NO"`, `"SE"`, `"IT"`, `"LU"`, the
   German control areas, ...) raise a `ValueError` naming the zone to use when `type` includes `"price"`. They are
   still accepted for load and generation.
@@ -138,7 +138,7 @@ are treated the same way.
 
 Actual generation per production type (A75) as `generation_<type>`, and the day-ahead wind and solar forecast (A69)
 as `generation_<type>_forecast`. Where a production type also consumes (pumped-storage pumping, and for some zones
-every type, mostly zeros), the consumption is a separate column `generation_<type>_consumption`; it is never mixed
+every type, mostly zeros), the consumption is a separate column `generation_<type>_consumption`. It is never mixed
 into the generation column.
 
 | Column | PsrType | Description |
@@ -167,7 +167,7 @@ into the generation column.
 | `generation_<type>_consumption` | any | Consumption reported for that type, e.g. `generation_hydro_pumped_storage_consumption` (MW) |
 | `generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` | B16, B19, B18 | Day-ahead forecast (MW) |
 
-Column names are the snake_case of ENTSO-E's production type names; an unknown code becomes `generation_<code>`,
+Column names are the snake_case of ENTSO-E's production type names. An unknown code becomes `generation_<code>`,
 e.g. `generation_b99`.
 
 ### Transfer Capacity (`type=["transfer_capacity"]`)
@@ -194,7 +194,7 @@ source = EntsoeSource("FR", api_key=key, type=["transfer_capacity"], neighbours=
 
 Installed generation capacity per production type (A68, year-ahead) in MW, as `installed_capacity_<type>` with the
 same type names as generation (e.g. `installed_capacity_solar`, `installed_capacity_wind_onshore`). There is one
-value per year, stamped at local midnight of 1 January; if that lies before `start`, the value is reported at
+value per year, stamped at local midnight of 1 January. If that lies before `start`, the value is reported at
 `start`. A `ResampleTransformer(freq="1h")` after `TimezoneTransformer` carries each value forward over its year.
 
 ### Combining zones with `prefix`
@@ -231,7 +231,7 @@ as produced by `LagTransformer` (`x_d-1` is yesterday, `x_d+1` tomorrow):
 | `price` | No later than 1 hour after gate closure (Art. 12) | `price` (delivery D, cleared on D-1) and `_d-k`. `price_d+1` is the target |
 | `load_actual` | No later than 1 hour after the operating period (Art. 6) | `_d-1` and older only. Unlagged `load_actual` is look-ahead for the hours after the issue time |
 | `load_forecast` | 2 hours before gate closure (10:00 CET) on the day before delivery, updated when significant changes occur (Art. 6) | `load_forecast` and `_d+1` if the forecast is issued at or after 10:00. `_d+2` and later are published on D+1 or later: look-ahead |
-| `load_forecast_daily_min/max` | Fridays, 2 hours before gate closure, for Monday–Sunday of the following week; updated when significant changes occur (Art. 6) | `_d+0` to `_d+2` always; `_d+3` when issued at or after 10:00 (on Friday mornings only the week up to Sunday is known). Larger horizons leak on some weekdays |
+| `load_forecast_daily_min/max` | Fridays, 2 hours before gate closure, for Monday–Sunday of the following week. Updated when significant changes occur (Art. 6) | `_d+0` to `_d+2` always. `_d+3` when issued at or after 10:00 (on Friday mornings only the week up to Sunday is known). Larger horizons leak on some weekdays |
 | `generation_*` (actual, incl. `_consumption`) | No later than 1 hour after the operational period (Art. 16) | `_d-1` and older only |
 | `generation_*_forecast` | 18:00 Brussels time on the day before delivery, updated during intraday trading with at least one update at 08:00 on the delivery day (Art. 14) | `_d+0` and older. `_d+1` is published after gate closure: not guaranteed at issue time |
 | `transfer_capacity_*` | "Sufficiently in advance of the allocation process" (Art. 11): before the day-ahead gate closure, no fixed hour | `_d+0` and older. `_d+1` is known before 12:00 on D but at no guaranteed hour, so borderline for an early issue time |

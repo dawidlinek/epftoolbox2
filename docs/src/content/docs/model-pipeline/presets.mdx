@@ -105,7 +105,7 @@ report = (
 and last price of d-1, each exogenous series for d, and weekday dummies of d.
 
 Ziel & Weron use an intercept plus Monday, Saturday and Sunday dummies. `OLSModel` fits without an intercept and
-takes the level from a full set of one-hot dummies, so the default is all seven weekdays; this spans the intercept
+takes the level from a full set of one-hot dummies, so the default is all seven weekdays. This spans the intercept
 and the three dummies. Pass `weekdays=("monday", "saturday", "sunday")` for the original set with a model that fits
 an intercept, such as `LassoCVModel`.
 

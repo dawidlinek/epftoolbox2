@@ -5,16 +5,16 @@ description: Check that every predictor only uses data known at the time a forec
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-A forecast issued on day D may only use values that are actually known at the moment it is issued — not
+A forecast issued on day D may only use values that are actually known at the moment it is issued, not
 everything that ends up in the historical data. `epftoolbox2.information_set` declares when each column
 becomes known and checks every expanded predictor (and the newest training target) against that boundary
 before any model is fitted.
 
-**The convention:** a predictor's availability — including a raw, unshifted (lag 0) column such as `price`
-used to forecast a different target — is decided purely by comparing its publication time to `issue_time`,
+**The convention:** a predictor's availability, including a raw, unshifted (lag 0) column such as `price`
+used to forecast a different target, is decided purely by comparing its publication time to `issue_time`,
 never by a fixed lag cutoff. This is independent of the model's own training-target boundary (the newest
-training target is always `day - 1`, see [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/));
-changing one is not a side effect of changing the other.
+training target is always `day - 1`, see [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/)).
+Changing one is not a side effect of changing the other.
 
 ---
 
@@ -50,32 +50,32 @@ are unaffected until you opt in.
 | `price` (ENTSO-E A44) | published ~13:00 Brussels on D-1 (within about 1h of the 12:00 gate closure) |
 | `load_actual` (A65/A16) | 1h after the end of the delivery period |
 | `load_forecast` (A65/A01) | published 10:00 Brussels on D-1 |
-| `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00, for the whole following week (Brussels by default; a bound `EntsoeSource` overrides this with the market's own zone, see below) |
+| `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00, for the whole following week (Brussels by default, a bound `EntsoeSource` overrides this with the market's own zone, see below) |
 | `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) |
 | `generation_*` (A75 actual generation) | 1h after the end of the delivery period |
-| Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static — known in advance |
+| Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static, known in advance |
 
 <Aside type="caution">
   A69 wind/solar's *legal* deadline (18:00 D-1) is after the day-ahead gate closure (12:00 D-1), and ENTSO-E
   gives no publication time per value, so the default rule is conservative and will flag `generation_*_forecast`
   predictors used same-day-ahead. Accept `assumptions=["entsoe_a69_by_10"]` to instead assume 10:00 D-1 (the
-  same slot as the day-ahead load forecast) — this is a documented assumption, not the default.
+  same slot as the day-ahead load forecast). This is a documented assumption, not the default.
 </Aside>
 
 Column names are parsed the same way predictors are: `price_d-1` resolves to the base column `price` shifted
-one calendar day back. There is no built-in default rule for weather columns — a `*_temperature_2m`-style
+one calendar day back. There is no built-in default rule for weather columns, a `*_temperature_2m`-style
 name alone doesn't say whether it's a forecast or an observed value. A `DataPipeline`'s sources refine the
-check — `with_source_rules()` (called automatically by `Workflow`) teaches it about a `CalendarSource(prefix=...)`,
+check: `with_source_rules()` (called automatically by `Workflow`) teaches it about a `CalendarSource(prefix=...)`,
 overrides the default week-ahead rule for an `EntsoeSource`'s own columns, and assigns a rule to exactly the
 columns an `OpenMeteoSource` emits:
 
 - An `EntsoeSource` with `"load"` in `type` gets its own `load_forecast_daily_min`/`_max` rule (prefixed the
   same way as its other columns), evaluated in the source's own bound market zone (`EntsoeSource._daily_zone`)
-  instead of the `Europe/Brussels` default — the zone the value's local midnight is actually anchored to. A
+  instead of the `Europe/Brussels` default: the zone the value's local midnight is actually anchored to. A
   neighbouring area combined into another market's `DataPipeline` (e.g. `EntsoeSource("FI", ..., prefix="fi")`
   inside `DataPipeline(timezone="Europe/Warsaw")`) is checked in the market's zone, not Finland's own, matching
   where the value is stamped.
-- `weather_cutoff(source.run, f"{delay}h")`, `delay` coming from `publication_delay_hours(source.model)` — known
+- `weather_cutoff(source.run, f"{delay}h")`, `delay` coming from `publication_delay_hours(source.model)`, known
   `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading `_d+k`. This is a
   conservative, model-side estimate of the run's real-world publication lag (ICON ~4h, GFS ~5h, ECMWF IFS ~8h,
   JMA ~10h, 10h for an unknown model): `OpenMeteoSource` itself has no notion of issue time or delay, only of
@@ -150,7 +150,7 @@ regression test for a specific model and information set, alongside (not instead
 
 **`check_target_boundary=True`** additionally perturbs the target column for every row on or after `run_day`,
 regardless of its own Availability rule: the model's own boundary (training targets end at D-1) is a deliberate,
-conservative choice that can be stricter than a column's factual publication time — a day-ahead price, for
+conservative choice that can be stricter than a column's factual publication time, a day-ahead price, for
 example, really is published before its own delivery day.
 
 **`rebuild`** catches a leak a transformer bakes into a derived column, which perturbing the already-built
@@ -196,5 +196,5 @@ epf model model_pipeline.yaml --data data.csv --test-start 2024-02-01 --test-end
 
 ## See Also
 
-- [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/) — `run()` parameters and the other pre-fit data checks
-- [ModelPipeline Serialization](/epftoolbox2/model-pipeline/serialization/) — the full YAML format
+- [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/): `run()` parameters and the other pre-fit data checks
+- [ModelPipeline Serialization](/epftoolbox2/model-pipeline/serialization/): the full YAML format

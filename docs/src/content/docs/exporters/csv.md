@@ -25,16 +25,16 @@ exporter = CsvExporter("results.csv")
 The CSV contains the following columns:
 
 **Base columns:**
-- `run_date` — date the forecast was made
-- `target_date` — date being forecasted
-- `hour` — hour of day (0-23)
-- `horizon` — forecast horizon (1 to max)
-- `day_in_test` — day index in the test period
-- `actual` — actual observed value
+- `run_date`: date the forecast was made
+- `target_date`: date being forecasted
+- `hour`: hour of day (0-23)
+- `horizon`: forecast horizon (1 to max)
+- `day_in_test`: day index in the test period
+- `actual`: actual observed value
 
 **Per-model columns:**
-- `{model}_prediction` — model's prediction
-- `{model}_error` — residual (prediction - actual)
+- `{model}_prediction`: model's prediction
+- `{model}_error`: residual (prediction - actual)
 
 **Extra columns** (optional):
 - Any columns from the source dataset, joined by `target_date` + `hour`

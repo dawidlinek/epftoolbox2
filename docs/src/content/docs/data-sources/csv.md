@@ -36,7 +36,7 @@ df = source.fetch(
 | `prefix` | str | No | `""` | Prefix for column names (`prefix="c"` gives `c_price`) |
 | `datetime_format` | str | No | Auto | strftime format |
 | `separator` | str | No | `","` | CSV separator |
-| `timezone` | str | No | `"UTC"` | Time zone of **naive** timestamps; ignored for timestamps with a UTC offset |
+| `timezone` | str | No | `"UTC"` | Time zone of **naive** timestamps. Ignored for timestamps with a UTC offset |
 
 A relative `file_path` is resolved from the working directory.
 

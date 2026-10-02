@@ -11,9 +11,9 @@ Validators check a DataFrame without changing it. `validate(df)` returns a `Vali
 
 | Problem | Validator |
 |---------|-----------|
-| Duplicate, unsorted or missing timestamps; mixed resolutions | [ContinuityValidator](/epftoolbox2/validators/continuity/) |
+| Duplicate, unsorted or missing timestamps, mixed resolutions | [ContinuityValidator](/epftoolbox2/validators/continuity/) |
 | A local day with the wrong number of rows (DST days, naive wall-clock index) | [DSTStructureValidator](/epftoolbox2/validators/dst-structure/) |
-| One column missing for a stretch on a complete index; late start or early end; too many nulls in the columns the model uses | [CoverageValidator](/epftoolbox2/validators/coverage/) |
+| One column missing for a stretch on a complete index, a late start or early end, too many nulls in the columns the model uses | [CoverageValidator](/epftoolbox2/validators/coverage/) |
 | Prices outside the SDAC limits, zero load, frozen values | [PlausibilityValidator](/epftoolbox2/validators/plausibility/) |
 | Summary statistics for a first look | [EdaValidator](/epftoolbox2/validators/eda/) |
 
@@ -59,4 +59,4 @@ ContinuityValidator   True      ok
   CoverageValidator  False   error  Column 'price' has values at 168 of 240 expected 1h timestamps ...
 ```
 
-`results_to_frame` takes a list of results, a list of `(name, result)` pairs or a dict `{name: result}`, and returns one row per error and warning (columns `validator`, `valid`, `level`, `message`); a result without messages gets one `ok` row.
+`results_to_frame` takes a list of results, a list of `(name, result)` pairs or a dict `{name: result}`, and returns one row per error and warning (columns `validator`, `valid`, `level`, `message`). A result without messages gets one `ok` row.

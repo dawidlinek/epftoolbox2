@@ -5,8 +5,8 @@ description: Per-column coverage, longest missing run and first/last value over 
 
 Measures, per column, which timestamps of a regular grid carry a value: coverage, the longest run of missing timestamps and the first and last value. It finds what the other checks can't:
 
-- an **outage of one column on a complete index** (for example three days without prices while load keeps coming), which `ContinuityValidator` can't see;
-- **rows missing from the index entirely**, which a null check on the rows present can't see;
+- an **outage of one column on a complete index** (for example three days without prices while load keeps coming), which `ContinuityValidator` can't see.
+- **rows missing from the index entirely**, which a null check on the rows present can't see.
 - a column that **starts late or ends early** compared with the range you asked for.
 
 ## Basic Usage
@@ -46,7 +46,7 @@ With `start`/`end` left at `None`, lag columns pass even though they are empty a
 
 ## Output
 
-- **Errors:** missing columns; columns with no values; columns below `min_coverage` or with a missing run longer than `max_gap`.
+- **Errors:** missing columns, columns with no values, and columns below `min_coverage` or with a missing run longer than `max_gap`.
 - **Warnings:** columns with missing timestamps that are still within both limits.
 - **info:** `freq`, `coverage`, `longest_missing_run` (in timestamps), `first_valid`, `last_valid` (all per column).
 - **stats:** `column`, `freq`, `start`, `end`, `expected`, `present`, `missing`, `coverage`, `longest_missing_run`, `longest_missing_start`, `longest_missing_end`, `first_valid`, `last_valid`.

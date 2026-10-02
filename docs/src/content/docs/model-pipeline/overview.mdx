@@ -74,7 +74,7 @@ Predictors can be specified in four ways:
     ```
   </TabItem>
   <TabItem label="Templates">
-    Use `{horizon}` placeholder — replaced with 1, 2, ..., horizon at runtime:
+    Use `{horizon}` placeholder: replaced with 1, 2, ..., horizon at runtime:
 
     ```python
     predictors = [
@@ -175,7 +175,7 @@ Set a model's `scaler` parameter to `"asinh"` or `"npit"` to use a variance-stab
 | `horizon` | int | `7` | Max forecast horizon (days) |
 | `freq` | str | `"1h"` | Forecasting frequency (e.g., `"15min"`) |
 | `save_dir` | str | `None` | Directory for incremental results |
-| `forecast_only` | bool | `False` | Skip evaluators/exporters; `test_start`/`test_end` default to `"today"` if omitted |
+| `forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted |
 
 Model names must be unique: they name the result files in `save_dir`.
 
@@ -185,8 +185,8 @@ Model names must be unique: they name the result files in `save_dir`.
 
 Before any model is fitted, `run()` checks every model's input and raises `ValueError` with a description of the problem:
 
-- **Resolution:** rows must be `freq` apart, with one row per local day and period (hour, or quarter-hour for `freq="15min"`). Only the hour repeated when clocks fall back may occur twice. Data finer than `freq` would put the issue day's prices into the training set; resample it first (`ResampleTransformer`) or pass the matching `freq`.
-- **Timestamps:** no duplicates; rows are sorted by time.
+- **Resolution:** rows must be `freq` apart, with one row per local day and period (hour, or quarter-hour for `freq="15min"`). Only the hour repeated when clocks fall back may occur twice. Data finer than `freq` would put the issue day's prices into the training set. Resample it first (`ResampleTransformer`) or pass the matching `freq`.
+- **Timestamps:** no duplicates. Rows are sorted by time.
 - **Names:** the data must not contain the model's target columns (`{target}_d+1` … `{target}_d+{horizon}`, e.g. from a `LagTransformer` with negative lags on the target) or columns named `hour` or `day`, which the model uses internally (use `CalendarSource(prefix=...)` for its `hour` column).
 - **Predictors:** every expanded predictor (for every hour and horizon) must exist, be numeric, and must not be one of the model's targets.
 

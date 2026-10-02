@@ -45,6 +45,6 @@ print(report.summary())
 
 ## See Also
 
-- [RMSEEvaluator](/epftoolbox2/evaluators/rmse/) — Root Mean Squared Error
-- [rMAEEvaluator](/epftoolbox2/evaluators/rmae/) — Relative MAE (benchmark comparison)
-- [Extending](/epftoolbox2/reference/extending/) — Creating custom evaluators
+- [RMSEEvaluator](/epftoolbox2/evaluators/rmse/): Root Mean Squared Error
+- [rMAEEvaluator](/epftoolbox2/evaluators/rmae/): Relative MAE (benchmark comparison)
+- [Extending](/epftoolbox2/reference/extending/): Creating custom evaluators

@@ -24,7 +24,7 @@ result = PlausibilityValidator(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `ranges` | dict or None | `None` | `{column or glob pattern: [min, max]}`, bounds inclusive, `None` for no bound. `None` uses the defaults below; `{}` turns the range check off. |
+| `ranges` | dict or None | `None` | `{column or glob pattern: [min, max]}`, bounds inclusive, `None` for no bound. `None` uses the defaults below. `{}` turns the range check off. |
 | `max_constant_run` | int or None | `24` | Longest run of identical consecutive values allowed, in rows. `None` turns the check off. |
 | `constant_columns` | List[str] or None | `None` | Columns or glob patterns checked for constant runs. `None` uses `price*` and `load_actual*`. `ImputeTransformer` flag columns (`*_imputed`) are always skipped. |
 
@@ -34,8 +34,8 @@ A column uses the **first** pattern in `ranges` it matches, so put specific patt
 
 | Pattern | Range | Why |
 |---------|-------|-----|
-| `price*` | -600 to 4000 EUR/MWh | SDAC harmonised minimum and maximum clearing prices. The maximum has been 4000 since 2022; the minimum was -500 until trading day 2026-05-28 and -600 since. |
-| `load*` | at least 1 MW | Load can't be zero or negative; some TSOs report zeros during outages. |
+| `price*` | -600 to 4000 EUR/MWh | SDAC harmonised minimum and maximum clearing prices. The maximum has been 4000 since 2022. The minimum was -500 until trading day 2026-05-28 and -600 since. |
+| `load*` | at least 1 MW | Load can't be zero or negative. Some TSOs report zeros during outages. |
 
 The SDAC limits move automatically under ACER's HMMCP methodology when prices come close to them. Pass `ranges` explicitly if they change, for non-SDAC markets, or for prices in another unit or currency.
 

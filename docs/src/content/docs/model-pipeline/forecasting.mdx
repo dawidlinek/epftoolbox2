@@ -45,7 +45,7 @@ if __name__ == "__main__":
     print(forecast)
 ```
 
-**Output** — 168 rows per model (24 hours × 7 horizons):
+**Output**: 168 rows per model (24 hours × 7 horizons):
 
 | run_date (today) | target_date | hour | horizon | prediction | model |
 |------------------|-------------|------|---------|------------|-------|
@@ -88,10 +88,10 @@ The offset `N` in `_d±N` accepts **any integer**, so it can match any model's `
 
 With `test_start = test_end = "today"` and `horizon=7`, the model runs **once from today** and produces predictions for:
 
-- today + 1 day (horizon 1) — all 24 hours
-- today + 2 days (horizon 2) — all 24 hours
+- today + 1 day (horizon 1), all 24 hours
+- today + 2 days (horizon 2), all 24 hours
 - ...
-- today + 7 days (horizon 7) — all 24 hours
+- today + 7 days (horizon 7), all 24 hours
 
 Total: **24 × 7 = 168 prediction rows** per model.
 
@@ -99,7 +99,7 @@ Total: **24 × 7 = 168 prediction rows** per model.
 
 ## YAML Workflow (Daily Automation)
 
-Save once and schedule via cron — no date changes needed. The referenced `data_pipeline.yaml` must have been saved from a `DataPipeline(timezone="Europe/Warsaw", ...)` (or your market's zone) for `end: today_d+7` to include the whole last horizon day; see [Date Format Options](/epftoolbox2/data-pipeline/overview/#date-format-options):
+Save once and schedule via cron: no date changes needed. The referenced `data_pipeline.yaml` must have been saved from a `DataPipeline(timezone="Europe/Warsaw", ...)` (or your market's zone) for `end: today_d+7` to include the whole last horizon day. See [Date Format Options](/epftoolbox2/data-pipeline/overview/#date-format-options):
 
 ```yaml
 data_pipeline:
@@ -123,6 +123,6 @@ forecast = report.predictions()
 
 ## See Also
 
-- [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/) — full `run()` parameter reference
-- [Workflow](/epftoolbox2/workflow/overview/) — YAML-based orchestration
+- [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/): full `run()` parameter reference
+- [Workflow](/epftoolbox2/workflow/overview/): YAML-based orchestration
 - [examples/05_forecast_only.py](https://github.com/dawidlinek/epftoolbox2/blob/main/examples/05_forecast_only.py)

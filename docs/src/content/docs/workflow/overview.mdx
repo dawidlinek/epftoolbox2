@@ -58,7 +58,7 @@ model_pipeline:
   freq: 1h
 ```
 
-**Forecast-only variant** — add `forecast_only: true` and use date keywords so the file runs daily without editing:
+**Forecast-only variant**: add `forecast_only: true` and use date keywords so the file runs daily without editing:
 
 ```yaml
 data_pipeline:
@@ -98,8 +98,8 @@ model_pipeline:
 | `max_processes` | int | `None` | Worker process count |
 | `threads_per_process` | int | `None` | Threads per process |
 | `cache_path` | str | `None` | Cache directory (overrides `data_cache` if set) |
-| `model_index` | int | `None` | Run only `models[model_index]` — all models run if omitted. Requires `model_save_dir` |
-| `model_forecast_only` | bool | `False` | Skip evaluators/exporters; `test_start`/`test_end` default to `"today"` if omitted |
+| `model_index` | int | `None` | Run only `models[model_index]`, all models run if omitted. Requires `model_save_dir` |
+| `model_forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted |
 | `model_save_dir` | str | `None` | Directory for one resumable JSONL per model (YAML: `model_pipeline.save_dir`), resolved from the YAML's directory |
 | `model_allow_manifest_mismatch` | bool | `False` | Resume into `model_save_dir` even if its [manifest](/epftoolbox2/model-pipeline/caching/) disagrees with this run's configuration (overwrites it) (YAML: `model_pipeline.allow_manifest_mismatch`) |
 | `model_require_manifest` | bool | `False` | Refuse to resume from a `model_save_dir` that has results but no manifest, instead of warning (YAML: `model_pipeline.require_manifest`) |
@@ -184,7 +184,7 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
   </TabItem>
 </Tabs>
 
-**Override semantics:** inline sections **replace** the entire corresponding section from the loaded file — not merge. Sources + validators from `path` are kept unless also overridden.
+**Override semantics:** inline sections **replace** the entire corresponding section from the loaded file, not merge. Sources + validators from `path` are kept unless also overridden.
 
 ---
 
@@ -306,7 +306,7 @@ sbatch --array=0-3 run_task.sh        # each task: epf run experiment.yaml
 epf report experiment.yaml
 ```
 
-`report()` raises if a model has no results file; `report(allow_missing=True)` (`epf report --allow-missing`) reports the models that have one. Check `report.forecast_counts()` before comparing models.
+`report()` raises if a model has no results file. `report(allow_missing=True)` (`epf report --allow-missing`) reports the models that have one. Check `report.forecast_counts()` before comparing models.
 
 ## Learn More
 

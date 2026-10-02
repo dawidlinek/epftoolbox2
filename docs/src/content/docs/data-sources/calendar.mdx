@@ -41,7 +41,7 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | [`country`](#supported-countries) | str | Required | Country code (see the list below) |
-| `timezone` | str \| None | `None` | Time zone whose local dates and times define the features. `None` inherits `DataPipeline.timezone` when part of a pipeline; standalone, it falls back to the country's own zone |
+| `timezone` | str \| None | `None` | Time zone whose local dates and times define the features. `None` inherits `DataPipeline.timezone` when part of a pipeline. Standalone, it falls back to the country's own zone |
 | [`holidays`](#holidays) | str/bool | `"binary"` | Holiday output format |
 | [`weekday`](#weekday) | str/bool | `"number"` | Weekday output format |
 | [`hour`](#hour) | str/bool | `False` | Hour (or period) output format |
@@ -85,11 +85,11 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 - One-hot names are lower case ASCII with underscores. The columns cover every holiday of the years touched
   by `[start, end)`, so the column set does not depend on which holidays fall inside the range.
 - Only **public** holidays are flagged by default, and only national ones. Use `region` for regional holidays
-  (Germany flags 9 days in 2024, Bavaria 12; England adds Easter Monday and the Late Summer Bank Holiday) and
+  (Germany flags 9 days in 2024 and Bavaria 12, and England adds Easter Monday and the Late Summer Bank Holiday) and
   `categories` for other kinds, e.g. Swedish Midsummer Eve and Christmas Eve are in the `"bank"` category
-  (which also has afternoon-only days such as "Maundy Thursday (from 2pm)"; they are flagged for the whole
+  (which also has afternoon-only days such as "Maundy Thursday (from 2pm)" and are flagged for the whole
   day). `categories` replaces the default, so include `"public"` when you want both.
-- Sweden: the `holidays` package lists every Sunday as a Swedish holiday; CalendarSource excludes them.
+- Sweden: the `holidays` package lists every Sunday as a Swedish holiday. CalendarSource excludes them.
 
 <Aside type="caution">
   `"name"` outputs (`holiday_name`, `weekday_name`, `month_name`) are strings, for inspection only. Models
@@ -118,7 +118,7 @@ The column depends on `freq`:
 
 `period` is the index of the period within the local day on the wall-clock grid (`hour * 4 + minute // 15` at
 15 minutes), the same numbering the models use for their `hour` key. On the fall-back day the repeated hour's
-periods occur twice; on the spring-forward day the missing hour's periods are absent.
+periods occur twice. On the spring-forward day the missing hour's periods are absent.
 
 <Aside type="note">
   The models fit one model per period of the day and drop any data column named `hour`, so these columns are
@@ -155,12 +155,12 @@ calendar as `holidays` (country, `region`, `categories`), even when `holidays=Fa
 | `christmas_period=True` | `is_christmas_period` | Local dates from 24 December to 1 January inclusive |
 | `holiday_distance=N` | `days_to_holiday`, `days_since_holiday` | Days to the next and since the previous holiday, 0 on a holiday, capped at N (so N means "N or more") |
 | `dst_switch=True` | `is_dst_switch_day` | 1 on every row of a local day with 23 or 25 hours |
-| `regimes=...` | `regime_{name}` | 1 on local dates `start <= D <= end`, 0 otherwise; open-ended (no upper bound) unless an `end` is given |
+| `regimes=...` | `regime_{name}` | 1 on local dates `start <= D <= end`, 0 otherwise. Open-ended (no upper bound) unless an `end` is given |
 
 ### Regime dummies
 
 `regimes` draws on a catalog of market-structure changes, policy interventions and shocks,
-`epftoolbox2.data.sources.calendar.DEFAULT_REGIMES`. The date is the first **delivery** day; the first auction
+`epftoolbox2.data.sources.calendar.DEFAULT_REGIMES`. The date is the first **delivery** day. The first auction
 was the day before.
 
 | `False` (default) | none |
@@ -229,20 +229,20 @@ list_regimes(country="PL")  # DataFrame: name, start, end, countries, ex_ante, d
 </Aside>
 
 <Aside type="caution" title="Look-ahead">
-  **A regime's `end` (or, for an open-ended shock, its date) is only leak-free if it was known in advance** —
+  **A regime's `end` (or, for an open-ended shock, its date) is only leak-free if it was known in advance**:
   announced, like a price cap's legislated expiry, or the go-live date of whatever superseded it. An end
   identified afterwards, from the data, is look-ahead: a forecast issued during the period could not have known
   when it would end. This is what the catalog's `ex_ante` field records, and why `default: False` entries
-  (`iberian_exception`, `bg_dam_launch`, `war_ukraine`, `baltic_sync`) are excluded from `regimes=True` — pass
+  (`iberian_exception`, `bg_dam_launch`, `war_ukraine`, `baltic_sync`) are excluded from `regimes=True`. Pass
   them by name only after reading why they're flagged. An ex-post label such as "energy crisis 2021-2023",
-  picked because that is where the data later showed elevated prices, has exactly this problem — don't build
+  picked because that is where the data later showed elevated prices, has exactly this problem. Don't build
   one from hindsight and use it in a backtest that spans it.
 </Aside>
 
 #### Bounded periods
 
 A `regimes` dict entry can be a single date (open-ended) or a period with an end, given as a `(start, end)`
-pair or a `{"start": ..., "end": ...}` dict — the two are equivalent:
+pair or a `{"start": ..., "end": ...}` dict: the two are equivalent:
 
 ```python
 regimes = {"eu_price_cap": ("2022-12-01", "2023-01-31")}
@@ -250,7 +250,7 @@ regimes = {"eu_price_cap": {"start": "2022-12-01", "end": "2023-01-31"}}
 ```
 
 `regime_{name}` is 1 on local dates `start <= D <= end` and 0 otherwise (`end` is inclusive: the last day it
-still equals 1); with no `end`, the dummy stays 1 from `start` on. `end` must not be before `start`.
+still equals 1). With no `end`, the dummy stays 1 from `start` on. `end` must not be before `start`.
 
 ---
 
@@ -259,7 +259,7 @@ still equals 1); with no `end`, the dummy stays 1 from `start` on. `end` must no
 With `school_holidays="national"` or `"all"`, CalendarSource additionally downloads school holidays from the
 [OpenHolidays API](https://www.openholidaysapi.org) and turns them into a flag or a share on the same local-date
 grid as every other feature. `True` is accepted as an alias for `"national"`. **No API key required.** This is
-the only case where CalendarSource makes network calls; without it, it stays offline and deterministic.
+the only case where CalendarSource makes network calls. Without it, it stays offline and deterministic.
 
 <Aside type="caution" title="Licence and attribution">
   The data is published under the [Open Database License (ODbL 1.0)](https://opendatacommons.org/licenses/odbl/1-0/).
@@ -283,7 +283,7 @@ source = CalendarSource(country="PL", school_holidays="all")
 | `True` / `"national"` | `is_school_holiday` | 1.0 on a day covered by a nationwide school-holiday period, 0.0 otherwise |
 | `"all"` | `school_holiday_share` | The unweighted fraction of the country's top-level regions on school holiday that day (a nationwide period counts for every region) |
 
-Values are `1.0`/`0.0` (or a fraction in `[0, 1]` for `"all"`); weekends outside holidays are `0.0`.
+Values are `1.0`/`0.0` (or a fraction in `[0, 1]` for `"all"`). Weekends outside holidays are `0.0`.
 CalendarSource's `prefix` applies to these columns like to every other feature. For Poland (16 voivodeships),
 `school_holiday_share` is `0.25` on a day when 4 of them are on their staggered winter break, and `1.0` during
 the (nationwide) summer break.
@@ -291,16 +291,16 @@ the (nationwide) summer break.
 - **Regions**: `"all"` takes its region list from the OpenHolidays [Subdivisions
   endpoint](https://openholidaysapi.org/Subdivisions?countryIsoCode=PL) and uses **top-level subdivisions
   only** (e.g. Poland's 16 voivodeships), never their nested children. A holiday entry that names a top-level
-  code (or is nationwide) counts for that region; an entry that names only a *child* of a top-level region
-  (e.g. a city or district code nested under it) is **not** rolled up into its parent's flag — it is invisible
-  to `"all"`. This matters for countries whose OpenHolidays data is recorded below the top level; Poland's and
+  code (or is nationwide) counts for that region. An entry that names only a *child* of a top-level region
+  (e.g. a city or district code nested under it) is **not** rolled up into its parent's flag. It is invisible
+  to `"all"`. This matters for countries whose OpenHolidays data is recorded below the top level. Poland's and
   Germany's regional entries are recorded at the top level, so this doesn't affect them.
 - In regions whose holidays differ by school type (e.g. general and vocational schools), a day is flagged when
   any group is on holiday.
 - Entries marked as half days are ignored.
 - `"national"` (and the nationwide entries `"all"` also uses) only count holidays marked as country-wide. In
-  Poland that is the spring, summer and Christmas breaks but not the regional winter breaks; Germany has no
-  country-wide school holidays at all, so `is_school_holiday` is always `0.0`/`NaN` there — use `"all"` instead.
+  Poland that is the spring, summer and Christmas breaks but not the regional winter breaks. Germany has no
+  country-wide school holidays at all, so `is_school_holiday` is always `0.0`/`NaN` there. Use `"all"` instead.
 
 ### Missing data is NaN, not 0
 
@@ -318,7 +318,7 @@ History start by country (from the [OpenHolidays data repository](https://github
 | 2017 | AT |
 | 2018 | FR |
 | 2020 | BE, BG, CH, CZ, ES, IE, IT, NL, PL, PT, SK |
-| no school holidays | SE (public holidays only); DK, FI, GB, GR and NO are not covered |
+| no school holidays | SE (public holidays only). DK, FI, GB, GR and NO are not covered |
 
 For Poland the first recorded school holiday is the 2019/20 Christmas break (from 23 December 2019), so earlier
 dates are NaN.
@@ -363,7 +363,7 @@ source = CalendarSource(country="DE", holidays="onehot")
 ```
 
 **Region-specific holidays of a federal country.** `region` adds that subdivision's own holidays on top of the
-national ones; Bavaria (`DE-BY`) observes Epiphany and Corpus Christi, which the rest of Germany does not:
+national ones. Bavaria (`DE-BY`) observes Epiphany and Corpus Christi, which the rest of Germany does not:
 
 ```python
 germany = CalendarSource(country="DE", holidays="binary")
@@ -395,7 +395,7 @@ source = CalendarSource(country="PL", christmas_period=True)
 # is_christmas_period: 1 from 24 Dec through 1 Jan, 0 the rest of the year
 ```
 
-**School holidays: `"national"` vs `"all"`.** `"national"` only flags nationwide breaks; `"all"` also picks up
+**School holidays: `"national"` vs `"all"`.** `"national"` only flags nationwide breaks. `"all"` also picks up
 regional ones as a share of the country's top-level regions. Poland's winter break is staggered by voivodeship,
 so it is invisible to `"national"` but shows up as a fraction with `"all"`:
 

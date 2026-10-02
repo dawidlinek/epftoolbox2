@@ -33,7 +33,7 @@ df = pipeline.run(start="2024-01-01", end="2024-06-01", cache="$SCRATCH/epf_cach
 1. **Look up the key** - each source gets a directory named after a hash of the cache format version, the source
    class and `source.get_cache_config()`
 
-2. **Find missing ranges** - `metadata.json` lists the ranges already cached; only the gaps are fetched
+2. **Find missing ranges** - `metadata.json` lists the ranges already cached. Only the gaps are fetched
 
 3. **Fetch and record** - the fetched data is stored, but only the part the source actually returned, and never
    the last two days before now (see below)
@@ -67,15 +67,15 @@ about an hour after delivery (often later), next-day prices after the auction, w
 run finishes. The recent part is returned for the current run but fetched again next time, so a daily forecast run
 with `cache=True` always sees the newly published data.
 
-A gap in an otherwise regular response — one missing hour in a day of hourly data — is never recorded as covered:
+A gap in an otherwise regular response: one missing hour in a day of hourly data, is never recorded as covered:
 only the contiguous run(s) of timestamps actually present are cached, so the hole is fetched again on the next run
 instead of silently being treated as covered and then lost for good.
 
 A multi-column source joins its columns on an outer index, so the merged rows run as far as the longest column
-even when a shorter one stopped early — for example `load_actual` during a multi-day TSO outage, while `price`
+even when a shorter one stopped early: for example `load_actual` during a multi-day TSO outage, while `price`
 keeps publishing day-ahead rows. To stop that outage's cells from being recorded as covered (and then never
 refetched once the source backfills them), the recorded range is additionally capped at one step past the last
-value of any column that is still being published — one whose last value is newer than 14 days before now. A
+value of any column that is still being published, one whose last value is newer than 14 days before now. A
 column whose last value is older than that is treated as discontinued (e.g. a PsrType ENTSO-E no longer reports)
 and does not cap coverage, so it can't force a refetch forever.
 
@@ -94,8 +94,8 @@ the first one downloads each source while the others wait and then read its resu
 and the API is called once.
 
 <Aside type="caution">
-  The lock relies on `flock`. On network file systems that do not support it, a plain lock file is used instead;
-  if a job is killed while holding it, delete the `.lock` file by hand.
+  The lock relies on `flock`. On network file systems that do not support it, a plain lock file is used instead.
+  If a job is killed while holding it, delete the `.lock` file by hand.
 </Aside>
 
 ### Missing or damaged files
@@ -137,7 +137,7 @@ reader restores the exact floats, dtypes and column names, so a reload equals a 
 It also records the unsettled boundary (two days before "now", same as the source cache) at the moment the file
 was written. A later run with a matching fingerprint is only served from the file if either the whole requested
 range was already past that boundary when it was written (nothing about it could still change), or the boundary
-hasn't moved since. Otherwise the file is rebuilt — without this, a fixed (non-relative) date range whose `end` is
+hasn't moved since. Otherwise the file is rebuilt. Without this, a fixed (non-relative) date range whose `end` is
 in the future would cache missing/not-yet-published rows for the unsettled tail once and keep serving that same
 gap forever, even after the real data was published, because nothing about the requested dates or sources ever
 changes to invalidate the fingerprint.
@@ -157,12 +157,11 @@ processes pointed at the same file download the data once.
 
 `CalendarSource.get_cache_config()` includes every constructor parameter that affects its output, plus the
 resolved market time zone, the installed `holidays` package version (its holiday data changes between releases)
-and a `schema_version`. A change to any of them, including upgrading the `holidays` package, gives a different
-cache key, so stale values are never served.
+and a `schema_version`. A change to any of them gives a different cache key, so stale values are never served.
 
 <Aside type="caution">
   The OpenHolidays API (used by `school_holidays`) can also correct its data over time, the same way ENTSO-E
-  does. The cache keeps the version it downloaded; clear it to pick up revisions, and a school year that was
+  does. The cache keeps the version it downloaded. Clear it to pick up revisions, and a school year that was
   `NaN` because it had not been published yet stays `NaN` until you do.
 </Aside>
 

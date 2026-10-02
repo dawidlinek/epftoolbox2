@@ -22,7 +22,7 @@ print(result.info["rows_per_day"])  # e.g. {23: 1, 24: 364, 25: 1}
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `tz` | str or None | `None` | Time zone that defines the local days. `None` uses the index's own time zone; a naive index counts as UTC (the source contract). |
+| `tz` | str or None | `None` | Time zone that defines the local days. `None` uses the index's own time zone. A naive index counts as UTC (the source contract). |
 | `freq` | str or None | `None` | Period length (`"15min"`, `"1h"`). `None` infers it from the data. |
 | `allow_partial_edges` | bool | `True` | Report a first or last day with too few rows as a warning instead of an error. |
 
@@ -38,7 +38,7 @@ Pipeline dates are UTC midnights, so after conversion to local time the first lo
 ## Output
 
 - **Errors:** days whose row count differs from the expected one (first 10 listed).
-- **Warnings:** partial first/last days (with `allow_partial_edges=True`); daily data, which is skipped.
+- **Warnings:** partial first/last days (with `allow_partial_edges=True`) and daily data, which is skipped.
 - **info:** `tz`, `freq`, `rows_per_day` (row count → number of days), `dst_days` (days not 24 hours long), `bad_days` and `partial_days` (date, rows, expected).
 - **stats:** one row per local day: `date`, `hours`, `rows`, `expected`.
 

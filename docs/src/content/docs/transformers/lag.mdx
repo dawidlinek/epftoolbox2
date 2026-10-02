@@ -38,7 +38,7 @@ df = transformer.transform(df)
 | `"second"` | `"seconds"`, `"s"`, `"1s"` | 1 second of elapsed time |
 
 Other pandas frequency strings work too. Whole days written in day units (`"2D"`, `"7D"`) shift by calendar days
-and are named `d`; everything else (`"15min"`, `"24h"`) shifts by elapsed time and is named in `h`, `min` or `s`.
+and are named `d`. Everything else (`"15min"`, `"24h"`) shifts by elapsed time and is named in `h`, `min` or `s`.
 
 ---
 
@@ -65,7 +65,7 @@ A NaN predictor makes the model skip that forecast, so a model using `price_d-1`
 
 <Aside type="caution">
   Day lags need a local-time index, so add `LagTransformer` **after** `TimezoneTransformer`. On a UTC index
-  "a day" is a UTC day and local hours drift by one around every DST switch; `LagTransformer` warns when that
+  "a day" is a UTC day and local hours drift by one around every DST switch. `LagTransformer` warns when that
   happens. A naive index is taken as local wall-clock time without DST.
 </Aside>
 

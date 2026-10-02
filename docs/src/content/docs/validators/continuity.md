@@ -36,7 +36,7 @@ All of these are errors:
 | Gaps (a step longer than `freq`) | `gaps` (start, end, duration, missing), `gap_count`, `missing_periods` |
 | Steps that are not a multiple of `freq` (mixed resolutions, off-grid rows) | `irregular_steps`, `irregular` (first 10) |
 
-`info` also holds `expected_freq` and `freq_inferred`. At most 10 gaps are listed in `errors`, followed by a line counting the rest; `info["gaps"]` has all of them.
+`info` also holds `expected_freq` and `freq_inferred`. At most 10 gaps are listed in `errors`, followed by a line counting the rest. `info["gaps"]` has all of them.
 
 ```python
 result = ContinuityValidator().validate(df)
@@ -57,4 +57,4 @@ print(result.info["gap_count"], result.info["missing_periods"])
 - On raw source data, to find missing rows and mixed resolutions (for example around the 15-minute SDAC switch on 2025-10-01).
 - After timezone conversion and resampling, to confirm a regular grid.
 
-It only sees rows that are missing from the index. A column that is empty on a complete index needs [CoverageValidator](/epftoolbox2/validators/coverage/); rows per local day are checked by [DSTStructureValidator](/epftoolbox2/validators/dst-structure/).
+It only sees rows that are missing from the index. A column that is empty on a complete index needs [CoverageValidator](/epftoolbox2/validators/coverage/). Rows per local day are checked by [DSTStructureValidator](/epftoolbox2/validators/dst-structure/).

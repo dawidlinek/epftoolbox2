@@ -45,8 +45,8 @@ You'll see a menu with arrow-key navigation:
 7. Running immediately
 
 **Build & run model pipeline interactively** walks you through:
-1. Loading an input CSV (from a previous data run; you are asked for the time zone if the file doesn't name it)
-2. Adding models — available columns are shown as a checkbox list for predictor selection
+1. Loading an input CSV (from a previous data run, with a prompt for the time zone if the file doesn't name it)
+2. Adding models: available columns are shown as a checkbox list for predictor selection
 3. Adding evaluators and exporters
 4. Setting the test period, target column, horizon and resolution (`1h` or `15min`)
 5. Saving a reusable `model_pipeline.yaml`
@@ -58,7 +58,7 @@ You'll see a menu with arrow-key navigation:
 
 ---
 
-## `epf run` — Full workflow
+## `epf run`: Full workflow
 
 Run a complete experiment from a [Workflow YAML](/epftoolbox2/workflow/overview/).
 
@@ -70,10 +70,10 @@ epf run experiment.yaml
 
 | Flag | Description |
 |------|-------------|
-| `--model-index N` | Run only `models[N]` (array mode: needs `model_pipeline.save_dir`, see [`epf report`](#epf-report--merge-array-results)) |
+| `--model-index N` | Run only `models[N]` (array mode: needs `model_pipeline.save_dir`, see [`epf report`](#epf-report-merge-array-results)) |
 | `--processes N` | Override `max_processes` |
 | `--threads N` | Override `threads_per_process` |
-| `--dry-run` | Build both pipelines without executing — validates config |
+| `--dry-run` | Build both pipelines without executing, validates config |
 
 **Examples:**
 
@@ -89,7 +89,7 @@ epf run experiment.yaml --dry-run
 
 ---
 
-## `epf report` — Merge array results
+## `epf report`: Merge array results
 
 After a SLURM array in which each task ran one model (`--model-index`), merge every model's JSONL from `model_pipeline.save_dir` and run the evaluators and exporters once. Prints planned vs produced forecasts per model.
 
@@ -102,7 +102,7 @@ Without `--allow-missing` it fails if any model has no results file.
 
 ---
 
-## `epf data` — Data pipeline only
+## `epf data`: Data pipeline only
 
 Run a DataPipeline YAML and save the result as a CSV.
 
@@ -138,9 +138,9 @@ epf data data_pipeline.yaml \
 
 ---
 
-## `epf model` — Model pipeline only
+## `epf model`: Model pipeline only
 
-Run a ModelPipeline YAML on an existing CSV dataset (e.g. produced by `epf data`). The model's days and hours are local, so the file must say which time zone it is in: files from `epf data` do; for other files with UTC offsets in the timestamps, pass `--tz`.
+Run a ModelPipeline YAML on an existing CSV dataset (e.g. produced by `epf data`). The model's days and hours are local, so the file must say which time zone it is in: files from `epf data` do. For other files with UTC offsets in the timestamps, pass `--tz`.
 
 ```bash
 epf model model_pipeline.yaml \
@@ -164,8 +164,8 @@ epf model model_pipeline.yaml \
 | `--target COL` | Target column name (default: `price`) |
 | `--horizon N` | Forecast horizon in days (default: `7`) |
 | `--freq {1h,15min}` | Data resolution: one model per hour or per quarter-hour (default: `1h`). Must match the data |
-| `--tz ZONE` | Local time zone of the data (e.g. `Europe/Warsaw`); overrides the zone named in the file |
-| `--issue-time HH:MM` | Check every predictor against this issue time before fitting ([information set](/epftoolbox2/model-pipeline/information-set/)); overrides the YAML's `information_set`, or adds one if it has none |
+| `--tz ZONE` | Local time zone of the data (e.g. `Europe/Warsaw`). Overrides the zone named in the file |
+| `--issue-time HH:MM` | Check every predictor against this issue time before fitting ([information set](/epftoolbox2/model-pipeline/information-set/)). Overrides the YAML's `information_set`, or adds one if it has none |
 | `--issue-timezone ZONE` | Zone of `--issue-time` (default: the YAML's, else `Europe/Brussels`) |
 | `--save-dir DIR` | Save per-model prediction JSONL files to this directory |
 | `--forecast-only` | Skip evaluators and exporters |
@@ -174,9 +174,9 @@ epf model model_pipeline.yaml \
 
 ---
 
-## `epf validate` — Validate any pipeline YAML
+## `epf validate`: Validate any pipeline YAML
 
-Load and parse a YAML file, instantiate all components, and report errors — without running anything.
+Load and parse a YAML file, instantiate all components, and report errors. Without running anything.
 
 ```bash
 epf validate data_pipeline.yaml
@@ -188,7 +188,7 @@ The file type is auto-detected from its top-level keys. Exits with code 1 if val
 
 ---
 
-## `epf init` — Scaffold template files
+## `epf init`: Scaffold template files
 
 Create `experiment.yaml`, `data_pipeline.yaml`, and `model_pipeline.yaml` with placeholder values in the current directory.
 

@@ -27,14 +27,14 @@ df = LambdaTransformer(func=lambda df: df.assign(spread=df["price"] - df["price_
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `func` | lambda \| str \| None | `None` | `df -> df` lambda (or its source text) for full control over the output frame |
-| `columns` | dict \| None | `None` | `{new_or_existing_column: expression}`; each expression is a `df -> Series` lambda (or its source text), or a string for `df.eval(...)` |
+| `columns` | dict \| None | `None` | `{new_or_existing_column: expression}`. Each expression is a `df -> Series` lambda (or its source text), or a string for `df.eval(...)` |
 
 ## `columns`: string or callable expressions
 
-Each entry adds or overwrites one column. A `df -> Series` lambda gives full pandas; any other string is
+Each entry adds or overwrites one column. A `df -> Series` lambda gives full pandas. Any other string is
 evaluated with [`DataFrame.eval`](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.eval.html).
 
-Entries run in the order given, each against the frame as built so far — including the columns earlier entries
+Entries run in the order given, each against the frame as built so far, including the columns earlier entries
 in the same `columns` dict just added:
 
 ```python
@@ -44,8 +44,8 @@ LambdaTransformer(columns={
 })
 ```
 
-Column names that `df.eval` can't parse as a plain identifier — spaces, operators, a name starting with a
-digit — need backticks, exactly as in pandas:
+Column names that `df.eval` can't parse as a plain identifier (spaces, operators, a name starting with a
+digit) need backticks, exactly as in pandas:
 
 ```python
 LambdaTransformer(columns={"spread": "`price (EUR)` - load"})
@@ -57,14 +57,14 @@ LambdaTransformer(columns={"spread": "`price (EUR)` - load"})
 LambdaTransformer(func=lambda df: df.assign(spread=df["price"] - df["price_d-1"]))
 ```
 
-`func` receives the whole frame and returns the whole frame; use it for anything `columns` can't express, such
+`func` receives the whole frame and returns the whole frame. Use it for anything `columns` can't express, such
 as dropping a column or building several columns with a shared intermediate.
 
 ## Index guard
 
 The result must have exactly the same index as the input: the same rows, in the same order.
 
-- `columns` mode can't break this — it only ever assigns aligned columns onto a copy of the input frame.
+- `columns` mode can't break this. It only ever assigns aligned columns onto a copy of the input frame.
 - A `func` that resamples, filters, sorts or otherwise reorders rows raises `ValueError` instead of silently
   changing what a later step in the pipeline sees. Row-count or row-order changes belong in a dedicated
   transformer (`ResampleTransformer`, etc.), not here.
@@ -77,11 +77,11 @@ The result must have exactly the same index as the input: the same rows, in the 
   `"load_forecast - wind_forecast - solar_forecast"`.
 
   These leak, because they pull in values a forecast issued on the row's own day would not yet have:
-  - `df["price"].shift(-1)` or any negative shift — tomorrow's value, today.
-  - `.bfill()` — a value copied backward from a later row.
+  - `df["price"].shift(-1)` or any negative shift: tomorrow's value, today.
+  - `.bfill()`: a value copied backward from a later row.
   - A rolling window that reaches past the current row (`.rolling(...).mean()` without excluding the current
     and later rows, or a centered window).
-  - Normalising with a whole-sample statistic — `(df["price"] - df["price"].mean()) / df["price"].std()`
+  - Normalising with a whole-sample statistic, `(df["price"] - df["price"].mean()) / df["price"].std()`
     computed once over the whole loaded range uses the mean and std of data that hadn't happened yet for the
     early rows.
 </Aside>
@@ -108,7 +108,7 @@ LambdaTransformer(columns={"hdd": "lambda df: (18.0 - df['temp']).clip(lower=0)"
 ```
 
 A lambda is converted to text when it only uses its argument, `pd`, `np` and builtins, and its source can be
-found unambiguously (a file or a notebook cell; not the plain interactive interpreter). Named functions
+found unambiguously (a file or a notebook cell, not the plain interactive interpreter). Named functions
 (`def`) and lambdas that close over other variables raise `TypeError` on `save()`.
 
 <Aside type="caution">

@@ -88,24 +88,24 @@ own `timezone`/`target_tz` come back `null`. See
 
 ## Validators and on_invalid
 
-`validators` run on the final frame; `source_validators` run on the raw, joined source output, before any
+`validators` run on the final frame. `source_validators` run on the raw, joined source output, before any
 transformer (useful for checks that a transformer such as `ResampleTransformer` would otherwise paper over).
 Every result is kept in `pipeline.validation_results`, keyed `"source_validators.<Class>"` / `"validators.<Class>"`.
-`on_invalid="warn"` (the default) logs a failure and continues; `on_invalid="raise"` raises `DataValidationError`
+`on_invalid="warn"` (the default) logs a failure and continues. `on_invalid="raise"` raises `DataValidationError`
 after the failing stage's validators have all run.
 
 ## Secrets
 
 `api_key` (and any component's declared secret) is written as `${<SOURCE>_API_KEY}` (e.g. `${ENTSOE_API_KEY}`) by
 default, and expanded from the environment on load. Pass `pipeline.save(path, include_secrets=True)` to write the
-literal value instead — only do this for files you don't commit. Any string parameter may itself contain a
-`${VAR}` reference (not just `api_key`); it is expanded on load, and preserved as the reference (not flattened to
+literal value instead: only do this for files you don't commit. Any string parameter may itself contain a
+`${VAR}` reference (not just `api_key`). It is expanded on load, and preserved as the reference (not flattened to
 the expanded value) when the pipeline is saved again.
 
 ## Relative Paths
 
 File-like parameters (`path`, `*_path`, `*_file`, `*_dir`, e.g. `CsvSource.file_path`) loaded from a relative path
-are resolved against the YAML file's directory, not the process's working directory — so a pipeline YAML and the
+are resolved against the YAML file's directory, not the process's working directory, so a pipeline YAML and the
 data it points to can be moved together. On save, a path under the YAML's directory is written relative to it
 again.
 
@@ -119,7 +119,7 @@ again.
 | `tuple`, `range` (e.g. lags) | Converted to `list` |
 | Private attrs (`_name`) | Excluded |
 | `session`, `console`, `logger` | Excluded (runtime objects, not configuration) |
-| Anything else (`set`, callable, arbitrary object) | Raises `TypeError` naming the parameter — nothing is dropped silently |
+| Anything else (`set`, callable, arbitrary object) | Raises `TypeError` naming the parameter. Nothing is dropped silently |
 
 ## Registering Custom Sources/Transformers/Validators
 

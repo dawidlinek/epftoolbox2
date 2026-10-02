@@ -22,7 +22,7 @@ lasso_price_vst = LassoCVModel(
 )
 ```
 
-A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `from epftoolbox2.scalers import AsinhScaler`; the model stores it as a `{"name", "params"}` dict so the pipeline can be saved to YAML. Only the scalers listed below are accepted.
+A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `from epftoolbox2.scalers import AsinhScaler`. The model stores it as a `{"name", "params"}` dict so the pipeline can be saved to YAML. Only the scalers listed below are accepted.
 
 ## Available scalers
 
@@ -32,7 +32,7 @@ A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `
 | `"asinh"` | `AsinhScaler` | `asinh((x - median) / (MAD / 0.6745))`, then standardised |
 | `"npit"` | `NPITScaler` | `Φ⁻¹(F̂(x))` with `F̂` the empirical CDF of the training rows, then standardised |
 
-- **`AsinhScaler`** is the "Invariant" scaler of epftoolbox's LEAR (Lago et al., 2021): median/MAD normalisation (the MAD divided by 0.6745 estimates the standard deviation of normal data), then the inverse hyperbolic sine. Near the median it is almost linear; for spikes it grows like a logarithm, and it is symmetric, so negative prices are fine. If the MAD is 0 (more than half of the training values are equal, e.g. a price floor) the sample standard deviation is used, and 1.0 if that is 0 too. The inverse is `median + scale · sinh(z)`.
+- **`AsinhScaler`** is the "Invariant" scaler of epftoolbox's LEAR (Lago et al., 2021): median/MAD normalisation (the MAD divided by 0.6745 estimates the standard deviation of normal data), then the inverse hyperbolic sine. Near the median it is almost linear. For spikes it grows like a logarithm, and it is symmetric, so negative prices are fine. If the MAD is 0 (more than half of the training values are equal, e.g. a price floor) the sample standard deviation is used, and 1.0 if that is 0 too. The inverse is `median + scale · sinh(z)`.
 - **`NPITScaler`** is the normal probability integral transform. The i-th smallest of n training values gets `F̂ = i / (n + 1)` (tied values share their mid-rank), so every value maps to a finite normal quantile. Between training values the map is linear. Values outside the training range are clamped to the extreme knots: a transformed predictor can't exceed the training range, and **a forecast can't go below the training window's lowest or above its highest price**.
 
 ## Parameters
@@ -41,21 +41,21 @@ A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `apply_to` | str or list | `"all"` | Which predictors get the VST besides the target: `"all"` (every non-binary predictor), `"target"` (none; predictors are standardised), or a list of glob patterns matched against the expanded predictor names, e.g. `["price", "price_d-*"]` |
+| `apply_to` | str or list | `"all"` | Which predictors get the VST besides the target: `"all"` (every non-binary predictor), `"target"` (none, predictors are standardised), or a list of glob patterns matched against the expanded predictor names, e.g. `["price", "price_d-*"]` |
 
 `StandardScaler` takes no parameters.
 
 ## Which columns are transformed
 
 - **The target** always gets the VST.
-- **Predictors** follow `apply_to`. The default `"all"` matches epftoolbox's LEAR, which applies the Invariant scaler to every input except the day-of-week dummies. The VST papers transform the price series; `apply_to=["price", "price_d-*"]` does that and only standardises exogenous inputs such as load or weather. If no pattern matches any predictor, a warning says that only the target is transformed.
+- **Predictors** follow `apply_to`. The default `"all"` matches epftoolbox's LEAR, which applies the Invariant scaler to every input except the day-of-week dummies. The VST papers transform the price series. `apply_to=["price", "price_d-*"]` does that and only standardises exogenous inputs such as load or weather. If no pattern matches any predictor, a warning says that only the target is transformed.
 - **Binary 0/1 predictors** (dummies) are never changed, whatever `apply_to` says. The same rule as for `StandardScaler` decides what is binary.
 - Every column gets its own parameters (median/MAD or empirical CDF), estimated from the task's training rows.
 - After the VST every transformed column, and the target, is standardised, so models always receive centred data with unit variance. This is why `OLSModel`, which fits without an intercept, stays valid. epftoolbox's LEAR skips this step. An affine rescaling doesn't change a least-squares fit with an intercept, but it does change the relative scale of the inputs that a Lasso penalty sees, so LassoCV results won't match LEAR's exactly.
 
 ## No look-ahead
 
-A fresh scaler is fitted for every (hour, horizon, run day) task on that task's training rows only; the newest training target is the price of the day before the forecast is issued. The test row is transformed with the training parameters and never changes them. Don't apply a VST to the whole data set in a `DataPipeline`: that would put information from the test period into the training data.
+A fresh scaler is fitted for every (hour, horizon, run day) task on that task's training rows only. The newest training target is the price of the day before the forecast is issued. The test row is transformed with the training parameters and never changes them. Don't apply a VST to the whole data set in a `DataPipeline`: that would put information from the test period into the training data.
 
 ## Back-transformed forecasts are median-type
 
@@ -93,6 +93,6 @@ The shifted and mirror logarithm, Box-Cox, the parametrised asinh of Uniejewski 
 
 ## References
 
-- B. Uniejewski, R. Weron, F. Ziel (2018). Variance stabilizing transformations for electricity spot price forecasting. *IEEE Transactions on Power Systems* 33(2). Compares 16 transformations on 12 markets; the normal PIT performed best.
+- B. Uniejewski, R. Weron, F. Ziel (2018). Variance stabilizing transformations for electricity spot price forecasting. *IEEE Transactions on Power Systems* 33(2). Compares 16 transformations on 12 markets. The normal PIT performed best.
 - B. Uniejewski (2026). Variance stabilizing transformations for electricity price forecasting in periods of increased volatility. *Electric Power Systems Research* 257, 112992. [arXiv:2511.13603](https://arxiv.org/abs/2511.13603). On German, Spanish and French data from 2015–2024, VSTs reduced LEAR errors by up to 14.6%.
 - J. Lago, G. Marcjasz, B. De Schutter, R. Weron (2021). Forecasting day-ahead electricity prices: A review of state-of-the-art algorithms, best practices and an open-access benchmark. *Applied Energy* 293.

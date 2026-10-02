@@ -54,25 +54,25 @@ Read-only properties: `index_timezone` (the fixed-offset zone of the dataset) an
 | `BE` | EPEX-BE | 2011-01-09 – 2016-12-31 | `load_forecast_fr`, `generation_forecast_fr` (**French** load and generation) | `Etc/GMT-1` (CET) | 2015-01-04 – 2016-12-31 |
 | `DE` | EPEX-DE | 2012-01-09 – 2017-12-31 | `load_forecast_amprion` (Amprion zone load), `wind_solar_forecast` (wind + solar) | `Etc/GMT-1` (CET) | 2016-01-04 – 2017-12-31 |
 
-Every dataset has `price` plus the two exogenous series. As in the paper, both exogenous series are **day-ahead forecasts**: the value at (day d, hour h) is the forecast for (d, h), available on d-1. The price column is the second column of the file, as in epftoolbox's `read_data`; the exogenous columns are recognised by a keyword in their header, so their order in the file doesn't matter.
+Every dataset has `price` plus the two exogenous series. As in the paper, both exogenous series are **day-ahead forecasts**: the value at (day d, hour h) is the forecast for (d, h), available on d-1. The price column is the second column of the file, as in epftoolbox's `read_data`. The exogenous columns are recognised by a keyword in their header, so their order in the file doesn't matter.
 
 ---
 
 ## Time index
 
-The files use local time with **exactly 24 values per day**: the missing spring hour is interpolated, and the two autumn hours are averaged. The library's sources return UTC, and a DST zone can't hold 24 hours on every day. The source therefore reads the wall-clock times in the market's **fixed standard-time offset** (`index_timezone`: `Etc/GMT-1` = UTC+1 for the European markets, `Etc/GMT+5` = UTC-5 for PJM; the POSIX sign is inverted) and converts that to UTC.
+The files use local time with **exactly 24 values per day**: the missing spring hour is interpolated, and the two autumn hours are averaged. The library's sources return UTC, and a DST zone can't hold 24 hours on every day. The source therefore reads the wall-clock times in the market's **fixed standard-time offset** (`index_timezone`: `Etc/GMT-1` = UTC+1 for the European markets, `Etc/GMT+5` = UTC-5 for PJM, where the POSIX sign is inverted) and converts that to UTC.
 
 What this means:
 
 - Convert with `TimezoneTransformer(target_tz=source.index_timezone)`. You get the file's wall-clock labels back, 24 rows on every day.
 - On this index a day is always 24 hours, so `LagTransformer(freq="day")` and `ModelPipeline`'s calendar-day targets agree. The DST lag problem of real-time indices doesn't arise.
-- In summer, the UTC timestamps are one hour off the true instants: they are labels for the wall clock. Don't combine this source with sources on real time (`EntsoeSource`, `OpenMeteoSource`); they would be misaligned by an hour for half of each year. `CalendarSource(..., timezone=source.index_timezone)` is fine for weekday and holiday features.
+- In summer, the UTC timestamps are one hour off the true instants: they are labels for the wall clock. Don't combine this source with sources on real time (`EntsoeSource`, `OpenMeteoSource`). They would be misaligned by an hour for half of each year. `CalendarSource(..., timezone=source.index_timezone)` is fine for weekday and holiday features.
 - Don't convert to `Europe/Berlin` or another DST zone: summer hours would shift by one and some would move to the neighbouring day.
 - DST days hold synthetic values (the interpolated and the averaged hour), exactly as in the paper's evaluation.
 
 ## Using it like the paper
 
-Row D of the data is the issue day in `ModelPipeline`; the paper forecasts day d = D+1 using information available on d-1 = D.
+Row D of the data is the issue day in `ModelPipeline`. The paper forecasts day d = D+1 using information available on d-1 = D.
 
 | Paper input for delivery day d | Column on row D |
 |--------------------------------|-----------------|
@@ -85,7 +85,7 @@ Row D of the data is the issue day in `ModelPipeline`; the paper forecasts day d
 
 ## Download and verification
 
-On the first `fetch`, the source reads the record metadata from `https://zenodo.org/api/records/4624805`, downloads `{dataset}.csv`, and compares its md5 with the published one. On a mismatch it raises and saves nothing. A verified file is stored as `{cache_dir}/{dataset}.csv` together with `{dataset}.csv.md5`; later runs check the file against that checksum and don't touch the network. A cached file that no longer matches is downloaded again.
+On the first `fetch`, the source reads the record metadata from `https://zenodo.org/api/records/4624805`, downloads `{dataset}.csv`, and compares its md5 with the published one. On a mismatch it raises and saves nothing. A verified file is stored as `{cache_dir}/{dataset}.csv` together with `{dataset}.csv.md5`. Later runs check the file against that checksum and don't touch the network. A cached file that no longer matches is downloaded again.
 
 <Aside type="tip">
   Machines without internet access (e.g. cluster compute nodes): run the source once elsewhere and copy both `{dataset}.csv` and `{dataset}.csv.md5` into `cache_dir`. A CSV without its `.md5` file is checked against the Zenodo metadata, which needs network access.
