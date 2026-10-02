@@ -39,22 +39,13 @@ TEST_END = "2024-03-01"
 
 if __name__ == "__main__":
     data_pipeline = (
-        # timezone makes DATA_START/DATA_END mean whole local calendar days, not UTC midnight, so the last
-        # local day of the fetch isn't left partial once TimezoneTransformer converts to Europe/Berlin below.
+        # timezone makes DATA_START/DATA_END whole local days
         DataPipeline(timezone="Europe/Berlin")
         .add_source(EntsoeSource(country_code="DE", api_key=ENTSOE_API_KEY, type=["load", "price"], prefer_15min=True))
-        .add_source(
-            # jma_seamless (default model) is only leak-free up to 5 days ahead at the default
-            # api="previous_runs"/run="00"; a longer horizon needs a different model or api="single_runs".
-            # timezone is left unset: it inherits DataPipeline(timezone=...) above.
-            OpenMeteoSource(latitude=52.5200, longitude=13.4050, horizon=5, prefix="berlin")
-        )
+        .add_source(OpenMeteoSource(latitude=52.5200, longitude=13.4050, prefix="berlin"))
         .add_source(CalendarSource(country="DE", holidays="binary", weekday="onehot", daylight=True, freq="15min"))
         .add_transformer(TimezoneTransformer())
-        # Hourly values become a step over their four quarter-hours; daily min/max cover their local day
         .add_transformer(ResampleTransformer(freq="15min"))
-        # load_actual is only known for D once D is over; never offer its same-day (unlagged) value —
-        # it is also this example's forecast target, so leaving it unlagged would hand the model the answer.
         .add_transformer(LagTransformer(columns=["load_actual"], lags=[1, 2, 7], freq="day"))
         .add_transformer(
             LagTransformer(
@@ -73,7 +64,6 @@ if __name__ == "__main__":
                 ],
             )
         )
-        # load_forecast (A65/A01) is published 10:00 CET the day before delivery: only d+1 is ever safe.
         .add_transformer(LagTransformer(lags=range(-1, 0), freq="day", columns=["load_forecast"]))
         .add_validator(CoverageValidator(columns=["load_actual"], min_coverage=1.0))
     )
@@ -99,9 +89,7 @@ if __name__ == "__main__":
         lambda h: f"berlin_temperature_2m_d+{h}",
     ]
 
-    # issue_time is 30 min before the 12:00 CET day-ahead gate closure. with_source_rules() teaches the check
-    # that "berlin_temperature_2m" is an OpenMeteoSource weather_cutoff column; Workflow does this
-    # automatically, but a standalone ModelPipeline needs it spelled out.
+    # Forecasts are issued at 11:30, before the 12:00 CET day-ahead gate closure
     information_set = InformationSet("11:30", "Europe/Berlin").with_source_rules(data_pipeline.sources)
 
     model_pipeline = (
@@ -121,7 +109,7 @@ if __name__ == "__main__":
         test_start=TEST_START,
         test_end=TEST_END,
         target="load_actual",
-        horizon=5,  # matches berlin_temperature_2m's leak-free horizon (see the OpenMeteoSource above)
+        horizon=5,  # as far ahead as the weather forecasts go
         freq="15min",
         save_dir="results_15min",
     )

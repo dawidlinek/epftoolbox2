@@ -4,8 +4,7 @@ Example 2: Model Pipeline Only
 This example demonstrates how to use the ModelPipeline to train and evaluate
 forecasting models on pre-existing data (loaded from CSV).
 
-Run 01_data_pipeline_only.py first: it writes the "data_output.csv" this example reads, with
-load_actual/price/load_forecast already lagged to leak-free horizons.
+Run 01_data_pipeline_only.py first: it writes the "data_output.csv" this example reads.
 """
 
 import os
@@ -47,9 +46,7 @@ if __name__ == "__main__":
         "warsaw_temperature_2m_d+{horizon}",
     ]
 
-    # issue_time is 30 min before the 12:00 CET day-ahead gate closure. with_source_rules() teaches the check
-    # that "warsaw_temperature_2m" is an OpenMeteoSource weather_cutoff column (see docs/model-pipeline/
-    # information-set); Workflow does this automatically, but a standalone ModelPipeline needs it spelled out.
+    # Forecasts are issued at 11:30, before the 12:00 CET day-ahead gate closure
     weather_source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, prefix="warsaw", timezone="Europe/Warsaw")
     information_set = InformationSet("11:30", "Europe/Warsaw").with_source_rules([weather_source])
 
@@ -83,9 +80,7 @@ if __name__ == "__main__":
         test_start="2024-02-01",
         test_end="2024-03-01",
         target="price",  # Column to predict
-        # Forecast up to 5 days ahead: warsaw_temperature_2m_d+{horizon} only goes up to d+5 (see
-        # 01_data_pipeline_only.py's OpenMeteoSource comment on jma_seamless's leak-free horizon limit).
-        horizon=5,
+        horizon=5,  # as far ahead as the weather forecasts go
         save_dir="results",  # Directory to save intermediate results
     )
 
