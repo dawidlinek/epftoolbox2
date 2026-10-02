@@ -244,7 +244,7 @@ No API key.
 
 **Notes:**
 - Holiday names are pinned to English (`en_US`), so one-hot column names don't depend on the machine's locale.
-  One-hot columns cover every holiday of the years in range.
+  The `holidays="onehot"` column set belongs to the configuration (country, region, categories), not to the range: every holiday name for 1970 to 2100, so separately fetched or cached pieces line up. A holiday outside those years raises a ValueError.
 - Sweden: Sundays are not flagged (the `holidays` package lists every Sunday as a Swedish holiday).
 - Only national public holidays by default. `region` adds regional ones, `categories` other kinds
   (`categories` replaces the default, so include "public").

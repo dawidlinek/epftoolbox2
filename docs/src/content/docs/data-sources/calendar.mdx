@@ -82,8 +82,14 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 - **Names are in English** (`en_US`) for every country. Without a pinned language the `holidays` package
   follows the process locale, so the same config gave different column names on machines with different
   `LANG` settings.
-- One-hot names are lower case ASCII with underscores. The columns cover every holiday of the years touched
-  by `[start, end)`, so the column set does not depend on which holidays fall inside the range.
+- One-hot names are lower case ASCII with underscores. The column set belongs to the configuration (country,
+  `region`, `categories`), not to the range: it holds every holiday name the `holidays` package produces for
+  1970 to 2100, so a range that touches fewer years, or a different set of them, gets the same columns. This
+  matters when ranges are fetched separately and joined (the [source cache](/epftoolbox2/data-pipeline/caching/)),
+  and for predictors that name a column. A holiday introduced in a later year (Poland's `holiday_christmas_eve`
+  from 2025) is a column that is 0 before it. Hungary and Bulgaria name each substitute day off with its date,
+  so they get many columns that are 0 in any one range. A holiday that appears only outside 1970 to 2100 raises
+  a `ValueError` rather than being left out.
 - Only **public** holidays are flagged by default, and only national ones. Use `region` for regional holidays
   (Germany flags 9 days in 2024 and Bavaria 12, and England adds Easter Monday and the Late Summer Bank Holiday) and
   `categories` for other kinds, e.g. Swedish Midsummer Eve and Christmas Eve are in the `"bank"` category
@@ -355,7 +361,7 @@ source = CalendarSource(country="DE", holidays="binary")
 # is_holiday: 1 on each of Germany's 9 nationwide public holidays, 0 otherwise
 ```
 
-**One-hot holiday names**, one column per holiday of the years in range:
+**One-hot holiday names**, one column per holiday name of the configuration, whatever the range:
 
 ```python
 source = CalendarSource(country="DE", holidays="onehot")

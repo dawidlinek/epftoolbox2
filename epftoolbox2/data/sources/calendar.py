@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Union
 
 import holidays as holidays_lib
@@ -62,10 +63,17 @@ MONTH_NAMES = [
 # depend on the process locale (without it, `holidays` falls back to LANG/LC_ALL) or the country's own language.
 HOLIDAY_LANGUAGE = "en_US"
 
+# First and last year (inclusive) whose holiday names define the `holidays="onehot"` columns. The column set is the
+# union of every name the `holidays` package produces for the configuration over this span, whatever range is
+# fetched, so frames fetched separately (the source cache) and predictors named in a model line up. A holiday that
+# only appears outside the span raises instead of being dropped.
+ONEHOT_YEARS = (1970, 2100)
+
 # Bump when this source's own computation changes (parsing, column layout, ...): every existing cache entry is
 # then ignored. The installed `holidays` package's own version is part of the cache key too (see
 # get_cache_config), since its holiday data changes between releases independently of this source's code.
-SCHEMA_VERSION = 1
+# 2: `holidays="onehot"` columns are fixed per configuration (ONEHOT_YEARS) instead of following the fetched years.
+SCHEMA_VERSION = 2
 
 # Market-structure changes, policy interventions and shocks catalogued for `regimes=`. "start" is the first
 # delivery day (local date); a regime dummy is 1 from that date on (through "end", inclusive, when given) for the
@@ -418,6 +426,32 @@ def _local_grid(start: pd.Timestamp, end: pd.Timestamp, step: pd.Timedelta, time
     return index, local_index, codes, pd.DatetimeIndex(dates)
 
 
+def _build_calendar(
+    country: str, region: Optional[str], categories: Optional[tuple], language: Optional[str], years: List[int]
+) -> holidays_lib.HolidayBase:
+    kwargs = {"years": years, "subdiv": region, "language": language}
+    if categories is not None:
+        kwargs["categories"] = categories
+    if country == "SE":
+        # holidays.Sweden lists every Sunday as a holiday unless told not to.
+        return holidays_lib.Sweden(include_sundays=False, **kwargs)
+    return holidays_lib.country_holidays(country, **kwargs)
+
+
+@lru_cache(maxsize=64)
+def _onehot_holiday_names(
+    country: str,
+    region: Optional[str],
+    categories: Optional[tuple],
+    language: Optional[str],
+    first_year: int,
+    last_year: int,
+) -> tuple:
+    """Sanitised names of every holiday of the configuration from `first_year` to `last_year`, sorted."""
+    calendar = _build_calendar(country, region, categories, language, list(range(first_year, last_year + 1)))
+    return tuple(sorted({_sanitise_name(name) for day in calendar for name in calendar.get_list(day)}))
+
+
 class CalendarSource(DataSource):
     """Calendar features on a UTC grid, computed from local dates and local wall-clock times.
 
@@ -667,14 +701,19 @@ class CalendarSource(DataSource):
         # Countries without translations (GB, IE) only have English names.
         return HOLIDAY_LANGUAGE if HOLIDAY_LANGUAGE in (getattr(cls, "supported_languages", ()) or ()) else None
 
+    def _holiday_categories(self) -> Optional[tuple]:
+        return None if self.categories is None else tuple(self.categories)
+
     def _holiday_calendar(self, years: List[int]) -> holidays_lib.HolidayBase:
-        kwargs = {"years": years, "subdiv": self.region, "language": self._holiday_language()}
-        if self.categories is not None:
-            kwargs["categories"] = tuple(self.categories)
-        if self.country == "SE":
-            # holidays.Sweden lists every Sunday as a holiday unless told not to.
-            return holidays_lib.Sweden(include_sundays=False, **kwargs)
-        return holidays_lib.country_holidays(self.country, **kwargs)
+        return _build_calendar(self.country, self.region, self._holiday_categories(), self._holiday_language(), years)
+
+    def _onehot_columns(self) -> tuple:
+        """The `holidays="onehot"` column names (without prefix): fixed for this configuration, whatever range is
+        fetched (see ONEHOT_YEARS)."""
+        first_year, last_year = ONEHOT_YEARS
+        return _onehot_holiday_names(
+            self.country, self.region, self._holiday_categories(), self._holiday_language(), first_year, last_year
+        )
 
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """Rows on the `freq` grid in [start, end), indexed in UTC."""
@@ -804,13 +843,21 @@ class CalendarSource(DataSource):
             joined = np.array(["; ".join(names) if names else None for names in names_per_date], dtype=object)
             df[f"{self.prefix}holiday_name"] = joined[codes] if len(codes) else np.array([], dtype=object)
         elif self.holidays == "onehot":
-            # One column per holiday of the years covered, so the column set does not depend on the exact range.
-            columns = sorted({_sanitise_name(n) for d in calendar for n in calendar.get_list(d)})
+            # The column set is fixed per configuration and does not depend on the range: pieces fetched separately
+            # (the source cache) must have the same columns, or concatenating them leaves NaN where one lacks a column.
+            columns = self._onehot_columns()
             position = {name: i for i, name in enumerate(columns)}
             per_date = np.zeros((len(local_dates), len(columns)), dtype=int)
             for i, names in enumerate(names_per_date):
                 for name in names:
-                    per_date[i, position[_sanitise_name(name)]] = 1
+                    column = _sanitise_name(name)
+                    if column not in position:
+                        raise ValueError(
+                            f"CalendarSource: holiday {name!r} on {local_dates[i].date()} is outside the years "
+                            f"{ONEHOT_YEARS[0]}-{ONEHOT_YEARS[1]} that define the holidays='onehot' columns, so it "
+                            "has no column. Fetch a range inside those years, or use holidays='name'"
+                        )
+                    per_date[i, position[column]] = 1
             dummies = pd.DataFrame(
                 per_date[codes], index=df.index, columns=[f"{self.prefix}holiday_{c}" for c in columns]
             )

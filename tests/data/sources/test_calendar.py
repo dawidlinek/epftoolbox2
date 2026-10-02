@@ -423,6 +423,76 @@ class TestHolidayNames:
         assert df["is_holiday"].eq(0).all()
 
 
+class TestOnehotColumnSet:
+    """The one-hot columns belong to the configuration, not to the fetched range: pieces fetched separately and
+    concatenated (the source cache) must line up, and so must the predictors a model names."""
+
+    def _source(self, **kwargs):
+        return CalendarSource(country="PL", timezone="Europe/Warsaw", holidays="onehot", weekday=False, **kwargs)
+
+    def test_columns_do_not_depend_on_the_years_fetched(self):
+        # Poland made Christmas Eve a public holiday from 2025, so its column used to exist only in 2025 ranges.
+        in_2024 = self._source().fetch(*_local_day("2024-12-10"))
+        in_2025 = self._source().fetch(*_local_day("2025-12-10"))
+        spanning = self._source().fetch(pd.Timestamp("2024-12-01", tz="UTC"), pd.Timestamp("2025-02-01", tz="UTC"))
+        assert list(in_2024.columns) == list(in_2025.columns) == list(spanning.columns)
+        assert "holiday_christmas_eve" in in_2024.columns
+        assert in_2024["holiday_christmas_eve"].eq(0).all()
+        assert in_2025["holiday_christmas_eve"].eq(0).all()
+
+    def test_christmas_eve_is_flagged_only_when_it_is_a_holiday(self):
+        df = self._source().fetch(pd.Timestamp("2024-12-20", tz="UTC"), pd.Timestamp("2026-01-05", tz="UTC"))
+        flagged = _flagged_local_dates(df, "holiday_christmas_eve", "Europe/Warsaw")
+        assert flagged == ["2025-12-24"]
+
+    def test_columns_are_integers(self):
+        df = self._source().fetch(*_local_day("2024-12-10"))
+        holiday_columns = [c for c in df.columns if c.startswith("holiday_")]
+        assert holiday_columns
+        assert all(df[c].dtype.kind == "i" for c in holiday_columns)
+
+    def test_column_set_follows_the_configuration(self):
+        bavaria = CalendarSource(country="DE", region="BY", holidays="onehot", weekday=False)
+        plain = CalendarSource(country="DE", holidays="onehot", weekday=False)
+        day = _local_day("2024-12-10", "Europe/Berlin")
+        assert "holiday_corpus_christi" in bavaria.fetch(*day).columns
+        assert "holiday_epiphany" in bavaria.fetch(*day).columns
+        assert "holiday_epiphany" not in plain.fetch(*day).columns
+
+    def test_prefix_applies_to_every_column(self):
+        df = self._source(prefix="cal_").fetch(*_local_day("2024-12-10"))
+        assert all(c.startswith("cal_") for c in df.columns)
+        assert "cal_holiday_christmas_eve" in df.columns
+
+    def test_range_without_a_grid_point_has_the_same_columns(self):
+        start = pd.Timestamp("2024-12-10 00:10", tz="UTC")
+        empty = self._source().fetch(start, start + pd.Timedelta(minutes=30))
+        assert empty.empty
+        assert list(empty.columns) == list(self._source().fetch(*_local_day("2024-12-10")).columns)
+
+    def test_a_holiday_outside_the_covered_years_raises_instead_of_being_dropped(self, monkeypatch):
+        monkeypatch.setattr(calendar_module, "ONEHOT_YEARS", (2000, 2010))
+        with pytest.raises(ValueError, match="2000"):
+            self._source().fetch(*_local_day("2025-12-24"))
+
+    def test_split_run_through_the_cache_equals_an_uncached_run(self, tmp_path, monkeypatch):
+        """Cached pieces fetched separately are concatenated: a column missing from one piece used to become NaN."""
+        from epftoolbox2.pipelines import DataPipeline
+
+        monkeypatch.chdir(tmp_path)
+
+        def pipeline():
+            return DataPipeline(timezone="Europe/Warsaw").add_source(CalendarSource(country="PL", holidays="onehot"))
+
+        fresh = pipeline().run("2024-12-01", "2025-01-31", cache=False)
+        pipeline().run("2024-12-01", "2024-12-31", cache=True)
+        split = pipeline().run("2024-12-01", "2025-01-31", cache=True)
+
+        assert not split.isna().any().any()
+        assert (split.dtypes == fresh.dtypes).all()
+        pd.testing.assert_frame_equal(split, fresh, check_freq=False)
+
+
 class TestPeriodColumn:
     def test_hourly_hour_column_is_hour_of_day(self):
         source = CalendarSource(country="PL", holidays=False, weekday=False, hour="number")
