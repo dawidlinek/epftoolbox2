@@ -64,7 +64,7 @@ The default anchor (`daily_anchor=None`) is `target_tz` itself, which is right f
 | Europe/Helsinki, summer (EEST, UTC+3) | 21:00 on D-1 (UTC) → already 00:00 EEST on D | 00:00 on D (no-op) |
 | Europe/Istanbul (fixed UTC+3) | 21:00 on D-1 (UTC) → already 00:00 on D | 00:00 on D (no-op) |
 
-A fixed `daily_anchor="UTC+02:00"` (the old default) gets this wrong for any zone whose actual offset isn't UTC+2 at that moment: it silently misplaces every value in EET/EEST zones (FI, EE, LV, LT, BG, GR) every summer, and every value, year-round, in a zone with a fixed UTC+3 offset. Pass an explicit `daily_anchor` only when a daily column's real anchor genuinely differs from `target_tz` — for example a source that anchors to a fixed offset regardless of the pipeline's own zone:
+A fixed `daily_anchor="UTC+02:00"` gets this wrong for any zone whose actual offset isn't UTC+2 at that moment: it silently misplaces every value in EET/EEST zones (FI, EE, LV, LT, BG, GR) every summer, and every value, year-round, in a zone with a fixed UTC+3 offset. Pass an explicit `daily_anchor` only when a daily column's real anchor genuinely differs from `target_tz` — for example a source that anchors to a fixed offset regardless of the pipeline's own zone:
 
 ```python
 TimezoneTransformer(target_tz="Europe/Warsaw", daily_columns=["my_daily_value"], daily_anchor="UTC+02:00")

@@ -111,7 +111,7 @@ Omitted points under curveType A03 are forward-filled; daily values follow the l
 
 **Errors:** "No matching data" chunks are skipped with a warning; 429/5xx/network errors are retried 5 times with backoff (honouring Retry-After); other errors raise `EntsoeApiError` with ENTSO-E's reason text. A failed chunk raises instead of leaving a gap.
 
-**Caching:** Cache config = area_code, types, prefer_15min, a parser schema_version, and neighbours/prefix when set. Cached to `.cache/sources/`; after upgrading, a changed schema_version makes old cache entries unused.
+**Caching:** Cache config = area_code, types, prefer_15min, a parser schema_version, and neighbours/prefix when set. Cached to `.cache/sources/`; a changed schema_version makes old cache entries unused.
 
 ---
 
@@ -179,7 +179,7 @@ source = OpenMeteoSource(
 )
 ```
 
-**Caching:** Cache key includes `latitude`/`longitude` (or `locations`, with `agg` and `keep_locations` when set, instead), horizon, model, columns, prefix, temporal_resolution, api, run, timezone and schema_version (bumped for this change, so old caches are not reused).
+**Caching:** Cache key includes `latitude`/`longitude` (or `locations`, with `agg` and `keep_locations` when set, instead), horizon, model, columns, prefix, temporal_resolution, api, run, timezone and schema_version.
 
 ---
 

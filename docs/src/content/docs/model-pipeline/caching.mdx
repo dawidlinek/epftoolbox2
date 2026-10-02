@@ -95,8 +95,8 @@ report = pipeline.run(
 )
 ```
 
-**Results from before this feature existed** (a `.jsonl` file with no `.manifest.json` next to it) are not
-a mismatch: by default they're accepted with a warning, and a manifest is written from then on. Pass
+**A `.jsonl` file with no `.manifest.json` next to it** is not
+a mismatch: by default it is accepted with a warning, and a manifest is written from then on. Pass
 `require_manifest=True` to refuse them instead, if you want the stricter guarantee for every results
 directory you resume into:
 

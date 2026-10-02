@@ -321,8 +321,7 @@ and generation but have no day-ahead price.
 ## Caching
 
 The cache key contains the area, the types, `prefer_15min` and a schema version of the parser. Changing any of
-them, or upgrading to a version whose parser output changed, uses a new cache directory; the old one under
-`.cache/sources/` is no longer read and can be deleted.
+them uses a new cache directory, and the old one under `.cache/sources/` is no longer read and can be deleted.
 
 ---
 

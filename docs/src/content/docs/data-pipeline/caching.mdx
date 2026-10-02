@@ -114,7 +114,7 @@ EntsoeSource(country_code="DE_LU", api_key="...", type=["load"])
 
 `get_cache_config()` must contain every parameter that changes the output. Sources also put a `schema_version`
 there and bump it when their parsing changes, and the package bumps its cache format version when the file layout
-changes, so stale files are never served after an upgrade. Old directories are then simply ignored; delete them to
+changes, so stale files are never served. Old directories are then simply ignored, and you can delete them to
 reclaim disk space.
 
 ## Single-file cache (`cache="path"`)
