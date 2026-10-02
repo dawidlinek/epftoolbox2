@@ -3,24 +3,29 @@ title: Data Pipeline Overview
 description: Using DataPipeline to download and process data
 ---
 
-import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
-
-# Data Pipeline
+import { CardGrid, LinkCard, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
 The `DataPipeline` class combines data sources, transformers, and validators into a cohesive data processing workflow.
 
 ## Components
 
-The pipeline consists of three types of components:
+The pipeline runs in three steps, each backed by a kind of component:
 
-- **Sources** fetch raw data from external APIs or files. Two sources producing the same column name raise
-  `ValueError` naming both sources — give one a `prefix` to resolve it.
-- **Transformers** modify the DataFrame (resample, create lags, convert timezone)
-- **Validators** check data quality without modifying the DataFrame. `validators` run on the final frame;
-  `source_validators` run on the raw, joined source output, before any transformer. Every result is kept in
-  `pipeline.validation_results`; `DataPipeline(on_invalid="raise")` raises `DataValidationError` on a failure
-  instead of the default (`"warn"`, log and continue). See
-  [Serialization](/epftoolbox2/data-pipeline/serialization/#validators-and-on_invalid).
+<Steps>
+
+1. **Sources fetch data in UTC.** Every source returns a DataFrame with a UTC `DatetimeIndex`. Two sources
+   producing the same column name raise `ValueError` naming both sources, give one a `prefix` to resolve it.
+
+2. **Transformers modify the data**, applied in order to the joined source output (resample, create lags, convert
+   timezone, ...).
+
+3. **Validators check quality** without modifying the DataFrame. `validators` run on the final frame, and
+   `source_validators` run on the raw, joined source output, before any transformer. Every result is kept in
+   `pipeline.validation_results`. `DataPipeline(on_invalid="raise")` raises `DataValidationError` on a failure
+   instead of the default (`"warn"`, log and continue). See
+   [Serialization](/epftoolbox2/data-pipeline/serialization/#validators-and-on_invalid).
+
+</Steps>
 
 ## Basic Usage
 
@@ -71,13 +76,14 @@ The `start` and `end` parameters accept multiple formats:
   </TabItem>
 </Tabs>
 
-By default, date strings mean midnight UTC, `end` is excluded, and naive timestamps are taken as UTC. Every
-source's output is clipped to the resolved range, whether it comes from the API or from the cache (see
-[Data Caching](/epftoolbox2/data-pipeline/caching/)).
+A date-only `start`/`end` (a string, or a keyword such as `"today"`) always names a whole calendar day: `start`
+begins at that day's midnight and `end` runs through the end of its own day, inclusive. By default those days are
+UTC days; naive timestamps are taken as UTC too. Every source's output is clipped to the resolved range, whether
+it comes from the API or from the cache (see [Data Caching](/epftoolbox2/data-pipeline/caching/)).
 
 ### Timezone (local calendar days)
 
-Pass a market time zone to make `run()` dates mean **local calendar days** instead:
+Pass a market time zone to make those days **local calendar days** instead:
 
 ```python
 pipeline = DataPipeline(timezone="Europe/Warsaw", sources=[...], transformers=[...])
@@ -92,51 +98,10 @@ With `timezone` set:
 - `"today"` / `"now_d±N"` keywords resolve using the current date **in that zone**.
 - Naive timestamps passed to `run()` are read as local instants; timezone-aware timestamps are used as given.
 
-Without `timezone` (the default), behaviour is unchanged: date strings and keywords mean midnight UTC, `end` is
-exclusive, and naive timestamps are UTC.
+Without `timezone` (the default), behaviour is the same except the day is a UTC one: date strings and keywords
+mean midnight UTC, and naive timestamps are UTC.
 
-<Aside type="tip">
-  `timezone` is the single place the market zone needs to be written. `TimezoneTransformer.target_tz`,
-  `CalendarSource`/`OpenMeteoSource`'s own zone may all be
-  left unset (`None`) and they then inherit `timezone` — as in the example above, where only `DataPipeline`
-  carries `"Europe/Warsaw"`. Setting one of them explicitly to a *different* zone still raises `ValueError` (at
-  construction and again at the start of `run()`), since `timezone` decides what a local calendar day is and a
-  component computing its own local time in a different zone would silently disagree with it. A component that
-  needs a zone and has neither raises a clear error when the pipeline runs. An inheriting component belongs to
-  one pipeline's zone: adding the same instance to a second pipeline with a different `timezone` raises too, so
-  give each pipeline its own instances.
-</Aside>
-
-<Aside type="caution">
-  A forecast-only recipe with `end="today_d+{horizon}"` (e.g. `"today_d+7"`) only fetches the whole last horizon
-  day if `timezone` is set — without it, `end` stops at that day's UTC midnight, so the last horizon day gets only
-  a few hours of data. Either set `timezone`, or use `"today_d+{horizon + 1}"`. See
-  [Forecast-Only Mode](/epftoolbox2/model-pipeline/forecasting/).
-</Aside>
-
-## Data Flow
-
-<Steps>
-
-1. **Sources fetch data in UTC**
-
-   All data sources output DataFrames with UTC DatetimeIndex.
-
-2. **Transformers modify the data**
-
-   Apply resampling, create lags, then convert timezone.
-
-3. **Validators check quality**
-
-   Verify data integrity without modifying the DataFrame.
-
-</Steps>
-
-<Aside type="tip">
-  Sources always output UTC. Use `TimezoneTransformer` at the end of your pipeline to convert to local time.
-</Aside>
-
-## Pipeline Components
+## Available Components
 
 ### Data Sources
 

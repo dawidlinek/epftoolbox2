@@ -492,7 +492,7 @@ def in_tmp(tmp_path, monkeypatch):
 
 class TestSourceCache:
     def test_cache_true_equals_cache_false(self, in_tmp):
-        """pipelines M2 / empirical F5c: both paths return exactly the requested half-open range."""
+        """pipelines M2 / empirical F5c: both paths return exactly the requested range (end inclusive)."""
         start, end = "2024-01-01", "2024-02-01"
 
         def pipe():
@@ -503,17 +503,17 @@ class TestSourceCache:
         hit = pipe().run(start, end, cache=True)
 
         assert fresh.index.min() == _utc(start)
-        assert fresh.index.max() == _utc(end) - pd.Timedelta("1h")
+        assert fresh.index.max() == _utc(end) + pd.Timedelta("23h")
         pd.testing.assert_frame_equal(fresh, miss, check_freq=False)
         pd.testing.assert_frame_equal(fresh, hit, check_freq=False)
 
     def test_uncached_source_is_clipped_too(self, in_tmp):
-        """Sources without a cache config (CalendarSource, CsvSource) are clipped to [start, end) as well."""
+        """Sources without a cache config (e.g. CsvSource) are clipped to the resolved range too."""
         src = RangeSource(before="1D", after="2D")
         src.get_cache_config = lambda: None
         df = DataPipeline().add_source(src).run("2024-01-01", "2024-01-03", cache=True)
         assert df.index.min() == _utc("2024-01-01")
-        assert df.index.max() == _utc("2024-01-02 23:00")
+        assert df.index.max() == _utc("2024-01-03 23:00")
         assert not (in_tmp / ".cache" / "sources").exists() or not list((in_tmp / ".cache" / "sources").iterdir())
 
     def test_cached_split_run_equals_fresh_run(self, in_tmp):
@@ -525,6 +525,18 @@ class TestSourceCache:
         pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
         assert cached.loc[_utc("2024-01-02 23:00")].notna().all()
         assert cached.loc[_utc("2024-01-03 00:00"), ["load_actual", "price"]].notna().all()
+
+    def test_cached_split_lands_exactly_on_the_inclusive_end_boundary(self, in_tmp):
+        """`end="2024-01-02"` now includes that whole day; a second fetch starting the next calendar day must
+        neither duplicate nor skip a row at that seam."""
+        first = DataPipeline().add_source(EntsoeLikeSource()).run("2024-01-01", "2024-01-02", cache=True)
+        cached = DataPipeline().add_source(EntsoeLikeSource()).run("2024-01-03", "2024-01-04", cache=True)
+        combined = pd.concat([first, cached]).sort_index()
+        fresh = DataPipeline().add_source(EntsoeLikeSource()).run("2024-01-01", "2024-01-04", cache=False)
+
+        assert first.index.max() == _utc("2024-01-02 23:00")
+        assert cached.index.min() == _utc("2024-01-03 00:00")
+        pd.testing.assert_frame_equal(fresh, combined, check_freq=False)
 
     def test_split_run_in_three_pieces_equals_fresh_run(self, in_tmp):
         for s, e in [("2024-01-10", "2024-01-12"), ("2024-01-01", "2024-01-03")]:
@@ -628,7 +640,7 @@ class TestSourceCache:
         """pipelines H1 / entsoe H5: SLURM array tasks starting together on a cold shared cache."""
         results, fetches = _run_concurrently(in_tmp, cache=True)
         assert len(set(results)) == 1, results
-        assert results[0][0] == len(pd.date_range("2024-01-01", "2024-07-01", freq="h", inclusive="left"))
+        assert results[0][0] == len(pd.date_range("2024-01-01", "2024-07-02", freq="h", inclusive="left"))
         assert fetches == 1
 
 
@@ -814,10 +826,12 @@ class TestFileCache:
 class TestDateSemantics:
     """pipelines H4: date strings as local calendar days with `timezone`, UTC midnights without it."""
 
-    def test_without_timezone_dates_are_utc_midnights_end_exclusive(self):
+    def test_without_timezone_dates_are_utc_midnights_end_inclusive(self):
+        """A date-only `end` covers that whole UTC day, same as with `timezone` set (just UTC instead of local)."""
         df = DataPipeline([RangeSource()]).run("2024-01-01", "2024-01-03")
         assert df.index.min() == _utc("2024-01-01")
-        assert df.index.max() == _utc("2024-01-02 23:00")
+        assert df.index.max() == _utc("2024-01-03 23:00")
+        assert len(df) == 72
 
     def test_timezone_dates_are_whole_local_days(self):
         df = DataPipeline([RangeSource()], timezone="Europe/Warsaw").run("2024-01-01", "2024-01-03")

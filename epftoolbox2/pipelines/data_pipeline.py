@@ -78,10 +78,12 @@ class DataPipeline:
         validators: Run on the final frame (after the transformers).
         source_validators: Run on the joined source output before any transformer, e.g. to catch gaps that
             resampling would interpolate over.
-        timezone: Market time zone (e.g. ``"Europe/Warsaw"``), the single place it needs to be set. If set, date
-            strings passed to ``run`` are local calendar days: ``start`` begins at local midnight and ``end``
-            covers its whole local day; naive timestamps are local times. If ``None``, date strings are midnight
-            UTC, ``end`` is exclusive and naive timestamps are UTC. Components whose own zone decides a local
+        timezone: Market time zone (e.g. ``"Europe/Warsaw"``), the single place it needs to be set. ``start`` and
+            a date-only ``end`` passed to ``run`` always cover a whole calendar day, local if set and UTC
+            otherwise: ``start`` begins at that day's midnight and ``end`` runs through the end of its own day
+            (inclusive). If set, date strings and keywords passed to ``run`` are read as local calendar days and
+            naive timestamps are local times. If ``None``, they are UTC calendar days and naive timestamps are
+            UTC. Components whose own zone decides a local
             calendar day or an issue time — ``TimezoneTransformer.target_tz``,
             ``OpenMeteoSource.timezone`` and
             ``CalendarSource.timezone`` (but not ``CsvSource.timezone``, which is the input file's own zone, not
@@ -276,8 +278,9 @@ class DataPipeline:
         if isinstance(ts, str):
             day = _calendar_day(ts, self.timezone)
             if day is not None:
-                if self.timezone is not None and is_end:
-                    day += pd.Timedelta(days=1)  # the end date is included as a whole local day
+                if is_end:
+                    # end is inclusive: the whole day is included (local if timezone is set, else UTC).
+                    day += pd.Timedelta(days=1)
                 return day.tz_localize(tz, ambiguous=True, nonexistent="shift_forward").tz_convert("UTC")
         ts = pd.Timestamp(ts)
         return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize(tz).tz_convert("UTC")

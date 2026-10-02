@@ -77,9 +77,10 @@ unregistered `class` name.
 ## Timezone
 
 `DataPipeline(timezone="Europe/Warsaw")` makes date strings and keywords passed to `run()` mean **local calendar
-days**: `start` begins at local midnight and `end` covers its *whole local day*, correctly sized on DST-transition
-days. Without `timezone` (the default), `start`/`end` mean midnight UTC and `end` is exclusive — unchanged from
-before `timezone` existed. See [Date Format Options](/epftoolbox2/data-pipeline/overview/#date-format-options).
+days**: `start` begins at local midnight and `end` covers its *whole local day* (inclusive), correctly sized on
+DST-transition days. Without `timezone` (the default), `start`/`end` mean midnight UTC instead, with `end`
+likewise covering the whole UTC day it names. See
+[Date Format Options](/epftoolbox2/data-pipeline/overview/#date-format-options).
 
 It is also the single place the market zone needs to be written: `TimezoneTransformer.target_tz`,
 `CalendarSource`/`OpenMeteoSource`'s own zone may all be

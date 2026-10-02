@@ -74,14 +74,14 @@ The offset `N` in `_d±N` accepts **any integer**, so it can match any model's `
 <Aside type="tip">
   Set `end="today_d+7"` in `DataPipeline` so that `OpenMeteoSource` and `CalendarSource` fetch forecast data for the full prediction window. ENTSOE columns will be `NaN` beyond today, but lag features (price/load from past days) remain valid and are what models use as predictors.
 
-  This requires `DataPipeline(timezone="Europe/Warsaw")` (or your market's zone): with `timezone` set, `end` covers the *whole local day* it names, so `"today_d+7"` includes all 24 hours of the last horizon day. Without `timezone`, date keywords resolve to UTC midnight and `end` is exclusive, so `"today_d+7"` cuts off at the start of that day — use `"today_d+8"` instead, or (better) set `timezone`.
+  `end` always covers the whole day it names, so `"today_d+7"` includes all 24 hours of the last horizon day. Set `DataPipeline(timezone="Europe/Warsaw")` (or your market's zone) so that day is the market's own local day rather than a UTC one.
 </Aside>
 
 <Aside type="caution">
   If `test_start` is not in the fetched data, `BaseModel.run()` raises `ValueError` with a message like:
   `'test_start' date '2026-04-03' is not in the data (data ends at 2026-04-02). Fetch data through at least '2026-04-03'.`
   
-  Increase `end` in `DataPipeline` (e.g. `"today_d+7"` with `timezone` set, or `"today_d+8"` without it) to ensure today's rows exist after all transformers.
+  Increase `end` in `DataPipeline` (e.g. `"today_d+7"`) to ensure today's rows exist after all transformers.
 </Aside>
 
 ---

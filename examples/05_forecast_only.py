@@ -10,8 +10,8 @@ Key patterns:
 - DataPipeline is given timezone="Europe/Warsaw", so "today"/"end" mean whole
   local calendar days: end="today_d+5" fetches weather forecasts and calendar
   features through the full 5-day prediction window (needed as predictors).
-  Without `timezone`, date keywords resolve to UTC midnight and `end` is
-  exclusive, so the last horizon day would need "today_d+6" instead.
+  `end` always includes the whole day it names (local here, since `timezone`
+  is set; UTC otherwise).
 - ModelPipeline uses forecast_only=True to skip evaluators and exporters.
 - ModelPipeline is given an InformationSet (issue_time + the data sources' rules), so every predictor is
   checked against what is actually known at that moment before any fit — the reason load_actual/price only

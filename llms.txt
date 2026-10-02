@@ -1276,9 +1276,8 @@ runs the evaluators and exporters once; it raises if a model has no results unle
 
 **Forecast-only workflow (runs daily without changing dates):**
 ```yaml
-# `end: today_d+7` covers the whole horizon-7 day only if data_pipeline.yaml was saved from
-# DataPipeline(timezone="Europe/Warsaw", ...) — see "Timezone and Date Semantics" below.
-# Without `timezone`, `end` is exclusive UTC midnight; use `today_d+8` instead.
+# `end: today_d+7` always covers the whole horizon-7 day (local if data_pipeline.yaml's DataPipeline sets
+# `timezone`, UTC otherwise). See "Timezone and Date Semantics" below.
 data_pipeline:
   start: now_d-730      # 2 years of history; adjust to match largest training_window
   end: today_d+7         # fetch weather/calendar forecast window too
@@ -1688,12 +1687,11 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 
 if __name__ == "__main__":
-    # Date keywords resolve at runtime — run this script every day without changing anything.
-    # "now_d-730" → 2 years ago; "today_d+5" → 5 days from now.
+    # Date keywords resolve at runtime, so this script can run every day without changing anything.
+    # "now_d-730" is 2 years ago, "today_d+5" is 5 days from now.
     # Adjust the -N offset to cover your largest model's training_window.
-    # timezone="Europe/Warsaw" makes "end" cover the *whole local day* it names, so "today_d+5"
-    # includes all 24 hours of the last horizon day. Without it, "end" is exclusive UTC midnight
-    # and the last horizon day would need "today_d+6" instead.
+    # "end" always covers the whole day it names, so "today_d+5" includes all 24 hours of the
+    # last horizon day. timezone="Europe/Warsaw" makes that day the market's own local day.
     df = (
         DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
@@ -1787,14 +1785,13 @@ class DataPipeline:
 
 ### Timezone and Date Semantics
 
-- `timezone=None` (default): `start`/`end` date strings and "today"/"now_d±N" keywords mean **midnight UTC**;
-  `end` is **exclusive**. Unchanged from before `timezone` existed — `end="today_d+7"` therefore only reaches UTC
-  midnight of that day, not the end of it; use `"today_d+8"` to include the whole 7th day ahead.
-- `timezone="Europe/Warsaw"` (or any IANA zone): date strings and keywords mean **local calendar days**; `start`
-  begins at local midnight and `end` covers its **whole local day** (inclusive), correctly sized on DST-transition
-  days (23/25 hours). `end="today_d+7"` then includes all 24 hours of the 7th day ahead — the natural choice for a
-  `horizon=7` forecast-only run. Naive timestamps passed to `run()` are read as local instants; timezone-aware
-  timestamps are used as given.
+- A date-only `start`/`end` (a string, or "today"/"now_d±N") always names a **whole calendar day**: `start`
+  begins at that day's midnight and `end` runs through the end of its own day (inclusive). `end="today_d+7"`
+  therefore includes all 24 hours of the 7th day ahead, the natural choice for a `horizon=7` forecast-only run.
+- `timezone=None` (default): those days are **UTC** days.
+- `timezone="Europe/Warsaw"` (or any IANA zone): those days are **local calendar days** instead, correctly sized
+  on DST-transition days (23/25 hours). Naive timestamps passed to `run()` are read as local instants, and
+  timezone-aware timestamps are used as given.
 - `timezone` is also the single place the market zone needs to be written: `TimezoneTransformer.target_tz`,
   `CalendarSource`/`OpenMeteoSource`'s own zone may all be
   left unset (`None`) and they then inherit it — checked and bound at construction and again at the start of
@@ -1976,9 +1973,10 @@ Callable predictors cannot be serialized to YAML. Use `"{horizon}"` string templ
 - Normal ISO date strings (`"2024-01-01"`) pass through unchanged.
 - `ModelPipeline.run()`, `BaseModel.run()` and `Workflow` resolve "today" as the machine's local date
   (`datetime.date.today()`, implemented in `epftoolbox2/_date_utils.py:resolve_date()`).
-  `DataPipeline.run()` resolves it the same way when `timezone` is not set; with `timezone="Europe/Warsaw"` (etc.)
-  set, it uses today's date **in that zone** instead, and `end` covers the whole local day it names rather than
-  stopping at UTC midnight — see "Timezone and Date Semantics" under DataPipeline in API REFERENCE.
+  `DataPipeline.run()` resolves it the same way when `timezone` is not set (and `end` then covers the whole
+  UTC day it names). With `timezone="Europe/Warsaw"` (etc.) set, it uses today's date **in that zone** instead,
+  and `end` covers the whole local day it names. See "Timezone and Date Semantics" under DataPipeline in API
+  REFERENCE.
 
 ## Windows Multiprocessing
 Windows uses `spawn` context (not `fork`). Scripts must use `if __name__ == '__main__':` guard.
