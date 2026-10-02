@@ -8,7 +8,7 @@ import { Aside } from '@astrojs/starlight/components';
 Generates calendar features: holidays, weekday, hour of day (or period of day), month, and sunrise/sunset.
 Every feature is computed from the **local date and wall-clock time** in the country's time zone, while the index
 stays in UTC like every other source. All features are known in advance, so their `_d+k` versions are legal
-predictors.
+predictors. The output is cached like that of any other source (see [Caching](#caching)).
 
 <Aside>
   CalendarSource uses the [holidays](https://pypi.org/project/holidays/) Python package for holiday detection. See their documentation for the [complete list of supported countries](https://python-holidays.readthedocs.io/en/latest/index.html#available-countries), subdivisions and categories.
@@ -40,19 +40,19 @@ has 23, 24 or 25 hourly rows (92, 96 or 100 at 15 minutes) depending on DST.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `country` | str | Required | Country code (see the list below) |
+| [`country`](#supported-countries) | str | Required | Country code (see the list below) |
 | `timezone` | str \| None | `None` | Time zone whose local dates and times define the features. `None` inherits `DataPipeline.timezone` when part of a pipeline; standalone, it falls back to the country's own zone |
 | [`holidays`](#holidays) | str/bool | `"binary"` | Holiday output format |
 | [`weekday`](#weekday) | str/bool | `"number"` | Weekday output format |
 | [`hour`](#hour) | str/bool | `False` | Hour (or period) output format |
 | [`month`](#month) | str/bool | `False` | Month output format |
 | [`daylight`](#daylight) | bool | `False` | Add `sunrise`, `sunset` (local decimal hours) and `daylight_hours` |
-| `lat` | float | Auto | Latitude for daylight (default: the country's capital) |
-| `lon` | float | Auto | Longitude for daylight (default: the country's capital) |
+| [`lat`](#daylight) | float | Auto | Latitude for daylight (default: the country's capital) |
+| [`lon`](#daylight) | float | Auto | Longitude for daylight (default: the country's capital) |
 | `prefix` | str | `""` | Column name prefix, used as is (`"cal_"` gives `cal_is_holiday`) |
-| `freq` | str | `"1h"` | Row spacing: a divisor of one hour (`"15min"`, `"30min"`) or whole hours dividing a day |
-| `region` | str | `None` | Subdivision code passed to the `holidays` package for regional public holidays: `"BY"` or `"DE-BY"` (Bavaria), `"ENG"` (England), `"ZH"` (Zurich) |
-| `categories` | str/List[str] | `None` | Holiday categories of the `holidays` package, e.g. `["public", "bank"]`. `None` means public holidays only |
+| [`freq`](#hour) | str | `"1h"` | Row spacing: a divisor of one hour (`"15min"`, `"30min"`) or whole hours dividing a day |
+| [`region`](#holidays) | str | `None` | Subdivision code passed to the `holidays` package for regional public holidays: `"BY"` or `"DE-BY"` (Bavaria), `"ENG"` (England), `"ZH"` (Zurich) |
+| [`categories`](#holidays) | str/List[str] | `None` | Holiday categories of the `holidays` package, e.g. `["public", "bank"]`. `None` means public holidays only |
 | [`bridge_days`](#additional-features) | bool | `False` | Add `is_bridge_day` |
 | [`christmas_period`](#additional-features) | bool | `False` | Add `is_christmas_period` (24 December to 1 January) |
 | [`holiday_distance`](#additional-features) | int | `0` | If N > 0, add `days_to_holiday` and `days_since_holiday`, capped at N |
@@ -190,37 +190,37 @@ list_regimes(country="PL")  # DataFrame: name, start, end, countries, ex_ante, d
 
 | Name | From → To | Countries | On by default? | Source |
 |------|-----------|-----------|-----------------|--------|
-| `de_at_split` | 2018-10-01 → — | DE, AT | yes | [source](https://www.entsoe.eu/) |
-| `brexit_decoupling` | 2021-01-01 → — | GB, IE | yes | [source](https://www.ofgem.gov.uk/) |
-| `core_fb` | 2022-06-09 → — | AT, BE, HR, CZ, FR, DE, HU, LU, NL, PL, RO, SK, SI | yes | [source](https://www.jao.eu/news/core-flow-based-market-coupling-project-go-live) |
-| `nordic_fb` | 2024-10-30 → — | DK, FI, NO, SE | yes | [source](https://www.nordpoolgroup.com/) |
-| `sdac_15min_mtu` | 2025-10-01 → — | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | yes | [source](https://www.nemo-committee.eu/assets/files/successful-implementation-of-15-minute-market-time-unit-%28mtu%29-in-sdac.pdf) |
-| `sem_30min_mtu` | 2025-10-01 → — | IE | yes | [source](https://www.semopx.com/market-messages/mcsc-confirms-sdac-15min-mtusem-30min-mtu-go-live-30-sept-2025) |
-| `cwe_market_coupling` | 2010-11-09 → — | BE, FR, DE, NL | yes | [source](https://www.epexspot.com/en/news/10-years-first-market-coupling-initiative-tlc) |
-| `nwe_price_coupling` | 2014-02-05 → — | BE, FR, DE, NL, DK, SE, NO, FI, PL | yes | [source](https://www.nordpoolgroup.com/en/message-center-container/newsroom/exchange-message-list/2014/Q1/No-052014---/) |
+| `de_at_split` | 2018-10-01 → ongoing | DE, AT | yes | [source](https://www.entsoe.eu/) |
+| `brexit_decoupling` | 2021-01-01 → ongoing | GB, IE | yes | [source](https://www.ofgem.gov.uk/) |
+| `core_fb` | 2022-06-09 → ongoing | AT, BE, HR, CZ, FR, DE, HU, LU, NL, PL, RO, SK, SI | yes | [source](https://www.jao.eu/news/core-flow-based-market-coupling-project-go-live) |
+| `nordic_fb` | 2024-10-30 → ongoing | DK, FI, NO, SE | yes | [source](https://www.nordpoolgroup.com/) |
+| `sdac_15min_mtu` | 2025-10-01 → ongoing | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | yes | [source](https://www.nemo-committee.eu/assets/files/successful-implementation-of-15-minute-market-time-unit-%28mtu%29-in-sdac.pdf) |
+| `sem_30min_mtu` | 2025-10-01 → ongoing | IE | yes | [source](https://www.semopx.com/market-messages/mcsc-confirms-sdac-15min-mtusem-30min-mtu-go-live-30-sept-2025) |
+| `cwe_market_coupling` | 2010-11-09 → ongoing | BE, FR, DE, NL | yes | [source](https://www.epexspot.com/en/news/10-years-first-market-coupling-initiative-tlc) |
+| `nwe_price_coupling` | 2014-02-05 → ongoing | BE, FR, DE, NL, DK, SE, NO, FI, PL | yes | [source](https://www.nordpoolgroup.com/en/message-center-container/newsroom/exchange-message-list/2014/Q1/No-052014---/) |
 | `gb_nwe_coupling` | 2014-02-05 → 2020-12-31 | GB | yes | [source](https://www.nordpoolgroup.com/en/message-center-container/newsroom/exchange-message-list/2014/Q1/No-052014---/) |
-| `swe_market_coupling` | 2014-05-14 → — | ES, PT, FR | yes | [source](https://www.epexspot.com/en/news/launch-full-swe-coupling-13-may-2014) |
-| `cwe_flow_based` | 2015-05-21 → — | BE, FR, DE, NL | yes | [source](https://www.transnetbw.de/en/newsroom/press-releases/flow-based-methodology-for-cwe-market-coupling-successfully-launched) |
-| `isem_start` | 2018-10-01 → — | IE | yes | [source](https://www.semcommittee.com/news/new-all-island-wholesale-electricity-market-goes-live) |
-| `baltic_sync` | 2025-02-09 → — | EE, LV, LT | no | [source](https://www.entsoe.eu/news/2025/02/09/entso-e-confirms-successful-synchronization-of-the-continental-european-electricity-system-with-the-systems-of-the-baltic-countries/) |
-| `cz_sk_hu_coupling_2012` | 2012-09-12 → — | CZ, SK, HU | yes | [source](https://www.okte.sk/media/27706/20120816_%20mc%20sg%20meeting%20press%20release_final.pdf) |
+| `swe_market_coupling` | 2014-05-14 → ongoing | ES, PT, FR | yes | [source](https://www.epexspot.com/en/news/launch-full-swe-coupling-13-may-2014) |
+| `cwe_flow_based` | 2015-05-21 → ongoing | BE, FR, DE, NL | yes | [source](https://www.transnetbw.de/en/newsroom/press-releases/flow-based-methodology-for-cwe-market-coupling-successfully-launched) |
+| `isem_start` | 2018-10-01 → ongoing | IE | yes | [source](https://www.semcommittee.com/news/new-all-island-wholesale-electricity-market-goes-live) |
+| `baltic_sync` | 2025-02-09 → ongoing | EE, LV, LT | no | [source](https://www.entsoe.eu/news/2025/02/09/entso-e-confirms-successful-synchronization-of-the-continental-european-electricity-system-with-the-systems-of-the-baltic-countries/) |
+| `cz_sk_hu_coupling_2012` | 2012-09-12 → ongoing | CZ, SK, HU | yes | [source](https://www.okte.sk/media/27706/20120816_%20mc%20sg%20meeting%20press%20release_final.pdf) |
 | `cee_4m_coupling` | 2014-11-20 → 2021-06-17 | CZ, SK, HU, RO | yes | [source](https://old.okte.sk/en/information/news/2014/11/14/4m-market-coupling-launch/) |
-| `gr_dam_launch` | 2020-11-01 → — | GR | yes | [source](https://www.enexgroup.gr/web/guest/dam-idm-archive) |
-| `it_gr_coupling` | 2020-12-16 → — | GR, IT | yes | [source](https://www.nemo-committee.eu/assets/files/extension-of-single-day-ahead-coupling-%28sdac%29-to-greece-.pdf) |
+| `gr_dam_launch` | 2020-11-01 → ongoing | GR | yes | [source](https://www.enexgroup.gr/web/guest/dam-idm-archive) |
+| `it_gr_coupling` | 2020-12-16 → ongoing | GR, IT | yes | [source](https://www.nemo-committee.eu/assets/files/extension-of-single-day-ahead-coupling-%28sdac%29-to-greece-.pdf) |
 | `bg_dam_launch` | 2016-01-20 → 2021-05-11 | BG | no | [source](http://umm.ibex.bg/en/announcements/news/first-successful-real-trading-session.html) |
-| `gr_bg_coupling` | 2021-05-12 → — | BG, GR | yes | [source](https://www.nemo-committee.eu/assets/files/210511%20Press%20release%20successful%20go-live%20BG-GR%20coupling-3b29443c09f164416f6b8bd9eda896e2.pdf) |
-| `interim_coupling_project` | 2021-06-18 → — | PL, CZ, SK, HU, AT, DE, RO | yes | [source](https://www.entsoe.eu/news/2021/06/18/successful-go-live-of-interim-coupling-reaching-the-sdac-enduring-phase/) |
-| `bg_ro_coupling` | 2021-10-28 → — | BG, RO | yes | [source](https://www.nemo-committee.eu/assets/files/211027%20PR%20successful%20go-live%20BG-RO%20border-281d241324d5ce9a4049381c71f4021d.pdf) |
-| `se_bidding_zones` | 2011-11-01 → — | SE | yes | [source](https://www.nordpoolgroup.com/4a7b04/globalassets/download-center/day-ahead/elspot-area-change-log.pdf) |
-| `it_zone_calabria` | 2021-01-01 → — | IT | yes | [source](https://lightbox.terna.it/en/insight/new-electricity-market-zones) |
-| `hmmcp_4000` | 2022-05-11 → — | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | yes | [source](https://www.epexspot.com/en/news/harmonised-maximum-clearing-price-sdac-be-set-4000-eurmwh-10th-may-2022) |
-| `hmmcp_min600` | 2026-05-29 → — | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | yes | [source](https://www.nemo-committee.eu/assets/files/harmonised-minimum-clearing-price-for-sdac-to-be-set-to-600-eur-per-mwh-starting-from-the-28th-may-2026-%28trading-date%29.pdf) |
+| `gr_bg_coupling` | 2021-05-12 → ongoing | BG, GR | yes | [source](https://www.nemo-committee.eu/assets/files/210511%20Press%20release%20successful%20go-live%20BG-GR%20coupling-3b29443c09f164416f6b8bd9eda896e2.pdf) |
+| `interim_coupling_project` | 2021-06-18 → ongoing | PL, CZ, SK, HU, AT, DE, RO | yes | [source](https://www.entsoe.eu/news/2021/06/18/successful-go-live-of-interim-coupling-reaching-the-sdac-enduring-phase/) |
+| `bg_ro_coupling` | 2021-10-28 → ongoing | BG, RO | yes | [source](https://www.nemo-committee.eu/assets/files/211027%20PR%20successful%20go-live%20BG-RO%20border-281d241324d5ce9a4049381c71f4021d.pdf) |
+| `se_bidding_zones` | 2011-11-01 → ongoing | SE | yes | [source](https://www.nordpoolgroup.com/4a7b04/globalassets/download-center/day-ahead/elspot-area-change-log.pdf) |
+| `it_zone_calabria` | 2021-01-01 → ongoing | IT | yes | [source](https://lightbox.terna.it/en/insight/new-electricity-market-zones) |
+| `hmmcp_4000` | 2022-05-11 → ongoing | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | yes | [source](https://www.epexspot.com/en/news/harmonised-maximum-clearing-price-sdac-be-set-4000-eurmwh-10th-may-2022) |
+| `hmmcp_min600` | 2026-05-29 → ongoing | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK | yes | [source](https://www.nemo-committee.eu/assets/files/harmonised-minimum-clearing-price-for-sdac-to-be-set-to-600-eur-per-mwh-starting-from-the-28th-may-2026-%28trading-date%29.pdf) |
 | `iberian_exception` | 2022-06-15 → 2023-12-31 | ES, PT | no | [source](https://www.energiaysociedad.es/regulaciones/en-que-consiste-la-excepcion-iberica-real-decreto-ley-rdl-10-2022/) |
-| `de_nuclear_phaseout` | 2023-04-15 → — | DE | yes | [source](https://www.base.bund.de/en/nuclear-safety/nuclear-phase-out/nuclear-phase-out.html) |
-| `be_nuclear_doel3_tihange2` | 2023-02-01 → — | BE | yes | [source](https://afcn.fgov.be/) |
+| `de_nuclear_phaseout` | 2023-04-15 → ongoing | DE | yes | [source](https://www.base.bund.de/en/nuclear-safety/nuclear-phase-out/nuclear-phase-out.html) |
+| `be_nuclear_doel3_tihange2` | 2023-02-01 → ongoing | BE | yes | [source](https://afcn.fgov.be/) |
 | `arenh` | 2011-07-01 → 2025-12-31 | FR | yes | [source](https://www.8advisory.com/en/2026/03/31/nuclear-power-navigating-frances-post-arenh-market-transformation/) |
-| `pl_capacity_market` | 2021-01-01 → — | PL | yes | [source](https://www.forum-energii.eu/en/the-capacity-market-in-poland-more-expensive-than-ever) |
-| `war_ukraine` | 2022-02-24 → — | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK, GB, IE, CH | no | not from a single citable market document |
+| `pl_capacity_market` | 2021-01-01 → ongoing | PL | yes | [source](https://www.forum-energii.eu/en/the-capacity-market-in-poland-more-expensive-than-ever) |
+| `war_ukraine` | 2022-02-24 → ongoing | AT, BE, BG, CZ, DE, DK, ES, FI, FR, GR, HU, IT, NL, NO, PL, PT, RO, SE, SK, GB, IE, CH | no | not from a single citable market document |
 
 <Aside type="note">
   A regime dummy only helps once the training window spans the change. While the window lies entirely before

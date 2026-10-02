@@ -145,7 +145,7 @@ source = OpenMeteoSource(
 
 **`api="single_runs"` rule:** requests exactly the run initialised at the cutoff and uses it for every row/lead of D. If the archive lacks that run, the affected cells are NaN (reported, see `strict`) — there is no fallback to another run. If `model` is one this library has a known run-hour table for and `run` isn't one of its hours, construction raises immediately naming the valid hours.
 
-**Horizon limit:** under `previous_runs` the API serves previous_day1..7 only; with the defaults (`run="00"`) the largest horizon is 5 for `jma_seamless`, `icon_seamless`, ECMWF IFS and GFS, a larger one raises `ValueError` naming the limit. Under `single_runs`, 1-14; leads beyond the run's own length come back NaN.
+**Horizon limit:** under `previous_runs` the API serves previous_day1..7 only; with the defaults (`run="00"`) and a Central European `timezone` the largest horizon is 5 for `jma_seamless`, `icon_seamless`, ECMWF IFS and GFS, a larger one raises `ValueError` naming the limit. Under `single_runs`, 1-14; leads beyond the run's own length come back NaN.
 
 **Publication delay (model-side, not enforced by the source):** ICON ~4h, GFS ~5h, ECMWF IFS ~8h, JMA ~10h, unknown models a conservative 10h (`epftoolbox2.data.sources.open_meteo.publication_delay_hours`). `run="00"` (default) is known in time for an 11:30 CET issue for every model above. `epftoolbox2.information_set.source_rules` uses this table to flag a `run`/issue-time combination that is too tight.
 
@@ -275,8 +275,7 @@ No API key.
   `"national"` (and the nationwide entries `"all"` also uses) only count holidays marked as country-wide;
   Germany has none, so `is_school_holiday` is always 0.0/NaN there.
 
-**Caching:** Returns None (not cached - deterministic generation without `school_holidays`; a few small
-requests per run with it, and a cache would keep the NaN of school years published after it was written).
+**Caching:** Cached like any other source. `get_cache_config()` has every parameter that affects the output (including `school_holidays`), the resolved market time zone, the installed `holidays` package version (its holiday data changes between releases) and a `schema_version`. The OpenHolidays API can correct its data over time, and the cache keeps the version it downloaded, including a school year that was NaN because it was not published yet. Clear the cache to pick up revisions.
 
 ---
 
@@ -1354,6 +1353,7 @@ df = pipeline.run(start, end, cache=False)
 - A multi-column source (e.g. `EntsoeSource`) outer-joins its columns, so the merged row index can run past where a shorter column actually stopped (e.g. `load_actual` mid-outage while `price` keeps publishing); the recorded range is additionally capped at one step past the last value of any column still being published (its last value newer than 14 days before now), so that outage's cells aren't cached as covered and lost for good
 - Deleted or unreadable cache files count as missing and are fetched again
 - Atomic writes and a per-source file lock: parallel processes (SLURM arrays) on a cold cache fetch once and get identical data
+- ENTSO-E sometimes revises data long after publication, and the cache keeps the version it downloaded. Clear it to pick up revisions
 - Single-file cache stores `<file>.meta.json` with a fingerprint (sources and their parameters without `api_key`, input file size/mtime, start, end, package version); a mismatch rebuilds the file
 
 ## Result Caching (ModelPipeline)
