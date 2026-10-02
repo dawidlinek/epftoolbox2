@@ -210,6 +210,20 @@ class TestOpenMeteoSourceInit:
         with pytest.raises(ValueError, match="previous_day8"):
             OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=6)
 
+    def test_default_horizon_is_the_largest_leak_free_one_at_run_00(self):
+        # Verified against the Previous Runs API (Warsaw, jma_seamless): the late hours of d+6 need previous_day8.
+        default = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
+        assert default.horizon == 5
+        assert max(default._buckets) <= 7
+
+    def test_later_run_allows_horizon_6_but_a_full_week_stays_out_of_reach(self):
+        # With the cutoff at 06:00 UTC the late hours of d+6 are served by previous_day7, but d+7 would need a run
+        # initialised after the cutoff on D itself.
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", run="06", horizon=6)
+        assert source.horizon == 6
+        with pytest.raises(ValueError, match="previous_day"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", run="06", horizon=7)
+
     @pytest.mark.parametrize("horizon", [1, 14])
     def test_single_runs_accepts_horizon_up_to_14(self, horizon):
         source = OpenMeteoSource(
