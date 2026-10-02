@@ -151,7 +151,7 @@ processes pointed at the same file download the data once.
 |--------|--------------|
 | `EntsoeSource` | ✅ Yes |
 | `OpenMeteoSource` | ✅ Yes |
-| `CalendarSource` | ✅ Yes (including `school_holidays`, downloaded from the OpenHolidays API, see below) |
+| `CalendarSource` | ✅ Yes, ❌ not with `school_holidays` (see below) |
 | `CsvSource` | ❌ No (reads from file) |
 | `EpftoolboxBenchmarkSource` | ❌ No (keeps its own verified copy of the file instead) |
 
@@ -159,10 +159,13 @@ processes pointed at the same file download the data once.
 resolved market time zone, the installed `holidays` package version (its holiday data changes between releases)
 and a `schema_version`. A change to any of them gives a different cache key, so stale values are never served.
 
+With `school_holidays` on, `CalendarSource` returns no cache config and is downloaded from the OpenHolidays API on
+every run. The API publishes school years ahead over time and returns `NaN` for a year it has not published yet,
+so a cached run would keep that `NaN` after the data appeared. The other sources of the pipeline stay cached.
+
 <Aside type="caution">
-  The OpenHolidays API (used by `school_holidays`) can also correct its data over time, the same way ENTSO-E
-  does. The cache keeps the version it downloaded. Clear it to pick up revisions, and a school year that was
-  `NaN` because it had not been published yet stays `NaN` until you do.
+  The single-file cache (`cache="path/to/file.parquet"`) keeps the whole result of a run, so it also keeps a
+  `NaN` school year. Delete the file to pick up school years that the API has published since.
 </Aside>
 
 ## Clearing Cache

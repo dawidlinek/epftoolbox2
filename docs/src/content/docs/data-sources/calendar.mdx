@@ -8,7 +8,7 @@ import { Aside } from '@astrojs/starlight/components';
 Generates calendar features: holidays, weekday, hour of day (or period of day), month, and sunrise/sunset.
 Every feature is computed from the **local date and wall-clock time** in the country's time zone, while the index
 stays in UTC like every other source. All features are known in advance, so their `_d+k` versions are legal
-predictors. The output is cached like that of any other source (see [Caching](#caching)).
+predictors. The output is cached like that of any other source, except with `school_holidays` (see [Caching](#caching)).
 
 <Aside>
   CalendarSource uses the [holidays](https://pypi.org/project/holidays/) Python package for holiday detection. See their documentation for the [complete list of supported countries](https://python-holidays.readthedocs.io/en/latest/index.html#available-countries), subdivisions and categories.
@@ -338,14 +338,19 @@ yet entered) are not detected when shorter than a year.
 
 ### Caching
 
-`CalendarSource` is cacheable like any other source (`DataPipeline.run(..., cache=True)`), including
-`school_holidays`: `get_cache_config()` includes it, so a different `school_holidays` value, or the installed
-`holidays` package version, gets its own cache entry (see [Data Caching](/epftoolbox2/data-pipeline/caching/)).
+Without `school_holidays`, `CalendarSource` is cacheable like any other source (`DataPipeline.run(..., cache=True)`).
+`get_cache_config()` includes every parameter that affects the output, so a different parameter, or a different
+installed `holidays` package version, gets its own cache entry (see
+[Data Caching](/epftoolbox2/data-pipeline/caching/)).
+
+With `school_holidays` on, the source is **not cached** and downloads from the OpenHolidays API on every run.
+The API publishes school years ahead over time, and the values for a year it has not published yet are `NaN`.
+A cached run would keep that `NaN` and never ask again after the API has the data. Other sources in the same
+pipeline are still cached.
 
 <Aside type="caution">
-  The OpenHolidays API can correct its data over time, the same way ENTSO-E does. The cache keeps the version it
-  downloaded, including a school year that was `NaN` because it was not published yet. Clear the cache to pick
-  up revisions or newly published school years.
+  The single-file cache (`cache="path/to/file.parquet"`) stores the whole result of a run, so it keeps those
+  `NaN` values too. Delete the file to pick up a school year that the API has published since.
 </Aside>
 
 ---

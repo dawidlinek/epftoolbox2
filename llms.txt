@@ -275,7 +275,7 @@ No API key.
   `"national"` (and the nationwide entries `"all"` also uses) only count holidays marked as country-wide.
   Germany has none, so `is_school_holiday` is always 0.0/NaN there.
 
-**Caching:** Cached like any other source. `get_cache_config()` has every parameter that affects the output (including `school_holidays`), the resolved market time zone, the installed `holidays` package version (its holiday data changes between releases) and a `schema_version`. The OpenHolidays API can correct its data over time, and the cache keeps the version it downloaded, including a school year that was NaN because it was not published yet. Clear the cache to pick up revisions.
+**Caching:** Cached like any other source: `get_cache_config()` has every parameter that affects the output, the resolved market time zone, the installed `holidays` package version (its holiday data changes between releases) and a `schema_version`. With `school_holidays` on it returns None (not cached) and downloads from the OpenHolidays API on every run, because the API publishes school years ahead over time and a cached NaN for an unpublished year would never be refetched. The single-file cache (`cache="file"`) keeps a NaN school year too, so delete the file to pick up newly published years.
 
 ---
 

@@ -462,7 +462,8 @@ class CalendarSource(DataSource):
     built from it, e.g. `epftoolbox2.data.sources._openholidays.ATTRIBUTION`). This is the only case where
     CalendarSource makes network calls; without it, it stays offline and deterministic. Values are NaN before
     the API's history starts for the country, or for school years not yet published, and a warning names the
-    affected dates; entries marked as half days are ignored (not counted as a holiday).
+    affected dates; entries marked as half days are ignored (not counted as a holiday). With it the source is not
+    cached, because a cached NaN for a school year the API publishes later would never be refetched.
 
     Example:
         >>> source = CalendarSource(country="DE", region="BY", holidays="binary", weekday="onehot")
@@ -979,12 +980,16 @@ class CalendarSource(DataSource):
             f"from {missing.min().date()} to {missing.max().date()}; {column} is NaN there"
         )
 
-    def get_cache_config(self) -> dict:
+    def get_cache_config(self) -> Optional[dict]:
         """Every output-affecting parameter, the resolved market time zone, the installed `holidays` package
         version (its holiday data changes between releases, independently of this source's own code) and a
-        `schema_version`. This also makes `school_holidays` output (downloaded from the OpenHolidays API)
-        cached like any other source; see the Caching docs for the same revision caution that applies to
-        ENTSO-E data."""
+        `schema_version`.
+
+        None (not cached) with `school_holidays`: the OpenHolidays API publishes school years ahead over time, and
+        a cached run would keep the NaN it returned for a school year that was not published yet, never refetching
+        it once the API has the data."""
+        if self.school_holidays:
+            return None
         config = {
             "source_type": "calendar",
             "schema_version": SCHEMA_VERSION,
@@ -1006,7 +1011,6 @@ class CalendarSource(DataSource):
             "holiday_distance": self.holiday_distance,
             "dst_switch": self.dst_switch,
             "regimes": self.regimes,
-            "school_holidays": self.school_holidays,
         }
         if self.prefix:
             config["prefix"] = self.prefix

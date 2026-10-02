@@ -88,16 +88,13 @@ class TestInit:
         source.fetch(*_range("2024-01-01", "2024-01-02"))
         source.session.get.assert_not_called()
 
-    def test_school_holidays_is_part_of_the_cache_key(self):
-        """CalendarSource is cacheable, so school_holidays must be in get_cache_config() or it would be served
-        from an unrelated config's cache entry."""
-        national = CalendarSource(country="PL", school_holidays="national").get_cache_config()
-        all_regions = CalendarSource(country="PL", school_holidays="all").get_cache_config()
-        off = CalendarSource(country="PL").get_cache_config()
-        assert national["school_holidays"] == "national"
-        assert all_regions["school_holidays"] == "all"
-        assert off["school_holidays"] is False
-        assert len({str(national), str(all_regions), str(off)}) == 3
+    @pytest.mark.parametrize("value", [True, "national", "all"])
+    def test_school_holidays_disables_the_source_cache(self, value):
+        """The API publishes school years over time, so a cached NaN would never be refetched."""
+        assert CalendarSource(country="PL", school_holidays=value).get_cache_config() is None
+
+    def test_the_source_is_cached_when_school_holidays_is_off(self):
+        assert CalendarSource(country="PL").get_cache_config() is not None
 
 
 class TestNationalFlags:
@@ -309,6 +306,57 @@ class TestYamlRoundTrip:
         source.session = FakeApi()
         start, end = _range("2024-01-10", "2024-02-20")
         pd.testing.assert_frame_equal(source.fetch(start, end), loaded.fetch(start, end))
+
+
+class TestPipelineCache:
+    """`DataPipeline.run(cache=True)` must not freeze a school year that the API had not published yet."""
+
+    # The recorded entries, cut off before 2025: every 2026 date is then a gap of more than a year, so NaN.
+    UNPUBLISHED = [e for e in PL_ENTRIES if pd.Timestamp(e["endDate"]) < pd.Timestamp("2025-01-01")]
+
+    @pytest.fixture(autouse=True)
+    def cold_cache(self, tmp_path, monkeypatch):
+        import epftoolbox2.data.cache_manager as cache_manager_module
+
+        monkeypatch.chdir(tmp_path)
+        # Far in the future, so the whole range counts as settled and would be recorded in the cache.
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: pd.Timestamp("2100-01-01", tz="UTC"))
+
+    @staticmethod
+    def _run(source):
+        from epftoolbox2.pipelines import DataPipeline
+
+        return DataPipeline(timezone=TZ).add_source(source).run("2026-07-01", "2026-07-05", cache=True)
+
+    @pytest.mark.parametrize("mode,column", [("national", "is_school_holiday"), ("all", "school_holiday_share")])
+    def test_a_school_year_published_later_is_picked_up(self, mode, column):
+        source = _source(FakeApi(entries=self.UNPUBLISHED), school_holidays=mode)
+        first = self._run(source)
+        assert first[column].isna().all()
+
+        source.session = FakeApi()  # the API has published the 2026 school year since
+        second = self._run(source)
+        assert second[column].eq(1.0).all()  # summer holidays
+
+    def test_nothing_is_written_to_the_source_cache(self):
+        self._run(_source())
+        sources_dir = Path(".cache") / "sources"
+        assert not sources_dir.exists() or not any(sources_dir.iterdir())
+
+    def test_without_school_holidays_the_second_run_is_served_from_the_cache(self):
+        from epftoolbox2.pipelines import DataPipeline
+
+        source = CalendarSource(country="PL", school_holidays=False, holidays="binary", weekday=False)
+        calls = []
+        fetch = source.fetch
+        source.fetch = lambda start, end: calls.append((start, end)) or fetch(start, end)
+
+        pipeline = DataPipeline(timezone=TZ).add_source(source)
+        first = pipeline.run("2026-07-01", "2026-07-05", cache=True)
+        second = pipeline.run("2026-07-01", "2026-07-05", cache=True)
+
+        assert len(calls) == 1
+        pd.testing.assert_frame_equal(first, second, check_freq=False)
 
 
 @pytest.mark.integration

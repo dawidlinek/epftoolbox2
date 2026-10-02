@@ -711,8 +711,8 @@ def _component_fingerprint(component: Any) -> Dict[str, Any]:
     fingerprint = {"class": _qualified_name(component), "params": params}
     # A component may inherit its market zone from DataPipeline.timezone (a private attribute, so it is not in
     # `params` above); include the value it actually resolved to, so the file cache is invalidated when only the
-    # pipeline's zone changes (this matters for a source such as CalendarSource, whose get_cache_config() is
-    # always None).
+    # pipeline's zone changes (this matters for a source such as CalendarSource with `school_holidays`, whose
+    # get_cache_config() is None).
     market_timezone = getattr(component, "market_timezone", None)
     if market_timezone is not None:
         fingerprint["market_timezone"] = market_timezone
