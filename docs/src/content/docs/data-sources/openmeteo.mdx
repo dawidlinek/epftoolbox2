@@ -5,15 +5,9 @@ description: Weather forecasts from Open-Meteo's Previous Runs or Single Runs AP
 
 import { Aside } from '@astrojs/starlight/components';
 
-# OpenMeteoSource
-
 Downloads archived weather forecasts from Open-Meteo's [Previous Runs API](https://open-meteo.com/en/docs/previous-runs-api) or [Single Runs API](https://open-meteo.com/en/docs/single-runs-api). **No API key required.**
 
-For every row of local day D, the column `{variable}_d+i` is the forecast for the **same local wall-clock hour on D+i**, taken only from model runs **initialised at or before a cutoff**: `D` at `run`:00 UTC. `run` is a UTC hour ("00", "06", ...), not a local issue time — the source itself has no notion of a market's real issue time or a model's real publication delay; see [Choosing `run`](#choosing-run) for how those map onto it.
-
-<Aside type="caution" title="Changed in this version">
-  `OpenMeteoSource` and the former `OpenMeteoSingleRunsSource` are now one class, selected with `api="previous_runs"` (default) or `api="single_runs"`. `issue_time`, `publication_delay_h`, `vintage` and `run_interval_h` are gone, replaced by `run`; `derived`/`hdd_base_c`/`cdd_base_c` are gone entirely. See [Upgrading](/epftoolbox2/getting-started/upgrading/) for the old → new parameter mapping. Clear `.cache/sources/` or rely on the new `schema_version` in the cache key.
-</Aside>
+For every row of local day D, the column `{variable}_d+i` is the forecast for the **same local wall-clock hour on D+i**, taken only from model runs **initialised at or before a cutoff**: `D` at `run`:00 UTC. `run` is a UTC hour ("00", "06", ...), not a local issue time: the source itself has no notion of a market's real issue time or a model's real publication delay. See [Choosing `run`](#choosing-run) for how those map onto it.
 
 ## Basic Usage
 
@@ -44,50 +38,27 @@ df = source.fetch(
 |-----------|------|----------|---------|-------------|
 | `latitude` | float \| None | No\* | `None` | Location latitude (-90 to 90). \*Required unless `locations` is given |
 | `longitude` | float \| None | No\* | `None` | Location longitude (-180 to 180). \*Required unless `locations` is given |
-| `locations` | dict \| str \| None | No | `None` | Several locations instead of `latitude`/`longitude` — see [Several locations](#several-locations) |
-| `agg` | str \| List[str] \| None | No | `None` | Aggregate `locations` across space — see [Several locations](#several-locations) |
-| `keep_locations` | bool | No | `False` | With `agg` set, also return each location's own columns — see [Several locations](#several-locations) |
+| `locations` | dict \| str \| None | No | `None` | Several locations instead of `latitude`/`longitude`, see [Several locations](#several-locations) |
+| `agg` | str \| List[str] \| None | No | `None` | Aggregate `locations` across space, see [Several locations](#several-locations) |
+| `keep_locations` | bool | No | `False` | With `agg` set, also return each location's own columns, see [Several locations](#several-locations) |
 | `columns` | List[str] \| None | No | `None` (= `DEFAULT_COLUMNS`) | Weather variables |
-| `horizon` | int | No | `5` | Days ahead: columns `d+1` .. `d+horizon`. Under `api="previous_runs"` the largest usable horizon depends on the model, `timezone` and `run` (5 for the default JMA model at `run="00"`; see [Horizon](#horizon)); a larger value raises. Under `api="single_runs"`, 1-14; leads beyond the run's own length come back NaN (reported, see `strict`) |
+| `horizon` | int | No | `5` | Days ahead: columns `d+1` .. `d+horizon`. Under `api="previous_runs"` the largest usable horizon depends on the model, `timezone` and `run` (5 for the default JMA model at `run="00"`, see [Horizon](#horizon)), and a larger value raises. Under `api="single_runs"`, 1-14. Leads beyond the run's own length come back NaN (reported, see `strict`) |
 | `model` | str | No | `"jma_seamless"` | Weather model (see [Choosing a model](#choosing-a-model)) |
-| `temporal_resolution` | str \| None | No | `None` | Time step of returned data — see [Temporal Resolution](#temporal-resolution) |
-| `api` | str | No | `"previous_runs"` | `"previous_runs"` (long archive, lead-time buckets) or `"single_runs"` (one exact run per day, shorter archive) — see [How the run is chosen](#how-the-run-is-chosen) |
+| `temporal_resolution` | str \| None | No | `None` | Time step of returned data, see [Temporal Resolution](#temporal-resolution) |
+| `api` | str | No | `"previous_runs"` | `"previous_runs"` (long archive, lead-time buckets) or `"single_runs"` (one exact run per day, shorter archive), see [How the run is chosen](#how-the-run-is-chosen) |
 | `run` | str | No | `"00"` | UTC hour (`"HH"`, `"00"`-`"23"`) of the model run the cutoff is anchored to: `D`'s cutoff is `D` at `run`:00 UTC. See [Choosing `run`](#choosing-run) |
-| `timezone` | str \| None | No | `None` | Market time zone: defines the local day D of each row and the wall-clock hour that `d+i` refers to. `None` inherits `DataPipeline.timezone` when part of a pipeline; fetching without either raises: a market outside CET that relied on one would compute the cutoff for the wrong calendar date. |
+| `timezone` | str \| None | No | `None` | Market time zone: defines the local day D of each row and the wall-clock hour that `d+i` refers to. `None` inherits `DataPipeline.timezone` when part of a pipeline. Fetching without either raises, because a market outside CET that relied on one would compute the cutoff for the wrong calendar date. |
 | `prefix` | str | No | `""` | Prefix for column names |
 | `strict` | bool | No | `False` | Raise instead of warning when a returned column has missing values |
 | `proxy_url` | str \| None | No | `None` | HTTP(S) proxy, e.g. `"http://proxy.example.com:8080"`. Saved to YAML as is, so don't put credentials in it. |
 
 ## How the run is chosen
 
-### `api="previous_runs"` (default)
-
-The Previous Runs API stores forecasts at fixed lead times: `{variable}_previous_dayK` at valid time T comes from the latest run **initialised at or before T - 24·K hours**. There is no way to ask it directly for "the run initialised at or before the cutoff"; the source reconstructs that from the buckets:
-
-1. For a row at local hour h on day D, the target valid time T is hour h on D+i in `timezone`.
-2. The cutoff is `D` at `run`:00 UTC.
-3. The source picks the **smallest K ≥ i** such that every run that can influence `previous_dayK` at T was initialised at or before the cutoff. It requests `previous_day1` .. `previous_day7` as needed for this fallback.
-
-Because the buckets are defined by lead time, not by issue day, the chosen run is often older than the newest one available: most D+1 hours come from bucket 2 or 3 (a run of D-1 or D-2).
-
-<Aside type="note" title="Why the model's time step matters">
-  Some models are stored at a coarser step than hourly (JMA every 6 h; ICON every 3 h beyond 78 h lead; ECMWF IFS 0.25° every 3 h, 6 h beyond 144 h). Open-Meteo fills the hours in between by interpolating across stored points, and neighbouring stored points come from **different runs**. An hourly value at T can therefore depend on the run behind the stored point up to two steps after T. The source accounts for this with a per-model table of stored steps (6 h for models it doesn't know), which is why JMA needs one bucket more for the late hours of each day.
-</Aside>
-
-Some hours will always come from a run well before D — that is the price of reconstructing a cutoff from lead-time buckets, and is expected.
-
-### `api="single_runs"`
-
-The Single Runs API stores every model run separately: the source requests **exactly the run initialised at the cutoff** (`D` at `run`:00 UTC) and uses it for every row and lead of D.
-
-- If the archive doesn't have that run for some day, the affected cells come back NaN and the coverage report warns (see below) — **there is no fallback to another run**.
-- If `model` has no run at `run`:00 UTC and this library's own table of typical run cycles covers it, construction raises immediately, naming the model's actual run hours. For a `model` this table doesn't cover, an unavailable run is only caught when the API responds (NaN + coverage warning, as above).
-
-`horizon` is 1-14 here; a lead beyond a run's own length comes back NaN, reported the same way.
+Open-Meteo has two ways to download historical model values: the **Previous Runs API** (`api="previous_runs"`, the default) and the **Single Runs API** (`api="single_runs"`). The Single Runs history starts much later for most models (see [Choosing a model](#choosing-a-model)), so **Previous Runs is recommended for historical modelling**.
 
 ### Choosing `run`
 
-The source has no notion of a market's real issue time or a model's real-world publication delay — `run` just fixes which UTC hour the cutoff is anchored to. Picking a `run` your issue time can actually rely on is a separate, model-side judgement:
+The source has no notion of a market's real issue time or a model's real-world publication delay: `run` just fixes which UTC hour the cutoff is anchored to. Picking a `run` your issue time can actually rely on is a separate, model-side judgement:
 
 | Model | Typical delay | 00 UTC run available around |
 |---|---|---|
@@ -95,7 +66,6 @@ The source has no notion of a market's real issue time or a model's real-world p
 | NCEP GFS | ~5 h | 05:00 UTC |
 | ECMWF IFS (9 km / 0.25° / 0.4°) | ~8 h | 08:00 UTC |
 | JMA GSM | ~10 h | 10:00 UTC |
-| Unknown model | 10 h (conservative default) | 10:00 UTC |
 
 **Rule of thumb:** pick the latest `run` you know is published before your issue time. `run="00"` (the default) fits an 11:30 CET issue for every model above, including JMA's 10 h: 00:00 UTC + 10 h = 10:00 UTC = 11:00 CET in winter, still before 11:30.
 
@@ -107,29 +77,29 @@ source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, timezone="Europe/W
 
 ### Horizon
 
-Under `api="previous_runs"` the API serves `previous_day1` .. `previous_day7` only. An hour of D+i needs bucket i, i+1 or i+2 (later hours need the larger ones), so the largest usable horizon depends on the model and on `run`. With the defaults (`run="00"`) it is **5** for `jma_seamless`, `icon_seamless`, ECMWF IFS and GFS. The constructor raises a `ValueError` for a horizon that would need `previous_day8` or later, and names the largest usable one; use `api="single_runs"` (horizon up to 14) if you need to reach further.
+Under `api="previous_runs"` the API serves `previous_day1` .. `previous_day7` only. With the defaults (`run="00"`) and a Central European `timezone`, the largest horizon without look-ahead is **5** for `jma_seamless`, `icon_seamless`, ECMWF IFS and GFS, because the late hours of D+6 would need `previous_day8`, which Open-Meteo does not serve. A later `run` can allow 6, but a full week would need a run initialised late on D itself. The constructor raises a `ValueError` for a longer horizon and names the largest usable one. Use `api="single_runs"` (horizon up to 14) to reach further.
 
 ### Local calendar days and DST
 
-`d+i` always refers to the same local wall-clock hour i calendar days later, so a row at 10:00 on the day before the spring switch gets the forecast for 10:00 CEST (08:00 UTC), not 11:00. A target hour that doesn't exist (02:00 on the spring switch day) comes back **NaN** — not silently the next hour's value under that row's name. An ambiguous one (02:00 on the autumn switch day) takes its first occurrence.
+`d+i` always refers to the same local wall-clock hour i calendar days later, so a row at 10:00 on the day before the spring switch gets the forecast for 10:00 CEST (08:00 UTC), not 11:00. A target hour that doesn't exist (02:00 on the spring switch day) comes back **NaN**, never silently the next hour's value under that row's name. An ambiguous one (02:00 on the autumn switch day) takes its first occurrence.
 
 ### Live use
 
-When a row's cutoff is still in the future (for example `end="today_d+7"`, or running before `run`'s hour), the source uses the runs published by **now** instead, logs that those rows are provisional, and does not return trailing rows it has no values for. Provisional values change when fetched again later; don't use them as training data.
+When a row's cutoff is still in the future (for example `end="today_d+7"`, or running before `run`'s hour), the source uses the runs published by **now** instead, logs that those rows are provisional, and does not return trailing rows it has no values for. Provisional values change when fetched again later, so don't use them as training data.
 
 ## Choosing a model
 
 | Model | Archive (Previous Runs) | Archive (Single Runs) | Notes |
 |---|---|---|---|
-| `jma_seamless` *(default)* | from 2018 | from 2026-05-13 00Z | Over Europe this is JMA GSM: about 55 km grid, stored every 6 h, so hourly values are interpolated. At Warsaw only `d+1`/`d+2` exist for 2018-2020 (Previous Runs); `d+5`-`d+7` start on 2021-01-06. |
-| `icon_seamless` | from 2024-01 | from 2026-04-02 00Z | DWD ICON-D2 / ICON-EU / ICON global, **mixed by lead time** under `previous_runs`: different `d+i` columns come from different sub-models. First Previous-Runs value at Warsaw 2024-01-19; `rain` is missing for Dec 2023-Jun 2024. |
-| `ecmwf_ifs025` | from 2024-02-04 | — | ECMWF IFS at 0.25°, stored every 3 h (6 h beyond 144 h lead). |
-| `ecmwf_ifs` | from 2025-10-01 | from 2024-03-14 00Z (00/12 UTC only at first) | ECMWF IFS at 9 km, hourly to 90 h. Longest Single-Runs archive; about 8% of Previous-Runs hours were missing in the first half of 2026. |
+| `jma_seamless` *(default)* | from 2018 | from 2026-05-13 00Z | Over Europe this is JMA GSM: about 55 km grid, stored every 6 h, so hourly values are interpolated. At Warsaw only `d+1`/`d+2` exist for 2018-2020 (Previous Runs), and `d+5`-`d+7` start on 2021-01-06. |
+| `icon_seamless` | from 2024-01 | from 2026-04-02 00Z | DWD ICON-D2 / ICON-EU / ICON global, **mixed by lead time** under `previous_runs`: different `d+i` columns come from different sub-models. The first Previous-Runs value at Warsaw is 2024-01-19, and `rain` is missing for Dec 2023-Jun 2024. |
+| `ecmwf_ifs025` | from 2024-02-04 | not available | ECMWF IFS at 0.25°, stored every 3 h (6 h beyond 144 h lead). |
+| `ecmwf_ifs` | from 2025-10-01 | from 2024-03-14 00Z (00/12 UTC only at first) | ECMWF IFS at 9 km, hourly to 90 h. It has the longest Single-Runs archive. About 8% of Previous-Runs hours were missing in the first half of 2026. |
 | `gfs_seamless` | temperature from 2021-03, other variables from 2024-01-19 | from 2026-04-02 00Z | NCEP GFS. |
 
-Dates are first valid values at Warsaw, or the archive start Open-Meteo documents (checked in September 2026). For data from 2024 on, ECMWF IFS 0.25° or ICON are better `previous_runs` choices than JMA; for `single_runs`, `ecmwf_ifs` has by far the longest archive and is a good default. Check any `model` not listed here the same way before relying on it for a backtest that reaches far back.
+Dates are first valid values at Warsaw, or the archive start Open-Meteo documents (checked in September 2026). For data from 2024 on, ECMWF IFS 0.25° or ICON are better `previous_runs` choices than JMA. For `single_runs`, `ecmwf_ifs` has by far the longest archive and is a good default. Check any `model` not listed here the same way before relying on it for a backtest that reaches far back.
 
-The source logs, for every column that has gaps, the share of missing values, the timestamp it is complete from, and the missing share by local hour when that's uneven (e.g. JMA's `previous_day5`-`7`, which are missing before 2021 only for the hours that need them); with `strict=True` it raises instead. Missing weather values make the model drop those forecasts, so check the log before comparing models.
+The source logs, for every column that has gaps, the share of missing values, the timestamp it is complete from, and the missing share by local hour when that's uneven (e.g. JMA's `previous_day5`-`7`, which are missing before 2021 only for the hours that need them). With `strict=True` it raises instead. Missing weather values make the model drop those forecasts, so check the log before comparing models.
 
 ## Variables that describe the preceding hour
 
@@ -139,7 +109,7 @@ The source logs, for every column that has gaps, the share of missing values, th
 
 | Value | Time step | Notes |
 |-------|-----------|-------|
-| `None` *(default)* | 1 h | Standard hourly data; no extra API parameter sent |
+| `None` *(default)* | 1 h | Standard hourly data, no extra API parameter sent |
 | `"hourly_3"` | 3 h | 8 data points per day |
 | `"hourly_6"` | 6 h | 4 data points per day |
 | `"native"` | model-dependent | The model's native step as returned by the API |
@@ -160,7 +130,7 @@ source = OpenMeteoSource(
 ## Rate Limiting
 
 <Aside type="caution">
-  Network errors and "too many concurrent requests" are retried up to 5 times with exponential backoff capped at 60 s; the minutely limit waits 60 s. The hourly and daily limits raise a `RuntimeError` instead of sleeping for hours.
+  Network errors and "too many concurrent requests" are retried up to 5 times with exponential backoff capped at 60 s, and the minutely limit waits 60 s. The hourly and daily limits raise a `RuntimeError` instead of sleeping for hours.
 </Aside>
 
 ---
@@ -198,17 +168,17 @@ Columns are named: `{prefix}_{variable}_d+{i}`
 | `wind_speed_10m` | Wind speed at 10m (km/h) |
 | `wind_direction_10m` | Wind direction at 10m (°) |
 
-With `jma_seamless`, `showers` is always 0; pass `columns=[...]` to skip it.
+With `jma_seamless`, `showers` is always 0. Pass `columns=[...]` to skip it.
 
 ---
 
 ## Several locations
 
-Pass `locations` instead of `latitude`/`longitude` to combine several locations into one source — for example a
+Pass `locations` instead of `latitude`/`longitude` to combine several locations into one source, for example a
 population- or capacity-weighted series for a whole bidding zone, or a plain multi-city dataset. It is a dict
 `{name: {"latitude", "longitude", "weight"?}}`, or the compact string `"name:lat:lon:weight, name:lat:lon:weight,
 ..."` handy for YAML or the TUI (the weight can also be left out there, per location). Names must use letters,
-digits and underscores and be unique; weights, when given, must be positive numbers, and must be given for
+digits and underscores and be unique. Weights, when given, must be positive numbers, and must be given for
 **every** location or for **none**.
 
 Every location is fetched by another `OpenMeteoSource` sharing every other parameter here (including `api` and
@@ -220,14 +190,14 @@ Every location is fetched by another `OpenMeteoSource` sharing every other param
 
 | `agg` | Output |
 |-------|--------|
-| `None` *(default)* | Only the per-location columns, `{prefix}_{name}_{variable}_d+i` — a plain multi-city dataset |
+| `None` *(default)* | Only the per-location columns, `{prefix}_{name}_{variable}_d+i`, a plain multi-city dataset |
 | `"mean"` \| `"median"` \| `"min"` \| `"max"` \| `"sum"`, or a list of them, e.g. `["mean", "max"]` | One series per variable **and** aggregation, `{prefix}_{variable}_{agg}_d+i`. A bare string and a one-element list name their column the same way |
 
-`keep_locations=True` additionally returns the per-location columns alongside whatever `agg` produces; it raises
-if `agg` is `None` (the per-location columns are then already the only output).
+`keep_locations=True` additionally returns the per-location columns alongside whatever `agg` produces. It raises
+if `agg` is `None`, because the per-location columns are then already the only output.
 
 ```python
-# one point, as today
+# one point
 OpenMeteoSource(latitude=52.2297, longitude=21.0122, prefix="warsaw")
 
 # several points, no agg -> per-location columns only
@@ -237,7 +207,7 @@ OpenMeteoSource(prefix="pl", locations={
 })
 # pl_warsaw_temperature_2m_d+1, pl_krakow_temperature_2m_d+1, ...
 
-# one averaged series per variable (plain mean: no weights given)
+# one averaged series per variable (a plain mean, as no weights are given)
 OpenMeteoSource(prefix="pl", locations={...}, agg="mean")
 # pl_temperature_2m_mean_d+1, ...
 
@@ -257,20 +227,14 @@ OpenMeteoSource(prefix="pl", locations={...}, agg=["mean", "max"])
 # pl_temperature_2m_mean_d+1, pl_temperature_2m_max_d+1, ...
 ```
 
-<Aside type="caution" title="Weights must be known on D">
-  Weights apply only to `"mean"` (which then becomes a weighted mean, `sum(w_l * x_l) / sum(w_l)` with weights
-  normalised to sum to 1); giving them when `agg` doesn't include `"mean"` raises. In a list, only `"mean"` is
-  weighted — the other aggregations are always unweighted, even with weights given. Weights are fixed
-  constructor parameters and apply to the whole sample: use population or installed-capacity figures from a
-  reference date **before the sample starts** (e.g. the start of the backtest, or the census/registry date
-  closest to it before that). Using end-of-sample figures for the whole history is look-ahead: the model would
-  see population or capacity growth that had not happened yet on earlier forecast days.
-</Aside>
+Weights apply only to `"mean"`, which then becomes a weighted mean with the weights normalised to sum to 1. Giving
+weights when `agg` doesn't include `"mean"` raises. In a list, only `"mean"` is weighted and the other aggregations
+are always unweighted.
 
 ### Special columns
 
 - **`*direction*` columns** (e.g. `wind_direction_10m`): `"mean"` uses the **weighted circular mean**, so 350°
-  and 10° average to about 0°, not 180°. Every other aggregation **skips** direction columns entirely — there is
+  and 10° average to about 0°, not 180°. Every other aggregation **skips** direction columns entirely, as there is
   no meaningful min/max/median/sum for a circular quantity. `keep_locations=True` still returns them per
   location.
 - **`weather_code`** is a WMO code and is ordinal (0 is clear, a higher code is worse weather), so it is aggregated
@@ -299,7 +263,7 @@ print(df.columns[:2].tolist())
 ```
 
 `locations` (with each location's latitude, longitude and weight), and, when used, `agg` and `keep_locations`,
-are part of the cache key; `latitude`/`longitude` are omitted from it in this mode.
+are part of the cache key, and `latitude`/`longitude` are omitted from it in this mode.
 
 ---
 
@@ -314,4 +278,4 @@ print(df.columns[:5].tolist())
 
 ## Caching
 
-The cache key includes `latitude`/`longitude` (or `locations`, with `agg` and `keep_locations` when they're set, instead), `horizon`, `model`, `columns`, `prefix`, `temporal_resolution`, `api`, `run`, `timezone` and a `schema_version`, so caches written by earlier versions are not reused. `strict` and `proxy_url` don't change the data and are not part of the key.
+The cache key includes `latitude`/`longitude` (or `locations`, with `agg` and `keep_locations` when they're set, instead), `horizon`, `model`, `columns`, `prefix`, `temporal_resolution`, `api`, `run`, `timezone` and a `schema_version`, so a change to any of them reads fresh data. `strict` and `proxy_url` don't change the data and are not part of the key.
