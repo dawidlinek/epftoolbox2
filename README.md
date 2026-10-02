@@ -27,20 +27,20 @@ epftoolbox2.verify()
 ```
 ## Key Features
 
-- **Data Sources**: ENTSOE (load, generation, day-ahead prices on an hourly or 15-minute grid, cross-border transfer capacity, installed capacity; `prefix` to combine zones), Open-Meteo (`OpenMeteoSource`, archived weather forecasts as known at a UTC cutoff — `api="previous_runs"` for a long lead-time-bucket archive or `api="single_runs"` for one exact model run per day; takes a `locations` dict to combine several locations into per-location columns, one or more aggregated series per variable via `agg` (mean, optionally population- or capacity-weighted; median, min, max, sum), or both), Calendar (national and regional holidays, bridge days, weekday, hour, month, daylight, a 31-entry market-regime catalog with ex-ante dates and sources, opt-in national or regional-share school holidays via the OpenHolidays API), CSV files (CsvSource), EpftoolboxBenchmark (the Lago et al. 2021 datasets NP, PJM, FR, BE, DE, downloaded on demand)
+- **Data Sources**: ENTSOE (load, generation, day-ahead prices on an hourly or 15-minute grid, cross-border transfer capacity, installed capacity, with `prefix` to combine zones), Open-Meteo (`OpenMeteoSource`, archived weather forecasts as known at a UTC cutoff, with `api="previous_runs"` for a long lead-time-bucket archive or `api="single_runs"` for one exact model run per day, and a `locations` dict to combine several locations into per-location columns, one or more aggregated series per variable via `agg` (mean, optionally population- or capacity-weighted, plus median, min, max and sum), or both), Calendar (national and regional holidays, bridge days, weekday, hour, month, daylight, a 31-entry market-regime catalog with ex-ante dates and sources, opt-in national or regional-share school holidays via the OpenHolidays API), CSV files (CsvSource), EpftoolboxBenchmark (the Lago et al. 2021 datasets NP, PJM, FR, BE, DE, downloaded on demand)
 - **Transformers**: Resample, Timezone conversion, Lag features (local calendar days), DST normalisation to 24 slots a day (DSTNormalize), daily profile and daily min/max/mean/last stats (DailyProfile, DailyStats), custom column arithmetic (Lambda), Impute (leak-safe gap filling)
-- **Presets**: `epftoolbox2.presets` — ready-made predictor lists for the LEAR and expert-model benchmarks from the literature
+- **Presets**: `epftoolbox2.presets`, ready-made predictor lists for the LEAR and expert-model benchmarks from the literature
 - **Validators**: Continuity (duplicates, gaps, mixed resolutions), DSTStructure (rows per local day), Coverage (per-column outages, missing timestamps and nulls), Plausibility (SDAC price limits, frozen values), EDA statistics
 - **Models**: OLS, LassoCV
 - **Scalers**: standardisation (default) or variance-stabilising transformations for spiky prices (asinh, N-PIT), fitted per forecast on training data only
 - **Evaluators**: MAE, RMSE, rMAE (relative to a base model)
 - **Exporters**: Excel with conditional formatting, Terminal output, CSV
 - **Caching**: Built-in per-source Parquet cache that fetches only missing ranges, refetches not-yet-published data and is safe for parallel jobs
-- **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files; an optional market timezone makes dates mean local calendar days, duplicate column names across sources raise instead of colliding silently, and `api_key` is written to YAML as an `${ENV_VAR}` reference instead of plain text
-- **Multiprocessing**: Process-based parallelism with inner thread pools; SLURM array mode (one model per task) with `epf report` to merge the results
+- **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files. An optional market timezone makes dates mean local calendar days, duplicate column names across sources raise instead of colliding silently, and `api_key` is written to YAML as an `${ENV_VAR}` reference instead of plain text
+- **Multiprocessing**: Process-based parallelism with inner thread pools. SLURM array mode (one model per task) with `epf report` to merge the results
 - **Safeguards**: The model's input (resolution, time stamps, column names, predictors) is checked before any fit, and forecasts that could not be made are counted per model (`report.forecast_counts()`)
 - **Information Set**: Optional `issue_time` check that every predictor is known at the moment the forecast is issued, with built-in availability rules for the shipped sources and an empirical leakage probe (`epftoolbox2.information_set`)
-- **Result Manifests**: Resumable results (`save_dir`) are fingerprinted with the configuration that produced them (the predictors' ordered layout, data up to `test_end` and its time zone, model params, ...); resuming into results made with a different configuration raises instead of silently mixing them (`epftoolbox2.results.manifest`)
+- **Result Manifests**: Resumable results (`save_dir`) are fingerprinted with the configuration that produced them (the predictors' ordered layout, data up to `test_end` and its time zone, model params, ...). Resuming into results made with a different configuration raises instead of silently mixing them (`epftoolbox2.results.manifest`)
 - **Extensibility**: Extensible base classes for data sources, transformers, validators, models, evaluators, and exporters
 
 ## Quick Start
@@ -180,9 +180,9 @@ report = pipeline.run(df, test_start="2024-04-01", test_end="2024-06-01", target
 ```
 
 Pass `issue_time` (and optionally `issue_timezone`) to check every predictor against the time the forecast is
-actually issued, before any model is fitted — `ModelPipeline(issue_time="11:30", issue_timezone="Europe/Brussels")`
+actually issued, before any model is fitted, `ModelPipeline(issue_time="11:30", issue_timezone="Europe/Brussels")`
 raises `InformationSetError` if a predictor uses a value not known yet (e.g. same-day `load_actual`). Built-in
-availability rules cover the shipped sources; see `epftoolbox2.information_set` for custom rules, accepted
+availability rules cover the shipped sources. See `epftoolbox2.information_set` for custom rules, accepted
 assumptions, and `leakage_probe`, an empirical check that perturbs unknown values and asserts forecasts don't move.
 
 

@@ -39,10 +39,10 @@ uv add epftoolbox2
 ## Core Concepts
 
 ### DataPipeline
-Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame covering `[start, end)` with a DatetimeIndex (UTC from the sources; local time after `TimezoneTransformer`). Can be saved/loaded as YAML.
+Downloads and processes data from multiple sources. Supports caching, transformations, and validation. Returns a pandas DataFrame covering `[start, end)` with a DatetimeIndex (UTC from the sources, local time after `TimezoneTransformer`). Can be saved/loaded as YAML.
 
 ### ModelPipeline
-Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport. Can be saved/loaded as YAML. Optionally takes an `information_set` (or `issue_time`/`issue_timezone` shortcut) that checks every predictor is known at the forecast issue time before any fit — see INFORMATION SET below.
+Trains and evaluates forecasting models. Generates rolling-window forecasts for multiple horizons (1-7 days ahead) and all 24 hours. Returns an EvaluationReport. Can be saved/loaded as YAML. Optionally takes an `information_set` (or `issue_time`/`issue_timezone` shortcut) that checks every predictor is known at the forecast issue time before any fit. See INFORMATION SET below.
 
 ### Workflow
 Orchestrates DataPipeline + ModelPipeline from a single YAML file. Sets environment variables (`OMP_NUM_THREADS`, `PYTHON_GIL`, `MAX_PROCESSES`, `THREADS_PER_PROCESS`). Supports inline component overrides on top of referenced pipeline files.
@@ -61,8 +61,8 @@ All pipelines use method chaining:
 # DATA SOURCES
 
 All sources implement `DataSource` base class with:
-- `fetch(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame` (UTC index covering at least `[start, end)`; `DataPipeline` drops rows outside that range)
-- `get_cache_config() -> Optional[Dict]` (returns None if not cacheable; must include every parameter that changes the output and a `schema_version` bumped when parsing changes)
+- `fetch(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame` (UTC index covering at least `[start, end)`, `DataPipeline` drops rows outside that range)
+- `get_cache_config() -> Optional[Dict]` (returns None if not cacheable, must include every parameter that changes the output and a `schema_version` bumped when parsing changes)
 
 ## EntsoeSource
 
@@ -85,39 +85,39 @@ source = EntsoeSource(
 - `country_code` (str): Area code, a key of `epftoolbox2.data.sources.entsoe.AREAS`. `type` with `"price"` needs a bidding zone: `"DE"`, `"DK"`, `"NO"`, `"SE"`, `"IT"`, `"LU"` etc. raise `ValueError` naming the zone to use (Germany: `"DE_LU"`, `"DE_AT_LU"` before 2018-10-01).
 - `api_key` (str): ENTSOE API key from https://transparency.entsoe.eu/
 - `type` (List[str]): Data types to fetch. Options: `"load"`, `"price"`, `"generation"`, `"transfer_capacity"`, `"installed_capacity"`
-- `prefer_15min` (bool): Defaults to False. Grid of the `price` column. False: hourly; 15-minute periods (all prices from 2025-10-01) are averaged into hours. True: 15-minute; hourly periods (before 2025-10-01) are step-filled, each quarter-hour gets its hour's price. No period is ever dropped.
-- `neighbours` (List[str] or comma-separated str): Defaults to None. Required with `"transfer_capacity"` (and rejected without it); each must be a bidding zone.
+- `prefer_15min` (bool): Defaults to False. Grid of the `price` column. False: hourly. 15-minute periods (all prices from 2025-10-01) are averaged into hours. True: 15-minute. Hourly periods (before 2025-10-01) are step-filled, each quarter-hour gets its hour's price. No period is ever dropped.
+- `neighbours` (List[str] or comma-separated str): Defaults to None. Required with `"transfer_capacity"` (and rejected without it). Each must be a bidding zone.
 - `prefix` (str): Defaults to "". Prepended to every column (`"cz"` -> `cz_price`), so several zones can be combined in one pipeline without collisions.
 
 **Output columns by type:**
-- `type=["load"]`: `load_actual` (A65/A16), `load_forecast` (A65/A01, day-ahead), `load_forecast_daily_min`, `load_forecast_daily_max` (A65/A31 week-ahead; one value per this area's own local day D, spread over the day by `ResampleTransformer(freq="1h")`). Stamped at the *market's* local midnight of D when this source is part of a `DataPipeline` (so a neighbour's value lands on the market's own local day, not the neighbour's — see `_daily_zone`); at this area's own midnight otherwise (unchanged, and a no-op when this area already is the market's own).
-- `type=["price"]`: `price` (EUR/MWh), the SDAC day-ahead price only (classificationSequence 1; the second 15-minute DE_LU/AT auction is ignored)
-- `type=["generation"]`: actual generation per production type `generation_<type>` (A75), e.g. `generation_biomass`, `generation_fossil_gas`, `generation_hydro_run_of_river_and_pondage`, `generation_nuclear`, `generation_solar`, `generation_wind_onshore`, `generation_energy_storage`; consumption of a type (pumped-storage pumping etc.) as `generation_<type>_consumption`; day-ahead wind/solar forecasts `generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` (A69). Unknown production types become `generation_<code>`.
+- `type=["load"]`: `load_actual` (A65/A16), `load_forecast` (A65/A01, day-ahead), `load_forecast_daily_min`, `load_forecast_daily_max` (A65/A31 week-ahead, one value per this area's own local day D, spread over the day by `ResampleTransformer(freq="1h")`). Stamped at the *market's* local midnight of D when this source is part of a `DataPipeline` (so a neighbour's value lands on the market's own local day, not the neighbour's, see `_daily_zone`), and at this area's own midnight otherwise (a no-op when this area already is the market's own).
+- `type=["price"]`: `price` (EUR/MWh), the SDAC day-ahead price only (classificationSequence 1, the second 15-minute DE_LU/AT auction is ignored)
+- `type=["generation"]`: actual generation per production type `generation_<type>` (A75), e.g. `generation_biomass`, `generation_fossil_gas`, `generation_hydro_run_of_river_and_pondage`, `generation_nuclear`, `generation_solar`, `generation_wind_onshore`, `generation_energy_storage`. Consumption of a type (pumped-storage pumping etc.) as `generation_<type>_consumption`. Day-ahead wind/solar forecasts `generation_solar_forecast`, `generation_wind_onshore_forecast`, `generation_wind_offshore_forecast` (A69). Unknown production types become `generation_<code>`.
 - `type=["transfer_capacity"]`: `transfer_capacity_export_<neighbour>` and `transfer_capacity_import_<neighbour>` (A61 day-ahead forecasted transfer capacity, MW), e.g. `transfer_capacity_export_es`. Borders without NTC publication (e.g. inside flow-based Core, all PL borders in 2024) return no data and the column is absent.
 - `type=["installed_capacity"]`: `installed_capacity_<type>` (A68, MW), one value per year at local midnight of 1 January (reported at `start` if the year began earlier), carried over its year by `ResampleTransformer(freq="1h")`.
 - Unavailability of generation units (A77/A80) is not offered: the API cannot give the revision known at issue time.
 
-Omitted points under curveType A03 are forward-filled; daily values follow the local calendar across DST.
+Omitted points under curveType A03 are forward-filled. Daily values follow the local calendar across DST.
 
-**Safe predictors for a forecast issued on D (before 12:00 CET gate closure; Regulation 543/2013 deadlines):**
+**Safe predictors for a forecast issued on D (before 12:00 CET gate closure, Regulation 543/2013 deadlines):**
 - `price`, `price_d-k`: safe (published 1 h after gate closure the day before).
-- `load_actual`, `generation_*` actuals: only `_d-1` and older (published 1 h after each period; unlagged is look-ahead).
-- `load_forecast`: row D and `_d+1` (published 10:00 CET the day before delivery); `_d+2` and later are look-ahead.
+- `load_actual`, `generation_*` actuals: only `_d-1` and older (published 1 h after each period, unlagged is look-ahead).
+- `load_forecast`: row D and `_d+1` (published 10:00 CET the day before delivery). `_d+2` and later are look-ahead.
 - `load_forecast_daily_min/max`: `_d+0` to `_d+2` always, `_d+3` if issued after 10:00 (published Fridays 10:00 for the next Mon-Sun).
-- `generation_*_forecast`: `_d+0` and older; `_d+1` has an 18:00 deadline, after gate closure.
-- `transfer_capacity_*`: `_d+0` and older; `_d+1` is published before gate closure at no fixed hour (borderline).
+- `generation_*_forecast`: `_d+0` and older. `_d+1` has an 18:00 deadline, after gate closure.
+- `transfer_capacity_*`: `_d+0` and older. `_d+1` is published before gate closure at no fixed hour (borderline).
 - `installed_capacity_*`: safe within the year (published a week before the year starts).
 - The API returns the latest revision, so revised forecasts can still carry slight look-ahead.
 
-**Errors:** "No matching data" chunks are skipped with a warning; 429/5xx/network errors are retried 5 times with backoff (honouring Retry-After); other errors raise `EntsoeApiError` with ENTSO-E's reason text. A failed chunk raises instead of leaving a gap.
+**Errors:** "No matching data" chunks are skipped with a warning. 429/5xx/network errors are retried 5 times with backoff (honouring Retry-After). Other errors raise `EntsoeApiError` with ENTSO-E's reason text. A failed chunk raises instead of leaving a gap.
 
-**Caching:** Cache config = area_code, types, prefer_15min, a parser schema_version, and neighbours/prefix when set. Cached to `.cache/sources/`; a changed schema_version makes old cache entries unused.
+**Caching:** Cache config = area_code, types, prefer_15min, a parser schema_version, and neighbours/prefix when set. Cached to `.cache/sources/`. A changed schema_version makes old cache entries unused.
 
 ---
 
 ## OpenMeteoSource
 
-Downloads archived weather forecasts from Open-Meteo's Previous Runs API (`api="previous_runs"`, default) or Single Runs API (`api="single_runs"`). No API key required. Each `{variable}_d+i` value on a row of local day D is the forecast for the same local wall-clock hour on D+i, taken only from model runs initialised at or before a cutoff: `D` at `run`:00 UTC (`run` is a UTC hour, not a local issue time — the source has no notion of a market's real issue time or a model's publication delay; see `publication_delay_hours`/`epftoolbox2.information_set.source_rules` for that).
+Downloads archived weather forecasts from Open-Meteo's Previous Runs API (`api="previous_runs"`, default) or Single Runs API (`api="single_runs"`). No API key required. Each `{variable}_d+i` value on a row of local day D is the forecast for the same local wall-clock hour on D+i, taken only from model runs initialised at or before a cutoff: `D` at `run`:00 UTC (`run` is a UTC hour, not a local issue time. The source has no notion of a market's real issue time or a model's publication delay, see `publication_delay_hours`/`epftoolbox2.information_set.source_rules` for that).
 
 ```python
 from epftoolbox2.data.sources import OpenMeteoSource
@@ -141,32 +141,32 @@ source = OpenMeteoSource(
 )
 ```
 
-**`api="previous_runs"` bucket rule:** `previous_dayK` at valid time T comes from the latest run initialised at or before T - 24K h. For each row and lead i the source uses the smallest K >= i whose runs were all initialised at or before the cutoff (`D` at `run`:00 UTC — no delay term: that only matters model-side, see below); for models stored every 3-6 h (JMA, ICON beyond 78 h, ECMWF IFS 0.25) it also accounts for Open-Meteo interpolating across stored points from later runs. Most D+1 hours come from a run of D-1 or D-2.
+**`api="previous_runs"` bucket rule:** `previous_dayK` at valid time T comes from the latest run initialised at or before T - 24K h. For each row and lead i the source uses the smallest K >= i whose runs were all initialised at or before the cutoff (`D` at `run`:00 UTC, no delay term: that only matters model-side, see below). For models stored every 3-6 h (JMA, ICON beyond 78 h, ECMWF IFS 0.25) it also accounts for Open-Meteo interpolating across stored points from later runs. Most D+1 hours come from a run of D-1 or D-2.
 
-**`api="single_runs"` rule:** requests exactly the run initialised at the cutoff and uses it for every row/lead of D. If the archive lacks that run, the affected cells are NaN (reported, see `strict`) — there is no fallback to another run. If `model` is one this library has a known run-hour table for and `run` isn't one of its hours, construction raises immediately naming the valid hours.
+**`api="single_runs"` rule:** requests exactly the run initialised at the cutoff and uses it for every row/lead of D. If the archive lacks that run, the affected cells are NaN (reported, see `strict`). There is no fallback to another run. If `model` is one this library has a known run-hour table for and `run` isn't one of its hours, construction raises immediately naming the valid hours.
 
-**Horizon limit:** under `previous_runs` the API serves previous_day1..7 only; with the defaults (`run="00"`) and a Central European `timezone` the largest horizon is 5 for `jma_seamless`, `icon_seamless`, ECMWF IFS and GFS, a larger one raises `ValueError` naming the limit. Under `single_runs`, 1-14; leads beyond the run's own length come back NaN.
+**Horizon limit:** under `previous_runs` the API serves previous_day1..7 only. With the defaults (`run="00"`) and a Central European `timezone` the largest horizon is 5 for `jma_seamless`, `icon_seamless`, ECMWF IFS and GFS. A larger one raises `ValueError` naming the limit. Under `single_runs`, 1-14. Leads beyond the run's own length come back NaN.
 
 **Publication delay (model-side, not enforced by the source):** ICON ~4h, GFS ~5h, ECMWF IFS ~8h, JMA ~10h, unknown models a conservative 10h (`epftoolbox2.data.sources.open_meteo.publication_delay_hours`). `run="00"` (default) is known in time for an 11:30 CET issue for every model above. `epftoolbox2.information_set.source_rules` uses this table to flag a `run`/issue-time combination that is too tight.
 
-**Returned rows:** exactly `[start, end)`, UTC index. Rows whose cutoff is still in the future use runs published by now (provisional); trailing rows without any value are not returned. Missing values per column are logged with their share, the timestamp the column is complete from, and the missing share by local hour when it's uneven across hours; `strict=True` raises.
+**Returned rows:** exactly `[start, end)`, UTC index. Rows whose cutoff is still in the future use runs published by now (provisional). Trailing rows without any value are not returned. Missing values per column are logged with their share, the timestamp the column is complete from, and the missing share by local hour when it's uneven across hours. `strict=True` raises.
 
 **Model notes:** `jma_seamless` (default) is JMA GSM over Europe: ~55 km, stored 6-hourly, `previous_runs` archive from 2018 (at Warsaw only d+1/d+2 before 2021), `single_runs` from 2026-05-13 00Z. `ecmwf_ifs025` (`previous_runs` only) from 2024-02-04, `icon_seamless` `previous_runs` from 2024-01-19 (sub-models mixed by lead)/`single_runs` from 2026-04-02 00Z, `ecmwf_ifs` `previous_runs` from 2025-10-01/`single_runs` (longest archive) from 2024-03-14 00Z. `rain`, `showers`, `snowfall`, `precipitation` and radiation are preceding-hour values.
 
 **Default columns:** `temperature_2m`, `rain`, `showers`, `snowfall`, `relative_humidity_2m`, `dew_point_2m`, `apparent_temperature`, `precipitation`, `weather_code`, `surface_pressure`, `pressure_msl`, `cloud_cover`, `wind_speed_10m`, `wind_direction_10m`
 
 **temporal_resolution values:**
-- `None` (default) — 1-hourly; no extra API parameter sent
-- `"hourly_3"` — 3-hourly (8 points/day)
-- `"hourly_6"` — 6-hourly (4 points/day)
-- `"native"` — model-native resolution as returned by the API
+- `None` (default): 1-hourly. No extra API parameter sent
+- `"hourly_3"`: 3-hourly (8 points/day)
+- `"hourly_6"`: 6-hourly (4 points/day)
+- `"native"`: model-native resolution as returned by the API
 
 **Output column naming:** `{prefix}_{variable}_d+{i}`
 - Example: `warsaw_temperature_2m_d+1`, `warsaw_temperature_2m_d+2`, ..., `warsaw_temperature_2m_d+5`
 
-**Several locations:** pass `locations` instead of `latitude`/`longitude` to combine several locations into one source, fetched by another `OpenMeteoSource` sharing every other parameter (including `api`/`run`). A dict `{name: {"latitude","longitude","weight"?}}`, or the compact string `"name:lat:lon:weight, name:lat:lon:weight, ..."` (weight optional there too, per location). Names use letters, digits, underscores and must be unique; weights, when given, must be positive and given for every location or none, and must be known on D (a reference date before the sample starts, not end-of-sample figures).
+**Several locations:** pass `locations` instead of `latitude`/`longitude` to combine several locations into one source, fetched by another `OpenMeteoSource` sharing every other parameter (including `api`/`run`). A dict `{name: {"latitude","longitude","weight"?}}`, or the compact string `"name:lat:lon:weight, name:lat:lon:weight, ..."` (weight optional there too, per location). Names use letters, digits, underscores and must be unique. Weights, when given, must be positive and given for every location or none, and must be known on D (a reference date before the sample starts, not end-of-sample figures).
 
-**`agg`** controls the output: `None` (default) — only the per-location columns, `{prefix}_{name}_{variable}_d+i`; a bare string (`"mean"`/`"median"`/`"min"`/`"max"`/`"sum"`) or a list of them, e.g. `["mean", "max"]` — one aggregated series per variable *and* aggregation, `{prefix}_{variable}_{agg}_d+i` (a bare string and a one-element list name their column the same way). `keep_locations=True` also adds the per-location columns; it raises if `agg` is `None`. Weights apply only to `"mean"` (a weighted mean, weights normalised to sum to 1); giving weights when `agg` doesn't include `"mean"` raises, and in a list only `"mean"` is weighted, the rest are unweighted. `*direction*` columns (e.g. `wind_direction_10m`) use a weighted circular mean for `"mean"` and are skipped for every other aggregation (no meaningful min/max/median/sum for a circular quantity); `weather_code` (an ordinal WMO code) is aggregated like any other numeric column. NaN wherever any location is NaN. `agg` and `keep_locations` raise with a single `latitude`/`longitude` point.
+**`agg`** controls the output: `None` (default) gives only the per-location columns, `{prefix}_{name}_{variable}_d+i`. A bare string (`"mean"`/`"median"`/`"min"`/`"max"`/`"sum"`) or a list of them, e.g. `["mean", "max"]`, gives one aggregated series per variable *and* aggregation, `{prefix}_{variable}_{agg}_d+i` (a bare string and a one-element list name their column the same way). `keep_locations=True` also adds the per-location columns. It raises if `agg` is `None`. Weights apply only to `"mean"` (a weighted mean, weights normalised to sum to 1). Giving weights when `agg` doesn't include `"mean"` raises, and in a list only `"mean"` is weighted, the rest are unweighted. `*direction*` columns (e.g. `wind_direction_10m`) use a weighted circular mean for `"mean"` and are skipped for every other aggregation (no meaningful min/max/median/sum for a circular quantity). `weather_code` (an ordinal WMO code) is aggregated like any other numeric column. NaN wherever any location is NaN. `agg` and `keep_locations` raise with a single `latitude`/`longitude` point.
 ```python
 source = OpenMeteoSource(
     locations={
@@ -186,7 +186,7 @@ source = OpenMeteoSource(
 ## CalendarSource
 
 Generates calendar features (holidays, weekday, hour/period, month, daylight) from local dates and wall-clock
-times in the country's time zone; the index stays UTC. `fetch(start, end)` returns the `freq` grid in [start, end).
+times in the country's time zone. The index stays UTC. `fetch(start, end)` returns the `freq` grid in [start, end).
 
 ```python
 from epftoolbox2.data.sources import CalendarSource
@@ -215,7 +215,7 @@ source = CalendarSource(
 ```
 
 `school_holidays` not `False` is the only case where CalendarSource makes network calls (to the OpenHolidays
-API, https://www.openholidaysapi.org); it stays offline and deterministic otherwise. Data under ODbL 1.0: credit
+API, https://www.openholidaysapi.org). It stays offline and deterministic otherwise. Data under ODbL 1.0: credit
 "School holidays: OpenHolidays API (www.openholidaysapi.org), ODbL 1.0" when you publish results built from it.
 No API key.
 
@@ -223,13 +223,13 @@ No API key.
 | Parameter | Value | Output Columns |
 |-----------|-------|----------------|
 | `holidays` | `"binary"` | `is_holiday` (0/1) |
-| `holidays` | `"name"` | `holiday_name` (English string or None; two holidays joined with "; ") |
+| `holidays` | `"name"` | `holiday_name` (English string or None, two holidays joined with `"; "`) |
 | `holidays` | `"onehot"` | `is_holiday` + `holiday_{name}` columns, e.g. `holiday_new_years_day` |
 | `weekday` | `"number"` | `weekday` (0=Monday, 6=Sunday) |
 | `weekday` | `"name"` | `weekday_name` ("monday", "tuesday", ...) |
 | `weekday` | `"onehot"` | `is_monday`, `is_tuesday`, ... |
-| `hour` | `"number"` | hourly `freq`: `hour` (0-23); sub-hourly: `period` (0-95 at 15min) |
-| `hour` | `"onehot"` | hourly: `is_0`, ..., `is_23`; sub-hourly: `is_period_0`, ..., `is_period_95` |
+| `hour` | `"number"` | hourly `freq`: `hour` (0-23). Sub-hourly: `period` (0-95 at 15min) |
+| `hour` | `"onehot"` | hourly: `is_0`, ..., `is_23`. Sub-hourly: `is_period_0`, ..., `is_period_95` |
 | `month` | `"number"` | `month` (1-12) |
 | `month` | `"name"` | `month_name` ("january", ...) |
 | `month` | `"onehot"` | `is_january`, ..., `is_december` |
@@ -238,7 +238,7 @@ No API key.
 | `christmas_period` | `True` | `is_christmas_period`: local dates 24 Dec - 1 Jan |
 | `holiday_distance` | `N` | `days_to_holiday`, `days_since_holiday` (0 on a holiday, capped at N) |
 | `dst_switch` | `True` | `is_dst_switch_day` (every row of a 23/25-hour local day) |
-| `regimes` | `True`/list/dict | `regime_{name}`: 1 on local dates start <= D <= end, 0 otherwise; open-ended (no end) unless one is given |
+| `regimes` | `True`/list/dict | `regime_{name}`: 1 on local dates start <= D <= end, 0 otherwise. Open-ended (no end) unless one is given |
 | `school_holidays` | `True`/`"national"` | `is_school_holiday`: 1.0 on a nationwide school-holiday day, 0.0 otherwise, NaN before history starts |
 | `school_holidays` | `"all"` | `school_holiday_share`: unweighted fraction of the country's top-level regions on school holiday that day |
 
@@ -246,7 +246,7 @@ No API key.
 - Holiday names are pinned to English (`en_US`), so one-hot column names don't depend on the machine's locale.
   One-hot columns cover every holiday of the years in range.
 - Sweden: Sundays are not flagged (the `holidays` package lists every Sunday as a Swedish holiday).
-- Only national public holidays by default; `region` adds regional ones, `categories` other kinds
+- Only national public holidays by default. `region` adds regional ones, `categories` other kinds
   (`categories` replaces the default, so include "public").
 - `period` = index of the period in the local day (`hour * 4 + minute // 15` at 15 min), as in the models.
 - `"name"` outputs are strings: drop them before modelling (models convert every column to float).
@@ -255,24 +255,24 @@ No API key.
   `description`, `source` and `default`. `regimes=True` adds every entry with `default: True` whose `countries`
   include `country` (`default` is `True` exactly when `ex_ante` is `True`, except `baltic_sync`, which is ex
   ante but excluded by name). `regimes=["name", ...]` adds exactly those entries regardless of `default` (an
-  unknown name raises, listing the known ones; a country missing from an entry's `countries` only warns).
+  unknown name raises, listing the known ones, and a country missing from an entry's `countries` only warns).
   Inspect the catalog with `list_regimes(country=None)` -> DataFrame(name, start, end, countries, ex_ante,
   default, description, source).
 - A `regimes` dict entry is a date (open-ended: `{name: "YYYY-MM-DD"}`), a `(start, end)` pair or
-  `{name: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}` ("end" optional, inclusive when given; must not be
+  `{name: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}` ("end" optional, inclusive when given, and not
   before "start"). A bounded period is only leak-free if its end date was known in advance (e.g. a legislated
-  expiry), not identified afterwards from the data — an ex-post label like "energy crisis 2021-2023" is
-  look-ahead in a backtest; this is what `ex_ante` records for catalog entries.
+  expiry), not identified afterwards from the data (an ex-post label like "energy crisis 2021-2023" is
+  look-ahead in a backtest). This is what `ex_ante` records for catalog entries.
 - All calendar features are known in advance, so `_d+k` versions are legal predictors.
 - `school_holidays=True` is an alias for `"national"`. School holiday NaN (with a warning) where the API has no
   data: any stretch of more than a year without a school holiday (before the history starts, or school years
   not yet published). In `"all"` mode a NaN in any one region's flag makes that day's share NaN.
 - `"all"` uses top-level OpenHolidays subdivisions only (e.g. Poland's 16 voivodeships), not their nested
-  children; an entry recorded only against a child code is not rolled up into its parent's flag.
-- School holiday history starts: DE 2012; HU, RO 2015; AT 2017; FR 2018; BE, BG, CH, CZ, ES, IE, IT, NL, PL, PT,
+  children. An entry recorded only against a child code is not rolled up into its parent's flag.
+- School holiday history starts in DE 2012, HU and RO 2015, AT 2017, FR 2018, and BE, BG, CH, CZ, ES, IE, IT, NL, PL, PT,
   SK 2020 (PL from the 2019/20 Christmas break). No school holidays for SE, DK, FI, GB, GR, NO.
-- School-type groups are merged (a day is flagged when any group is on holiday); half-day entries are ignored.
-  `"national"` (and the nationwide entries `"all"` also uses) only count holidays marked as country-wide;
+- School-type groups are merged (a day is flagged when any group is on holiday). Half-day entries are ignored.
+  `"national"` (and the nationwide entries `"all"` also uses) only count holidays marked as country-wide.
   Germany has none, so `is_school_holiday` is always 0.0/NaN there.
 
 **Caching:** Cached like any other source. `get_cache_config()` has every parameter that affects the output (including `school_holidays`), the resolved market time zone, the installed `holidays` package version (its holiday data changes between releases) and a `schema_version`. The OpenHolidays API can correct its data over time, and the cache keeps the version it downloaded, including a school year that was NaN because it was not published yet. Clear the cache to pick up revisions.
@@ -300,7 +300,7 @@ source = CsvSource(
 **Requirements:**
 - File must have a `.csv` extension, optionally compressed (`.csv.gz`, `.csv.bz2`, `.csv.xz`, `.csv.zip`)
 - Must contain the specified datetime column
-- Datetime column is parsed and set as index; `fetch(start, end)` returns [start, end)
+- Datetime column is parsed and set as index. `fetch(start, end)` returns [start, end)
 - Timestamps with a UTC offset (also mixed +01:00/+02:00 across DST) are converted to UTC
 - Naive timestamps are local times in `timezone`, localized with `ambiguous="infer"` (rows must be oldest-first
   around the fall-back hour, otherwise it raises) and `nonexistent="raise"`
@@ -312,7 +312,7 @@ source = CsvSource(
 
 ## EpftoolboxBenchmarkSource
 
-The five open-access benchmark datasets of Lago et al. (2021, Applied Energy 293): NP, PJM, FR, BE, DE. Downloaded on first use from Zenodo record 4624805, md5-verified against the record metadata, cached locally. Not shipped (licence "other-open"; the authors don't own the data).
+The five open-access benchmark datasets of Lago et al. (2021, Applied Energy 293): NP, PJM, FR, BE, DE. Downloaded on first use from Zenodo record 4624805, md5-verified against the record metadata, cached locally. Not shipped (licence "other-open", the authors don't own the data).
 
 ```python
 from epftoolbox2.data.sources import EpftoolboxBenchmarkSource
@@ -327,13 +327,13 @@ source.test_period               # paper's test period (delivery days), e.g. ("2
 ```
 
 **Output columns:** `price` + two exogenous day-ahead forecasts (value at (d, h) = forecast for (d, h), available on d-1):
-- NP: `load_forecast`, `wind_forecast`; PJM: `load_forecast`, `zonal_load_forecast`; FR: `load_forecast`, `generation_forecast`; BE: `load_forecast_fr`, `generation_forecast_fr` (French series); DE: `load_forecast_amprion`, `wind_solar_forecast`
+- NP: `load_forecast`, `wind_forecast`. PJM: `load_forecast`, `zonal_load_forecast`. FR: `load_forecast`, `generation_forecast`. BE: `load_forecast_fr`, `generation_forecast_fr` (French series). DE: `load_forecast_amprion`, `wind_solar_forecast`
 
-**Index:** files are local wall-clock time with 24 values per day (DST hours interpolated/averaged). Mapped to UTC through the fixed standard-time offset, so every day keeps 24 rows. Use `TimezoneTransformer(target_tz=source.index_timezone)`, never a DST zone; day lags then equal calendar-day lags. Summer UTC timestamps are labels (1 h off real time): don't mix with real-time sources (ENTSO-E, Open-Meteo).
+**Index:** files are local wall-clock time with 24 values per day (DST hours interpolated/averaged). Mapped to UTC through the fixed standard-time offset, so every day keeps 24 rows. Use `TimezoneTransformer(target_tz=source.index_timezone)`, never a DST zone. Day lags then equal calendar-day lags. Summer UTC timestamps are labels (1 h off real time): don't mix with real-time sources (ENTSO-E, Open-Meteo).
 
 **Like the paper:** row D forecasts D+1 with `horizon=1` (`x_d+2`+ would be look-ahead: day-ahead forecasts only). Paper inputs for delivery d: `price`, `price_d-1`, `price_d-2`, `price_d-6`, `x_d+1`, `x`, `x_d-6`. Issue days start one day before the test period's delivery days.
 
-**Caching:** Returns None; the source keeps its own verified copy (`{dataset}.csv` + `{dataset}.csv.md5`). Offline machines: copy both files into `cache_dir`.
+**Caching:** Returns None. The source keeps its own verified copy (`{dataset}.csv` + `{dataset}.csv.md5`). Offline machines: copy both files into `cache_dir`.
 
 ---
 
@@ -362,8 +362,8 @@ ResampleTransformer(freq="1h", agg={"default": "mean", "energy_mwh": "sum"})
 
 **Behavior:**
 - Each value covers a period: from its timestamp for the column's own spacing (15 min, 1 h, one local calendar day), found per column, so mixed hourly/15-min/daily frames work column by column.
-- **Upsampling** (1h → 15min): the value repeats over the slots inside its own period (a step; dummies stay 0/1); `sum` columns are split evenly; the last period is completed (96 quarter-hours on the last day). `fill=None` leaves the new slots NaN.
-- **Downsampling** (15min → 1h): `agg` over the values inside each target period; incomplete periods are NaN (no partial sums, no zeros for empty periods). Non-numeric columns use "first" for numeric-only aggregations.
+- **Upsampling** (1h → 15min): the value repeats over the slots inside its own period (a step, dummies stay 0/1). `sum` columns are split evenly. The last period is completed (96 quarter-hours on the last day). `fill=None` leaves the new slots NaN.
+- **Downsampling** (15min → 1h): `agg` over the values inside each target period. Incomplete periods are NaN (no partial sums, no zeros for empty periods). Non-numeric columns use "first" for numeric-only aggregations.
 - Missing values from the source are never filled and nothing is extrapolated past a column's last value (no look-ahead). No rounding.
 - DST: on a local index the spring day keeps 23 hours (no 02:00 row is created) and the autumn day 25.
 
@@ -391,14 +391,14 @@ transformer = LagTransformer(
 - other strings that aren't whole days (`"15min"`, `"24h"`) → elapsed time, named in h/min/s
 
 **Day lags follow local calendar days**, not 24-hour offsets: `price_d-1` at 10:00 is 10:00 on the previous local
-date, also across DST switches. The hour skipped in spring gives NaN; both occurrences of the repeated autumn hour
+date, also across DST switches. The hour skipped in spring gives NaN. Both occurrences of the repeated autumn hour
 look back to that hour on the previous day, and the day after the switch looks back to the first occurrence. A NaN
 lag makes the model skip that forecast (e.g. 02:00 on the day after the spring switch with `price_d-1`). Run
-`LagTransformer` after `TimezoneTransformer`; with day lags on a UTC index it warns.
+`LagTransformer` after `TimezoneTransformer`. With day lags on a UTC index it warns.
 
 **Output column naming:** `{column}_{unit}-{lag}`
 - Example with `freq="day"`, lag=1: `load_actual_d-1`
-- Example with `freq="day"`, lag=-7: `load_actual_d+7` (value recorded for D+7; only safe for columns known in advance, e.g. calendar features)
+- Example with `freq="day"`, lag=-7: `load_actual_d+7` (value recorded for D+7, only safe for columns known in advance, e.g. calendar features)
 - Example with `freq="hour"`: `price_h-24`, `price_h-168`
 - Example with `freq="15min"`, lag=96: `price_h-24` (elapsed time is never named `d`)
 - A name that already exists in the frame raises `ValueError` instead of creating a duplicate column.
@@ -448,8 +448,8 @@ transformer = DailyProfileTransformer(
 ```
 
 **Behavior:**
-- A row of day D only gets values of day D. Whether they are known when a forecast is issued on D depends on the column (day-ahead prices/forecasts: yes; realised values: only lagged, e.g. `load_actual_h05_d-1`).
-- On a time-zone-aware index the spring-switch day's skipped slot is NaN and the autumn-switch day's repeated slot takes its first occurrence; a warning suggests running `DSTNormalizeTransformer` first for complete profiles.
+- A row of day D only gets values of day D. Whether they are known when a forecast is issued on D depends on the column (day-ahead prices/forecasts: yes, realised values: only lagged, e.g. `load_actual_h05_d-1`).
+- On a time-zone-aware index the spring-switch day's skipped slot is NaN and the autumn-switch day's repeated slot takes its first occurrence. A warning suggests running `DSTNormalizeTransformer` first for complete profiles.
 - On a UTC index the "days" are UTC days, and the transformer warns.
 - A name that already exists in the frame raises `ValueError`.
 
@@ -472,7 +472,7 @@ transformer = DailyStatsTransformer(
 **Output column naming:** `{column}_day_min`, `{column}_day_max`, `{column}_day_mean`, `{column}_day_last` (the value in the day's last slot, 23:00 for hourly data).
 
 **Behavior:**
-- A day gets statistics only when every slot it has (23, 24 or 25 hours on a time-zone-aware index, 24 after `DSTNormalizeTransformer`) holds a value; incomplete days, including partial days at the ends of the data, get NaN.
+- A day gets statistics only when every slot it has (23, 24 or 25 hours on a time-zone-aware index, 24 after `DSTNormalizeTransformer`) holds a value. Incomplete days, including partial days at the ends of the data, get NaN.
 - Never a rolling window into D+1: a row of D only gets statistics of D.
 - On a UTC index the "days" are UTC days, and the transformer warns.
 
@@ -492,9 +492,9 @@ transformer = LambdaTransformer(
 ```
 
 **Behavior:**
-- `columns`: each entry runs in order against the frame as built so far, so a later expression can reference a column an earlier one just added. String expressions use `df.eval(...)`; column names `eval` can't parse as identifiers need backticks, e.g. `` "`price (EUR)` - load" ``.
-- Lambdas are saved to YAML as their source text (and `"lambda df: ..."` strings are accepted directly); they may use `pd`, `np` and builtins. A lambda that closes over other variables, or a named function, raises `TypeError` on save. Loading a YAML runs the lambdas in it: only load trusted files.
-- The output must keep exactly the same index (same rows, same order) as the input; `columns` mode can't break this, but a `func` that resamples, filters or reorders rows raises `ValueError`.
+- `columns`: each entry runs in order against the frame as built so far, so a later expression can reference a column an earlier one just added. String expressions use `df.eval(...)`. Column names `eval` can't parse as identifiers need backticks, e.g. `` "`price (EUR)` - load" ``.
+- Lambdas are saved to YAML as their source text (and `"lambda df: ..."` strings are accepted directly). They may use `pd`, `np` and builtins. A lambda that closes over other variables, or a named function, raises `TypeError` on save. Loading a YAML runs the lambdas in it: only load trusted files.
+- The output must keep exactly the same index (same rows, same order) as the input. `columns` mode can't break this, but a `func` that resamples, filters or reorders rows raises `ValueError`.
 - Nothing here checks for look-ahead: same-row arithmetic is safe, but `shift(-k)`, `bfill()`, a rolling window reaching past the current row, or normalising with a whole-sample statistic all leak.
 
 ---
@@ -518,10 +518,10 @@ transformer = TimezoneTransformer(
 
 **Behavior:**
 - If index is timezone-naive, localizes to UTC first, then converts
-- If index has timezone, converts directly; local days have 23/24/25 rows, nothing is added for DST
-- Daily columns: a value at t belongs to the calendar date of t in `daily_anchor` and moves to 00:00 local on that date. The default anchor is `target_tz` itself, which is right for ENTSO-E's A31 in every zone (it always stamps at the *area's own* local midnight) — a fixed `"UTC+02:00"` anchor gets this wrong in EET/EEST zones every summer and always in a fixed-UTC+3 zone. `EntsoeSource` inside the same `DataPipeline` now anchors a neighbouring area's A31 value to the market's own midnight already, so this snap is a no-op for it too; an explicit `daily_anchor` is only needed for a column whose real anchor still differs (e.g. a standalone `EntsoeSource`, not part of that `DataPipeline`)
+- If index has timezone, converts directly. Local days have 23/24/25 rows, nothing is added for DST
+- Daily columns: a value at t belongs to the calendar date of t in `daily_anchor` and moves to 00:00 local on that date. The default anchor is `target_tz` itself, which is right for ENTSO-E's A31 in every zone (it always stamps at the *area's own* local midnight). A fixed `"UTC+02:00"` anchor gets this wrong in EET/EEST zones every summer and always in a fixed-UTC+3 zone. An `EntsoeSource` inside the same `DataPipeline` anchors a neighbouring area's A31 value to the market's own midnight, so this snap is a no-op for it too. An explicit `daily_anchor` is only needed for a column whose real anchor still differs (e.g. a standalone `EntsoeSource`, not part of that `DataPipeline`)
 - Raises ValueError if a daily column has more than one value per day (e.g. ResampleTransformer ran first)
-- If that local midnight is not in the index the row is added; a UserWarning is emitted when it lies inside the data
+- If that local midnight is not in the index the row is added. A UserWarning is emitted when it lies inside the data
 
 ---
 
@@ -546,10 +546,10 @@ transformer = ImputeTransformer(
 - `"ffill"` repeats the last valid value forward. `"previous_day"`/`"previous_week"` use the same local
   wall-clock hour 1 calendar day/week earlier (DST-safe: 23/24/25-hour days), walking further back through
   the *original* series if that source day is itself missing.
-- `limit` bounds how long an outage may be, measured from the last real value before the gap; it does not
+- `limit` bounds how long an outage may be, measured from the last real value before the gap. It does not
   bound how far back a seasonal source is searched. Default `None` fills every gap the method can reach.
 - Never fills before a column's first observed value or after its last one.
-- `flag=True` adds `{column}{suffix}_imputed`; if that column already exists (e.g. running it twice), the
+- `flag=True` adds `{column}{suffix}_imputed`. If that column already exists (e.g. running it twice), the
   new flags are OR'd into it instead of replacing it.
 - Logs, per column, how many values were imputed and how many are still missing.
 - Raises ValueError for an unsorted or duplicate-timestamp index (does not silently sort, unlike
@@ -562,7 +562,7 @@ transformer = ImputeTransformer(
 All validators implement `Validator` base class with:
 - `validate(df: pd.DataFrame) -> ValidationResult`
 
-Validators never modify the frame and never raise on bad data: errors mark data that can't be used, warnings data that is suspicious. Invalid settings raise `ValueError` in the constructor. Gaps are easiest to see on raw source data, before resampling fills them; validators that need local days take a `tz` parameter for a UTC source frame.
+Validators never modify the frame and never raise on bad data: errors mark data that can't be used, warnings data that is suspicious. Invalid settings raise `ValueError` in the constructor. Gaps are easiest to see on raw source data, before resampling fills them. Validators that need local days take a `tz` parameter for a UTC source frame.
 
 ## ValidationResult
 
@@ -582,7 +582,7 @@ class ValidationResult:
     def to_frame(self) -> pd.DataFrame: ...          # messages as a table
 ```
 
-`bool(result)` is `result.is_valid`; `print(result)` shows status, errors, warnings, info (long lists shortened) and the size of `stats`.
+`bool(result)` is `result.is_valid`. `print(result)` shows status, errors, warnings, info (long lists shortened) and the size of `stats`.
 
 ```python
 from epftoolbox2.data.validators import results_to_frame
@@ -594,7 +594,7 @@ print(table.to_string(index=False))   # columns: validator, valid, level (error/
 
 ## ContinuityValidator
 
-Checks that the index is a sorted grid with one step, no duplicates and no missing timestamps. Steps are measured in elapsed time, so a tz-aware local index is continuous across DST; day-or-longer steps on a tz-aware index follow the local calendar. A naive local wall-clock index shows DST switches as a gap and a duplicate.
+Checks that the index is a sorted grid with one step, no duplicates and no missing timestamps. Steps are measured in elapsed time, so a tz-aware local index is continuous across DST. Day-or-longer steps on a tz-aware index follow the local calendar. A naive local wall-clock index shows DST switches as a gap and a duplicate.
 
 ```python
 from epftoolbox2.data.validators import ContinuityValidator
@@ -606,7 +606,7 @@ validator = ContinuityValidator(
 
 **Errors:**
 - Non-DatetimeIndex
-- Duplicate timestamps; unsorted index
+- Duplicate timestamps. Unsorted index
 - Gaps (steps longer than `freq`), at most 10 listed plus a count of the rest
 - Steps that are not a multiple of `freq` (mixed resolutions, off-grid rows)
 
@@ -628,7 +628,7 @@ validator = DSTStructureValidator(
 )
 ```
 
-**Errors:** days with the wrong row count. **Warnings:** partial first/last days; daily data (skipped).
+**Errors:** days with the wrong row count. **Warnings:** partial first/last days and daily data (skipped).
 **Info:** `tz`, `freq`, `rows_per_day` ({rows: days}), `dst_days`, `bad_days`, `partial_days`.
 **Stats:** one row per local day: date, hours, rows, expected.
 
@@ -651,9 +651,9 @@ validator = CoverageValidator(
 )
 ```
 
-`start`/`end` accept dates, timestamps and `today`/`today_d-N` keywords (resolved at validation time; naive = UTC, like `DataPipeline.run`).
+`start`/`end` accept dates, timestamps and `today`/`today_d-N` keywords (resolved at validation time, naive = UTC, like `DataPipeline.run`).
 
-**Errors:** missing or empty columns; coverage below `min_coverage`; a missing run longer than `max_gap`. **Warnings:** missing timestamps within both limits.
+**Errors:** missing or empty columns, coverage below `min_coverage` and a missing run longer than `max_gap`. **Warnings:** missing timestamps within both limits.
 **Info:** `freq`, `coverage`, `longest_missing_run`, `first_valid`, `last_valid` (all per column).
 **Stats:** column, freq, start, end, expected, present, missing, coverage, longest_missing_run, longest_missing_start, longest_missing_end, first_valid, last_valid.
 
@@ -673,9 +673,9 @@ validator = PlausibilityValidator(
 )
 ```
 
-Default ranges: `price*` in [-600, 4000] EUR/MWh (SDAC harmonised min/max; the min was -500 until trading day 2026-05-28), `load*` >= 1 MW. `ranges={}` turns range checks off. `ImputeTransformer`'s `*_imputed` flag columns are always skipped by the constant-run check (they are 0 for the whole column whenever nothing needed filling).
+Default ranges: `price*` in [-600, 4000] EUR/MWh (SDAC harmonised min/max, the min was -500 until trading day 2026-05-28), `load*` >= 1 MW. `ranges={}` turns range checks off. `ImputeTransformer`'s `*_imputed` flag columns are always skipped by the constant-run check (they are 0 for the whole column whenever nothing needed filling).
 
-**Errors:** values out of range. **Warnings:** constant runs longer than `max_constant_run`; a pattern you passed that matches no column.
+**Errors:** values out of range. **Warnings:** constant runs longer than `max_constant_run` and a pattern you passed that matches no column.
 **Info:** `out_of_range`, `longest_constant_run`, `checked_columns`.
 **Stats:** column, rule, low, high, min, max, out_of_range, longest_constant_run, constant_value, constant_start.
 
@@ -730,7 +730,7 @@ predictors = [
 ## Predictor Presets
 
 `epftoolbox2.presets` returns the predictor lists of two literature benchmark models, as plain `{horizon}`-template
-strings (YAML-safe). The paper indexes inputs by the day being forecast, d; this library indexes columns by the
+strings (YAML-safe). The paper indexes inputs by the day being forecast, d. This library indexes columns by the
 issue day D of the row, with horizon h targeting D+h.
 
 ```python
@@ -754,9 +754,9 @@ profile_columns("price", freq="1h")  # -> ["price_h00", ..., "price_h23"], the n
 ```
 
 **Behavior:**
-- Both presets need `DailyProfileTransformer` (and for `expert_predictors`, `DailyStatsTransformer`) run on the price and exogenous columns, plus `LagTransformer` for the d-1/d-2/d-7 price lags and the horizon-lead exogenous/weekday columns; see the `docs/model-pipeline/presets.mdx` page for the full pipeline.
-- `lear_predictors` returns all slot prices of d-1, d-2, d-3 and d-7; all slot values of each exogenous series for d, d-1 and d-7; seven weekday dummies of d.
-- `expert_predictors` returns the same slot's price on d-1, d-2 and d-7; the min/max/last price of d-1; each exogenous series for d; weekday dummies of d. `OLSModel` (no intercept) needs the default `weekdays=WEEKDAYS`; pass `weekdays=("monday", "saturday", "sunday")` for the original set with an intercept-fitting model such as `LassoCVModel`.
+- Both presets need `DailyProfileTransformer` (and for `expert_predictors`, `DailyStatsTransformer`) run on the price and exogenous columns, plus `LagTransformer` for the d-1/d-2/d-7 price lags and the horizon-lead exogenous/weekday columns. See the `docs/model-pipeline/presets.mdx` page for the full pipeline.
+- `lear_predictors` returns all slot prices of d-1, d-2, d-3 and d-7, all slot values of each exogenous series for d, d-1 and d-7, and seven weekday dummies of d.
+- `expert_predictors` returns the same slot's price on d-1, d-2 and d-7, the min/max/last price of d-1, each exogenous series for d and the weekday dummies of d. `OLSModel` (no intercept) needs the default `weekdays=WEEKDAYS`. Pass `weekdays=("monday", "saturday", "sunday")` for the original set with an intercept-fitting model such as `LassoCVModel`.
 - An unknown weekday name raises `ValueError`.
 
 ---
@@ -799,10 +799,10 @@ model = LassoCVModel(
 
 ## Scalers
 
-Every model scales each (hour, horizon, run day) task with a fresh scaler fitted on that task's training rows only; the
+Every model scales each (hour, horizon, run day) task with a fresh scaler fitted on that task's training rows only. The
 test row is transformed with the training parameters and the prediction is mapped back. Choose it with the model's
 `scaler` parameter. `AsinhScaler` and `NPITScaler` are variance-stabilising transformations (VSTs) for spiky and
-negative prices (Uniejewski, Weron & Ziel 2018, IEEE TPWRS 33(2); Uniejewski 2026, EPSR 257, arXiv:2511.13603).
+negative prices (Uniejewski, Weron & Ziel 2018, IEEE TPWRS 33(2), Uniejewski 2026, EPSR 257, arXiv:2511.13603).
 
 ```python
 from epftoolbox2.models import OLSModel
@@ -824,16 +824,16 @@ StandardScaler()                 # No parameters
 ```
 
 - The target always gets the VST. `apply_to="all"` also transforms every non-binary predictor (as epftoolbox's LEAR
-  does); `"target"` only standardises predictors; a pattern list (e.g. `["price", "price_d-*"]`) transforms the matching
+  does). `"target"` only standardises predictors. A pattern list (e.g. `["price", "price_d-*"]`) transforms the matching
   predictors. Binary 0/1 predictors are never changed. Each column has its own parameters.
 - After the VST, transformed columns and the target are standardised (mean 0, sd 1), so `OLSModel` (no intercept) stays valid.
 - AsinhScaler: a zero MAD falls back to the sample standard deviation, then 1.0. NPITScaler: positions i/(n+1),
-  mid-ranks for ties, linear between knots; values outside the training range are clamped, so an N-PIT forecast stays
+  mid-ranks for ties, linear between knots. Values outside the training range are clamped, so an N-PIT forecast stays
   within the training window's [min, max] price.
 - Back-transformed forecasts are median-type (the inverse is non-linear): fine for MAE, possibly biased for RMSE. No
   bias correction is applied.
 - Give each scaler variant its own model `name`: result files are keyed by model name and resumed by (hour, horizon, day).
-- Don't fit a VST over the whole data set in a DataPipeline; that leaks test-period information into training.
+- Don't fit a VST over the whole data set in a DataPipeline. That leaks test-period information into training.
 
 ---
 
@@ -843,7 +843,7 @@ Uses `ProcessPoolExecutor` (one process per forecast day) + inner `ThreadPoolExe
 
 For each (hour, horizon, day) combination:
 1. Extract training data (rolling window)
-2. Fit the model's scaler (default StandardScaler) on the training rows; binary features are skipped
+2. Fit the model's scaler (default StandardScaler) on the training rows. Binary features are skipped
 3. Fit model on scaled data
 4. Predict and inverse-scale prediction
 5. Store result with metadata
@@ -851,15 +851,15 @@ For each (hour, horizon, day) combination:
 **Checks before any fit** (ValueError): rows `freq` apart with one row per local day and period (only the
 repeated fall-back DST hour may repeat), no duplicate timestamps, a UTC index that already carries `_d-<k>`
 day-lag columns raises (those lags were computed against different calendar-day boundaries than the ones now
-derived from a UTC index — a plain UTC index with no such columns only warns, see `LagTransformer`), no data
+derived from a UTC index, while a plain UTC index with no such columns only warns, see `LagTransformer`), no data
 columns named `hour`/`day` or `{target}_d+1..{target}_d+{horizon}`, every expanded predictor present, numeric
 and not a target. Only the target and the predictors are used, so unused text columns are fine. Model names
 must be unique.
 
 **Tasks without a forecast** are counted per reason on the `ModelResultRef` (`produced`, `skipped`) and in
 `report.forecast_counts()`: `missing_test_predictors`, `missing_test_row` (gap on the issue day), `too_few_rows`,
-`no_finite_training_rows`, `fit_error` (ValueError from the model). A shortfall is logged; a model that produces
-nothing raises; any other exception in a task stops the run.
+`no_finite_training_rows`, `fit_error` (ValueError from the model). A shortfall is logged. A model that produces
+nothing raises. Any other exception in a task stops the run.
 
 **Result record structure:**
 ```python
@@ -908,34 +908,34 @@ pipeline = ModelPipeline(information_set=info)  # equivalent to passing issue_ti
 - `load_actual` (A65/A16), `generation_*` (A75): known 1h after the delivery period ends
 - `load_forecast` (A65/A01): published 10:00 Brussels on D-1
 - `load_forecast_daily_min`/`_max` (A65/A31): published Friday 10:00 for the whole next week, in Brussels by
-  default — a bound `EntsoeSource` overrides this with the market's own zone, see below
-- `generation_*_forecast` (A69 wind/solar): published 18:00 Brussels on D-1 (legal deadline; accept the
+  default: a bound `EntsoeSource` overrides this with the market's own zone, see below
+- `generation_*_forecast` (A69 wind/solar): published 18:00 Brussels on D-1 (legal deadline, accept the
   `entsoe_a69_by_10` assumption to instead treat it as 10:00, like the load forecast)
 - Calendar columns (holiday/weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`): static, known in advance
 
-Weather columns have no default rule (a `*_temperature_2m`-style name alone doesn't mean "forecast timing" —
+Weather columns have no default rule (a `*_temperature_2m`-style name alone doesn't mean "forecast timing",
 it could be an observed value too): `source_rules(sources)` / `InformationSet.with_source_rules(sources)`
 (called automatically by `Workflow`) assigns one only to the columns an `OpenMeteoSource` actually emits, plus
 overrides the week-ahead rule for an `EntsoeSource`'s own `load_forecast_daily_min`/`_max` (prefixed the same
-way as its other columns) with `weekly("friday", "10:00", timezone=source._daily_zone())` — the source's own
+way as its other columns) with `weekly("friday", "10:00", timezone=source._daily_zone())`, i.e. the source's own
 bound market zone (or its area's own zone standalone), matching where A31's local midnight is actually
 anchored, instead of the `Europe/Brussels` default. For weather: `weather_cutoff(source.run, f"{delay}h")`,
 `delay` from `publication_delay_hours(source.model)` (ICON ~4h, GFS ~5h, ECMWF IFS ~8h, JMA ~10h, 10h for an
-unknown model) — known `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading
-`_d+k`. `run`/`model` are read with `getattr`, so this works with any `OpenMeteoSource`-like object; the
+unknown model). It is known `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading
+`_d+k`. `run`/`model` are read with `getattr`, so this works with any `OpenMeteoSource`-like object. The
 source itself has no notion of issue time or delay, only of `run`.
 
 **Availability kinds** (`Availability.<kind>(...)`): `static()`, `realised(delay="1h")`,
 `published(time, days_before=1, timezone="Europe/Brussels")`, `daily_close(time)` (= `published(time, days_before=0)`),
 `weekly(weekday="friday", time="10:00")`, `weather_run(delay="6h")` (a user-defined rolling-forecast rule),
-`as_of(time, timezone="Europe/Brussels")` (known at a fixed time on the issue day D; a leading `_d+k` doesn't
+`as_of(time, timezone="Europe/Brussels")` (known at a fixed time on the issue day D, a leading `_d+k` doesn't
 change that), `weather_cutoff(run, delay)` (like `as_of`, but a UTC run hour plus a delay that may push past
-24:00 — used by `source_rules` for `OpenMeteoSource`).
+24:00, used by `source_rules` for `OpenMeteoSource`).
 
-**Unknown columns:** a predictor whose base column has no rule anywhere raises by default (`unknown="raise"`);
-pass `"warn"` to log instead, or `"ignore"` to skip it silently once you've reviewed which columns that affects.
+**Unknown columns:** a predictor whose base column has no rule anywhere raises by default (`unknown="raise"`).
+Pass `"warn"` to log instead, or `"ignore"` to skip it silently once you've reviewed which columns that affects.
 
-**Leakage probe** — an empirical check against real data and a real model, for use in tests:
+**Leakage probe**: an empirical check against real data and a real model, for use in tests:
 ```python
 from epftoolbox2.information_set import leakage_probe
 
@@ -964,10 +964,10 @@ model_pipeline:
 # EVALUATORS
 
 All evaluators implement `Evaluator` base class with:
-- `name: str` — Display name for reports
-- `compute(df: pd.DataFrame, **kwargs) -> float` — Compute aggregate metric from prediction/actual columns
+- `name: str`: Display name for reports
+- `compute(df: pd.DataFrame, **kwargs) -> float`: Compute aggregate metric from prediction/actual columns
 
-The `**kwargs` may include `model_dfs` — a dict of all model DataFrames for the current data slice, used by cross-model evaluators like `rMAEEvaluator`.
+The `**kwargs` may include `model_dfs`: a dict of all model DataFrames for the current data slice, used by cross-model evaluators like `rMAEEvaluator`.
 
 ## MAEEvaluator
 
@@ -1196,15 +1196,15 @@ exporters:
 - Runtime attributes excluded: `session`, `console`, `logger`
 - Private attributes (prefixed `_`) are always excluded
 - Anything else (a `set`, a callable, an arbitrary object) raises `TypeError` naming the parameter, instead of being
-  silently dropped — use `"{horizon}"` string templates instead of callable predictors
-- `DataPipeline` only — **secrets**: `api_key` (and any component's declared secret) is written as
-  `${<SOURCE>_API_KEY}` by default and expanded from the environment on load;
+  silently dropped. Use `"{horizon}"` string templates instead of callable predictors
+- `DataPipeline` only, **secrets**: `api_key` (and any component's declared secret) is written as
+  `${<SOURCE>_API_KEY}` by default and expanded from the environment on load.
   `pipeline.save(path, include_secrets=True)` opts out and writes the literal value. Any string parameter may
-  itself contain a `${VAR}` reference; it is expanded on load and written back as the reference (not the expanded
+  itself contain a `${VAR}` reference. It is expanded on load and written back as the reference (not the expanded
   value) on resave.
-- `DataPipeline` only — **relative paths**: file-like parameters (`path`, `*_path`, `*_file`, `*_dir`) loaded from
+- `DataPipeline` only, **relative paths**: file-like parameters (`path`, `*_path`, `*_file`, `*_dir`) loaded from
   a relative path are resolved against the YAML file's directory, not the working directory, and written relative
-  to it again on save — a pipeline and its data can be moved together.
+  to it again on save: a pipeline and its data can be moved together.
 - `DataPipeline.load()` raises `ValueError` on an unknown top-level YAML key (e.g. a typo'd `timezon:`).
 
 ---
@@ -1267,7 +1267,7 @@ model_pipeline:
 **SLURM array (one model per task):** set `environment.model_index` and `model_pipeline.save_dir`. Each task
 writes its model's JSONL to `save_dir` and skips evaluators/exporters (rMAE and exporters need every model).
 After all tasks finish, `epf report experiment.yaml` (or `Workflow.load(path).report()`) merges the files and
-runs the evaluators and exporters once; it raises if a model has no results unless `allow_missing=True`
+runs the evaluators and exporters once. It raises if a model has no results unless `allow_missing=True`
 (`--allow-missing`). A negative or out-of-range `model_index` raises.
 
 **Forecast-only workflow (runs daily without changing dates):**
@@ -1348,13 +1348,13 @@ df = pipeline.run(start, end, cache=False)
 **Cache behavior:**
 - All three modes return the same frame: each source's output is clipped to `[start, end)`
 - Each source gets a cache key hashing the cache format version, the source class and `get_cache_config()`
-- Only fetches missing date ranges from the API; each cached file is only read inside its own recorded range
-- Records only what the source actually returned, and never the last 2 days before now (data may still be published); that tail is fetched again on the next run
-- A multi-column source (e.g. `EntsoeSource`) outer-joins its columns, so the merged row index can run past where a shorter column actually stopped (e.g. `load_actual` mid-outage while `price` keeps publishing); the recorded range is additionally capped at one step past the last value of any column still being published (its last value newer than 14 days before now), so that outage's cells aren't cached as covered and lost for good
+- Only fetches missing date ranges from the API. Each cached file is only read inside its own recorded range
+- Records only what the source actually returned, and never the last 2 days before now (data may still be published). That tail is fetched again on the next run
+- A multi-column source (e.g. `EntsoeSource`) outer-joins its columns, so the merged row index can run past where a shorter column actually stopped (e.g. `load_actual` mid-outage while `price` keeps publishing). The recorded range is additionally capped at one step past the last value of any column still being published (its last value newer than 14 days before now), so that outage's cells aren't cached as covered and lost for good
 - Deleted or unreadable cache files count as missing and are fetched again
 - Atomic writes and a per-source file lock: parallel processes (SLURM arrays) on a cold cache fetch once and get identical data
 - ENTSO-E sometimes revises data long after publication, and the cache keeps the version it downloaded. Clear it to pick up revisions
-- Single-file cache stores `<file>.meta.json` with a fingerprint (sources and their parameters without `api_key`, input file size/mtime, start, end, package version); a mismatch rebuilds the file
+- Single-file cache stores `<file>.meta.json` with a fingerprint (sources and their parameters without `api_key`, input file size/mtime, start, end, package version). A mismatch rebuilds the file
 
 ## Result Caching (ModelPipeline)
 
@@ -1369,11 +1369,11 @@ report = pipeline.run(..., save_dir="results")
 report = pipeline.report("results", test_start="2024-02-01", test_end="2024-03-01", horizon=7, freq="1h")
 ```
 
-**The manifest** (`epftoolbox2.results.manifest`) records what produced a results file — a hash of the
+**The manifest** (`epftoolbox2.results.manifest`) records what produced a results file: a hash of the
 predictors' ordered per-(period, horizon) layout (not just a set of names: order and per-task differences
 both matter), target, horizon, freq, training_window, model class and all hyperparameters (the model's
 `scaler` plus whatever `_model_kwargs` returns), a content hash of the data columns used up to `test_end` (rows after
-`test_end` don't count, so appending them between runs isn't a mismatch), and the data's own time zone —
+`test_end` don't count, so appending them between runs isn't a mismatch), and the data's own time zone,
 and compares it before resuming. The information_set settings and provenance (package version, git SHA,
 timestamps) are recorded but not compared. A disagreement raises `ManifestMismatchError`:
 
@@ -1394,10 +1394,10 @@ report = pipeline.run(..., save_dir="results", require_manifest=True)          #
 
 Package version and git SHA are recorded for provenance but not compared, so a version bump or a new commit
 does not by itself invalidate a results directory. Extending `test_start`/`test_end` is not a mismatch either:
-the resume key is `(hour, horizon, run_date)` — the calendar date, not the `day_in_test` offset from
-`test_start` — so growing the test period is the normal way to extend a resumable run. A saved JSONL keeps
+the resume key is `(hour, horizon, run_date)`, the calendar date and not the `day_in_test` offset from
+`test_start`, so growing the test period is the normal way to extend a resumable run. A saved JSONL keeps
 every row ever written to it, so `pipeline.report(...)`/`summary()`/`forecast_counts()`/`predictions()`/the
-`by_*` breakdowns filter to the current call's own `test_start`/`test_end` — narrowing the window between
+`by_*` breakdowns filter to the current call's own `test_start`/`test_end`: narrowing the window between
 runs into the same `save_dir` is scored only on that narrower window, not on an earlier, wider run's rows too.
 
 ---
@@ -1791,7 +1791,7 @@ class DataPipeline:
   timezone-aware timestamps are used as given.
 - `timezone` is also the single place the market zone needs to be written: `TimezoneTransformer.target_tz`,
   `CalendarSource`/`OpenMeteoSource`'s own zone may all be
-  left unset (`None`) and they then inherit it — checked and bound at construction and again at the start of
+  left unset (`None`) and they then inherit it, checked and bound at construction and again at the start of
   `run()` (so `add_transformer`/`add_source` can't introduce a mismatch unnoticed). An explicitly set, different
   zone still raises `ValueError`: `timezone` decides what a local calendar day is, and a component computing its
   own local time in a different zone would silently disagree with it. A component that needs a zone and has
@@ -1920,7 +1920,7 @@ os.environ["THREADS_PER_PROCESS"] = "16"  # Threads per worker process (alias: M
 os.environ["OMP_NUM_THREADS"] = "1"       # Prevent BLAS oversubscription (always recommended)
 ```
 
-`Workflow.run()` always sets `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `BLAS_NUM_THREADS=1`, and `PYTHON_GIL=0` automatically, and applies `MAX_PROCESSES`/`THREADS_PER_PROCESS` from its config. `model_index` is expanded from env vars at `load()` time (e.g. `$SLURM_ARRAY_TASK_ID`) and selects a single model by index — all models run if omitted. For code-only usage (no Workflow), set thread vars manually before imports.
+`Workflow.run()` always sets `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `BLAS_NUM_THREADS=1`, and `PYTHON_GIL=0` automatically, and applies `MAX_PROCESSES`/`THREADS_PER_PROCESS` from its config. `model_index` is expanded from env vars at `load()` time (e.g. `$SLURM_ARRAY_TASK_ID`) and selects a single model by index, all models run if omitted. For code-only usage (no Workflow), set thread vars manually before imports.
 
 ---
 
@@ -1951,9 +1951,9 @@ Callable predictors cannot be serialized to YAML. Use `"{horizon}"` string templ
 
 ## Timezone Handling
 - Sources return UTC
-- Use TimezoneTransformer for local time; order: TimezoneTransformer → ResampleTransformer → LagTransformer
-- DST days keep 23 or 25 local hours; ResampleTransformer does not create the missing 02:00 row
-- ResampleTransformer fills only slots it creates by upsampling; real gaps stay NaN
+- Use TimezoneTransformer for local time. Order: TimezoneTransformer → ResampleTransformer → LagTransformer
+- DST days keep 23 or 25 local hours. ResampleTransformer does not create the missing 02:00 row
+- ResampleTransformer fills only slots it creates by upsampling. Real gaps stay NaN
 
 ## Column Naming
 - Lag columns: `{column}_{unit}-{lag}` (e.g., `load_actual_d-1`)
@@ -1966,7 +1966,7 @@ Callable predictors cannot be serialized to YAML. Use `"{horizon}"` string templ
 - `"today"` / `"now"` → today's date
 - `"today_d+7"` / `"now_d+7"` → today + 7 days
 - `"now_d-730"` → today − 730 days
-- The offset `N` in `_d±N` is any integer — use any value to match your training window.
+- The offset `N` in `_d±N` is any integer. Use any value to match your training window.
 - Normal ISO date strings (`"2024-01-01"`) pass through unchanged.
 - `ModelPipeline.run()`, `BaseModel.run()` and `Workflow` resolve "today" as the machine's local date
   (`datetime.date.today()`, implemented in `epftoolbox2/_date_utils.py:resolve_date()`).
@@ -2062,7 +2062,7 @@ class MyEvaluator(Evaluator):
         return ...
 ```
 
-The `**kwargs` may include `model_dfs` (Dict[str, DataFrame]) — all model DataFrames for the current data slice, enabling cross-model metrics like rMAE.
+The `**kwargs` may include `model_dfs` (Dict[str, DataFrame]), all model DataFrames for the current data slice, enabling cross-model metrics like rMAE.
 
 Register in `COMPONENT_REGISTRY["evaluators"]` in `model_pipeline.py`.
 
@@ -2087,7 +2087,7 @@ Installed automatically with the package. Available as `epf` on PATH after `pip 
 ## Commands
 
 ### `epf` (no arguments)
-Launches an interactive wizard. Arrow-key menus + text prompts — no YAML required.
+Launches an interactive wizard. Arrow-key menus + text prompts, no YAML required.
 
 **Main menu options:**
 - Run experiment / data pipeline / model pipeline from an existing YAML
@@ -2122,7 +2122,7 @@ epf data data_pipeline.yaml --start 2022-01-01 --end 2024-01-01 --output data.cs
 Required flags: `--start DATE`, `--end DATE`, `--output FILE`
 Optional flags: `--cache PATH`
 
-The CSV names its time zone in the index header (e.g. `datetime[Europe/Warsaw]`); `epf model` and the TUI read it
+The CSV names its time zone in the index header (e.g. `datetime[Europe/Warsaw]`). `epf model` and the TUI read it
 back in that zone.
 
 ### `epf model <model_pipeline.yaml>`
@@ -2141,8 +2141,8 @@ epf model model_pipeline.yaml \
 
 Required flags: `--data FILE`, `--test-start DATE`, `--test-end DATE`
 Optional flags: `--target COL` (default: price), `--horizon N` days (default: 7), `--freq {1h,15min}` (default: 1h),
-`--tz ZONE` (local zone of the data; needed for CSVs with UTC offsets but no zone in the header), `--save-dir DIR`,
-`--forecast-only`, `--issue-time HH:MM` and `--issue-timezone ZONE` (information set; overrides the YAML),
+`--tz ZONE` (local zone of the data, needed for CSVs with UTC offsets but no zone in the header), `--save-dir DIR`,
+`--forecast-only`, `--issue-time HH:MM` and `--issue-timezone ZONE` (information set, overrides the YAML),
 `--allow-manifest-mismatch` (resume even if `--save-dir`'s manifest disagrees with this run, overwriting it),
 `--require-manifest` (refuse to resume from a `--save-dir` with results but no manifest, instead of warning)
 
