@@ -3,8 +3,6 @@ title: rMAEEvaluator
 description: Relative Mean Absolute Error metric
 ---
 
-# rMAEEvaluator
-
 Calculates relative Mean Absolute Error (rMAE) — the ratio of a model's MAE to a base model's MAE. This is a standard metric in the electricity price forecasting literature (Lago et al., 2021) for benchmarking model performance.
 
 ## Formula

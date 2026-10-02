@@ -3,8 +3,6 @@ title: DSTStructureValidator
 description: Check rows per local day (23, 24 or 25 hours times periods per hour)
 ---
 
-# DSTStructureValidator
-
 Checks that every local calendar day has one row per period. The number of hours in each day comes from the time zone: in Europe the spring switch day has 23 hours and the autumn one 25, so an hourly frame must have 23/24/25 rows per day and a 15-minute frame 92/96/100.
 
 ## Basic Usage

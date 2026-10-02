@@ -5,8 +5,6 @@ description: Copy each local day's hourly values onto every row of that day
 
 import { Aside } from '@astrojs/starlight/components';
 
-# DailyProfileTransformer
-
 Copies each local day's values of a column onto every row of that day. With hourly data, `price` becomes
 `price_h00` … `price_h23`: on every row of day D, `price_h05` is the price at 05:00 on D. With 15-minute data the
 columns are `price_s00` … `price_s95`.

@@ -5,8 +5,6 @@ description: Load time-series data from CSV files
 
 import { Aside } from '@astrojs/starlight/components';
 
-# CsvSource
-
 Loads time-series data from CSV files with automatic datetime parsing.
 
 ## Basic Usage

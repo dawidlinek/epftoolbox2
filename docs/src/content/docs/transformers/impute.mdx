@@ -5,8 +5,6 @@ description: Fill missing values with leak-safe methods only
 
 import { Aside } from '@astrojs/starlight/components';
 
-# ImputeTransformer
-
 Fills missing values with methods that only ever look backward: forward fill, or a seasonal-naive lookup
 at the same local wall-clock hour on the previous day or week. Interpolation, backward fill and any other
 method that could use a later value are refused by the constructor.

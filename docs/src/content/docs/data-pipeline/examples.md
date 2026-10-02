@@ -3,8 +3,6 @@ title: Pipeline Examples
 description: Complete DataPipeline examples
 ---
 
-# Pipeline Examples
-
 ## Basic Example: Polish Electricity Data
 
 ```python

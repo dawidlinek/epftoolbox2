@@ -5,8 +5,6 @@ description: Generate calendar features (holidays, weekday, hour, month, dayligh
 
 import { Aside } from '@astrojs/starlight/components';
 
-# CalendarSource
-
 Generates calendar features: holidays, weekday, hour of day (or period of day), month, and sunrise/sunset.
 Every feature is computed from the **local date and wall-clock time** in the country's time zone, while the index
 stays in UTC like every other source. All features are known in advance, so their `_d+k` versions are legal

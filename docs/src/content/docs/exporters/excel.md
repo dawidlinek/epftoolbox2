@@ -3,8 +3,6 @@ title: ExcelExporter
 description: Export results to Excel with formatting
 ---
 
-# ExcelExporter
-
 Exports evaluation results to Excel files with conditional formatting.
 
 ## Basic Usage

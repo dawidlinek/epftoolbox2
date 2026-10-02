@@ -5,8 +5,6 @@ description: Check that every predictor only uses data known at the time a forec
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-# Information Set
-
 A forecast issued on day D may only use values that are actually known at the moment it is issued — not
 everything that ends up in the historical data. `epftoolbox2.information_set` declares when each column
 becomes known and checks every expanded predictor (and the newest training target) against that boundary

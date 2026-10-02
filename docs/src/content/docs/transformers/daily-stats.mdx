@@ -5,8 +5,6 @@ description: Per local day minimum, maximum, mean and last value
 
 import { Aside } from '@astrojs/starlight/components';
 
-# DailyStatsTransformer
-
 Adds the minimum, maximum, mean and last value of each local day to every row of that day, as
 `{column}_day_min`, `{column}_day_max`, `{column}_day_mean` and `{column}_day_last`. The last value is the one in
 the last slot of the day (23:00 for hourly data).

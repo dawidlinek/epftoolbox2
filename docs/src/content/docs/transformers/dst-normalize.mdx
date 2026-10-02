@@ -5,8 +5,6 @@ description: Give every local day exactly 24 (or 96) slots
 
 import { Aside } from '@astrojs/starlight/components';
 
-# DSTNormalizeTransformer
-
 Turns a local-time index into naive wall-clock time with exactly 24 slots per day (96 for 15-minute data), the
 convention of the original epftoolbox (Lago et al., 2021). On the day clocks go back, the two occurrences of the
 repeated hour are averaged into one slot. On the day clocks go forward, the skipped hour is filled with the

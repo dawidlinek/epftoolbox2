@@ -3,8 +3,6 @@ title: API Reference
 description: Complete API reference for epftoolbox2
 ---
 
-# API Reference
-
 ## DataPipeline
 
 ```python

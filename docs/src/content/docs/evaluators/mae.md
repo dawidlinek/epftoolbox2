@@ -3,8 +3,6 @@ title: MAEEvaluator
 description: Mean Absolute Error metric
 ---
 
-# MAEEvaluator
-
 Calculates Mean Absolute Error (MAE) between predictions and actual values.
 
 ## Formula

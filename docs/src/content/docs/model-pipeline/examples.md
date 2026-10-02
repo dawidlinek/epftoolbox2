@@ -3,8 +3,6 @@ title: Model Pipeline Examples
 description: Complete ModelPipeline usage examples
 ---
 
-# Model Pipeline Examples
-
 ## Basic Example
 
 ```python

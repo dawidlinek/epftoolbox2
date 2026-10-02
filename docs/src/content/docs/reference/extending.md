@@ -3,8 +3,6 @@ title: Extending the Library
 description: Creating custom components for epftoolbox2
 ---
 
-# Extending the Library
-
 epftoolbox2 is designed to be extensible. Create custom sources, transformers, validators, models, evaluators, and exporters.
 
 ## Custom DataSource

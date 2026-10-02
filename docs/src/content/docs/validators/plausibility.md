@@ -3,8 +3,6 @@ title: PlausibilityValidator
 description: Check value ranges (e.g. SDAC price limits) and frozen constant runs
 ---
 
-# PlausibilityValidator
-
 Checks that values lie in plausible ranges and that they don't stay frozen for too long.
 
 ## Basic Usage

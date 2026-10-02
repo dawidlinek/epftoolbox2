@@ -3,8 +3,6 @@ title: ContinuityValidator
 description: Check that the time index is a sorted, gap-free grid
 ---
 
-# ContinuityValidator
-
 Checks the `DatetimeIndex` itself: it must be sorted, free of duplicates, and step through time at one frequency without missing timestamps.
 
 ## Basic Usage

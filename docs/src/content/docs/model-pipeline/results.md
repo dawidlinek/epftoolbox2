@@ -3,8 +3,6 @@ title: Working with Results
 description: Using EvaluationReport to analyze model performance
 ---
 
-# Working with Results
-
 The `ModelPipeline.run()` method returns an `EvaluationReport` object with various analysis methods.
 
 ## EvaluationReport Methods

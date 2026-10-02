@@ -5,8 +5,6 @@ sidebar:
   order: 0
 ---
 
-# Validators
-
 Validators check a DataFrame without changing it. `validate(df)` returns a `ValidationResult`: **errors** for data that can't be used, **warnings** for data that is suspicious. Invalid settings raise `ValueError` when the validator is created.
 
 ## Which Validator Catches What

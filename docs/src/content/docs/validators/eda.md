@@ -3,8 +3,6 @@ title: EdaValidator
 description: Display exploratory data analysis statistics
 ---
 
-# EdaValidator
-
 Calculates EDA statistics for numeric columns, returns them in `result.stats` and, by default, prints them as a Rich table.
 
 ## Basic Usage

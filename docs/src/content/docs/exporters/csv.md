@@ -3,8 +3,6 @@ title: CsvExporter
 description: Export results to a wide-format CSV
 ---
 
-# CsvExporter
-
 Exports detailed prediction results to a wide-format CSV file. Each row represents a single forecast point, with per-model prediction and error columns.
 
 ## Parameters

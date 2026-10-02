@@ -5,8 +5,6 @@ description: Produce operational next-7-days forecasts without back-testing or e
 
 import { Steps, Tabs, TabItem, Aside, Code } from '@astrojs/starlight/components';
 
-# Forecast-Only Mode
-
 `forecast_only=True` runs models in operational mode: trains on all available history and predicts the next `horizon` days from today. No evaluators run, no exporters fire, and `report.predictions()` returns a clean DataFrame with no "actual" column.
 
 ---

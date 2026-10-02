@@ -3,8 +3,6 @@ title: Serialization
 description: Save and load DataPipeline configurations as YAML
 ---
 
-# DataPipeline Serialization
-
 Save and load pipeline configurations for reproducibility and version control.
 
 ## Save
