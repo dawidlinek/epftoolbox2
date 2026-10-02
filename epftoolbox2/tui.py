@@ -101,8 +101,8 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "agg",
-            "description": "Aggregate locations with these (blank = per-location columns only; one pick = "
-            '"{variable}_d+i"; several = "{variable}_{agg}_d+i" each; weight above needs "mean" among them)',
+            "description": "Aggregate locations with these (blank = per-location columns only; otherwise "
+            '"{variable}_{agg}_d+i" for each pick; weight above needs "mean" among them)',
             "required": False,
             "default": None,
             "kind": "multiselect",

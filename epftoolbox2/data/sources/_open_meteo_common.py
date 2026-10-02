@@ -19,7 +19,6 @@ _RUN_RE = re.compile(r"^([01]\d|2[0-3])$")
 _LOCATION_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 # Variables that cannot be averaged arithmetically when combining several locations (see `_combine_locations`).
 _CIRCULAR_VARIABLE_RE = re.compile(r"direction")
-_CATEGORICAL_VARIABLES = ("weather_code",)
 
 # Valid `agg` values (see OpenMeteoSource.agg): a bare string or a non-empty list of these.
 AGGREGATIONS = ("mean", "median", "min", "max", "sum")
@@ -172,10 +171,8 @@ def _parse_location_spec(name: str, spec: Any) -> Dict[str, Any]:
 def parse_agg(agg: Optional[Union[str, List[str], Tuple[str, ...]]]) -> Optional[Tuple[str, ...]]:
     """Normalise `agg` (see `OpenMeteoSource.agg`) to a tuple of `AGGREGATIONS` names, or `None`.
 
-    A bare string and a one-element list both normalise to a length-1 tuple; callers that need to tell them
-    apart for column naming (`{variable}_d+i` for a string, `{variable}_{agg}_d+i` for a list — see
-    `_combine_locations`/`aggregated_variable_names`) must check `isinstance(agg, (list, tuple))` on the
-    original value themselves, not on what this function returns.
+    A bare string and a one-element list both normalise to a length-1 tuple: they name their output columns the
+    same way, `{variable}_{agg}_d+i` (see `_combine_locations`/`aggregated_variable_names`).
     """
     if agg is None:
         return None
@@ -193,35 +190,28 @@ def parse_agg(agg: Optional[Union[str, List[str], Tuple[str, ...]]]) -> Optional
     return values
 
 
-def _is_categorical(variable: str) -> bool:
-    return variable in _CATEGORICAL_VARIABLES
-
-
 def _is_direction(variable: str) -> bool:
     return bool(_CIRCULAR_VARIABLE_RE.search(variable))
 
 
-def aggregated_variable_names(columns: List[str], agg: Optional[Tuple[str, ...]], suffixed: bool) -> List[str]:
-    """Base variable names (before `_d+i`) that `_combine_locations` actually emits for `columns`, given a
-    normalised `agg` (as `parse_agg` returns it) and whether the caller names by a list of aggregations
-    (`suffixed`: `{variable}_{kind}` for each entry) rather than one bare string (`{variable}`, un-suffixed).
+def aggregated_variable_names(columns: List[str], agg: Optional[Tuple[str, ...]]) -> List[str]:
+    """Base variable names (before `_d+i`), `{variable}_{kind}`, that `_combine_locations` actually emits for
+    `columns` given a normalised `agg` (as `parse_agg` returns it).
 
     Mirrors `_combine_locations`'s own skip rules, so callers such as `information_set.source_rules` can find
-    the exact columns without recomputing anything: `weather_code` (`_CATEGORICAL_VARIABLES`) never appears; a
-    `*direction*` column only appears for `kind="mean"` (see `_CIRCULAR_VARIABLE_RE`). `agg` of `None` (or
-    empty) gives an empty list, since no aggregated column is emitted at all then.
+    the exact columns without recomputing anything: a `*direction*` column only appears for `kind="mean"` (see
+    `_CIRCULAR_VARIABLE_RE`). `agg` of `None` (or empty) gives an empty list, since no aggregated column is
+    emitted at all then.
     """
     if not agg:
         return []
     names = []
     for column in columns:
-        if _is_categorical(column):
-            continue
         direction = _is_direction(column)
         for kind in agg:
             if direction and kind != "mean":
                 continue
-            names.append(f"{column}_{kind}" if suffixed else column)
+            names.append(f"{column}_{kind}")
     return names
 
 
@@ -234,16 +224,14 @@ def _combine_locations(frames: List[pd.DataFrame], kind: str, weights: np.ndarra
     correctly (`np.min`/`max`/`median`/`sum` of a slice containing NaN is NaN). A column whose variable name
     (before `_d+i`) contains "direction" uses a weighted circular mean for `kind="mean"` (350 deg and 10 deg
     average to about 0, not 180) and is skipped entirely for every other `kind`: min/max/median/sum have no
-    meaningful value for a circular quantity. A categorical variable (`_CATEGORICAL_VARIABLES`, e.g.
-    `weather_code`) is skipped entirely for every `kind` — it has no meaningful aggregate. A row is NaN
-    wherever any location is NaN there: weights are never re-normalised over just the locations that have a
-    value. See `aggregated_variable_names` for the same skip rules without the computation.
+    meaningful value for a circular quantity. `weather_code` (WMO code, ordinal: 0 is clear, higher is worse
+    weather) is aggregated like any other numeric column, not skipped. A row is NaN wherever any location is
+    NaN there: weights are never re-normalised over just the locations that have a value. See
+    `aggregated_variable_names` for the same skip rules without the computation.
     """
     combined = {}
     for column in frames[0].columns:
         variable = column.rsplit("_d+", 1)[0]
-        if _is_categorical(variable):
-            continue
         direction = _is_direction(variable)
         if direction and kind != "mean":
             continue
@@ -484,12 +472,12 @@ class OpenMeteoBase(DataSource):
 
         Every location is fetched by another instance of this class sharing every other setting, so all
         locations follow the same cutoff. With `agg` set, this returns one aggregated series per variable and
-        aggregation (see `_combine_locations`): `{prefix}_{variable}_d+i` for a bare string, or
-        `{prefix}_{variable}_{kind}_d+i` per entry for a list; `keep_locations=True` also adds the per-location
-        columns `{prefix}_{name}_{variable}_d+i`. With `agg=None`, only the per-location columns are returned
-        (`_configure_locations` requires `agg` to be set before `keep_locations` can be `True`, so this is the
-        only way to reach this branch). One shared "now" is used for every location so a live fetch can't
-        settle some locations as final and others as still provisional.
+        aggregation (see `_combine_locations`), always as `{prefix}_{variable}_{kind}_d+i` (a bare string and a
+        one-element list name their single aggregation the same way); `keep_locations=True` also adds the
+        per-location columns `{prefix}_{name}_{variable}_d+i`. With `agg=None`, only the per-location columns
+        are returned (`_configure_locations` requires `agg` to be set before `keep_locations` can be `True`, so
+        this is the only way to reach this branch). One shared "now" is used for every location so a live fetch
+        can't settle some locations as final and others as still provisional.
         """
         now = self._now()
         for source in self._location_sources:
@@ -511,12 +499,10 @@ class OpenMeteoBase(DataSource):
         agg = self._agg
         parts = []
         if agg is not None:
-            suffixed = isinstance(self.agg, (list, tuple))
             weights = self._location_weights if self._locations_weighted else np.full(len(frames), 1.0 / len(frames))
             for kind in agg:
                 combined = _combine_locations(frames, kind, weights)
-                if suffixed:
-                    combined.columns = [_agg_suffixed(col, kind) for col in combined.columns]
+                combined.columns = [_agg_suffixed(col, kind) for col in combined.columns]
                 if self.prefix:
                     combined.columns = [f"{self.prefix}_{col}" for col in combined.columns]
                 parts.append(combined)
@@ -540,12 +526,6 @@ class OpenMeteoBase(DataSource):
         if self.keep_locations:
             return
         variables = [col.rsplit("_d+", 1)[0] for col in columns]
-        categorical = sorted({v for v in variables if _is_categorical(v)})
-        if categorical:
-            self.logger.info(
-                f"{self._label}: {', '.join(categorical)} is categorical and is not aggregated; use "
-                "keep_locations=True to keep it per location"
-            )
         if any(kind != "mean" for kind in agg):
             directional = sorted({v for v in variables if _is_direction(v)})
             if directional:
@@ -716,9 +696,9 @@ class OpenMeteoBase(DataSource):
             if self.keep_locations:
                 config["keep_locations"] = True
             if self._agg is not None:
-                # `self.agg` (not the normalised `self._agg` tuple) so a bare string and a one-element list —
-                # different output column names, see `_fetch_locations` — hash to different cache keys too.
-                config["agg"] = self.agg
+                # The normalised tuple: a bare string and a one-element list naming the same aggregation
+                # produce the same output columns (see `_fetch_locations`), so they share a cache key too.
+                config["agg"] = list(self._agg)
         else:
             config["latitude"] = self.latitude
             config["longitude"] = self.longitude

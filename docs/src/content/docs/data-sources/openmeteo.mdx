@@ -221,8 +221,7 @@ Every location is fetched by another `OpenMeteoSource` sharing every other param
 | `agg` | Output |
 |-------|--------|
 | `None` *(default)* | Only the per-location columns, `{prefix}_{name}_{variable}_d+i` — a plain multi-city dataset |
-| `"mean"` \| `"median"` \| `"min"` \| `"max"` \| `"sum"` | One aggregated series per variable, `{prefix}_{variable}_d+i` |
-| A list, e.g. `["mean", "max"]` | One series per variable **and** entry, `{prefix}_{variable}_{agg}_d+i` — even with a single entry, unlike the bare-string form |
+| `"mean"` \| `"median"` \| `"min"` \| `"max"` \| `"sum"`, or a list of them, e.g. `["mean", "max"]` | One series per variable **and** aggregation, `{prefix}_{variable}_{agg}_d+i`. A bare string and a one-element list name their column the same way |
 
 `keep_locations=True` additionally returns the per-location columns alongside whatever `agg` produces; it raises
 if `agg` is `None` (the per-location columns are then already the only output).
@@ -240,18 +239,18 @@ OpenMeteoSource(prefix="pl", locations={
 
 # one averaged series per variable (plain mean: no weights given)
 OpenMeteoSource(prefix="pl", locations={...}, agg="mean")
-# pl_temperature_2m_d+1, ...
+# pl_temperature_2m_mean_d+1, ...
 
 # weighted mean
 OpenMeteoSource(prefix="pl", locations={
     "warsaw": {"latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},   # millions
     "krakow": {"latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
 }, agg="mean")
-# pl_temperature_2m_d+1, ... (weighted)
+# pl_temperature_2m_mean_d+1, ... (weighted)
 
 # aggregate and keep the per-location columns too
 OpenMeteoSource(prefix="pl", locations={...}, agg="max", keep_locations=True)
-# pl_temperature_2m_d+1, pl_warsaw_temperature_2m_d+1, pl_krakow_temperature_2m_d+1, ...
+# pl_temperature_2m_max_d+1, pl_warsaw_temperature_2m_d+1, pl_krakow_temperature_2m_d+1, ...
 
 # several aggregates at once
 OpenMeteoSource(prefix="pl", locations={...}, agg=["mean", "max"])
@@ -274,8 +273,9 @@ OpenMeteoSource(prefix="pl", locations={...}, agg=["mean", "max"])
   and 10° average to about 0°, not 180°. Every other aggregation **skips** direction columns entirely — there is
   no meaningful min/max/median/sum for a circular quantity. `keep_locations=True` still returns them per
   location.
-- **`weather_code`** is categorical and is **never aggregated**, for any `agg` value — it is dropped from the
-  aggregated output unless `keep_locations=True` returns it per location.
+- **`weather_code`** is a WMO code and is ordinal (0 is clear, a higher code is worse weather), so it is aggregated
+  like any other numeric column. The mean of several codes is a fractional index, not a code, and `max` is the worst
+  weather at any location.
 - A row is missing (`NaN`) if **any** location is missing at that row: weights are never re-normalised over just
   the available locations, and this is unaffected by `agg`. Locations are unioned on their index first, and
   trailing rows with no value at all are dropped, as elsewhere in the Open-Meteo source.

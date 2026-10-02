@@ -174,7 +174,7 @@ class TestFetchMean:
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
         # weights normalise to [0.75, 0.25]: 0.75*10 + 0.25*30 = 15; 0.75*20 + 0.25*0 = 15
-        np.testing.assert_allclose(df["temperature_2m_d+1"].tolist(), [15.0, 15.0])
+        np.testing.assert_allclose(df["temperature_2m_mean_d+1"].tolist(), [15.0, 15.0])
 
     def test_unweighted_mean_without_location_weights(self):
         index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
@@ -187,7 +187,7 @@ class TestFetchMean:
             ],
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert df["temperature_2m_d+1"].iloc[0] == 20.0  # plain average of 10 and 30
+        assert df["temperature_2m_mean_d+1"].iloc[0] == 20.0  # plain average of 10 and 30
 
     def test_nan_at_any_location_makes_the_mean_nan(self):
         # The NaN row is not last, so the trailing-row trim does not remove it.
@@ -200,9 +200,9 @@ class TestFetchMean:
             ],
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert df["temperature_2m_d+1"].iloc[0] == 15.0
-        assert np.isnan(df["temperature_2m_d+1"].iloc[1])
-        assert df["temperature_2m_d+1"].iloc[2] == 15.0
+        assert df["temperature_2m_mean_d+1"].iloc[0] == 15.0
+        assert np.isnan(df["temperature_2m_mean_d+1"].iloc[1])
+        assert df["temperature_2m_mean_d+1"].iloc[2] == 15.0
 
     def test_prefix_applied_to_aggregated_columns(self):
         index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
@@ -215,7 +215,7 @@ class TestFetchMean:
             prefix="pl",
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert list(df.columns) == ["pl_temperature_2m_d+1"]
+        assert list(df.columns) == ["pl_temperature_2m_mean_d+1"]
 
     def test_indices_are_unioned_and_missing_rows_are_nan(self):
         idx1 = pd.date_range("2024-01-10 00:00", periods=2, freq="1h", tz="UTC")
@@ -231,8 +231,8 @@ class TestFetchMean:
         # 00:00 only in location 1 -> NaN; 01:00 and 02:00 both present -> weighted; last row trimmed by the tail
         # trim only if fully NaN, so 00:00 (partially NaN combined -> NaN) is dropped only if it's the very end.
         assert pd.Timestamp("2024-01-10 00:00", tz="UTC") in df.index
-        assert np.isnan(df.loc["2024-01-10 00:00", "temperature_2m_d+1"])
-        np.testing.assert_allclose(df.loc["2024-01-10 01:00", "temperature_2m_d+1"], 0.75 * 20 + 0.25 * 30)
+        assert np.isnan(df.loc["2024-01-10 00:00", "temperature_2m_mean_d+1"])
+        np.testing.assert_allclose(df.loc["2024-01-10 01:00", "temperature_2m_mean_d+1"], 0.75 * 20 + 0.25 * 30)
 
     def test_all_empty_frames_return_empty_dataframe(self):
         source = make_source(agg="mean", fetch_returns=[pd.DataFrame(), pd.DataFrame()])
@@ -270,7 +270,7 @@ class TestOtherAggregations:
             ],
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert df["temperature_2m_d+1"].iloc[0] == expected
+        assert df[f"temperature_2m_{agg}_d+1"].iloc[0] == expected
 
     def test_nan_at_any_location_makes_it_nan(self):
         # The NaN row is not last, so the trailing-row trim (drops rows with no value at all) does not remove it.
@@ -284,8 +284,8 @@ class TestOtherAggregations:
             ],
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert np.isnan(df["temperature_2m_d+1"].iloc[0])
-        assert df["temperature_2m_d+1"].iloc[1] == 30.0
+        assert np.isnan(df["temperature_2m_max_d+1"].iloc[0])
+        assert df["temperature_2m_max_d+1"].iloc[1] == 30.0
 
     def test_weights_have_no_effect_on_non_mean_aggregations(self):
         # "mean" is weighted; every other aggregation is always unweighted, even when weights are given
@@ -340,7 +340,7 @@ class TestAggListNaming:
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
         assert list(df.columns) == ["temperature_2m_max_d+1"]
 
-    def test_bare_string_has_no_suffix(self):
+    def test_bare_string_is_suffixed_the_same_way_as_a_one_element_list(self):
         index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
         source = make_source(
             locations=LOCATIONS_NO_WEIGHT,
@@ -351,7 +351,7 @@ class TestAggListNaming:
             ],
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert list(df.columns) == ["temperature_2m_d+1"]
+        assert list(df.columns) == ["temperature_2m_max_d+1"]
 
     def test_multiple_aggregations_each_get_their_own_column(self):
         index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
@@ -392,7 +392,7 @@ class TestWindDirection:
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
         # A plain arithmetic mean would give 180 deg (due south); the circular mean must be near 0/360.
-        value = df["wind_direction_10m_d+1"].iloc[0]
+        value = df["wind_direction_10m_mean_d+1"].iloc[0]
         assert value < 5 or value > 355
 
     def test_direction_is_skipped_for_max(self):
@@ -407,8 +407,8 @@ class TestWindDirection:
             ],
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert "wind_direction_10m_d+1" not in df.columns
-        assert df["temperature_2m_d+1"].iloc[0] == 30.0
+        assert "wind_direction_10m_max_d+1" not in df.columns
+        assert df["temperature_2m_max_d+1"].iloc[0] == 30.0
 
     def test_direction_kept_for_mean_but_skipped_for_max_in_a_list(self):
         index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
@@ -425,11 +425,13 @@ class TestWindDirection:
         assert list(df.columns) == ["wind_direction_10m_mean_d+1"]
 
 
-class TestCategoricalColumns:
-    def test_weather_code_is_not_aggregated(self):
+class TestWeatherCodeColumn:
+    def test_weather_code_is_aggregated_like_any_other_numeric_column(self):
+        # WMO codes are ordinal (0 = clear, higher = worse), so the usual aggregations are meaningful.
         index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
         source = make_source(
-            agg="mean",
+            locations=LOCATIONS_NO_WEIGHT,
+            agg="max",
             columns=["temperature_2m", "weather_code"],
             fetch_returns=[
                 _frame(index, **{"weather_code_d+1": [1.0], "temperature_2m_d+1": [10.0]}),
@@ -437,10 +439,10 @@ class TestCategoricalColumns:
             ],
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert "weather_code_d+1" not in df.columns
-        assert "temperature_2m_d+1" in df.columns
+        assert df["weather_code_max_d+1"].iloc[0] == 2.0
+        assert df["temperature_2m_max_d+1"].iloc[0] == 30.0
 
-    def test_keep_locations_exposes_weather_code_per_location_only(self):
+    def test_keep_locations_also_keeps_the_per_location_weather_code(self):
         index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")
         source = make_source(
             agg="mean",
@@ -452,7 +454,7 @@ class TestCategoricalColumns:
             ],
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert "weather_code_d+1" not in df.columns
+        assert df["weather_code_mean_d+1"].iloc[0] == 1.25  # weighted mean: 0.75*1 + 0.25*2
         assert df["warsaw_weather_code_d+1"].iloc[0] == 1.0
         assert df["krakow_weather_code_d+1"].iloc[0] == 2.0
 
@@ -470,7 +472,7 @@ class TestKeepLocations:
             prefix="pl",
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert "pl_temperature_2m_d+1" in df.columns
+        assert "pl_temperature_2m_mean_d+1" in df.columns
         assert "pl_warsaw_temperature_2m_d+1" in df.columns
         assert "pl_krakow_temperature_2m_d+1" in df.columns
         assert df["pl_warsaw_temperature_2m_d+1"].iloc[0] == 10.0
@@ -486,7 +488,7 @@ class TestKeepLocations:
             ],
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert list(df.columns) == ["temperature_2m_d+1"]
+        assert list(df.columns) == ["temperature_2m_mean_d+1"]
 
 
 # ---------------------------------------------------------------------------
@@ -567,7 +569,7 @@ class TestCacheConfigAndSerialization:
         assert "latitude" not in config
         assert "longitude" not in config
         assert "keep_locations" not in config  # only included when True
-        assert config["agg"] == "mean"
+        assert config["agg"] == ["mean"]
 
     def test_changing_a_weight_changes_the_cache_config(self):
         base = OpenMeteoSource(
@@ -593,8 +595,8 @@ class TestCacheConfigAndSerialization:
         ).get_cache_config()
         assert base != other
 
-    def test_agg_as_string_and_as_one_element_list_have_different_cache_configs(self):
-        # They also produce differently-named output columns (see TestAggListNaming), so must not share a
+    def test_agg_as_string_and_as_one_element_list_share_a_cache_config(self):
+        # They also produce identically-named output columns (see TestAggListNaming), so they can share a
         # cache key.
         bare = OpenMeteoSource(
             locations=LOCATIONS_NO_WEIGHT, agg="max", columns=["temperature_2m"], timezone=TZ
@@ -602,7 +604,7 @@ class TestCacheConfigAndSerialization:
         listed = OpenMeteoSource(
             locations=LOCATIONS_NO_WEIGHT, agg=["max"], columns=["temperature_2m"], timezone=TZ
         ).get_cache_config()
-        assert bare != listed
+        assert bare == listed
 
     def test_locations_and_single_point_configs_are_never_equal(self):
         point = OpenMeteoSource(latitude=52.23, longitude=21.01, columns=["temperature_2m"], timezone=TZ)
@@ -703,7 +705,7 @@ class TestSingleRunsApiLocations:
             ],
         )
         df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
-        assert df["temperature_2m_d+1"].iloc[0] == 0.75 * 10 + 0.25 * 30
+        assert df["temperature_2m_mean_d+1"].iloc[0] == 0.75 * 10 + 0.25 * 30
 
     def test_per_location_columns_without_agg(self):
         index = pd.date_range("2024-01-10", periods=1, freq="1h", tz="UTC")

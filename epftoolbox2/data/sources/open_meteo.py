@@ -188,7 +188,7 @@ class OpenMeteoSource(OpenMeteoBase):
     UNAVAILABLE_RUN = "requested model run is not available"
 
     VALID_TEMPORAL_RESOLUTIONS = {None, "native", "hourly_3", "hourly_6"}
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(
         self,
@@ -228,15 +228,15 @@ class OpenMeteoSource(OpenMeteoBase):
             agg: Only with ``locations`` (several points); raises with a single ``latitude``/``longitude``
                 point. ``None`` (default), ``"mean"``, ``"median"``, ``"min"``, ``"max"``, ``"sum"``, or a list
                 of these. ``None``: no aggregation, only the per-location columns (see ``locations``). A bare
-                string: one aggregated series per variable, `{prefix}_{variable}_d+i`. A list: one series per
-                variable *and* entry, `{prefix}_{variable}_{agg}_d+i` (even with one entry — the bare-string
-                and one-element-list forms name their output differently). ``"mean"`` is a weighted mean when
-                every location has a ``weight`` (normalised to sum to 1), else a plain mean; giving weights
-                when ``agg`` doesn't include ``"mean"`` raises, and in a list only ``"mean"`` is weighted, the
-                rest are always unweighted. A `*direction*` column (e.g. `wind_direction_10m`) uses the
-                circular (weighted) mean for ``"mean"`` and is skipped entirely for every other aggregation,
-                which has no meaningful min/max/median/sum for a circular quantity; `weather_code` is never
-                aggregated. A row is NaN wherever any location is NaN there.
+                string or a list: one aggregated series per variable and entry, `{prefix}_{variable}_{agg}_d+i`
+                (a bare string and a one-element list containing it name the same output the same way).
+                ``"mean"`` is a weighted mean when every location has a ``weight`` (normalised to sum to 1),
+                else a plain mean; giving weights when ``agg`` doesn't include ``"mean"`` raises, and in a list
+                only ``"mean"`` is weighted, the rest are always unweighted. A `*direction*` column (e.g.
+                `wind_direction_10m`) uses the circular (weighted) mean for ``"mean"`` and is skipped entirely
+                for every other aggregation, which has no meaningful min/max/median/sum for a circular
+                quantity. `weather_code` (an ordinal WMO code) is aggregated like any other numeric column. A
+                row is NaN wherever any location is NaN there.
             keep_locations: With ``agg`` set, also return each location's own columns,
                 `{prefix}_{name}_{variable}_d+i` (default: False). Raises if ``agg`` is ``None``: the
                 per-location columns are then already the only output.

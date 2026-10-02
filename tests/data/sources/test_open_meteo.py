@@ -733,7 +733,7 @@ class TestOpenMeteoSourceParsing:
 class TestCacheConfigAndSerialization:
     def test_cache_config_has_schema_version_and_key_parameters(self):
         config = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw").get_cache_config()
-        assert config["schema_version"] >= 3
+        assert config["schema_version"] >= 5
         for key in ("api", "run", "timezone", "horizon", "model", "columns"):
             assert key in config
 
