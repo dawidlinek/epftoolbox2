@@ -413,8 +413,8 @@ class TestCurveTypeA03:
 class TestWeekAheadDailyMarketZone:
     """A neighbouring area's week-ahead daily value (A31) must land on the *market*'s local day when this
     source is combined with another area in a DataPipeline, not on the neighbour's own local day (finding: a
-    Finnish or Lithuanian (EET) neighbour of a Polish (CET) market pipeline used to be off by one hour, and
-    around a DST switch even lands on the wrong calendar day). See EntsoeSource._daily_zone."""
+    Finnish or Lithuanian (EET) neighbour of a Polish (CET) market pipeline would be off by one hour, and
+    around a DST switch even land on the wrong calendar day). See EntsoeSource._daily_zone."""
 
     def _bound_neighbour(self, area, zone, first_day, values, market="Europe/Warsaw"):
         week = _doc(_series(_week_period(zone, first_day, values), business_type="A60", out_bz=AREAS[area]))

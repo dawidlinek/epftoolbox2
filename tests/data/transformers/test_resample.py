@@ -245,7 +245,7 @@ class TestDownsampling:
         assert out.iloc[2].isna().all()
 
     def test_mean_of_quarter_hours_not_the_first(self):
-        """empirical F2: the old two-step pattern kept only the :00 quarter-hour of every 15-min series."""
+        """empirical F2: the hourly value is the mean of the four quarter-hours, not just the :00 one."""
         idx = pd.date_range("2024-10-28 05:00", periods=8, freq="15min", tz="UTC")
         load = pd.Series([17829.0, 18472.0, 19047.0, 19743.0, 1.0, 2.0, 3.0, 4.0], index=idx)
         out = ResampleTransformer(freq="1h").transform(load.to_frame("load_actual"))

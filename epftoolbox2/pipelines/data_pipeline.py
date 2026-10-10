@@ -812,19 +812,18 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 def _is_file_cache_stale(meta: Dict[str, Any], end: pd.Timestamp) -> bool:
     """Whether a matching-fingerprint file cache might now be missing data that has become settled since it was
-    written (pipelines review, single-file cache finding: the per-source cache never records the unsettled tail
-    before "now" as covered, but the single-file cache had no such boundary at all, so a fixed date range whose
-    `end` was in the future cached NaN for not-yet-published rows forever).
+    written (a fixed date range whose `end` is in the future would otherwise cache NaN for not-yet-published rows
+    forever, which the per-source cache avoids by never recording the unsettled tail before "now" as covered).
 
     A file is trusted only if either the whole requested range was already settled when it was fetched (`end` was
     at or before that fetch's settled boundary, so nothing about it could still change), or the settled boundary
-    has not moved since (same day, or `unsettled_period` unchanged). A file written before this check existed has
-    no "settled_at" and is always treated as stale, so it is refetched once after an upgrade.
+    has not moved since (same day, or `unsettled_period` unchanged). A file without "settled_at" is always treated
+    as stale.
 
     A source can also declare that its rows from some instant on are not settled (`DataSource`, e.g. school holidays
     the API has not published yet). The earliest such instant is stored as "settled_until", and a file whose
     "settled_until" is before the requested `end` is never reused: the fetch it holds was only settled up to there.
-    A missing value (a file written before this field existed) means the sources declared nothing.
+    A missing value means the sources declared nothing.
     """
     settled_until = meta.get("settled_until")
     if settled_until is not None:
@@ -845,7 +844,7 @@ def _is_file_cache_stale(meta: Dict[str, Any], end: pd.Timestamp) -> bool:
 def _describe_mismatch(meta: Dict[str, Any], fingerprint: Dict[str, Any]) -> str:
     old = meta.get("config")
     if not old:
-        return "an unknown configuration (written by an older version)"
+        return "an unknown configuration"
     if (old.get("start"), old.get("end")) != (fingerprint["start"], fingerprint["end"]):
         return f"{old.get('start')} .. {old.get('end')}, requested {fingerprint['start']} .. {fingerprint['end']}"
     if old.get("sources") != fingerprint["sources"]:

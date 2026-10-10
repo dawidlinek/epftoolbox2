@@ -107,7 +107,7 @@ class TestCacheWriteRead:
         assert not [f for f in files if f.endswith(".tmp")]
 
     def test_round_trip_is_exact(self, cache_manager, sample_config, frozen_now):
-        """tz, dtypes and every float bit survive the cache (CSV lost the last digit of some floats)."""
+        """tz, dtypes and every float bit survive the cache (a CSV round trip would lose the last digit of some floats)."""
         idx = pd.date_range("2024-03-30", periods=96, freq="15min", tz="UTC")
         rng = np.random.default_rng(0)
         df = pd.DataFrame(
@@ -225,8 +225,8 @@ class TestCoverage:
 
 
 class TestCoverageGaps:
-    """pipelines-integration H4-follow-up: a gap in the middle of a response used to be recorded as covered, so
-    the missing hour was never fetched again — silently lost for good."""
+    """pipelines-integration H4-follow-up: a gap in the middle of a response must not be recorded as covered,
+    or the missing hour would never be fetched again — silently lost for good."""
 
     def test_internal_gap_is_not_recorded_as_covered(self, cache_manager, sample_config, frozen_now):
         key = cache_manager.get_cache_key(sample_config)
@@ -273,8 +273,8 @@ class TestCoverageGaps:
         ]
 
     def test_single_timestamp_response_is_cached(self, cache_manager, sample_config, frozen_now):
-        """A source that returns exactly one row for the requested range used to never be cached at all, because
-        `covered` computed from a zero-length step equalled `start` and failed the `covered > start` check."""
+        """A source that returns exactly one row for the requested range is cached, although `covered` computed
+        from a zero-length step equals `start` and would fail the `covered > start` check."""
         key = cache_manager.get_cache_key(sample_config)
         df = pd.DataFrame({"price": [42.0]}, index=pd.DatetimeIndex([ts("2024-01-01")]))
 
@@ -381,10 +381,10 @@ class TestPerColumnTailCoverage:
 
 
 class TestResolutionChangeGaps:
-    """entsoe-cache/pipelines review, finding 1: `covered_ranges` used to pick one "most common step" for the
+    """entsoe-cache/pipelines review, finding 1: `covered_ranges` must not pick one "most common step" for the
     whole response. A fetch that changes resolution partway through (e.g. the ENTSO-E 15-minute go-live) made
     every diff on one side look like a gap relative to the other side's step, producing thousands of slivers and
-    covering only a small fraction of the span -- refetched in full on every run."""
+    covering only a small fraction of the span, refetched in full on every run."""
 
     def test_hourly_then_15min_does_not_cause_endless_refetch(self, cache_manager, sample_config, frozen_now):
         key = cache_manager.get_cache_key(sample_config)
@@ -400,7 +400,7 @@ class TestResolutionChangeGaps:
 
         total_span = end - start
         missing_span = sum((e - s for s, e in missing), pd.Timedelta(0))
-        # A small boundary sliver refetched is acceptable and documented; the old bug refetched most of the span.
+        # A small boundary sliver refetched is acceptable and documented; refetching most of the span is not.
         assert len(missing) < 10, missing
         assert missing_span < pd.Timedelta(hours=6), missing_span
         assert missing_span < total_span * 0.01
@@ -471,13 +471,13 @@ class TestSeams:
 
     def test_each_file_is_sliced_to_its_own_range(self, cache_manager, sample_config, frozen_now):
         key = cache_manager.get_cache_key(sample_config)
-        # file A was written by an older version: it holds a half-empty row at its end (price only, no load)
+        # file A holds a half-empty row at its end (price only, no load)
         a = hourly("2024-01-01", "2024-01-03", load=0.0, price=100.0)
         a.loc[ts("2024-01-03"), "price"] = 999.0
         cache_manager.write_cache(key, a, ts("2024-01-01"), ts("2024-01-03"), sample_config)
         path = cache_manager.cache_dir / key
         name_a = json.loads((path / "metadata.json").read_text())["cached_ranges"][0]["filename"]
-        a.to_parquet(path / name_a)  # put the boundary row back into the file, as old caches have it
+        a.to_parquet(path / name_a)  # put the boundary row back into the file
 
         b = hourly("2024-01-03", "2024-01-05", load=48.0, price=148.0)
         cache_manager.write_cache(key, b, ts("2024-01-03"), ts("2024-01-05"), sample_config)

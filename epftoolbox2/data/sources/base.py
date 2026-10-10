@@ -61,7 +61,7 @@ class DataSource(ABC):
         Returns:
             Dictionary of configuration parameters that uniquely identify this source's output, or ``None`` to
             disable caching. Include every parameter that changes the output, and a ``"schema_version"`` entry
-            that is bumped whenever parsing changes, so caches written by older code are not served. The cache key
+            that is bumped whenever parsing changes, so cached frames are rebuilt instead of served. The cache key
             also contains the source class and the package cache format version.
         """
         pass

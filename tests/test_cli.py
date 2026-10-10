@@ -74,9 +74,9 @@ def test_csv_round_trip_keeps_the_local_time_zone_and_exact_values(tmp_path, loc
 
 
 def test_save_frame_csv_does_not_rename_the_callers_index(tmp_path, local_data):
-    """DST/timezone review finding 5: `save_frame_csv` used to write the zone into the header by renaming
-    `df.index` in place; a shallow `copy(deep=False)` shares the Index object with the original DataFrame, so
-    that rename leaked back onto the caller's own frame. Saving must not mutate `df` at all."""
+    """DST/timezone review finding 5: `save_frame_csv` writes the zone into the header on a copy, but a
+    shallow `copy(deep=False)` shares the Index object with the original DataFrame, so renaming `df.index` in
+    place would leak onto the caller's own frame. Saving must not mutate `df` at all."""
     original_name = local_data.index.name
     save_frame_csv(local_data, tmp_path / "data.csv")
     assert local_data.index.name == original_name
@@ -180,7 +180,7 @@ def test_epf_data_then_epf_model_keeps_day_lags_aligned_with_targets(tmp_path, m
 
 def test_epf_data_then_epf_model_with_dst_normalize_keeps_day_lags_aligned(tmp_path, monkeypatch):
     """Same round trip with DSTNormalizeTransformer: its naive wall-clock output must also survive
-    `epf data` -> `epf model` so day lags and targets keep agreeing, including on the old DST switch day."""
+    `epf data` -> `epf model` so day lags and targets keep agreeing, including on a DST switch day."""
     loaded, records = _run_data_pipeline_cli_round_trip(
         tmp_path,
         monkeypatch,
@@ -202,9 +202,9 @@ def test_epf_data_then_epf_model_with_dst_normalize_keeps_day_lags_aligned(tmp_p
         )
 
 
-def test_old_csv_with_offsets_needs_the_zone(tmp_path, local_data):
-    path = tmp_path / "old.csv"
-    local_data.to_csv(path)  # what `epf data` wrote before: offsets, no zone name
+def test_csv_with_offsets_but_no_zone_name_needs_the_zone(tmp_path, local_data):
+    path = tmp_path / "plain.csv"
+    local_data.to_csv(path)  # a plain DataFrame.to_csv: offsets, no zone name in the header
 
     with pytest.raises(ValueError, match="--tz"):
         load_frame_csv(path)
@@ -251,10 +251,10 @@ def test_model_horizon_help_says_days():
     assert "days" in horizon.help and "hours" not in horizon.help
 
 
-def test_tui_asks_for_the_zone_of_an_old_csv(tmp_path, local_data, monkeypatch):
+def test_tui_asks_for_the_zone_of_a_csv_without_a_zone_name(tmp_path, local_data, monkeypatch):
     from epftoolbox2 import tui
 
-    path = tmp_path / "old.csv"
+    path = tmp_path / "plain.csv"
     local_data.to_csv(path)
     asked = []
 

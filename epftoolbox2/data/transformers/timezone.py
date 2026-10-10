@@ -31,7 +31,7 @@ class TimezoneTransformer(Transformer):
     time (``target_tz``) on that date.** The default anchor is ``target_tz`` itself (None), which is right
     whenever the daily column comes from the market's own area, in every zone — including EET/EEST and zones
     with a fixed UTC+3 offset, which a fixed ``"UTC+02:00"`` anchor gets wrong every summer (or every day, for a
-    zone that never observes UTC+2). ``EntsoeSource`` itself now anchors a *neighbouring* area's daily value to
+    zone that never observes UTC+2). ``EntsoeSource`` itself anchors a *neighbouring* area's daily value to
     the market's own local midnight already, when it is part of the same ``DataPipeline`` (see
     ``EntsoeSource._daily_zone``), so this snap is then already a no-op for it too; pass an explicit
     ``daily_anchor`` only for a column whose real anchor still differs from ``target_tz`` (e.g. a standalone
@@ -51,8 +51,8 @@ class TimezoneTransformer(Transformer):
             matches nothing in the frame is skipped.
         daily_anchor: Time zone whose calendar date a daily value belongs to: a UTC offset such as
             ``"UTC+02:00"`` or an IANA name. None (default) uses the resolved ``target_tz`` itself, matching
-            where ENTSO-E stamps A31 data for the market's own area (and, now, for any other area combined
-            into the same pipeline — see above).
+            where ENTSO-E stamps A31 data for the market's own area (and for any other area combined into
+            the same pipeline, see above).
 
     Example:
         >>> transformer = TimezoneTransformer(

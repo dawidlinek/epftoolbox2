@@ -224,8 +224,8 @@ def test_source_rules_week_ahead_uses_the_markets_own_zone_for_a_helsinki_index(
     """entsoe/information-set: `default_rules()`'s weekly rule for load_forecast_daily_min/max is evaluated in
     Europe/Brussels regardless of the actual market. For a Helsinki index issued Thursday 2024-01-11,
     `load_forecast_daily_max_d+4` delivers on Monday 2024-01-15, whose controlling Friday (2024-01-12) hasn't
-    published yet -- every period must be flagged alike. Period 0 used to be missed because Monday 00:00 EET
-    is still Sunday 23:00 in Brussels (UTC+2 vs UTC+1 in January), landing the value in the wrong ISO week."""
+    published yet -- every period must be flagged alike. Period 0 is the one at risk because Monday 00:00 EET
+    is still Sunday 23:00 in Brussels (UTC+2 vs UTC+1 in January), which would land the value in the wrong ISO week."""
     source = EntsoeSource("FI", api_key="test-key", type=["load"])
     DataPipeline(sources=[source], timezone="Europe/Helsinki")
     info = InformationSet("11:30", "Europe/Helsinki").with_source_rules([source])
@@ -741,12 +741,12 @@ def test_perturbation_follows_each_columns_delivery_time():
     ],
 )
 def test_perturbation_uses_each_rows_own_offset_near_a_dst_switch(run_day, first_changed_utc):
-    """DST/timezone review finding 3: `perturb_unknown` used to apply the issue day's own noon UTC offset to
-    every row, instead of each row's own. On a UTC-indexed frame, `load_forecast` (published 10:00 Brussels on
+    """DST/timezone review finding 3: `perturb_unknown` applies each row's own UTC offset, not the issue
+    day's own noon offset. On a UTC-indexed frame, `load_forecast` (published 10:00 Brussels on
     D-1) is delivered on the local calendar day, in Brussels, of the row itself; once that day has crossed a
-    DST switch relative to run_day, the stale issue-day offset put some rows on the wrong side of the
-    publication boundary. Before the fix, run day 2024-03-30 left `load_forecast` at 2024-03-31 22:00Z
-    unperturbed (it should not be, since 2024-03-31 is delivered in CEST, one hour further from UTC than
+    DST switch relative to run_day, the issue day's offset would put some rows on the wrong side of the
+    publication boundary. With it, run day 2024-03-30 would leave `load_forecast` at 2024-03-31 22:00Z
+    unperturbed (it must not be, since 2024-03-31 is delivered in CEST, one hour further from UTC than
     run_day's own CET offset); the mirror case near the autumn switch is off by an hour the other way."""
     idx = pd.date_range("2024-03-20", "2024-11-05", freq="1h", tz="UTC", inclusive="left")
     rng = np.random.default_rng(0)

@@ -1,8 +1,8 @@
 """The data contract a model run checks before any fit.
 
-Every check here replaces a failure mode that used to produce wrong or missing forecasts without an error:
-data at a finer resolution than `freq` (look-ahead through the training cut), columns that collide with
-the model's own target or id columns, predictors that don't exist, and non-numeric predictors.
+Every check here turns a failure mode that would otherwise produce wrong or missing forecasts without an error
+into an error: data at a finer resolution than `freq` (look-ahead through the training cut), columns that
+collide with the model's own target or id columns, predictors that don't exist, and non-numeric predictors.
 """
 
 import re

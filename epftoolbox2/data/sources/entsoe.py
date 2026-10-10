@@ -21,11 +21,8 @@ from epftoolbox2.logging import get_logger
 from .._market_timezone import resolve as _resolve_timezone
 from .base import DataSource
 
-# Bump whenever the output for the same parameters changes, so that cached frames from older parsers are not served.
-# 2: every price period kept on a uniform grid, SDAC sequence only, curveType A03 filled, A75 consumption split,
-#    daily values on the local calendar, [start, end) range, PsrType names.
-# 3: a week-ahead daily value (A31, load_forecast_daily_min/max) is anchored to the market zone bound onto this
-#    source by DataPipeline, not always this area's own (see _daily_zone); the cache key now includes it too.
+# Bump whenever the output for the same parameters changes, so that cached frames are rebuilt instead of served.
+# The cache key also contains the zone a week-ahead daily value (A31) is anchored to, see _daily_zone.
 SCHEMA_VERSION = 3
 
 

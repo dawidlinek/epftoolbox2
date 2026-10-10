@@ -26,7 +26,7 @@ def local_frame(start: str, end: str, freq: str = "1h", seed: int = 0) -> pd.Dat
 
 
 def test_day_lag_keeps_wall_clock_hour_across_dst():
-    # Formerly tests/test_known_issues.py: day lags shifted by elapsed time, not local calendar days.
+    # Day lags shift by local calendar days, not by elapsed time.
     index = pd.date_range("2024-03-29 22:00", "2024-04-01 00:00", freq="1h", tz="UTC").tz_convert(TZ)
     df = pd.DataFrame({"price": np.arange(len(index), dtype=float)}, index=index)
 

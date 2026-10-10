@@ -279,7 +279,7 @@ class TestDataPipelineSettingsInYaml:
 
 
 class TestSecretsInYaml:
-    """Known issue (rules/data.md) / pipelines M6: the API key used to be written to YAML in plain text."""
+    """Known issue (rules/data.md) / pipelines M6: the API key is not written to YAML in plain text."""
 
     def _entsoe(self, key="real-secret-123"):
         from epftoolbox2.data.sources import EntsoeSource

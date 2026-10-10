@@ -236,7 +236,7 @@ class TestOpenMeteoSourceInit:
             OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", api="single_runs", horizon=15)
 
     def test_timezone_is_required(self):
-        # A default used to compute the cutoff in the wrong zone for markets outside CET (e.g. a market's local
+        # A default zone would compute the cutoff in the wrong zone for markets outside CET (e.g. a market's local
         # day landing on the wrong UTC calendar date), leaking future runs. Construction with no zone is
         # allowed (a DataPipeline may still supply one later), but fetching without one anywhere raises.
         source = OpenMeteoSource(latitude=52.23, longitude=21.01)
@@ -493,7 +493,7 @@ class TestReturnedRange:
 class TestStoredStepHours:
     def test_ecmwf_ifs04_is_not_matched_by_the_hourly_ecmwf_ifs_prefix(self):
         # ecmwf_ifs04 (ECMWF IFS 0.4 deg) is stored 3-hourly (6-hourly beyond 144 h lead). Its name starts with
-        # "ecmwf_ifs", so without its own entry it used to match the hourly ecmwf_ifs (9 km) one instead,
+        # "ecmwf_ifs", so without its own entry it would match the hourly ecmwf_ifs (9 km) one instead,
         # understating how far the interpolated hourly value can reach into runs not yet published.
         assert stored_step_hours("ecmwf_ifs04", 1) == 3
         assert stored_step_hours("ecmwf_ifs04", 6) == 6
@@ -559,8 +559,7 @@ class TestSingleRunsFetch:
 
     def test_missing_run_leaves_nan_with_no_fallback_to_an_older_run(self):
         # api="single_runs" requests exactly the run at the cutoff; if the archive doesn't have it, the
-        # affected cells are NaN — there is no silent fallback to another run (unlike the old, removed
-        # OpenMeteoSingleRunsSource, which tried up to 4 older runs on the same cycle).
+        # affected cells are NaN — there is no silent fallback to another run.
         day = pd.Timestamp("2024-01-11", tz="UTC")
         missing_run = day  # run="00" -> cutoff/run instant is exactly local day D's midnight UTC
         archive = make_run_archive(missing={missing_run})

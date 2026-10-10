@@ -439,7 +439,7 @@ class TestOnehotColumnSet:
         return CalendarSource(country="PL", timezone="Europe/Warsaw", holidays="onehot", weekday=False, **kwargs)
 
     def test_columns_do_not_depend_on_the_years_fetched(self):
-        # Poland made Christmas Eve a public holiday from 2025, so its column used to exist only in 2025 ranges.
+        # Poland made Christmas Eve a public holiday from 2025, so its column must exist in 2024 ranges too, not only in 2025 ones.
         in_2024 = self._source().fetch(*_local_day("2024-12-10"))
         in_2025 = self._source().fetch(*_local_day("2025-12-10"))
         spanning = self._source().fetch(pd.Timestamp("2024-12-01", tz="UTC"), pd.Timestamp("2025-02-01", tz="UTC"))
@@ -484,7 +484,7 @@ class TestOnehotColumnSet:
             self._source().fetch(*_local_day("2025-12-24"))
 
     def test_split_run_through_the_cache_equals_an_uncached_run(self, tmp_path, monkeypatch):
-        """Cached pieces fetched separately are concatenated: a column missing from one piece used to become NaN."""
+        """Cached pieces fetched separately are concatenated: a column missing from one piece must not become NaN."""
         from epftoolbox2.pipelines import DataPipeline
 
         monkeypatch.chdir(tmp_path)

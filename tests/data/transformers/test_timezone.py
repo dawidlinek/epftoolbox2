@@ -272,8 +272,8 @@ class TestDailyAnchorRule:
         assert landed.tolist() == [1.0, 2.0, 3.0]
 
     def test_values_stamped_at_local_midnight_east_of_utc_plus_2(self):
-        """Data stamped at local midnight in EEST (UTC+3) still works with an explicit daily_anchor=target_tz
-        (now also the default — see TestDefaultAnchorIsTargetZone)."""
+        """Data stamped at local midnight in EEST (UTC+3) works with an explicit daily_anchor=target_tz
+        (also the default, see TestDefaultAnchorIsTargetZone)."""
         df = _a31_frame("2024-07-08", 4, ["2024-07-09 21:00"], [5.0])  # 00:00 EEST on 2024-07-10
         out = TimezoneTransformer(target_tz="Europe/Helsinki", daily_anchor="Europe/Helsinki").transform(df)
         landed = out["load_forecast_daily_min"].dropna()
@@ -283,15 +283,15 @@ class TestDailyAnchorRule:
 class TestDefaultAnchorIsTargetZone:
     """DST/timezone review finding 1: ENTSO-E always stamps A31 daily values at the *area's own* local midnight.
     The default `daily_anchor` (None) must therefore resolve to `target_tz`, not a fixed UTC+2 offset — which
-    silently misplaces every value in EET/EEST zones every summer, and every value, year-round, in a zone with
-    a fixed UTC+3 offset (real FI data: 336/336 hourly rows wrong under the old default, 2024-06-03..16)."""
+    would silently misplace every value in EET/EEST zones every summer, and every value, year-round, in a zone
+    with a fixed UTC+3 offset (real FI data: 336/336 hourly rows wrong with a fixed anchor, 2024-06-03..16)."""
 
     @pytest.mark.parametrize(
         "tz, local_day",
         [
-            ("Europe/Helsinki", "2024-01-10"),  # EET winter, UTC+2 — coincides with the old fixed anchor
-            ("Europe/Helsinki", "2024-07-10"),  # EEST summer, UTC+3 — the old fixed anchor got this wrong
-            ("Europe/Istanbul", "2024-01-10"),  # fixed UTC+3, no DST — always wrong under the old anchor
+            ("Europe/Helsinki", "2024-01-10"),  # EET winter, UTC+2 — coincides with a fixed UTC+02:00 anchor
+            ("Europe/Helsinki", "2024-07-10"),  # EEST summer, UTC+3 — a fixed UTC+02:00 anchor gets this wrong
+            ("Europe/Istanbul", "2024-01-10"),  # fixed UTC+3, no DST — always wrong with a fixed UTC+02:00 anchor
             ("Europe/Istanbul", "2024-07-10"),
         ],
     )
@@ -307,7 +307,7 @@ class TestDefaultAnchorIsTargetZone:
 
     @pytest.mark.parametrize(
         "tz",
-        ["Europe/Warsaw", "Europe/Helsinki"],  # CET/CEST (correct under the old default too) and EET/EEST
+        ["Europe/Warsaw", "Europe/Helsinki"],  # CET/CEST (correct with a fixed UTC+02:00 anchor too) and EET/EEST
     )
     @pytest.mark.parametrize(
         "local_days",
@@ -364,7 +364,7 @@ class TestDailyColumnChecks:
         assert len(out) == len(df)
 
     def test_missing_midnight_at_the_edge_is_added(self):
-        """review F7: a value whose local midnight is not in the index used to stay at 23:00 of the day before."""
+        """review F7: a value whose local midnight is not in the index must not stay at 23:00 of the day before."""
         idx = pd.date_range("2024-01-08", "2024-01-09 21:00", freq="1h", tz="UTC")
         df = pd.DataFrame({"load_actual": 1.0, "load_forecast_daily_min": np.nan}, index=idx)
         extra = pd.DataFrame(

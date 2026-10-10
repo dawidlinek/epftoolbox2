@@ -272,7 +272,7 @@ class TestValidateCommon:
         source._validate_common()  # no max_horizon: does not raise
 
     def test_timezone_is_required(self):
-        # A default used to compute the cutoff in the wrong zone for markets outside CET (e.g. London's local
+        # A default zone would compute the cutoff in the wrong zone for markets outside CET (e.g. London's local
         # day landing on the wrong UTC calendar date), leaking future runs. Construction with no zone is
         # allowed (a DataPipeline may still supply one later), but using the source without one anywhere raises.
         source = _StubSource(timezone=None)

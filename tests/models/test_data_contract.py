@@ -1,7 +1,7 @@
 """The data contract BaseModel.run checks before any fit, and how skipped or failed tasks are reported.
 
-Each case here used to run silently with wrong or missing forecasts (review findings C1, F3, M5 and the
-worker error handling); now it must fail loudly or be counted.
+Each case here would run silently with wrong or missing forecasts (review findings C1, F3, M5 and the
+worker error handling) if it were not checked: it must fail loudly or be counted.
 """
 
 import numpy as np
@@ -190,7 +190,7 @@ def test_missing_test_predictors_are_counted_and_reported():
 
 
 def test_missing_test_row_is_skipped_not_mislabelled():
-    """A gap on the issue day used to make the worker forecast from the previous day's row."""
+    """A gap on the issue day must not make the worker forecast from the previous day's row."""
     df = make_market_data(days=120, noise=5.0, seed=2)
     gap = pd.Timestamp("2023-04-12 07:00", tz=df.index.tz)
     df = df.drop(index=gap)

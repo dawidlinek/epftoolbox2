@@ -278,7 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tz",
         metavar="ZONE",
         help="Local time zone of the data (e.g. Europe/Warsaw). Files from `epf data` name it in their header; "
-        "older files with UTC offsets need it",
+        "other files with UTC offsets need it",
     )
     model_p.add_argument(
         "--issue-time",

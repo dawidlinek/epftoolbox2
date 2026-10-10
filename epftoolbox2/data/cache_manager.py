@@ -30,10 +30,7 @@ from filelock import FileLock, SoftFileLock, Timeout
 from epftoolbox2.logging import get_logger
 
 # Bump when the on-disk layout or the meaning of cached ranges changes: every existing cache is then ignored.
-# 1: CSV files, whole requested range recorded. 2: Parquet, only returned and settled data recorded. 3: gaps are
-# detected against the local resolution instead of one step for the whole response, and a response with fewer
-# than three timestamps no longer has a lone diff trusted as the step for it — see ``covered_ranges``. 4: a
-# column that stops early is no longer masked by a longer column sharing the same merged row index — see
+# The cache is Parquet files plus a record of the ranges they cover, derived in ``covered_ranges`` and
 # ``_still_published_tail_cap``.
 CACHE_FORMAT_VERSION = 4
 
@@ -113,7 +110,7 @@ def hold_lock(lock: FileLock, description: str) -> Iterator[None]:
 
 def make_file_lock(lock_path: Path) -> FileLock:
     """``FileLock`` (flock/msvcrt, released by the OS if the process dies); falls back to ``SoftFileLock`` on file
-    systems without flock support (old filelock versions raise NotImplementedError there)."""
+    systems without flock support (``FileLock`` raises NotImplementedError there)."""
     lock = FileLock(str(lock_path))
     try:
         lock.acquire(timeout=0)
@@ -171,10 +168,10 @@ def without_settled_until(df: pd.DataFrame) -> pd.DataFrame:
 
 def _local_steps(diffs: List[pd.Timedelta], window: int = _STEP_WINDOW) -> List[pd.Timedelta]:
     """For each diff, the most common diff among up to ``window`` neighbours on either side of it (the diff
-    itself is excluded, so a gap can't count as evidence for its own normality). Ties favor the smaller step,
-    same as the single response-wide mode this replaces. Used as the expected spacing at that point instead of
-    one step for the whole response, so a resolution change partway through a fetch (e.g. hourly data followed
-    by 15-minute data) only makes the diffs nearest the boundary look like a gap, not every diff on either side.
+    itself is excluded, so a gap can't count as evidence for its own normality). Ties favor the smaller step.
+    Used as the expected spacing at that point instead of one step for the whole response, so a resolution change
+    partway through a fetch (e.g. hourly data followed by 15-minute data) only makes the diffs nearest the boundary
+    look like a gap, not every diff on either side.
     """
     steps = []
     for i in range(len(diffs)):

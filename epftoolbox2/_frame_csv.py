@@ -3,7 +3,8 @@
 A CSV stores timestamps with their UTC offset (`2024-03-31 03:00:00+02:00`) but not the zone name, and the
 model's days and hours are local: reading such a file back as UTC shifts every forecast key. The writer
 therefore names the zone in the index header, e.g. `datetime[Europe/Warsaw]`, and the reader converts back
-to it. Files written before this (offsets but no zone name) need the zone passed explicitly.
+to it. A file without the zone name in its header (e.g. one from `DataFrame.to_csv`) needs the zone passed
+explicitly.
 """
 
 import re

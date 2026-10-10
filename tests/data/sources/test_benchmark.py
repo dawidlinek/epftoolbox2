@@ -187,9 +187,9 @@ class TestFormat:
         assert list(df["price"]) == [500, 501, 502, 503, 504]
 
     def test_fetch_excludes_a_row_exactly_at_end(self, tmp_path):
-        """DST/timezone review finding 4: fetch used to include a row exactly at `end` (`df.loc[start:end]`),
-        breaking the source contract's half-open [start, end) that DataPipeline and the per-source cache rely
-        on."""
+        """DST/timezone review finding 4: fetch excludes a row exactly at `end` (unlike `df.loc[start:end]`),
+        as the source contract's half-open [start, end) that DataPipeline and the per-source cache rely on
+        requires."""
         source = EpftoolboxBenchmarkSource("PJM", cache_dir=str(tmp_path))
         mock_zenodo(source, benchmark_csv("PJM", first="2016-01-05", days=2), dataset="PJM")
         start, end = pd.Timestamp("2016-01-05 05:00", tz="UTC"), pd.Timestamp("2016-01-05 06:00", tz="UTC")

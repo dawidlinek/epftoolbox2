@@ -317,8 +317,7 @@ class OpenMeteoBase(DataSource):
             "timezone is required: set it to your market's zone, e.g. 'Europe/Warsaw' for PL, 'Europe/London' "
             "for GB, 'Europe/Berlin' for DE — either directly on this source, or once via "
             "DataPipeline(timezone=...). It defines the local day D that the leak-free cutoff (D at run:00 UTC) "
-            "is anchored to; a market outside CET that left it unset used to silently fall back to "
-            "Europe/Warsaw, computing that cutoff in the wrong zone."
+            "is anchored to. A zone is never guessed: a wrong one would put that cutoff in the wrong day."
         )
 
     def _setup(self):

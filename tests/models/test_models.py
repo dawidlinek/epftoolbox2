@@ -271,7 +271,7 @@ class TestModels:
             )
 
     def test_resume_key_uses_run_date_not_the_test_start_offset(self, sample_data, tmp_path):
-        """Changing test_start must not make an old file's day_in_test=0 look done for a different date."""
+        """Changing test_start must not make an existing file's day_in_test=0 look done for a different date."""
         save_to = str(tmp_path / "ols.jsonl")
         model = OLSModel(predictors=["load"], training_window=30, name="OLS")
         model.run(
@@ -294,7 +294,7 @@ class TestModels:
             # this is a real, expected forecast-window change, not the config drift the manifest guards.
             allow_manifest_mismatch=True,
         )
-        # 2023-12-02 has no result yet under the old run, so it must be (re)computed, not skipped as "done".
+        # 2023-12-02 has no result yet under the first run, so it must be (re)computed, not skipped as "done".
         assert ref.produced == ref.count
 
         dates = {r["run_date"] for r in ResultStore(save_to, test_start="2023-12-01").load_all()}

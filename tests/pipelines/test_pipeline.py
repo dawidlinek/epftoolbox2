@@ -547,10 +547,11 @@ class TestSourceCache:
 
     @pytest.mark.parametrize("tz", ["Europe/Warsaw", "Europe/Helsinki"])
     def test_second_cached_run_does_not_double_stamp_a_daily_value(self, in_tmp, monkeypatch, tz):
-        """DST/timezone review finding 2: the per-source cache's unsettled boundary used to be floored at UTC
-        midnight, which (almost) never lines up with a source's own local midnight. Resuming a fetch there made
-        EntsoeSource._clip carry the day's already-cached daily value forward again, re-stamped at that
-        non-local-midnight boundary — a second value for the same local day, which TimezoneTransformer rejects.
+        """DST/timezone review finding 2: the per-source cache's unsettled boundary is floored at the market's
+        local midnight, not at UTC midnight, which (almost) never lines up with a source's own local midnight.
+        Resuming a fetch there would make EntsoeSource._clip carry the day's already-cached daily value forward
+        again, re-stamped at that non-local-midnight boundary — a second value for the same local day, which
+        TimezoneTransformer rejects.
         A cached, split run must equal a fresh one, including daily columns, in PL and in an EET zone."""
         start, end = _utc("2024-10-25"), _utc("2024-10-29")
 
@@ -588,7 +589,7 @@ class TestSourceCache:
         provisional (it substitutes "now" for the issue time and uses whatever run has been published so
         far, see OpenMeteoSource._build_features). Such a row is always within a day or two of "now", so
         the per-source cache's 2-day unsettled boundary must already keep it from being recorded as
-        covered. Fetch a wide, mostly-old range twice: the old part must be served from cache (the second
+        covered. Fetch a wide, mostly-old range twice: the part far in the past must be served from cache (the second
         fetch requests far less than the full range), but the tail around "now" must still be requested
         again instead of being served a stale, wrongly-covered provisional value."""
         from tests.data.sources.test_open_meteo import make_archive
@@ -697,7 +698,7 @@ class TestFileCache:
         return DataPipeline().add_source(RangeSource(**kw))
 
     def test_refetches_when_dates_change(self, in_tmp):
-        """pipelines M3 / empirical F5e: a different range must not return the old frame."""
+        """pipelines M3 / empirical F5e: a different range must not return the frame of another range."""
         self._pipe().run("2024-01-01", "2024-03-01", cache="cache.csv")
         other = self._pipe().run("2024-02-01", "2024-05-01", cache="cache.csv")
         fresh = self._pipe().run("2024-02-01", "2024-05-01")
@@ -715,8 +716,8 @@ class TestFileCache:
         assert src.calls == []
 
     @pytest.mark.parametrize("name", ["cache.csv", "cache"])
-    def test_file_from_older_version_is_rebuilt(self, in_tmp, name):
-        """A cache file without a fingerprint (written before this version) is never trusted."""
+    def test_file_without_a_fingerprint_is_rebuilt(self, in_tmp, name):
+        """A cache file without a fingerprint is never trusted."""
         pd.DataFrame({"price": [1.0]}, index=pd.DatetimeIndex(["2020-01-01"], tz="UTC")).to_csv(in_tmp / name)
         got = self._pipe().run("2024-01-01", "2024-02-01", cache=name)
         pd.testing.assert_frame_equal(got, self._pipe().run("2024-01-01", "2024-02-01"), check_freq=False)
@@ -724,7 +725,7 @@ class TestFileCache:
 
     @pytest.mark.parametrize("name", ["cache.csv", "cache.parquet"])
     def test_reload_is_exact(self, in_tmp, name):
-        """Floats, dtypes and the UTC index survive the file (read_csv's fast float parser lost a digit)."""
+        """Floats, dtypes and the UTC index survive the file (read_csv's fast float parser would lose a digit)."""
         from epftoolbox2.data.sources import CalendarSource
 
         def pipe():
@@ -788,9 +789,9 @@ class TestFileCache:
         assert fetches == 1
 
     def test_refetches_once_the_unsettled_tail_becomes_settled(self, in_tmp, monkeypatch):
-        """pipelines-integration: a fixed `end` beyond "now" used to cache the not-yet-settled tail forever — the
-        per-source cache never records that tail as covered, but the single-file cache had no such boundary at
-        all. Once the settled boundary has moved past it, the file must be refetched, not served stale."""
+        """pipelines-integration: a fixed `end` beyond "now" must not cache the not-yet-settled tail forever:
+        the per-source cache never records that tail as covered, and the single-file cache must not either.
+        Once the settled boundary has moved past it, the file must be refetched, not served stale."""
         day1, day2 = _utc("2024-06-10 09:00"), _utc("2024-06-13 09:00")
 
         monkeypatch.setattr(cache_manager_module, "_now", lambda: day1)
@@ -801,7 +802,7 @@ class TestFileCache:
         monkeypatch.setattr(cache_manager_module, "_now", lambda: day2)
         src2 = RangeSource()
         DataPipeline().add_source(src2).run("2024-06-01", "2024-06-15", cache="cache.parquet")
-        assert src2.calls  # day1's settled boundary no longer covers "now" on day2: refetched
+        assert src2.calls  # day1's settled boundary does not cover "now" on day2: refetched
 
     def test_does_not_refetch_when_the_whole_range_was_already_settled(self, in_tmp, monkeypatch):
         """The staleness check must not defeat caching for a plain historical range."""
@@ -1011,7 +1012,7 @@ class TestDateSemantics:
 
 
 class TestColumnCollisions:
-    """pipelines M1: two sources producing the same column name used to be kept silently."""
+    """pipelines M1: two sources producing the same column name must not be kept silently."""
 
     def test_duplicate_column_across_sources_raises_naming_sources(self):
         from epftoolbox2.data.sources import CalendarSource

@@ -111,7 +111,7 @@ def test_scaler_assigned_after_construction_is_validated_and_saved(tmp_path):
 
 
 def test_yaml_without_scaler_loads_the_standard_scaler(tmp_path):
-    path = tmp_path / "old.yaml"
+    path = tmp_path / "no_scaler.yaml"
     path.write_text(
         yaml.dump({"models": [{"class": "OLSModel", "params": {"predictors": ["load"], "training_window": 30}}]})
     )
