@@ -18,7 +18,6 @@ from epftoolbox2.data.sources import OpenMeteoSource
 source = OpenMeteoSource(
     latitude=52.2297,   # Warsaw
     longitude=21.0122,
-    horizon=5,
     prefix="warsaw",
     timezone="Europe/Warsaw",  # market time zone: defines local day D
     run="00",                  # the leak-free cutoff is D at 00:00 UTC
@@ -42,7 +41,7 @@ df = source.fetch(
 | `agg` | str \| List[str] \| None | No | `None` | Aggregate `locations` across space, see [Several locations](#several-locations) |
 | `keep_locations` | bool | No | `False` | With `agg` set, also return each location's own columns, see [Several locations](#several-locations) |
 | `columns` | List[str] \| None | No | `None` (= `DEFAULT_COLUMNS`) | Weather variables |
-| `horizon` | int | No | `5` | Days ahead: columns `d+1` .. `d+horizon`. Under `api="previous_runs"` the largest usable horizon depends on the model, `timezone` and `run` (5 for the default JMA model at `run="00"`, see [Horizon](#horizon)), and a larger value raises. Under `api="single_runs"`, 1-14. Leads beyond the run's own length come back NaN (reported, see `strict`) |
+| `horizon` | int \| None | No | `None` | Days ahead: columns `d+1` .. `d+horizon`. `None` takes the largest horizon without look-ahead for the model, `timezone` and `run` under `api="previous_runs"` (see [Horizon](#horizon)) and 5 under `api="single_runs"`. A larger explicit value raises under `previous_runs`, naming the limit and suggesting `api="single_runs"`. Under `api="single_runs"`, 1-14. Leads beyond the run's own length come back NaN (reported, see `strict`) |
 | `model` | str | No | `"jma_seamless"` | Weather model (see [Choosing a model](#choosing-a-model)) |
 | `temporal_resolution` | str \| None | No | `None` | Time step of returned data, see [Temporal Resolution](#temporal-resolution) |
 | `api` | str | No | `"previous_runs"` | `"previous_runs"` (long archive, lead-time buckets) or `"single_runs"` (one exact run per day, shorter archive), see [How the run is chosen](#how-the-run-is-chosen) |
@@ -77,7 +76,13 @@ source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, timezone="Europe/W
 
 ### Horizon
 
-Under `api="previous_runs"` the API serves `previous_day1` .. `previous_day7` only. With the defaults (`run="00"`) and a Central European `timezone`, the largest horizon without look-ahead is **5** for `jma_seamless`, `icon_seamless`, ECMWF IFS and GFS, because the late hours of D+6 would need `previous_day8`, which Open-Meteo does not serve. A later `run` can allow 6, but a full week would need a run initialised late on D itself. The constructor raises a `ValueError` for a longer horizon and names the largest usable one. Use `api="single_runs"` (horizon up to 14) to reach further.
+`previous_dayK` at valid time T comes from the latest run initialised at or before T minus 24K hours, hour by hour rather than by calendar day, so each hour of D+i is read from the lowest `previous_dayK` with K at least i whose runs are all at or before the cutoff. D+7 is out of reach because its late hours would need `previous_day8`, which Open-Meteo does not serve, or a run initialised after the cutoff.
+
+| Model | Largest horizon (`run="00"`, `Europe/Warsaw`) |
+|---|---|
+| `jma_seamless`, `gfs_seamless`, `ecmwf_ifs025`, `ecmwf_ifs` | 6 |
+| `icon_seamless` (no `previous_day7`) | 5 |
+| Any other model (assumed hourly runs and a 6 h store) | 5 |
 
 ### Local calendar days and DST
 
@@ -92,9 +97,9 @@ When a row's cutoff is still in the future (for example `end="today_d+7"`, or ru
 | Model | Archive (Previous Runs) | Archive (Single Runs) | Notes |
 |---|---|---|---|
 | `jma_seamless` *(default)* | from 2018 | from 2026-05-13 00Z | Over Europe this is JMA GSM: about 55 km grid, stored every 6 h, so hourly values are interpolated. At Warsaw only `d+1`/`d+2` exist for 2018-2020 (Previous Runs), and `d+5`-`d+7` start on 2021-01-06. |
-| `icon_seamless` | from 2024-01 | from 2026-04-02 00Z | DWD ICON-D2 / ICON-EU / ICON global, **mixed by lead time** under `previous_runs`: different `d+i` columns come from different sub-models. The first Previous-Runs value at Warsaw is 2024-01-19, and `rain` is missing for Dec 2023-Jun 2024. |
-| `ecmwf_ifs025` | from 2024-02-04 | not available | ECMWF IFS at 0.25°, stored every 3 h (6 h beyond 144 h lead). |
-| `ecmwf_ifs` | from 2025-10-01 | from 2024-03-14 00Z (00/12 UTC only at first) | ECMWF IFS at 9 km, hourly to 90 h. It has the longest Single-Runs archive. About 8% of Previous-Runs hours were missing in the first half of 2026. |
+| `icon_seamless` | from 2024-01 | from 2026-04-02 00Z | DWD ICON-D2 / ICON-EU / ICON global, **mixed by lead time** under `previous_runs`: different `d+i` columns come from different sub-models. It has no `previous_day7`. The first Previous-Runs value at Warsaw is 2024-01-19, and `rain` is missing for Dec 2023-Jun 2024. |
+| `ecmwf_ifs025` | from 2024-02-04 | not available | ECMWF IFS at 0.25°, stored every 3 h, so hourly values are interpolated. |
+| `ecmwf_ifs` | from 2025-10-01 | from 2024-03-14 00Z (00/12 UTC only at first) | ECMWF IFS at 9 km, stored hourly. It has the longest Single-Runs archive. About 8% of Previous-Runs hours were missing in the first half of 2026. |
 | `gfs_seamless` | temperature from 2021-03, other variables from 2024-01-19 | from 2026-04-02 00Z | NCEP GFS. |
 
 Dates are first valid values at Warsaw, or the archive start Open-Meteo documents (checked in September 2026). For data from 2024 on, ECMWF IFS 0.25° or ICON are better `previous_runs` choices than JMA. For `single_runs`, `ecmwf_ifs` has by far the longest archive and is a good default. Check any `model` not listed here the same way before relying on it for a backtest that reaches far back.
@@ -278,4 +283,4 @@ print(df.columns[:5].tolist())
 
 ## Caching
 
-The cache key includes `latitude`/`longitude` (or `locations`, with `agg` and `keep_locations` when they're set, instead), `horizon`, `model`, `columns`, `prefix`, `temporal_resolution`, `api`, `run`, `timezone` and a `schema_version`, so a change to any of them reads fresh data. `strict` and `proxy_url` don't change the data and are not part of the key.
+The cache key includes `latitude`/`longitude` (or `locations`, with `agg` and `keep_locations` when they're set, instead), `horizon` (the resolved value when it is `None`), `model`, `columns`, `prefix`, `temporal_resolution`, `api`, `run`, `timezone` and a `schema_version`, so a change to any of them reads fresh data. `strict` and `proxy_url` don't change the data and are not part of the key.
