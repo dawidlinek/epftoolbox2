@@ -267,11 +267,19 @@ class TestCacheConfig:
         assert config["schema_version"] >= 1
         assert config["timezone"] == "Europe/Berlin"
 
-    def test_school_holidays_makes_the_source_uncacheable(self):
-        # The OpenHolidays API publishes school years ahead over time, so a cached NaN would never be refetched.
-        assert CalendarSource(country="PL").get_cache_config() is not None
-        assert CalendarSource(country="PL", school_holidays="national").get_cache_config() is None
-        assert CalendarSource(country="PL", school_holidays="all").get_cache_config() is None
+    def test_school_holidays_is_part_of_the_key(self):
+        national = CalendarSource(country="PL", school_holidays="national")
+        all_regions = CalendarSource(country="PL", school_holidays="all")
+        off = CalendarSource(country="PL")
+        assert len({str(c.get_cache_config()) for c in (national, all_regions, off)}) == 3
+
+    def test_entries_written_before_unpublished_school_years_were_left_unsettled_are_not_served(self):
+        # Version 2 entries may hold NaN rows for school years the API had not published, recorded as covered.
+        assert CalendarSource(country="PL", school_holidays="all").get_cache_config()["schema_version"] >= 3
+
+    def test_true_is_the_same_key_as_national(self):
+        true = CalendarSource(country="PL", school_holidays=True).get_cache_config()
+        assert true == CalendarSource(country="PL", school_holidays="national").get_cache_config()
 
 
 def _local_day(day: str, tz: str = "Europe/Warsaw") -> tuple:

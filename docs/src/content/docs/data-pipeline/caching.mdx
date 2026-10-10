@@ -163,7 +163,7 @@ processes pointed at the same file download the data once.
 |--------|--------------|
 | `EntsoeSource` | ✅ Yes |
 | `OpenMeteoSource` | ✅ Yes |
-| `CalendarSource` | ✅ Yes, ❌ not with `school_holidays` (see below) |
+| `CalendarSource` | ✅ Yes (including `school_holidays`, see below) |
 | `CsvSource` | ❌ No (reads from file) |
 | `EpftoolboxBenchmarkSource` | ❌ No (keeps its own verified copy of the file instead) |
 
@@ -173,14 +173,23 @@ and a `schema_version`. A change to any of them gives a different cache key, so 
 `regimes` is keyed by the periods it resolves to (name, start and end), so a change to the regime catalog gives a
 different key as well.
 
-With `school_holidays` on, `CalendarSource` returns no cache config and is downloaded from the OpenHolidays API on
-every run. The API publishes school years ahead over time and returns `NaN` for a year it has not published yet,
-so a cached run would keep that `NaN` after the data appeared. The other sources of the pipeline stay cached.
+With `school_holidays` on, the cache key also holds the mode (`"national"` or `"all"`). Past school holidays are
+cached like any other data, so a rerun does not download them again. Dates after the end of the last school-holiday
+period that the OpenHolidays API has published are unknown and come out as `NaN`. `CalendarSource` declares them
+unsettled (`settled_until`, see [What is recorded as cached](#what-is-recorded-as-cached)), so they are never
+recorded and are requested again on every run until the API has published them. Then only those dates are fetched
+and the cached past is read from disk. A country for which the API has no school holidays at all is requested on
+every run for the same reason, because nothing about it is settled. The other sources of the pipeline are cached as
+usual.
 
 <Aside type="caution">
-  The single-file cache (`cache="path/to/file.parquet"`) keeps the whole result of a run, so it also keeps a
-  `NaN` school year. Delete the file to pick up school years that the API has published since.
+  The OpenHolidays API can also correct data it has already published, the same way ENTSO-E does. The cache keeps
+  the version it downloaded. Clear it to pick up a correction to past dates. Only the dates that were still
+  unpublished are refreshed on their own.
 </Aside>
+
+The single-file cache (`cache="path/to/file.parquet"`) stores the earliest `settled_until` of its sources, so a file
+is rebuilt on every run while the API has not published the whole requested range. Once it has, the file is reused.
 
 ## Clearing Cache
 

@@ -63,7 +63,7 @@ All pipelines use method chaining:
 All sources implement `DataSource` base class with:
 - `fetch(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame` (UTC index covering at least `[start, end)`, `DataPipeline` drops rows outside that range)
 - `get_cache_config() -> Optional[Dict]` (returns None if not cacheable, must include every parameter that changes the output and a `schema_version` bumped when parsing changes)
-- Optional: `df.attrs["settled_until"] = pd.Timestamp(..., tz="UTC")` on the frame `fetch` returns declares that rows at or after that instant are not settled (e.g. NaN placeholders for data the provider has not published yet). The per-source cache returns them but does not record them as covered, so they are fetched again next time. The single-file cache is not reused when the earliest declared instant is before its `end`. The pipeline removes the attribute, so it never reaches the output
+- Optional: `df.attrs["settled_until"] = pd.Timestamp(..., tz="UTC")` (or its ISO 8601 string, needed if the frame is saved with `to_parquet`) on the frame `fetch` returns declares that rows at or after that instant are not settled (e.g. NaN placeholders for data the provider has not published yet). The per-source cache returns them but does not record them as covered, so they are fetched again next time. The single-file cache is not reused when the earliest declared instant is before its `end`. The pipeline removes the attribute, so it never reaches the output
 
 ## EntsoeSource
 
@@ -277,7 +277,7 @@ No API key.
   `"national"` (and the nationwide entries `"all"` also uses) only count holidays marked as country-wide.
   Germany has none, so `is_school_holiday` is always 0.0/NaN there.
 
-**Caching:** Cached like any other source: `get_cache_config()` has every parameter that affects the output, the resolved market time zone, the installed `holidays` package version (its holiday data changes between releases) and a `schema_version`. `regimes` is keyed by the periods it resolves to (name, start, end), so editing the regime catalog gives a new key. With `school_holidays` on it returns None (not cached) and downloads from the OpenHolidays API on every run, because the API publishes school years ahead over time and a cached NaN for an unpublished year would never be refetched. The single-file cache (`cache="file"`) keeps a NaN school year too, so delete the file to pick up newly published years.
+**Caching:** Cached like any other source: `get_cache_config()` has every parameter that affects the output (including `school_holidays` and its mode), the resolved market time zone, the installed `holidays` package version (its holiday data changes between releases) and a `schema_version`. `regimes` is keyed by the periods it resolves to (name, start, end), so editing the regime catalog gives a new key. Past school holidays are cached. Dates beyond the published school years are unknown (NaN), and the source declares them unsettled (`df.attrs["settled_until"]`), so they are not recorded and are fetched again on every run until OpenHolidays publishes them. A correction to past data is picked up only after clearing the cache, as with ENTSO-E. The single-file cache (`cache="file"`) is rebuilt on every run while the requested range is not fully published.
 
 ---
 

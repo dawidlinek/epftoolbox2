@@ -12,7 +12,10 @@ import requests
 
 import epftoolbox2.data.sources._openholidays as openholidays_module
 import epftoolbox2.data.sources.calendar as calendar_module
+from epftoolbox2.data import cache_manager as cache_manager_module
+from epftoolbox2.data.cache_manager import settled_until_of
 from epftoolbox2.data.sources import CalendarSource
+from epftoolbox2.pipelines import DataPipeline
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "openholidays"
 PL_ENTRIES = json.loads((FIXTURES / "pl_school_holidays.json").read_text())  # 2019-12-23 .. 2027-02-28
@@ -90,13 +93,14 @@ class TestInit:
         source.fetch(*_range("2024-01-01", "2024-01-02"))
         source.session.get.assert_not_called()
 
-    @pytest.mark.parametrize("value", [True, "national", "all"])
-    def test_school_holidays_disables_the_source_cache(self, value):
-        """The API publishes school years over time, so a cached NaN would never be refetched."""
-        assert CalendarSource(country="PL", school_holidays=value).get_cache_config() is None
-
-    def test_the_source_is_cached_when_school_holidays_is_off(self):
-        assert CalendarSource(country="PL").get_cache_config() is not None
+    def test_school_holidays_and_its_mode_are_part_of_the_cache_key(self):
+        national = CalendarSource(country="PL", school_holidays="national").get_cache_config()
+        all_regions = CalendarSource(country="PL", school_holidays="all").get_cache_config()
+        off = CalendarSource(country="PL").get_cache_config()
+        assert national["school_holidays"] == "national"
+        assert all_regions["school_holidays"] == "all"
+        assert off["school_holidays"] is False
+        assert len({str(national), str(all_regions), str(off)}) == 3
 
 
 class TestNationalFlags:
@@ -372,49 +376,206 @@ class TestYamlRoundTrip:
         pd.testing.assert_frame_equal(source.fetch(start, end), loaded.fetch(start, end))
 
 
-class TestPipelineCache:
-    """`DataPipeline.run(cache=True)` must not freeze a school year that the API had not published yet."""
+def _entry(first: str, last: str, regions=None, name="Winter Holidays") -> dict:
+    """A school holiday entry in the API's shape: for the given voivodeships, or nationwide (all 16) without."""
+    codes = regions or [s["code"] for s in PL_SUBDIVISIONS]
+    return {
+        "id": f"{name}-{first}-{regions}", "startDate": first, "endDate": last, "type": "School",
+        "name": [{"language": "EN", "text": name}], "nationwide": False,
+        "regionalScope": "Regional" if regions else "National", "temporalScope": "FullDay",
+        "subdivisions": [{"code": code} for code in codes],
+    }  # fmt: skip
 
-    # The recorded entries, cut off before 2025: every 2026 date is then a gap of more than a year, so NaN.
-    UNPUBLISHED = [e for e in PL_ENTRIES if pd.Timestamp(e["endDate"]) < pd.Timestamp("2025-01-01")]
+
+# The 2026/27 school year as the API publishes it later: the recorded winter breaks of 15 voivodeships plus the
+# missing one (Lubuskie), a nationwide Christmas break and a nationwide spring break reaching 2027-03-31.
+PL_ENTRIES_2026_27 = PL_ENTRIES + [
+    _entry("2027-02-01", "2027-02-14", ["PL-LB"]),
+    _entry("2026-12-23", "2026-12-31", name="Christmas Break"),
+    _entry("2027-03-26", "2027-03-31", name="Spring Break"),
+]
+
+
+class TestSettledUntil:
+    """The first instant (UTC) whose school holiday value the API has not published yet, as the cache needs it."""
+
+    @staticmethod
+    def _declared(source, first_day, last_day):
+        return settled_until_of(source.fetch(*_range(first_day, last_day)))
+
+    @pytest.mark.parametrize("mode", ["national", "all"])
+    def test_is_local_midnight_after_the_end_of_the_published_data(self, mode):
+        source = _source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026), school_holidays=mode)
+        with patch.object(CalendarSource, "_warn_missing_school_holidays"):
+            declared = self._declared(source, "2026-06-01", "2027-03-31")
+        assert declared == pd.Timestamp("2026-09-01 00:00", tz=TZ).tz_convert("UTC")
+        assert declared == pd.Timestamp("2026-08-31 22:00", tz="UTC")
+
+    def test_follows_the_zone_offset_of_the_day_after_the_last_published_one(self):
+        # Published until 27 March 2027, the day before Warsaw moves to summer time: that midnight is still UTC+1.
+        entries = PL_ENTRIES_TO_SUMMER_2026 + [_entry("2027-03-20", "2027-03-27", name="Spring Break")]
+        source = _source(FakeApi(entries=entries), school_holidays="national")
+        with patch.object(CalendarSource, "_warn_missing_school_holidays"):
+            declared = self._declared(source, "2027-03-01", "2027-04-10")
+        assert declared == pd.Timestamp("2027-03-27 23:00", tz="UTC")
+
+    def test_all_mode_waits_for_the_region_whose_data_stops_first(self):
+        # Lubuskie stops at the 2026 summer break while the other 15 voivodeships go on to the winter of 2027.
+        source = _source(school_holidays="all")
+        with patch.object(CalendarSource, "_warn_missing_school_holidays"):
+            declared = self._declared(source, "2026-06-01", "2027-03-31")
+        assert declared == pd.Timestamp("2026-08-31 22:00", tz="UTC")
+
+    def test_all_mode_is_settled_up_to_the_end_of_the_nationwide_spring_break(self):
+        source = _source(FakeApi(entries=PL_ENTRIES_2026_27), school_holidays="all")
+        with patch.object(CalendarSource, "_warn_missing_school_holidays"):
+            declared = self._declared(source, "2026-06-01", "2027-06-30")
+        assert declared == pd.Timestamp("2027-04-01 00:00", tz=TZ).tz_convert("UTC")  # the spring break ends 31 March
+
+    def test_is_not_declared_when_the_request_ends_inside_the_published_data(self):
+        source = _source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026))
+        assert self._declared(source, "2026-06-01", "2026-08-31") is None
+        assert "settled_until" not in source.fetch(*_range("2024-01-01", "2024-02-01")).attrs
+
+    def test_is_not_declared_when_the_end_is_the_first_unknown_instant(self):
+        source = _source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026))
+        assert self._declared(source, "2026-08-01", "2026-08-31") is None  # [.., 2026-09-01 00:00 Warsaw)
+
+    def test_nothing_is_settled_when_the_api_has_no_period_for_the_target(self):
+        source = _source(FakeApi(entries=[]), school_holidays="national")
+        start, end = _range("2024-01-01", "2024-01-05")
+        with patch.object(CalendarSource, "_warn_missing_school_holidays"):
+            assert settled_until_of(source.fetch(start, end)) == start
+
+    def test_the_frame_can_still_be_saved_as_parquet(self, tmp_path):
+        # pandas writes `attrs` as JSON: a Timestamp in there would make this raise.
+        source = _source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026))
+        df = source.fetch(*_range("2026-06-01", "2027-03-31"))
+        df.to_parquet(tmp_path / "calendar.parquet")
+        assert pd.read_parquet(tmp_path / "calendar.parquet").attrs == df.attrs
+
+    def test_off_declares_nothing(self):
+        source = CalendarSource(country="PL", **BARE)
+        assert "settled_until" not in source.fetch(*_range("2026-09-01", "2026-09-05")).attrs
+
+
+class TestPipelineCache:
+    """`DataPipeline.run(cache=True)` records the past school holidays, and never a date the API has not published."""
+
+    FIRST_UNKNOWN = pd.Timestamp("2026-08-31 22:00", tz="UTC")  # 2026-09-01 00:00 in Warsaw
+    END = pd.Timestamp("2027-04-01 00:00", tz=TZ).tz_convert("UTC")  # run(.., "2027-03-31") is [.., this)
 
     @pytest.fixture(autouse=True)
     def cold_cache(self, tmp_path, monkeypatch):
-        import epftoolbox2.data.cache_manager as cache_manager_module
-
         monkeypatch.chdir(tmp_path)
-        # Far in the future, so the whole range counts as settled and would be recorded in the cache.
-        monkeypatch.setattr(cache_manager_module, "_now", lambda: pd.Timestamp("2100-01-01", tz="UTC"))
+        self.set_now = lambda value: monkeypatch.setattr(
+            cache_manager_module, "_now", lambda: pd.Timestamp(value, tz="UTC")
+        )
+        self.set_now("2026-10-10 12:00")  # day 1
 
     @staticmethod
-    def _run(source):
-        from epftoolbox2.pipelines import DataPipeline
-
-        return DataPipeline(timezone=TZ).add_source(source).run("2026-07-01", "2026-07-05", cache=True)
-
-    @pytest.mark.parametrize("mode,column", [("national", "is_school_holiday"), ("all", "school_holiday_share")])
-    def test_a_school_year_published_later_is_picked_up(self, mode, column):
-        source = _source(FakeApi(entries=self.UNPUBLISHED), school_holidays=mode)
-        first = self._run(source)
-        assert first[column].isna().all()
-
-        source.session = FakeApi()  # the API has published the 2026 school year since
-        second = self._run(source)
-        assert second[column].eq(1.0).all()  # summer holidays
-
-    def test_nothing_is_written_to_the_source_cache(self):
-        self._run(_source())
-        sources_dir = Path(".cache") / "sources"
-        assert not sources_dir.exists() or not any(sources_dir.iterdir())
-
-    def test_without_school_holidays_the_second_run_is_served_from_the_cache(self):
-        from epftoolbox2.pipelines import DataPipeline
-
-        source = CalendarSource(country="PL", school_holidays=False, holidays="binary", weekday=False)
+    def _spied(source):
         calls = []
         fetch = source.fetch
         source.fetch = lambda start, end: calls.append((start, end)) or fetch(start, end)
+        return calls
 
+    @staticmethod
+    def _run(source, start="2026-06-01", end="2027-03-31", cache=True):
+        return DataPipeline(timezone=TZ).add_source(source).run(start, end, cache=cache)
+
+    @staticmethod
+    def _recorded():
+        ranges = []
+        for path in (Path(".cache") / "sources").glob("*/metadata.json"):
+            ranges += [
+                (pd.Timestamp(r["start"]), pd.Timestamp(r["end"]))
+                for r in json.loads(path.read_text())["cached_ranges"]
+            ]
+        return sorted(ranges)
+
+    @pytest.mark.parametrize("mode,column", [("national", "is_school_holiday"), ("all", "school_holiday_share")])
+    def test_a_school_year_published_later_is_fetched_and_the_past_is_not(self, mode, column):
+        source = _source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026), school_holidays=mode)
+        calls = self._spied(source)
+
+        # Day 1: the API knows up to the 2026 summer break, the request runs to March 2027.
+        first = self._run(source)
+        published = first[column][first.index < self.FIRST_UNKNOWN]
+        assert published.notna().all() and published.eq(1.0).any()
+        assert first[column][first.index >= self.FIRST_UNKNOWN].isna().all()
+        assert len(calls) == 1
+        start = pd.Timestamp("2026-06-01", tz=TZ).tz_convert("UTC")
+        assert self._recorded() == [(start, self.FIRST_UNKNOWN)]  # the NaN rows are not recorded
+
+        # Day 2: the 2026/27 school year has been published. Only the dates that were unknown are asked for.
+        self.set_now("2026-10-11 12:00")
+        source.session = FakeApi(entries=PL_ENTRIES_2026_27)
+        calls.clear()
+        second = self._run(source)
+        assert calls == [(self.FIRST_UNKNOWN, self.END)]
+        assert second[column].notna().all()
+        assert second[column][second.index < self.FIRST_UNKNOWN].equals(first[column][first.index < self.FIRST_UNKNOWN])
+        assert second[column].loc["2026-12-24":"2026-12-30"].eq(1.0).all()  # the Christmas break that was unknown
+
+        fresh = self._run(source, cache=False)
+        pd.testing.assert_frame_equal(second, fresh, check_freq=False)
+
+    def test_past_dates_are_served_from_the_cache_without_a_request(self):
+        source = _source(FakeApi(entries=PL_ENTRIES_2026_27), school_holidays="all")
+        self.set_now("2026-10-11 12:00")
+        self._run(source)  # day 1, published to 2027-03-31 for all voivodeships but Lubuskie
+        source.session = MagicMock()
+        source.session.get.side_effect = AssertionError("no request for dates that are cached")
+        self._run(source, start="2026-06-01", end="2026-08-31")  # entirely before the first unknown date
+
+    @pytest.mark.parametrize("mode,column", [("national", "is_school_holiday"), ("all", "school_holiday_share")])
+    def test_split_runs_equal_a_fresh_fetch_whatever_the_api_knew_when(self, mode, column):
+        source = _source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026), school_holidays=mode)
+        self._run(source, end="2026-09-20")
+        self.set_now("2026-10-11 12:00")
+        source.session = FakeApi(entries=PL_ENTRIES_2026_27)
+        self._run(source, end="2027-01-15")
+        self.set_now("2026-10-13 12:00")
+        cached = self._run(source)
+        fresh = self._run(source, cache=False)
+        pd.testing.assert_frame_equal(cached, fresh, check_freq=False)
+        assert cached[column].notna().all()
+
+    def test_a_school_year_the_api_still_has_not_published_is_asked_for_again_each_run(self):
+        source = _source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026))
+        calls = self._spied(source)
+        self._run(source)
+        self.set_now("2026-10-11 12:00")
+        again = self._run(source)
+        assert calls == [(pd.Timestamp("2026-05-31 22:00", tz="UTC"), self.END), (self.FIRST_UNKNOWN, self.END)]
+        assert again["is_school_holiday"][again.index >= self.FIRST_UNKNOWN].isna().all()
+
+    def test_a_range_entirely_after_the_published_data_is_not_recorded(self):
+        source = _source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026))
+        self._run(source, start="2026-09-05", end="2027-03-31")
+        assert self._recorded() == []
+
+    def test_the_cache_key_of_a_school_holiday_source_is_its_own(self):
+        self._run(_source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026), school_holidays="national"), end="2026-07-01")
+        self._run(_source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026), school_holidays="all"), end="2026-07-01")
+        self._run(CalendarSource(country="PL", holidays="binary", weekday=False), end="2026-07-01")
+        assert len(list((Path(".cache") / "sources").glob("*/metadata.json"))) == 3
+
+    def test_single_file_cache_is_rebuilt_while_the_api_has_not_published_the_whole_range(self):
+        source = _source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026))
+        self._run(source, cache="calendar/")
+        source.session = FakeApi(entries=PL_ENTRIES_2026_27)
+        second = self._run(source, cache="calendar/")
+        assert second["is_school_holiday"].notna().all()  # the first run's NaN rows were not served again
+
+        source.session = MagicMock()
+        source.session.get.side_effect = AssertionError("fully published: served from the file")
+        pd.testing.assert_frame_equal(self._run(source, cache="calendar/"), second, check_freq=False)
+
+    def test_without_school_holidays_the_second_run_is_served_from_the_cache(self):
+        source = CalendarSource(country="PL", school_holidays=False, holidays="binary", weekday=False)
+        calls = self._spied(source)
         pipeline = DataPipeline(timezone=TZ).add_source(source)
         first = pipeline.run("2026-07-01", "2026-07-05", cache=True)
         second = pipeline.run("2026-07-01", "2026-07-05", cache=True)

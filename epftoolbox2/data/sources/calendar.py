@@ -1,7 +1,7 @@
 import re
 import unicodedata
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import holidays as holidays_lib
 import numpy as np
@@ -73,7 +73,9 @@ ONEHOT_YEARS = (1970, 2100)
 # then ignored. The installed `holidays` package's own version is part of the cache key too (see
 # get_cache_config), since its holiday data changes between releases independently of this source's code.
 # 2: `holidays="onehot"` columns are fixed per configuration (ONEHOT_YEARS) instead of following the fetched years.
-SCHEMA_VERSION = 2
+# 3: school holiday rows after the end of the published data are never recorded as covered (`settled_until`). Entries
+# of version 2 may hold NaN rows for school years the API had not published yet, recorded as covered.
+SCHEMA_VERSION = 3
 
 # Market-structure changes, policy interventions and shocks catalogued for `regimes=`. "start" is the first
 # delivery day (local date); a regime dummy is 1 from that date on (through "end", inclusive, when given) for the
@@ -412,12 +414,16 @@ def _grid_step(freq: str) -> pd.Timedelta:
     return step
 
 
+def _to_utc(timestamp: pd.Timestamp) -> pd.Timestamp:
+    """A tz-naive timestamp is taken to be UTC (the source contract), any other zone is converted."""
+    timestamp = pd.Timestamp(timestamp)
+    return timestamp.tz_convert("UTC") if timestamp.tzinfo else timestamp.tz_localize("UTC")
+
+
 def _local_grid(start: pd.Timestamp, end: pd.Timestamp, step: pd.Timedelta, timezone: str):
     """UTC grid over [start, end), its local-time view, and the local date of each row (codes into dates)."""
-    start = pd.Timestamp(start)
-    end = pd.Timestamp(end)
-    start = start.tz_convert("UTC") if start.tzinfo else start.tz_localize("UTC")
-    end = end.tz_convert("UTC") if end.tzinfo else end.tz_localize("UTC")
+    start = _to_utc(start)
+    end = _to_utc(end)
     if end <= start:
         raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
     index = pd.date_range(start.ceil(step), end, freq=step, inclusive="left")
@@ -461,9 +467,11 @@ class CalendarSource(DataSource):
     (https://www.openholidaysapi.org, ODbL 1.0 licence: credit it when you publish results or share a dataset
     built from it, e.g. `epftoolbox2.data.sources._openholidays.ATTRIBUTION`). This is the only case where
     CalendarSource makes network calls; without it, it stays offline and deterministic. Values are NaN before
-    the API's history starts for the country, or for school years not yet published, and a warning names the
-    affected dates; entries marked as half days are ignored (not counted as a holiday). With it the source is not
-    cached, because a cached NaN for a school year the API publishes later would never be refetched.
+    the API's history starts for the country, or after the end of the last published school holiday period (school
+    years not yet published), and a warning names the affected dates; entries marked as half days are ignored (not
+    counted as a holiday). The source is cached with it too: the past is recorded, and the dates after the
+    published data are declared unsettled (`df.attrs["settled_until"]`, see `DataSource`), so they are fetched
+    again until the API has published them.
 
     Example:
         >>> source = CalendarSource(country="DE", region="BY", holidays="binary", weekday="onehot")
@@ -750,7 +758,11 @@ class CalendarSource(DataSource):
                     flag &= local_dates <= pd.Timestamp(end)
                 df[f"{self.prefix}regime_{name}"] = np.asarray(flag, dtype=int)[codes]
         if self.school_holidays:
-            df = self._add_school_holidays(df, local_dates, codes)
+            df, published_until = self._add_school_holidays(df, local_dates, codes)
+            settled_until = self._school_holidays_settled_until(published_until, start, end)
+            if settled_until is not None:
+                # As text: pandas writes `attrs` as JSON, so a Timestamp would make `fetch(...).to_parquet()` fail.
+                df.attrs["settled_until"] = settled_until.isoformat()
 
         return df
 
@@ -947,14 +959,20 @@ class CalendarSource(DataSource):
         df[f"{self.prefix}daylight_hours"] = values[:, 2]
         return df
 
-    def _add_school_holidays(self, df: pd.DataFrame, local_dates: pd.DatetimeIndex, codes: np.ndarray) -> pd.DataFrame:
+    def _add_school_holidays(
+        self, df: pd.DataFrame, local_dates: pd.DatetimeIndex, codes: np.ndarray
+    ) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
         """`is_school_holiday` (nationwide flag) or `school_holiday_share` (unweighted fraction of the country's
-        top-level regions on school holiday) from the OpenHolidays API, depending on `school_holidays`."""
+        top-level regions on school holiday) from the OpenHolidays API, depending on `school_holidays`.
+
+        Also returns the last local date the output is known for: the end of the last published period (of the
+        nationwide ones, or in `"all"` mode of the region whose data stops first, as the share needs every
+        region), or None if nothing is published. Every later date is NaN."""
         national = self.school_holidays == "national"
         column = f"{self.prefix}is_school_holiday" if national else f"{self.prefix}school_holiday_share"
         if not len(local_dates):
             df[column] = np.array([], dtype=float)
-            return df
+            return df, None
 
         margin = pd.Timedelta(days=_openholidays.QUERY_MARGIN_DAYS)
         days = pd.date_range(local_dates.min() - margin, local_dates.max() + margin, freq="D")
@@ -966,6 +984,7 @@ class CalendarSource(DataSource):
 
         if national:
             per_day = _openholidays.daily_flags(entries, None, days)
+            published_until = _openholidays.last_published_day(entries, None)
         else:
             regions = _openholidays.top_level_subdivisions(self.session, self.country)
             if not regions:
@@ -976,12 +995,28 @@ class CalendarSource(DataSource):
             # partial average would look like fewer regions on holiday than is actually known).
             per_region_day = np.column_stack([_openholidays.daily_flags(entries, region, days) for region in regions])
             per_day = per_region_day.mean(axis=1)
+            last_days = [_openholidays.last_published_day(entries, region) for region in regions]
+            published_until = None if None in last_days else min(last_days)
 
         per_date = per_day[positions]
         df[column] = per_date[codes]
         if np.isnan(per_date).any():
             self._warn_missing_school_holidays(column, local_dates[np.isnan(per_date)])
-        return df
+        return df, published_until
+
+    def _school_holidays_settled_until(
+        self, published_until: Optional[pd.Timestamp], start: pd.Timestamp, end: pd.Timestamp
+    ) -> Optional[pd.Timestamp]:
+        """The first UTC instant whose school holiday value is unknown because the API has not published it
+        (`df.attrs["settled_until"]`, see `DataSource`): the start of the local day after `published_until`, or
+        `start` if nothing is published. None when the whole range `[start, end)` is published."""
+        if published_until is None:
+            return _to_utc(start)
+        first_unknown_day = published_until + pd.Timedelta(days=1)
+        settled_until = first_unknown_day.tz_localize(
+            self.market_timezone, ambiguous=True, nonexistent="shift_forward"
+        ).tz_convert("UTC")
+        return settled_until if settled_until < _to_utc(end) else None
 
     def _warn_missing_school_holidays(self, column: str, missing: pd.DatetimeIndex) -> None:
         logger.warning(
@@ -994,11 +1029,8 @@ class CalendarSource(DataSource):
         version (its holiday data changes between releases, independently of this source's own code) and a
         `schema_version`. `regimes` is keyed by the periods it resolves to (name, start, end), not by its raw value.
 
-        None (not cached) with `school_holidays`: the OpenHolidays API publishes school years ahead over time, and
-        a cached run would keep the NaN it returned for a school year that was not published yet, never refetching
-        it once the API has the data."""
-        if self.school_holidays:
-            return None
+        `school_holidays` and its mode are part of the key. The rows after the end of the published school
+        holiday data are declared unsettled in `fetch` and so never recorded, see `DataSource`."""
         config = {
             "source_type": "calendar",
             "schema_version": SCHEMA_VERSION,
@@ -1022,6 +1054,7 @@ class CalendarSource(DataSource):
             # The catalog (DEFAULT_REGIMES) defines the columns of `regimes=True` and of a list of names, so the key
             # holds what they resolve to: an edited catalog entry gives a new key instead of serving stale columns.
             "regimes": [list(period) for period in self._regime_periods()],
+            "school_holidays": self.school_holidays,
         }
         if self.prefix:
             config["prefix"] = self.prefix
