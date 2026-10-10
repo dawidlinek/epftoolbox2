@@ -131,7 +131,7 @@ are treated the same way.
   **Bidding zones:** prices are published per bidding zone. For Germany use `"DE_LU"` (since 2018-10-01,
   `"DE_AT_LU"` before). Codes that are not bidding zones (`"DE"`, `"DK"`, `"NO"`, `"SE"`, `"IT"`, `"LU"`, the
   German control areas, ...) raise a `ValueError` naming the zone to use when `type` includes `"price"`. They are
-  still accepted for load and generation.
+  accepted for load and generation.
 </Aside>
 
 ### Generation Data (`type=["generation"]`)
@@ -321,7 +321,8 @@ and generation but have no day-ahead price.
 ## Caching
 
 The cache key contains the area, the types, `prefer_15min` and a schema version of the parser. Changing any of
-them uses a new cache directory, and the old one under `.cache/sources/` is no longer read and can be deleted.
+them uses a new cache directory under `.cache/sources/`. Directories for other values are not read and can be
+deleted.
 
 ---
 

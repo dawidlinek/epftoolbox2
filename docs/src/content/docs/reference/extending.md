@@ -38,7 +38,7 @@ class MyApiSource(DataSource):
         return {
             "source_type": "my_api",
             "api_url": self.api_url,
-            "schema_version": 1,  # bump when parsing changes, so old caches are not served
+            "schema_version": 1,  # bump when parsing changes, so cached frames are rebuilt
         }
 ```
 

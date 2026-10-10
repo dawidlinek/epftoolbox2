@@ -151,8 +151,7 @@ changes to invalidate the fingerprint.
 
 If a source declared rows unsettled (`settled_until`, see above), the earliest such instant over all sources is
 stored as `settled_until` in the sidecar too. A file whose `settled_until` is earlier than the requested `end` is
-never reused and is rebuilt on every run, because what it holds was settled only up to that instant. A file written
-before this field existed is trusted as before.
+never reused and is rebuilt on every run, because what it holds was settled only up to that instant.
 
 The single-file cache uses the same temporary-file-and-rename writes and a lock (`<file>.lock`), so parallel
 processes pointed at the same file download the data once.

@@ -112,7 +112,7 @@ Omitted points under curveType A03 are forward-filled. Daily values follow the l
 
 **Errors:** "No matching data" chunks are skipped with a warning. 429/5xx/network errors are retried 5 times with backoff (honouring Retry-After). Other errors raise `EntsoeApiError` with ENTSO-E's reason text. A failed chunk raises instead of leaving a gap.
 
-**Caching:** Cache config = area_code, types, prefer_15min, a parser schema_version, and neighbours/prefix when set. Cached to `.cache/sources/`. A changed schema_version makes old cache entries unused.
+**Caching:** Cache config = area_code, types, prefer_15min, a parser schema_version, and neighbours/prefix when set. Cached to `.cache/sources/`. A changed schema_version uses a new cache directory.
 
 ---
 
@@ -852,7 +852,7 @@ For each (hour, horizon, day) combination:
 
 **Checks before any fit** (ValueError): rows `freq` apart with one row per local day and period (only the
 repeated fall-back DST hour may repeat), no duplicate timestamps, a UTC index that already carries `_d-<k>`
-day-lag columns raises (those lags were computed against different calendar-day boundaries than the ones now
+day-lag columns raises (those lags were computed against different calendar-day boundaries than the ones
 derived from a UTC index, while a plain UTC index with no such columns only warns, see `LagTransformer`), no data
 columns named `hour`/`day` or `{target}_d+1..{target}_d+{horizon}`, every expanded predictor present, numeric
 and not a target. Only the target and the predictors are used, so unused text columns are fine. Model names
@@ -1137,7 +1137,7 @@ sources:
     holidays: binary
     weekday: onehot
     daylight: true
-    lat: 52.23                   # serialized (no longer dropped)
+    lat: 52.23
     lon: 21.01
 source_validators:               # run on raw source output, before any transformer
 - class: ContinuityValidator
