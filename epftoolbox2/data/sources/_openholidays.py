@@ -77,21 +77,40 @@ def applies(entry: dict, target: Optional[str]) -> bool:
     return any(target == code or target.startswith(f"{code}-") for code in codes)
 
 
-def daily_flags(entries: list, target: Optional[str], days: pd.DatetimeIndex) -> np.ndarray:
-    """1/0 per day in `days` (consecutive local dates), NaN where the data has a gap of more than a year."""
-    intervals = sorted(
+def _full_day_periods(entries: list, target: Optional[str]) -> list:
+    """Sorted (first day, last day) of the full-day school holiday periods that apply to `target`."""
+    return sorted(
         (pd.Timestamp(e["startDate"]), pd.Timestamp(e["endDate"]))
         for e in entries
         if applies(e, target) and e.get("temporalScope", "FullDay") != "HalfDay"
     )
+
+
+def last_published_day(entries: list, target: Optional[str]) -> Optional[pd.Timestamp]:
+    """Last day of the latest school holiday period that applies to `target`, or None if no period applies. The API
+    says nothing about later days yet: they are unknown, not free of school holidays."""
+    periods = _full_day_periods(entries, target)
+    return max(end for _, end in periods) if periods else None
+
+
+def daily_flags(entries: list, target: Optional[str], days: pd.DatetimeIndex) -> np.ndarray:
+    """1/0 per day in `days` (consecutive local dates), NaN where the data does not say.
+
+    NaN means unknown, never "no holiday": it is set after the last published period (`last_published_day`), for
+    every day if there is no period at all, and where a gap of more than a year separates two periods or lies in
+    front of the first one (the history has not started). Between two periods less than a year apart a day is 0.
+    """
+    periods = _full_day_periods(entries, target)
     flags = np.zeros(len(days))
     covered = np.ones(len(days), dtype=bool)
     previous_end = days[0] - pd.Timedelta(days=1)
-    for start, end in intervals + [(days[-1] + pd.Timedelta(days=1), None)]:
+    for start, end in periods:
         if (start - previous_end).days > MAX_GAP_DAYS:
             covered[(days > previous_end) & (days < start)] = False
-        if end is not None:
-            flags[days.searchsorted(start, "left") : days.searchsorted(end, "right")] = 1.0
-            previous_end = max(previous_end, end)
+        flags[days.searchsorted(start, "left") : days.searchsorted(end, "right")] = 1.0
+        previous_end = max(previous_end, end)
     flags[~covered] = np.nan
+    # Decided here and not by the gap check alone: that one only sees the end of the data when the query reaches
+    # more than a year past it (QUERY_MARGIN_DAYS does that for CalendarSource, nothing else guarantees it).
+    flags[days > previous_end] = np.nan
     return flags

@@ -239,7 +239,7 @@ No API key.
 | `holiday_distance` | `N` | `days_to_holiday`, `days_since_holiday` (0 on a holiday, capped at N) |
 | `dst_switch` | `True` | `is_dst_switch_day` (every row of a 23/25-hour local day) |
 | `regimes` | `True`/list/dict | `regime_{name}`: 1 on local dates start <= D <= end, 0 otherwise. Open-ended (no end) unless one is given |
-| `school_holidays` | `True`/`"national"` | `is_school_holiday`: 1.0 on a nationwide school-holiday day, 0.0 otherwise, NaN before history starts |
+| `school_holidays` | `True`/`"national"` | `is_school_holiday`: 1.0 on a nationwide school-holiday day, 0.0 otherwise, NaN where the API has no data (before the history starts, after the last published period) |
 | `school_holidays` | `"all"` | `school_holiday_share`: unweighted fraction of the country's top-level regions on school holiday that day |
 
 **Notes:**
@@ -265,8 +265,9 @@ No API key.
   look-ahead in a backtest). This is what `ex_ante` records for catalog entries.
 - All calendar features are known in advance, so `_d+k` versions are legal predictors.
 - `school_holidays=True` is an alias for `"national"`. School holiday NaN (with a warning) where the API has no
-  data: any stretch of more than a year without a school holiday (before the history starts, or school years
-  not yet published). In `"all"` mode a NaN in any one region's flag makes that day's share NaN.
+  data: after the end of the last published school-holiday period (school years not yet published), before the
+  history starts, and in any stretch of more than a year without a school holiday. In `"all"` mode a NaN in any one
+  region's flag makes that day's share NaN, so the share is NaN from the end of the region whose data stops first.
 - `"all"` uses top-level OpenHolidays subdivisions only (e.g. Poland's 16 voivodeships), not their nested
   children. An entry recorded only against a child code is not rolled up into its parent's flag.
 - School holiday history starts in DE 2012, HU and RO 2015, AT 2017, FR 2018, and BE, BG, CH, CZ, ES, IE, IT, NL, PL, PT,

@@ -19,6 +19,8 @@ PL_ENTRIES = json.loads((FIXTURES / "pl_school_holidays.json").read_text())  # 2
 PL_SUBDIVISIONS = json.loads((FIXTURES / "pl_subdivisions.json").read_text())  # 16 top-level voivodeships
 TZ = "Europe/Warsaw"
 BARE = {"holidays": False, "weekday": False}
+# What the API had published before the 2026/27 school year: nothing after the 2026 summer break.
+PL_ENTRIES_TO_SUMMER_2026 = [e for e in PL_ENTRIES if e["endDate"] <= "2026-08-31"]
 
 
 def _response(payload, status=200):
@@ -173,10 +175,16 @@ class TestAllShare:
         # A holiday recorded only against a child code (BY-AU) must not count toward its top-level parent
         # (BY) in "all" mode: `top_level_subdivisions` only lists BY, and `daily_flags(..., "BY", ...)` only
         # matches entries naming BY itself (or nationwide ones) - a child-only entry doesn't cascade upward.
+        def entry(first, last, code):
+            return {"id": first, "startDate": first, "endDate": last, "nationwide": False, "regionalScope": "Local",
+                    "temporalScope": "FullDay", "subdivisions": [{"code": code}]}  # fmt: skip
+
+        # BY itself has periods on either side of 5 February, so that day is inside its published history.
         entries = [
-            {"id": "a", "startDate": "2024-02-05", "endDate": "2024-02-05", "nationwide": False,
-             "regionalScope": "Local", "temporalScope": "FullDay", "subdivisions": [{"code": "DE-BY-AU"}]},
-        ]  # fmt: skip
+            entry("2024-01-08", "2024-01-12", "DE-BY"),
+            entry("2024-02-05", "2024-02-05", "DE-BY-AU"),
+            entry("2024-03-04", "2024-03-08", "DE-BY"),
+        ]
         subdivisions = [{"code": "DE-BY", "children": [{"code": "DE-BY-AU"}]}]
         source = _source(country="DE", school_holidays="all", api=FakeApi(entries=entries, subdivisions=subdivisions))
         with patch.object(openholidays_module, "MAX_GAP_DAYS", 10_000):  # tiny fixture: no coverage check
@@ -220,6 +228,62 @@ class TestCoverage:
             source.fetch(*_range("2019-11-01", "2020-01-31"))
         message = warning.call_args.args[0]
         assert "2019-11-01" in message and "2019-12-22" in message
+
+
+class TestUnknownIsNaN:
+    """A date the API has not published yet is NaN, never 0.0 ("not a holiday")."""
+
+    def test_days_after_the_last_period_are_nan_even_when_the_range_ends_within_a_year(self):
+        # No 400-day margin here: the next period (the end of the range) is only 213 days after the summer break.
+        days = pd.date_range("2026-08-01", "2027-03-31")
+        flags = openholidays_module.daily_flags(PL_ENTRIES_TO_SUMMER_2026, None, days)
+        assert (flags[days <= pd.Timestamp("2026-08-31")] == 1.0).all()
+        assert np.isnan(flags[days > pd.Timestamp("2026-08-31")]).all()
+
+    def test_a_gap_inside_the_history_is_still_zero(self):
+        entries = [
+            {"id": "a", "startDate": "2026-01-05", "endDate": "2026-01-09", "nationwide": True},
+            {"id": "b", "startDate": "2026-03-02", "endDate": "2026-03-06", "nationwide": True},
+        ]
+        days = pd.date_range("2026-01-01", "2026-04-30")
+        flags = pd.Series(openholidays_module.daily_flags(entries, None, days), index=days)
+        assert flags["2026-01-12":"2026-02-27"].eq(0.0).all()  # between two periods: known to be no holiday
+        assert flags["2026-03-09":].isna().all()  # after the last one: not published
+        assert flags["2026-03-02":"2026-03-06"].eq(1.0).all()
+
+    def test_no_period_at_all_means_every_day_is_unknown(self):
+        flags = openholidays_module.daily_flags([], None, pd.date_range("2026-01-01", "2026-01-10"))
+        assert np.isnan(flags).all()
+
+    def test_a_half_day_entry_does_not_extend_what_is_published(self):
+        half_day = {"id": "h", "startDate": "2026-12-23", "endDate": "2026-12-23", "nationwide": True,
+                    "temporalScope": "HalfDay"}  # fmt: skip
+        days = pd.date_range("2026-08-01", "2027-01-31")
+        flags = openholidays_module.daily_flags(PL_ENTRIES_TO_SUMMER_2026 + [half_day], None, days)
+        assert np.isnan(flags[days > pd.Timestamp("2026-08-31")]).all()
+
+    def test_last_published_day_is_per_target(self):
+        assert openholidays_module.last_published_day(PL_ENTRIES, None) == pd.Timestamp("2026-08-31")
+        assert openholidays_module.last_published_day(PL_ENTRIES, "PL-MA") == pd.Timestamp("2027-02-28")
+        assert openholidays_module.last_published_day(PL_ENTRIES, "PL-LB") == pd.Timestamp("2026-08-31")
+        assert openholidays_module.last_published_day([], None) is None
+
+    @pytest.mark.parametrize("mode,column", [("national", "is_school_holiday"), ("all", "school_holiday_share")])
+    def test_fetch_is_nan_after_the_last_published_period(self, mode, column):
+        source = _source(FakeApi(entries=PL_ENTRIES_TO_SUMMER_2026), school_holidays=mode)
+        with patch.object(CalendarSource, "_warn_missing_school_holidays"):
+            df = source.fetch(*_range("2026-08-25", "2027-03-31"))
+        values = _per_local_date(df, column)
+        assert values[:"2026-08-31"].eq(1.0).all()
+        assert values["2026-09-01":].isna().all()
+
+    def test_all_mode_is_nan_while_any_region_has_not_published(self):
+        # The recorded data has winter 2027 breaks for 15 of the 16 voivodeships, but Lubuskie (PL-LB) stops at
+        # the summer break: the share needs every region, so it is unknown from there on.
+        source = _source(school_holidays="all")
+        with patch.object(CalendarSource, "_warn_missing_school_holidays"):
+            df = source.fetch(*_range("2027-01-20", "2027-02-10"))
+        assert _per_local_date(df, "school_holiday_share").isna().all()
 
 
 class TestChunking:

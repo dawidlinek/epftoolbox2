@@ -310,10 +310,16 @@ the (nationwide) summer break.
 
 ### Missing data is NaN, not 0
 
-The API only knows school years that have been entered, so a `0` would be ambiguous. Every school year has
-holidays, so a stretch of more than a year without any is treated as missing: those dates are **NaN** (and the
-share is NaN too), and a warning names them. The source queries 400 days beyond both ends of the range to decide
-this. It happens before the data's history starts and for school years that aren't published yet.
+The API only knows school years that have been entered, so a `0` would be ambiguous. A date is **NaN** (and the
+share is NaN too) when the API says nothing about it, and a warning names these dates. That is the case
+
+- after the end of the last published school-holiday period, which is every school year that is not published yet,
+- before the data's history starts,
+- inside a stretch of more than a year without any school holiday, because every school year has holidays.
+
+A date between two periods that are less than a year apart is `0.0`. With `"all"` the share needs every region, so
+it turns NaN right after the last published period of the region whose data stops first. The source queries 400
+days beyond both ends of the range to judge a gap in the history.
 
 History start by country (from the [OpenHolidays data repository](https://github.com/openpotato/openholidaysapi.data)):
 
