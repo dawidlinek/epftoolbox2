@@ -542,8 +542,6 @@ class DataPipeline:
 
         if class_name not in COMPONENT_REGISTRY[component_type]:
             raise ValueError(f"Unknown {component_type[:-1]}: {class_name}")
-        if class_name in _LEGACY_PARAMS:
-            raw_params = _LEGACY_PARAMS[class_name](raw_params)
 
         params, refs = {}, {}
         for key, raw in raw_params.items():
@@ -597,26 +595,6 @@ class DataPipeline:
         logger.info(f"Pipeline: Loaded configuration from {path}")
         return pipeline
 
-
-def _upgrade_resample_params(params: Dict[str, Any]) -> Dict[str, Any]:
-    """``ResampleTransformer`` lost ``method`` and ``columns``. The serializer dumped every public attribute, so a
-    YAML saved before that holds ``method: null`` and ``columns: null``. Those are dropped. A value that was set
-    cannot be mapped silently (the old ``method`` also interpolated and back-filled), so it raises."""
-    removed = {"method": "the aggregation and fill of every column", "columns": "the columns it applied to"}
-    for key, meaning in removed.items():
-        if key in params and params[key] is not None:
-            raise ValueError(
-                f"ResampleTransformer: '{key}' ({params[key]!r}) was removed from the transformer, it set {meaning}. "
-                "Use 'agg' (the aggregation when downsampling) and 'fill' (how slots created by upsampling are "
-                "filled), each a single value or a {column: value} dict"
-            )
-    return {key: value for key, value in params.items() if key not in removed}
-
-
-# Class name -> function that brings the ``params`` of a YAML written by an older version up to date, called by
-# ``_load_component`` before the class is built. Keeps old files loading without keeping removed parameters in the
-# constructors.
-_LEGACY_PARAMS = {"ResampleTransformer": _upgrade_resample_params}
 
 _PIPELINE_KEYS = ("timezone", "on_invalid", "sources", "source_validators", "transformers", "validators")
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")

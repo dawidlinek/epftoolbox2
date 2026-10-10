@@ -278,42 +278,6 @@ class TestDataPipelineSettingsInYaml:
             DataPipeline.load(path)
 
 
-class TestLegacyResampleYaml:
-    """ResampleTransformer lost `method` and `columns`. The serializer dumped every public attribute, so YAMLs
-    saved earlier hold `method: null` and `columns: null`, and they must keep loading."""
-
-    LEGACY = "transformers:\n- class: ResampleTransformer\n  params:\n    freq: 15min\n    agg: sum\n    fill: ffill\n"
-
-    def _load(self, tmp_path, extra: str):
-        path = tmp_path / "dp.yaml"
-        path.write_text(self.LEGACY + extra)
-        return DataPipeline.load(path)
-
-    def test_null_method_and_columns_are_dropped(self, tmp_path):
-        loaded = self._load(tmp_path, "    method: null\n    columns: null\n")
-        transformer = loaded.transformers[0]
-        assert isinstance(transformer, ResampleTransformer)
-        assert (transformer.freq, transformer.agg, transformer.fill) == ("15min", "sum", "ffill")
-        assert not hasattr(transformer, "method")
-        assert not hasattr(transformer, "columns")
-
-    def test_loaded_legacy_yaml_saves_without_the_removed_keys(self, tmp_path):
-        loaded = self._load(tmp_path, "    method: null\n    columns: null\n")
-        path = tmp_path / "again.yaml"
-        loaded.save(path)
-        params = yaml.safe_load(path.read_text())["transformers"][0]["params"]
-        assert set(params) == {"freq", "agg", "fill"}
-
-    @pytest.mark.parametrize("key,value", [("method", "ffill"), ("columns", "[price]")])
-    def test_a_set_value_raises_and_points_to_agg_and_fill(self, tmp_path, key, value):
-        with pytest.raises(ValueError, match=rf"(?s)ResampleTransformer.*'{key}'.*agg.*fill"):
-            self._load(tmp_path, f"    {key}: {value}\n")
-
-    def test_a_null_value_is_only_tolerated_for_the_removed_keys(self, tmp_path):
-        with pytest.raises(TypeError, match="unexpected keyword"):
-            self._load(tmp_path, "    freq2: null\n")
-
-
 class TestSecretsInYaml:
     """Known issue (rules/data.md) / pipelines M6: the API key used to be written to YAML in plain text."""
 
@@ -690,26 +654,6 @@ class TestWorkflowSerialization:
         assert isinstance(dp.transformers[0], ResampleTransformer)
         assert dp.transformers[0].freq == "1h"
         assert dp.transformers[0].agg == "sum"
-
-    def test_inline_legacy_resample_params_are_dropped(self, tmp_path, pipeline_yamls):
-        dp_path, mp_path = pipeline_yamls
-        out = tmp_path / "exp.yaml"
-        Workflow(
-            data_pipeline=str(dp_path),
-            model_pipeline=str(mp_path),
-            data_start="2023-01-01",
-            data_end="2024-01-01",
-            model_test_start="2023-10-01",
-            model_test_end="2024-01-01",
-        ).save(out)
-        config = yaml.safe_load(out.read_text())
-        config["data_pipeline"]["transformers"] = [
-            {"class": "ResampleTransformer", "params": {"freq": "1h", "method": None, "columns": None}}
-        ]
-        out.write_text(yaml.dump(config, default_flow_style=False))
-
-        dp = Workflow.load(out)._build_data_pipeline()
-        assert isinstance(dp.transformers[0], ResampleTransformer)
 
     def test_inline_model_override(self, tmp_path, pipeline_yamls):
         dp_path, mp_path = pipeline_yamls

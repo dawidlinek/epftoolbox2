@@ -74,6 +74,3 @@ After `TimezoneTransformer`, a local day has 23 hours on the spring switch day a
 - Timestamps are period starts (ENTSO-E convention).
 - Output values are not rounded.
 - Numeric columns come out as `float64`.
-- `method` and `columns` were removed. YAML files saved with `method: null` and `columns: null` still load, a file
-  that set either raises a `ValueError` that points to `agg` and `fill` (see
-  [Serialization](/epftoolbox2/data-pipeline/serialization/)).
