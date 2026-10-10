@@ -46,6 +46,18 @@ class MyApiSource(DataSource):
 rows outside `[start, end)`, and a fetch for a sub-range must give the same values as a fetch for a larger range.
 Otherwise a run assembled from cached pieces differs from a fresh one.
 
+If some of the rows you return are placeholders or provisional for longer than the cache's two unsettled days (for
+example NaN for a period the provider has not published yet), say so on the frame:
+
+```python
+df.attrs["settled_until"] = pd.Timestamp("2026-09-01", tz="UTC")  # rows at or after this are not settled
+```
+
+The cache then does not record those rows as covered and fetches them again next time, while the settled rows
+before the timestamp come from disk. Leave it out when every row is settled. A naive timestamp is taken to be UTC.
+The value may also be an ISO 8601 string (`timestamp.isoformat()`), which you need if the frame is saved with
+`to_parquet`, because pandas writes `attrs` as JSON. See [Data Caching](/epftoolbox2/data-pipeline/caching/).
+
 ---
 
 ## Custom Transformer

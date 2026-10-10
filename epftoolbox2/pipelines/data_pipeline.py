@@ -23,7 +23,9 @@ from epftoolbox2.data.cache_manager import (
     clip_to_range,
     hold_lock,
     make_file_lock,
+    settled_until_of,
     unsettled_boundary,
+    without_settled_until,
 )
 from epftoolbox2.logging import get_logger
 from epftoolbox2._date_utils import _DATE_PATTERN
@@ -224,12 +226,29 @@ class DataPipeline:
         self.source_validators.append(validator)
         return self
 
+    @staticmethod
+    def _fetch_source(
+        source: DataSource, start: pd.Timestamp, end: pd.Timestamp
+    ) -> Tuple[Optional[pd.DataFrame], Optional[pd.Timestamp]]:
+        """``source.fetch(start, end)`` and the instant from which its rows are not settled (``DataSource``), or
+        ``None`` if all of them are. The declaration is read and removed here, before any clip or concat can drop
+        it or pass it on to the output."""
+        df = source.fetch(start, end)
+        if df is None:
+            return None, None
+        settled_until = settled_until_of(df)
+        if settled_until is not None and settled_until >= end:
+            settled_until = None
+        return without_settled_until(df), settled_until
+
     def _fetch_with_cache(
         self, source: DataSource, start: pd.Timestamp, end: pd.Timestamp, cache_manager: CacheManager
-    ) -> pd.DataFrame:
+    ) -> Tuple[Optional[pd.DataFrame], Optional[pd.Timestamp]]:
+        """The source's rows for ``[start, end)`` from the cache and the API, and the earliest instant a fetch
+        declared its rows unsettled from (``None`` if none did; what the cache holds is settled)."""
         source_config = source.get_cache_config()
         if source_config is None:
-            return source.fetch(start, end)
+            return self._fetch_source(source, start, end)
 
         source_class = _qualified_name(source)
         cache_key = cache_manager.get_cache_key(source_config, source_class)
@@ -242,7 +261,7 @@ class DataPipeline:
 
             if not missing_ranges:
                 logger.info(f"Cache: Full hit for {source_type} source")
-                return cached if cached is not None else pd.DataFrame()
+                return (cached if cached is not None else pd.DataFrame()), None
 
             if len(missing_ranges) == 1 and missing_ranges[0] == (start, end):
                 logger.info(f"Cache: Miss for {source_type} source")
@@ -250,27 +269,39 @@ class DataPipeline:
                 logger.info(f"Cache: Partial hit for {source_type} source")
 
             parts = [] if cached is None else [cached]
+            unsettled_from = []
             for missing_start, missing_end in missing_ranges:
-                fresh_df = source.fetch(missing_start, missing_end)
+                fresh_df, settled_until = self._fetch_source(source, missing_start, missing_end)
                 if fresh_df is None or fresh_df.empty:
                     continue
                 fresh_df = clip_to_range(fresh_df, missing_start, missing_end)
-                # Records only the part the source actually returned and that is settled; the rest is still
-                # returned now and fetched again next time. `timezone` floors that cap to this pipeline's market
-                # zone's own local midnight (not UTC midnight), so a later resumed fetch starts exactly there
-                # instead of strictly inside a source's one-day period (e.g. ENTSO-E's A31 daily min/max) — a
-                # source that carries such a period's value forward to cover its fetch's own start would
-                # otherwise re-stamp the same day's value a second time on top of the one already cached.
+                # Records only the part the source actually returned, that is settled and that the source did not
+                # declare unsettled; the rest is still returned now and fetched again next time. `timezone`
+                # floors the unsettled-period cap to this pipeline's market zone's own local midnight (not UTC
+                # midnight), so a later resumed fetch starts exactly there instead of strictly inside a source's
+                # one-day period (e.g. ENTSO-E's A31 daily min/max) — a source that carries such a period's value
+                # forward to cover its fetch's own start would otherwise re-stamp the same day's value a second
+                # time on top of the one already cached.
                 cache_manager.write_cache(
-                    cache_key, fresh_df, missing_start, missing_end, source_config, source_class, self.timezone
+                    cache_key,
+                    fresh_df,
+                    missing_start,
+                    missing_end,
+                    source_config,
+                    source_class,
+                    timezone=self.timezone,
+                    settled_until=settled_until,
                 )
+                if settled_until is not None:
+                    unsettled_from.append(settled_until)
                 parts.append(fresh_df)
 
+        unsettled = min(unsettled_from) if unsettled_from else None
         parts = [p for p in parts if not p.empty]
         if not parts:
-            return pd.DataFrame()
+            return pd.DataFrame(), unsettled
         # Cached and missing ranges are disjoint, so there are no duplicate timestamps to resolve.
-        return pd.concat(parts).sort_index(kind="stable")
+        return pd.concat(parts).sort_index(kind="stable"), unsettled
 
     def _parse_timestamp(self, ts: Union[str, pd.Timestamp], is_end: bool = False) -> pd.Timestamp:
         """UTC bound for ``run``. See the class docstring for how dates, keywords and timestamps are read."""
@@ -321,13 +352,14 @@ class DataPipeline:
     ) -> pd.DataFrame:
         if isinstance(cache, (str, os.PathLike)):
             return self._run_sources_with_file_cache(start, end, cache)
-        return self._run_sources(start, end, cache)
+        return self._run_sources(start, end, cache)[0]
 
     def _run_sources_with_file_cache(
         self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[str, os.PathLike]
     ) -> pd.DataFrame:
         """Cache the combined source output in one file, reused only for the same sources, dates and settledness
-        (see ``_is_file_cache_stale``)."""
+        (see ``_is_file_cache_stale``), which includes the instant from which a source declared its rows
+        unsettled (``DataSource``)."""
         fingerprint = self._sources_fingerprint(start, end)
         digest = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()[:16]
         path = _resolve_cache_file(cache, digest)
@@ -348,13 +380,13 @@ class DataPipeline:
                     logger.warning(f"Cache: cannot read {path} ({type(e).__name__}: {e}); fetching again")
             elif stale:
                 logger.info(
-                    f"Cache: {path} was fetched while part of the range was still unsettled and that boundary "
-                    "has since moved; fetching again"
+                    f"Cache: {path} was fetched while part of the range was not settled (still within the unsettled "
+                    "period, or declared unsettled by a source); fetching again"
                 )
             elif path.exists():
                 logger.info(f"Cache: {path} holds data for {_describe_mismatch(meta, fingerprint)}; fetching again")
 
-            result = self._run_sources(start, end, cache=False)
+            result, settled_until = self._run_sources(start, end, cache=False)
             if not result.empty:
                 # Invalidate first: a crash between the two writes must not pair old metadata with new data.
                 meta_path.unlink(missing_ok=True)
@@ -363,6 +395,8 @@ class DataPipeline:
                     "fingerprint": digest,
                     "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
                     "settled_at": unsettled_boundary().isoformat(),
+                    # None when every source's rows were settled up to `end`.
+                    "settled_until": settled_until.isoformat() if settled_until is not None else None,
                     "columns": [str(c) for c in result.columns],
                     "dtypes": [str(t) for t in result.dtypes],
                     "index_name": result.index.name,
@@ -383,15 +417,22 @@ class DataPipeline:
             "sources": [_component_fingerprint(source) for source in self.sources],
         }
 
-    def _run_sources(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]) -> pd.DataFrame:
+    def _run_sources(
+        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]
+    ) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
+        """The sources' joined output for ``[start, end)`` and the earliest instant from which any source declared
+        its rows unsettled (``None`` if none did)."""
         cache_manager = CacheManager() if cache is True else None
         labelled = []
+        unsettled_from = []
 
         for number, source in enumerate(self.sources, start=1):
             if cache_manager is not None:
-                df = self._fetch_with_cache(source, start, end, cache_manager)
+                df, settled_until = self._fetch_with_cache(source, start, end, cache_manager)
             else:
-                df = source.fetch(start, end)
+                df, settled_until = self._fetch_source(source, start, end)
+            if settled_until is not None:
+                unsettled_from.append(settled_until)
             if df is None or df.empty:
                 continue
             # Sources may return rows outside the request (ENTSO-E load from start - 1 day, Open-Meteo up to
@@ -400,12 +441,13 @@ class DataPipeline:
             if not df.empty:
                 labelled.append((f"{type(source).__name__} #{number}", df))
 
+        unsettled = min(unsettled_from) if unsettled_from else None
         if not labelled:
             logger.warning("Pipeline: No data returned from any source")
-            return pd.DataFrame()
+            return pd.DataFrame(), unsettled
 
         _check_unique_columns(labelled)
-        return pd.concat([df for _, df in labelled], axis=1)
+        return pd.concat([df for _, df in labelled], axis=1), unsettled
 
     def _run_transformers(self, df: pd.DataFrame) -> pd.DataFrame:
         for transformer in self.transformers:
@@ -801,7 +843,19 @@ def _is_file_cache_stale(meta: Dict[str, Any], end: pd.Timestamp) -> bool:
     at or before that fetch's settled boundary, so nothing about it could still change), or the settled boundary
     has not moved since (same day, or `unsettled_period` unchanged). A file written before this check existed has
     no "settled_at" and is always treated as stale, so it is refetched once after an upgrade.
+
+    A source can also declare that its rows from some instant on are not settled (`DataSource`, e.g. school holidays
+    the API has not published yet). The earliest such instant is stored as "settled_until", and a file whose
+    "settled_until" is before the requested `end` is never reused: the fetch it holds was only settled up to there.
+    A missing value (a file written before this field existed) means the sources declared nothing.
     """
+    settled_until = meta.get("settled_until")
+    if settled_until is not None:
+        try:
+            if pd.Timestamp(settled_until) < end:
+                return True
+        except (TypeError, ValueError):
+            return True
     settled_at = meta.get("settled_at")
     if settled_at is None:
         return True

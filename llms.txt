@@ -63,6 +63,7 @@ All pipelines use method chaining:
 All sources implement `DataSource` base class with:
 - `fetch(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame` (UTC index covering at least `[start, end)`, `DataPipeline` drops rows outside that range)
 - `get_cache_config() -> Optional[Dict]` (returns None if not cacheable, must include every parameter that changes the output and a `schema_version` bumped when parsing changes)
+- Optional: `df.attrs["settled_until"] = pd.Timestamp(..., tz="UTC")` on the frame `fetch` returns declares that rows at or after that instant are not settled (e.g. NaN placeholders for data the provider has not published yet). The per-source cache returns them but does not record them as covered, so they are fetched again next time. The single-file cache is not reused when the earliest declared instant is before its `end`. The pipeline removes the attribute, so it never reaches the output
 
 ## EntsoeSource
 
@@ -1352,11 +1353,13 @@ df = pipeline.run(start, end, cache=False)
 - Each source gets a cache key hashing the cache format version, the source class and `get_cache_config()`
 - Only fetches missing date ranges from the API. Each cached file is only read inside its own recorded range
 - Records only what the source actually returned, and never the last 2 days before now (data may still be published). That tail is fetched again on the next run
+- A source can declare rows unsettled with `df.attrs["settled_until"]` (a UTC timestamp, see DataSource above). The recorded range stops there too, whatever the age of the rows after it, and they are fetched again on the next run
 - A multi-column source (e.g. `EntsoeSource`) outer-joins its columns, so the merged row index can run past where a shorter column actually stopped (e.g. `load_actual` mid-outage while `price` keeps publishing). The recorded range is additionally capped at one step past the last value of any column still being published (its last value newer than 14 days before now), so that outage's cells aren't cached as covered and lost for good
 - Deleted or unreadable cache files count as missing and are fetched again
 - Atomic writes and a per-source file lock: parallel processes (SLURM arrays) on a cold cache fetch once and get identical data
 - ENTSO-E sometimes revises data long after publication, and the cache keeps the version it downloaded. Clear it to pick up revisions
 - Single-file cache stores `<file>.meta.json` with a fingerprint (sources and their parameters without `api_key`, input file size/mtime, start, end, package version). A mismatch rebuilds the file
+- Single-file cache also stores the earliest `settled_until` a source declared (`null` if none). A file whose value is before the requested `end` is rebuilt on every run
 
 ## Result Caching (ModelPipeline)
 

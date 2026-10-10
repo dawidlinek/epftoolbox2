@@ -67,6 +67,13 @@ about an hour after delivery (often later), next-day prices after the auction, w
 run finishes. The recent part is returned for the current run but fetched again next time, so a daily forecast run
 with `cache=True` always sees the newly published data.
 
+A source can also say that some of its own rows are not settled yet. When the frame returned by `fetch` carries
+`df.attrs["settled_until"]` (a UTC timestamp), the rows from that instant on are returned for the current run but
+are not recorded as covered, however old they are. They are fetched again next time, and the settled rows before
+that instant are served from disk. This is for data that stays missing or provisional for much longer than two
+days, such as a period that the provider has not published yet. The pipeline reads and removes the attribute right
+after `fetch`, so it never appears on the output frame.
+
 A gap in an otherwise regular response: one missing hour in a day of hourly data, is never recorded as covered:
 only the contiguous run(s) of timestamps actually present are cached, so the hole is fetched again on the next run
 instead of silently being treated as covered and then lost for good.
@@ -141,6 +148,11 @@ hasn't moved since. Otherwise the file is rebuilt. Without this, a fixed (non-re
 in the future would cache missing/not-yet-published rows for the unsettled tail once and keep serving that same
 gap forever, even after the real data was published, because nothing about the requested dates or sources ever
 changes to invalidate the fingerprint.
+
+If a source declared rows unsettled (`settled_until`, see above), the earliest such instant over all sources is
+stored as `settled_until` in the sidecar too. A file whose `settled_until` is earlier than the requested `end` is
+never reused and is rebuilt on every run, because what it holds was settled only up to that instant. A file written
+before this field existed is trusted as before.
 
 The single-file cache uses the same temporary-file-and-rename writes and a lock (`<file>.lock`), so parallel
 processes pointed at the same file download the data once.

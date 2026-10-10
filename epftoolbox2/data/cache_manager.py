@@ -6,7 +6,9 @@ format version, the source class and ``source.get_cache_config()``. ``metadata.j
 
 Only what a source actually returned is recorded, and never the last ``unsettled_period`` before now, because data
 close to now may still be published or completed (actual load, next-day prices, weather model runs). Those ranges
-are fetched again on the next run.
+are fetched again on the next run. A source can also say that its rows from some instant on are not settled
+(``df.attrs["settled_until"]``, see ``DataSource``), for data that stays provisional or missing for longer than
+the unsettled period, and the recorded ranges stop there too.
 
 Writes go to a temporary file that is renamed into place, and every metadata read-modify-write happens under a
 per-key file lock, so parallel processes (e.g. SLURM array tasks sharing one cache directory) never see a
@@ -37,6 +39,9 @@ CACHE_FORMAT_VERSION = 4
 
 # Data newer than this (relative to now, floored to UTC midnight) is returned but never recorded as cached.
 UNSETTLED_PERIOD = pd.Timedelta(days=2)
+
+# ``DataFrame.attrs`` key under which a source declares that its rows at or after that UTC instant are not settled.
+SETTLED_UNTIL_ATTR = "settled_until"
 
 # A column whose last valid (non-null) value is older than this, relative to now, is treated as discontinued
 # (e.g. a PsrType ENTSO-E no longer reports) rather than still being published, and does not cap
@@ -129,6 +134,39 @@ def clip_to_range(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> p
         df = df.copy()
         df.index = df.index.tz_localize("UTC")
     return df[(df.index >= start) & (df.index < end)]
+
+
+def settled_until_of(df: pd.DataFrame) -> Optional[pd.Timestamp]:
+    """The instant a source declared in ``df.attrs["settled_until"]``, as a UTC timestamp: its rows at or after it
+    are not settled yet. ``None`` if the source declared nothing (every row is settled) or ``NaT``. The value is a
+    timestamp or an ISO 8601 string (``pandas`` writes ``attrs`` as JSON, so a frame that is saved with
+    ``to_parquet`` needs the string). A tz-naive value is taken to be UTC, like a tz-naive index (the source
+    contract).
+
+    Read it right after ``fetch``: a clip or a concat of several frames may drop ``attrs``, or keep them only when
+    every frame has the same.
+    """
+    value = df.attrs.get(SETTLED_UNTIL_ATTR)
+    if value is None:
+        return None
+    try:
+        settled_until = pd.Timestamp(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"df.attrs[{SETTLED_UNTIL_ATTR!r}] must be a timestamp, got {value!r}") from e
+    if pd.isna(settled_until):
+        return None
+    return settled_until.tz_localize("UTC") if settled_until.tzinfo is None else settled_until.tz_convert("UTC")
+
+
+def without_settled_until(df: pd.DataFrame) -> pd.DataFrame:
+    """``df`` without its ``settled_until`` declaration: the frame itself if it has none, else a shallow copy (the
+    source's own frame is left alone). The declaration is for the cache only. It must not end up in a Parquet file
+    (a timestamp in ``attrs`` cannot be written) or in the pipeline's output."""
+    if SETTLED_UNTIL_ATTR not in df.attrs:
+        return df
+    stripped = df.copy(deep=False)
+    stripped.attrs = {key: value for key, value in df.attrs.items() if key != SETTLED_UNTIL_ATTR}
+    return stripped
 
 
 def _local_steps(diffs: List[pd.Timedelta], window: int = _STEP_WINDOW) -> List[pd.Timedelta]:
@@ -320,15 +358,26 @@ class CacheManager:
         return pd.concat(chunks).sort_index(kind="stable")
 
     def covered_ranges(
-        self, df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, timezone: Optional[str] = None
+        self,
+        df: pd.DataFrame,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        timezone: Optional[str] = None,
+        settled_until: Optional[pd.Timestamp] = None,
     ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
         """Contiguous, disjoint sub-ranges of ``[start, end)`` that ``df`` (fetched for ``[start, end)``) may be
-        recorded as covering, each capped at ``end``, at the start of the unsettled period before now, and at
-        one step past the last value of any column that is still being published (``_still_published_tail_cap``).
+        recorded as covering, each capped at ``end``, at the start of the unsettled period before now, at the
+        instant from which the source declared its rows unsettled (``settled_until``) and at one step past the last
+        value of any column that is still being published (``_still_published_tail_cap``).
 
         ``timezone``, when given, floors the unsettled-period cap to a local midnight in that zone instead of
         UTC (see ``unsettled_boundary``), so a later resumed fetch starts exactly at a source's own local
         midnight rather than strictly inside a one-day period.
+
+        ``settled_until`` is the source's own statement that its rows from that UTC instant on are placeholders or
+        provisional (``DataSource``). Given as ``None`` it is read from ``df.attrs``, which is the frame as the
+        source returned it; a caller that has clipped or concatenated the frame passes the value it read before.
+        The rows after it are still in ``df``, and are returned to the caller, only not recorded.
 
         A gap between two consecutive returned timestamps ends a run if it is wider than the expected spacing at
         that point in the response, estimated from a small window of neighbouring diffs (``_local_steps``)
@@ -349,11 +398,15 @@ class CacheManager:
         row for any requested range, such as a weekly aggregate); exactly two timestamps cover only themselves,
         not the span between or beyond them.
         """
+        if settled_until is None:
+            settled_until = settled_until_of(df)
         clipped = clip_to_range(df, start, end)
         index = clipped.index.unique().sort_values()
         if len(index) == 0:
             return []
         cap = min(end, unsettled_boundary(self.unsettled_period, timezone))
+        if settled_until is not None:
+            cap = min(cap, settled_until)
         tail_cap = _still_published_tail_cap(clipped, _now())
         if tail_cap is not None:
             cap = min(cap, tail_cap)
@@ -405,6 +458,7 @@ class CacheManager:
         source_config: Dict,
         source_class: Optional[str] = None,
         timezone: Optional[str] = None,
+        settled_until: Optional[pd.Timestamp] = None,
     ) -> Optional[pd.Timestamp]:
         """Store the contiguous run(s) of ``df`` (fetched for ``[start, end)``) that are actually present and
         settled — see ``covered_ranges``. Returns the end of the last (rightmost) range recorded, or ``None`` if
@@ -412,13 +466,14 @@ class CacheManager:
         callers rely on ``find_missing_ranges`` for that, not this return value.
 
         ``timezone`` (typically the owning ``DataPipeline``'s market zone) is passed through to
-        ``covered_ranges`` so the unsettled-period cap lands on that zone's local midnight; see there.
+        ``covered_ranges`` so the unsettled-period cap lands on that zone's local midnight; see there. So is
+        ``settled_until``, the instant from which the source declared its rows unsettled.
 
         Rows outside a recorded range are not stored. Each new range replaces any overlapping part of older ranges.
         """
         if df is None or df.empty:
             return None
-        ranges = self.covered_ranges(df, start, end, timezone)
+        ranges = self.covered_ranges(df, start, end, timezone, settled_until)
         if not ranges:
             return None
 
@@ -429,7 +484,7 @@ class CacheManager:
             new_entries = []
 
             for range_start, range_end in ranges:
-                part = clip_to_range(df, range_start, range_end)
+                part = without_settled_until(clip_to_range(df, range_start, range_end))
                 filename = self._get_data_filename(range_start, range_end)
                 atomic_write(cache_path / filename, lambda tmp, part=part: part.to_parquet(tmp))
                 kept = self._trim_overlap(kept, range_start, range_end, filename)
