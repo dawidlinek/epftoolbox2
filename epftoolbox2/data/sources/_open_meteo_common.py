@@ -321,6 +321,11 @@ class OpenMeteoBase(DataSource):
             "Europe/Warsaw, computing that cutoff in the wrong zone."
         )
 
+    def _effective_horizon(self) -> int:
+        """The number of days ahead actually fetched; a subclass whose `horizon` can stand for a computed value
+        (``None``) resolves it here."""
+        return self.horizon
+
     def _setup(self):
         self.session = requests.Session()
         self._configure_proxy()
@@ -368,9 +373,11 @@ class OpenMeteoBase(DataSource):
             if not isinstance(self.longitude, (int, float)) or not -180 <= self.longitude <= 180:
                 raise ValueError(f"Longitude must be between -180 and 180, got {self.longitude}")
 
-        if isinstance(self.horizon, bool) or not isinstance(self.horizon, int) or self.horizon <= 0:
-            raise ValueError(f"Horizon must be a positive integer, got {self.horizon}")
-        if max_horizon is not None and self.horizon > max_horizon:
+        if self.horizon is not None and (
+            isinstance(self.horizon, bool) or not isinstance(self.horizon, int) or self.horizon <= 0
+        ):
+            raise ValueError(f"Horizon must be a positive integer or None, got {self.horizon}")
+        if max_horizon is not None and self.horizon is not None and self.horizon > max_horizon:
             raise ValueError(f"Horizon must be at most {max_horizon} for {type(self).__name__}, got {self.horizon}")
 
         if not self.columns or not all(isinstance(c, str) and c for c in self.columns):
@@ -682,7 +689,7 @@ class OpenMeteoBase(DataSource):
 
     def _common_cache_config(self) -> Dict:
         config = {
-            "horizon": self.horizon,
+            "horizon": self._effective_horizon(),
             "model": self.model,
             "columns": sorted(self.columns),
             "prefix": self.prefix,
