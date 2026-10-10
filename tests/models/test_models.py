@@ -246,7 +246,7 @@ class TestModels:
         save_to.write_text('{"run_date": "2023-12-01", "hour": 0, "horizon": 1, "day_in_test": 0}\n')
         model = OLSModel(predictors=["load"], training_window=30, name="OLS")
 
-        # Default: an old results file with no manifest is accepted, and a manifest is now written for it.
+        # Default: a results file with no manifest is accepted, and a manifest is written for it.
         assert not manifest_path(save_to).exists()
         model.run(
             data=sample_data,

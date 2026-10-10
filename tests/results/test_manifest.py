@@ -161,14 +161,6 @@ def test_to_dict_from_dict_round_trip():
     assert restored == manifest
 
 
-def test_from_dict_ignores_unknown_future_fields():
-    manifest = make_manifest(make_data())
-    data = manifest.to_dict()
-    data["some_field_from_a_newer_schema"] = "value"
-    restored = Manifest.from_dict(data)
-    assert restored.extra == {"some_field_from_a_newer_schema": "value"}
-
-
 def test_check_and_write_creates_a_fresh_manifest(tmp_path):
     path = tmp_path / "ols.manifest.json"
     manifest = make_manifest(make_data())
@@ -218,7 +210,7 @@ def test_check_and_write_allow_mismatch_overwrites(tmp_path):
 
 
 def test_missing_manifest_is_accepted_by_default_and_can_be_required(tmp_path):
-    path = tmp_path / "ols.manifest.json"  # no file written yet, simulating results from before this feature
+    path = tmp_path / "ols.manifest.json"  # results exist but no manifest file was written
     manifest = make_manifest(make_data())
 
     check_and_write(path, manifest, has_existing_results=True)  # default: warn and write, not raise

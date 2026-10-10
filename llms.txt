@@ -1920,7 +1920,7 @@ Must be set **before** any library imports (especially before numpy/sklearn are 
 import os
 os.environ["PYTHON_GIL"] = "0"            # Enable free-threading (Python 3.13t+, or -Xgil=0)
 os.environ["MAX_PROCESSES"] = "4"         # Worker processes (default: cpu_count // THREADS_PER_PROCESS)
-os.environ["THREADS_PER_PROCESS"] = "16"  # Threads per worker process (alias: MAX_THREADS)
+os.environ["THREADS_PER_PROCESS"] = "16"  # Threads per worker process
 os.environ["OMP_NUM_THREADS"] = "1"       # Prevent BLAS oversubscription (always recommended)
 ```
 

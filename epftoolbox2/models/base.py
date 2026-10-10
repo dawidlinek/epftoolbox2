@@ -105,8 +105,7 @@ class BaseModel(ABC):
         With `save_to`, a manifest is written next to the results (see epftoolbox2.results.manifest) and,
         if one is already there, compared to this run's configuration before anything is resumed.
         `allow_manifest_mismatch` overwrites a disagreeing manifest instead of raising; `require_manifest`
-        raises instead of warning when `save_to` has results but no manifest (e.g. from before this
-        feature existed).
+        raises instead of warning when `save_to` has results but no manifest.
         """
         self._set_freq(freq)
 
@@ -312,7 +311,7 @@ class BaseModel(ABC):
         return expanded
 
     def _executor_config(self) -> tuple:
-        threads = int(os.environ.get("THREADS_PER_PROCESS", os.environ.get("MAX_THREADS", "16")))
+        threads = int(os.environ.get("THREADS_PER_PROCESS", "16"))
         processes = int(os.environ.get("MAX_PROCESSES", max(1, (os.cpu_count() or 1) // threads)))
         return threads, processes
 

@@ -78,15 +78,6 @@ class TestResultStore:
         store = ResultStore(temp_file, test_start=TEST_START)
         assert store.is_done(5, 2, 1)
 
-    def test_lines_without_run_date_are_not_trusted_for_resuming(self, temp_file):
-        """A line from an older schema without run_date can still be loaded, but isn't treated as done."""
-        Path(temp_file).write_text('{"hour": 5, "horizon": 2, "day_in_test": 3}\n')
-
-        store = ResultStore(temp_file, test_start=TEST_START)
-
-        assert not store.is_done(5, 2, 3)
-        assert len(store.load_all()) == 1
-
     def test_empty_file(self, temp_file):
         store = ResultStore(temp_file, test_start=TEST_START)
 

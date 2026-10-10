@@ -13,9 +13,8 @@ are allowed before fitting, and don't themselves change what a fitted model pred
 Provenance fields (package version, git SHA, timestamps) are recorded but never compared: a version bump
 or a new commit does not by itself invalidate a results directory.
 
-A directory with results but no manifest (from before this feature existed) is not a mismatch — by
-default it is accepted with a warning and a manifest is written from now on. Pass `require_manifest=True`
-for the stricter behaviour of refusing those too.
+A directory with results but no manifest is not a mismatch. By default it is accepted with a warning and
+a manifest is written for it. Pass `require_manifest=True` for the stricter behaviour of refusing those too.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -77,7 +76,6 @@ class Manifest:
     created_at: str
     updated_at: str
     schema_version: int = SCHEMA_VERSION
-    extra: Dict[str, Any] = field(default_factory=dict)  # forward compatibility: unknown fields from newer schemas
 
     def differences(self, existing: "Manifest") -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -89,16 +87,11 @@ class Manifest:
         return out
 
     def to_dict(self) -> Dict[str, Any]:
-        out = {f.name: getattr(self, f.name) for f in fields(self) if f.name != "extra"}
-        out.update(self.extra)
-        return out
+        return {f.name: getattr(self, f.name) for f in fields(self)}
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Manifest":
-        known = {f.name for f in fields(cls)} - {"extra"}
-        kwargs = {k: v for k, v in data.items() if k in known}
-        extra = {k: v for k, v in data.items() if k not in known}
-        return cls(**kwargs, extra=extra)
+        return cls(**data)
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,14 +243,11 @@ def check_and_write(
             logger.warning(f"{model_name}: manifest mismatch at {path} overridden: {'; '.join(diffs)}")
         manifest.created_at = existing.created_at  # keep the first run's provenance
     elif has_existing_results:
-        message = (
-            f"{model_name}: {path.parent} has results but no manifest ({path.name} not found), most likely "
-            "from before this feature existed."
-        )
+        message = f"{model_name}: {path.parent} has results but no manifest ({path.name} not found)."
         if require_manifest:
             raise ManifestMismatchError(
                 f"{message} Pass require_manifest=False (the default) to accept them and start recording a "
-                "manifest, or remove the old results to start fresh."
+                "manifest, or remove the results to start fresh."
             )
         logger.warning(f"{message} Continuing without checking they match this run's configuration.")
     manifest.write(path)

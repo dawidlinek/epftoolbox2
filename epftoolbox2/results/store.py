@@ -76,8 +76,6 @@ class ResultStore:
 
     def _load_existing(self) -> None:
         for r in self.iter_lines(cols=["hour", "horizon", "run_date"]):
-            if "run_date" not in r:
-                continue  # pre-existing line from an older schema; recomputed rather than trusted
             self._completed.add((r["hour"], r["horizon"], r["run_date"]))
 
     def _writer_loop(self) -> None:
