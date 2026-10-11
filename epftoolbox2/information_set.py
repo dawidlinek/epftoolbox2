@@ -85,10 +85,12 @@ class Availability:
                      availability depends on the row time, not on k.
         as_of:       known at a fixed `time` (in `timezone`) on the issue day D, regardless of a leading `_d+k`
                      (a value fixed as of the source's own issue time, e.g. a reanalysis snapshot rather than a
-                     rolling forecast run).
+                     rolling forecast run). A shift after the leading `_d+k` moves the day: `x_d+1_d+1` holds
+                     the value of D+1 and is known as of D+1.
         weather_cutoff: an OpenMeteoSource column. Known `delay` after `run`:00 UTC on the issue day D itself,
                      regardless of a leading `_d+k` — the source's own leak-free cutoff is fixed to D's run, not
-                     to the delivery day (see OpenMeteoSource and `publication_delay_hours`).
+                     to the delivery day (see OpenMeteoSource and `publication_delay_hours`). A shift after the
+                     leading `_d+k` moves the day the run is read from, as for `as_of`.
     """
 
     kind: str
@@ -618,6 +620,11 @@ class InformationSet:
         """An OpenMeteoSource column's own cutoff is a source-side setting, not a data fact: point at it."""
         if col.rule is None or col.rule.kind != "weather_cutoff":
             return ""
+        if any(s.offset > 0 for s in _shifts_after_source_lead(col.shifts)):
+            return (
+                "a forward shift after the source's own `_d+k` reads the run of a later issue day, which starts "
+                "after the issue time whatever `run` is; drop the forward shift"
+            )
         run = col.rule.time.split(":", 1)[0]
         return (
             f"OpenMeteoSource(run={run!r}, ...) is known {col.rule.delay} after that UTC run; suggest an "
@@ -898,15 +905,18 @@ def _available_array(
     if rule.kind == "static":
         return np.full(len(day), -np.inf)
     if rule.kind == "as_of":
-        # Fixed to a time on the issue day D itself: independent of the row's own day/minute or any shift,
-        # so a leading `_d+k` doesn't change it.
-        known = np.full(len(day), _minutes(rule.time), dtype=float) + issue_day * 1440.0
+        # Fixed to a time on the day the value is read from: the issue day D itself, moved by every shift after a
+        # leading `_d+k` (see `_read_day_offset`), but not by the leading `_d+k`, the row's own day or minute.
+        read_day = issue_day + _read_day_offset(col.shifts, minute)
+        known = np.full(len(day), _minutes(rule.time), dtype=float) + read_day * 1440.0
         return _from_zone(known, rule.timezone, ctx)
     if rule.kind == "weather_cutoff":
-        # Fixed to `run`:00 UTC plus `delay` on the issue day D itself, same independence as `as_of` above. The
-        # run+delay total is minutes after UTC midnight of D and may exceed 1440 (a late run plus its delay can
-        # land on D+1 in UTC); that is fine here, this is a plain offset, not a wall-clock time to re-parse.
-        cutoff = np.full(len(day), _minutes(rule.time) + _parse_delay(rule.delay), dtype=float) + issue_day * 1440.0
+        # Fixed to `run`:00 UTC plus `delay` on the day the value is read from, same as `as_of` above. The
+        # run+delay total is minutes after UTC midnight of that day and may exceed 1440 (a late run plus its delay
+        # can land on the next day in UTC), or be negative for a value read from an earlier day; that is fine
+        # here, this is a plain offset, not a wall-clock time to re-parse.
+        read_day = issue_day + _read_day_offset(col.shifts, minute)
+        cutoff = np.full(len(day), _minutes(rule.time) + _parse_delay(rule.delay), dtype=float) + read_day * 1440.0
         return _from_zone(cutoff, rule.timezone, ctx)
     shifts = list(col.shifts)
     if rule.kind == "weather_run" and shifts and shifts[0].unit == "d" and shifts[0].offset > 0:
@@ -933,6 +943,29 @@ def _available_array(
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _shifts_after_source_lead(shifts: Sequence[Shift]) -> List[Shift]:
+    """`shifts` without a leading `_d+k`, which is a source's own lead (the forecast for k days ahead) and not a
+    shift of the row."""
+    rest = list(shifts)
+    if rest and rest[0].unit == "d" and rest[0].offset > 0:
+        rest = rest[1:]
+    return rest
+
+
+def _read_day_offset(shifts: Sequence[Shift], minute: np.ndarray) -> np.ndarray:
+    """Days after (negative: before) the issue day D that an `as_of` or `weather_cutoff` column is read from.
+
+    Such a rule is fixed to the issue day of the row a value is taken from. A leading `_d+k` is the source's own
+    lead and keeps the row. Any shift after it moves the row: `x_d+1_d+1` on day D holds what `x_d+1` had on D+1
+    (its run, issued on D+1), `x_d+1_d-1` what it had on D-1, and an hour or minute shift that crosses midnight
+    from `minute` (the row's clock minute) moves it to the next or the previous day.
+    """
+    rest = _shifts_after_source_lead(shifts)
+    days = sum(s.offset for s in rest if s.unit == "d")
+    elapsed = sum(s.minutes for s in rest if s.unit != "d")
+    return days + np.floor((np.asarray(minute, dtype=float) + elapsed) / 1440.0)
 
 
 def _convert_wall_clock(

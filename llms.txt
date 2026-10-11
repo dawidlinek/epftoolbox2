@@ -924,14 +924,15 @@ bound market zone (or its area's own zone standalone), matching where A31's loca
 anchored, instead of the `Europe/Brussels` default. For weather: `weather_cutoff(source.run, f"{delay}h")`,
 `delay` from `publication_delay_hours(source.model)` (ICON 4.5h, GFS 6.5h, ECMWF IFS 9h, JMA 9.6h, 10h for an
 unknown model). It is known `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading
-`_d+k`. `run`/`model` are read with `getattr`, so this works with any `OpenMeteoSource`-like object. The
+`_d+k`. A shift after the leading `_d+k` moves the day the run is read from (`temperature_2m_d+1_d+1` holds the
+value of D+1 and is known only after D+1's run, `temperature_2m_d+1_d-1` comes from D-1's run). `run`/`model` are read with `getattr`, so this works with any `OpenMeteoSource`-like object. The
 source itself has no notion of issue time or delay, only of `run`.
 
 **Availability kinds** (`Availability.<kind>(...)`): `static()`, `realised(delay="1h")`,
 `published(time, days_before=1, timezone="Europe/Brussels")`, `daily_close(time)` (= `published(time, days_before=0)`),
 `weekly(weekday="friday", time="10:00")`, `weather_run(delay="6h")` (a user-defined rolling-forecast rule),
 `as_of(time, timezone="Europe/Brussels")` (known at a fixed time on the issue day D, a leading `_d+k` doesn't
-change that), `weather_cutoff(run, delay)` (like `as_of`, but a UTC run hour plus a delay that may push past
+change that, a shift after it moves the day), `weather_cutoff(run, delay)` (like `as_of`, but a UTC run hour plus a delay that may push past
 24:00, used by `source_rules` for `OpenMeteoSource`).
 
 **Unknown columns:** a predictor whose base column has no rule anywhere raises by default (`unknown="raise"`).

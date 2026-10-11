@@ -79,8 +79,10 @@ columns an `OpenMeteoSource` emits:
   inside `DataPipeline(timezone="Europe/Warsaw")`) is checked in the market's zone, not Finland's own, matching
   where the value is stamped.
 - `weather_cutoff(source.run, f"{delay}h")`, `delay` coming from `publication_delay_hours(source.model)`, known
-  `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading `_d+k`. This is a
-  conservative, model-side estimate of the run's real-world publication lag (ICON 4.5h, GFS 6.5h, ECMWF IFS 9h,
+  `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading `_d+k`. A shift after
+  the leading `_d+k` moves the day the run is read from: `temperature_2m_d+1_d+1` (a `LagTransformer` with
+  `lags=[-1]` on `temperature_2m_d+1`) holds the value of D+1 and is known only after D+1's run, so it is
+  flagged, while `temperature_2m_d+1_d-1` comes from D-1's run. This is a conservative, model-side estimate of the run's real-world publication lag (ICON 4.5h, GFS 6.5h, ECMWF IFS 9h,
   JMA 9.6h, 10h for an unknown model): `OpenMeteoSource` itself has no notion of issue time or delay, only of
   the nominal cutoff `run`.
 
@@ -116,7 +118,8 @@ pipeline = ModelPipeline(information_set=info)
     Availability.weekly(weekday="friday", time="10:00")       # published once for the whole next week
     Availability.weather_run(delay="6h")                      # a rolling forecast run ~ row time + delay
     Availability.as_of("09:00", "Europe/Brussels")             # known at a fixed time on the issue day D;
-                                                                # a leading `_d+k` doesn't change that
+                                                                # a leading `_d+k` doesn't change that, a
+                                                                # shift after it moves the day
     Availability.weather_cutoff(run="00", delay="9.6h")        # OpenMeteoSource: known `delay` after `run`:00
                                                                 # UTC on the issue day D; used by source_rules
     ```

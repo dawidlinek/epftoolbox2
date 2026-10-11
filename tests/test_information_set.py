@@ -16,6 +16,7 @@ from epftoolbox2.information_set import (
     source_rules,
 )
 from epftoolbox2.data.sources.entsoe import EntsoeSource
+from epftoolbox2.data.transformers import LagTransformer
 from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
@@ -183,6 +184,49 @@ def test_jma_run_00_is_not_known_by_1130_in_summer():
         ["warsaw_temperature_2m_d+{horizon}"], info=info, start="2024-07-10", end="2024-07-23", index=SUMMER_WARSAW
     )
     assert found != set()
+
+
+def test_a_day_lag_of_a_weather_column_is_read_from_the_next_days_run():
+    """`LagTransformer(lags=[-1])` on `warsaw_temperature_2m_d+1` names its output `..._d+1_d+1`, and its value on
+    day D is the column's value on D+1, i.e. from D+1's run. The rule is fixed to the run of the day a value is read
+    from, so a shift after the source's own `_d+k` moves the issue day, in either direction."""
+    frame = pd.DataFrame({"warsaw_temperature_2m_d+1": np.arange(len(WARSAW), dtype=float)}, index=WARSAW)
+    lagged = LagTransformer(columns=["warsaw_temperature_2m_d+1"], lags=[-1, 1], freq="day").transform(frame)
+    forward, backward = "warsaw_temperature_2m_d+1_d+1", "warsaw_temperature_2m_d+1_d-1"
+    assert {forward, backward} <= set(lagged.columns)
+
+    info = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    names = [
+        "warsaw_temperature_2m_d+1",
+        "warsaw_temperature_2m_d+3",
+        forward,
+        "warsaw_temperature_2m_d+2_d+1",
+        backward,
+    ]
+    found, _ = violations(names, info=info, horizon=1)
+    assert {name for name, _, _ in found} == {forward, "warsaw_temperature_2m_d+2_d+1"}
+    assert {p for name, p, _ in found if name == forward} == set(range(24))
+    # D-1's run is known long before D's issue time, even for a run published late in the evening.
+    late_run = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source(run="18")])
+    found, _ = violations(["warsaw_temperature_2m_d+1", backward], info=late_run, horizon=1)
+    assert {name for name, _, _ in found} == {"warsaw_temperature_2m_d+1"}
+
+
+def test_a_forward_hour_lag_of_a_weather_column_is_read_from_the_next_days_run_after_midnight():
+    """`x_d+1_h+3` at 22:00 is the column's value at 01:00 the next day, which belongs to the next day's run."""
+    info = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    found, _ = violations(
+        ["warsaw_temperature_2m_d+1_h+3", "warsaw_temperature_2m_d+1_h-3", "warsaw_temperature_2m_d+1_h-24"],
+        info=info,
+        horizon=1,
+    )
+    assert {(name, p) for name, p, _ in found} == {("warsaw_temperature_2m_d+1_h+3", p) for p in (21, 22, 23)}
+
+
+def test_a_day_lag_of_an_as_of_column_is_read_from_the_next_day():
+    info = InformationSet(rules={"x": Availability.as_of("09:00", "Europe/Brussels")})
+    found, _ = violations(["x", "x_d+1_d+1", "x_d+1_d-1", "x_d-1"], info=info, horizon=1)
+    assert {name for name, _, _ in found} == {"x_d+1_d+1"}
 
 
 def test_source_rules_agg_mean_locations_cover_the_aggregated_columns():
@@ -888,6 +932,50 @@ def test_perturbation_keeps_a_repeated_hours_own_occurrence():
 
     assert perturbed["px"].loc[pd.Timestamp("2024-11-03 05:00", tz="UTC")] == 1.0
     assert perturbed["px"].loc[pd.Timestamp("2024-11-03 06:00", tz="UTC")] != 1.0
+
+
+def test_perturbation_covers_a_day_lag_of_a_weather_column():
+    """The same rule drives the probe: the issue day's value of `x_d+1_d+1` comes from the next day's run, which is
+    unknown at issue time, while `x_d+1` itself (D's run, published by 10:36 CET) is known."""
+    index = pd.date_range("2024-01-01", "2024-02-01", freq="h", tz="Europe/Warsaw", inclusive="left")
+    df = pd.DataFrame(
+        {
+            name: np.linspace(0, 1, len(index))
+            for name in ("warsaw_temperature_2m_d+1", "warsaw_temperature_2m_d+1_d+1")
+        },
+        index=index,
+    )
+    info = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    perturbed, counts, _ = perturb_unknown(df, "2024-01-16", info)
+    assert "warsaw_temperature_2m_d+1" not in counts
+    assert (perturbed["warsaw_temperature_2m_d+1"] == df["warsaw_temperature_2m_d+1"]).all()
+    issue_day = df.index.normalize() == pd.Timestamp("2024-01-16", tz="Europe/Warsaw")
+    assert (perturbed.loc[issue_day, "warsaw_temperature_2m_d+1_d+1"] > 1e5).all()
+
+
+def test_probe_detects_a_model_reading_a_weather_column_through_a_forward_day_lag():
+    df = make_market_data(noise=5.0, seed=7)
+    df["temperature_d+1"] = np.random.default_rng(3).normal(10, 5, len(df))
+    df["temperature_d+1_d+1"] = df["temperature_d+1"].shift(-24)
+    info = InformationSet(
+        rules={
+            **PRICE_KNOWN_AFTER_DELIVERY,
+            "temperature": Availability.weather_cutoff("00", "9.6h"),
+        }
+    )
+    predictors = ["load_d+{horizon}", "is_weekend_d+{horizon}", "is_weekday_d+{horizon}"]
+
+    clean = leakage_probe(
+        lambda: OLSModel(predictors + ["temperature_d+1"], training_window=45), df, "2023-04-12", info, horizon=1
+    )
+    clean.assert_ok()
+    assert "temperature_d+1" not in clean.perturbed
+
+    leaky = leakage_probe(
+        lambda: OLSModel(predictors + ["temperature_d+1_d+1"], training_window=45), df, "2023-04-12", info, horizon=1
+    )
+    assert leaky.perturbed["temperature_d+1_d+1"] > 0
+    assert not leaky.ok
 
 
 def test_probe_passes_for_the_models_information_set():
