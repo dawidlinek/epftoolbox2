@@ -22,7 +22,7 @@ Workflow(
     model_test_start="2024-06-01",
     model_test_end="2024-07-01",
     model_target="price",
-    model_horizon=7,
+    model_horizon=6,
     max_processes=32,
     threads_per_process=8,
     cache_path="/tmp/scratch/$SLURM_JOB_ID/cache",
@@ -54,7 +54,7 @@ model_pipeline:
   test_start: "2024-06-01"
   test_end: "2024-07-01"
   target: price
-  horizon: 7
+  horizon: 6
   freq: 1h
 ```
 
@@ -64,13 +64,13 @@ model_pipeline:
 data_pipeline:
   path: data_pipeline.yaml
   start: "now_d-735"       # ~2 years of history, relative to today
-  end: "today_d+7"         # whole horizon-7 day (local day, given `timezone` in data_pipeline.yaml)
+  end: "today_d+6"         # whole horizon-6 day (local day, given `timezone` in data_pipeline.yaml)
   cache: true
 
 model_pipeline:
   path: model_pipeline.yaml
   target: price
-  horizon: 7
+  horizon: 6
   freq: 1h                 # set to 15min for 15-minute forecasting
   forecast_only: true      # test_start/test_end default to "today", skips evaluators and exporters
 ```
@@ -221,7 +221,7 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
    (
        DataPipeline()
        .add_source(EntsoeSource(country_code="PL", api_key=os.environ["ENTSOE_API_KEY"], type=["load", "price"]))
-       .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+       .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, prefix="warsaw"))
        .add_source(CalendarSource(country="PL", holidays="binary", daylight=True, weekday="onehot"))
        .add_transformer(ResampleTransformer(freq="1h"))
        .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
@@ -255,7 +255,7 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
        model_test_start="2024-06-01",
        model_test_end="2024-07-01",
        model_target="price",
-       model_horizon=7,
+       model_horizon=6,
        max_processes=32,
        threads_per_process=8,
        cache_path="/tmp/cache",
