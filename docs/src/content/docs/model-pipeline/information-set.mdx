@@ -89,6 +89,15 @@ columns an `OpenMeteoSource` emits:
 `run` and `model` are read with `getattr` and default when a source doesn't set them, so this works with any
 `OpenMeteoSource`-like object.
 
+An `OpenMeteoSource` column cut each local day D of its market zone off at D's own run. The check and the probe
+read a row's issue day D from the data's index, so they need the index in that zone. On a UTC index (a pipeline
+without `TimezoneTransformer`) the row at 22:00Z in summer belongs to the next day of `Europe/Warsaw`, whose run is
+published only the next morning, and the check would read the wrong run. `check()`, `violations()` and
+`leakage_probe` therefore raise `InformationSetError` when such a column sits on an index whose wall clock differs
+from the source's market zone, and say to add a `TimezoneTransformer` (it takes its zone from
+`DataPipeline(timezone=...)`). A zone with the same wall clock on every row, such as `Europe/Berlin` for a Warsaw
+source, passes.
+
 ---
 
 ## Custom Rules and Assumptions

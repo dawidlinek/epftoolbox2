@@ -229,6 +229,72 @@ def test_a_day_lag_of_an_as_of_column_is_read_from_the_next_day():
     assert {name for name, _, _ in found} == {"x_d+1_d+1"}
 
 
+UTC_SUMMER = pd.date_range("2024-06-20", periods=24 * 30, freq="h", tz="UTC")
+
+
+def test_a_utc_index_with_weather_columns_is_refused():
+    """A pipeline without `TimezoneTransformer` leaves the index in UTC. The row at 2024-07-03 22:00Z belongs to
+    Warsaw's 07-04 and so to its 07-04 00Z run, published about 09:36Z the next day, but on the UTC index it is a
+    row of 07-03. The check would read the wrong day's run and pass, so it refuses such an index."""
+    info = InformationSet().with_source_rules([_warsaw_weather_source()])
+    names = ["warsaw_temperature_2m_d+{horizon}"]
+    with pytest.raises(InformationSetError, match="TimezoneTransformer") as raised:
+        violations(names, info=info, index=UTC_SUMMER, start="2024-07-01", end="2024-07-05")
+    assert "'Europe/Warsaw'" in str(raised.value) and "'UTC'" in str(raised.value)
+    assert "DataPipeline(timezone='Europe/Warsaw')" in str(raised.value)
+    with pytest.raises(InformationSetError, match="TimezoneTransformer"):
+        info.check(expand(names), "price", "1h", UTC_SUMMER, "2024-07-01", "2024-07-05")
+
+
+def test_a_utc_index_with_weather_columns_is_refused_by_the_probe_too():
+    info = InformationSet().with_source_rules([_warsaw_weather_source()])
+    df = pd.DataFrame({"warsaw_temperature_2m_d+1": np.arange(len(UTC_SUMMER), dtype=float)}, index=UTC_SUMMER)
+    with pytest.raises(InformationSetError, match="TimezoneTransformer"):
+        perturb_unknown(df, "2024-07-03", info)
+
+
+def test_a_utc_index_with_weather_columns_is_refused_before_a_model_runs(tmp_path):
+    # No day-lag columns, so the model's own UTC checks have nothing to object to: only the weather column does.
+    df = make_market_data(days=120, noise=5.0, seed=3, start="2024-05-01", tz="UTC").drop(columns=["price_d-1"])
+    df["warsaw_temperature_2m_d+1"] = np.random.default_rng(1).normal(15, 5, len(df))
+    info = InformationSet(rules=SYNTHETIC_RULES).with_source_rules([_warsaw_weather_source()])
+    pipeline = ModelPipeline(information_set=info).add_model(
+        OLSModel(["warsaw_temperature_2m_d+1", "wind_d+1"], training_window=30, name="OLS")
+    )
+    with pytest.raises(InformationSetError, match="TimezoneTransformer"):
+        pipeline.run(df, test_start="2024-07-03", test_end="2024-07-03", horizon=1, save_dir=str(tmp_path))
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("zone", ["Europe/Warsaw", "Europe/Berlin"])
+def test_an_index_in_the_market_zone_or_one_with_its_wall_clock_is_accepted(zone):
+    index = pd.date_range("2024-06-20", periods=24 * 30, freq="h", tz=zone)
+    info = InformationSet().with_source_rules([_warsaw_weather_source()])
+    found, _ = violations(
+        ["warsaw_temperature_2m_d+{horizon}"], info=info, index=index, start="2024-07-01", end="2024-07-05"
+    )
+    assert found == set()
+
+
+def test_a_zone_with_another_wall_clock_is_refused_and_a_user_rule_or_other_columns_are_not_checked():
+    info = InformationSet().with_source_rules([_warsaw_weather_source()])
+    london = pd.date_range("2024-06-20", periods=24 * 30, freq="h", tz="Europe/London")
+    with pytest.raises(InformationSetError, match="Europe/London"):
+        violations(["warsaw_temperature_2m_d+{horizon}"], info=info, index=london, start="2024-07-01", end="2024-07-05")
+    # A rule the user wrote for the column replaces the source's, and the other columns have rules of their own zone.
+    own = InformationSet(rules={"warsaw_temperature_2m": Availability.static()}).with_source_rules(
+        [_warsaw_weather_source()]
+    )
+    found, _ = violations(
+        ["warsaw_temperature_2m_d+{horizon}"], info=own, index=UTC_SUMMER, start="2024-07-01", end="2024-07-05"
+    )
+    assert found == set()
+    found, _ = violations(
+        ["load_forecast_d+{horizon}"], info=info, index=UTC_SUMMER, start="2024-07-01", end="2024-07-05", horizon=1
+    )
+    assert {period for _, period, _ in found} <= {22, 23}  # its own zone conversion handles the UTC index
+
+
 def test_source_rules_agg_mean_locations_cover_the_aggregated_columns():
     # agg="mean" emits `{prefix}_{variable}_mean_d+i`, suffixed just like a list containing "mean".
     source = _warsaw_weather_source(

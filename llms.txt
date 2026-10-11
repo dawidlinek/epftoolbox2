@@ -925,8 +925,11 @@ anchored, instead of the `Europe/Brussels` default. For weather: `weather_cutoff
 `delay` from `publication_delay_hours(source.model)` (ICON 4.5h, GFS 6.5h, ECMWF IFS 9h, JMA 9.6h, 10h for an
 unknown model). It is known `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading
 `_d+k`. A shift after the leading `_d+k` moves the day the run is read from (`temperature_2m_d+1_d+1` holds the
-value of D+1 and is known only after D+1's run, `temperature_2m_d+1_d-1` comes from D-1's run). `run`/`model` are read with `getattr`, so this works with any `OpenMeteoSource`-like object. The
-source itself has no notion of issue time or delay, only of `run`.
+value of D+1 and is known only after D+1's run, `temperature_2m_d+1_d-1` comes from D-1's run). The issue day D of a
+row is a local day of the source's market zone, so `check`/`violations`/`leakage_probe` raise `InformationSetError`
+for such a column on an index with another wall clock (a UTC index from a pipeline without `TimezoneTransformer`),
+naming `TimezoneTransformer` and `DataPipeline(timezone=...)`. `run`/`model` are read with `getattr`, so this
+works with any `OpenMeteoSource`-like object. The source itself has no notion of issue time or delay, only of `run`.
 
 **Availability kinds** (`Availability.<kind>(...)`): `static()`, `realised(delay="1h")`,
 `published(time, days_before=1, timezone="Europe/Brussels")`, `daily_close(time)` (= `published(time, days_before=0)`),

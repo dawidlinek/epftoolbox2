@@ -300,28 +300,46 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             for name in ("load_forecast_daily_min", "load_forecast_daily_max"):
                 rules[f"{prefix}{name}"] = rule
         elif isinstance(source, OpenMeteoSource):
-            from .data.sources._open_meteo_common import aggregated_variable_names
-
-            prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
             rule = _weather_availability(source)
-            # A source built with `locations` (see OpenMeteoSource.locations) emits aggregated columns
-            # (`{prefix}{variable}_{kind}` per entry — see `aggregated_variable_names`) only when `agg` is set;
-            # it also, or instead, emits per-location columns `{prefix}{name}_{variable}`, with `agg` only when
-            # `keep_locations`, always otherwise (they are then the only output). Both column shapes follow the
-            # same cutoff rule.
-            locations = getattr(source, "_locations", [])
-            agg = getattr(source, "_agg", None)
-            if not locations:
-                for variable in source.columns:
-                    rules[f"{prefix}{variable}"] = rule
-            else:
-                for variable in aggregated_variable_names(source.columns, agg):
-                    rules[f"{prefix}{variable}"] = rule
-                if agg is None or getattr(source, "keep_locations", False):
-                    for location in locations:
-                        for variable in source.columns:
-                            rules[f"{prefix}{location['name']}_{variable}"] = rule
+            for name in _weather_column_names(source):
+                rules[name] = rule
     return rules
+
+
+def _weather_column_names(source: Any) -> List[str]:
+    """The unshifted column names an OpenMeteoSource emits (each is also emitted as `{name}_d+{i}`)."""
+    from .data.sources._open_meteo_common import aggregated_variable_names
+
+    prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
+    # A source built with `locations` (see OpenMeteoSource.locations) emits aggregated columns
+    # (`{prefix}{variable}_{kind}` per entry — see `aggregated_variable_names`) only when `agg` is set;
+    # it also, or instead, emits per-location columns `{prefix}{name}_{variable}`, with `agg` only when
+    # `keep_locations`, always otherwise (they are then the only output). Both column shapes follow the
+    # same cutoff rule.
+    locations = getattr(source, "_locations", [])
+    agg = getattr(source, "_agg", None)
+    if not locations:
+        return [f"{prefix}{variable}" for variable in source.columns]
+    names = [f"{prefix}{variable}" for variable in aggregated_variable_names(source.columns, agg)]
+    if agg is None or getattr(source, "keep_locations", False):
+        names += [f"{prefix}{location['name']}_{variable}" for location in locations for variable in source.columns]
+    return names
+
+
+def _source_market_zones(sources: Iterable[Any]) -> Dict[str, str]:
+    """Rule key -> the market zone of the source whose rule it is, for rules that only mean something on an index
+    in that zone. An OpenMeteoSource's cutoff is `run`:00 UTC of the local market day D, so the issue day D of a row
+    is a day of the market's zone: on an index in another zone (UTC, say) a row can belong to another day D.
+    Rules that carry their own zone and convert exactly (the week-ahead load rule, calendar columns) need none."""
+    from .data.sources.open_meteo import OpenMeteoSource
+
+    zones: Dict[str, str] = {}
+    for source in sources:
+        zone = getattr(source, "market_timezone", None)
+        if isinstance(source, OpenMeteoSource) and zone:
+            for name in _weather_column_names(source):
+                zones[name] = zone
+    return zones
 
 
 def _weather_availability(source: Any) -> Availability:
@@ -446,13 +464,16 @@ class InformationSet:
         self.unknown = unknown
         self.use_defaults = use_defaults
         self._source_rules: Dict[str, Availability] = {}
+        self._source_zones: Dict[str, str] = {}
 
     # -- configuration --------------------------------------------------------
 
     def with_source_rules(self, sources: Iterable[Any]) -> "InformationSet":
         """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables)."""
+        sources = list(sources)
         out = self.copy()
         out._source_rules = {**self._source_rules, **source_rules(sources)}
+        out._source_zones = {**self._source_zones, **_source_market_zones(sources)}
         return out
 
     def copy(self) -> "InformationSet":
@@ -465,6 +486,7 @@ class InformationSet:
             self.use_defaults,
         )
         out._source_rules = dict(self._source_rules)
+        out._source_zones = dict(self._source_zones)
         return out
 
     def to_dict(self) -> Dict[str, Any]:
@@ -569,6 +591,8 @@ class InformationSet:
                 resolved[name] = self.resolve(name)
                 if resolved[name].rule is None:
                     unknown.add(resolved[name].base)
+                else:
+                    self._check_source_zone(resolved[name], index)
 
         days = self._issue_days(index, test_start, test_end)
         if not len(days):
@@ -606,6 +630,27 @@ class InformationSet:
                     hint = hint or self._weather_cutoff_hint(col)
                     out.append(Violation(name, period, hz, col, known, issue_minute, role, hint))
         return out, unknown
+
+    def _check_source_zone(self, col: ResolvedColumn, index: pd.DatetimeIndex) -> None:
+        """Raise if `col` is a data source's column whose rule needs the market zone and the index is in another.
+
+        The check reads each row's issue day D as a local day of the index's zone. An Open-Meteo column took its
+        run from D in the source's market zone, so on a UTC index a row at 22:00Z belongs to the market's next
+        day, whose run is published only the next morning: neither the check nor the probe could see that.
+        Zones with the same wall clock on every row (Europe/Berlin and Europe/Warsaw) are the same here.
+        """
+        zone = self._source_zones.get(col.key) if col.layer == "sources" and col.key else None
+        if zone is None or getattr(index, "tz", None) is None or not len(index):
+            return
+        if (index.tz_convert(zone).tz_localize(None) == index.tz_localize(None)).all():
+            return
+        raise InformationSetError(
+            f"Column '{col.name}' comes from a data source for the market zone '{zone}', but the data is indexed "
+            f"in '{index.tz}'. The source cut each local day D of the market off at D's own model run, which a "
+            f"'{index.tz}' index cannot tell: a row late in the evening already belongs to the next day of "
+            f"'{zone}', whose run is published only the next morning. Put the index in the market zone first: add "
+            f"a TimezoneTransformer to the DataPipeline (it takes its zone from DataPipeline(timezone='{zone}'))."
+        )
 
     def _assumption_hint(self, col, day, row_minute, step, ctx) -> str:
         for name, (pattern, rule, description) in ASSUMPTIONS.items():
@@ -867,6 +912,7 @@ def perturb_unknown(
         if col.rule is None:
             unchecked.append(name)
             continue
+        information_set._check_source_zone(col, index)
         available = _available_array(col, col.rule, day, minute, step, ctx, first)
         mask = available > ctx.issue_minute
         if target_from_issue is not None and name == target_from_issue:
