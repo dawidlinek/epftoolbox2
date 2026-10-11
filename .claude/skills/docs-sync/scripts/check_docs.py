@@ -4,16 +4,17 @@
 Checks
   registry  every public component is registered for YAML loading and offered in the TUI,
             and TUI parameter schemas match the constructors
-  coverage  every component has an llms.txt section, a docs page and a README mention
-  params    every constructor parameter appears in the component's llms.txt section and docs page;
-            defaults written as "(default: X)" / "Defaults to X" in llms.txt match the code
+  coverage  every component has a docs page and a README mention
+  params    every constructor parameter appears in the component's docs page
+  index     llms.txt (the entry point for agents) has an H1 and a summary, links every docs page under
+            docs/src/content/docs, and every repo-relative link in it points to an existing file
   imports   `from epftoolbox2... import X` statements in code blocks and examples resolve
   calls     keyword arguments in documented `Component(...)` calls are accepted by the constructor
   report    `report.<method>(` calls in code blocks exist on EvaluationReport
 
 Usage
   uv run python .claude/skills/docs-sync/scripts/check_docs.py              # human-readable report
-  uv run python .claude/skills/docs-sync/scripts/check_docs.py --inventory  # JSON: params, defaults, doc locations
+  uv run python .claude/skills/docs-sync/scripts/check_docs.py --inventory  # JSON: params, defaults, docs pages
   uv run python .claude/skills/docs-sync/scripts/check_docs.py --json       # findings as JSON
 
 Exit code 1 when any error is found; warnings don't fail.
@@ -66,7 +67,6 @@ class Component:
     name: str
     module: str
     params: dict  # name -> repr(default) or None when required
-    llms_lines: tuple | None = None  # (start, end), 1-based inclusive
     docs_page: str | None = None
 
 
@@ -103,30 +103,6 @@ def normalize(value: str) -> str:
     value = re.split(r"\s|=", value, maxsplit=1)[0] if value else value
     value = value.strip("'\"").lower().rstrip(".")
     return "none" if value == "" else value
-
-
-def split_sections(text: str) -> dict[str, tuple[int, int]]:
-    """Map `## Heading` → (start_line, end_line) in markdown, ignoring '#' lines inside code fences."""
-    lines = text.splitlines()
-    headings: list[tuple[int, int, str]] = []  # (line_no, level, title)
-    in_code = False
-    for i, line in enumerate(lines, 1):
-        if line.lstrip().startswith("```"):
-            in_code = not in_code
-            continue
-        if not in_code:
-            m = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
-            if m:
-                headings.append((i, len(m.group(1)), m.group(2)))
-    sections = {}
-    for idx, (line_no, level, title) in enumerate(headings):
-        end = len(lines)
-        for next_line, next_level, _ in headings[idx + 1 :]:
-            if next_level <= level:
-                end = next_line - 1
-                break
-        sections.setdefault(title, (line_no, end))
-    return sections
 
 
 def code_blocks(path: Path) -> list[tuple[int, str]]:
@@ -184,7 +160,7 @@ def epf_imports(code: str) -> list[tuple[int, str, str]]:
 
 
 def doc_files() -> list[Path]:
-    files = [README, LLMS] + sorted(DOCS_DIR.rglob("*.md")) + sorted(DOCS_DIR.rglob("*.mdx"))
+    files = [README] + sorted(DOCS_DIR.rglob("*.md")) + sorted(DOCS_DIR.rglob("*.mdx"))
     return files + sorted(EXAMPLES.glob("*.py"))
 
 
@@ -192,7 +168,6 @@ def doc_files() -> list[Path]:
 
 
 def discover() -> list[Component]:
-    llms_sections = split_sections(LLMS.read_text(encoding="utf-8"))
     components = []
     for category, package, base_name, docs_dir, _, _ in CATEGORIES:
         module = importlib.import_module(package)
@@ -213,7 +188,6 @@ def discover() -> list[Component]:
                     name=name,
                     module=obj.__module__,
                     params=constructor_params(obj),
-                    llms_lines=llms_sections.get(name),
                     docs_page=page,
                 )
             )
@@ -295,12 +269,9 @@ def check_registry(components: list[Component]) -> list[Finding]:
     return findings
 
 
-DEFAULT_PATTERNS = [re.compile(r"\(default:\s*([^)]+)\)", re.I), re.compile(r"defaults? to\s+`?([^`.,;\n]+)`?", re.I)]
-
-
 def check_coverage_and_params(components: list[Component]) -> list[Finding]:
+    """Every component has a README mention and a docs page that names all of its constructor parameters."""
     findings = []
-    llms_lines = LLMS.read_text(encoding="utf-8").splitlines()
     readme = README.read_text(encoding="utf-8").lower()
     for comp in components:
         short = comp.name
@@ -332,38 +303,54 @@ def check_coverage_and_params(components: list[Component]) -> list[Finding]:
                     findings.append(
                         Finding("params", "error", comp.name, f"parameter '{param}' not documented", comp.docs_page)
                     )
+    return findings
 
-        if comp.llms_lines is None:
-            findings.append(Finding("coverage", "error", comp.name, f"no '## {comp.name}' section", "llms.txt"))
+
+MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+INLINE_CODE = re.compile(r"`[^`]*`")
+
+
+def markdown_links(text: str) -> list[tuple[int, str]]:
+    """(line_number, target) for every `[text](target)` link outside code fences and inline code."""
+    links = []
+    in_code = False
+    for i, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
             continue
-        start, end = comp.llms_lines
-        section = llms_lines[start - 1 : end]
-        section_text = "\n".join(section)
-        for param, default in comp.params.items():
-            if not re.search(rf"\b{re.escape(param)}\b", section_text):
-                findings.append(
-                    Finding(
-                        "params", "error", comp.name, f"parameter '{param}' missing from section", f"llms.txt:{start}"
-                    )
-                )
-                continue
-            if default is None:
-                continue
-            for offset, line in enumerate(section):
-                if not re.search(rf"\b{re.escape(param)}\b", line):
-                    continue
-                for pattern in DEFAULT_PATTERNS:
-                    m = pattern.search(line)
-                    if m and normalize(m.group(1)) != normalize(default):
-                        findings.append(
-                            Finding(
-                                "params",
-                                "warning",
-                                comp.name,
-                                f"'{param}' documented default {m.group(1).strip()!r}, code default {default}",
-                                f"llms.txt:{start + offset}",
-                            )
-                        )
+        if in_code:
+            continue
+        links += [(i, m.group(2)) for m in MARKDOWN_LINK.finditer(INLINE_CODE.sub("", line))]
+    return links
+
+
+def check_llms_index() -> list[Finding]:
+    """llms.txt is an index of the docs: an H1 and a summary, a link to every docs page, no dead links."""
+    findings = []
+    text = LLMS.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if not lines or not re.match(r"^# \S", lines[0]):
+        findings.append(
+            Finding("index", "error", "llms.txt", "the first line must be an H1 with the project name", "llms.txt:1")
+        )
+    if not any(line.startswith("> ") for line in lines):
+        findings.append(Finding("index", "error", "llms.txt", "no `>` summary after the H1", "llms.txt"))
+
+    linked: set[Path] = set()
+    for line_no, target in markdown_links(text):
+        if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I):
+            continue  # external URL: not checkable offline
+        path = (ROOT / target.split("#", 1)[0]).resolve()
+        if not path.exists():
+            findings.append(
+                Finding("index", "error", target, "link points to a file that does not exist", f"llms.txt:{line_no}")
+            )
+        linked.add(path)
+
+    pages = sorted(DOCS_DIR.rglob("*.md")) + sorted(DOCS_DIR.rglob("*.mdx"))
+    for page in pages:
+        if page.resolve() not in linked:
+            findings.append(Finding("index", "error", rel(page), "docs page is not linked from llms.txt", "llms.txt"))
     return findings
 
 
@@ -449,7 +436,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--json", action="store_true", help="print findings as JSON")
     parser.add_argument(
-        "--inventory", action="store_true", help="print components with params and doc locations as JSON"
+        "--inventory", action="store_true", help="print components with params, defaults and docs pages as JSON"
     )
     args = parser.parse_args()
 
@@ -461,6 +448,7 @@ def main() -> int:
     findings = (
         check_registry(components)
         + check_coverage_and_params(components)
+        + check_llms_index()
         + check_imports()
         + check_calls(components)
         + check_report_methods()
@@ -475,7 +463,7 @@ def main() -> int:
     if not findings:
         print("No drift found.")
         return 0
-    for check in ("registry", "coverage", "params", "imports", "calls", "report"):
+    for check in ("registry", "coverage", "params", "index", "imports", "calls", "report"):
         group = [f for f in findings if f.check == check]
         if not group:
             continue
