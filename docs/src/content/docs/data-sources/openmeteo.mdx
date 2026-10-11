@@ -100,7 +100,7 @@ When a row's cutoff is still in the future (for example `end="today_d+7"`, or ru
 | Model | Archive (Previous Runs) | Archive (Single Runs) | Notes |
 |---|---|---|---|
 | `jma_seamless` *(default)* | from 2018 | from 2026-05-13 00Z | Over Europe this is JMA GSM: about 55 km grid, stored every 6 h, so hourly values are interpolated. At Warsaw only `d+1`/`d+2` exist for 2018-2020 (Previous Runs), and `d+5`-`d+7` start on 2021-01-06. |
-| `icon_seamless` | from 2024-01 | from 2026-04-02 00Z | DWD ICON-D2 / ICON-EU / ICON global, **mixed by lead time** under `previous_runs`: different `d+i` columns come from different sub-models. It has no `previous_day7`. The first Previous-Runs value at Warsaw is 2024-01-19, and `rain` is missing for Dec 2023-Jun 2024. |
+| `icon_seamless` | from 2024-01 | from 2026-04-02 00Z | DWD ICON-D2 / ICON-EU / ICON global, **mixed by lead time** under `previous_runs`: different `d+i` columns come from different sub-models. It has no `previous_day7`. Inside the ICON-D2 area (for example Berlin) it also has runs every 3 h, so the bucket choice assumes a 3-hourly run grid and some D+1 hours come from a run of D-2. The first Previous-Runs value at Warsaw is 2024-01-19, and `rain` is missing for Dec 2023-Jun 2024. |
 | `ecmwf_ifs025` | from 2024-02-04 | not available | ECMWF IFS at 0.25°, stored every 3 h, so hourly values are interpolated. |
 | `ecmwf_ifs` | from 2025-10-01 | from 2024-03-14 00Z (00/12 UTC only at first) | ECMWF IFS at 9 km, stored hourly. It has the longest Single-Runs archive. About 8% of Previous-Runs hours were missing in the first half of 2026. |
 | `gfs_seamless` | temperature from 2021-03, other variables from 2024-01-19 | from 2026-04-02 00Z | NCEP GFS. |
