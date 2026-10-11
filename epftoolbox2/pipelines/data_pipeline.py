@@ -258,17 +258,15 @@ class DataPipeline:
         cache_key = cache_manager.get_cache_key(source_config, source_class)
         source_type = source_config.get("source_type", type(source).__name__)
 
-        # Held across the fetch: parallel processes wait for the one fetching this source, then read its result.
         # Without a pipeline zone a source can still say which zone its one-day values are stamped at.
         day_zone = _cache_day_zone(source, self.timezone)
+        # Held across the fetch: parallel processes wait for the one fetching this source, then read its result.
         with cache_manager.lock(cache_key):
             cached = cache_manager.read_cached_data(cache_key, start, end)
             # Holes are fetched from the start of their local day, see ``align_to_local_days``.
             missing_ranges = align_to_local_days(
                 cache_manager.find_missing_ranges(cache_key, start, end), start, day_zone
             )
-            if cached is not None:
-                cached = without_ranges(cached, missing_ranges)
 
             if not missing_ranges:
                 logger.info(f"Cache: Full hit for {source_type} source")
@@ -279,13 +277,19 @@ class DataPipeline:
             else:
                 logger.info(f"Cache: Partial hit for {source_type} source")
 
-            parts = [] if cached is None else [cached]
+            parts = []
             unsettled_from = []
+            # A range widened back to the start of its day also covers rows that are cached. Those are replaced only
+            # by a refetch that returns rows (so a stale stamp inside it cannot stay next to the new one), and kept
+            # when the source answers with nothing for the range (ENTSO-E's "No matching data" is an empty frame).
+            replaced = []
             for missing_start, missing_end in missing_ranges:
                 fresh_df, settled_until = self._fetch_source(source, missing_start, missing_end)
                 if fresh_df is None or fresh_df.empty:
                     continue
                 fresh_df = clip_to_range(fresh_df, missing_start, missing_end)
+                if not fresh_df.empty:
+                    replaced.append((missing_start, missing_end))
                 # Records only the part the source actually returned, that is settled and that the source did not
                 # declare unsettled; the rest is still returned now and fetched again next time. `timezone`
                 # floors the unsettled-period cap to this pipeline's market zone's own local midnight (not UTC
@@ -307,11 +311,14 @@ class DataPipeline:
                     unsettled_from.append(settled_until)
                 parts.append(fresh_df)
 
+            if cached is not None:
+                parts.insert(0, without_ranges(cached, replaced))
+
         unsettled = min(unsettled_from) if unsettled_from else None
         parts = [p for p in parts if not p.empty]
         if not parts:
             return pd.DataFrame(), unsettled
-        # Cached and missing ranges are disjoint, so there are no duplicate timestamps to resolve.
+        # What is left of the cache and the refetched ranges are disjoint, so there are no duplicate timestamps.
         return pd.concat(parts).sort_index(kind="stable"), unsettled
 
     def _parse_timestamp(self, ts: Union[str, date, pd.Timestamp], is_end: bool = False) -> pd.Timestamp:

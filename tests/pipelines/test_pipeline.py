@@ -502,6 +502,36 @@ class EntsoeLikeResolutionSwitchSource(EntsoeLikeClippingSource):
         return {"source_type": "entsoe_like_resolution_switch", "tz": self.tz}
 
 
+class EntsoeLikeRevisedSource(EntsoeLikeResolutionSwitchSource):
+    """Like `EntsoeLikeResolutionSwitchSource`, with every load value moved by `offset` (a later revision). The cache
+    config does not mention it, so revisions share one cache."""
+
+    def __init__(self, tz="Europe/Warsaw", offset=0.0):
+        super().__init__(tz)
+        self.offset = offset
+
+    def _load(self):
+        return super()._load() + self.offset
+
+
+class EntsoeLikeEmptyRefetchSource(EntsoeLikeResolutionSwitchSource):
+    """Like `EntsoeLikeResolutionSwitchSource`, but a fetch that ends at 2024-06-13 00:00 UTC or earlier, which is
+    only the refetch of the hole's local day, gets an empty frame, as ENTSO-E answers "No matching data"."""
+
+    def __init__(self, tz="Europe/Warsaw"):
+        super().__init__(tz)
+        self.calls = []
+
+    def fetch(self, start, end):
+        self.calls.append((start, end))
+        if end <= pd.Timestamp("2024-06-13", tz="UTC"):
+            return pd.DataFrame()
+        return super().fetch(start, end)
+
+    def get_cache_config(self):
+        return {"source_type": "entsoe_like_empty_refetch", "tz": self.tz}
+
+
 def _utc(s):
     return pd.Timestamp(s, tz="UTC")
 
@@ -668,6 +698,46 @@ class TestSourceCache:
         source.calls.clear()
         pipe.run(start, _utc("2024-01-05"), cache=True)
         assert source.calls == [(end, _utc("2024-01-05"))]
+
+    def test_an_empty_refetch_of_a_hole_keeps_the_rows_already_cached(self, in_tmp):
+        """The hole's local day is fetched again from its midnight (22:00Z) and the source answers with nothing.
+        The rows of that day that were cached (22:00Z and 23:00Z, with the day's daily value) must stay in the
+        result, not vanish because they were dropped before the refetch."""
+        start, end = _utc("2024-06-10"), _utc("2024-06-16")
+
+        def pipe():
+            source = EntsoeLikeEmptyRefetchSource()
+            return DataPipeline(sources=[source], timezone="Europe/Warsaw"), source
+
+        first_pipe, _ = pipe()
+        first = first_pipe.run(start, end, cache=True)
+        assert _utc("2024-06-12 22:00") in first.index and _utc("2024-06-12 23:00") in first.index
+        assert (
+            first.loc[_utc("2024-06-12 22:00"), "load_forecast_daily_min"]
+            == first["load_forecast_daily_min"].dropna().loc[_utc("2024-06-12 22:00")]
+        )
+
+        for _ in range(2):
+            second_pipe, source = pipe()
+            second = second_pipe.run(start, end, cache=True)
+            assert source.calls == [(_utc("2024-06-12 22:00"), _utc("2024-06-13"))]  # the hole was asked for
+            pd.testing.assert_frame_equal(first, second, check_freq=False)
+
+    def test_a_refetch_that_returns_rows_still_replaces_the_cached_rows_of_its_range(self, in_tmp):
+        """Only an empty answer keeps the cached rows: when the refetch returns rows for the hole's local day, they
+        replace what was cached there, and the rest of the cache is untouched."""
+        start, end = _utc("2024-06-10"), _utc("2024-06-16")
+
+        first = DataPipeline(sources=[EntsoeLikeRevisedSource()], timezone="Europe/Warsaw").run(start, end, cache=True)
+        second = DataPipeline(sources=[EntsoeLikeRevisedSource(offset=1000.0)], timezone="Europe/Warsaw").run(
+            start, end, cache=True
+        )
+        day = second.index >= _utc("2024-06-12 22:00")
+        assert second.index.equals(first.index)
+        assert (second.loc[day & (second.index < _utc("2024-06-13")), "load_actual"] > 1000).all()
+        pd.testing.assert_frame_equal(first.loc[~day], second.loc[~day], check_freq=False)
+        # The 15-minute rows after the hole were cached whole, so they are the first source's values.
+        assert (second.loc[second.index >= _utc("2024-06-13"), "load_actual"] < 1000).all()
 
     def test_unpublished_tail_is_fetched_again_next_day(self, in_tmp, monkeypatch):
         """pipelines H3 / entsoe H4 / empirical F5d: the daily forecast-only recipe with cache=True."""

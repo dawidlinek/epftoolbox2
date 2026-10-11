@@ -77,8 +77,9 @@ after `fetch`, so it never appears on the output frame.
 A gap in an otherwise regular response: one missing hour in a day of hourly data, is never recorded as covered:
 only the contiguous run(s) of timestamps actually present are cached, so the hole is fetched again on the next run
 instead of silently being treated as covered and then lost for good. A hole is fetched from the start of its local
-day (but not before the start of the run), and the cached rows of that day are replaced. The day is a local day of
-the pipeline's `timezone`. Without one, an `EntsoeSource` uses the zone its week-ahead daily values are stamped at,
+day (but not before the start of the run), and the cached rows of that day are replaced by what the refetch returns.
+If the source returns nothing for the refetch (ENTSO-E answers "No matching data" with an empty frame), the rows
+already cached stay in the result. The day is a local day of the pipeline's `timezone`. Without one, an `EntsoeSource` uses the zone its week-ahead daily values are stamped at,
 which is its area's own zone. A source that carries a one-day value forward to the start of its fetch, such as the
 ENTSO-E week-ahead daily load forecast, would otherwise stamp the same day twice.
 
