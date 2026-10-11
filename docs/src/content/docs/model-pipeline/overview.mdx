@@ -201,7 +201,7 @@ The checks above don't know *when* a forecast is issued, so they can't tell a le
 `issue_time` to `ModelPipeline` to add that check:
 
 ```python
-pipeline = ModelPipeline(issue_time="11:30", issue_timezone="Europe/Brussels")
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
 ```
 
 This raises `InformationSetError` before any fit if a predictor (or the newest training target) is not known

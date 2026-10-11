@@ -46,9 +46,9 @@ if __name__ == "__main__":
         "warsaw_temperature_2m_d+{horizon}",
     ]
 
-    # Forecasts are issued at 11:30, before the 12:00 CET day-ahead gate closure
+    # Forecasts are issued at 11:45, before the 12:00 CET day-ahead gate closure
     weather_source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, prefix="warsaw", timezone="Europe/Warsaw")
-    information_set = InformationSet("11:30", "Europe/Warsaw").with_source_rules([weather_source])
+    information_set = InformationSet("11:45", "Europe/Warsaw").with_source_rules([weather_source])
 
     pipeline = (
         ModelPipeline(information_set=information_set)

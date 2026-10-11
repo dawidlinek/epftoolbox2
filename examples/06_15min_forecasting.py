@@ -89,8 +89,8 @@ if __name__ == "__main__":
         lambda h: f"berlin_temperature_2m_d+{h}",
     ]
 
-    # Forecasts are issued at 11:30, before the 12:00 CET day-ahead gate closure
-    information_set = InformationSet("11:30", "Europe/Berlin").with_source_rules(data_pipeline.sources)
+    # Forecasts are issued at 11:45, before the 12:00 CET day-ahead gate closure
+    information_set = InformationSet("11:45", "Europe/Berlin").with_source_rules(data_pipeline.sources)
 
     model_pipeline = (
         ModelPipeline(information_set=information_set)

@@ -23,7 +23,7 @@ Changing one is not a side effect of changing the other.
 ```python
 from epftoolbox2.pipelines import ModelPipeline
 
-pipeline = ModelPipeline(issue_time="11:30", issue_timezone="Europe/Brussels")
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
 ```
 
 `issue_time`/`issue_timezone` is a shortcut for `InformationSet(issue_time, issue_timezone)` with the built-in
@@ -31,9 +31,9 @@ availability rules. `ModelPipeline.run()` (and `Workflow.run()`) then check ever
 fitting anything and raise `InformationSetError` (a `ValueError`) if one uses a value that is not known yet:
 
 ```
-OLS: 98 use(s) of inputs not known at the issue time (11:30 Europe/Brussels on the issue day D):
+OLS: 98 use(s) of inputs not known at the issue time (11:45 Europe/Brussels on the issue day D):
   - predictor load_actual: 'load_actual' is known 1h after the end of the period. Periods 10-23, horizons 1-7;
-    e.g. load_actual for period 23 is known D+1 01:00, issued D 11:30.
+    e.g. load_actual for period 23 is known D+1 01:00, issued D 11:45.
 Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too strict for your data, override it
 with InformationSet(rules={...}).
 ```
@@ -78,7 +78,7 @@ columns an `OpenMeteoSource` emits:
 - `weather_cutoff(source.run, f"{delay}h")`, `delay` coming from `publication_delay_hours(source.model)`, known
   `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading `_d+k`. This is a
   conservative, model-side estimate of the run's real-world publication lag (ICON ~4h, GFS ~5h, ECMWF IFS ~8h,
-  JMA ~10h, 10h for an unknown model): `OpenMeteoSource` itself has no notion of issue time or delay, only of
+  JMA ~9.5h, 10h for an unknown model): `OpenMeteoSource` itself has no notion of issue time or delay, only of
   the nominal cutoff `run`.
 
 `run` and `model` are read with `getattr` and default when a source doesn't set them, so this works with any
@@ -92,7 +92,7 @@ columns an `OpenMeteoSource` emits:
 from epftoolbox2.information_set import Availability, InformationSet
 
 info = InformationSet(
-    "11:30", "Europe/Brussels",
+    "11:45", "Europe/Brussels",
     rules={
         "fuel_ttf": Availability.daily_close("18:00"),          # a daily settlement price
         "my_forecast": Availability.published("09:00", days_before=1),
@@ -114,7 +114,7 @@ pipeline = ModelPipeline(information_set=info)
     Availability.weather_run(delay="6h")                      # a rolling forecast run ~ row time + delay
     Availability.as_of("09:00", "Europe/Brussels")             # known at a fixed time on the issue day D;
                                                                 # a leading `_d+k` doesn't change that
-    Availability.weather_cutoff(run="00", delay="10h")         # OpenMeteoSource: known `delay` after `run`:00
+    Availability.weather_cutoff(run="00", delay="9.5h")        # OpenMeteoSource: known `delay` after `run`:00
                                                                 # UTC on the issue day D; used by source_rules
     ```
   </TabItem>
@@ -178,7 +178,7 @@ the original and the perturbed raw data before the model runs.
 ```yaml
 model_pipeline:
   information_set:
-    issue_time: "11:30"
+    issue_time: "11:45"
     issue_timezone: Europe/Brussels
     assumptions: [entsoe_a69_by_10]
   models: [...]
@@ -189,7 +189,7 @@ model_pipeline:
 
 ```bash
 epf model model_pipeline.yaml --data data.csv --test-start 2024-02-01 --test-end 2024-03-01 \
-  --issue-time 11:30 --issue-timezone Europe/Brussels
+  --issue-time 11:45 --issue-timezone Europe/Brussels
 ```
 
 ---

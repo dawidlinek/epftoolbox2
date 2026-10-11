@@ -64,10 +64,10 @@ The source has no notion of a market's real issue time or a model's real-world p
 | DWD ICON (global/EU/D2) | ~4 h | 04:00 UTC |
 | NCEP GFS | ~5 h | 05:00 UTC |
 | ECMWF IFS (9 km / 0.25° / 0.4°) | ~8 h | 08:00 UTC |
-| JMA GSM | ~10 h | 10:00 UTC |
+| JMA GSM | ~9.5 h | 09:30 UTC |
 
-**Rule of thumb:** pick the latest `run` you know is published before your issue time. `run="00"` (the default) fits an 11:30 CET issue for every model above, including JMA's 10 h: 00:00 UTC + 10 h = 10:00 UTC = 11:00 CET in winter, still before 11:30.
-In summer 11:30 local time is 09:30 UTC, so JMA's 00 UTC run is not published yet and the information-set check rejects it. For an 11:30 issue time all year, use ICON, ECMWF IFS or GFS, whose 00 UTC runs are published by 08:00 UTC. A JMA backtest needs winter test windows.
+**Rule of thumb:** pick the latest `run` you know is published before your issue time. `run="00"` (the default) fits an 11:45 CET issue for every model above, all year. JMA is the slowest: 00:00 UTC + 9.5 h = 09:30 UTC, which is 11:30 CEST in summer and 10:30 CET in winter, so both are before 11:45.
+An issue time before 11:30 CEST would make the information-set check reject JMA in summer. For an earlier summer issue, use ICON, ECMWF IFS or GFS, whose 00 UTC runs are published by 08:00 UTC.
 
 These delays are also built into `epftoolbox2.information_set.source_rules` (see [Information Set](/epftoolbox2/model-pipeline/information-set/)): with a `ModelPipeline(issue_time=...)` information-set check enabled, a `run`/`issue_time` combination that is too tight raises `InformationSetError` before any model is fit, naming the column and suggesting an earlier run or a later issue time.
 

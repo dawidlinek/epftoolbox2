@@ -172,7 +172,7 @@ from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.exporters import ExcelExporter
 
 pipeline = (
-    ModelPipeline(issue_time="11:30", issue_timezone="Europe/Warsaw")  # issued before the 12:00 CET gate closure
+    ModelPipeline(issue_time="11:45", issue_timezone="Europe/Warsaw")  # issued before the 12:00 CET gate closure
     .add_model(OLSModel(predictors=["load_actual_d-1", *seasonal_indicators], name="OLS"))
     .add_model(LassoCVModel(predictors=["load_actual_d-1", *seasonal_indicators], name="Lasso"))
     .add_evaluator(MAEEvaluator())

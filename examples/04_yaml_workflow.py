@@ -82,8 +82,8 @@ predictors = [
 )
 
 (
-    # Forecasts are issued at 11:30, before the 12:00 CET day-ahead gate closure
-    ModelPipeline(issue_time="11:30", issue_timezone="Europe/Warsaw")
+    # Forecasts are issued at 11:45, before the 12:00 CET day-ahead gate closure
+    ModelPipeline(issue_time="11:45", issue_timezone="Europe/Warsaw")
     .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
     .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=5, name="LassoCV"))
     .add_evaluator(MAEEvaluator())

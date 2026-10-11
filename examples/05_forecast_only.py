@@ -39,8 +39,7 @@ if __name__ == "__main__":
     data_pipeline = (
         DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-        # JMA, the default model, publishes its 00 UTC run after 11:30 local time in summer. ECMWF IFS does not.
-        .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, prefix="warsaw", model="ecmwf_ifs025"))
+        .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, prefix="warsaw"))
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
         .add_transformer(TimezoneTransformer())
         .add_transformer(ResampleTransformer(freq="1h"))
@@ -87,8 +86,8 @@ if __name__ == "__main__":
         "warsaw_temperature_2m_d+{horizon}",
     ]
 
-    # Forecasts are issued at 11:30, before the 12:00 CET day-ahead gate closure
-    information_set = InformationSet("11:30", "Europe/Warsaw").with_source_rules(data_pipeline.sources)
+    # Forecasts are issued at 11:45, before the 12:00 CET day-ahead gate closure
+    information_set = InformationSet("11:45", "Europe/Warsaw").with_source_rules(data_pipeline.sources)
 
     report = (
         ModelPipeline(information_set=information_set)
