@@ -476,6 +476,10 @@ class EntsoeLikeClippingSource(DataSource):
             df.loc[start, "load_forecast_daily_min"] = carried
         return df
 
+    def _daily_zone(self):
+        """Like `EntsoeSource._daily_zone`: the zone a daily value is stamped at when no pipeline zone is bound."""
+        return self.tz
+
     def _validate_config(self):
         return True
 
@@ -590,6 +594,28 @@ class TestSourceCache:
         pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
 
     @pytest.mark.parametrize("tz", ["Europe/Warsaw", "Europe/Helsinki"])
+    def test_second_cached_run_does_not_double_stamp_a_daily_value_without_a_pipeline_timezone(
+        self, in_tmp, monkeypatch, tz
+    ):
+        """The unsettled boundary of the cache is floored in the source's own zone when the pipeline has none,
+        not in UTC, so the resumed fetch does not start inside a local day either."""
+        start, end = _utc("2024-10-25"), _utc("2024-10-29")
+
+        def pipe():
+            return DataPipeline(
+                sources=[EntsoeLikeClippingSource(tz)], transformers=[TimezoneTransformer(target_tz=tz)]
+            )
+
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: _utc("2024-10-30 12:00"))
+        pipe().run(start, end, cache=True)
+
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: _utc("2024-11-15 12:00"))
+        cached = pipe().run(start, end, cache=True)
+
+        fresh = pipe().run(start, end, cache=False)
+        pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
+
+    @pytest.mark.parametrize("tz", ["Europe/Warsaw", "Europe/Helsinki"])
     def test_a_hole_inside_a_local_day_does_not_double_stamp_a_daily_value(self, in_tmp, tz):
         """The cache fetches a hole on its own, and the hole after the last hourly row of a series that turns into
         15-minute rows starts inside a local day whose daily value sits in the neighbouring piece. A fetch from
@@ -606,6 +632,42 @@ class TestSourceCache:
         fresh = pipe().run(start, end, cache=False)
         for _ in range(3):  # the first run fetches everything, the next ones fetch the hole
             pd.testing.assert_frame_equal(fresh, pipe().run(start, end, cache=True), check_freq=False)
+
+    @pytest.mark.parametrize("tz", ["Europe/Warsaw", "Europe/Helsinki"])
+    def test_a_hole_does_not_double_stamp_a_daily_value_without_a_pipeline_timezone(self, in_tmp, tz):
+        """The same without `DataPipeline(timezone=...)`: the hole starts from the start of its day in the source's
+        own zone (`_daily_zone`), and every cached run equals a fresh one."""
+        start, end = _utc("2024-06-10"), _utc("2024-06-16")
+
+        def pipe():
+            return DataPipeline(
+                sources=[EntsoeLikeResolutionSwitchSource(tz)], transformers=[TimezoneTransformer(target_tz=tz)]
+            )
+
+        fresh = pipe().run(start, end, cache=False)
+        for _ in range(3):
+            pd.testing.assert_frame_equal(fresh, pipe().run(start, end, cache=True), check_freq=False)
+
+    def test_the_zone_holes_start_in_is_the_pipelines_else_the_sources_own(self):
+        from epftoolbox2.data.sources import EntsoeSource
+        from epftoolbox2.pipelines.data_pipeline import _cache_day_zone
+
+        fi = EntsoeSource("FI", "key", ["load"])
+        assert _cache_day_zone(fi, None) == "Europe/Helsinki"
+        assert _cache_day_zone(fi, "Europe/Warsaw") == "Europe/Warsaw"
+        assert _cache_day_zone(RangeSource(), None) is None
+        DataPipeline([fi], timezone="Europe/Warsaw")  # binding the market zone makes it the source's
+        assert _cache_day_zone(fi, None) == "Europe/Warsaw"
+
+    def test_a_source_without_a_zone_keeps_holes_as_they_are_without_a_pipeline_timezone(self, in_tmp):
+        source = RangeSource()
+        assert not hasattr(source, "_daily_zone")
+        start, end = _utc("2024-01-01"), _utc("2024-01-03")
+        pipe = DataPipeline([source])
+        pipe.run(start, end, cache=True)
+        source.calls.clear()
+        pipe.run(start, _utc("2024-01-05"), cache=True)
+        assert source.calls == [(end, _utc("2024-01-05"))]
 
     def test_unpublished_tail_is_fetched_again_next_day(self, in_tmp, monkeypatch):
         """pipelines H3 / entsoe H4 / empirical F5d: the daily forecast-only recipe with cache=True."""

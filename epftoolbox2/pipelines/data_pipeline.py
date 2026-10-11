@@ -259,11 +259,13 @@ class DataPipeline:
         source_type = source_config.get("source_type", type(source).__name__)
 
         # Held across the fetch: parallel processes wait for the one fetching this source, then read its result.
+        # Without a pipeline zone a source can still say which zone its one-day values are stamped at.
+        day_zone = _cache_day_zone(source, self.timezone)
         with cache_manager.lock(cache_key):
             cached = cache_manager.read_cached_data(cache_key, start, end)
             # Holes are fetched from the start of their local day, see ``align_to_local_days``.
             missing_ranges = align_to_local_days(
-                cache_manager.find_missing_ranges(cache_key, start, end), start, self.timezone
+                cache_manager.find_missing_ranges(cache_key, start, end), start, day_zone
             )
             if cached is not None:
                 cached = without_ranges(cached, missing_ranges)
@@ -619,6 +621,16 @@ _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 def _now(tz: Optional[str]) -> pd.Timestamp:
     """Current time in ``tz``, or naive machine-local time when ``tz`` is None."""
     return pd.Timestamp.now(tz=tz) if tz else pd.Timestamp.now()
+
+
+def _cache_day_zone(source: DataSource, timezone: Optional[str]) -> Optional[str]:
+    """The zone whose local midnights a per-source cache fetches from: the pipeline's ``timezone``, else the zone a
+    source says its one-day values are stamped at (``EntsoeSource._daily_zone``, the area's own zone for a source
+    used without a pipeline zone), else ``None`` (no source-specific day to start from)."""
+    if timezone is not None:
+        return timezone
+    daily_zone = getattr(source, "_daily_zone", None)
+    return daily_zone() if callable(daily_zone) else None
 
 
 def _calendar_day(text: str, tz: Optional[str]) -> Optional[pd.Timestamp]:

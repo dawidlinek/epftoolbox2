@@ -76,10 +76,11 @@ after `fetch`, so it never appears on the output frame.
 
 A gap in an otherwise regular response: one missing hour in a day of hourly data, is never recorded as covered:
 only the contiguous run(s) of timestamps actually present are cached, so the hole is fetched again on the next run
-instead of silently being treated as covered and then lost for good. With a `timezone` on the pipeline, a hole is
-fetched from the start of its local day (but not before the start of the run), and the cached rows of that day
-are replaced. A source that carries a one-day value forward to the start of its fetch, such as the ENTSO-E
-week-ahead daily load forecast, would otherwise stamp the same day twice.
+instead of silently being treated as covered and then lost for good. A hole is fetched from the start of its local
+day (but not before the start of the run), and the cached rows of that day are replaced. The day is a local day of
+the pipeline's `timezone`. Without one, an `EntsoeSource` uses the zone its week-ahead daily values are stamped at,
+which is its area's own zone. A source that carries a one-day value forward to the start of its fetch, such as the
+ENTSO-E week-ahead daily load forecast, would otherwise stamp the same day twice.
 
 A multi-column source joins its columns on an outer index, so the merged rows run as far as the longest column
 even when a shorter one stopped early: for example `load_actual` during a multi-day TSO outage, while `price`
