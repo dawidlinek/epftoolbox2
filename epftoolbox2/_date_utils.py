@@ -1,5 +1,5 @@
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -16,10 +16,13 @@ def resolve_date(s: Any) -> Any:
         'today_d+7', 'now_d+7'  → today + 7 days
         'today_d-365'           → today - 365 days
         '2024-01-01'            → passed through unchanged
+        date(2024, 1, 1)        → '2024-01-01' (what YAML makes of an unquoted 2024-01-01)
 
     The offset N in _d±N accepts any integer, so training windows of any
     length can be expressed (e.g. 'now_d-800' for an 800-day history).
     """
+    if isinstance(s, date) and not isinstance(s, datetime):
+        return s.isoformat()
     if not isinstance(s, str):
         return s
     m = _DATE_PATTERN.match(s.strip())

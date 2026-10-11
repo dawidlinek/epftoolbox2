@@ -1,3 +1,4 @@
+import datetime
 import multiprocessing
 import os
 import time
@@ -475,6 +476,10 @@ class EntsoeLikeClippingSource(DataSource):
             df.loc[start, "load_forecast_daily_min"] = carried
         return df
 
+    def _daily_zone(self):
+        """Like `EntsoeSource._daily_zone`: the zone a daily value is stamped at when no pipeline zone is bound."""
+        return self.tz
+
     def _validate_config(self):
         return True
 
@@ -495,6 +500,36 @@ class EntsoeLikeResolutionSwitchSource(EntsoeLikeClippingSource):
 
     def get_cache_config(self):
         return {"source_type": "entsoe_like_resolution_switch", "tz": self.tz}
+
+
+class EntsoeLikeRevisedSource(EntsoeLikeResolutionSwitchSource):
+    """Like `EntsoeLikeResolutionSwitchSource`, with every load value moved by `offset` (a later revision). The cache
+    config does not mention it, so revisions share one cache."""
+
+    def __init__(self, tz="Europe/Warsaw", offset=0.0):
+        super().__init__(tz)
+        self.offset = offset
+
+    def _load(self):
+        return super()._load() + self.offset
+
+
+class EntsoeLikeEmptyRefetchSource(EntsoeLikeResolutionSwitchSource):
+    """Like `EntsoeLikeResolutionSwitchSource`, but a fetch that ends at 2024-06-13 00:00 UTC or earlier, which is
+    only the refetch of the hole's local day, gets an empty frame, as ENTSO-E answers "No matching data"."""
+
+    def __init__(self, tz="Europe/Warsaw"):
+        super().__init__(tz)
+        self.calls = []
+
+    def fetch(self, start, end):
+        self.calls.append((start, end))
+        if end <= pd.Timestamp("2024-06-13", tz="UTC"):
+            return pd.DataFrame()
+        return super().fetch(start, end)
+
+    def get_cache_config(self):
+        return {"source_type": "entsoe_like_empty_refetch", "tz": self.tz}
 
 
 def _utc(s):
@@ -589,6 +624,28 @@ class TestSourceCache:
         pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
 
     @pytest.mark.parametrize("tz", ["Europe/Warsaw", "Europe/Helsinki"])
+    def test_second_cached_run_does_not_double_stamp_a_daily_value_without_a_pipeline_timezone(
+        self, in_tmp, monkeypatch, tz
+    ):
+        """The unsettled boundary of the cache is floored in the source's own zone when the pipeline has none,
+        not in UTC, so the resumed fetch does not start inside a local day either."""
+        start, end = _utc("2024-10-25"), _utc("2024-10-29")
+
+        def pipe():
+            return DataPipeline(
+                sources=[EntsoeLikeClippingSource(tz)], transformers=[TimezoneTransformer(target_tz=tz)]
+            )
+
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: _utc("2024-10-30 12:00"))
+        pipe().run(start, end, cache=True)
+
+        monkeypatch.setattr(cache_manager_module, "_now", lambda: _utc("2024-11-15 12:00"))
+        cached = pipe().run(start, end, cache=True)
+
+        fresh = pipe().run(start, end, cache=False)
+        pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
+
+    @pytest.mark.parametrize("tz", ["Europe/Warsaw", "Europe/Helsinki"])
     def test_a_hole_inside_a_local_day_does_not_double_stamp_a_daily_value(self, in_tmp, tz):
         """The cache fetches a hole on its own, and the hole after the last hourly row of a series that turns into
         15-minute rows starts inside a local day whose daily value sits in the neighbouring piece. A fetch from
@@ -605,6 +662,82 @@ class TestSourceCache:
         fresh = pipe().run(start, end, cache=False)
         for _ in range(3):  # the first run fetches everything, the next ones fetch the hole
             pd.testing.assert_frame_equal(fresh, pipe().run(start, end, cache=True), check_freq=False)
+
+    @pytest.mark.parametrize("tz", ["Europe/Warsaw", "Europe/Helsinki"])
+    def test_a_hole_does_not_double_stamp_a_daily_value_without_a_pipeline_timezone(self, in_tmp, tz):
+        """The same without `DataPipeline(timezone=...)`: the hole starts from the start of its day in the source's
+        own zone (`_daily_zone`), and every cached run equals a fresh one."""
+        start, end = _utc("2024-06-10"), _utc("2024-06-16")
+
+        def pipe():
+            return DataPipeline(
+                sources=[EntsoeLikeResolutionSwitchSource(tz)], transformers=[TimezoneTransformer(target_tz=tz)]
+            )
+
+        fresh = pipe().run(start, end, cache=False)
+        for _ in range(3):
+            pd.testing.assert_frame_equal(fresh, pipe().run(start, end, cache=True), check_freq=False)
+
+    def test_the_zone_holes_start_in_is_the_pipelines_else_the_sources_own(self):
+        from epftoolbox2.data.sources import EntsoeSource
+        from epftoolbox2.pipelines.data_pipeline import _cache_day_zone
+
+        fi = EntsoeSource("FI", "key", ["load"])
+        assert _cache_day_zone(fi, None) == "Europe/Helsinki"
+        assert _cache_day_zone(fi, "Europe/Warsaw") == "Europe/Warsaw"
+        assert _cache_day_zone(RangeSource(), None) is None
+        DataPipeline([fi], timezone="Europe/Warsaw")  # binding the market zone makes it the source's
+        assert _cache_day_zone(fi, None) == "Europe/Warsaw"
+
+    def test_a_source_without_a_zone_keeps_holes_as_they_are_without_a_pipeline_timezone(self, in_tmp):
+        source = RangeSource()
+        assert not hasattr(source, "_daily_zone")
+        start, end = _utc("2024-01-01"), _utc("2024-01-03")
+        pipe = DataPipeline([source])
+        pipe.run(start, end, cache=True)
+        source.calls.clear()
+        pipe.run(start, _utc("2024-01-05"), cache=True)
+        assert source.calls == [(end, _utc("2024-01-05"))]
+
+    def test_an_empty_refetch_of_a_hole_keeps_the_rows_already_cached(self, in_tmp):
+        """The hole's local day is fetched again from its midnight (22:00Z) and the source answers with nothing.
+        The rows of that day that were cached (22:00Z and 23:00Z, with the day's daily value) must stay in the
+        result, not vanish because they were dropped before the refetch."""
+        start, end = _utc("2024-06-10"), _utc("2024-06-16")
+
+        def pipe():
+            source = EntsoeLikeEmptyRefetchSource()
+            return DataPipeline(sources=[source], timezone="Europe/Warsaw"), source
+
+        first_pipe, _ = pipe()
+        first = first_pipe.run(start, end, cache=True)
+        assert _utc("2024-06-12 22:00") in first.index and _utc("2024-06-12 23:00") in first.index
+        assert (
+            first.loc[_utc("2024-06-12 22:00"), "load_forecast_daily_min"]
+            == first["load_forecast_daily_min"].dropna().loc[_utc("2024-06-12 22:00")]
+        )
+
+        for _ in range(2):
+            second_pipe, source = pipe()
+            second = second_pipe.run(start, end, cache=True)
+            assert source.calls == [(_utc("2024-06-12 22:00"), _utc("2024-06-13"))]  # the hole was asked for
+            pd.testing.assert_frame_equal(first, second, check_freq=False)
+
+    def test_a_refetch_that_returns_rows_still_replaces_the_cached_rows_of_its_range(self, in_tmp):
+        """Only an empty answer keeps the cached rows: when the refetch returns rows for the hole's local day, they
+        replace what was cached there, and the rest of the cache is untouched."""
+        start, end = _utc("2024-06-10"), _utc("2024-06-16")
+
+        first = DataPipeline(sources=[EntsoeLikeRevisedSource()], timezone="Europe/Warsaw").run(start, end, cache=True)
+        second = DataPipeline(sources=[EntsoeLikeRevisedSource(offset=1000.0)], timezone="Europe/Warsaw").run(
+            start, end, cache=True
+        )
+        day = second.index >= _utc("2024-06-12 22:00")
+        assert second.index.equals(first.index)
+        assert (second.loc[day & (second.index < _utc("2024-06-13")), "load_actual"] > 1000).all()
+        pd.testing.assert_frame_equal(first.loc[~day], second.loc[~day], check_freq=False)
+        # The 15-minute rows after the hole were cached whole, so they are the first source's values.
+        assert (second.loc[second.index >= _utc("2024-06-13"), "load_actual"] < 1000).all()
 
     def test_unpublished_tail_is_fetched_again_next_day(self, in_tmp, monkeypatch):
         """pipelines H3 / entsoe H4 / empirical F5d: the daily forecast-only recipe with cache=True."""
@@ -877,6 +1010,28 @@ class TestDateSemantics:
         assert local.min() == pd.Timestamp("2024-01-01 00:00", tz="Europe/Warsaw")
         assert local.max() == pd.Timestamp("2024-01-03 23:00", tz="Europe/Warsaw")
         assert len(df) == 72
+
+    @pytest.mark.parametrize("timezone", [None, "Europe/Warsaw"])
+    def test_a_plain_date_names_the_same_whole_days_as_its_string(self, timezone):
+        """YAML turns an unquoted `end: 2024-01-31` into a `datetime.date`. It must end through the end of 01-31,
+        as the quoted string does, and not at its midnight (one day short)."""
+        pipe = DataPipeline([RangeSource()], timezone=timezone)
+        quoted = pipe.resolve_range("2024-01-01", "2024-01-31")
+        assert pipe.resolve_range(datetime.date(2024, 1, 1), datetime.date(2024, 1, 31)) == quoted
+        assert quoted[1] - quoted[0] == pd.Timedelta(days=31)
+        df = pipe.run(datetime.date(2024, 1, 1), datetime.date(2024, 1, 31))
+        assert df.index.max() == quoted[1] - pd.Timedelta(hours=1)
+        assert len(df) == 31 * 24
+
+    def test_a_plain_date_end_is_the_whole_local_day_on_a_dst_day(self):
+        pipe = DataPipeline([RangeSource()], timezone="Europe/Warsaw")
+        assert len(pipe.run(datetime.date(2024, 3, 31), datetime.date(2024, 3, 31))) == 23
+
+    def test_a_datetime_or_timestamp_is_still_an_exact_instant(self):
+        pipe = DataPipeline([RangeSource()], timezone="Europe/Warsaw")
+        exact = pipe.resolve_range(datetime.datetime(2024, 1, 1), datetime.datetime(2024, 1, 31))
+        assert exact[1] == pd.Timestamp("2024-01-30 23:00", tz="UTC")
+        assert pipe.resolve_range(pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-31")) == exact
 
     @pytest.mark.parametrize("day, hours", [("2024-03-31", 23), ("2024-10-27", 25), ("2024-06-01", 24)])
     def test_timezone_end_day_is_complete_on_dst_days(self, day, hours):

@@ -14,6 +14,7 @@ from epftoolbox2.data.sources.open_meteo import (
     max_previous_runs_horizon,
     previous_run_lengths,
     publication_delay_hours,
+    select_buckets,
     stored_step_hours,
 )
 from epftoolbox2.pipelines import DataPipeline
@@ -77,13 +78,15 @@ def archive_facts(model):
     return stored_step_hours(model, 1), lengths, max_previous_day(model)
 
 
-def make_archive(step_h=1, latest_run=None, null_columns=(), max_bucket=7, model=None):
+def make_archive(step_h=1, latest_run=None, null_columns=(), max_bucket=7, model=None, lengths=None):
     """Return a fake `session.get` that answers Previous Runs requests from the synthetic archive.
 
     With `model`, its stored step, runs and deepest bucket come from the source's tables (the facts verified
-    against the API); otherwise 6-hourly runs that reach every point and the given `step_h` / `max_bucket`.
+    against the API). Otherwise the runs are `lengths` (init hour -> forecast length, default: 6-hourly runs that
+    reach every point), written down by the test itself rather than read from the source's tables, and the given
+    `step_h` / `max_bucket`.
     """
-    lengths = UNLIMITED_6H_RUNS
+    lengths = UNLIMITED_6H_RUNS if lengths is None else lengths
     if model is not None:
         step_h, lengths, max_bucket = archive_facts(model)
     latest = None if latest_run is None else int(_hours(latest_run))
@@ -636,6 +639,52 @@ class TestTheArchiveWouldCatchALeak:
             inits = [_latest_init(int(_hours(valid)), k, step_h, lengths) for k in range(limit + 1, deepest + 1)]
             late += not any(init <= _hours(cut) for init in inits if init is not None)
         assert late > 0
+
+
+# Runs behind `icon_seamless` inside the ICON-D2 area (e.g. Berlin), as verified against the Single Runs API in
+# 2026-10: `previous_day1` at T holds the newest run of a 3-hourly grid at or before T - 24 h. The 3/9/15/21 UTC
+# runs are ICON-D2's alone (48 h), the 00/12 UTC ones reach 180 h and the 06/18 UTC ones 120 h.
+ICON_SEAMLESS_D2_AREA_RUNS = {0: 180, 3: 48, 6: 120, 9: 48, 12: 180, 15: 48, 18: 120, 21: 48}
+
+
+class TestIconSeamlessRunGrid:
+    def test_cell_after_a_3_hourly_d2_run_does_not_get_bucket_1(self):
+        # Berlin, run="00", issue day 2026-10-04: d+1 at 05:00 CEST is 03:00Z on 10-05. In the D2 area
+        # previous_day1 there holds the 03Z run of 10-04, started 3 h after the cutoff (live: 10.2 C, the D2 03Z
+        # run, not the 00Z run's 10.8 C). The 06Z global run does not make it better: it is later still.
+        valid = pd.date_range("2026-10-05 03:00", periods=3, freq="1h", tz="UTC")
+        cutoff = pd.DatetimeIndex([pd.Timestamp("2026-10-04 00:00", tz="UTC")] * len(valid))
+        assert select_buckets("icon_seamless", valid, cutoff, 1, 7).tolist() == [2, 2, 2]
+        # The cells served by the 00Z run itself stay on bucket 1.
+        early = pd.date_range("2026-10-05 00:00", periods=3, freq="1h", tz="UTC")
+        assert select_buckets("icon_seamless", early, cutoff, 1, 7).tolist() == [1, 1, 1]
+
+    def test_runs_are_3_hourly_and_only_icon_seamless_has_the_d2_runs(self):
+        assert sorted(previous_run_lengths("icon_seamless")) == list(range(0, 24, 3))
+        assert previous_run_lengths("icon_seamless")[3] == 48
+        # ICON global and ICON-EU were checked live on the same cells: they only have 00/06/12/18 UTC runs.
+        assert sorted(previous_run_lengths("icon_global")) == [0, 6, 12, 18]
+        assert sorted(previous_run_lengths("icon_eu")) == [0, 6, 12, 18]
+        assert sorted(previous_run_lengths("icon_d2")) == list(range(0, 24, 3))
+
+    @pytest.mark.parametrize("run", ["00", "06", "12"])
+    def test_no_value_comes_from_a_run_after_the_cutoff_in_the_d2_area(self, run):
+        timezone = "Europe/Berlin"
+        archive = make_archive(max_bucket=6, lengths=ICON_SEAMLESS_D2_AREA_RUNS)
+        source = make_source(archive, model="icon_seamless", run=run, timezone=timezone)
+        df = source.fetch(*SPRING)
+        limit = max_previous_runs_horizon("icon_seamless", timezone, run)
+        assert limit >= 5
+        cutoff = cutoff_times(df.index, run, timezone)
+        for lead in range(1, limit + 1):
+            column = df[f"temperature_2m_d+{lead}"]
+            present = column.notna().to_numpy()
+            assert present.sum() >= len(df) - 1
+            assert (from_hours(column[present]) <= cutoff[present]).all(), f"d+{lead} has a value from a late run"
+
+    def test_the_default_horizon_is_still_5_at_run_00(self):
+        assert max_previous_runs_horizon("icon_seamless", "Europe/Berlin", "00") == 5
+        assert max_previous_runs_horizon("icon_seamless", WARSAW, "00") == 5
 
 
 # ---------------------------------------------------------------------------

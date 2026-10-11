@@ -40,6 +40,10 @@ _MAX_PREVIOUS_DAY_BY_MODEL: Tuple[Tuple[str, int], ...] = (
 _RUN_LENGTH_H: Tuple[Tuple[str, Dict[int, int]], ...] = (
     ("icon_d2", {hour: 48 for hour in range(0, 24, 3)}),
     ("icon_eu", {0: 120, 6: 120, 12: 120, 18: 120}),
+    # icon_seamless blends ICON-D2 into the global and EU runs: inside the D2 area (e.g. Berlin) `previous_day1`
+    # holds the newest D2 run, which starts every 3 h (verified against Single Runs 2026-10), outside it the
+    # 00/06/12/18 UTC runs. The 3-hourly grid is the strictest of the two.
+    ("icon_seamless", {hour: 180 if hour in (0, 12) else 120 if hour in (6, 18) else 48 for hour in range(0, 24, 3)}),
     ("icon_", {0: 180, 6: 120, 12: 180, 18: 120}),
     ("ecmwf_ifs", {0: 360, 6: 144, 12: 360, 18: 144}),
     ("gfs_", {0: 384, 6: 384, 12: 384, 18: 384}),
@@ -304,7 +308,7 @@ class OpenMeteoSource(OpenMeteoBase):
     UNAVAILABLE_RUN = "requested model run is not available"
 
     VALID_TEMPORAL_RESOLUTIONS = {None, "native", "hourly_3", "hourly_6"}
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
 
     def __init__(
         self,

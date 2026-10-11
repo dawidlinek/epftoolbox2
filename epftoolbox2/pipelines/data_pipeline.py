@@ -1,3 +1,4 @@
+from datetime import date, datetime
 from typing import List, Optional, Tuple, Union, Dict, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import hashlib
@@ -84,7 +85,8 @@ class DataPipeline:
         timezone: Market time zone (e.g. ``"Europe/Warsaw"``), the single place it needs to be set. ``start`` and
             a date-only ``end`` passed to ``run`` always cover a whole calendar day, local if set and UTC
             otherwise: ``start`` begins at that day's midnight and ``end`` runs through the end of its own day
-            (inclusive). If set, date strings and keywords passed to ``run`` are read as local calendar days and
+            (inclusive). A ``datetime.date`` (what YAML makes of an unquoted ``end: 2024-01-31``) counts as a
+            date-only string. If set, date strings and keywords passed to ``run`` are read as local calendar days and
             naive timestamps are local times. If ``None``, they are UTC calendar days and naive timestamps are
             UTC. Components whose own zone decides a local
             calendar day or an issue time — ``TimezoneTransformer.target_tz``,
@@ -255,15 +257,15 @@ class DataPipeline:
         cache_key = cache_manager.get_cache_key(source_config, source_class)
         source_type = source_config.get("source_type", type(source).__name__)
 
+        # Without a pipeline zone a source can still say which zone its one-day values are stamped at.
+        day_zone = _cache_day_zone(source, self.timezone)
         # Held across the fetch: parallel processes wait for the one fetching this source, then read its result.
         with cache_manager.lock(cache_key):
             cached = cache_manager.read_cached_data(cache_key, start, end)
             # Holes are fetched from the start of their local day, see ``align_to_local_days``.
             missing_ranges = align_to_local_days(
-                cache_manager.find_missing_ranges(cache_key, start, end), start, self.timezone
+                cache_manager.find_missing_ranges(cache_key, start, end), start, day_zone
             )
-            if cached is not None:
-                cached = without_ranges(cached, missing_ranges)
 
             if not missing_ranges:
                 logger.info(f"Cache: Full hit for {source_type} source")
@@ -274,13 +276,19 @@ class DataPipeline:
             else:
                 logger.info(f"Cache: Partial hit for {source_type} source")
 
-            parts = [] if cached is None else [cached]
+            parts = []
             unsettled_from = []
+            # A range widened back to the start of its day also covers rows that are cached. Those are replaced only
+            # by a refetch that returns rows (so a stale stamp inside it cannot stay next to the new one), and kept
+            # when the source answers with nothing for the range (ENTSO-E's "No matching data" is an empty frame).
+            replaced = []
             for missing_start, missing_end in missing_ranges:
                 fresh_df, settled_until = self._fetch_source(source, missing_start, missing_end)
                 if fresh_df is None or fresh_df.empty:
                     continue
                 fresh_df = clip_to_range(fresh_df, missing_start, missing_end)
+                if not fresh_df.empty:
+                    replaced.append((missing_start, missing_end))
                 # Records only the part the source actually returned, that is settled and that the source did not
                 # declare unsettled; the rest is still returned now and fetched again next time. `timezone`
                 # floors the unsettled-period cap to this pipeline's market zone's own local midnight (not UTC
@@ -302,16 +310,22 @@ class DataPipeline:
                     unsettled_from.append(settled_until)
                 parts.append(fresh_df)
 
+            if cached is not None:
+                parts.insert(0, without_ranges(cached, replaced))
+
         unsettled = min(unsettled_from) if unsettled_from else None
         parts = [p for p in parts if not p.empty]
         if not parts:
             return pd.DataFrame(), unsettled
-        # Cached and missing ranges are disjoint, so there are no duplicate timestamps to resolve.
+        # What is left of the cache and the refetched ranges are disjoint, so there are no duplicate timestamps.
         return pd.concat(parts).sort_index(kind="stable"), unsettled
 
-    def _parse_timestamp(self, ts: Union[str, pd.Timestamp], is_end: bool = False) -> pd.Timestamp:
+    def _parse_timestamp(self, ts: Union[str, date, pd.Timestamp], is_end: bool = False) -> pd.Timestamp:
         """UTC bound for ``run``. See the class docstring for how dates, keywords and timestamps are read."""
         tz = self.timezone or "UTC"
+        if isinstance(ts, date) and not isinstance(ts, datetime):
+            # A plain date, such as YAML makes of an unquoted `end: 2024-01-31`, names a whole day like "2024-01-31".
+            ts = ts.isoformat()
         if isinstance(ts, str):
             day = _calendar_day(ts, self.timezone)
             if day is not None:
@@ -323,7 +337,7 @@ class DataPipeline:
         return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize(tz).tz_convert("UTC")
 
     def resolve_range(
-        self, start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp]
+        self, start: Union[str, date, pd.Timestamp], end: Union[str, date, pd.Timestamp]
     ) -> Tuple[pd.Timestamp, pd.Timestamp]:
         """The half-open UTC range ``[start, end)`` that ``run(start, end)`` returns."""
         start_ts = self._parse_timestamp(start)
@@ -333,7 +347,10 @@ class DataPipeline:
         return start_ts, end_ts
 
     def run(
-        self, start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp], cache: Union[bool, str] = False
+        self,
+        start: Union[str, date, pd.Timestamp],
+        end: Union[str, date, pd.Timestamp],
+        cache: Union[bool, str] = False,
     ) -> pd.DataFrame:
         if not self.sources:
             raise ValueError("At least one data source is required")
@@ -610,6 +627,16 @@ _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 def _now(tz: Optional[str]) -> pd.Timestamp:
     """Current time in ``tz``, or naive machine-local time when ``tz`` is None."""
     return pd.Timestamp.now(tz=tz) if tz else pd.Timestamp.now()
+
+
+def _cache_day_zone(source: DataSource, timezone: Optional[str]) -> Optional[str]:
+    """The zone whose local midnights a per-source cache fetches from: the pipeline's ``timezone``, else the zone a
+    source says its one-day values are stamped at (``EntsoeSource._daily_zone``, the area's own zone for a source
+    used without a pipeline zone), else ``None`` (no source-specific day to start from)."""
+    if timezone is not None:
+        return timezone
+    daily_zone = getattr(source, "_daily_zone", None)
+    return daily_zone() if callable(daily_zone) else None
 
 
 def _calendar_day(text: str, tz: Optional[str]) -> Optional[pd.Timestamp]:

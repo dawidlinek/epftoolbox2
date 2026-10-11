@@ -85,10 +85,12 @@ class Availability:
                      availability depends on the row time, not on k.
         as_of:       known at a fixed `time` (in `timezone`) on the issue day D, regardless of a leading `_d+k`
                      (a value fixed as of the source's own issue time, e.g. a reanalysis snapshot rather than a
-                     rolling forecast run).
+                     rolling forecast run). A shift after the leading `_d+k` moves the day: `x_d+1_d+1` holds
+                     the value of D+1 and is known as of D+1.
         weather_cutoff: an OpenMeteoSource column. Known `delay` after `run`:00 UTC on the issue day D itself,
                      regardless of a leading `_d+k` — the source's own leak-free cutoff is fixed to D's run, not
-                     to the delivery day (see OpenMeteoSource and `publication_delay_hours`).
+                     to the delivery day (see OpenMeteoSource and `publication_delay_hours`). A shift after the
+                     leading `_d+k` moves the day the run is read from, as for `as_of`.
     """
 
     kind: str
@@ -298,28 +300,46 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             for name in ("load_forecast_daily_min", "load_forecast_daily_max"):
                 rules[f"{prefix}{name}"] = rule
         elif isinstance(source, OpenMeteoSource):
-            from .data.sources._open_meteo_common import aggregated_variable_names
-
-            prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
             rule = _weather_availability(source)
-            # A source built with `locations` (see OpenMeteoSource.locations) emits aggregated columns
-            # (`{prefix}{variable}_{kind}` per entry — see `aggregated_variable_names`) only when `agg` is set;
-            # it also, or instead, emits per-location columns `{prefix}{name}_{variable}`, with `agg` only when
-            # `keep_locations`, always otherwise (they are then the only output). Both column shapes follow the
-            # same cutoff rule.
-            locations = getattr(source, "_locations", [])
-            agg = getattr(source, "_agg", None)
-            if not locations:
-                for variable in source.columns:
-                    rules[f"{prefix}{variable}"] = rule
-            else:
-                for variable in aggregated_variable_names(source.columns, agg):
-                    rules[f"{prefix}{variable}"] = rule
-                if agg is None or getattr(source, "keep_locations", False):
-                    for location in locations:
-                        for variable in source.columns:
-                            rules[f"{prefix}{location['name']}_{variable}"] = rule
+            for name in _weather_column_names(source):
+                rules[name] = rule
     return rules
+
+
+def _weather_column_names(source: Any) -> List[str]:
+    """The unshifted column names an OpenMeteoSource emits (each is also emitted as `{name}_d+{i}`)."""
+    from .data.sources._open_meteo_common import aggregated_variable_names
+
+    prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
+    # A source built with `locations` (see OpenMeteoSource.locations) emits aggregated columns
+    # (`{prefix}{variable}_{kind}` per entry — see `aggregated_variable_names`) only when `agg` is set;
+    # it also, or instead, emits per-location columns `{prefix}{name}_{variable}`, with `agg` only when
+    # `keep_locations`, always otherwise (they are then the only output). Both column shapes follow the
+    # same cutoff rule.
+    locations = getattr(source, "_locations", [])
+    agg = getattr(source, "_agg", None)
+    if not locations:
+        return [f"{prefix}{variable}" for variable in source.columns]
+    names = [f"{prefix}{variable}" for variable in aggregated_variable_names(source.columns, agg)]
+    if agg is None or getattr(source, "keep_locations", False):
+        names += [f"{prefix}{location['name']}_{variable}" for location in locations for variable in source.columns]
+    return names
+
+
+def _source_market_zones(sources: Iterable[Any]) -> Dict[str, str]:
+    """Rule key -> the market zone of the source whose rule it is, for rules that only mean something on an index
+    in that zone. An OpenMeteoSource's cutoff is `run`:00 UTC of the local market day D, so the issue day D of a row
+    is a day of the market's zone: on an index in another zone (UTC, say) a row can belong to another day D.
+    Rules that carry their own zone and convert exactly (the week-ahead load rule, calendar columns) need none."""
+    from .data.sources.open_meteo import OpenMeteoSource
+
+    zones: Dict[str, str] = {}
+    for source in sources:
+        zone = getattr(source, "market_timezone", None)
+        if isinstance(source, OpenMeteoSource) and zone:
+            for name in _weather_column_names(source):
+                zones[name] = zone
+    return zones
 
 
 def _weather_availability(source: Any) -> Availability:
@@ -444,13 +464,16 @@ class InformationSet:
         self.unknown = unknown
         self.use_defaults = use_defaults
         self._source_rules: Dict[str, Availability] = {}
+        self._source_zones: Dict[str, str] = {}
 
     # -- configuration --------------------------------------------------------
 
     def with_source_rules(self, sources: Iterable[Any]) -> "InformationSet":
         """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables)."""
+        sources = list(sources)
         out = self.copy()
         out._source_rules = {**self._source_rules, **source_rules(sources)}
+        out._source_zones = {**self._source_zones, **_source_market_zones(sources)}
         return out
 
     def copy(self) -> "InformationSet":
@@ -463,6 +486,7 @@ class InformationSet:
             self.use_defaults,
         )
         out._source_rules = dict(self._source_rules)
+        out._source_zones = dict(self._source_zones)
         return out
 
     def to_dict(self) -> Dict[str, Any]:
@@ -567,6 +591,8 @@ class InformationSet:
                 resolved[name] = self.resolve(name)
                 if resolved[name].rule is None:
                     unknown.add(resolved[name].base)
+                else:
+                    self._check_source_zone(resolved[name], index)
 
         days = self._issue_days(index, test_start, test_end)
         if not len(days):
@@ -605,6 +631,27 @@ class InformationSet:
                     out.append(Violation(name, period, hz, col, known, issue_minute, role, hint))
         return out, unknown
 
+    def _check_source_zone(self, col: ResolvedColumn, index: pd.DatetimeIndex) -> None:
+        """Raise if `col` is a data source's column whose rule needs the market zone and the index is in another.
+
+        The check reads each row's issue day D as a local day of the index's zone. An Open-Meteo column took its
+        run from D in the source's market zone, so on a UTC index a row at 22:00Z belongs to the market's next
+        day, whose run is published only the next morning: neither the check nor the probe could see that.
+        Zones with the same wall clock on every row (Europe/Berlin and Europe/Warsaw) are the same here.
+        """
+        zone = self._source_zones.get(col.key) if col.layer == "sources" and col.key else None
+        if zone is None or getattr(index, "tz", None) is None or not len(index):
+            return
+        if (index.tz_convert(zone).tz_localize(None) == index.tz_localize(None)).all():
+            return
+        raise InformationSetError(
+            f"Column '{col.name}' comes from a data source for the market zone '{zone}', but the data is indexed "
+            f"in '{index.tz}'. The source cut each local day D of the market off at D's own model run, which a "
+            f"'{index.tz}' index cannot tell: a row late in the evening already belongs to the next day of "
+            f"'{zone}', whose run is published only the next morning. Put the index in the market zone first: add "
+            f"a TimezoneTransformer to the DataPipeline (it takes its zone from DataPipeline(timezone='{zone}'))."
+        )
+
     def _assumption_hint(self, col, day, row_minute, step, ctx) -> str:
         for name, (pattern, rule, description) in ASSUMPTIONS.items():
             if name in self.assumptions or col.key != pattern:
@@ -618,6 +665,11 @@ class InformationSet:
         """An OpenMeteoSource column's own cutoff is a source-side setting, not a data fact: point at it."""
         if col.rule is None or col.rule.kind != "weather_cutoff":
             return ""
+        if any(s.offset > 0 for s in _shifts_after_source_lead(col.shifts)):
+            return (
+                "a forward shift after the source's own `_d+k` reads the run of a later issue day, which starts "
+                "after the issue time whatever `run` is; drop the forward shift"
+            )
         run = col.rule.time.split(":", 1)[0]
         return (
             f"OpenMeteoSource(run={run!r}, ...) is known {col.rule.delay} after that UTC run; suggest an "
@@ -860,6 +912,7 @@ def perturb_unknown(
         if col.rule is None:
             unchecked.append(name)
             continue
+        information_set._check_source_zone(col, index)
         available = _available_array(col, col.rule, day, minute, step, ctx, first)
         mask = available > ctx.issue_minute
         if target_from_issue is not None and name == target_from_issue:
@@ -898,15 +951,18 @@ def _available_array(
     if rule.kind == "static":
         return np.full(len(day), -np.inf)
     if rule.kind == "as_of":
-        # Fixed to a time on the issue day D itself: independent of the row's own day/minute or any shift,
-        # so a leading `_d+k` doesn't change it.
-        known = np.full(len(day), _minutes(rule.time), dtype=float) + issue_day * 1440.0
+        # Fixed to a time on the day the value is read from: the issue day D itself, moved by every shift after a
+        # leading `_d+k` (see `_read_day_offset`), but not by the leading `_d+k`, the row's own day or minute.
+        read_day = issue_day + _read_day_offset(col.shifts, minute)
+        known = np.full(len(day), _minutes(rule.time), dtype=float) + read_day * 1440.0
         return _from_zone(known, rule.timezone, ctx)
     if rule.kind == "weather_cutoff":
-        # Fixed to `run`:00 UTC plus `delay` on the issue day D itself, same independence as `as_of` above. The
-        # run+delay total is minutes after UTC midnight of D and may exceed 1440 (a late run plus its delay can
-        # land on D+1 in UTC); that is fine here, this is a plain offset, not a wall-clock time to re-parse.
-        cutoff = np.full(len(day), _minutes(rule.time) + _parse_delay(rule.delay), dtype=float) + issue_day * 1440.0
+        # Fixed to `run`:00 UTC plus `delay` on the day the value is read from, same as `as_of` above. The
+        # run+delay total is minutes after UTC midnight of that day and may exceed 1440 (a late run plus its delay
+        # can land on the next day in UTC), or be negative for a value read from an earlier day; that is fine
+        # here, this is a plain offset, not a wall-clock time to re-parse.
+        read_day = issue_day + _read_day_offset(col.shifts, minute)
+        cutoff = np.full(len(day), _minutes(rule.time) + _parse_delay(rule.delay), dtype=float) + read_day * 1440.0
         return _from_zone(cutoff, rule.timezone, ctx)
     shifts = list(col.shifts)
     if rule.kind == "weather_run" and shifts and shifts[0].unit == "d" and shifts[0].offset > 0:
@@ -933,6 +989,29 @@ def _available_array(
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _shifts_after_source_lead(shifts: Sequence[Shift]) -> List[Shift]:
+    """`shifts` without a leading `_d+k`, which is a source's own lead (the forecast for k days ahead) and not a
+    shift of the row."""
+    rest = list(shifts)
+    if rest and rest[0].unit == "d" and rest[0].offset > 0:
+        rest = rest[1:]
+    return rest
+
+
+def _read_day_offset(shifts: Sequence[Shift], minute: np.ndarray) -> np.ndarray:
+    """Days after (negative: before) the issue day D that an `as_of` or `weather_cutoff` column is read from.
+
+    Such a rule is fixed to the issue day of the row a value is taken from. A leading `_d+k` is the source's own
+    lead and keeps the row. Any shift after it moves the row: `x_d+1_d+1` on day D holds what `x_d+1` had on D+1
+    (its run, issued on D+1), `x_d+1_d-1` what it had on D-1, and an hour or minute shift that crosses midnight
+    from `minute` (the row's clock minute) moves it to the next or the previous day.
+    """
+    rest = _shifts_after_source_lead(shifts)
+    days = sum(s.offset for s in rest if s.unit == "d")
+    elapsed = sum(s.minutes for s in rest if s.unit != "d")
+    return days + np.floor((np.asarray(minute, dtype=float) + elapsed) / 1440.0)
 
 
 def _convert_wall_clock(
