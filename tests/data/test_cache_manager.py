@@ -8,7 +8,12 @@ import pandas as pd
 import pytest
 
 from epftoolbox2.data import cache_manager as cache_manager_module
-from epftoolbox2.data.cache_manager import CACHE_FORMAT_VERSION, CacheManager
+from epftoolbox2.data.cache_manager import (
+    CACHE_FORMAT_VERSION,
+    CacheManager,
+    align_to_local_days,
+    without_ranges,
+)
 
 
 def hourly(start, end, **cols):
@@ -673,3 +678,66 @@ class TestCacheInfo:
         assert info["exists"] is True
         assert info["num_chunks"] == 1
         assert len(info["date_ranges"]) == 1
+
+
+class TestAlignToLocalDays:
+    """Holes are fetched from the start of their local day, so a source that carries a one-day period's value to its
+    fetch's start (EntsoeSource._clip) has nothing to carry."""
+
+    def test_a_start_inside_a_day_moves_back_to_that_days_local_midnight(self):
+        hole = (ts("2024-06-12 23:15"), ts("2024-06-13 00:00"))
+        # Warsaw is UTC+2 in June: its midnight of 13 June is 22:00 UTC on the 12th
+        assert align_to_local_days([hole], ts("2024-01-01"), "Europe/Warsaw") == [(ts("2024-06-12 22:00"), hole[1])]
+
+    def test_the_zone_decides_where_the_day_starts(self):
+        hole = (ts("2024-06-12 23:15"), ts("2024-06-13 00:00"))
+        assert align_to_local_days([hole], ts("2024-01-01"), "UTC") == [(ts("2024-06-12"), hole[1])]
+
+    def test_it_never_starts_before_the_request(self):
+        hole = (ts("2024-06-12 23:15"), ts("2024-06-13 00:00"))
+        assert align_to_local_days([hole], ts("2024-06-12 23:00"), "Europe/Warsaw") == [
+            (ts("2024-06-12 23:00"), hole[1])
+        ]
+
+    def test_ranges_that_now_overlap_are_merged(self):
+        first = (ts("2024-06-12 23:15"), ts("2024-06-12 23:30"))
+        second = (ts("2024-06-12 23:45"), ts("2024-06-13 06:00"))
+        assert align_to_local_days([first, second], ts("2024-01-01"), "Europe/Warsaw") == [
+            (ts("2024-06-12 22:00"), ts("2024-06-13 06:00"))
+        ]
+
+    def test_ranges_in_different_days_stay_apart(self):
+        first = (ts("2024-06-10 12:00"), ts("2024-06-10 13:00"))
+        second = (ts("2024-06-12 12:00"), ts("2024-06-12 13:00"))
+        assert align_to_local_days([first, second], ts("2024-01-01"), "Europe/Warsaw") == [
+            (ts("2024-06-09 22:00"), first[1]),
+            (ts("2024-06-11 22:00"), second[1]),
+        ]
+
+    def test_the_day_of_a_dst_switch_starts_at_its_own_midnight(self):
+        # Warsaw springs forward on 2024-03-31: midnight is still UTC+1, 23:00 UTC on the 30th
+        hole = (ts("2024-03-31 10:00"), ts("2024-03-31 11:00"))
+        assert align_to_local_days([hole], ts("2024-01-01"), "Europe/Warsaw") == [(ts("2024-03-30 23:00"), hole[1])]
+
+    def test_without_a_zone_the_ranges_are_unchanged(self):
+        hole = (ts("2024-06-12 23:15"), ts("2024-06-13 00:00"))
+        assert align_to_local_days([hole], ts("2024-01-01"), None) == [hole]
+
+
+class TestWithoutRanges:
+    def test_rows_inside_the_ranges_are_removed(self):
+        df = hourly("2024-01-01", "2024-01-02", load=0.0)
+        out = without_ranges(
+            df, [(ts("2024-01-01 02:00"), ts("2024-01-01 04:00")), (ts("2024-01-01 22:00"), ts("2024-01-02"))]
+        )
+        assert out.index.hour.tolist() == [0, 1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+
+    def test_no_ranges_return_the_frame(self):
+        df = hourly("2024-01-01", "2024-01-02", load=0.0)
+        assert without_ranges(df, []) is df
+
+    def test_a_naive_index_is_taken_to_be_utc(self):
+        df = hourly("2024-01-01", "2024-01-02", load=0.0)
+        df.index = df.index.tz_localize(None)
+        out = without_ranges(df, [(ts("2024-01-01 02:00"), ts("2024-01-01 04:00"))])
+        assert len(out) == 22

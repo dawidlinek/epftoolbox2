@@ -450,9 +450,13 @@ class EntsoeLikeClippingSource(DataSource):
     def __init__(self, tz="Europe/Warsaw"):
         self.tz = tz
 
+    def _load(self):
+        return _SERIES["load"]
+
     def fetch(self, start, end):
-        daily = _SERIES["load"].tz_convert(self.tz).resample("D").min().tz_convert("UTC")  # one value per local day
-        df = pd.DataFrame({"load_actual": _SERIES["load"], "load_forecast_daily_min": daily})
+        load = self._load()
+        daily = load.tz_convert(self.tz).resample("D").min().tz_convert("UTC")  # one value per local day
+        df = pd.DataFrame({"load_actual": load, "load_forecast_daily_min": daily})
         df = df.truncate(before=start - pd.Timedelta(days=1), after=end)
 
         values = df["load_forecast_daily_min"].dropna()
@@ -476,6 +480,21 @@ class EntsoeLikeClippingSource(DataSource):
 
     def get_cache_config(self):
         return {"source_type": "entsoe_like_clipping", "tz": self.tz}
+
+
+class EntsoeLikeResolutionSwitchSource(EntsoeLikeClippingSource):
+    """Like `EntsoeLikeClippingSource`, but the load rows are hourly up to 2024-06-12 23:00 UTC and 15-minute from
+    2024-06-13 00:00 UTC, as PL's ENTSO-E load is. The cache cannot tell whether the 45 minutes after the last
+    hourly row are missing, so it leaves them as a hole and fetches them on their own next time."""
+
+    def _load(self):
+        hourly = pd.date_range("2024-06-10", "2024-06-12 23:00", freq="1h", tz="UTC")
+        quarter_hourly = pd.date_range("2024-06-13", "2024-06-16 23:45", freq="15min", tz="UTC")
+        index = hourly.append(quarter_hourly)
+        return pd.Series(np.arange(len(index), dtype=float) % 29 + 100.0, index=index)
+
+    def get_cache_config(self):
+        return {"source_type": "entsoe_like_resolution_switch", "tz": self.tz}
 
 
 def _utc(s):
@@ -568,6 +587,24 @@ class TestSourceCache:
 
         fresh = pipe().run(start, end, cache=False)
         pd.testing.assert_frame_equal(fresh, cached, check_freq=False)
+
+    @pytest.mark.parametrize("tz", ["Europe/Warsaw", "Europe/Helsinki"])
+    def test_a_hole_inside_a_local_day_does_not_double_stamp_a_daily_value(self, in_tmp, tz):
+        """The cache fetches a hole on its own, and the hole after the last hourly row of a series that turns into
+        15-minute rows starts inside a local day whose daily value sits in the neighbouring piece. A fetch from
+        there would carry that value forward (EntsoeSource._clip) and stamp the day a second time, which
+        TimezoneTransformer rejects, so every run after the first would fail. Holes are fetched from the start of
+        their local day instead, and every cached run must equal a fresh one."""
+        start, end = _utc("2024-06-10"), _utc("2024-06-16")
+
+        def pipe():
+            return DataPipeline(
+                sources=[EntsoeLikeResolutionSwitchSource(tz)], transformers=[TimezoneTransformer()], timezone=tz
+            )
+
+        fresh = pipe().run(start, end, cache=False)
+        for _ in range(3):  # the first run fetches everything, the next ones fetch the hole
+            pd.testing.assert_frame_equal(fresh, pipe().run(start, end, cache=True), check_freq=False)
 
     def test_unpublished_tail_is_fetched_again_next_day(self, in_tmp, monkeypatch):
         """pipelines H3 / entsoe H4 / empirical F5d: the daily forecast-only recipe with cache=True."""

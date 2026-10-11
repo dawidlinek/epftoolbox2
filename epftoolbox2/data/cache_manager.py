@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 from filelock import FileLock, SoftFileLock, Timeout
 
@@ -131,6 +132,45 @@ def clip_to_range(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> p
         df = df.copy()
         df.index = df.index.tz_localize("UTC")
     return df[(df.index >= start) & (df.index < end)]
+
+
+def without_ranges(df: pd.DataFrame, ranges: List[Tuple[pd.Timestamp, pd.Timestamp]]) -> pd.DataFrame:
+    """``df`` without the rows in any of the half-open ``ranges``. A tz-naive index is taken to be UTC."""
+    if df.empty or not ranges:
+        return df
+    index = df.index if df.index.tz is not None else df.index.tz_localize("UTC")
+    inside = np.zeros(len(df), dtype=bool)
+    for range_start, range_end in ranges:
+        inside |= (index >= range_start) & (index < range_end)
+    return df[~inside]
+
+
+def align_to_local_days(
+    ranges: List[Tuple[pd.Timestamp, pd.Timestamp]], earliest: pd.Timestamp, timezone: Optional[str]
+) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+    """``ranges`` with every start moved back to the local midnight in ``timezone`` that begins its day, but not
+    before ``earliest`` (the start of the request), and ranges that then overlap merged. Without a ``timezone`` the
+    ranges are returned as they are.
+
+    The per-source cache fills the holes in what it holds by fetching them on their own, and a hole can start at any
+    instant of a day, for example where a series changes from hourly to 15-minute rows. A source that carries a
+    one-day period's value forward to cover its fetch's own start (``EntsoeSource._clip``) would stamp that day's
+    value a second time there, on top of the one at the day's own local midnight in the neighbouring piece. Starting
+    the fetch at the local midnight leaves nothing to carry, see ``unsettled_boundary`` for the same reasoning at the
+    cache's tail. The caller removes the cached rows inside the returned ranges (``without_ranges``), so they are
+    fetched, and recorded, again.
+    """
+    if timezone is None:
+        return list(ranges)
+    aligned: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    for range_start, range_end in sorted(ranges):
+        local = range_start.tz_convert(timezone).floor("D", ambiguous=True, nonexistent="shift_forward")
+        range_start = max(earliest, local.tz_convert("UTC"))
+        if aligned and range_start <= aligned[-1][1]:
+            aligned[-1] = (aligned[-1][0], max(aligned[-1][1], range_end))
+        else:
+            aligned.append((range_start, range_end))
+    return aligned
 
 
 def settled_until_of(df: pd.DataFrame) -> Optional[pd.Timestamp]:

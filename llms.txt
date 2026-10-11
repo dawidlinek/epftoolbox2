@@ -1352,6 +1352,7 @@ df = pipeline.run(start, end, cache=False)
 - Each source gets a cache key hashing the cache format version, the source class and `get_cache_config()`
 - Only fetches missing date ranges from the API. Each cached file is only read inside its own recorded range
 - Records only what the source actually returned, and never the last 2 days before now (data may still be published). That tail is fetched again on the next run
+- A hole inside what is cached is fetched again from the start of its local day when the pipeline has a `timezone` (never before the start of the run), replacing the cached rows of that day. Without it a source that carries a one-day value forward to the start of its fetch (ENTSO-E's A31 daily load forecast) would stamp the day twice
 - A source can declare rows unsettled with `df.attrs["settled_until"]` (a UTC timestamp, see DataSource above). The recorded range stops there too, whatever the age of the rows after it, and they are fetched again on the next run
 - A multi-column source (e.g. `EntsoeSource`) outer-joins its columns, so the merged row index can run past where a shorter column actually stopped (e.g. `load_actual` mid-outage while `price` keeps publishing). The recorded range is additionally capped at one step past the last value of any column still being published (its last value newer than 14 days before now), so that outage's cells aren't cached as covered and lost for good
 - Deleted or unreadable cache files count as missing and are fetched again

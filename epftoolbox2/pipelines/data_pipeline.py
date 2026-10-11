@@ -19,12 +19,14 @@ from epftoolbox2.data.validators.result import ValidationResult
 from epftoolbox2.data.cache_manager import (
     CACHE_FORMAT_VERSION,
     CacheManager,
+    align_to_local_days,
     atomic_write,
     clip_to_range,
     hold_lock,
     make_file_lock,
     settled_until_of,
     unsettled_boundary,
+    without_ranges,
     without_settled_until,
 )
 from epftoolbox2.logging import get_logger
@@ -257,7 +259,12 @@ class DataPipeline:
         # Held across the fetch: parallel processes wait for the one fetching this source, then read its result.
         with cache_manager.lock(cache_key):
             cached = cache_manager.read_cached_data(cache_key, start, end)
-            missing_ranges = cache_manager.find_missing_ranges(cache_key, start, end)
+            # Holes are fetched from the start of their local day, see ``align_to_local_days``.
+            missing_ranges = align_to_local_days(
+                cache_manager.find_missing_ranges(cache_key, start, end), start, self.timezone
+            )
+            if cached is not None:
+                cached = without_ranges(cached, missing_ranges)
 
             if not missing_ranges:
                 logger.info(f"Cache: Full hit for {source_type} source")
