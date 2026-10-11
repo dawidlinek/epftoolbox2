@@ -6,13 +6,13 @@ hourly. The model trains 96 sub-models per day (one per 15-min slot) rather
 than the default 24.
 
 Key differences vs. example 03:
-- EntsoeSource(..., prefer_15min=True) to pick 15-min prices when available
 - ResampleTransformer(freq="15min") to align everything to 15-min bins
 - CalendarSource(..., freq="15min") so calendar features are at 15-min too
 - ModelPipeline.run(..., freq="15min") selects the 96-period training loop
 
-Note: DE 15-min data from ENTSOE only includes load, not price.
-This example forecasts load_actual as the target.
+ENTSO-E publishes the DE_LU load every 15 minutes, so this example forecasts load_actual.
+Day-ahead prices are 15-minute from 2025-10-01 only: add type=["price"] and prefer_15min=True to
+EntsoeSource for them (before that date the hourly price is repeated over its four quarter-hours).
 """
 
 import os
@@ -41,7 +41,7 @@ if __name__ == "__main__":
     data_pipeline = (
         # timezone makes DATA_START/DATA_END whole local days
         DataPipeline(timezone="Europe/Berlin")
-        .add_source(EntsoeSource(country_code="DE", api_key=ENTSOE_API_KEY, type=["load", "price"], prefer_15min=True))
+        .add_source(EntsoeSource(country_code="DE_LU", api_key=ENTSOE_API_KEY, type=["load"]))
         .add_source(OpenMeteoSource(latitude=52.5200, longitude=13.4050, prefix="berlin"))
         .add_source(CalendarSource(country="DE", holidays="binary", weekday="onehot", daylight=True, freq="15min"))
         .add_transformer(TimezoneTransformer())

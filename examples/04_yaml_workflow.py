@@ -96,11 +96,11 @@ predictors = [
 Workflow(
     data_pipeline="data_pipeline.yaml",
     model_pipeline="model_pipeline.yaml",
-    data_start="2023-05-01",
-    data_end="2024-08-01",
+    data_start="2023-01-01",
+    data_end="2024-04-01",
     data_cache=True,
-    model_test_start="2024-06-01",
-    model_test_end="2024-07-01",
+    model_test_start="2024-02-01",
+    model_test_end="2024-03-01",
     model_target="price",
     model_horizon=5,  # as far ahead as the weather forecasts go
     max_processes=4,

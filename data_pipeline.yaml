@@ -1,4 +1,5 @@
 timezone: Europe/Warsaw
+on_invalid: warn
 sources:
 - class: EntsoeSource
   params:
@@ -8,12 +9,15 @@ sources:
     - load
     - price
     prefer_15min: false
+    neighbours: null
+    prefix: ''
 - class: OpenMeteoSource
   params:
     latitude: 52.2297
     longitude: 21.0122
-    horizon: 5
-    model: jma_seamless
+    locations: null
+    agg: null
+    keep_locations: false
     columns:
     - temperature_2m
     - rain
@@ -29,11 +33,21 @@ sources:
     - cloud_cover
     - wind_speed_10m
     - wind_direction_10m
+    horizon: 5
+    model: jma_seamless
+    temporal_resolution: null
+    api: previous_runs
+    run: '00'
+    timezone: null
     prefix: warsaw
+    strict: false
     proxy_url: null
 - class: CalendarSource
   params:
     country: PL
+    timezone: null
+    lat: 52.2297
+    lon: 21.0122
     holidays: binary
     weekday: onehot
     hour: false
@@ -41,12 +55,23 @@ sources:
     daylight: true
     prefix: ''
     freq: 1h
+    region: null
+    categories: null
+    bridge_days: false
+    christmas_period: false
+    holiday_distance: 0
+    dst_switch: false
+    regimes: false
+    school_holidays: false
+source_validators: []
 transformers:
 - class: TimezoneTransformer
   params:
+    target_tz: null
     daily_columns:
     - load_forecast_daily_min
     - load_forecast_daily_max
+    daily_anchor: null
 - class: ResampleTransformer
   params:
     freq: 1h
@@ -97,4 +122,8 @@ validators:
     columns:
     - load_actual
     - price
+    start: null
+    end: null
+    freq: null
     min_coverage: 1.0
+    max_gap: null

@@ -18,11 +18,13 @@ models:
     - warsaw_temperature_2m_d+{horizon}
     training_window: 365
     name: OLS
+    scaler: standard
 - class: LassoCVModel
   params:
     predictors: *id001
     training_window: 365
     name: LassoCV
+    scaler: standard
     cv: 5
     max_iter: 10000
 evaluators:
