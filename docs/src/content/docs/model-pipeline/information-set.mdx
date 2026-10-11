@@ -80,8 +80,8 @@ columns an `OpenMeteoSource` emits:
   where the value is stamped.
 - `weather_cutoff(source.run, f"{delay}h")`, `delay` coming from `publication_delay_hours(source.model)`, known
   `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading `_d+k`. This is a
-  conservative, model-side estimate of the run's real-world publication lag (ICON ~4h, GFS ~5h, ECMWF IFS ~8h,
-  JMA ~9.5h, 10h for an unknown model): `OpenMeteoSource` itself has no notion of issue time or delay, only of
+  conservative, model-side estimate of the run's real-world publication lag (ICON 4.5h, GFS 6h, ECMWF IFS 9h,
+  JMA 9.6h, 10h for an unknown model): `OpenMeteoSource` itself has no notion of issue time or delay, only of
   the nominal cutoff `run`.
 
 `run` and `model` are read with `getattr` and default when a source doesn't set them, so this works with any
@@ -117,7 +117,7 @@ pipeline = ModelPipeline(information_set=info)
     Availability.weather_run(delay="6h")                      # a rolling forecast run ~ row time + delay
     Availability.as_of("09:00", "Europe/Brussels")             # known at a fixed time on the issue day D;
                                                                 # a leading `_d+k` doesn't change that
-    Availability.weather_cutoff(run="00", delay="9.5h")        # OpenMeteoSource: known `delay` after `run`:00
+    Availability.weather_cutoff(run="00", delay="9.6h")        # OpenMeteoSource: known `delay` after `run`:00
                                                                 # UTC on the issue day D; used by source_rules
     ```
   </TabItem>

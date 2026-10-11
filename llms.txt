@@ -148,7 +148,7 @@ source = OpenMeteoSource(
 
 **Horizon limit:** `previous_dayK` at T is the run 24K h older, so D+7 is never fully served (its late hours need `previous_day8`, which Open-Meteo does not serve, or a run after the cutoff). At `run="00"` in `Europe/Warsaw` the largest horizon without look-ahead is 6 for `jma_seamless`, `gfs_seamless`, `ecmwf_ifs025` and `ecmwf_ifs`, and 5 for `icon_seamless` (no `previous_day7`) and for any model without a table (hourly runs and a 6 h store assumed). `horizon=None` takes it, `epftoolbox2.data.sources.open_meteo.max_previous_runs_horizon(model, timezone, run)` returns it, and a larger explicit value raises `ValueError` naming the limit and suggesting `api="single_runs"` for a full week. Under `single_runs`, `horizon=None` means 5 and 1-14 is accepted. Leads beyond the run's own length come back NaN.
 
-**Publication delay (model-side, not enforced by the source):** ICON ~4h, GFS ~5h, ECMWF IFS ~8h, JMA ~9.5h, unknown models a conservative 10h (`epftoolbox2.data.sources.open_meteo.publication_delay_hours`). `run="00"` (default) is known in time for an 11:45 CET issue for every model above, in summer and winter. `epftoolbox2.information_set.source_rules` uses this table to flag a `run`/issue-time combination that is too tight.
+**Publication delay (model-side, not enforced by the source):** ICON 4.5h, GFS 6h, ECMWF IFS 9h, JMA 9.6h, unknown models a conservative 10h (`epftoolbox2.data.sources.open_meteo.publication_delay_hours`). `run="00"` (default) is known in time for an 11:45 CET issue for every model above, in summer and winter. `epftoolbox2.information_set.source_rules` uses this table to flag a `run`/issue-time combination that is too tight.
 
 **Returned rows:** exactly `[start, end)`, UTC index. Rows whose cutoff is still in the future use runs published by now (provisional). Trailing rows without any value are not returned. Missing values per column are logged with their share, the timestamp the column is complete from, and the missing share by local hour when it's uneven across hours. `strict=True` raises.
 
@@ -922,7 +922,7 @@ overrides the week-ahead rule for an `EntsoeSource`'s own `load_forecast_daily_m
 way as its other columns) with `weekly("friday", "10:00", timezone=source._daily_zone())`, i.e. the source's own
 bound market zone (or its area's own zone standalone), matching where A31's local midnight is actually
 anchored, instead of the `Europe/Brussels` default. For weather: `weather_cutoff(source.run, f"{delay}h")`,
-`delay` from `publication_delay_hours(source.model)` (ICON ~4h, GFS ~5h, ECMWF IFS ~8h, JMA ~9.5h, 10h for an
+`delay` from `publication_delay_hours(source.model)` (ICON 4.5h, GFS 6h, ECMWF IFS 9h, JMA 9.6h, 10h for an
 unknown model). It is known `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading
 `_d+k`. `run`/`model` are read with `getattr`, so this works with any `OpenMeteoSource`-like object. The
 source itself has no notion of issue time or delay, only of `run`.

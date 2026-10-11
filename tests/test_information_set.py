@@ -113,20 +113,20 @@ def test_source_rules_weather_cutoff_for_a_weather_source():
     """`run`/`model` are read with `getattr`, so this works with a stub that has them."""
     source = _warsaw_weather_source(run="09", model="ecmwf_ifs")
     rule = source_rules([source])["warsaw_temperature_2m"]
-    assert (rule.kind, rule.time, rule.delay, rule.timezone) == ("weather_cutoff", "09:00", "8.0h", "UTC")
+    assert (rule.kind, rule.time, rule.delay, rule.timezone) == ("weather_cutoff", "09:00", "9.0h", "UTC")
 
 
 def test_source_rules_weather_cutoff_uses_the_models_publication_delay():
-    # ICON ~4h, unknown models the conservative 10h default (see publication_delay_hours).
+    # ICON 4.5h, unknown models the conservative 10h default (see publication_delay_hours).
     icon = source_rules([_warsaw_weather_source(model="icon_seamless")])["warsaw_temperature_2m"]
-    assert icon.delay == "4.0h"
+    assert icon.delay == "4.5h"
     unknown = source_rules([_warsaw_weather_source(model="some_unpublished_model")])["warsaw_temperature_2m"]
     assert unknown.delay == "10.0h"
 
 
 def test_default_run_passes_the_cutoff_check_at_1145_but_not_1000_brussels():
-    """JMA's default publication delay (9.5h, see publication_delay_hours) makes the default run="00" cutoff
-    (00:00 UTC + 9.5h = 09:30 UTC = 10:30 Brussels in winter) known in time for an 11:45 Brussels issue but not
+    """JMA's default publication delay (9.6h, see publication_delay_hours) makes the default run="00" cutoff
+    (00:00 UTC + 9.6h = 09:36 UTC = 10:36 Brussels in winter) known in time for an 11:45 Brussels issue but not
     for a 10:00 one. The error must then suggest an earlier run or a later issue time."""
     source = _warsaw_weather_source()  # model="jma_seamless", run="00" (both defaults)
 
@@ -152,7 +152,7 @@ SUMMER_WARSAW = pd.date_range("2024-07-01", periods=24 * 40, freq="h", tz="Europ
     ids=["winter", "summer"],
 )
 def test_default_run_passes_the_cutoff_check_at_1145_brussels_all_year(index, start, end):
-    """JMA's 00 UTC run is available 9.5h later, 09:30 UTC. An 11:45 Brussels issue is 09:45 UTC in summer and
+    """JMA's 00 UTC run is available 9.6h later, 09:36 UTC. An 11:45 Brussels issue is 09:45 UTC in summer and
     10:45 UTC in winter, so the default model passes in both seasons."""
     info = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
     found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=info, start=start, end=end, index=index)
@@ -174,6 +174,15 @@ def test_default_information_set_accepts_the_default_weather_model_all_year(inde
     info = InformationSet().with_source_rules([_warsaw_weather_source()])
     found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=info, start=start, end=end, index=index)
     assert found == set()
+
+
+def test_jma_run_00_is_not_known_by_1130_in_summer():
+    """JMA's 9.6h delay puts the 00 UTC run at 09:36 UTC, i.e. 11:36 CEST: an 11:30 summer issue is too early."""
+    info = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    found, _ = violations(
+        ["warsaw_temperature_2m_d+{horizon}"], info=info, start="2024-07-10", end="2024-07-23", index=SUMMER_WARSAW
+    )
+    assert found != set()
 
 
 def test_source_rules_agg_mean_locations_cover_the_aggregated_columns():
@@ -639,7 +648,7 @@ def test_shipped_example_predictors_are_flagged():
     """The predictor list of model_pipeline.yaml / examples 02-05 (as of this change) uses look-ahead inputs.
 
     warsaw_temperature_2m_d+{horizon} is not flagged: OpenMeteoSource's default cutoff (run="00" plus JMA's
-    typical 9.5h publication delay) is known before the model's own issue time, see
+    conservative 9.6h publication delay) is known before the model's own issue time, see
     test_default_run_passes_the_cutoff_check_at_1145_brussels_all_year above.
     """
     shipped = [

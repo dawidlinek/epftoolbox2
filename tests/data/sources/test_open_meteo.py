@@ -854,19 +854,27 @@ class TestPublicationDelayHours:
     @pytest.mark.parametrize(
         "model, expected",
         [
-            ("icon_seamless", 4.0),
-            ("icon_d2", 4.0),
-            ("gfs_seamless", 5.0),
-            ("ecmwf_ifs025", 8.0),
-            ("ecmwf_ifs", 8.0),
-            ("jma_seamless", 9.5),
+            ("icon_seamless", 4.5),
+            ("icon_d2", 4.5),
+            ("gfs_seamless", 6.0),
+            ("ecmwf_ifs025", 9.0),
+            ("ecmwf_ifs", 9.0),
+            ("jma_seamless", 9.6),
         ],
     )
     def test_known_model_families(self, model, expected):
         assert publication_delay_hours(model) == expected
 
     def test_unknown_model_gets_the_conservative_default(self):
-        assert publication_delay_hours("totally_unknown_model") == 10.0
+        assert publication_delay_hours("totally_unknown_model") >= 10.0
+
+    @pytest.mark.parametrize(
+        "model, measured",
+        [("icon_seamless", 4.30), ("gfs_seamless", 5.54), ("ecmwf_ifs025", 8.55), ("jma_seamless", 9.53)],
+    )
+    def test_each_family_is_later_than_the_lag_measured_on_2026_10_11(self, model, measured):
+        """The table errs on the late side of Open-Meteo's own metadata."""
+        assert publication_delay_hours(model) > measured
 
 
 class TestKnownRunHours:

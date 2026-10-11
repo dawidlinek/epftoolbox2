@@ -59,15 +59,17 @@ Open-Meteo has two ways to download historical model values: the **Previous Runs
 
 The source has no notion of a market's real issue time or a model's real-world publication delay: `run` just fixes which UTC hour the cutoff is anchored to. Picking a `run` your issue time can actually rely on is a separate, model-side judgement:
 
-| Model | Typical delay | 00 UTC run available around |
+| Model | Assumed delay | 00 UTC run available around |
 |---|---|---|
-| DWD ICON (global/EU/D2) | ~4 h | 04:00 UTC |
-| NCEP GFS | ~5 h | 05:00 UTC |
-| ECMWF IFS (9 km / 0.25° / 0.4°) | ~8 h | 08:00 UTC |
-| JMA GSM | ~9.5 h | 09:30 UTC |
+| DWD ICON (global/EU/D2) | 4.5 h | 04:30 UTC |
+| NCEP GFS | 6 h | 06:00 UTC |
+| ECMWF IFS (9 km / 0.25° / 0.4°) | 9 h | 09:00 UTC |
+| JMA GSM | 9.6 h | 09:36 UTC |
 
-**Rule of thumb:** pick the latest `run` you know is published before your issue time. `run="00"` (the default) fits an 11:45 CET issue for every model above, all year. JMA is the slowest: 00:00 UTC + 9.5 h = 09:30 UTC, which is 11:30 CEST in summer and 10:30 CET in winter, so both are before 11:45.
-An issue time before 11:30 CEST would make the information-set check reject JMA in summer. For an earlier summer issue, use ICON, ECMWF IFS or GFS, whose 00 UTC runs are published by 08:00 UTC.
+The delays are rounded up from the lag that Open-Meteo reports for each model, so the check errs on the late side. A model that is not in the table gets 10 h.
+
+**Rule of thumb:** pick the latest `run` you know is published before your issue time. `run="00"` (the default) fits an 11:45 CET issue for every model above, all year. JMA is the slowest: 00:00 UTC + 9.6 h = 09:36 UTC, which is 11:36 CEST in summer and 10:36 CET in winter, so both are before 11:45.
+An issue time before 11:36 CEST would make the information-set check reject JMA in summer. For an earlier summer issue, use ICON or GFS, whose 00 UTC runs are published by 06:00 UTC, or ECMWF IFS from 11:00 CEST.
 
 These delays are also built into `epftoolbox2.information_set.source_rules` (see [Information Set](/epftoolbox2/model-pipeline/information-set/)): with a `ModelPipeline(issue_time=...)` information-set check enabled, a `run`/`issue_time` combination that is too tight raises `InformationSetError` before any model is fit, naming the column and suggesting an earlier run or a later issue time.
 
