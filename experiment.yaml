@@ -8,7 +8,7 @@ data_pipeline:
   path: data_pipeline.yaml
 model_pipeline:
   target: price
-  horizon: 5
+  horizon: 6
   freq: 1h
   forecast_only: false
   test_start: '2024-02-01'

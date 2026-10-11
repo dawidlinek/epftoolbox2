@@ -33,7 +33,7 @@ sources:
     - cloud_cover
     - wind_speed_10m
     - wind_direction_10m
-    horizon: 5
+    horizon: null
     model: jma_seamless
     temporal_resolution: null
     api: previous_runs

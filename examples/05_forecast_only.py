@@ -1,8 +1,8 @@
 """
 Example 5: Forecast-Only Mode
 
-Produce a 5-day-ahead electricity price forecast from today's data — no back-test,
-no evaluation, no scores.
+Produce a 5-day-ahead electricity price forecast from today's data, with no back-test,
+no evaluation and no scores.
 
 Key patterns:
 - Date keywords: "today", "now_d-730", "today_d+5" resolve at runtime, so this
@@ -10,8 +10,8 @@ Key patterns:
 - DataPipeline is given timezone="Europe/Warsaw", so "today"/"end" mean whole
   local calendar days: end="today_d+5" fetches weather forecasts and calendar
   features through the full 5-day prediction window (needed as predictors).
-  `end` always includes the whole day it names (local here, since `timezone`
-  is set; UTC otherwise).
+  `end` always includes the whole day it names (local here because `timezone`
+  is set, UTC otherwise).
 - ModelPipeline uses forecast_only=True to skip evaluators and exporters.
 - ModelPipeline is given an InformationSet (issue_time + the data sources' rules), so every predictor is
   checked against what is known at issue time before any fit.

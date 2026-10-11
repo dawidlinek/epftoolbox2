@@ -8,7 +8,7 @@ Two-phase pattern:
   1. Build pipelines once, save to YAML (setup phase)
   2. Load Workflow from YAML and run (execution phase)
 
-Note: predictors must be strings or "{horizon}" templates — callables cannot
+Note: predictors must be strings or "{horizon}" templates, because callables cannot
 be serialized. Use "col_d+{horizon}" template syntax instead of lambdas.
 """
 
@@ -102,7 +102,7 @@ Workflow(
     model_test_start="2024-02-01",
     model_test_end="2024-03-01",
     model_target="price",
-    model_horizon=5,  # as far ahead as the weather forecasts go
+    model_horizon=6,  # as far ahead as the weather forecasts go
     max_processes=4,
     threads_per_process=8,
 ).save("experiment.yaml")

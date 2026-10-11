@@ -80,7 +80,7 @@ if __name__ == "__main__":
         test_start="2024-02-01",
         test_end="2024-03-01",
         target="price",  # Column to predict
-        horizon=5,  # as far ahead as the weather forecasts go
+        horizon=6,  # as far ahead as the weather forecasts go
         save_dir="results",  # Directory to save intermediate results
     )
 

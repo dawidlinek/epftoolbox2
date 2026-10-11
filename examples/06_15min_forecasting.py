@@ -109,7 +109,7 @@ if __name__ == "__main__":
         test_start=TEST_START,
         test_end=TEST_END,
         target="load_actual",
-        horizon=5,  # as far ahead as the weather forecasts go
+        horizon=6,  # as far ahead as the weather forecasts go
         freq="15min",
         save_dir="results_15min",
     )
