@@ -20,6 +20,8 @@ import os
 os.environ["THREADS_PER_PROCESS"] = "16"
 os.environ["MAX_PROCESSES"] = "2"
 
+from pathlib import Path
+
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer, TimezoneTransformer
@@ -31,15 +33,17 @@ from epftoolbox2.exporters import ExcelExporter, TerminalExporter, CsvExporter
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_API_KEY_HERE")
 
-DATA_START = "2023-01-01"
-DATA_END = "2024-04-01"
 
-TEST_START = "2024-02-01"
-TEST_END = "2024-03-01"
-
-if __name__ == "__main__":
+def main(
+    data_start="2023-01-01",
+    data_end="2024-04-01",
+    test_start="2024-02-01",
+    test_end="2024-03-01",
+    output_dir=".",
+):
+    output = Path(output_dir)
     data_pipeline = (
-        # timezone makes DATA_START/DATA_END whole local days
+        # timezone makes data_start/data_end whole local days
         DataPipeline(timezone="Europe/Berlin")
         .add_source(EntsoeSource(country_code="DE_LU", api_key=ENTSOE_API_KEY, type=["load"]))
         .add_source(OpenMeteoSource(latitude=52.5200, longitude=13.4050, prefix="berlin"))
@@ -67,8 +71,8 @@ if __name__ == "__main__":
         .add_transformer(LagTransformer(lags=range(-1, 0), freq="day", columns=["load_forecast"]))
         .add_validator(CoverageValidator(columns=["load_actual"], min_coverage=1.0))
     )
-    df = data_pipeline.run(start=DATA_START, end=DATA_END, cache=True)
-    df.to_csv("15min_forecasting_data.csv")
+    df = data_pipeline.run(start=data_start, end=data_end, cache=True)
+    df.to_csv(output / "15min_forecasting_data.csv")
 
     seasonal_indicators = [
         "is_monday_d+{horizon}",
@@ -100,16 +104,21 @@ if __name__ == "__main__":
         .add_evaluator(RMSEEvaluator())
         .add_evaluator(rMAEEvaluator(base_model="OLS"))
         .add_exporter(TerminalExporter())
-        .add_exporter(ExcelExporter("15min_workflow_results.xlsx"))
-        .add_exporter(CsvExporter("15min_workflow_results.csv"))
+        .add_exporter(ExcelExporter(output / "15min_workflow_results.xlsx"))
+        .add_exporter(CsvExporter(output / "15min_workflow_results.csv"))
     )
 
     report = model_pipeline.run(
         data=df,
-        test_start=TEST_START,
-        test_end=TEST_END,
+        test_start=test_start,
+        test_end=test_end,
         target="load_actual",
         horizon=6,  # as far ahead as the weather forecasts go
         freq="15min",
-        save_dir="results_15min",
+        save_dir=output / "results_15min",
     )
+    return report
+
+
+if __name__ == "__main__":
+    main()

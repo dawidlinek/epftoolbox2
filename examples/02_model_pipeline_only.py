@@ -12,6 +12,8 @@ import os
 os.environ["THREADS_PER_PROCESS"] = "16"
 os.environ["MAX_PROCESSES"] = "2"
 
+from pathlib import Path
+
 import pandas as pd
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.data.sources import OpenMeteoSource
@@ -20,8 +22,10 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
 from epftoolbox2.exporters import ExcelExporter, TerminalExporter, CsvExporter
 
-if __name__ == "__main__":
-    df = pd.read_csv("data_output.csv", index_col=0)
+
+def main(data_path="data_output.csv", test_start="2024-02-01", test_end="2024-03-01", output_dir="."):
+    output = Path(output_dir)
+    df = pd.read_csv(data_path, index_col=0)
     df.index = pd.to_datetime(df.index, utc=True).tz_convert("Europe/Warsaw")
     print(f"Loaded {len(df)} rows")
 
@@ -71,17 +75,17 @@ if __name__ == "__main__":
         .add_evaluator(RMSEEvaluator())
         .add_evaluator(rMAEEvaluator(base_model="OLS Baseline"))
         .add_exporter(TerminalExporter(["horizon"]))
-        .add_exporter(ExcelExporter("model_results.xlsx"))
-        .add_exporter(CsvExporter("model_results.csv"))
+        .add_exporter(ExcelExporter(output / "model_results.xlsx"))
+        .add_exporter(CsvExporter(output / "model_results.csv"))
     )
 
     report = pipeline.run(
         data=df,
-        test_start="2024-02-01",
-        test_end="2024-03-01",
+        test_start=test_start,
+        test_end=test_end,
         target="price",  # Column to predict
         horizon=6,  # as far ahead as the weather forecasts go
-        save_dir="results",  # Directory to save intermediate results
+        save_dir=output / "results",  # Directory to save intermediate results
     )
 
     print("\n=== Summary ===")
@@ -89,3 +93,8 @@ if __name__ == "__main__":
 
     print("\n=== Results by Hour ===")
     print(report.by_hour())
+    return report
+
+
+if __name__ == "__main__":
+    main()

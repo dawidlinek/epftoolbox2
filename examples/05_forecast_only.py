@@ -33,9 +33,10 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_ENTSOE_API_KEY")
 
-if __name__ == "__main__":
+
+def main(data_start="now_d-735", data_end="today_d+5"):
     # Fetch 2 years of history + 5-day weather/calendar forecast.
-    # Adjust "now_d-730" to match your largest model's training_window.
+    # Adjust data_start to match your largest model's training_window.
     data_pipeline = (
         DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
@@ -63,7 +64,7 @@ if __name__ == "__main__":
         )
         .add_transformer(LagTransformer(lags=range(-1, 0), freq="day", columns=["load_forecast"]))
     )
-    df = data_pipeline.run(start="now_d-735", end="today_d+5", cache=True)
+    df = data_pipeline.run(start=data_start, end=data_end, cache=True)
 
     seasonal_indicators = [
         "is_monday_d+{horizon}",
@@ -99,3 +100,8 @@ if __name__ == "__main__":
     # 120 rows per model: target_date, hour, horizon, prediction, model
     forecast = report.predictions()
     print(forecast.to_string())
+    return report
+
+
+if __name__ == "__main__":
+    main()

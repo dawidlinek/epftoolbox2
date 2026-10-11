@@ -192,4 +192,4 @@ forecasts don't move.
 
 ## Examples
 
-See the `examples/` folder for complete working examples.
+See the `examples/` folder for complete working examples. Each script defines a `main()` that takes the date ranges it uses (and a directory for its output files when it writes any), so it can also be imported and called on a short window, for example `main(data_start="2024-01-01", data_end="2024-03-01")`.
