@@ -12,7 +12,7 @@ The code is the source of truth. It is documented in four places, all hand-writt
 | `docs/src/content/docs/<category>/*.md(x)` | Starlight site; one page per component, plus pipeline, workflow and reference pages |
 | `llms.txt` | Entry point for LLM agents (llmstxt.org format). An H1, a `>` summary, a short list of essential rules, then one `- [Title](docs/src/content/docs/<path>): one-line description` bullet per docs page under H2 sections that mirror the docs sidebar, and an `## Optional` section. It is an index, not a reference: parameters, defaults and examples live only in the docs pages |
 | `README.md` | Key Features list and quick start |
-| `examples/*.py` | Runnable end-to-end scripts (need an ENTSO-E key; not run in CI) |
+| `examples/*.py` | Runnable end-to-end scripts, each with a `main(...)` that `tests/test_examples.py` calls on a short window (need an ENTSO-E key; not run in CI) |
 
 ## 1. Find the drift
 
@@ -54,5 +54,6 @@ Rules:
 ## 3. Verify and report
 
 1. Re-run `check_docs.py` until it reports no errors. Resolve warnings or say why they stay (e.g. a TUI default that proposes a display name on purpose).
-2. If `docs/node_modules` exists and pages changed structurally, build the site: `cd docs && npm run build`. Otherwise say the build wasn't run.
-3. Report: each file changed and what changed in it, drift fixed, anything left and why.
+2. Run `uv run pytest tests/test_docs_code.py -q`. It compiles every python block and checks its imports and its call arguments against the real signatures, and compares the `reference/api.md` stubs with them. It is part of the fast suite in CI. Fix a failing block rather than opting it out with ```` ```python nocheck ````.
+3. If `docs/node_modules` exists and pages changed structurally, build the site: `cd docs && npm run build`. Otherwise say the build wasn't run.
+4. Report: each file changed and what changed in it, drift fixed, anything left and why.

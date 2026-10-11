@@ -117,7 +117,9 @@ def code_blocks(path: Path) -> list[tuple[int, str]]:
             if current is None:
                 lang, current, start = stripped[3:].strip().lower(), [], i + 1
             else:
-                if lang.startswith(("python", "py")):
+                # A fence meta string `nocheck` (```python nocheck) marks a block that is deliberately not runnable
+                # Python. tests/test_docs_code.py skips it too.
+                if lang.startswith(("python", "py")) and "nocheck" not in lang.split()[1:]:
                     blocks.append((start, "\n".join(current)))
                 current = None
             continue
