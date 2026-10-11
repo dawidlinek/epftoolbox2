@@ -859,7 +859,7 @@ class TestPublicationDelayHours:
             ("gfs_seamless", 5.0),
             ("ecmwf_ifs025", 8.0),
             ("ecmwf_ifs", 8.0),
-            ("jma_seamless", 10.0),
+            ("jma_seamless", 9.5),
         ],
     )
     def test_known_model_families(self, model, expected):

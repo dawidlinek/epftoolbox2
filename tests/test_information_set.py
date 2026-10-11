@@ -125,8 +125,8 @@ def test_source_rules_weather_cutoff_uses_the_models_publication_delay():
 
 
 def test_default_run_passes_the_cutoff_check_at_1130_but_not_1000_brussels():
-    """JMA's default publication delay (10h, see publication_delay_hours) makes the default run="00" cutoff
-    (00:00 UTC + 10h = 10:00 UTC = 11:00 Brussels in winter) known in time for an 11:30 Brussels issue but not
+    """JMA's default publication delay (9.5h, see publication_delay_hours) makes the default run="00" cutoff
+    (00:00 UTC + 9.5h = 09:30 UTC = 10:30 Brussels in winter) known in time for an 11:30 Brussels issue but not
     for a 10:00 one; the error must then suggest an earlier run or a later issue time."""
     source = _warsaw_weather_source()  # model="jma_seamless", run="00" (both defaults)
 
@@ -141,6 +141,22 @@ def test_default_run_passes_the_cutoff_check_at_1130_but_not_1000_brussels():
         early_issue.check(
             expand(["warsaw_temperature_2m_d+{horizon}"]), "price", "1h", WARSAW, "2024-01-10", "2024-01-10"
         )
+
+
+SUMMER_WARSAW = pd.date_range("2024-07-01", periods=24 * 40, freq="h", tz="Europe/Warsaw")
+
+
+@pytest.mark.parametrize(
+    "index, start, end",
+    [(WARSAW, "2024-01-10", "2024-01-23"), (SUMMER_WARSAW, "2024-07-10", "2024-07-23")],
+    ids=["winter", "summer"],
+)
+def test_default_run_passes_the_cutoff_check_at_1145_brussels_all_year(index, start, end):
+    """JMA's 00 UTC run is available 9.5h later, 09:30 UTC. An 11:45 Brussels issue is 09:45 UTC in summer and
+    10:45 UTC in winter, so the default model passes in both seasons."""
+    info = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=info, start=start, end=end, index=index)
+    assert found == set()
 
 
 def test_source_rules_agg_mean_locations_cover_the_aggregated_columns():
@@ -606,8 +622,8 @@ def test_shipped_example_predictors_are_flagged():
     """The predictor list of model_pipeline.yaml / examples 02-05 (as of this change) uses look-ahead inputs.
 
     warsaw_temperature_2m_d+{horizon} is not flagged: OpenMeteoSource's default cutoff (run="00" plus JMA's
-    typical 10h publication delay) is known well before the model's own issue time, see
-    test_default_run_passes_the_cutoff_check_at_1130_but_not_1000_brussels above.
+    typical 9.5h publication delay) is known before the model's own issue time, see
+    test_default_run_passes_the_cutoff_check_at_1145_brussels_all_year above.
     """
     shipped = [
         "load_actual",
@@ -622,7 +638,7 @@ def test_shipped_example_predictors_are_flagged():
         "price_d-2",
         "warsaw_temperature_2m_d+{horizon}",
     ]
-    info = InformationSet("11:30", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    info = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
     found, unknown = violations(shipped, info=info)
     assert unknown == set()
     assert {name for name, _, _ in found} == {"load_actual"}

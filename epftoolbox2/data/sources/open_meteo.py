@@ -98,20 +98,22 @@ def previous_run_lengths(model: str) -> Optional[Dict[int, int]]:
 # Typical hours between a model run's initialisation and its availability, by model family — used only by
 # epftoolbox2.information_set.source_rules to decide when an OpenMeteoSource column is actually known (the
 # source itself does not use this: its own bucket/run selection uses the nominal cutoff "D at run:00 UTC" only,
-# see run_cutoff). Not a constructor parameter: it is a conservative, best-effort estimate, not a promise about
-# any particular historical run.
+# see run_cutoff). Not a constructor parameter: it is a best-effort estimate, not a promise about any particular
+# historical run.
 #
 # Basis: Open-Meteo's Single Runs API docs (https://open-meteo.com/en/docs/single-runs-api) say "typically 4-6
 # hours for global models (e.g. ECMWF IFS, GFS) and 1-3 hours for regional models"; the model metadata endpoint
 # (https://api.open-meteo.com/data/<model>/static/meta.json, field last_run_availability_time minus
-# last_run_initialisation_time) gave these figures when checked on 2026-09-25: DWD ICON global 3.4h, ICON-EU
-# 2.9h, ICON-D2 1.4h; NCEP GFS 5.9h (013) / 6.9h (025); ECMWF IFS 6.9h (9 km) / 8.3h (0.25 deg) / 8.6h (0.4 deg);
-# JMA GSM 9.6h. Round, conservative (never lower than measured) values are used below.
+# last_run_initialisation_time) gave these figures when checked on 2026-10-11: DWD ICON global 4.3h, ICON-EU
+# 3.0h, ICON-D2 1.4h; NCEP GFS 5.5h (013) / 6.4h (025); ECMWF IFS 6.9h (9 km) / 8.6h (0.25 deg); JMA GSM 9.5h
+# (9.53h, the 18 UTC run). The figures move a little from run to run. JMA is set to the measured half hour because
+# its 00 UTC run (available about 09:30 UTC, i.e. 11:30 CEST) decides whether the default weather model passes an
+# issue time just before the 12:00 CET gate closure in summer. The other families are whole hours near their figures.
 _PUBLICATION_DELAY_H: Tuple[Tuple[str, float], ...] = (
     ("icon_", 4.0),
     ("gfs_", 5.0),
     ("ecmwf_ifs", 8.0),
-    ("jma_", 10.0),
+    ("jma_", 9.5),
 )
 _DEFAULT_PUBLICATION_DELAY_H = 10.0
 
