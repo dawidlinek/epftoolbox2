@@ -30,7 +30,7 @@ Path-scoped rules in `.claude/rules/` load automatically for models, data, evalu
 
 ## Changing public API
 - New source / transformer / validator / model / evaluator / exporter: use the `add-component` skill; it touches about eight places.
-- Any change to public classes, parameters or defaults must reach README.md, `llms.txt` and `docs/`. Use the `docs-sync` agent before finishing, or run `uv run python .claude/skills/docs-sync/scripts/check_docs.py` to see drift.
+- Any change to public classes, parameters or defaults must reach README.md and `docs/` (and the examples when the typical workflow changes). `llms.txt` is a short index of `docs/` for agents: a new, renamed or removed docs page needs its bullet there, and its essential rules must stay true. Use the `docs-sync` agent before finishing, or run `uv run python .claude/skills/docs-sync/scripts/check_docs.py` to see drift.
 - Changes under `models/`, `data/transformers/`, `evaluators/` or `results/`: have the `forecast-methodology-reviewer` agent review the diff.
 - Measuring the numeric effect of a change on real data: `experiment-check` skill.
 

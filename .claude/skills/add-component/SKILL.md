@@ -15,7 +15,7 @@ A component is finished only when all of these places agree. Work through them i
 | 4 | `epftoolbox2/tui.py` | Add it to the matching `_SOURCES` … `_EXPORTERS` list and add a `PARAM_SCHEMAS["ClassName"]` entry. Field `name`s must equal constructor parameter names. |
 | 5 | `tests/` | Behaviour tests plus a YAML round trip (save → load → same parameters), following `tests/pipelines/test_serialization.py`. |
 | 6 | `docs/src/content/docs/<category>/<kebab-name>.md` | New page modelled on a sibling; the sidebar picks it up automatically. |
-| 7 | `llms.txt` | `## ClassName` section in the right category, listing every parameter with its default. |
+| 7 | `llms.txt` | One bullet for the new docs page under the matching H2: `- [ClassName](docs/src/content/docs/<category>/<kebab-name>.md): one-line description`. Parameters and defaults stay on the docs page only. |
 | 8 | `README.md` | Key Features list. |
 | 9 | `examples/` | Only if the component changes the typical workflow. |
 
