@@ -12,7 +12,7 @@ from rich.table import Table
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
 
-__version__ = "2.2.2"
+__version__ = "2.3.0"
 
 
 def verify():
