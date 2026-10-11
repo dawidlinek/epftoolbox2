@@ -59,7 +59,7 @@ pipeline.add_source(OpenMeteoSource(
 ```
 
 The three cities become one population-weighted series per variable, with the columns
-`pl_temperature_2m_mean_d+1` to `pl_temperature_2m_mean_d+5` and the same for the other variables. They already
+`pl_temperature_2m_mean_d+1` to `pl_temperature_2m_mean_d+6` and the same for the other variables. They already
 hold the forecast for the target day, so they need no `LagTransformer`. See
 [OpenMeteoSource](/epftoolbox2/data-sources/openmeteo/) for the other options.
 

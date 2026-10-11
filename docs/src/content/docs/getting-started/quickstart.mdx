@@ -116,7 +116,7 @@ This guide shows you how to download electricity data and run a simple forecast 
        test_start="2024-02-01",
        test_end="2024-03-01",
        target="price",
-       horizon=5,  # as far ahead as the weather forecasts go
+       horizon=6,  # as far ahead as the weather forecasts go
        save_dir="results",
    )
    ```
@@ -146,28 +146,30 @@ Summary
 ┏━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┓
 ┃ model   ┃ forecasts ┃ MAE     ┃
 ┡━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━┩
-│ OLS     │ 3600      │ 15.4008 │
-│ LassoCV │ 3600      │ 15.1872 │
+│ OLS     │ 4320      │ 15.5850 │
+│ LassoCV │ 4320      │ 15.5754 │
 └─────────┴───────────┴─────────┘
 
 By Horizon
 ┏━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┓
 ┃ model   ┃ horizon ┃ MAE     ┃
 ┡━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━┩
-│ OLS     │ 1       │ 14.8656 │
-│ LassoCV │ 1       │ 14.6471 │
-│ OLS     │ 2       │ 15.3449 │
-│ LassoCV │ 2       │ 14.8365 │
-│ OLS     │ 3       │ 14.9662 │
-│ LassoCV │ 3       │ 14.5872 │
-│ OLS     │ 4       │ 15.7315 │
-│ LassoCV │ 4       │ 15.3333 │
-│ OLS     │ 5       │ 16.0957 │
-│ LassoCV │ 5       │ 16.5319 │
+│ OLS     │ 1       │ 14.8547 │
+│ LassoCV │ 1       │ 14.6445 │
+│ OLS     │ 2       │ 15.3472 │
+│ LassoCV │ 2       │ 14.8396 │
+│ OLS     │ 3       │ 14.9454 │
+│ LassoCV │ 3       │ 14.5638 │
+│ OLS     │ 4       │ 15.6970 │
+│ LassoCV │ 4       │ 15.2951 │
+│ OLS     │ 5       │ 15.8217 │
+│ LassoCV │ 5       │ 16.4123 │
+│ OLS     │ 6       │ 16.8437 │
+│ LassoCV │ 6       │ 17.6971 │
 └─────────┴─────────┴─────────┘
 ```
 
-The MAE is in EUR/MWh. Each model made 3600 forecasts: 30 issue days, 24 hours and 5 horizons.
+The MAE is in EUR/MWh. Each model made 4320 forecasts: 30 issue days, 24 hours and 6 horizons.
 
 <Aside type="tip">
   The first run downloads data from APIs. Subsequent runs with `cache=True` load from disk instantly.
