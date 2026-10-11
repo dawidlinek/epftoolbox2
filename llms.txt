@@ -246,6 +246,7 @@ No API key.
 **Notes:**
 - Holiday names are pinned to English (`en_US`), so one-hot column names don't depend on the machine's locale.
   The `holidays="onehot"` column set belongs to the configuration (country, region, categories), not to the range: every holiday name for 1970 to 2100, so separately fetched or cached pieces line up. A holiday outside those years raises a ValueError.
+- Substitute days off ("Day off (substituted from 01/13/2024)" in Hungary and Bulgaria) lose the date: `holiday_name` is "Day off (substituted)" and they share one `holiday_day_off_substituted` column. `is_holiday` is unchanged.
 - Sweden: Sundays are not flagged (the `holidays` package lists every Sunday as a Swedish holiday).
 - Only national public holidays by default. `region` adds regional ones, `categories` other kinds
   (`categories` replaces the default, so include "public").

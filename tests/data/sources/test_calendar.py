@@ -431,6 +431,139 @@ class TestHolidayNames:
         assert df["is_holiday"].eq(0).all()
 
 
+class TestSubstituteDaysOff:
+    """The `holidays` package names a substitute day off after the day it replaces ("Day off (substituted from
+    01/13/2024)" in Hungary and Bulgaria). Without normalising, every such day is its own one-hot column."""
+
+    HU_TZ, BG_TZ = "Europe/Budapest", "Europe/Sofia"
+
+    @staticmethod
+    def _range(first: str, last: str, tz: str) -> tuple:
+        """UTC [start, end) covering the local days first..last inclusive."""
+        return (
+            pd.Timestamp(first, tz=tz).tz_convert("UTC"),
+            (pd.Timestamp(last, tz=tz) + pd.DateOffset(days=1)).tz_convert("UTC"),
+        )
+
+    @staticmethod
+    def _holiday_columns(df: pd.DataFrame) -> list:
+        return [c for c in df.columns if c.startswith("holiday_")]
+
+    @pytest.mark.parametrize(
+        "name, expected",
+        [
+            ("Day off (substituted from 01/13/2024)", "Day off (substituted)"),
+            ("Day off (substituted from 13.01.2024)", "Day off (substituted)"),
+            ("Day off (substituted from 2024-01-13)", "Day off (substituted)"),
+            ("Christmas Day", "Christmas Day"),
+            ("Christmas Day (observed)", "Christmas Day (observed)"),
+            (
+                "75th anniversary of the East German uprising of 1953",
+                "75th anniversary of the East German uprising of 1953",
+            ),
+            ("Boxing Day (substitute day)", "Boxing Day (substitute day)"),
+        ],
+    )
+    def test_only_the_date_of_a_substitute_day_is_dropped(self, name, expected):
+        assert calendar_module._holiday_name(name) == expected
+
+    def test_hungary_onehot_has_one_substitute_day_column(self):
+        # 2024-08-19 (from 08/03), 2024-12-24 (from 12/07) and 2024-12-27 (from 12/14) are substitute days off.
+        source = CalendarSource(country="HU", holidays="onehot", weekday=False)
+        df = source.fetch(*self._range("2024-08-01", "2025-01-05", self.HU_TZ))
+        columns = self._holiday_columns(df)
+
+        assert "holiday_day_off_substituted" in columns
+        assert [c for c in columns if c.startswith("holiday_day_off")] == ["holiday_day_off_substituted"]
+        assert not [c for c in columns if re.search(r"\d", c)]
+        assert _flagged_local_dates(df, "holiday_day_off_substituted", self.HU_TZ) == [
+            "2024-08-19",
+            "2024-12-24",
+            "2024-12-27",
+        ]
+        assert _flagged_local_dates(df, "is_holiday", self.HU_TZ) == [
+            "2024-08-19",
+            "2024-08-20",
+            "2024-10-23",
+            "2024-11-01",
+            "2024-12-24",
+            "2024-12-25",
+            "2024-12-26",
+            "2024-12-27",
+            "2025-01-01",
+        ]
+        assert "holiday_state_foundation_day" in columns  # 20 August is a holiday of its own and keeps its column
+
+    def test_bulgaria_onehot_has_one_substitute_day_column(self):
+        source = CalendarSource(country="BG", holidays="onehot", weekday=False)
+        df = source.fetch(*self._range("2016-03-01", "2016-10-01", self.BG_TZ))
+        columns = self._holiday_columns(df)
+
+        assert [c for c in columns if c.startswith("holiday_day_off")] == ["holiday_day_off_substituted"]
+        assert not [c for c in columns if re.search(r"\d", c)]
+        assert _flagged_local_dates(df, "holiday_day_off_substituted", self.BG_TZ) == [
+            "2016-03-04",
+            "2016-05-23",
+            "2016-09-05",
+            "2016-09-23",
+        ]
+        assert df["is_holiday"].loc[df["holiday_day_off_substituted"] == 1].eq(1).all()
+
+    @pytest.mark.parametrize("country", ["HU", "BG"])
+    def test_column_set_is_fixed_and_has_no_dated_names(self, country):
+        # The set covers 1970-2100, so a range without any substitute day has the same columns as one with them.
+        source = CalendarSource(country=country, holidays="onehot", weekday=False)
+        quiet = source.fetch(*_local_day("2024-03-05", source.market_timezone))
+        busy = source.fetch(*self._range("2015-12-28", "2016-03-05", source.market_timezone))
+
+        assert list(quiet.columns) == list(busy.columns)
+        assert "holiday_day_off_substituted" in quiet.columns
+        assert quiet["holiday_day_off_substituted"].eq(0).all()
+        assert not [c for c in quiet.columns if re.search(r"\d", c)]
+        assert len(source._onehot_columns()) < 40  # one column per distinct holiday, not one per dated day
+
+    def test_a_substitute_day_after_2024_has_its_column(self):
+        # 2026-01-02 replaces Saturday 2026-01-10.
+        source = CalendarSource(country="HU", holidays="onehot", weekday=False)
+        df = source.fetch(*_local_day("2026-01-02", self.HU_TZ))
+        assert df["holiday_day_off_substituted"].eq(1).all()
+        assert df["is_holiday"].eq(1).all()
+
+    def test_name_mode_gives_the_same_name_to_every_substitute_day(self):
+        source = CalendarSource(country="HU", holidays="name", weekday=False)
+        df = source.fetch(*self._range("2024-08-18", "2024-12-27", self.HU_TZ))
+        names = df.tz_convert(self.HU_TZ).groupby(df.tz_convert(self.HU_TZ).index.date)["holiday_name"].first()
+
+        assert set(names.dropna()) == {
+            "Day off (substituted)",
+            "State Foundation Day",
+            "National Day",
+            "All Saints' Day",
+            "Christmas Day",
+            "Second Day of Christmas",
+        }
+        assert names[pd.Timestamp("2024-08-19").date()] == "Day off (substituted)"
+        assert names[pd.Timestamp("2024-12-27").date()] == "Day off (substituted)"
+
+    def test_binary_mode_is_unaffected(self):
+        source = CalendarSource(country="HU", holidays="binary", weekday=False)
+        df = source.fetch(*self._range("2024-08-18", "2024-08-21", self.HU_TZ))
+        assert _flagged_local_dates(df, "is_holiday", self.HU_TZ) == ["2024-08-19", "2024-08-20"]
+
+    @pytest.mark.parametrize("country", [c for c in COUNTRY_DATA if c not in ("HU", "BG")])
+    def test_countries_without_substitute_days_keep_every_name(self, country):
+        source = CalendarSource(country=country, holidays="onehot", weekday=False)
+        calendar = calendar_module._build_calendar(
+            country, None, None, source._holiday_language(), list(range(1970, 2101))
+        )
+        raw = sorted({calendar_module._sanitise_name(n) for d in calendar for n in calendar.get_list(d)})
+
+        assert list(source._onehot_columns()) == raw
+
+    def test_cache_entries_of_the_dated_names_are_not_reused(self):
+        assert CalendarSource(country="HU", holidays="onehot").get_cache_config()["schema_version"] >= 4
+
+
 class TestOnehotColumnSet:
     """The one-hot columns belong to the configuration, not to the fetched range: pieces fetched separately and
     concatenated (the source cache) must line up, and so must the predictors a model names."""

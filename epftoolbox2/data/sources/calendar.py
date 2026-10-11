@@ -75,7 +75,10 @@ ONEHOT_YEARS = (1970, 2100)
 # 2: `holidays="onehot"` columns are fixed per configuration (ONEHOT_YEARS) instead of following the fetched years.
 # 3: school holiday rows after the end of the published data are never recorded as covered (`settled_until`). Entries
 # of version 2 may hold NaN rows for school years the API had not published yet, recorded as covered.
-SCHEMA_VERSION = 3
+# 4: substitute days off are named without the date they replace (`_holiday_name`), so `holidays="onehot"` has one
+# `holiday_day_off_substituted` column for Hungary and Bulgaria instead of one per dated day, and `holiday_name`
+# reads "Day off (substituted)".
+SCHEMA_VERSION = 4
 
 # Market-structure changes, policy interventions and shocks catalogued for `regimes=`. "start" is the first
 # delivery day (local date); a regime dummy is 1 from that date on (through "end", inclusive, when given) for the
@@ -400,6 +403,26 @@ def _sanitise_name(name: str) -> str:
     return re.sub(r"[^0-9a-z]+", "_", ascii_name.lower()).strip("_") or "unnamed"
 
 
+# The `holidays` package names a substitute day off after the day it replaces: "Day off (substituted from
+# 01/13/2024)" in Hungary and Bulgaria, the only supported countries that do this. The date follows "from" inside
+# the parentheses, in whatever date format the language uses.
+_SUBSTITUTED_FROM = re.compile(r" from [\d./\- ]+(?=\))")
+
+
+def _holiday_name(name: str) -> str:
+    """The name `holiday_name` and the one-hot columns use for a holiday of the `holidays` package.
+
+    The date a substitute day off replaces is dropped ("Day off (substituted from 01/13/2024)" becomes "Day off
+    (substituted)"), so all such days share one name instead of each having its own. Other names are unchanged.
+    """
+    return _SUBSTITUTED_FROM.sub("", name)
+
+
+def _day_names(calendar: holidays_lib.HolidayBase, day) -> List[str]:
+    """Names of the holidays on a day, as `_holiday_name` gives them, each once, in the package's order."""
+    return list(dict.fromkeys(_holiday_name(name) for name in calendar.get_list(day)))
+
+
 def _grid_step(freq: str) -> pd.Timedelta:
     """Row spacing of a calendar grid: a divisor of one hour, or whole hours dividing a day."""
     try:
@@ -455,7 +478,7 @@ def _onehot_holiday_names(
 ) -> tuple:
     """Sanitised names of every holiday of the configuration from `first_year` to `last_year`, sorted."""
     calendar = _build_calendar(country, region, categories, language, list(range(first_year, last_year + 1)))
-    return tuple(sorted({_sanitise_name(name) for day in calendar for name in calendar.get_list(day)}))
+    return tuple(sorted({_sanitise_name(name) for day in calendar for name in _day_names(calendar, day)}))
 
 
 class CalendarSource(DataSource):
@@ -513,7 +536,9 @@ class CalendarSource(DataSource):
             timezone: Time zone whose local dates and wall-clock times define the features. None (default)
                 inherits `DataPipeline.timezone` when this source is part of a pipeline; standalone, it falls
                 back to the country's own zone.
-            holidays: False | "binary" | "onehot" | "name".
+            holidays: False | "binary" | "onehot" | "name". A substitute day off is named without the date it
+                replaces: "Day off (substituted)" instead of "Day off (substituted from 01/13/2024)" (Hungary,
+                Bulgaria), so all of them share one name and one `holiday_day_off_substituted` column.
             weekday: False | "number" | "onehot" | "name".
             hour: False | "number" | "onehot". Hourly or coarser `freq`: local hour of day (`hour`, `is_{h}`).
                 Sub-hourly `freq`: index of the period within the local day (`period`, `is_period_{p}`),
@@ -856,7 +881,7 @@ class CalendarSource(DataSource):
     def _add_holidays(self, df: pd.DataFrame, local_dates: pd.DatetimeIndex, codes: np.ndarray) -> pd.DataFrame:
         years = list(range(local_dates.min().year, local_dates.max().year + 1)) if len(local_dates) else []
         calendar = self._holiday_calendar(years)
-        names_per_date = [calendar.get_list(d) for d in local_dates.date]
+        names_per_date = [_day_names(calendar, d) for d in local_dates.date]
         is_holiday = np.array([len(names) > 0 for names in names_per_date], dtype=int)
 
         if self.holidays in ("binary", "onehot"):
