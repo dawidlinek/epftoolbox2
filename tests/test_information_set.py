@@ -56,7 +56,7 @@ def expand(predictors, periods=24, horizon=7):
 
 
 def violations(predictors, info=None, target="price", start="2024-01-10", end="2024-01-23", horizon=7, index=WARSAW):
-    info = info or InformationSet("11:30", "Europe/Brussels")
+    info = info or InformationSet("11:45", "Europe/Brussels")
     found, unknown = info.violations(expand(predictors, horizon=horizon), target, "1h", index, start, end)
     return {(v.predictor, v.period, v.horizon) for v in found}, unknown
 
@@ -102,11 +102,11 @@ def test_as_of_rule_ignores_a_leading_day_shift():
     info = InformationSet(rules={"x": Availability.as_of("09:00", "Europe/Brussels")})
     assert info.resolve("x").rule.kind == "as_of"
     early, _ = violations(["x", "x_d+1", "x_d+3"], info=info, horizon=3, start="2024-01-10", end="2024-01-10")
-    assert early == set()  # 09:00 Brussels is before the 11:30 issue, for every shift alike
+    assert early == set()  # 09:00 Brussels is before the 11:45 issue, for every shift alike
 
     late_info = InformationSet(rules={"x": Availability.as_of("12:00", "Europe/Brussels")})
     late, _ = violations(["x", "x_d+1", "x_d+3"], info=late_info, horizon=3, start="2024-01-10", end="2024-01-10")
-    assert {name for name, _, _ in late} == {"x", "x_d+1", "x_d+3"}  # all fail identically (12:00 > 11:30 issue)
+    assert {name for name, _, _ in late} == {"x", "x_d+1", "x_d+3"}  # all fail identically (12:00 > 11:45 issue)
 
 
 def test_source_rules_weather_cutoff_for_a_weather_source():
@@ -124,13 +124,13 @@ def test_source_rules_weather_cutoff_uses_the_models_publication_delay():
     assert unknown.delay == "10.0h"
 
 
-def test_default_run_passes_the_cutoff_check_at_1130_but_not_1000_brussels():
+def test_default_run_passes_the_cutoff_check_at_1145_but_not_1000_brussels():
     """JMA's default publication delay (9.5h, see publication_delay_hours) makes the default run="00" cutoff
-    (00:00 UTC + 9.5h = 09:30 UTC = 10:30 Brussels in winter) known in time for an 11:30 Brussels issue but not
-    for a 10:00 one; the error must then suggest an earlier run or a later issue time."""
+    (00:00 UTC + 9.5h = 09:30 UTC = 10:30 Brussels in winter) known in time for an 11:45 Brussels issue but not
+    for a 10:00 one. The error must then suggest an earlier run or a later issue time."""
     source = _warsaw_weather_source()  # model="jma_seamless", run="00" (both defaults)
 
-    late_issue = InformationSet("11:30", "Europe/Brussels").with_source_rules([source])
+    late_issue = InformationSet("11:45", "Europe/Brussels").with_source_rules([source])
     found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=late_issue)
     assert found == set()
 
@@ -155,6 +155,23 @@ def test_default_run_passes_the_cutoff_check_at_1145_brussels_all_year(index, st
     """JMA's 00 UTC run is available 9.5h later, 09:30 UTC. An 11:45 Brussels issue is 09:45 UTC in summer and
     10:45 UTC in winter, so the default model passes in both seasons."""
     info = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
+    found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=info, start=start, end=end, index=index)
+    assert found == set()
+
+
+def test_issue_time_defaults_to_1145_brussels():
+    info = InformationSet()
+    assert (info.issue_time, info.issue_timezone) == ("11:45", "Europe/Brussels")
+
+
+@pytest.mark.parametrize(
+    "index, start, end",
+    [(WARSAW, "2024-01-10", "2024-01-23"), (SUMMER_WARSAW, "2024-07-10", "2024-07-23")],
+    ids=["winter", "summer"],
+)
+def test_default_information_set_accepts_the_default_weather_model_all_year(index, start, end):
+    """`InformationSet()` with no arguments, plus the default JMA `run="00"` source, flags nothing in either season."""
+    info = InformationSet().with_source_rules([_warsaw_weather_source()])
     found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=info, start=start, end=end, index=index)
     assert found == set()
 
@@ -244,7 +261,7 @@ def test_source_rules_week_ahead_uses_the_markets_own_zone_for_a_helsinki_index(
     is still Sunday 23:00 in Brussels (UTC+2 vs UTC+1 in January), which would land the value in the wrong ISO week."""
     source = EntsoeSource("FI", api_key="test-key", type=["load"])
     DataPipeline(sources=[source], timezone="Europe/Helsinki")
-    info = InformationSet("11:30", "Europe/Helsinki").with_source_rules([source])
+    info = InformationSet("11:45", "Europe/Helsinki").with_source_rules([source])
     index = pd.date_range("2024-01-01", periods=24 * 30, freq="h", tz="Europe/Helsinki")
 
     found, unknown = violations(
@@ -266,7 +283,7 @@ def test_source_rules_week_ahead_uses_the_markets_own_zone_for_a_warsaw_control(
     never broken there -- binding the market's own zone must not change an already-correct result."""
     source = EntsoeSource("PL", api_key="test-key", type=["load"])
     DataPipeline(sources=[source], timezone="Europe/Warsaw")
-    info = InformationSet("11:30", "Europe/Warsaw").with_source_rules([source])
+    info = InformationSet("11:45", "Europe/Warsaw").with_source_rules([source])
     index = pd.date_range("2024-01-01", periods=24 * 30, freq="h", tz="Europe/Warsaw")
 
     found, unknown = violations(
@@ -312,7 +329,7 @@ def test_invalid_settings_raise():
     with pytest.raises(ValueError, match="HH:MM"):
         InformationSet("1130")
     with pytest.raises(ValueError, match="time zone"):
-        InformationSet("11:30", "Mars/Olympus")
+        InformationSet("11:45", "Mars/Olympus")
     with pytest.raises(ValueError, match="assumption"):
         InformationSet(assumptions=["everything_is_known"])
     with pytest.raises(ValueError, match="kind"):
@@ -320,7 +337,7 @@ def test_invalid_settings_raise():
 
 
 # ---------------------------------------------------------------------------
-# The check, rule by rule (issue 11:30 Brussels, Warsaw data: same wall clock)
+# The check, rule by rule (issue 11:45 Brussels, Warsaw data: same wall clock)
 # ---------------------------------------------------------------------------
 
 
@@ -488,9 +505,9 @@ def test_weather_run_availability_depends_on_the_row_time():
     """`Availability.weather_run` is still available for a user-defined rule (e.g. a custom rolling-forecast
     source), even though no built-in source produces it through `source_rules` any more — OpenMeteoSource's own
     rule is always `weather_cutoff`, see the tests above."""
-    info = InformationSet("11:30", "Europe/Brussels", rules={"warsaw_temperature_2m": Availability.weather_run("10h")})
+    info = InformationSet("11:45", "Europe/Brussels", rules={"warsaw_temperature_2m": Availability.weather_run("10h")})
     found, _ = violations(["warsaw_temperature_2m_d+{horizon}"], info=info)
-    # Run started about at the row time and published 10 h later: rows up to 01:00 are known by 11:30.
+    # Run started about at the row time and published 10 h later: rows up to 01:00 are known by 11:45.
     assert {p for _, p, _ in found} == set(range(2, 24))
     assert {hz for _, _, hz in found} == set(range(1, 8))
 
@@ -498,7 +515,7 @@ def test_weather_run_availability_depends_on_the_row_time():
 def test_hourly_lags_and_static_columns():
     found, _ = violations(["load_actual_h-12", "is_holiday_d+{horizon}", "daylight_hours_d+7"], horizon=1)
     # load_actual 12 hours earlier ends 11h before the row (12h gap - 1h period) and is known 1h after that,
-    # i.e. 10h before the row: that is after the 11:30 issue only for the last two hours of the day.
+    # i.e. 10h before the row: that is after the 11:45 issue only for the last two hours of the day.
     assert {(name, p) for name, p, _ in found} == {("load_actual_h-12", p) for p in (22, 23)}
 
 
@@ -510,17 +527,17 @@ def test_training_target_known_too_late_is_reported():
 
 def test_issue_time_is_converted_to_the_data_zone():
     utc = WARSAW.tz_convert("UTC")
-    # 11:30 Brussels is 10:30 UTC in winter: load_actual rows up to 08:00 UTC are known in time.
+    # 11:45 Brussels is 10:45 UTC in winter: load_actual rows up to 08:00 UTC are known in time.
     found, _ = violations(["load_actual"], horizon=1, index=utc, start="2024-01-10", end="2024-01-10")
     assert min(p for _, p, _ in found) == 9
-    # In summer it is 09:30 UTC.
+    # In summer it is 09:45 UTC.
     summer = pd.date_range("2024-06-01", periods=24 * 30, freq="h", tz="UTC")
     found, _ = violations(["load_actual"], horizon=1, index=summer, start="2024-06-10", end="2024-06-10")
     assert min(p for _, p, _ in found) == 8
 
 
 @pytest.mark.parametrize("data_zone", ["UTC", "Etc/GMT-1", "Asia/Tokyo"])
-@pytest.mark.parametrize("issue_time", ["11:30", "12:30", "13:30"])
+@pytest.mark.parametrize("issue_time", ["11:45", "12:30", "13:30"])
 def test_violations_use_the_delivery_and_publication_instants_own_offsets(data_zone, issue_time):
     """The pre-fit check's counterpart of test_perturbation_uses_the_delivery_and_publication_instants_own_offsets.
     On a frame whose zone has no DST (UTC, a benchmark source's fixed offset) checked against Brussels-anchored rules,
@@ -651,7 +668,7 @@ def test_shipped_example_predictors_are_flagged():
 
 def test_model_pipeline_checks_before_fitting(tmp_path):
     df = make_market_data(days=120).rename(columns={"load": "load_actual"})
-    pipeline = ModelPipeline(issue_time="11:30").add_model(
+    pipeline = ModelPipeline(issue_time="11:45").add_model(
         OLSModel(["load_actual", "price_d-1"], training_window=30, name="OLS")
     )
     with pytest.raises(InformationSetError, match="load_actual"):
@@ -701,7 +718,7 @@ def test_workflow_inline_information_set_knows_prefixed_calendar_columns(tmp_pat
             "test_start": "2023-03-01",
             "test_end": "2023-03-01",
             "horizon": 1,
-            "information_set": {"issue_time": "11:30", "issue_timezone": "Europe/Brussels"},
+            "information_set": {"issue_time": "11:45", "issue_timezone": "Europe/Brussels"},
             "models": [
                 {
                     "class": "OLSModel",
@@ -742,7 +759,7 @@ def test_perturbation_follows_each_columns_delivery_time():
     info = InformationSet(rules=SYNTHETIC_RULES)
     perturbed, counts, unchecked = perturb_unknown(df, "2023-01-20", info)
     changed = _changed(perturbed["price"], df["price"])
-    # A44 default: prices for 2023-01-21 are published 2023-01-20 13:00, after the 11:30 issue.
+    # A44 default: prices for 2023-01-21 are published 2023-01-20 13:00, after the 11:45 issue.
     assert df.index[changed].min() == pd.Timestamp("2023-01-21 00:00", tz="Europe/Warsaw")
     lag_changed = _changed(perturbed["price_d-1"], df["price_d-1"])
     assert df.index[lag_changed].min() == pd.Timestamp("2023-01-22 00:00", tz="Europe/Warsaw")
@@ -767,7 +784,7 @@ def test_perturbation_uses_each_rows_own_offset_near_a_dst_switch(run_day, first
     idx = pd.date_range("2024-03-20", "2024-11-05", freq="1h", tz="UTC", inclusive="left")
     rng = np.random.default_rng(0)
     df = pd.DataFrame({"load_forecast": rng.normal(1000, 10, len(idx))}, index=idx)
-    info = InformationSet("11:30", "Europe/Brussels")
+    info = InformationSet("11:45", "Europe/Brussels")
 
     perturbed, counts, _ = perturb_unknown(df, run_day, info)
     changed = _changed(perturbed["load_forecast"], df["load_forecast"])
@@ -786,17 +803,17 @@ def test_as_of_perturbation_ignores_a_rows_own_dst_offset():
     idx = pd.date_range("2024-03-25", "2024-04-05", freq="1h", tz="UTC", inclusive="left")
     rng = np.random.default_rng(0)
     df = pd.DataFrame({"snap": rng.normal(0, 1, len(idx))}, index=idx)
-    info = InformationSet("11:30", "Europe/Brussels", rules={"snap": Availability.as_of("14:00", "Europe/Brussels")})
+    info = InformationSet("11:45", "Europe/Brussels", rules={"snap": Availability.as_of("14:00", "Europe/Brussels")})
 
     perturbed, counts, _ = perturb_unknown(df, "2024-03-30", info)
     changed = _changed(perturbed["snap"], df["snap"])
 
-    assert changed.all()  # 14:00 Brussels on run_day is after the 11:30 issue: unknown for every row alike
+    assert changed.all()  # 14:00 Brussels on run_day is after the 11:45 issue: unknown for every row alike
     assert counts["snap"] == len(idx)
 
 
 @pytest.mark.parametrize("data_zone", ["UTC", "Etc/GMT-1", "Asia/Tokyo"])
-@pytest.mark.parametrize("issue_time", ["11:30", "12:30", "13:30"])
+@pytest.mark.parametrize("issue_time", ["11:45", "12:30", "13:30"])
 @pytest.mark.parametrize(
     "run_day", ["2024-03-29", "2024-03-30", "2024-03-31", "2024-10-26", "2024-10-27", "2025-10-25", "2025-10-26"]
 )
@@ -851,11 +868,11 @@ def test_perturbation_converts_the_issue_time_at_its_own_instant():
 def test_perturbation_keeps_a_repeated_hours_own_occurrence():
     """New York's repeated hour 01:00-02:00 on 2024-11-03 straddles midnight in Mexico City (UTC-6 all year):
     01:00 EDT (05:00Z) delivers on 2024-11-02 there, 01:00 EST (06:00Z) on 2024-11-03, published 13:00 Mexico
-    City the day before (19:00Z on 2024-11-02, after the 11:30 Brussels = 10:30Z issue)."""
+    City the day before (19:00Z on 2024-11-02, after the 11:45 Brussels = 10:45Z issue)."""
     idx = pd.date_range("2024-10-30", "2024-11-06", freq="1h", tz="America/New_York", inclusive="left")
     df = pd.DataFrame({"px": 1.0}, index=idx)
     info = InformationSet(
-        "11:30", "Europe/Brussels", rules={"px": Availability.published("13:00", 1, "America/Mexico_City")}
+        "11:45", "Europe/Brussels", rules={"px": Availability.published("13:00", 1, "America/Mexico_City")}
     )
 
     perturbed, _, _ = perturb_unknown(df, "2024-11-02", info)
@@ -936,7 +953,7 @@ def test_source_rebuild_catches_a_transformer_leak_that_the_final_column_probe_m
     row into `load_forecast_d+1` across a DST spring-forward (Europe/Warsaw, 2024-03-31): the issue row
     2024-03-30 23:00 ends up holding the raw source's 2024-04-01 00:00 value instead of 2024-03-31 23:00's.
     By its parsed name, `load_forecast_d+1` is a day-ahead forecast published 10:00 on the issue day D,
-    known well before the 11:30 issue, so perturbing the already-built column never touches that cell.
+    known well before the 11:45 issue, so perturbing the already-built column never touches that cell.
     Perturbing the raw source and rebuilding does, because the raw 2024-04-01 00:00 cell it actually reads
     from is correctly identified as not yet known.
     """

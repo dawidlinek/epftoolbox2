@@ -43,7 +43,7 @@ class ModelPipeline:
         information_set: Check every predictor against the time the forecast is issued before any fit
             (see epftoolbox2.information_set). None skips the check.
         issue_time: Shortcut for `information_set=InformationSet(issue_time, issue_timezone)` with the
-            built-in availability rules, e.g. "11:30".
+            built-in availability rules, e.g. "11:45".
         issue_timezone: Zone of `issue_time`.
     """
 

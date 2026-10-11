@@ -895,7 +895,7 @@ pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
 from epftoolbox2.information_set import Availability, InformationSet
 
 info = InformationSet(
-    issue_time="11:30",              # Optional. "HH:MM" (default: "11:30")
+    issue_time="11:45",              # Optional. "HH:MM" (default: "11:45")
     issue_timezone="Europe/Brussels", # Optional. Zone of issue_time (default: "Europe/Brussels")
     rules=None,                       # Optional. {column name or glob: Availability}, overrides everything else
     assumptions=None,                 # Optional. Names from ASSUMPTIONS accepted explicitly, e.g. ["entsoe_a69_by_10"]

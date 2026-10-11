@@ -228,7 +228,7 @@ def test_information_set_is_recorded_but_not_compared():
     from epftoolbox2.information_set import InformationSet
 
     data = make_data()
-    a = make_manifest(data, information_set=InformationSet("11:30", "Europe/Brussels"))
+    a = make_manifest(data, information_set=InformationSet("11:45", "Europe/Brussels"))
     b = make_manifest(data, information_set=InformationSet("13:00", "Europe/Brussels"))
 
     assert a.information_set != b.information_set  # still recorded

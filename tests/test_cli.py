@@ -244,6 +244,17 @@ def test_model_command_passes_freq(tmp_path, monkeypatch):
     assert seen["data"].index.tz is not None
 
 
+def test_model_command_with_only_an_issue_timezone_checks_at_the_default_issue_time(tmp_path, monkeypatch, local_data):
+    path = tmp_path / "data.csv"
+    save_frame_csv(local_data, path)
+    seen = []
+    monkeypatch.setattr(ModelPipeline, "run", lambda self, **kwargs: seen.append(self.information_set))
+
+    cli.cmd_model(model_args(tmp_path, path, issue_timezone="Europe/Warsaw"))
+
+    assert (seen[0].issue_time, seen[0].issue_timezone) == ("11:45", "Europe/Warsaw")
+
+
 def test_model_horizon_help_says_days():
     parser = cli.build_parser()
     model_parser = parser._subparsers._group_actions[0].choices["model"]

@@ -166,7 +166,7 @@ epf model model_pipeline.yaml \
 | `--freq {1h,15min}` | Data resolution: one model per hour or per quarter-hour (default: `1h`). Must match the data |
 | `--tz ZONE` | Local time zone of the data (e.g. `Europe/Warsaw`). Overrides the zone named in the file |
 | `--issue-time HH:MM` | Check every predictor against this issue time before fitting ([information set](/epftoolbox2/model-pipeline/information-set/)). Overrides the YAML's `information_set`, or adds one if it has none |
-| `--issue-timezone ZONE` | Zone of `--issue-time` (default: the YAML's, else `Europe/Brussels`) |
+| `--issue-timezone ZONE` | Zone of `--issue-time` (default: the YAML's, else `Europe/Brussels`). Without `--issue-time`, the YAML's issue time is kept, or `11:45` if the YAML has no `information_set` |
 | `--save-dir DIR` | Save per-model prediction JSONL files to this directory |
 | `--forecast-only` | Skip evaluators and exporters |
 | `--allow-manifest-mismatch` | Resume even if `--save-dir`'s [manifest](/epftoolbox2/model-pipeline/caching/) disagrees with this run's configuration (overwrites it) |

@@ -286,7 +286,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Check every predictor against this issue time before fitting (information set; overrides the YAML)",
     )
     model_p.add_argument(
-        "--issue-timezone", metavar="ZONE", help="Zone of --issue-time (default: the YAML's, else Europe/Brussels)"
+        "--issue-timezone",
+        metavar="ZONE",
+        help="Zone of --issue-time (default: the YAML's, else Europe/Brussels). Without --issue-time the YAML's issue "
+        "time is kept, or 11:45 if the YAML has no information set",
     )
     model_p.add_argument("--save-dir", metavar="DIR", help="Directory to save per-model prediction JSONL files")
     model_p.add_argument("--forecast-only", action="store_true", help="Skip evaluation and exporters")

@@ -1137,6 +1137,7 @@ def build_data_pipeline_interactive():  # noqa: ANN201
 
 
 def build_model_pipeline_interactive() -> None:
+    from .information_set import DEFAULT_ISSUE_TIME
     from .pipelines.model_pipeline import ModelPipeline
 
     console.print("\n[bold cyan]── Model Pipeline ─────────────────────────[/bold cyan]")
@@ -1197,7 +1198,7 @@ def build_model_pipeline_interactive() -> None:
     save_dir = save_dir_raw.strip() or None
 
     issue_time = questionary.text(
-        "  Issue time to check predictors against, Brussels time (HH:MM, blank to skip)", default="11:30"
+        "  Issue time to check predictors against, Brussels time (HH:MM, blank to skip)", default=DEFAULT_ISSUE_TIME
     ).ask()
     if issue_time is None:
         _abort()

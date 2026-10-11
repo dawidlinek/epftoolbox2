@@ -1,6 +1,6 @@
 """When each input becomes known, and checks that a forecast only uses what is known when it is issued.
 
-A forecast issued on day D at the issue time (e.g. 11:30 Brussels, before the 12:00 day-ahead gate closure) may
+A forecast issued on day D at the issue time (e.g. 11:45 Brussels, before the 12:00 day-ahead gate closure) may
 only use values published by then. Each base column gets an `Availability` rule; predictor names are parsed
 (`x`, `x_d-k`, `x_d+k`, `x_h-k`, ...) to find the base column and the delivery time of the value they hold; and
 `InformationSet.check` evaluates every expanded predictor for every (period, horizon) before any model is fitted.
@@ -26,6 +26,7 @@ from .logging import get_logger
 
 logger = get_logger(__name__)
 
+DEFAULT_ISSUE_TIME = "11:45"
 KINDS = ("static", "realised", "published", "weekly", "weather_run", "as_of", "weather_cutoff")
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 _UNKNOWN_POLICIES = ("raise", "warn", "ignore")
@@ -416,13 +417,13 @@ class InformationSet:
         use_defaults: Include `default_rules()`.
 
     Example:
-        >>> info = InformationSet("11:30", "Europe/Brussels", rules={"load": Availability.realised("1h")})
+        >>> info = InformationSet("11:45", "Europe/Brussels", rules={"load": Availability.realised("1h")})
         >>> ModelPipeline(information_set=info)
     """
 
     def __init__(
         self,
-        issue_time: str = "11:30",
+        issue_time: str = DEFAULT_ISSUE_TIME,
         issue_timezone: str = "Europe/Brussels",
         rules: Optional[Dict[str, Union[Availability, Dict[str, Any]]]] = None,
         assumptions: Optional[Sequence[str]] = None,

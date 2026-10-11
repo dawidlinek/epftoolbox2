@@ -30,3 +30,42 @@ def test_rmae_and_csv_exporter_can_be_built(tmp_path):
     assert rmae.base_model == "OLS"
     exporter = tui._instantiate("CsvExporter", {"path": str(tmp_path / "out.csv"), "extra_columns": ["is_holiday"]})
     assert exporter.extra_columns == ["is_holiday"]
+
+
+def test_issue_time_prompt_defaults_to_the_information_set_default(monkeypatch, tmp_path):
+    """The wizard offers the same issue time as `InformationSet()`."""
+    import pandas as pd
+
+    from epftoolbox2.information_set import InformationSet
+
+    class Stop(Exception):
+        pass
+
+    class Answer:
+        def __init__(self, value):
+            self.value = value
+
+        def ask(self):
+            return self.value
+
+    offered = {}
+
+    def text(message, default=""):
+        if "Issue time" in message:
+            offered["issue_time"] = default
+            raise Stop
+        return Answer(str(tmp_path) if "CSV" in message else default or "7")
+
+    frame = pd.DataFrame({"price": [1.0]}, index=pd.date_range("2024-01-01", periods=1, freq="h", tz="UTC"))
+    monkeypatch.setattr(tui, "_load_data_csv", lambda path: frame)
+    monkeypatch.setattr(tui, "_build_component_list", lambda *args, **kwargs: [])
+    monkeypatch.setattr(tui, "_ask_date", lambda label, default="": "2024-01-01")
+    monkeypatch.setattr(tui, "_ask_freq", lambda: "1h")
+    monkeypatch.setattr(tui.questionary, "text", text)
+    monkeypatch.setattr(tui.questionary, "confirm", lambda *args, **kwargs: Answer(False))
+    monkeypatch.setattr(tui.questionary, "select", lambda *args, **kwargs: Answer("price"))
+
+    with pytest.raises(Stop):
+        tui.build_model_pipeline_interactive()
+
+    assert offered["issue_time"] == InformationSet().issue_time == "11:45"

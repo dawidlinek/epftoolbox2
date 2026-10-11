@@ -38,6 +38,9 @@ Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too str
 with InformationSet(rules={...}).
 ```
 
+`InformationSet()` with no arguments issues at `11:45` `Europe/Brussels`, 15 minutes before the 12:00 CET gate
+closure of the day-ahead auction.
+
 Passing no `issue_time` and no `information_set` (the default) skips the check entirely, so existing pipelines
 are unaffected until you opt in.
 
