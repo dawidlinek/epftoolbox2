@@ -4,6 +4,7 @@ information-set check against the declared issue_time. This mirrors what `Workfl
 (attach each source's rules, then check every expanded predictor) without actually fetching data.
 """
 
+import importlib.util
 from pathlib import Path
 
 import pandas as pd
@@ -85,3 +86,18 @@ def test_shipped_configs_predictors_pass_the_information_set_check():
         expanded = _expand(model.predictors, horizon)
         # Raises InformationSetError if a predictor (or the newest training target) isn't known at issue time.
         information_set.check(expanded, target, freq, index, "2024-02-01", "2024-02-07", model_name=model.name)
+
+
+def test_example_4_with_its_defaults_writes_the_shipped_configs(tmp_path, monkeypatch):
+    """examples/04_yaml_workflow.py is where the three root YAMLs come from. Its phase 1 needs no network, so the
+    example and the shipped files can be compared byte for byte and can't drift apart."""
+    monkeypatch.delenv("PYTHON_GIL", raising=False)  # the example sets it while it is imported
+    spec = importlib.util.spec_from_file_location("example_04", ROOT / "examples" / "04_yaml_workflow.py")
+    example = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(example)
+
+    monkeypatch.chdir(tmp_path)  # output_dir defaults to ".", and the ExcelExporter path in the YAML is relative to it
+    assert example.main() is None  # run=False: only the YAML files are written
+
+    for name in SHIPPED_YAMLS:
+        assert (tmp_path / name).read_text() == (ROOT / name).read_text(), f"{name} no longer matches example 4"
