@@ -6,6 +6,7 @@ Electricity price forecasting library (a rewrite of Lago et al.'s epftoolbox): d
 - Fast tests (~10 s, no network): `uv run pytest -m "not integration" -q`
 - Lint / format: `uv run ruff check .` and `uv run ruff format .` (line length 120)
 - Integration tests need `ENTSOE_API_KEY` and hit real APIs; don't run them unless asked.
+- Example tests (~4 min, live APIs): `ENTSOE_API_KEY=... uv run pytest -m examples -q` runs every `examples/*.py` through its `main(...)` on a short window. Give the key on the command line only, never in a file. They are `integration` tests too, so the fast suite skips them. Don't run them unless asked.
 - `.python-version` pins free-threaded 3.14t locally, but CI runs 3.10–3.14: no syntax newer than 3.10 in the package.
 - Dependencies live only in `pyproject.toml`. After changing them run `uv lock`; CI fails on a stale lock (`uv lock --check`).
 

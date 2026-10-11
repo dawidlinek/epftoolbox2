@@ -65,7 +65,10 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
-markers = ["integration: Integration tests that require real API keys and use real connections"]
+markers = [
+    "integration: Integration tests that require real API keys and use real connections",
+    "examples: Runs examples/*.py and the documentation quick start against the live APIs (also marked integration)",
+]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
