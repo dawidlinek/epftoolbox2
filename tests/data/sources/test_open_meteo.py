@@ -856,7 +856,7 @@ class TestPublicationDelayHours:
         [
             ("icon_seamless", 4.5),
             ("icon_d2", 4.5),
-            ("gfs_seamless", 6.0),
+            ("gfs_seamless", 6.5),
             ("ecmwf_ifs025", 9.0),
             ("ecmwf_ifs", 9.0),
             ("jma_seamless", 9.6),

@@ -108,12 +108,12 @@ def previous_run_lengths(model: str) -> Optional[Dict[int, int]]:
 # last_run_initialisation_time) gave these figures when checked on 2026-10-11: DWD ICON global 4.3h, ICON-EU
 # 3.0h, ICON-D2 1.4h; NCEP GFS 5.5h (013) / 6.4h (025); ECMWF IFS 6.9h (9 km) / 8.6h (0.25 deg); JMA GSM 9.5h
 # (9.53h, the 18 UTC run). The figures move a little from run to run, so the table rounds them up: ICON 4.5h,
-# GFS 6.0h, ECMWF IFS 9.0h, JMA 9.6h. JMA at 9.6h puts its 00 UTC run at 09:36 UTC, i.e. 11:36 CEST, which decides
+# GFS 6.5h, ECMWF IFS 9.0h, JMA 9.6h. JMA at 9.6h puts its 00 UTC run at 09:36 UTC, i.e. 11:36 CEST, which decides
 # whether the default weather model passes an issue time just before the 12:00 CET gate closure in summer. That is
 # why the default issue time is 11:45.
 _PUBLICATION_DELAY_H: Tuple[Tuple[str, float], ...] = (
     ("icon_", 4.5),
-    ("gfs_", 6.0),
+    ("gfs_", 6.5),
     ("ecmwf_ifs", 9.0),
     ("jma_", 9.6),
 )
