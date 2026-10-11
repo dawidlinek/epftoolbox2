@@ -1,17 +1,13 @@
 ---
 title: OpenMeteoSource
-description: Download weather forecast data from Open-Meteo API
+description: Weather forecasts from Open-Meteo's Previous Runs or Single Runs API, as they stood at a UTC cutoff
 ---
 
-import { Tabs, TabItem, Aside, Badge } from '@astrojs/starlight/components';
+import { Aside } from '@astrojs/starlight/components';
 
-# OpenMeteoSource
+Downloads archived weather forecasts from Open-Meteo's [Previous Runs API](https://open-meteo.com/en/docs/previous-runs-api) or [Single Runs API](https://open-meteo.com/en/docs/single-runs-api). **No API key required.**
 
-Downloads weather forecast data from [Open-Meteo Previous Runs API](https://open-meteo.com/en/docs/previous-runs-api). **No API key required.**
-
-<Aside type="note">
-  This source uses the **Previous Runs API** to get historical weather forecasts as they were available at the time, which is essential for realistic backtesting.
-</Aside>
+For every row of local day D, the column `{variable}_d+i` is the forecast for the **same local wall-clock hour on D+i**, taken only from model runs **initialised at or before a cutoff**: `D` at `run`:00 UTC. `run` is a UTC hour ("00", "06", ...), not a local issue time: the source itself has no notion of a market's real issue time or a model's real publication delay. See [Choosing `run`](#choosing-run) for how those map onto it.
 
 ## Basic Usage
 
@@ -22,8 +18,9 @@ from epftoolbox2.data.sources import OpenMeteoSource
 source = OpenMeteoSource(
     latitude=52.2297,   # Warsaw
     longitude=21.0122,
-    horizon=7,
     prefix="warsaw",
+    timezone="Europe/Warsaw",  # market time zone: defines local day D
+    run="00",                  # the leak-free cutoff is D at 00:00 UTC
 )
 
 df = source.fetch(
@@ -32,64 +29,130 @@ df = source.fetch(
 )
 ```
 
+`fetch` returns exactly the rows in `[start, end)` with a **UTC** index.
+
 ## Parameters
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `latitude` | float | Yes | - | Location latitude (-90 to 90) |
-| `longitude` | float | Yes | - | Location longitude (-180 to 180) |
-| `horizon` | int | No | 7 | Days ahead for forecasts |
-| `model` | str | No | `"jma_seamless"` | Weather model |
-| `columns` | List[str] | No | DEFAULT_COLUMNS | Weather variables |
+| `latitude` | float \| None | No\* | `None` | Location latitude (-90 to 90). \*Required unless `locations` is given |
+| `longitude` | float \| None | No\* | `None` | Location longitude (-180 to 180). \*Required unless `locations` is given |
+| `locations` | dict \| str \| None | No | `None` | Several locations instead of `latitude`/`longitude`, see [Several locations](#several-locations) |
+| `agg` | str \| List[str] \| None | No | `None` | Aggregate `locations` across space, see [Several locations](#several-locations) |
+| `keep_locations` | bool | No | `False` | With `agg` set, also return each location's own columns, see [Several locations](#several-locations) |
+| `columns` | List[str] \| None | No | `None` (= `DEFAULT_COLUMNS`) | Weather variables |
+| `horizon` | int \| None | No | `None` | Days ahead: columns `d+1` .. `d+horizon`. `None` takes the largest horizon without look-ahead for the model, `timezone` and `run` under `api="previous_runs"` (see [Horizon](#horizon)) and 5 under `api="single_runs"`. A larger explicit value raises under `previous_runs`, naming the limit and suggesting `api="single_runs"`. Under `api="single_runs"`, 1-14. Leads beyond the run's own length come back NaN (reported, see `strict`) |
+| `model` | str | No | `"jma_seamless"` | Weather model (see [Choosing a model](#choosing-a-model)) |
+| `temporal_resolution` | str \| None | No | `None` | Time step of returned data, see [Temporal Resolution](#temporal-resolution) |
+| `api` | str | No | `"previous_runs"` | `"previous_runs"` (long archive, lead-time buckets) or `"single_runs"` (one exact run per day, shorter archive), see [How the run is chosen](#how-the-run-is-chosen) |
+| `run` | str | No | `"00"` | UTC hour (`"HH"`, `"00"`-`"23"`) of the model run the cutoff is anchored to: `D`'s cutoff is `D` at `run`:00 UTC. See [Choosing `run`](#choosing-run) |
+| `timezone` | str \| None | No | `None` | Market time zone: defines the local day D of each row and the wall-clock hour that `d+i` refers to. `None` inherits `DataPipeline.timezone` when part of a pipeline. Fetching without either raises, because a market outside CET that relied on one would compute the cutoff for the wrong calendar date. |
 | `prefix` | str | No | `""` | Prefix for column names |
-| `temporal_resolution` | str \| None | No | `None` | Time step of returned data — see below |
+| `strict` | bool | No | `False` | Raise instead of warning when a returned column has missing values |
+| `proxy_url` | str \| None | No | `None` | HTTP(S) proxy, e.g. `"http://proxy.example.com:8080"`. Saved to YAML as is, so don't put credentials in it. |
 
-### Temporal Resolution
+## How the run is chosen
+
+Open-Meteo has two ways to download historical model values: the **Previous Runs API** (`api="previous_runs"`, the default) and the **Single Runs API** (`api="single_runs"`). The Single Runs history starts much later for most models (see [Choosing a model](#choosing-a-model)), so **Previous Runs is recommended for historical modelling**.
+
+### Choosing `run`
+
+The source has no notion of a market's real issue time or a model's real-world publication delay: `run` just fixes which UTC hour the cutoff is anchored to. Picking a `run` your issue time can actually rely on is a separate, model-side judgement:
+
+| Model | Assumed delay | 00 UTC run available around |
+|---|---|---|
+| DWD ICON (global/EU/D2) | 4.5 h | 04:30 UTC |
+| NCEP GFS | 6.5 h | 06:30 UTC |
+| ECMWF IFS (9 km / 0.25° / 0.4°) | 9 h | 09:00 UTC |
+| JMA GSM | 9.6 h | 09:36 UTC |
+
+The delays are rounded up from the lag that Open-Meteo reports for each model, so the check errs on the late side. A model that is not in the table gets 10 h.
+
+**Rule of thumb:** pick the latest `run` you know is published before your issue time. `run="00"` (the default) fits an 11:45 CET issue for every model above, all year. JMA is the slowest: 00:00 UTC + 9.6 h = 09:36 UTC, which is 11:36 CEST in summer and 10:36 CET in winter, so both are before 11:45.
+An issue time before 11:36 CEST would make the information-set check reject JMA in summer. For an earlier summer issue, use ICON or GFS, whose 00 UTC runs are published by 06:00 UTC, or ECMWF IFS from 11:00 CEST.
+
+These delays are also built into `epftoolbox2.information_set.source_rules` (see [Information Set](/epftoolbox2/model-pipeline/information-set/)): with a `ModelPipeline(issue_time=...)` information-set check enabled, a `run`/`issue_time` combination that is too tight raises `InformationSetError` before any model is fit, naming the column and suggesting an earlier run or a later issue time.
+
+```python
+source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, timezone="Europe/Warsaw", run="00")
+```
+
+### Horizon
+
+`previous_dayK` at valid time T comes from the latest run initialised at or before T minus 24K hours, hour by hour rather than by calendar day, so each hour of D+i is read from the lowest `previous_dayK` with K at least i whose runs are all at or before the cutoff. D+7 is out of reach because its late hours would need `previous_day8`, which Open-Meteo does not serve, or a run initialised after the cutoff.
+
+| Model | Largest horizon (`run="00"`, `Europe/Warsaw`) |
+|---|---|
+| `jma_seamless`, `gfs_seamless`, `ecmwf_ifs025`, `ecmwf_ifs` | 6 |
+| `icon_seamless` (no `previous_day7`) | 5 |
+| Any other model (assumed hourly runs and a 6 h store) | 5 |
+
+### Local calendar days and DST
+
+`d+i` always refers to the same local wall-clock hour i calendar days later, so a row at 10:00 on the day before the spring switch gets the forecast for 10:00 CEST (08:00 UTC), not 11:00. A target hour that doesn't exist (02:00 on the spring switch day) comes back **NaN**, never silently the next hour's value under that row's name. An ambiguous one (02:00 on the autumn switch day) takes its first occurrence.
+
+### Live use
+
+When a row's cutoff is still in the future (for example `end="today_d+7"`, or running before `run`'s hour), the source uses the runs published by **now** instead, logs that those rows are provisional, and does not return trailing rows it has no values for. Provisional values change when fetched again later, so don't use them as training data.
+
+## Choosing a model
+
+| Model | Archive (Previous Runs) | Archive (Single Runs) | Notes |
+|---|---|---|---|
+| `jma_seamless` *(default)* | from 2018 | from 2026-05-13 00Z | Over Europe this is JMA GSM: about 55 km grid, stored every 6 h, so hourly values are interpolated. At Warsaw only `d+1`/`d+2` exist for 2018-2020 (Previous Runs), and `d+5`-`d+7` start on 2021-01-06. |
+| `icon_seamless` | from 2024-01 | from 2026-04-02 00Z | DWD ICON-D2 / ICON-EU / ICON global, **mixed by lead time** under `previous_runs`: different `d+i` columns come from different sub-models. It has no `previous_day7`. Inside the ICON-D2 area (for example Berlin) it also has runs every 3 h, so the bucket choice assumes a 3-hourly run grid and some D+1 hours come from a run of D-2. The first Previous-Runs value at Warsaw is 2024-01-19, and `rain` is missing for Dec 2023-Jun 2024. |
+| `ecmwf_ifs025` | from 2024-02-04 | not available | ECMWF IFS at 0.25°, stored every 3 h, so hourly values are interpolated. |
+| `ecmwf_ifs` | from 2025-10-01 | from 2024-03-14 00Z (00/12 UTC only at first) | ECMWF IFS at 9 km, stored hourly. It has the longest Single-Runs archive. About 8% of Previous-Runs hours were missing in the first half of 2026. |
+| `gfs_seamless` | temperature from 2021-03, other variables from 2024-01-19 | from 2026-04-02 00Z | NCEP GFS. |
+
+Dates are first valid values at Warsaw, or the archive start Open-Meteo documents (checked in September 2026). For data from 2024 on, ECMWF IFS 0.25° or ICON are better `previous_runs` choices than JMA. For `single_runs`, `ecmwf_ifs` has by far the longest archive and is a good default. Check any `model` not listed here the same way before relying on it for a backtest that reaches far back.
+
+The source logs, for every column that has gaps, the share of missing values, the timestamp it is complete from, and the missing share by local hour when that's uneven (e.g. JMA's `previous_day5`-`7`, which are missing before 2021 only for the hours that need them). With `strict=True` it raises instead. Missing weather values make the model drop those forecasts, so check the log before comparing models.
+
+## Variables that describe the preceding hour
+
+`rain`, `showers`, `snowfall` and `precipitation` (and radiation variables such as `shortwave_radiation`) are sums or means over the **preceding** hour: the value at 14:00 describes 13:00-14:00, while the 14:00 price covers delivery 14:00-15:00. This is a lag, not a leak. Instantaneous variables (temperature, wind, pressure) refer to the timestamp itself.
+
+## Temporal Resolution
 
 | Value | Time step | Notes |
 |-------|-----------|-------|
-| `None` *(default)* | 1 h | Standard hourly data; no extra API parameter sent |
+| `None` *(default)* | 1 h | Standard hourly data, no extra API parameter sent |
 | `"hourly_3"` | 3 h | 8 data points per day |
 | `"hourly_6"` | 6 h | 4 data points per day |
-| `"native"` | model-dependent | Uses the weather model's native resolution; step is inferred automatically from the response |
+| `"native"` | model-dependent | The model's native step as returned by the API |
+
+With a step longer than 1 h, `d+i` uses the stored time closest to the target local hour. Applies under both `api` values.
 
 ```python
-# 3-hourly data — useful for coarser feature sets or faster pipelines
 source = OpenMeteoSource(
     latitude=52.2297,
     longitude=21.0122,
-    horizon=7,
+    horizon=5,
     prefix="warsaw",
+    timezone="Europe/Warsaw",
     temporal_resolution="hourly_3",
-)
-
-# Model-native resolution
-source = OpenMeteoSource(
-    latitude=52.2297,
-    longitude=21.0122,
-    model="icon_seamless",
-    temporal_resolution="native",
 )
 ```
 
 ## Rate Limiting
 
 <Aside type="caution">
-  Open-Meteo has API rate limits. When the limit is reached, the source automatically waits (e.g., 60 seconds) before retrying.
+  Network errors and "too many concurrent requests" are retried up to 5 times with exponential backoff capped at 60 s, and the minutely limit waits 60 s. The hourly and daily limits raise a `RuntimeError` instead of sleeping for hours.
 </Aside>
 
 ---
 
 ## Output Column Naming
 
-Columns are named: `{prefix}_{variable}_d+{horizon}`
+Columns are named: `{prefix}_{variable}_d+{i}`
 
 ```python
 # Example output columns:
 # warsaw_temperature_2m_d+1
 # warsaw_temperature_2m_d+2
 # ...
-# warsaw_temperature_2m_d+7
+# warsaw_temperature_2m_d+5
 ```
 
 ---
@@ -99,13 +162,13 @@ Columns are named: `{prefix}_{variable}_d+{horizon}`
 | Variable | Description |
 |----------|-------------|
 | `temperature_2m` | Temperature at 2m (°C) |
-| `rain` | Rain amount (mm) |
-| `showers` | Shower amount (mm) |
-| `snowfall` | Snowfall amount (cm) |
+| `rain` | Rain amount (mm), preceding hour |
+| `showers` | Shower amount (mm), preceding hour |
+| `snowfall` | Snowfall amount (cm), preceding hour |
 | `relative_humidity_2m` | Relative humidity (%) |
 | `dew_point_2m` | Dew point (°C) |
 | `apparent_temperature` | Feels-like temperature (°C) |
-| `precipitation` | Total precipitation (mm) |
+| `precipitation` | Total precipitation (mm), preceding hour |
 | `weather_code` | WMO weather code |
 | `surface_pressure` | Surface pressure (hPa) |
 | `pressure_msl` | Sea-level pressure (hPa) |
@@ -113,39 +176,114 @@ Columns are named: `{prefix}_{variable}_d+{horizon}`
 | `wind_speed_10m` | Wind speed at 10m (km/h) |
 | `wind_direction_10m` | Wind direction at 10m (°) |
 
+With `jma_seamless`, `showers` is always 0 and `shortwave_radiation` is empty. Pass `columns=[...]` to skip them.
+
 ---
 
-## Example: Multiple Locations
+## Several locations
+
+Pass `locations` instead of `latitude`/`longitude` to combine several locations into one source, for example a
+population- or capacity-weighted series for a whole bidding zone, or a plain multi-city dataset. It is a dict
+`{name: {"latitude", "longitude", "weight"?}}`, or the compact string `"name:lat:lon:weight, name:lat:lon:weight,
+..."` handy for YAML or the TUI (the weight can also be left out there, per location). Names must use letters,
+digits and underscores and be unique. Weights, when given, must be positive numbers, and must be given for
+**every** location or for **none**.
+
+Every location is fetched by another `OpenMeteoSource` sharing every other parameter here (including `api` and
+`run`), so all locations follow the same cutoff.
+
+### `agg`: combining locations into one series
+
+`agg` controls what `fetch()` returns for several `locations`:
+
+| `agg` | Output |
+|-------|--------|
+| `None` *(default)* | Only the per-location columns, `{prefix}_{name}_{variable}_d+i`, a plain multi-city dataset |
+| `"mean"` \| `"median"` \| `"min"` \| `"max"` \| `"sum"`, or a list of them, e.g. `["mean", "max"]` | One series per variable **and** aggregation, `{prefix}_{variable}_{agg}_d+i`. A bare string and a one-element list name their column the same way |
+
+`keep_locations=True` additionally returns the per-location columns alongside whatever `agg` produces. It raises
+if `agg` is `None`, because the per-location columns are then already the only output.
+
+```python
+# one point
+OpenMeteoSource(latitude=52.2297, longitude=21.0122, prefix="warsaw")
+
+# several points, no agg -> per-location columns only
+OpenMeteoSource(prefix="pl", locations={
+    "warsaw": {"latitude": 52.2297, "longitude": 21.0122},
+    "krakow": {"latitude": 50.0647, "longitude": 19.9450},
+})
+# pl_warsaw_temperature_2m_d+1, pl_krakow_temperature_2m_d+1, ...
+
+# one averaged series per variable (a plain mean, as no weights are given)
+OpenMeteoSource(prefix="pl", locations={...}, agg="mean")
+# pl_temperature_2m_mean_d+1, ...
+
+# weighted mean
+OpenMeteoSource(prefix="pl", locations={
+    "warsaw": {"latitude": 52.2297, "longitude": 21.0122, "weight": 1.86},   # millions
+    "krakow": {"latitude": 50.0647, "longitude": 19.9450, "weight": 0.80},
+}, agg="mean")
+# pl_temperature_2m_mean_d+1, ... (weighted)
+
+# aggregate and keep the per-location columns too
+OpenMeteoSource(prefix="pl", locations={...}, agg="max", keep_locations=True)
+# pl_temperature_2m_max_d+1, pl_warsaw_temperature_2m_d+1, pl_krakow_temperature_2m_d+1, ...
+
+# several aggregates at once
+OpenMeteoSource(prefix="pl", locations={...}, agg=["mean", "max"])
+# pl_temperature_2m_mean_d+1, pl_temperature_2m_max_d+1, ...
+```
+
+Weights apply only to `"mean"`, which then becomes a weighted mean with the weights normalised to sum to 1. Giving
+weights when `agg` doesn't include `"mean"` raises. In a list, only `"mean"` is weighted and the other aggregations
+are always unweighted.
+
+### Special columns
+
+- **`*direction*` columns** (e.g. `wind_direction_10m`): `"mean"` uses the **weighted circular mean**, so 350°
+  and 10° average to about 0°, not 180°. Every other aggregation **skips** direction columns entirely, as there is
+  no meaningful min/max/median/sum for a circular quantity. `keep_locations=True` still returns them per
+  location.
+- **`weather_code`** is a WMO code and is ordinal (0 is clear, a higher code is worse weather), so it is aggregated
+  like any other numeric column. The mean of several codes is a fractional index, not a code, and `max` is the worst
+  weather at any location.
+- A row is missing (`NaN`) if **any** location is missing at that row: weights are never re-normalised over just
+  the available locations, and this is unaffected by `agg`. Locations are unioned on their index first, and
+  trailing rows with no value at all are dropped, as elsewhere in the Open-Meteo source.
 
 ```python
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import OpenMeteoSource
 
-cities = {
-    "warsaw": (52.2297, 21.0122),
-    "krakow": (50.0647, 19.9450),
-    "gdansk": (54.3520, 18.6466),
-}
-
-pipeline = DataPipeline()
-for name, (lat, lon) in cities.items():
-    pipeline.add_source(OpenMeteoSource(
-        latitude=lat,
-        longitude=lon,
-        horizon=7,
-        prefix=name,
-    ))
+pipeline = DataPipeline(timezone="Europe/Warsaw").add_source(OpenMeteoSource(
+    locations={
+        "warsaw": {"latitude": 52.2297, "longitude": 21.0122},
+        "krakow": {"latitude": 50.0647, "longitude": 19.9450},
+        "gdansk": {"latitude": 54.3520, "longitude": 18.6466},
+    },
+    horizon=5,
+))
 
 df = pipeline.run(start="2024-01-01", end="2024-06-01", cache=True)
+print(df.columns[:2].tolist())
+# ['warsaw_temperature_2m_d+1', 'krakow_temperature_2m_d+1']
 ```
+
+`locations` (with each location's latitude, longitude and weight), and, when used, `agg` and `keep_locations`,
+are part of the cache key, and `latitude`/`longitude` are omitted from it in this mode.
 
 ---
 
 ## Output
 
-Data is returned with a **UTC DatetimeIndex**:
+Data is returned with a **UTC DatetimeIndex** covering `[start, end)`:
 
 ```python
 print(df.columns[:5].tolist())
 # ['warsaw_temperature_2m_d+1', 'warsaw_temperature_2m_d+2', ...]
 ```
+
+## Caching
+
+The cache key includes `latitude`/`longitude` (or `locations`, with `agg` and `keep_locations` when they're set, instead), `horizon` (the resolved value when it is `None`), `model`, `columns`, `prefix`, `temporal_resolution`, `api`, `run`, `timezone` and a `schema_version`, so a change to any of them reads fresh data. `strict` and `proxy_url` don't change the data and are not part of the key.

@@ -5,8 +5,6 @@ description: Using ModelPipeline to train and evaluate forecasting models
 
 import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-# Model Pipeline
-
 The `ModelPipeline` class trains and evaluates forecasting models with rolling-window validation.
 
 ## Basic Usage
@@ -76,7 +74,7 @@ Predictors can be specified in four ways:
     ```
   </TabItem>
   <TabItem label="Templates">
-    Use `{horizon}` placeholder — replaced with 1, 2, ..., horizon at runtime:
+    Use `{horizon}` placeholder: replaced with 1, 2, ..., horizon at runtime:
 
     ```python
     predictors = [
@@ -100,7 +98,7 @@ Predictors can be specified in four ways:
         lambda horizon: f"weather_d+{horizon}",
     ]
 
-    # horizon + hour — different feature per hour of day
+    # horizon + hour: different feature per hour of day
     predictors = [
         lambda horizon, hour: f"load_h{hour:02d}_d+{horizon}",
     ]
@@ -132,7 +130,7 @@ Models use a **process pool with inner thread pools**. Each worker process handl
 | Variable | Default | Description |
 |---|---|---|
 | `MAX_PROCESSES` | `cpu_count // THREADS_PER_PROCESS` | Worker processes |
-| `THREADS_PER_PROCESS` | `16` | Threads per process (alias: `MAX_THREADS`) |
+| `THREADS_PER_PROCESS` | `16` | Threads per process |
 
 ```python
 import os
@@ -150,7 +148,7 @@ See [Installation](/epftoolbox2/getting-started/installation/#parallel-model-tra
 
 ## Feature Scaling
 
-Models automatically apply `StandardScaler`:
+Models scale each task's data with a scaler fitted on that task's training rows only. By default this is `StandardScaler`:
 
 <Steps>
 
@@ -161,6 +159,8 @@ Models automatically apply `StandardScaler`:
 3. **Target variable** is scaled, predictions are inverse-scaled
 
 </Steps>
+
+Set a model's `scaler` parameter to `"asinh"` or `"npit"` to use a variance-stabilising transformation instead, which damps price spikes and handles negative prices. See [Scalers and VSTs](/epftoolbox2/models/scalers/).
 
 ---
 
@@ -175,7 +175,39 @@ Models automatically apply `StandardScaler`:
 | `horizon` | int | `7` | Max forecast horizon (days) |
 | `freq` | str | `"1h"` | Forecasting frequency (e.g., `"15min"`) |
 | `save_dir` | str | `None` | Directory for incremental results |
-| `forecast_only` | bool | `False` | Skip evaluators/exporters; `test_start`/`test_end` default to `"today"` if omitted |
+| `forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted |
+
+Model names must be unique: they name the result files in `save_dir`.
+
+---
+
+## Data Checks
+
+Before any model is fitted, `run()` checks every model's input and raises `ValueError` with a description of the problem:
+
+- **Resolution:** rows must be `freq` apart, with one row per local day and period (hour, or quarter-hour for `freq="15min"`). Only the hour repeated when clocks fall back may occur twice. Data finer than `freq` would put the issue day's prices into the training set. Resample it first (`ResampleTransformer`) or pass the matching `freq`.
+- **Timestamps:** no duplicates. Rows are sorted by time.
+- **Names:** the data must not contain the model's target columns (`{target}_d+1` … `{target}_d+{horizon}`, e.g. from a `LagTransformer` with negative lags on the target) or columns named `hour` or `day`, which the model uses internally (use `CalendarSource(prefix=...)` for its `hour` column).
+- **Predictors:** every expanded predictor (for every hour and horizon) must exist, be numeric, and must not be one of the model's targets.
+
+Only the target and the predictors are used, so other columns (e.g. text columns such as `holiday_name`) can stay in the data.
+
+---
+
+## Information Set
+
+The checks above don't know *when* a forecast is issued, so they can't tell a legitimate lag from look-ahead
+(same-day `load_actual` passes them, even though it isn't known until after the hour it describes). Pass
+`issue_time` to `ModelPipeline` to add that check:
+
+```python
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
+```
+
+This raises `InformationSetError` before any fit if a predictor (or the newest training target) is not known
+at issue time, using built-in availability rules for the shipped sources (ENTSO-E prices/load/generation,
+Open-Meteo weather, calendar). See [Information Set](/epftoolbox2/model-pipeline/information-set/) for the
+full rule reference, custom rules, and the empirical `leakage_probe`.
 
 ---
 
@@ -184,11 +216,14 @@ Models automatically apply `StandardScaler`:
 The pipeline returns an `EvaluationReport`:
 
 ```python
-report.summary()           # Overall metrics
+report.summary()           # Overall metrics, with a `forecasts` count per model
+report.forecast_counts()   # Planned vs produced forecasts and skip reasons
 report.by_hour()           # Breakdown by hour
 report.by_horizon()        # Breakdown by horizon
 report.by_hour_horizon()   # Combined breakdown
 ```
+
+See [Working with Results](/epftoolbox2/model-pipeline/results/) for what the counts mean.
 
 ---
 
@@ -213,4 +248,5 @@ See [ModelPipeline Serialization](/epftoolbox2/model-pipeline/serialization/) fo
   <LinkCard title="Caching" description="Incremental training" href="/epftoolbox2/model-pipeline/caching/" />
   <LinkCard title="Workflow" description="YAML-based experiment orchestration" href="/epftoolbox2/workflow/overview/" />
   <LinkCard title="Forecasting" description="Forecast-only mode and date keywords" href="/epftoolbox2/model-pipeline/forecasting/" />
+  <LinkCard title="Information Set" description="Check predictors against the forecast issue time" href="/epftoolbox2/model-pipeline/information-set/" />
 </CardGrid>

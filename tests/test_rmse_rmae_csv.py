@@ -15,6 +15,7 @@ from epftoolbox2.results.report import EvaluationReport
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_results(model_name, predictions, actuals, hours, horizons, target_dates, run_dates=None, day_in_test=None):
     """Build a list of result dicts for a single model."""
     if run_dates is None:
@@ -23,11 +24,22 @@ def _make_results(model_name, predictions, actuals, hours, horizons, target_date
         day_in_test = [0] * len(predictions)
     return [
         {
-            "prediction": p, "actual": a, "hour": h, "horizon": hz,
-            "target_date": td, "run_date": rd, "day_in_test": dit,
+            "prediction": p,
+            "actual": a,
+            "hour": h,
+            "horizon": hz,
+            "target_date": td,
+            "run_date": rd,
+            "day_in_test": dit,
         }
         for p, a, h, hz, td, rd, dit in zip(
-            predictions, actuals, hours, horizons, target_dates, run_dates, day_in_test,
+            predictions,
+            actuals,
+            hours,
+            horizons,
+            target_dates,
+            run_dates,
+            day_in_test,
         )
     ]
 
@@ -59,6 +71,7 @@ def two_model_results():
 # RMSEEvaluator
 # ===========================================================================
 
+
 class TestRMSEEvaluator:
     def test_compute(self):
         df = pd.DataFrame({"prediction": [10, 20, 30], "actual": [12, 18, 33]})
@@ -83,6 +96,7 @@ class TestRMSEEvaluator:
 # ===========================================================================
 # rMAEEvaluator
 # ===========================================================================
+
 
 class TestRMAEEvaluator:
     def test_name(self):
@@ -143,8 +157,8 @@ class TestRMAEEvaluator:
     def test_serialization_roundtrip(self):
         """rMAEEvaluator should serialize/deserialize via COMPONENT_REGISTRY."""
         from epftoolbox2.pipelines.model_pipeline import ModelPipeline
-        import tempfile, yaml
-        from pathlib import Path
+        import tempfile
+        import yaml
 
         pipeline = ModelPipeline().add_evaluator(rMAEEvaluator(base_model="OLS"))
         d = pipeline.to_dict()
@@ -166,6 +180,7 @@ class TestRMAEEvaluator:
 # ===========================================================================
 # CsvExporter
 # ===========================================================================
+
 
 class TestCsvExporter:
     def test_basic_export(self, two_model_results):
@@ -315,7 +330,5 @@ class TestCsvExporter:
             CsvExporter(path).export(report)
             df = pd.read_csv(path)
             assert df["target_date"].is_monotonic_increasing or (
-                df.sort_values(["target_date", "hour", "horizon"])
-                .reset_index(drop=True)
-                .equals(df)
+                df.sort_values(["target_date", "hour", "horizon"]).reset_index(drop=True).equals(df)
             )

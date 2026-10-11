@@ -5,8 +5,6 @@ description: YAML-based experiment orchestration for reproducible forecasting ru
 
 import { Steps, Tabs, TabItem, Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-# Workflow
-
 `Workflow` ties a `DataPipeline` YAML, a `ModelPipeline` YAML, and all run parameters together into a single experiment file.
 
 ## Quick Example
@@ -24,7 +22,7 @@ Workflow(
     model_test_start="2024-06-01",
     model_test_end="2024-07-01",
     model_target="price",
-    model_horizon=7,
+    model_horizon=6,
     max_processes=32,
     threads_per_process=8,
     cache_path="/tmp/scratch/$SLURM_JOB_ID/cache",
@@ -56,25 +54,28 @@ model_pipeline:
   test_start: "2024-06-01"
   test_end: "2024-07-01"
   target: price
-  horizon: 7
+  horizon: 6
   freq: 1h
 ```
 
-**Forecast-only variant** — add `forecast_only: true` and use date keywords so the file runs daily without editing:
+Dates may be quoted or not. YAML reads an unquoted `end: 2024-08-01` as a date and the workflow treats it like the
+string `"2024-08-01"`, so the whole day is included.
+
+**Forecast-only variant**: add `forecast_only: true` and use date keywords so the file runs daily without editing:
 
 ```yaml
 data_pipeline:
   path: data_pipeline.yaml
   start: "now_d-735"       # ~2 years of history, relative to today
-  end: "today_d+7"         # fetch weather/calendar through the forecast window
+  end: "today_d+6"         # whole horizon-6 day (local day, given `timezone` in data_pipeline.yaml)
   cache: true
 
 model_pipeline:
   path: model_pipeline.yaml
   target: price
-  horizon: 7
+  horizon: 6
   freq: 1h                 # set to 15min for 15-minute forecasting
-  forecast_only: true      # test_start/test_end default to "today"; skips evaluators and exporters
+  forecast_only: true      # test_start/test_end default to "today", skips evaluators and exporters
 ```
 
 <Aside type="tip">
@@ -100,8 +101,11 @@ model_pipeline:
 | `max_processes` | int | `None` | Worker process count |
 | `threads_per_process` | int | `None` | Threads per process |
 | `cache_path` | str | `None` | Cache directory (overrides `data_cache` if set) |
-| `model_index` | int | `None` | Run only `models[model_index]` — all models run if omitted |
-| `model_forecast_only` | bool | `False` | Skip evaluators/exporters; `test_start`/`test_end` default to `"today"` if omitted |
+| `model_index` | int | `None` | Run only `models[model_index]`, all models run if omitted. Requires `model_save_dir` |
+| `model_forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted |
+| `model_save_dir` | str | `None` | Directory for one resumable JSONL per model (YAML: `model_pipeline.save_dir`), resolved from the YAML's directory |
+| `model_allow_manifest_mismatch` | bool | `False` | Resume into `model_save_dir` even if its [manifest](/epftoolbox2/model-pipeline/caching/) disagrees with this run's configuration (overwrites it) (YAML: `model_pipeline.allow_manifest_mismatch`) |
+| `model_require_manifest` | bool | `False` | Refuse to resume from a `model_save_dir` that has results but no manifest, instead of warning (YAML: `model_pipeline.require_manifest`) |
 
 ---
 
@@ -175,14 +179,15 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
         - class: ResampleTransformer
           params: {freq: 1h}
       validators:
-        - class: NullCheckValidator
+        - class: CoverageValidator
           params:
             columns: [load_actual, price]
+            min_coverage: 1.0
     ```
   </TabItem>
 </Tabs>
 
-**Override semantics:** inline sections **replace** the entire corresponding section from the loaded file — not merge. Sources + validators from `path` are kept unless also overridden.
+**Override semantics:** inline sections **replace** the entire corresponding section from the loaded file, not merge. Sources + validators from `path` are kept unless also overridden.
 
 ---
 
@@ -198,14 +203,13 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
 
    from epftoolbox2.pipelines import DataPipeline, ModelPipeline
    from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
-   from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
-   from epftoolbox2.data.validators import NullCheckValidator
+   from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, LagTransformer
+   from epftoolbox2.data.validators import CoverageValidator
    from epftoolbox2.models import OLSModel, LassoCVModel
    from epftoolbox2.evaluators import MAEEvaluator
    from epftoolbox2.exporters import ExcelExporter, TerminalExporter
 
    predictors = [
-       "load_actual",
        "is_monday_d+{horizon}", "is_tuesday_d+{horizon}",
        "is_wednesday_d+{horizon}", "is_thursday_d+{horizon}",
        "is_friday_d+{horizon}", "is_saturday_d+{horizon}",
@@ -217,14 +221,22 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
    ]
 
    (
-       DataPipeline()
+       DataPipeline(timezone="Europe/Warsaw")
        .add_source(EntsoeSource(country_code="PL", api_key=os.environ["ENTSOE_API_KEY"], type=["load", "price"]))
-       .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=7, prefix="warsaw"))
+       .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, prefix="warsaw"))
        .add_source(CalendarSource(country="PL", holidays="binary", daylight=True, weekday="onehot"))
+       .add_transformer(TimezoneTransformer())
        .add_transformer(ResampleTransformer(freq="1h"))
        .add_transformer(LagTransformer(columns=["load_actual", "price"], lags=[1, 2, 7], freq="day"))
-       .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "daylight_hours", "load_forecast", "is_holiday"]))
-       .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+       .add_transformer(LagTransformer(
+           lags=range(-7, 1),
+           freq="day",
+           columns=[
+               "is_monday", "is_tuesday", "is_wednesday", "is_thursday", "is_friday",
+               "is_saturday", "is_sunday", "is_holiday", "daylight_hours",
+           ],
+       ))
+       .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
        .save("data_pipeline.yaml")
    )
 
@@ -253,7 +265,7 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
        model_test_start="2024-06-01",
        model_test_end="2024-07-01",
        model_target="price",
-       model_horizon=7,
+       model_horizon=6,
        max_processes=32,
        threads_per_process=8,
        cache_path="/tmp/cache",
@@ -277,9 +289,11 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
 
 ---
 
-## Run only one model
+## Run only one model (SLURM arrays)
 
 `model_index` selects a single model by its 0-based position in the model list. When omitted, all models run. This enables submitting one job per model that allows further parallelization.
+
+In this array mode each task writes its model's results to `model_pipeline.save_dir` (one JSONL per model, resumable if the task is restarted) and skips the evaluators and exporters: relative metrics such as rMAE and the exporters need every model. Once all tasks have finished, merge the results and run the evaluators and exporters once with `epf report experiment.yaml` (or `Workflow.load("experiment.yaml").report()`). A negative or out-of-range `model_index` raises, and so does array mode without `save_dir`.
 
 **Workflow YAML for example SLURM cluster:**
 
@@ -287,9 +301,22 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
 environment:
   max_processes: 8
   threads_per_process: 8
-  cache_path: /tmp/scratch/$SLURM_JOB_ID/cache
   model_index: $SLURM_ARRAY_TASK_ID   # 0-based, expanded at load() time
+
+model_pipeline:
+  path: model_pipeline.yaml
+  save_dir: results                   # shared by all tasks; relative to this YAML
+  test_start: "2024-01-01"
+  test_end: "2024-12-31"
 ```
+
+```bash
+sbatch --array=0-3 run_task.sh        # each task: epf run experiment.yaml
+# after the array has finished (e.g. sbatch --dependency=afterok:<array job id>):
+epf report experiment.yaml
+```
+
+`report()` raises if a model has no results file. `report(allow_missing=True)` (`epf report --allow-missing`) reports the models that have one. Check `report.forecast_counts()` before comparing models.
 
 ## Learn More
 

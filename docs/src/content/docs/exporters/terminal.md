@@ -3,8 +3,6 @@ title: TerminalExporter
 description: Display results in the terminal
 ---
 
-# TerminalExporter
-
 Displays evaluation results as formatted tables in the terminal using Rich.
 
 ## Basic Usage

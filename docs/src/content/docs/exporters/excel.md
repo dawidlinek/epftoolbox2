@@ -3,8 +3,6 @@ title: ExcelExporter
 description: Export results to Excel with formatting
 ---
 
-# ExcelExporter
-
 Exports evaluation results to Excel files with conditional formatting.
 
 ## Basic Usage
@@ -30,6 +28,8 @@ exporter = ExcelExporter("results.xlsx")
 - `"hour_horizon"` - Hour × Horizon matrix
 - `"year"` - Breakdown by year
 - `"year_horizon"` - Year × Horizon matrix
+- `"run_weekday_horizon"` - Issue day's weekday × Horizon matrix
+- `"target_weekday_horizon"` - Target day's weekday × Horizon matrix
 - `"details"` - Details of each prediction
 
 ## Example

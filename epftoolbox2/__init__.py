@@ -12,7 +12,7 @@ from rich.table import Table
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
 
-__version__ = "2.2.2"
+__version__ = "2.3.0"
 
 
 def verify():
@@ -51,9 +51,15 @@ def verify():
         console.print(f"\n💡 [yellow]Info:[/yellow] {gil_info}")
 
     console.print("\n📚 [bold cyan]Resources:[/bold cyan]")
-    console.print("  • Documentation: [link=https://dawidlinek.github.io/epftoolbox2]https://dawidlinek.github.io/epftoolbox2[/link]")
-    console.print("  • GitHub: [link=https://github.com/dawidlinek/epftoolbox2]https://github.com/dawidlinek/epftoolbox2[/link]")
-    console.print("  • Issues: [link=https://github.com/dawidlinek/epftoolbox2/issues]https://github.com/dawidlinek/epftoolbox2/issues[/link]")
+    console.print(
+        "  • Documentation: [link=https://dawidlinek.github.io/epftoolbox2]https://dawidlinek.github.io/epftoolbox2[/link]"
+    )
+    console.print(
+        "  • GitHub: [link=https://github.com/dawidlinek/epftoolbox2]https://github.com/dawidlinek/epftoolbox2[/link]"
+    )
+    console.print(
+        "  • Issues: [link=https://github.com/dawidlinek/epftoolbox2/issues]https://github.com/dawidlinek/epftoolbox2/issues[/link]"
+    )
 
     if hasattr(sys, "_is_gil_enabled") and sys._is_gil_enabled() and cpu_count > 1:
         console.print("\n⚡ [bold yellow]Performance Tip:[/bold yellow]")

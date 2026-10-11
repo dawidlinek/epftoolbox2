@@ -3,8 +3,6 @@ title: RMSEEvaluator
 description: Root Mean Squared Error metric
 ---
 
-# RMSEEvaluator
-
 Calculates Root Mean Squared Error (RMSE) between predictions and actual values. RMSE penalizes larger errors more heavily than MAE.
 
 ## Formula

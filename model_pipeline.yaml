@@ -2,7 +2,6 @@ models:
 - class: OLSModel
   params:
     predictors: &id001
-    - load_actual
     - is_monday_d+{horizon}
     - is_tuesday_d+{horizon}
     - is_wednesday_d+{horizon}
@@ -19,11 +18,13 @@ models:
     - warsaw_temperature_2m_d+{horizon}
     training_window: 365
     name: OLS
+    scaler: standard
 - class: LassoCVModel
   params:
     predictors: *id001
     training_window: 365
     name: LassoCV
+    scaler: standard
     cv: 5
     max_iter: 10000
 evaluators:
@@ -50,3 +51,7 @@ exporters:
     - run_weekday_horizon
     - target_weekday_horizon
     - details
+information_set:
+  issue_time: '11:45'
+  issue_timezone: Europe/Warsaw
+  unknown: raise

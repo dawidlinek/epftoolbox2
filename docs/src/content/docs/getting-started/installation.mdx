@@ -5,8 +5,6 @@ description: How to install epftoolbox2
 
 import { Steps, Tabs, TabItem, Aside, Badge, Code } from '@astrojs/starlight/components';
 
-# Installation
-
 <Steps>
 
 1. **Install the package**
@@ -90,7 +88,7 @@ For best results use Python 3.14t (free-threading build), which removes the GIL 
 ### Script Setup
 
 <Aside type="caution">
-  Environment variables must be set **before any imports** — especially before numpy, sklearn, or epftoolbox2. BLAS thread pools are initialized at import time and ignore later changes.
+  Environment variables must be set **before any imports**, especially before numpy, sklearn, or epftoolbox2. BLAS thread pools are initialized at import time and ignore later changes.
 </Aside>
 
 Place this block at the very top of your script:
@@ -101,7 +99,7 @@ import os
 # Enable free-threading (Python 3.13t+)
 os.environ["PYTHON_GIL"] = "0"
 
-# Pin BLAS to 1 thread per process — prevents oversubscription
+# Pin BLAS to 1 thread per process, prevents oversubscription
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -121,19 +119,19 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 | Variable | Default | Description |
 |---|---|---|
 | `MAX_PROCESSES` | `cpu_count // THREADS_PER_PROCESS` | Number of worker processes |
-| `THREADS_PER_PROCESS` | `16` | Threads per worker process (also accepts `MAX_THREADS`) |
-| `OMP_NUM_THREADS` | system default | OpenMP threads per process — set to `1` |
-| `MKL_NUM_THREADS` | system default | MKL threads per process — set to `1` |
-| `OPENBLAS_NUM_THREADS` | system default | OpenBLAS threads per process — set to `1` |
+| `THREADS_PER_PROCESS` | `16` | Threads per worker process |
+| `OMP_NUM_THREADS` | system default | OpenMP threads per process. Set to `1` |
+| `MKL_NUM_THREADS` | system default | MKL threads per process. Set to `1` |
+| `OPENBLAS_NUM_THREADS` | system default | OpenBLAS threads per process. Set to `1` |
 
 ### Platform Notes
 
 <Tabs>
   <TabItem label="Linux / Mac">
-    Uses `fork` — worker processes inherit the parent's memory directly. No `if __name__ == '__main__':` guard needed in your scripts.
+    Uses `fork`: worker processes inherit the parent's memory directly. No `if __name__ == '__main__':` guard needed in your scripts.
   </TabItem>
   <TabItem label="Windows">
-    Uses `spawn` — worker processes start fresh Python interpreters. Scripts that call `model.run()` at top level **must** be wrapped:
+    Uses `spawn`: worker processes start fresh Python interpreters. Scripts that call `model.run()` at top level **must** be wrapped:
     ```python
     if __name__ == '__main__':
         report = model.run(...)

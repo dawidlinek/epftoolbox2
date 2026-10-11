@@ -45,7 +45,7 @@ class EvaluationReport:
 
         rows = []
         for name, df in model_dfs.items():
-            rows.append({"model": name, **self._apply_evaluators(df, model_dfs=model_dfs)})
+            rows.append({"model": name, "forecasts": len(df), **self._apply_evaluators(df, model_dfs=model_dfs)})
         return pd.DataFrame(rows)
 
     def by_hour(self) -> pd.DataFrame:
@@ -83,13 +83,28 @@ class EvaluationReport:
             return df
         return df.sort_values(["model", "horizon", "hour"]).reset_index(drop=True)
 
+    def forecast_counts(self) -> pd.DataFrame:
+        """Planned vs produced forecasts per model, with one column per skip reason.
+
+        Models are only comparable on the forecasts they all produced; check this table before comparing.
+        `planned` equals `produced` for results passed in as plain lists.
+        """
+        reasons = sorted({reason for ref in self.refs.values() for reason in ref.skipped})
+        rows = []
+        for name, ref in self.refs.items():
+            produced = ref.produced
+            if produced is None:
+                produced = sum(1 for _ in self._iter_ref(ref, cols=["hour"]))
+            planned = max(ref.count, produced)
+            row = {"model": name, "planned": planned, "produced": produced, "missing": planned - produced}
+            row.update({reason: ref.skipped.get(reason, 0) for reason in reasons})
+            rows.append(row)
+        return pd.DataFrame(rows, columns=["model", "planned", "produced", "missing", *reasons])
+
     def iter_details(self) -> Iterator[Tuple[str, pd.DataFrame]]:
         detail_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual", "prediction"]
         for name, ref in self.refs.items():
-            rows = [
-                {k: r[k] for k in detail_cols if k in r}
-                for r in self._iter_ref(ref, cols=detail_cols)
-            ]
+            rows = [{k: r[k] for k in detail_cols if k in r} for r in self._iter_ref(ref, cols=detail_cols)]
             df = pd.DataFrame(rows)
             yield name, df
             del df, rows
@@ -98,9 +113,19 @@ class EvaluationReport:
         return {ev.name: ev.compute(df, **kwargs) for ev in self.evaluators}
 
     def _iter_ref(self, ref: ModelResultRef, cols: List[str] = None) -> Iterator[Dict]:
+        # A resumed JSONL can hold rows from an earlier run with a wider or different test window (its
+        # rows are never deleted); filter to this ref's own window so a narrower resume isn't scored on
+        # forecasts outside it. Refs built from plain result lists have no window (test_start/test_end
+        # are "") and are read as given.
+        filter_dates = bool(ref.test_start and ref.test_end)
+
+        def in_window(r: Dict) -> bool:
+            return not filter_dates or ref.test_start <= r["run_date"] <= ref.test_end
+
         if ref.path is not None:
             import json
             from pathlib import Path
+
             p = Path(ref.path)
             if p.exists():
                 with open(p) as f:
@@ -108,10 +133,12 @@ class EvaluationReport:
                         line = line.strip()
                         if line:
                             r = json.loads(line)
-                            yield {k: r[k] for k in cols if k in r} if cols else r
+                            if in_window(r):
+                                yield {k: r[k] for k in cols if k in r} if cols else r
         else:
-            for r in (ref._results or []):
-                yield {k: r[k] for k in cols if k in r} if cols else r
+            for r in ref._results or []:
+                if in_window(r):
+                    yield {k: r[k] for k in cols if k in r} if cols else r
 
     def compute_all(self) -> Dict[str, pd.DataFrame]:
         group_configs = [
@@ -126,9 +153,7 @@ class EvaluationReport:
 
         summary_dfs: Dict[str, pd.DataFrame] = {}
         # config_name -> model_name -> {group_key -> {prediction: [], actual: []}}
-        all_buckets: Dict[str, Dict[str, Dict[tuple, Dict[str, list]]]] = {
-            name: {} for name, _ in group_configs
-        }
+        all_buckets: Dict[str, Dict[str, Dict[tuple, Dict[str, list]]]] = {name: {} for name, _ in group_configs}
 
         for model_name, ref in self.refs.items():
             summary_preds: List[float] = []
@@ -149,10 +174,7 @@ class EvaluationReport:
 
                 for config_name, group_keys in group_configs:
                     try:
-                        key = tuple(
-                            year if k == "year" else r[k]
-                            for k in group_keys
-                        )
+                        key = tuple(year if k == "year" else r[k] for k in group_keys)
                     except KeyError:
                         continue
                     bucket = all_buckets[config_name][model_name]
@@ -161,15 +183,13 @@ class EvaluationReport:
                     bucket[key]["prediction"].append(pred)
                     bucket[key]["actual"].append(actual)
 
-            summary_dfs[model_name] = pd.DataFrame(
-                {"prediction": summary_preds, "actual": summary_actuals}
-            )
+            summary_dfs[model_name] = pd.DataFrame({"prediction": summary_preds, "actual": summary_actuals})
             del summary_preds, summary_actuals
 
         rows_summary = []
         for model_name, df in summary_dfs.items():
             rows_summary.append(
-                {"model": model_name, **self._apply_evaluators(df, model_dfs=summary_dfs)}
+                {"model": model_name, "forecasts": len(df), **self._apply_evaluators(df, model_dfs=summary_dfs)}
             )
 
         rows_by_config: Dict[str, List[Dict]] = {name: [] for name, _ in group_configs}
@@ -178,9 +198,7 @@ class EvaluationReport:
             all_keys = sorted({k for b in model_buckets.values() for k in b})
             for key in all_keys:
                 model_dfs = {
-                    name: pd.DataFrame(model_buckets[name][key])
-                    for name in model_buckets
-                    if key in model_buckets[name]
+                    name: pd.DataFrame(model_buckets[name][key]) for name in model_buckets if key in model_buckets[name]
                 }
                 for name, df in model_dfs.items():
                     row: Dict = {"model": name}
@@ -228,11 +246,7 @@ class EvaluationReport:
         rows = []
         all_keys = sorted({k for b in all_buckets.values() for k in b})
         for key in all_keys:
-            model_dfs = {
-                name: pd.DataFrame(all_buckets[name][key])
-                for name in all_buckets
-                if key in all_buckets[name]
-            }
+            model_dfs = {name: pd.DataFrame(all_buckets[name][key]) for name in all_buckets if key in all_buckets[name]}
             for name, df in model_dfs.items():
                 row = {"model": name}
                 for k, v in zip(group_keys, key):

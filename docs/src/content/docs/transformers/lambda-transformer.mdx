@@ -1,0 +1,116 @@
+---
+title: LambdaTransformer
+description: Custom column arithmetic or a full custom transform, without writing a new class
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Builds one-off columns from an expression or a callable, for feature arithmetic that doesn't need its own
+transformer class. Exactly one of `func` and `columns` must be given.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import LambdaTransformer
+
+# columns: {new_or_existing_column: expression}. A string is evaluated with df.eval(...).
+df = LambdaTransformer(
+    columns={"residual_load": "load_forecast - wind_forecast - solar_forecast"}
+).transform(df)
+
+# func: full control, df -> df
+df = LambdaTransformer(func=lambda df: df.assign(spread=df["price"] - df["price_d-1"])).transform(df)
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `func` | lambda \| str \| None | `None` | `df -> df` lambda (or its source text) for full control over the output frame |
+| `columns` | dict \| None | `None` | `{new_or_existing_column: expression}`. Each expression is a `df -> Series` lambda (or its source text), or a string for `df.eval(...)` |
+
+## `columns`: string or callable expressions
+
+Each entry adds or overwrites one column. A `df -> Series` lambda gives full pandas. Any other string is
+evaluated with [`DataFrame.eval`](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.eval.html).
+
+Entries run in the order given, each against the frame as built so far, including the columns earlier entries
+in the same `columns` dict just added:
+
+```python
+LambdaTransformer(columns={
+    "residual_load": "load_forecast - wind_forecast - solar_forecast",
+    "residual_load_per_capacity": "residual_load / installed_capacity",  # uses the column above
+})
+```
+
+Column names that `df.eval` can't parse as a plain identifier (spaces, operators, a name starting with a
+digit) need backticks, exactly as in pandas:
+
+```python
+LambdaTransformer(columns={"spread": "`price (EUR)` - load"})
+```
+
+## `func`: full control
+
+```python
+LambdaTransformer(func=lambda df: df.assign(spread=df["price"] - df["price_d-1"]))
+```
+
+`func` receives the whole frame and returns the whole frame. Use it for anything `columns` can't express, such
+as dropping a column or building several columns with a shared intermediate.
+
+## Index guard
+
+The result must have exactly the same index as the input: the same rows, in the same order.
+
+- `columns` mode can't break this. It only ever assigns aligned columns onto a copy of the input frame.
+- A `func` that resamples, filters, sorts or otherwise reorders rows raises `ValueError` instead of silently
+  changing what a later step in the pipeline sees. Row-count or row-order changes belong in a dedicated
+  transformer (`ResampleTransformer`, etc.), not here.
+
+<Aside type="caution">
+  **You are responsible for look-ahead.** `LambdaTransformer` doesn't know which columns are forecasts and
+  which are realised, or what a forecast issued on a row's day could actually have known.
+
+  Same-row arithmetic is safe: it only combines values already sitting on that row, e.g.
+  `"load_forecast - wind_forecast - solar_forecast"`.
+
+  These leak, because they pull in values a forecast issued on the row's own day would not yet have:
+  - `df["price"].shift(-1)` or any negative shift: tomorrow's value, today.
+  - `.bfill()`: a value copied backward from a later row.
+  - A rolling window that reaches past the current row (`.rolling(...).mean()` without excluding the current
+    and later rows, or a centered window).
+  - Normalising with a whole-sample statistic, `(df["price"] - df["price"].mean()) / df["price"].std()`
+    computed once over the whole loaded range uses the mean and std of data that hadn't happened yet for the
+    early rows.
+</Aside>
+
+## Serialization
+
+```python
+from epftoolbox2.pipelines import DataPipeline
+
+# Lambdas are saved as their source text; df.eval strings as they are.
+DataPipeline().add_transformer(
+    LambdaTransformer(columns={
+        "residual_load": "load_forecast - wind_forecast - solar_forecast",
+        "log_load": lambda df: np.log(df["load_forecast"]),
+    })
+).save("pipeline.yaml")
+# pipeline.yaml:  log_load: lambda df: np.log(df["load_forecast"])
+
+# A lambda that uses an outside variable can't be saved: the text alone wouldn't mean the same thing.
+base = 18.0
+LambdaTransformer(columns={"hdd": lambda df: (base - df["temp"]).clip(lower=0)})    # save() raises TypeError
+LambdaTransformer(columns={"hdd": lambda df: (18.0 - df["temp"]).clip(lower=0)})    # fine
+LambdaTransformer(columns={"hdd": "lambda df: (18.0 - df['temp']).clip(lower=0)"})  # the same, as text
+```
+
+A lambda is converted to text when it only uses its argument, `pd`, `np` and builtins, and its source can be
+found unambiguously (a file or a notebook cell, not the plain interactive interpreter). Named functions
+(`def`) and lambdas that close over other variables raise `TypeError` on `save()`.
+
+<Aside type="caution">
+  Loading a pipeline YAML evaluates the lambdas in it, so it runs that code. Only load pipeline files you trust.
+</Aside>

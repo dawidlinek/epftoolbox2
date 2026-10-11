@@ -1,0 +1,62 @@
+---
+title: DailyProfileTransformer
+description: Copy each local day's hourly values onto every row of that day
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Copies each local day's values of a column onto every row of that day. With hourly data, `price` becomes
+`price_h00` … `price_h23`: on every row of day D, `price_h05` is the price at 05:00 on D. With 15-minute data the
+columns are `price_s00` … `price_s95`.
+
+The library fits one model per hour, and each row only carries its own hour's values. Lagging profile columns by
+days makes cross-hour inputs possible, such as LEAR's "all 24 prices of the previous day"
+(see [Predictor Presets](/epftoolbox2/model-pipeline/presets/)).
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import DailyProfileTransformer, LagTransformer
+
+df = DailyProfileTransformer(columns=["price"]).transform(df)
+df = LagTransformer(columns=[f"price_h{h:02d}" for h in range(24)], lags=[1, 2, 6], freq="day").transform(df)
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `columns` | str \| List[str] | required | Column name(s) to spread over the day |
+| `freq` | str | `"1h"` | Slot length of the data: `"1h"` adds 24 columns per input column, `"15min"` adds 96 |
+
+`epftoolbox2.presets.profile_columns("price", freq="1h")` returns the column names.
+
+## Information Set
+
+A row of day D only gets values of day D. Whether they are known when a forecast is issued on D depends on the
+column:
+
+- **Day-ahead prices and day-ahead forecasts for D** are published on D-1, so `price_h05` on the rows of D is known.
+- **Realised values**, such as `load_actual`, are not known for the rest of D in the morning of D. Use their
+  profiles only lagged: `load_actual_h05_d-1`.
+
+<Aside type="caution">
+  Leading a profile (`price_h05_d+1`) looks up the prices being forecast. Only lead columns that are known in
+  advance.
+</Aside>
+
+## DST Days
+
+On a time-zone-aware index the day of the spring switch has no 02:00, so `price_h02` is NaN on its rows, and on
+the autumn switch day `price_h02` takes the first 02:00. A warning suggests running
+[`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/) first, which gives every day 24 slots:
+
+```python
+df = DSTNormalizeTransformer(freq="1h").transform(df)
+df = DailyProfileTransformer(columns=["price"]).transform(df)
+```
+
+A NaN profile column makes the model skip every forecast whose row uses it, so without normalisation a model with
+`price_h02_d-1` loses all forecasts issued on the day after the spring switch.
+
+On a UTC index the "days" are UTC days, and the transformer warns.

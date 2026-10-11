@@ -5,8 +5,6 @@ description: Lasso regression with cross-validated regularization
 
 import { Aside } from '@astrojs/starlight/components';
 
-# LassoCVModel
-
 Lasso regression with cross-validated regularization using scikit-learn's [`LassoCV`](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LassoCV.html).
 
 ## Basic Usage
@@ -42,8 +40,9 @@ model = LassoCVModel(
 | `cv` | int | `5` | Cross-validation folds |
 | `max_iter` | int | `10000` | Max optimization iterations |
 | `name` | str | `"Model"` | Display name for reports |
+| `scaler` | str, dict or scaler | `"standard"` | `"standard"`, `"asinh"` or `"npit"`, or `{"name": ..., "params": {...}}`. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
 
-Callable predictors accept `(horizon)` or `(horizon, hour)` — see [OLSModel](/epftoolbox2/models/ols/#parameters) for details.
+Callable predictors accept `(horizon)` or `(horizon, hour)`. See [OLSModel](/epftoolbox2/models/ols/#parameters) for details.
 
 ## When to Use
 

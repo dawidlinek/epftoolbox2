@@ -31,12 +31,12 @@ class CsvExporter(Exporter):
         base_df: Optional[pd.DataFrame] = None
 
         for model_name, model_df in report.iter_details():
-            model_df = model_df.rename(columns={
-                "prediction": f"{model_name}_prediction",
-            })
-            model_df[f"{model_name}_error"] = (
-                model_df[f"{model_name}_prediction"] - model_df["actual"]
+            model_df = model_df.rename(
+                columns={
+                    "prediction": f"{model_name}_prediction",
+                }
             )
+            model_df[f"{model_name}_error"] = model_df[f"{model_name}_prediction"] - model_df["actual"]
             keep = _MERGE_KEYS + [f"{model_name}_prediction", f"{model_name}_error"]
             if base_df is None:
                 base_df = model_df[base_cols + [f"{model_name}_prediction", f"{model_name}_error"]].copy()
@@ -58,9 +58,7 @@ class CsvExporter(Exporter):
         base_df = base_df.sort_values(by=sort_keys).reset_index(drop=True)
         base_df.to_csv(self.path, index=False)
 
-    def _join_extra_columns(
-        self, base_df: pd.DataFrame, source_data: pd.DataFrame
-    ) -> pd.DataFrame:
+    def _join_extra_columns(self, base_df: pd.DataFrame, source_data: pd.DataFrame) -> pd.DataFrame:
         available = [c for c in self.extra_columns if c in source_data.columns]
         if not available:
             return base_df

@@ -3,8 +3,6 @@ title: Extending the Library
 description: Creating custom components for epftoolbox2
 ---
 
-# Extending the Library
-
 epftoolbox2 is designed to be extensible. Create custom sources, transformers, validators, models, evaluators, and exporters.
 
 ## Custom DataSource
@@ -33,15 +31,32 @@ class MyApiSource(DataSource):
         # Fetch data from API
         # ... your implementation ...
         
-        return df
+        return df  # UTC DatetimeIndex covering at least [start, end)
     
     def get_cache_config(self) -> Optional[dict]:
         # Return dict for caching, or None to disable
         return {
             "source_type": "my_api",
             "api_url": self.api_url,
+            "schema_version": 1,  # bump when parsing changes, so cached frames are rebuilt
         }
 ```
+
+`get_cache_config()` must contain every parameter that changes the output (not the API key). The pipeline drops
+rows outside `[start, end)`, and a fetch for a sub-range must give the same values as a fetch for a larger range.
+Otherwise a run assembled from cached pieces differs from a fresh one.
+
+If some of the rows you return are placeholders or provisional for longer than the cache's two unsettled days (for
+example NaN for a period the provider has not published yet), say so on the frame:
+
+```python
+df.attrs["settled_until"] = pd.Timestamp("2026-09-01", tz="UTC")  # rows at or after this are not settled
+```
+
+The cache then does not record those rows as covered and fetches them again next time, while the settled rows
+before the timestamp come from disk. Leave it out when every row is settled. A naive timestamp is taken to be UTC.
+The value may also be an ISO 8601 string (`timestamp.isoformat()`), which you need if the frame is saved with
+`to_parquet`, because pandas writes `attrs` as JSON. See [Data Caching](/epftoolbox2/data-pipeline/caching/).
 
 ---
 
@@ -150,10 +165,10 @@ class sMAPEEvaluator(Evaluator):
 
 Every evaluator must implement:
 
-- **`name`** — class attribute used as the column header in reports
-- **`compute(self, df, **kwargs) -> float`** — aggregate metric over a DataFrame with `prediction` and `actual` columns
+- **`name`**: class attribute used as the column header in reports
+- **`compute(self, df, **kwargs) -> float`**: aggregate metric over a DataFrame with `prediction` and `actual` columns
 
-The `**kwargs` may include `model_dfs` — a dict of all model DataFrames for the current data slice, used by cross-model evaluators like `rMAEEvaluator`.
+The `**kwargs` may include `model_dfs`: a dict of all model DataFrames for the current data slice, used by cross-model evaluators like `rMAEEvaluator`.
 
 ### Using Custom Evaluators
 

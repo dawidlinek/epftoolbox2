@@ -1,0 +1,92 @@
+---
+title: DSTNormalizeTransformer
+description: Give every local day exactly 24 (or 96) slots
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Turns a local-time index into naive wall-clock time with exactly 24 slots per day (96 for 15-minute data), the
+convention of the original epftoolbox (Lago et al., 2021). On the day clocks go back, the two occurrences of the
+repeated hour are averaged into one slot. On the day clocks go forward, the skipped hour is filled with the
+average of the hour before and the hour after it. An `is_dst_adjusted` column marks those slots.
+
+It is optional: nothing else in the library needs it, and no default changes.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import DSTNormalizeTransformer
+
+transformer = DSTNormalizeTransformer(freq="1h")
+df = transformer.transform(df)  # df has a local-time index, e.g. after TimezoneTransformer
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `freq` | str | `"1h"` | Slot length of the data: `"1h"` gives 24 slots a day, `"15min"` gives 96. Must divide a day |
+| `tz` | str \| None | `None` | Time zone to convert the index to first. `None` means the index is already in local time |
+
+## What Happens on Switch Days
+
+| Day (Europe/Warsaw) | Input | Output | `is_dst_adjusted` |
+|---------------------|-------|--------|-------------------|
+| Spring switch | 23 hours, no 02:00 | 02:00 = mean of 01:00 and 03:00 | 1 on 02:00 |
+| Autumn switch | 25 hours, 02:00 twice | 02:00 = mean of the two 02:00 values | 1 on 02:00 |
+| Any other day | 24 hours | unchanged | 0 |
+
+- With 15-minute data the four skipped quarter-hours all get the mean of 01:45 and 03:00, and each repeated
+  quarter-hour is averaged with its twin.
+- A missing value in either input gives a missing result, so a gap is not averaged away.
+- Non-numeric columns (e.g. `weekday_name`) take the first occurrence and the slot before, respectively.
+- Gaps that are not caused by DST, and partial days at either end of the data, are left as they are.
+- Every filled value comes from the same local day, so no row uses data from a later day.
+
+## Pipeline Order
+
+```python
+pipeline = (
+    DataPipeline()
+    .add_source(EntsoeSource(...))  # UTC
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))  # local time, 23/25-hour days
+    .add_transformer(ResampleTransformer(freq="1h"))
+    .add_transformer(DSTNormalizeTransformer(freq="1h"))  # naive wall-clock time, 24 slots a day
+    .add_transformer(LagTransformer(columns=["price"], lags=[1, 2, 7], freq="day"))
+)
+```
+
+- Put it **before** `LagTransformer`. On the naive index a day lag is a plain 24-slot shift, and lags then read
+  the real 02:00 of the day before rather than an average.
+- Don't run `TimezoneTransformer` after it: a naive index is read as UTC.
+- Columns that describe the slot itself, such as hour-of-day dummies from `CalendarSource(hour="onehot")`, come
+  out averaged on the filled spring slot. Build them after normalising if you need them.
+
+With one row per hour and day, the models' DST caveats go away: every hour has exactly one training row per day,
+and the spring switch day gets its own 02:00 forecast.
+
+## Synthetic Actuals
+
+On flagged slots the values are synthetic, and that includes the prices the model uses as targets and scores as
+"actuals". Keep them out of error metrics, or report them separately:
+
+```python
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.results.report import EvaluationReport
+
+flagged = df.index[df["is_dst_adjusted"] == 1]
+periods_per_hour = 1  # 4 for 15-minute data
+synthetic = {(ts.date().isoformat(), ts.hour * periods_per_hour + ts.minute // 15) for ts in flagged}
+
+for name, details in report.iter_details():
+    keep = [(d, p) not in synthetic for d, p in zip(details["target_date"], details["hour"])]
+    real_only = EvaluationReport({name: details[keep].to_dict("records")}, [MAEEvaluator()])
+    print(name, real_only.summary())
+```
+
+Filter every model the same way so they're still compared on identical forecasts.
+
+<Aside type="note">
+  The flagged slots are two per year (eight for 15-minute data). Leaving them in changes metrics very little, but
+  they aren't real prices.
+</Aside>

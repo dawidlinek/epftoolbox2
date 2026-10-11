@@ -5,8 +5,6 @@ description: Resume interrupted model training runs
 
 import { Aside, FileTree } from '@astrojs/starlight/components';
 
-# Incremental Training
-
 When training models over long test periods, epftoolbox2 can save intermediate results and resume if interrupted.
 
 ## Enabling Incremental Training
@@ -28,12 +26,15 @@ report = pipeline.run(
 
 ## Cache Directory Structure
 
+Each model gets a results file and a manifest next to it:
+
 <FileTree>
 
 - results/
     - ols.jsonl
+    - ols.manifest.json
     - lasso.jsonl
-    - model_name.jsonl
+    - lasso.manifest.json
 
 </FileTree>
 
@@ -46,6 +47,65 @@ Each line in `results.jsonl` is a JSON object:
 {"run_date": "2024-02-01", "target_date": "2024-02-02", "hour": 0, "horizon": 1, "day_in_test": 0, "prediction": 92.33908219178082, "actual": 58.62, "coefficients": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
 ```
 
+A task is considered already done by its `(hour, horizon, run_date)`, the actual calendar date, not the
+`day_in_test` offset from `test_start`, so extending or shifting `test_start` between runs into the same
+directory can't make an unrelated date look already computed.
+
 <Aside type="tip">
   For long training runs, use `save_dir` to avoid losing progress if the script crashes or is interrupted.
+</Aside>
+
+---
+
+## The Manifest
+
+`<model>.manifest.json` records what produced `<model>.jsonl`: the model class and its hyperparameters (all
+of them: whatever the model returns from its `_model_kwargs`), the predictors' per-`(period, horizon)`
+order (not just which names are used: a reordering changes what stored coefficients mean, and a hash of
+the ordered layout tells `["price_d-1", "price_d-2"]` apart from `["price_d-{horizon}"]`), target, horizon,
+freq, training window, a content hash of the data columns used up to `test_end` (rows after `test_end`
+don't affect any forecast in this run, so appending them between runs isn't a mismatch), and the data's own
+time zone (converting the same instants to a different zone keeps the same hash, since it's over each
+value's own representation, not the zone label): everything that defines what a forecast in the file
+actually *is*. It also records provenance (package version, git SHA if available, when it was first and
+last written) and the
+[information set](/epftoolbox2/model-pipeline/information-set/) settings, but neither is compared: a
+version bump or a new commit does not by itself invalidate a results directory, and the information set
+gates which predictors are allowed before fitting rather than changing what a fitted model predicts.
+
+Before resuming, the pipeline compares a manifest built from the current run to the one on disk. If they
+disagree, it raises rather than silently mixing forecasts made under two configurations:
+
+```
+ManifestMismatchError: OLS: the results in results were produced with a different configuration than this
+run (ols.manifest.json):
+  - predictor_layout_hash: '9c2c1f...' (existing results) vs 'a71e08...' (this run)
+Resuming would silently mix forecasts made under two configurations. Use a different save_dir, remove the
+existing results, or pass allow_manifest_mismatch=True (`epf model --allow-manifest-mismatch`) to overwrite
+the manifest and resume anyway.
+```
+
+```python
+report = pipeline.run(
+    data=df,
+    test_start="2024-01-01",
+    test_end="2024-12-31",
+    save_dir="results",
+    allow_manifest_mismatch=True,  # overwrite the manifest and resume anyway
+)
+```
+
+**A `.jsonl` file with no `.manifest.json` next to it** is not
+a mismatch: by default it is accepted with a warning, and a manifest is written from then on. Pass
+`require_manifest=True` to refuse them instead, if you want the stricter guarantee for every results
+directory you resume into:
+
+```python
+report = pipeline.run(..., save_dir="results", require_manifest=True)
+```
+
+<Aside type="caution">
+  A `training_window`, predictor list, model hyperparameter, or the data itself changing between runs into
+  the same `save_dir` raises by default. Extending `test_start`/`test_end` to cover more days does not,
+  that's the normal way to grow a resumable run.
 </Aside>

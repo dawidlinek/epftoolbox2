@@ -1,0 +1,215 @@
+---
+title: Information Set
+description: Check that every predictor only uses data known at the time a forecast is issued
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+A forecast issued on day D may only use values that are actually known at the moment it is issued, not
+everything that ends up in the historical data. `epftoolbox2.information_set` declares when each column
+becomes known and checks every expanded predictor (and the newest training target) against that boundary
+before any model is fitted.
+
+**The convention:** a predictor's availability, including a raw, unshifted (lag 0) column such as `price`
+used to forecast a different target, is decided purely by comparing its publication time to `issue_time`,
+never by a fixed lag cutoff. This is independent of the model's own training-target boundary (the newest
+training target is always `day - 1`, see [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/)).
+Changing one is not a side effect of changing the other.
+
+---
+
+## Quick Start
+
+```python
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
+```
+
+`issue_time`/`issue_timezone` is a shortcut for `InformationSet(issue_time, issue_timezone)` with the built-in
+availability rules. `ModelPipeline.run()` (and `Workflow.run()`) then check every model's predictors before
+fitting anything and raise `InformationSetError` (a `ValueError`) if one uses a value that is not known yet:
+
+```
+OLS: 98 use(s) of inputs not known at the issue time (11:45 Europe/Brussels on the issue day D):
+  - predictor load_actual: 'load_actual' is known 1h after the end of the period. Periods 10-23, horizons 1-7;
+    e.g. load_actual for period 23 is known D+1 01:00, issued D 11:45.
+Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too strict for your data, override it
+with InformationSet(rules={...}).
+```
+
+`InformationSet()` with no arguments issues at `11:45` `Europe/Brussels`, 15 minutes before the 12:00 CET gate
+closure of the day-ahead auction.
+
+Passing no `issue_time` and no `information_set` (the default) skips the check entirely, so existing pipelines
+are unaffected until you opt in.
+
+---
+
+## Built-in Availability Rules
+
+| Column | Available from |
+|---|---|
+| `price` (ENTSO-E A44) | published ~13:00 Brussels on D-1 (within about 1h of the 12:00 gate closure) |
+| `load_actual` (A65/A16) | 1h after the end of the delivery period |
+| `load_forecast` (A65/A01) | published 10:00 Brussels on D-1 |
+| `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00, for the whole following week (Brussels by default, a bound `EntsoeSource` overrides this with the market's own zone, see below) |
+| `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) |
+| `generation_*` (A75 actual generation) | 1h after the end of the delivery period |
+| Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static, known in advance |
+
+<Aside type="caution">
+  A69 wind/solar's *legal* deadline (18:00 D-1) is after the day-ahead gate closure (12:00 D-1), and ENTSO-E
+  gives no publication time per value, so the default rule is conservative and will flag `generation_*_forecast`
+  predictors used same-day-ahead. Accept `assumptions=["entsoe_a69_by_10"]` to instead assume 10:00 D-1 (the
+  same slot as the day-ahead load forecast). This is a documented assumption, not the default.
+</Aside>
+
+Column names are parsed the same way predictors are: `price_d-1` resolves to the base column `price` shifted
+one calendar day back. There is no built-in default rule for weather columns, a `*_temperature_2m`-style
+name alone doesn't say whether it's a forecast or an observed value. A `DataPipeline`'s sources refine the
+check: `with_source_rules()` (called automatically by `Workflow`) teaches it about a `CalendarSource(prefix=...)`,
+overrides the default week-ahead rule for an `EntsoeSource`'s own columns, and assigns a rule to exactly the
+columns an `OpenMeteoSource` emits:
+
+- An `EntsoeSource` with `"load"` in `type` gets its own `load_forecast_daily_min`/`_max` rule (prefixed the
+  same way as its other columns), evaluated in the source's own bound market zone (`EntsoeSource._daily_zone`)
+  instead of the `Europe/Brussels` default: the zone the value's local midnight is actually anchored to. A
+  neighbouring area combined into another market's `DataPipeline` (e.g. `EntsoeSource("FI", ..., prefix="fi")`
+  inside `DataPipeline(timezone="Europe/Warsaw")`) is checked in the market's zone, not Finland's own, matching
+  where the value is stamped.
+- `weather_cutoff(source.run, f"{delay}h")`, `delay` coming from `publication_delay_hours(source.model)`, known
+  `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading `_d+k`. A shift after
+  the leading `_d+k` moves the day the run is read from: `temperature_2m_d+1_d+1` (a `LagTransformer` with
+  `lags=[-1]` on `temperature_2m_d+1`) holds the value of D+1 and is known only after D+1's run, so it is
+  flagged, while `temperature_2m_d+1_d-1` comes from D-1's run. This is a conservative, model-side estimate of the run's real-world publication lag (ICON 4.5h, GFS 6.5h, ECMWF IFS 9h,
+  JMA 9.6h, 10h for an unknown model): `OpenMeteoSource` itself has no notion of issue time or delay, only of
+  the nominal cutoff `run`.
+
+`run` and `model` are read with `getattr` and default when a source doesn't set them, so this works with any
+`OpenMeteoSource`-like object.
+
+An `OpenMeteoSource` column cut each local day D of its market zone off at D's own run. The check and the probe
+read a row's issue day D from the data's index, so they need the index in that zone. On a UTC index (a pipeline
+without `TimezoneTransformer`) the row at 22:00Z in summer belongs to the next day of `Europe/Warsaw`, whose run is
+published only the next morning, and the check would read the wrong run. `check()`, `violations()` and
+`leakage_probe` therefore raise `InformationSetError` when such a column sits on an index whose wall clock differs
+from the source's market zone, and say to add a `TimezoneTransformer` (it takes its zone from
+`DataPipeline(timezone=...)`). A zone with the same wall clock on every row, such as `Europe/Berlin` for a Warsaw
+source, passes.
+
+---
+
+## Custom Rules and Assumptions
+
+```python
+from epftoolbox2.information_set import Availability, InformationSet
+
+info = InformationSet(
+    "11:45", "Europe/Brussels",
+    rules={
+        "fuel_ttf": Availability.daily_close("18:00"),          # a daily settlement price
+        "my_forecast": Availability.published("09:00", days_before=1),
+    },
+    assumptions=["entsoe_a69_by_10"],
+    unknown="raise",   # "warn" or "ignore" also accepted
+)
+pipeline = ModelPipeline(information_set=info)
+```
+
+<Tabs>
+  <TabItem label="Availability kinds">
+    ```python
+    Availability.static()                                   # known in advance (calendar)
+    Availability.realised(delay="1h")                        # known `delay` after the period ends
+    Availability.published("13:00", days_before=1)           # published at a fixed local time, days_before delivery
+    Availability.daily_close("18:00")                        # published(time, days_before=0)
+    Availability.weekly(weekday="friday", time="10:00")       # published once for the whole next week
+    Availability.weather_run(delay="6h")                      # a rolling forecast run ~ row time + delay
+    Availability.as_of("09:00", "Europe/Brussels")             # known at a fixed time on the issue day D;
+                                                                # a leading `_d+k` doesn't change that, a
+                                                                # shift after it moves the day
+    Availability.weather_cutoff(run="00", delay="9.6h")        # OpenMeteoSource: known `delay` after `run`:00
+                                                                # UTC on the issue day D; used by source_rules
+    ```
+  </TabItem>
+  <TabItem label="Rule keys">
+    Keys in `rules=` may be exact column names or glob patterns (`fuel_*`), and take precedence over accepted
+    assumptions, rules learned from data sources, and the built-in defaults, in that order.
+  </TabItem>
+</Tabs>
+
+**Unknown columns.** A predictor whose base column has no rule anywhere is, by default, a hard error
+(`unknown="raise"`): a check that silently skipped columns it knows nothing about would report a pass it
+cannot vouch for. Pass `unknown="warn"` to log instead, or `"ignore"` to skip silently once you've reviewed
+which columns that affects.
+
+---
+
+## Leakage Probe
+
+`InformationSet.check()` is a static analysis of predictor *names*. `leakage_probe` checks the same boundary
+empirically, against real data and a real model:
+
+```python
+from epftoolbox2.information_set import leakage_probe
+
+result = leakage_probe(model, data, run_day="2024-06-03", information_set=info, target="price", horizon=7)
+result.assert_ok()  # raises AssertionError listing the forecasts that moved
+```
+
+It perturbs every value in `data` that is not known at `information_set`'s issue time on `run_day` (replacing
+it with noise), runs `model` on the original and the perturbed data, and checks that every forecast issued on
+`run_day` is unchanged. Any forecast that moves depends on information from after the issue time. Use it as a
+regression test for a specific model and information set, alongside (not instead of) the static `check()`.
+
+**`check_target_boundary=True`** additionally perturbs the target column for every row on or after `run_day`,
+regardless of its own Availability rule: the model's own boundary (training targets end at D-1) is a deliberate,
+conservative choice that can be stricter than a column's factual publication time, a day-ahead price, for
+example, really is published before its own delivery day.
+
+**`rebuild`** catches a leak a transformer bakes into a derived column, which perturbing the already-built
+column by its parsed name cannot see (a wrong shift moves the *right* raw value into the *wrong* row, and
+that row's name still looks fine). Pass raw, pre-transform data as `data` and a callable that reproduces the
+transformer pipeline:
+
+```python
+def rebuild(raw):
+    df = raw.copy()
+    for transformer in data_pipeline.transformers:
+        df = transformer.transform(df)
+    return df
+
+result = leakage_probe(model, source_data, run_day="2024-06-03", information_set=info, rebuild=rebuild)
+```
+
+Perturbation is applied to the raw `data` by its own columns' availability, then `rebuild` is called on both
+the original and the perturbed raw data before the model runs.
+
+---
+
+## YAML and the CLI
+
+```yaml
+model_pipeline:
+  information_set:
+    issue_time: "11:45"
+    issue_timezone: Europe/Brussels
+    assumptions: [entsoe_a69_by_10]
+  models: [...]
+```
+
+`epf model` accepts `--issue-time HH:MM` and `--issue-timezone ZONE`, which override the YAML's
+`information_set` (or add one if the YAML has none):
+
+```bash
+epf model model_pipeline.yaml --data data.csv --test-start 2024-02-01 --test-end 2024-03-01 \
+  --issue-time 11:45 --issue-timezone Europe/Brussels
+```
+
+---
+
+## See Also
+
+- [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/): `run()` parameters and the other pre-fit data checks
+- [ModelPipeline Serialization](/epftoolbox2/model-pipeline/serialization/): the full YAML format

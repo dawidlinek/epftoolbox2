@@ -1,36 +1,165 @@
-import pytest
-import pandas as pd
+import functools
+import json
+import re
+from pathlib import Path
 from unittest.mock import Mock, patch
+
+import numpy as np
+import pandas as pd
+import pytest
+import requests
+
+from epftoolbox2.data.sources import entsoe as entsoe_module
 from epftoolbox2.data.sources.entsoe import (
     EntsoeSource,
     lookup_area,
     AREAS,
 )
+from epftoolbox2.pipelines import DataPipeline
+
+KEY = "test-key-0000-secret"
+PL = AREAS["PL"]
+AT = AREAS["AT"]
+DE_LU = AREAS["DE_LU"]
+FI = AREAS["FI"]
+LT = AREAS["LT"]
+FIXTURES = Path(__file__).parent / "fixtures" / "entsoe"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Synthetic XML builders and a fake HTTP session
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def _period(start, end, resolution, points, tag="quantity"):
+    pts = "".join(f"<Point><position>{p}</position><{tag}>{v}</{tag}></Point>" for p, v in points.items())
+    return (
+        f"<Period><timeInterval><start>{start}</start><end>{end}</end></timeInterval>"
+        f"<resolution>{resolution}</resolution>{pts}</Period>"
+    )
+
+
+def _series(*periods, curve="A03", business_type=None, psr=None, in_bz=None, out_bz=None, sequence=None):
+    parts = ["<TimeSeries><mRID>1</mRID>"]
+    if business_type:
+        parts.append(f"<businessType>{business_type}</businessType>")
+    if in_bz:
+        parts.append(f'<inBiddingZone_Domain.mRID codingScheme="A01">{in_bz}</inBiddingZone_Domain.mRID>')
+    if out_bz:
+        parts.append(f'<outBiddingZone_Domain.mRID codingScheme="A01">{out_bz}</outBiddingZone_Domain.mRID>')
+    if sequence is not None:
+        parts.append(
+            "<classificationSequence_AttributeInstanceComponent.position>"
+            f"{sequence}</classificationSequence_AttributeInstanceComponent.position>"
+        )
+    if curve:
+        parts.append(f"<curveType>{curve}</curveType>")
+    if psr:
+        parts.append(f"<MktPSRType><psrType>{psr}</psrType></MktPSRType>")
+    parts.extend(periods)
+    parts.append("</TimeSeries>")
+    return "".join(parts)
+
+
+def _doc(*series, root="GL_MarketDocument"):
+    ns = "urn:iec62325.351:tc57wg16:451-6:generationloaddocument:3:0"
+    return f'<?xml version="1.0" encoding="utf-8"?>\n<{root} xmlns="{ns}"><mRID>x</mRID>{"".join(series)}</{root}>'
+
+
+def _ack(text):
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<Acknowledgement_MarketDocument '
+        'xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0"><mRID>1</mRID>'
+        f"<Reason><code>999</code><text>{text}</text></Reason></Acknowledgement_MarketDocument>"
+    )
+
+
+NO_DATA = _ack("No matching data found for Data item X and interval Y.")
+
+
+def _response(params, text, status=200, headers=None, reason="OK"):
+    """A real requests.Response, with the URL requests would build from `params`."""
+    response = requests.Response()
+    response.status_code = status
+    response._content = text.encode()
+    response.headers.update({"Content-Type": "text/xml", **(headers or {})})
+    response.url = requests.Request("GET", EntsoeSource.API_URL, params=params).prepare().url
+    response.reason = reason
+    return response
+
+
+class FakeSession:
+    """Routes session.get calls to a function of the query parameters and records them."""
+
+    def __init__(self, route):
+        self.route = route
+        self.calls = []
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        self.calls.append({"url": url, "params": dict(params or {}), "headers": dict(headers or {})})
+        result = self.route(dict(params or {}))
+        if isinstance(result, Exception):
+            raise result
+        if isinstance(result, requests.Response):
+            return result
+        return _response(params, result if result is not None else NO_DATA)
+
+    def close(self):
+        pass
+
+
+def _source(route, country="PL", type=("price",), prefer_15min=False, **kwargs):
+    source = EntsoeSource(country, KEY, type=list(type), prefer_15min=prefer_15min, **kwargs)
+    source.session = FakeSession(route)
+    source.logger = Mock()
+    return source
+
+
+def _route_by_document(docs):
+    """docs: {(documentType, processType or None): xml}"""
+
+    def route(params):
+        return docs.get((params.get("documentType"), params.get("processType")))
+
+    return route
+
+
+def _utc(ts):
+    return pd.Timestamp(ts, tz="UTC")
+
+
+def _hours(start, n):
+    return {p: float(start + p) for p in range(1, n + 1)}
+
+
+def _week_period(zone, first_day, values, resolution="P1D"):
+    """A P1D Period covering `len(values)` consecutive local calendar days of `zone` starting `first_day` (an
+    ISO date string), exactly as ENTSO-E reports a week-ahead series: one Point per local day."""
+    days = pd.date_range(first_day, periods=len(values) + 1, freq="D", tz=zone)
+    start = days[0].tz_convert("UTC").strftime("%Y-%m-%dT%H:%MZ")
+    end = days[-1].tz_convert("UTC").strftime("%Y-%m-%dT%H:%MZ")
+    points = {i: v for i, v in enumerate(values, start=1)}
+    return _period(start, end, resolution, points)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Area lookup and configuration
+# ---------------------------------------------------------------------------------------------------------------
 
 
 class TestAreaLookup:
-    """Test area lookup functionality"""
-
     def test_lookup_valid_area(self):
-        """Test looking up a valid area code"""
         name, code = lookup_area("PL")
         assert name == "PL"
         assert code == "10YPL-AREA-----S"
 
     def test_lookup_is_case_insensitive(self):
-        """Test that lookup is case insensitive"""
-        name1, code1 = lookup_area("pl")
-        name2, code2 = lookup_area("PL")
-        assert name1 == name2
-        assert code1 == code2
+        assert lookup_area("pl") == lookup_area("PL")
 
     def test_lookup_invalid_area(self):
-        """Test that invalid area raises ValueError"""
         with pytest.raises(ValueError, match="Invalid country code"):
             lookup_area("INVALID")
 
     def test_all_areas_have_codes(self):
-        """Test that all areas in AREAS dict have valid codes"""
         for name, code in AREAS.items():
             assert isinstance(name, str)
             assert isinstance(code, str)
@@ -38,10 +167,7 @@ class TestAreaLookup:
 
 
 class TestEntsoeSourceInit:
-    """Test EntsoeSource initialization"""
-
     def test_init_valid_params(self):
-        """Test initialization with valid parameters"""
         source = EntsoeSource("PL", "test-api-key", type=["load"])
         assert source._area_name == "PL"
         assert source._area_code == "10YPL-AREA-----S"
@@ -49,272 +175,754 @@ class TestEntsoeSourceInit:
         assert source.type == ["load"]
 
     def test_init_multiple_types(self):
-        """Test initialization with multiple data types"""
-        source = EntsoeSource("DE", "test-key", type=["load", "generation", "price"])
-        assert len(source.type) == 3
-        assert "load" in source.type
-        assert "generation" in source.type
-        assert "price" in source.type
+        source = EntsoeSource("DE_LU", "test-key", type=["load", "generation", "price"])
+        assert set(source.type) == {"load", "generation", "price"}
 
     def test_init_invalid_country(self):
-        """Test initialization with invalid country code"""
         with pytest.raises(ValueError, match="Invalid country code"):
             EntsoeSource("XX", "test-key", type=["load"])
 
     def test_init_empty_api_key(self):
-        """Test initialization with empty API key"""
         with pytest.raises(ValueError, match="API key cannot be empty"):
             EntsoeSource("PL", "", type=["load"])
 
     def test_init_empty_types(self):
-        """Test initialization with empty types list"""
         with pytest.raises(ValueError, match="At least one data type must be specified"):
             EntsoeSource("PL", "test-key", type=[])
 
     def test_init_invalid_type(self):
-        """Test initialization with invalid data type"""
         with pytest.raises(ValueError, match="Invalid type"):
             EntsoeSource("PL", "test-key", type=["invalid_type"])
 
     def test_validate_config_returns_true(self):
-        """Test that _validate_config returns True on success"""
-        source = EntsoeSource("PL", "test-api-key", type=["load"])
-        result = source._validate_config()
-        assert result is True
+        assert EntsoeSource("PL", "test-api-key", type=["load"])._validate_config() is True
 
     def test_fetch_validates_timestamps(self):
-        """Test that fetch validates end > start"""
         source = EntsoeSource("PL", "test-key", type=["load"])
-        start = pd.Timestamp("2024-01-02", tz="UTC")
-        end = pd.Timestamp("2024-01-01", tz="UTC")
-
         with pytest.raises(ValueError, match="End timestamp.*must be after start timestamp"):
-            source.fetch(start, end)
+            source.fetch(_utc("2024-01-02"), _utc("2024-01-01"))
+
+    def test_price_for_country_that_is_not_a_bidding_zone_raises_with_hint(self):
+        # "DE" (Germany as a country) has no day-ahead price; the API answers "No matching data" after a long wait.
+        with pytest.raises(ValueError, match="DE_LU"):
+            EntsoeSource("DE", "test-key", type=["price"])
+
+    def test_load_for_country_code_is_allowed(self):
+        EntsoeSource("DE", "test-key", type=["load"])
+
+    def test_cache_config_includes_every_output_parameter(self):
+        hourly = EntsoeSource("PL", "k", type=["price", "load"]).get_cache_config()
+        quarter = EntsoeSource("PL", "k", type=["load", "price"], prefer_15min=True).get_cache_config()
+        assert hourly["prefer_15min"] is False and quarter["prefer_15min"] is True
+        assert hourly["types"] == ["load", "price"]
+        assert hourly["schema_version"] >= 2
+        assert "api_key" not in hourly and "k" not in json.dumps(hourly)
 
 
 class TestEntsoeSourceChunking:
-    """Test date range chunking"""
-
     def test_generate_chunks_single_month(self):
-        """Test chunking for a single month period"""
         source = EntsoeSource("PL", "test-key", type=["load"])
-        start = pd.Timestamp("2024-01-01", tz="UTC")
-        end = pd.Timestamp("2024-01-15", tz="UTC")
-
-        chunks = source._generate_chunks(start, end, months=3)
-        assert len(chunks) == 1
-        assert chunks[0][0] == start
-        assert chunks[0][1] == end
+        chunks = source._generate_chunks(_utc("2024-01-01"), _utc("2024-01-15"), months=3)
+        assert chunks == [(_utc("2024-01-01"), _utc("2024-01-15"))]
 
     def test_generate_chunks_multiple_months(self):
-        """Test chunking for multi-month period"""
         source = EntsoeSource("PL", "test-key", type=["load"])
-        start = pd.Timestamp("2024-01-01", tz="UTC")
-        end = pd.Timestamp("2024-07-01", tz="UTC")
-
-        chunks = source._generate_chunks(start, end, months=3)
+        chunks = source._generate_chunks(_utc("2024-01-01"), _utc("2024-07-01"), months=3)
         assert len(chunks) == 2
-        assert chunks[0][0] == start
-        assert chunks[-1][1] == end
+        assert chunks[0][0] == _utc("2024-01-01")
+        assert chunks[-1][1] == _utc("2024-07-01")
 
     def test_generate_chunks_exact_boundary(self):
-        """Test chunking with exact 3-month boundary"""
         source = EntsoeSource("PL", "test-key", type=["load"])
-        start = pd.Timestamp("2024-01-01", tz="UTC")
-        end = pd.Timestamp("2024-04-01", tz="UTC")
-
-        chunks = source._generate_chunks(start, end, months=3)
-        assert len(chunks) == 1
+        assert len(source._generate_chunks(_utc("2024-01-01"), _utc("2024-04-01"), months=3)) == 1
 
     def test_generate_chunks_validates_months_parameter(self):
-        """Test that _generate_chunks validates months parameter"""
         source = EntsoeSource("PL", "test-key", type=["load"])
-        start = pd.Timestamp("2024-01-01", tz="UTC")
-        end = pd.Timestamp("2024-07-01", tz="UTC")
-
-        with pytest.raises(ValueError, match="months parameter must be positive"):
-            source._generate_chunks(start, end, months=0)
-
-        with pytest.raises(ValueError, match="months parameter must be positive"):
-            source._generate_chunks(start, end, months=-1)
+        for months in (0, -1):
+            with pytest.raises(ValueError, match="months parameter must be positive"):
+                source._generate_chunks(_utc("2024-01-01"), _utc("2024-07-01"), months=months)
 
 
-class TestEntsoeSourceAPIRequests:
-    """Test API request methods"""
-
-    @patch("epftoolbox2.data.sources.entsoe.requests.Session")
-    def test_api_request_success(self, mock_session):
-        """Test successful API request"""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.text = "<data>test</data>"
-        mock_response.headers = {"content-type": "application/xml"}
-        mock_session.return_value.get.return_value = mock_response
-
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        source.session = mock_session.return_value
-
-        result = source._api_request({"documentType": "A65"}, pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
-
-        assert result == "<data>test</data>"
-
-    @patch("epftoolbox2.data.sources.entsoe.requests.Session")
-    def test_api_request_no_matching_data(self, mock_session):
-        """Test API request with no matching data"""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.text = "<text>No matching data found</text>"
-        mock_response.headers = {"content-type": "application/xml"}
-        mock_session.return_value.get.return_value = mock_response
-
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        source.session = mock_session.return_value
-
-        result = source._api_request({"documentType": "A65"}, pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-02", tz="UTC"))
-
-        assert result is None
+# ---------------------------------------------------------------------------------------------------------------
+# HTTP: authentication, errors, retries
+# ---------------------------------------------------------------------------------------------------------------
 
 
-class TestEntsoeSourceParsing:
-    """Test XML parsing methods"""
+class TestApiRequest:
+    def _request(self, source, start="2024-01-01", end="2024-01-02"):
+        return source._api_request({"documentType": "A65", "processType": "A16"}, _utc(start), _utc(end))
 
-    def test_resolution_to_timedelta_60min(self):
-        """Test resolution conversion for 60 minutes"""
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        result = source._resolution_to_timedelta("PT60M")
-        assert result == "60min"
+    def test_returns_text_on_success(self):
+        source = _source(lambda p: "<data>test</data>", type=["load"])
+        assert self._request(source) == "<data>test</data>"
 
-    def test_resolution_to_timedelta_15min(self):
-        """Test resolution conversion for 15 minutes"""
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        result = source._resolution_to_timedelta("PT15M")
-        assert result == "15min"
+    def test_no_matching_data_returns_none_and_warns(self):
+        source = _source(lambda p: NO_DATA, type=["load"])
+        assert self._request(source) is None
+        assert source.logger.warning.called
+        assert "no matching data" in source.logger.warning.call_args[0][0].lower()
 
-    def test_resolution_to_timedelta_invalid(self):
-        """Test resolution conversion for invalid format"""
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        with pytest.raises(NotImplementedError):
-            source._resolution_to_timedelta("INVALID")
+    def test_no_matching_data_with_http_400_returns_none(self):
+        source = _source(lambda p: _response(p, NO_DATA, status=400, reason="Bad Request"), type=["load"])
+        assert self._request(source) is None
 
-    def test_parse_loads_returns_dataframe(self, sample_xml_load):
-        """Test that parse_loads returns a DataFrame"""
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        df = source._parse_loads(sample_xml_load, "A16")
-        assert isinstance(df, pd.DataFrame)
-        assert "load_actual" in df.columns
+    def test_api_key_is_sent_as_header_not_in_url(self):
+        source = _source(lambda p: "<ok/>", type=["load"])
+        self._request(source)
+        call = source.session.calls[0]
+        assert call["headers"].get("SECURITY_TOKEN") == KEY
+        assert "securityToken" not in call["params"]
+        assert KEY not in json.dumps(call["params"])
 
-    def test_parse_generation_returns_dataframe(self, sample_xml_generation):
-        """Test that parse_generation returns a DataFrame"""
-        source = EntsoeSource("PL", "test-key", type=["generation"])
-        df = source._parse_generation(sample_xml_generation)
-        assert isinstance(df, pd.DataFrame)
-        assert "solar" in df.columns
+    def test_period_keeps_minutes(self):
+        source = _source(lambda p: "<ok/>", type=["load"])
+        self._request(source, "2024-01-01 00:15", "2024-01-01 23:45")
+        params = source.session.calls[0]["params"]
+        assert params["periodStart"] == "202401010015"
+        assert params["periodEnd"] == "202401012345"
 
-    def test_parse_prices_returns_dict(self, sample_xml_price):
-        """Test that parse_prices returns a dict"""
-        source = EntsoeSource("PL", "test-key", type=["price"])
-        result = source._parse_prices(sample_xml_price)
-        assert isinstance(result, dict)
-        assert "60min" in result
-        assert "15min" in result
+    def test_http_error_carries_acknowledgement_reason_and_not_the_key(self):
+        source = _source(lambda p: _response(p, _ack("Mandatory parameter ProcessType is missing."), status=400))
+        with pytest.raises(Exception) as info:
+            self._request(source)
+        message = str(info.value)
+        assert "Mandatory parameter ProcessType is missing." in message
+        assert KEY not in message
+        assert KEY not in repr(info.value.__cause__) and KEY not in repr(info.value.__context__)
 
-    def test_resolution_to_timedelta_daily(self):
-        """Test resolution conversion for daily (1D) resolution"""
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        result = source._resolution_to_timedelta("P1D")
-        assert result == "1D"
+    def test_authentication_failure_is_not_retried(self):
+        source = _source(lambda p: _response(p, _ack("Authentication failed."), status=401))
+        with patch.object(entsoe_module.time, "sleep") as sleep, pytest.raises(Exception, match="Authentication"):
+            self._request(source)
+        assert len(source.session.calls) == 1
+        sleep.assert_not_called()
 
-    def test_resolution_to_timedelta_weekly(self):
-        """Test resolution conversion for weekly (7D) resolution"""
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        result = source._resolution_to_timedelta("P7D")
-        assert result == "7D"
+    def test_retries_429_honouring_retry_after(self):
+        responses = iter(["429", "ok"])
 
-    def test_parse_loads_with_none_xml(self, sample_xml_load_none):
-        """Test that parse_loads handles None XML gracefully"""
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        df = source._parse_loads(sample_xml_load_none, "A16")
-        # Should return empty dataframe when no timeseries found
-        assert isinstance(df, pd.DataFrame)
+        def route(p):
+            if next(responses) == "429":
+                return _response(p, "Too many requests", status=429, headers={"Retry-After": "7"})
+            return "<ok/>"
 
-    def test_parse_timeseries_with_daily_resolution(self, sample_xml_with_daily_resolution):
-        """Test parsing with daily (1D) resolution"""
-        from bs4 import BeautifulSoup
+        source = _source(route, type=["load"])
+        with patch.object(entsoe_module.time, "sleep") as sleep:
+            assert self._request(source) == "<ok/>"
+        sleep.assert_called_once_with(7.0)
+        assert len(source.session.calls) == 2
 
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        soup = BeautifulSoup(sample_xml_with_daily_resolution, "html.parser")
-        timeseries = soup.find("timeseries")
+    def test_retries_server_errors_with_backoff_then_raises(self):
+        source = _source(lambda p: _response(p, "Service Unavailable", status=503), type=["load"])
+        with patch.object(entsoe_module.time, "sleep") as sleep, pytest.raises(Exception, match="503"):
+            self._request(source)
+        assert len(source.session.calls) == EntsoeSource.MAX_RETRIES + 1
+        waits = [c.args[0] for c in sleep.call_args_list]
+        assert waits == sorted(waits) and waits[0] > 0
 
-        result = source._parse_timeseries_generic(timeseries, merge=True)
-        assert isinstance(result, pd.Series)
-        assert len(result) > 0
+    @pytest.mark.parametrize(
+        "error_type", [requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError]
+    )
+    def test_network_errors_are_retried_and_sanitised(self, error_type):
+        error = error_type(f"HTTPSConnectionPool: Max retries exceeded (token {KEY})")
+        source = _source(lambda p: error, type=["load"])
+        with patch.object(entsoe_module.time, "sleep"), pytest.raises(Exception) as info:
+            self._request(source)
+        assert len(source.session.calls) == EntsoeSource.MAX_RETRIES + 1
+        assert KEY not in str(info.value)
+        assert info.value.__cause__ is None and info.value.__context__ is None
 
-    def test_parse_timeseries_with_weekly_resolution(self, sample_xml_with_weekly_resolution):
-        """Test parsing with weekly (7D) resolution"""
-        from bs4 import BeautifulSoup
+    def test_generic_request_exception_is_not_retried_and_clears_context(self):
+        # Unlike the retried network errors above, requests.RequestException subclasses that are not connection,
+        # timeout or chunked-encoding errors are treated as fatal and must not be retried, but the raised
+        # EntsoeApiError must still carry no exception context (nothing to leak into SLURM .out logs or tracebacks).
+        error = requests.exceptions.URLRequired(f"bad url (token {KEY})")
+        source = _source(lambda p: error, type=["load"])
+        with pytest.raises(Exception) as info:
+            self._request(source)
+        assert len(source.session.calls) == 1
+        assert KEY not in str(info.value)
+        assert info.value.__cause__ is None and info.value.__context__ is None
 
-        source = EntsoeSource("PL", "test-key", type=["load"])
-        soup = BeautifulSoup(sample_xml_with_weekly_resolution, "html.parser")
-        timeseries = soup.find("timeseries")
+    def test_failed_chunk_makes_fetch_raise(self):
+        # A chunk that keeps failing must not silently produce a frame with a gap.
+        def route(p):
+            if p["periodStart"].startswith("202404"):
+                return _response(p, "Bad Gateway", status=502)
+            return _doc(_series(_period("2024-01-01T00:00Z", "2024-01-01T01:00Z", "PT60M", {1: 1.0}, "price.amount")))
 
-        result = source._parse_timeseries_generic(timeseries, merge=True)
-        assert isinstance(result, pd.Series)
-        assert len(result) > 0
+        source = _source(route)
+        with patch.object(entsoe_module.time, "sleep"), pytest.raises(Exception, match="502"):
+            source.fetch(_utc("2024-01-01"), _utc("2024-06-01"))
+
+    def test_xml_with_doctype_is_rejected(self):
+        evil = '<?xml version="1.0"?><!DOCTYPE a [<!ENTITY b "c">]><Publication_MarketDocument/>'
+        source = _source(lambda p: evil)
+        with pytest.raises(Exception, match="DTD"):
+            source.fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------------------------------------------
+
+
+class TestCurveTypeA03:
+    def test_omitted_positions_repeat_previous_value_including_trailing(self):
+        xml = _doc(_series(_period("2024-01-01T00:00Z", "2024-01-01T06:00Z", "PT60M", {1: 10, 2: 20, 5: 50})))
+        source = _source(_route_by_document({("A65", "A16"): xml}), type=["load"])
+        df = source.fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        assert df["load_actual"].tolist() == [10, 20, 20, 20, 50, 50]
+        assert df.index[0] == _utc("2024-01-01 00:00") and df.index[-1] == _utc("2024-01-01 05:00")
+
+    def test_a01_curve_is_not_filled(self):
+        xml = _doc(_series(_period("2024-01-01T00:00Z", "2024-01-01T03:00Z", "PT60M", {1: 10, 3: 30}), curve="A01"))
+        source = _source(_route_by_document({("A65", "A16"): xml}), type=["load"])
+        df = source.fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        assert df["load_actual"].dropna().tolist() == [10, 30]
+
+    def test_a03_fill_applies_to_prices_and_generation(self):
+        price = _doc(
+            _series(_period("2024-01-01T00:00Z", "2024-01-01T04:00Z", "PT60M", {1: 1, 3: 3}, "price.amount")),
+            root="Publication_MarketDocument",
+        )
+        gen = _doc(_series(_period("2024-01-01T00:00Z", "2024-01-01T04:00Z", "PT60M", {1: 5}), psr="B16", in_bz=PL))
+        source = _source(_route_by_document({("A44", None): price, ("A75", "A16"): gen}), type=["price", "generation"])
+        df = source.fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        assert df["price"].tolist() == [1, 1, 3, 3]
+        assert df["generation_solar"].tolist() == [5, 5, 5, 5]
+
+    def test_daily_positions_follow_the_local_calendar_across_dst(self):
+        # A week period with the autumn switch lasts 169 hours; (end - start) / 24 h would give 7.04 positions and
+        # fixed 24-hour steps would put Sunday's value at 23:00 local on Saturday.
+        week = _doc(
+            _series(
+                _period("2024-10-20T22:00Z", "2024-10-27T23:00Z", "P1D", {1: 100, 2: 200, 6: 600, 7: 700}),
+                business_type="A60",
+                out_bz=PL,
+            )
+        )
+        source = _source(_route_by_document({("A65", "A31"): week}), type=["load"])
+        df = source.fetch(_utc("2024-10-20 22:00"), _utc("2024-10-27 23:00"))
+        values = df["load_forecast_daily_min"].dropna()
+        local = values.index.tz_convert("Europe/Warsaw")
+        assert (local == local.normalize()).all()
+        assert list(local.day) == [21, 22, 23, 24, 25, 26, 27]
+        assert values.tolist() == [100, 200, 200, 200, 200, 600, 700]
+
+
+class TestWeekAheadDailyMarketZone:
+    """A neighbouring area's week-ahead daily value (A31) must land on the *market*'s local day when this
+    source is combined with another area in a DataPipeline, not on the neighbour's own local day (finding: a
+    Finnish or Lithuanian (EET) neighbour of a Polish (CET) market pipeline would be off by one hour, and
+    around a DST switch even land on the wrong calendar day). See EntsoeSource._daily_zone."""
+
+    def _bound_neighbour(self, area, zone, first_day, values, market="Europe/Warsaw"):
+        week = _doc(_series(_week_period(zone, first_day, values), business_type="A60", out_bz=AREAS[area]))
+        source = _source(_route_by_document({("A65", "A31"): week}), country=area, type=["load"], prefix=area.lower())
+        DataPipeline(sources=[source], timezone=market)
+        days = pd.date_range(first_day, periods=len(values) + 1, freq="D", tz=zone)
+        df = source.fetch(days[0].tz_convert("UTC"), days[-1].tz_convert("UTC"))
+        column = f"{area.lower()}_load_forecast_daily_min"
+        return df[column].dropna(), days[:-1]
+
+    def _assert_lands_on_the_markets_own_day(self, values, local_days, market, expected):
+        local = values.index.tz_convert(market)
+        assert (local == local.normalize()).all(), "value is not at the market's own local midnight"
+        assert list(local.date) == [d.date() for d in local_days]
+        assert values.tolist() == expected
+
+    def test_finnish_neighbour_normal_week(self):
+        values, days = self._bound_neighbour("FI", "Europe/Helsinki", "2024-01-15", list(range(101, 108)))
+        self._assert_lands_on_the_markets_own_day(values, days, "Europe/Warsaw", list(range(101, 108)))
+
+    def test_lithuanian_neighbour_normal_week(self):
+        values, days = self._bound_neighbour("LT", "Europe/Vilnius", "2024-01-15", list(range(201, 208)))
+        self._assert_lands_on_the_markets_own_day(values, days, "Europe/Warsaw", list(range(201, 208)))
+
+    def test_finnish_neighbour_around_the_spring_dst_switch(self):
+        # 2024-03-31: EU-wide spring-forward at 01:00 UTC; the same calendar date in every EU zone.
+        values, days = self._bound_neighbour("FI", "Europe/Helsinki", "2024-03-28", list(range(301, 308)))
+        self._assert_lands_on_the_markets_own_day(values, days, "Europe/Warsaw", list(range(301, 308)))
+
+    def test_finnish_neighbour_around_the_autumn_dst_switch(self):
+        # 2024-10-27: EU-wide fall-back at 01:00 UTC.
+        values, days = self._bound_neighbour("FI", "Europe/Helsinki", "2024-10-24", list(range(401, 408)))
+        self._assert_lands_on_the_markets_own_day(values, days, "Europe/Warsaw", list(range(401, 408)))
+
+    def test_unbound_neighbour_keeps_its_own_area_midnight(self):
+        # Without a DataPipeline there is no market zone to anchor to; behaviour is unchanged (FI's own midnight).
+        week = _doc(
+            _series(
+                _week_period("Europe/Helsinki", "2024-01-15", list(range(101, 108))), business_type="A60", out_bz=FI
+            )
+        )
+        source = _source(_route_by_document({("A65", "A31"): week}), country="FI", type=["load"])
+        days = pd.date_range("2024-01-15", periods=8, freq="D", tz="Europe/Helsinki")
+        df = source.fetch(days[0].tz_convert("UTC"), days[-1].tz_convert("UTC"))
+        values = df["load_forecast_daily_min"].dropna()
+        local = values.index.tz_convert("Europe/Helsinki")
+        assert (local == local.normalize()).all()
+        assert list(local.date) == [d.date() for d in days[:-1]]
+
+    def test_same_zone_source_in_a_matching_pipeline_is_unchanged(self):
+        # PL's own AREA_TIMEZONES fallback ("Europe/Brussels") and the market zone ("Europe/Warsaw") are
+        # offset-identical (same CET/CEST rule) but different zone *names*; binding must not move the value.
+        week = _doc(
+            _series(_week_period("Europe/Warsaw", "2024-01-15", list(range(1, 8))), business_type="A60", out_bz=PL)
+        )
+        route = _route_by_document({("A65", "A31"): week})
+        days = pd.date_range("2024-01-15", periods=8, freq="D", tz="Europe/Warsaw")
+        start, end = days[0].tz_convert("UTC"), days[-1].tz_convert("UTC")
+
+        unbound = _source(route, country="PL", type=["load"])
+        bound = _source(route, country="PL", type=["load"])
+        DataPipeline(sources=[bound], timezone="Europe/Warsaw")
+
+        pd.testing.assert_series_equal(
+            unbound.fetch(start, end)["load_forecast_daily_min"], bound.fetch(start, end)["load_forecast_daily_min"]
+        )
+
+    def test_cache_key_reflects_the_bound_market_zone(self):
+        source_pl = _source(lambda p: NO_DATA, country="FI", type=["load"])
+        source_de = _source(lambda p: NO_DATA, country="FI", type=["load"])
+        DataPipeline(sources=[source_pl], timezone="Europe/Warsaw")
+        DataPipeline(sources=[source_de], timezone="Europe/Berlin")
+        unbound = EntsoeSource("FI", KEY, type=["load"]).get_cache_config()
+
+        assert source_pl.get_cache_config()["daily_zone"] == "Europe/Warsaw"
+        assert source_de.get_cache_config()["daily_zone"] == "Europe/Berlin"
+        assert unbound["daily_zone"] == "Europe/Helsinki"
+        assert (
+            len(
+                {
+                    source_pl.get_cache_config()["daily_zone"],
+                    source_de.get_cache_config()["daily_zone"],
+                    unbound["daily_zone"],
+                }
+            )
+            == 3
+        )
+
+    def test_cache_key_omits_daily_zone_without_load(self):
+        source = _source(lambda p: NO_DATA, country="FI", type=["generation"])
+        DataPipeline(sources=[source], timezone="Europe/Warsaw")
+        assert "daily_zone" not in source.get_cache_config()
+
+
+class TestPrices:
+    def _two_days(self, prefer_15min, sequence=None):
+        hourly = _period("2025-09-29T22:00Z", "2025-09-30T22:00Z", "PT60M", _hours(0, 24), "price.amount")
+        quarters = {p: float(1000 + p) for p in range(1, 97)}
+        quarter = _period("2025-09-30T22:00Z", "2025-10-01T22:00Z", "PT15M", quarters, "price.amount")
+        xml = _doc(_series(hourly, sequence=sequence), _series(quarter, sequence=sequence), root="P")
+        source = _source(_route_by_document({("A44", None): xml}), prefer_15min=prefer_15min)
+        return source.fetch(_utc("2025-09-29 22:00"), _utc("2025-10-01 22:00"))["price"]
+
+    def test_hourly_output_keeps_both_sides_of_the_15min_switch(self):
+        price = self._two_days(prefer_15min=False)
+        assert len(price) == 48 and price.notna().all()
+        assert (price.index[1:] - price.index[:-1] == pd.Timedelta("1h")).all()
+        assert price[_utc("2025-09-29 22:00")] == 1.0
+        # the first hour after the switch is the mean of its four quarter-hours 1001..1004
+        assert price[_utc("2025-09-30 22:00")] == pytest.approx(1002.5)
+
+    def test_15min_output_keeps_both_sides_of_the_15min_switch(self):
+        price = self._two_days(prefer_15min=True)
+        assert len(price) == 192 and price.notna().all()
+        assert (price.index[1:] - price.index[:-1] == pd.Timedelta("15min")).all()
+        # hourly periods are step-filled: every quarter-hour gets its hour's price
+        assert price[_utc("2025-09-29 22:00") : _utc("2025-09-29 22:45")].tolist() == [1.0] * 4
+        assert price[_utc("2025-09-30 22:00")] == 1001.0
+
+    def test_single_classification_sequence_one_is_kept(self):
+        assert len(self._two_days(prefer_15min=False, sequence=1)) == 48
+
+    def test_only_the_sdac_sequence_is_used(self):
+        # DE_LU/AT publish a second 15-minute series (sequence 2) on the same timestamps; it is a different auction.
+        sdac = _period("2024-07-01T22:00Z", "2024-07-02T22:00Z", "PT60M", _hours(0, 24), "price.amount")
+        other = _period(
+            "2024-07-01T22:00Z", "2024-07-02T22:00Z", "PT15M", {p: 999.0 for p in range(1, 97)}, "price.amount"
+        )
+        xml = _doc(_series(other, sequence=2), _series(sdac, sequence=1), root="P")
+        for prefer_15min, rows in ((False, 24), (True, 96)):
+            source = _source(_route_by_document({("A44", None): xml}), country="DE_LU", prefer_15min=prefer_15min)
+            price = source.fetch(_utc("2024-07-01 22:00"), _utc("2024-07-02 22:00"))["price"]
+            assert len(price) == rows
+            assert 999.0 not in price.values
+            assert price.iloc[0] == 1.0 and price.iloc[-1] == 24.0
+
+    def test_incomplete_hour_is_not_averaged(self):
+        quarters = {1: 1.0, 2: 2.0, 3: 3.0, 5: 5.0, 6: 6.0, 7: 7.0, 8: 8.0}
+        xml = _doc(
+            _series(_period("2025-10-01T00:00Z", "2025-10-01T02:00Z", "PT15M", quarters, "price.amount"), curve="A01"),
+            root="P",
+        )
+        source = _source(_route_by_document({("A44", None): xml}))
+        price = source.fetch(_utc("2025-10-01"), _utc("2025-10-02"))["price"]
+        assert price.dropna().tolist() == [6.5]
+
+    def test_chunk_boundary_does_not_drop_the_straddled_hour(self):
+        # A 3-month chunk boundary that lands mid-hour (e.g. a request that doesn't start on the hour) splits one
+        # hour's four quarter-hours across two separate API responses. Gridding per chunk sees only two of the four
+        # quarter-hours in each response, so neither chunk can average a complete hour and it is dropped entirely.
+        boundary = _utc("2024-01-01 00:30")
+        first_half = _doc(
+            _series(
+                _period("2024-01-01T00:00Z", "2024-01-01T00:30Z", "PT15M", {1: 10.0, 2: 20.0}, "price.amount"),
+                curve="A01",
+            )
+        )
+        second_half = _doc(
+            _series(
+                _period("2024-01-01T00:30Z", "2024-01-01T01:00Z", "PT15M", {1: 30.0, 2: 40.0}, "price.amount"),
+                curve="A01",
+            )
+        )
+
+        def route(params):
+            req_start = pd.to_datetime(params["periodStart"], format="%Y%m%d%H%M", utc=True)
+            return first_half if req_start < boundary else second_half
+
+        source = _source(route)
+        source._generate_chunks = lambda start, end, months=3: [(start, boundary), (boundary, end)]
+
+        df = source.fetch(_utc("2024-01-01 00:00"), _utc("2024-01-01 01:00"))
+        assert "price" in df.columns
+        price = df["price"]
+        assert list(price.index) == [_utc("2024-01-01 00:00")]
+        assert price.iloc[0] == pytest.approx(25.0)
+
+
+class TestGeneration:
+    def test_generation_and_consumption_are_separate_columns(self):
+        period = "2024-03-30T00:00Z", "2024-03-30T02:00Z", "PT60M"
+        xml = _doc(
+            _series(_period(*period, {1: 100, 2: 110}), psr="B10", in_bz=AT),
+            _series(_period(*period, {1: 0, 2: 55}), psr="B10", out_bz=AT),
+            _series(_period(*period, {1: 7}), psr="B01", in_bz=AT),
+            _series(_period(*period, {1: 0}), psr="B01", out_bz=AT),
+        )
+        source = _source(_route_by_document({("A75", "A16"): xml}), country="AT", type=["generation"])
+        df = source.fetch(_utc("2024-03-30"), _utc("2024-03-31"))
+        assert df["generation_hydro_pumped_storage"].tolist() == [100, 110]
+        assert df["generation_hydro_pumped_storage_consumption"].tolist() == [0, 55]
+        assert df["generation_biomass"].tolist() == [7, 7]
+        assert df["generation_biomass_consumption"].tolist() == [0, 0]
+
+    @pytest.mark.parametrize(
+        "psr, column",
+        [
+            ("B02", "generation_fossil_brown_coal_lignite"),
+            ("B03", "generation_fossil_coal_derived_gas"),
+            ("B07", "generation_fossil_oil_shale"),
+            ("B08", "generation_fossil_peat"),
+            ("B11", "generation_hydro_run_of_river_and_pondage"),
+            ("B25", "generation_energy_storage"),
+            ("B99", "generation_b99"),
+        ],
+    )
+    def test_production_type_column_names(self, psr, column):
+        xml = _doc(_series(_period("2024-01-01T00:00Z", "2024-01-01T01:00Z", "PT60M", {1: 1}), psr=psr, in_bz=PL))
+        source = _source(_route_by_document({("A75", "A16"): xml}), type=["generation"])
+        assert list(source.fetch(_utc("2024-01-01"), _utc("2024-01-02")).columns) == [column]
+
+    def test_wind_solar_forecast_columns(self):
+        xml = _doc(_series(_period("2024-01-01T00:00Z", "2024-01-01T01:00Z", "PT60M", {1: 3}), psr="B19", in_bz=PL))
+        source = _source(_route_by_document({("A69", "A01"): xml}), type=["generation"])
+        df = source.fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        assert list(df.columns) == ["generation_wind_onshore_forecast"]
+
+
+class TestFetchRange:
+    def test_returns_half_open_range(self):
+        xml = _doc(_series(_period("2024-01-01T00:00Z", "2024-01-01T04:00Z", "PT60M", _hours(0, 4), "price.amount")))
+        source = _source(_route_by_document({("A44", None): xml}))
+        price = source.fetch(_utc("2024-01-01 00:00"), _utc("2024-01-01 02:00"))["price"]
+        assert list(price.index) == [_utc("2024-01-01 00:00"), _utc("2024-01-01 01:00")]
+
+    def test_daily_value_covering_start_is_reported_at_start(self):
+        # The local day 2024-01-02 (Warsaw) starts at 2024-01-01 23:00Z, before a request that starts at UTC midnight.
+        week = _doc(
+            _series(_period("2024-01-01T23:00Z", "2024-01-03T23:00Z", "P1D", {1: 111, 2: 222}), business_type="A61")
+        )
+        source = _source(_route_by_document({("A65", "A31"): week}), type=["load"])
+        df = source.fetch(_utc("2024-01-02 00:00"), _utc("2024-01-04 00:00"))
+        daily = df["load_forecast_daily_max"].dropna()
+        assert daily.to_dict() == {_utc("2024-01-02 00:00"): 111, _utc("2024-01-02 23:00"): 222}
+        assert df.index.min() >= _utc("2024-01-02 00:00")
+
+    def test_warns_when_coverage_starts_long_after_start(self):
+        xml = _doc(_series(_period("2024-03-01T00:00Z", "2024-03-01T01:00Z", "PT60M", {1: 1.0}, "price.amount")))
+        source = _source(_route_by_document({("A44", None): xml}))
+        source.fetch(_utc("2024-01-01"), _utc("2024-03-02"))
+        messages = " ".join(str(c.args[0]) for c in source.logger.warning.call_args_list)
+        assert "2024-03-01" in messages and "starts" in messages
+
+    def test_parses_real_response_with_two_sequences(self):
+        # 3 days of DE_LU prices: sequence 1 (SDAC, hourly then 15-minute) and sequence 2 (15-minute) per day.
+        text = (FIXTURES / "DE_LU_A44_2025-09-30_3d.xml").read_text()
+        source = EntsoeSource("DE_LU", KEY, type=["price"])
+        parts = source._parse_timeseries(text, "price.amount")
+        assert len(parts) == 6
+        assert {meta["sequence"] for meta, _ in parts} == {"1", "2"}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Known answers: recorded API responses vs. an independent decoding (tests/data/sources/fixtures/entsoe/)
+# ---------------------------------------------------------------------------------------------------------------
+
+_FIXTURE_NAME = re.compile(r"^(?P<zone>[A-Z_]+?)_(?P<doc>A\d\d)(?:-(?P<proc>A\d\d))?_\d{4}-\d\d-\d\d_\d+d\.xml$")
+_INTERVAL = re.compile(r"[pP]eriod\.timeInterval>\s*<start>(.*?)</start>\s*<end>(.*?)</end>")
+REFERENCE = json.loads((FIXTURES / "reference.json").read_text())["cases"]
+
+
+@functools.lru_cache(maxsize=1)
+def _fixture_index():
+    index = []
+    for path in sorted(FIXTURES.glob("*.xml")):
+        m = _FIXTURE_NAME.match(path.name)
+        text = path.read_text()
+        start, end = (pd.Timestamp(t) for t in _INTERVAL.search(text).groups())
+        index.append((AREAS[m["zone"]], m["doc"], m["proc"], start, end, text))
+    return index
+
+
+def _fixture_route(params):
+    """Serve the smallest recorded response that covers the requested period, else "No matching data"."""
+    start = pd.Timestamp(params["periodStart"], tz="UTC")
+    end = pd.Timestamp(params["periodEnd"], tz="UTC")
+    area = params.get("in_Domain") or params.get("outBiddingZone_Domain")
+    hits = [
+        (e - s, text)
+        for code, doc, proc, s, e, text in _fixture_index()
+        if code == area and doc == params["documentType"] and proc == params.get("processType") and s <= start
+        if end <= e
+    ]
+    return min(hits, key=lambda h: h[0])[1] if hits else NO_DATA
+
+
+def _local_window(tz, day, days):
+    start = pd.Timestamp(day, tz=tz)
+    end = pd.Timestamp(pd.Timestamp(day) + pd.Timedelta(days=days), tz=tz)
+    return start.tz_convert("UTC"), end.tz_convert("UTC")
+
+
+def _reference_series(case):
+    values = {pd.Timestamp(t): v for t, v in case["values"].items()}
+    return pd.Series(values, dtype=float).sort_index()
+
+
+def _on_price_grid(series, resolution, prefer_15min):
+    """What the source should return for a reference price series at its native resolution."""
+    native = pd.Timedelta("1h") if resolution == "PT60M" else pd.Timedelta("15min")
+    target = pd.Timedelta("15min") if prefer_15min else pd.Timedelta("1h")
+    if native == target:
+        return series
+    if native > target:
+        k = int(native / target)
+        index = series.index.repeat(k) + np.tile(np.arange(k) * target, len(series))
+        return pd.Series(np.repeat(series.values, k), index=index)
+    return series.resample(target).mean()
+
+
+def _column_type(column):
+    return "price" if column == "price" else ("load" if column.startswith("load") else "generation")
+
+
+def _known_answer_params():
+    params = []
+    for case in REFERENCE:
+        for prefer_15min in (False, True) if case["library_column"] == "price" else (False,):
+            params.append(pytest.param(case, prefer_15min, id=f"{case['case']}-p15={prefer_15min}"))
+    return params
+
+
+@pytest.mark.parametrize("case, prefer_15min", _known_answer_params())
+def test_known_answer_single_local_day(case, prefer_15min):
+    days = 7 if "local_week_start" in case else 1
+    start, end = _local_window(case["local_timezone"], case.get("local_day") or case["local_week_start"], days)
+    source = _source(_fixture_route, country=case["zone"], type=[_column_type(case["library_column"])])
+    source.prefer_15min = prefer_15min
+    df = source.fetch(start, end)
+
+    expected = _reference_series(case)
+    if case["library_column"] == "price":
+        expected = _on_price_grid(expected, case["resolution"], prefer_15min)
+    got = df[case["library_column"]].dropna()
+    pd.testing.assert_series_equal(got, expected, check_names=False, check_freq=False, check_index_type=False)
+    assert df.index.min() >= start and df.index.max() < end
+
+
+@pytest.mark.parametrize("zone", ["PL", "DE_LU"])
+@pytest.mark.parametrize("prefer_15min", [False, True])
+def test_known_answer_chunk_across_15min_go_live(zone, prefer_15min):
+    """One request covering 2025-09-30..10-02 (hourly day, then 15-minute days) must give all three days."""
+    start, end = _local_window("Europe/Warsaw", "2025-09-30", 3)
+    source = _source(_fixture_route, country=zone, prefer_15min=prefer_15min)
+    assert len(source._generate_chunks(start, end)) == 1
+    price = source.fetch(start, end)["price"]
+
+    cases = [
+        c for c in REFERENCE if c["zone"] == zone and c["library_column"] == "price" and c["local_day"] >= "2025-09-30"
+    ]
+    expected = pd.concat(
+        [_on_price_grid(_reference_series(c), c["resolution"], prefer_15min) for c in cases]
+    ).sort_index()
+    assert len(price) == (288 if prefer_15min else 72)
+    assert price.notna().all()
+    pd.testing.assert_series_equal(price, expected, check_names=False, check_freq=False, check_index_type=False)
+
+
+def test_fixtures_do_not_contain_credentials():
+    for path in (p for p in FIXTURES.rglob("*") if p.is_file()):
+        text = path.read_text()
+        assert "securityToken" not in text and "SECURITY_TOKEN" not in text, path.name
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Transfer capacity, installed capacity, prefix
+# ---------------------------------------------------------------------------------------------------------------
+
+OTHER = FIXTURES / "other"
+
+
+class TestTransferCapacity:
+    def _route(self, params):
+        # recorded: day-ahead forecasted transfer capacity FR -> ES, 2024-10-01..02 (A03, 6 of 48 points present)
+        if params["documentType"] == "A61" and (params["out_Domain"], params["in_Domain"]) == (
+            AREAS["FR"],
+            AREAS["ES"],
+        ):
+            assert params["contract_MarketAgreement.Type"] == "A01"
+            return (OTHER / "A61_FR-ES_2024-10-01_2d.xml").read_text()
+        return NO_DATA
+
+    def test_export_and_import_columns_per_neighbour(self):
+        source = _source(self._route, country="FR", type=["transfer_capacity"], neighbours=["ES"])
+        df = source.fetch(_utc("2024-09-30 22:00"), _utc("2024-10-02 22:00"))
+        assert list(df.columns) == ["transfer_capacity_export_es"]
+        export = df["transfer_capacity_export_es"]
+        assert len(export) == 48 and export.notna().all()
+        expected = [2400] * 24 + [2450] * 4 + [2350] * 2 + [2450] * 5 + [2497] * 4 + [2450] * 9
+        assert export.tolist() == expected
+        requested = {(c["params"]["out_Domain"], c["params"]["in_Domain"]) for c in source.session.calls}
+        assert requested == {(AREAS["FR"], AREAS["ES"]), (AREAS["ES"], AREAS["FR"])}
+
+    def test_neighbours_are_required(self):
+        with pytest.raises(ValueError, match="neighbours"):
+            EntsoeSource("PL", KEY, type=["transfer_capacity"])
+
+    def test_neighbours_must_be_bidding_zones(self):
+        with pytest.raises(ValueError, match="DE_LU"):
+            EntsoeSource("PL", KEY, type=["transfer_capacity"], neighbours=["DE"])
+
+    def test_neighbours_without_transfer_capacity_is_an_error(self):
+        with pytest.raises(ValueError, match="transfer_capacity"):
+            EntsoeSource("PL", KEY, type=["price"], neighbours=["CZ"])
+
+    def test_neighbours_accept_a_comma_separated_string(self):
+        source = EntsoeSource("PL", KEY, type=["transfer_capacity"], neighbours="DE_LU, cz")
+        assert source.neighbours == ["DE_LU", "cz"]
+        assert source.get_cache_config()["neighbours"] == ["CZ", "DE_LU"]
+
+
+class TestInstalledCapacity:
+    def _route(self, params):
+        if (params["documentType"], params.get("processType")) == ("A68", "A33"):
+            return (OTHER / "A68-A33_PL_2024.xml").read_text()
+        return NO_DATA
+
+    def test_yearly_value_is_reported_at_start(self):
+        source = _source(self._route, type=["installed_capacity"])
+        df = source.fetch(_utc("2024-06-01"), _utc("2024-06-08"))
+        assert list(df.index) == [_utc("2024-06-01")]
+        assert df.loc[_utc("2024-06-01"), "installed_capacity_solar"] == 14608.7
+        assert df.loc[_utc("2024-06-01"), "installed_capacity_fossil_hard_coal"] == 18830.51
+
+    def test_value_is_stamped_at_local_new_year(self):
+        source = _source(self._route, type=["installed_capacity"])
+        df = source.fetch(_utc("2023-12-31 23:00"), _utc("2024-12-31 23:00"))
+        assert list(df.index) == [_utc("2023-12-31 23:00")]
+        assert "installed_capacity_wind_onshore" in df.columns
+
+
+class TestPrefix:
+    def _price_doc(self, params):
+        return _doc(_series(_period("2024-01-01T00:00Z", "2024-01-01T02:00Z", "PT60M", {1: 1, 2: 2}, "price.amount")))
+
+    def test_prefix_is_prepended_to_every_column(self):
+        source = _source(self._price_doc, country="CZ", prefix="cz")
+        df = source.fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        assert list(df.columns) == ["cz_price"]
+
+    def test_two_zones_combine_without_collisions(self):
+        pl = _source(self._price_doc, country="PL").fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        cz = _source(self._price_doc, country="CZ", prefix="cz").fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        combined = pd.concat([pl, cz], axis=1)
+        assert list(combined.columns) == ["price", "cz_price"]
+
+    def test_prefix_applies_to_carried_daily_values(self):
+        installed = TestInstalledCapacity()._route
+        source = _source(installed, type=["installed_capacity"], prefix="pl")
+        df = source.fetch(_utc("2024-06-01"), _utc("2024-06-08"))
+        assert df.loc[_utc("2024-06-01"), "pl_installed_capacity_solar"] == 14608.7
+
+    def test_cache_config(self):
+        plain = EntsoeSource("PL", KEY, type=["price"]).get_cache_config()
+        assert "prefix" not in plain and "neighbours" not in plain  # keys of existing caches do not change
+        assert EntsoeSource("PL", KEY, type=["price"], prefix="pl").get_cache_config()["prefix"] == "pl"
+
+    def test_yaml_round_trip_keeps_new_parameters(self):
+        from epftoolbox2.pipelines.data_pipeline import DataPipeline
+
+        source = EntsoeSource("PL", KEY, type=["transfer_capacity"], neighbours=["CZ"], prefix="pl")
+        params = DataPipeline()._serialize_component(source)["params"]
+        clone = EntsoeSource(**params)
+        assert clone.get_cache_config() == source.get_cache_config()
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Real API
+# ---------------------------------------------------------------------------------------------------------------
 
 
 @pytest.mark.integration
 class TestEntsoeSourceIntegration:
-    """Integration tests that hit the real API (require API key)"""
-
     def test_fetch_load_data_poland(self, entsoe_api_key):
-        """Test fetching load data for Poland"""
         source = EntsoeSource("PL", entsoe_api_key, type=["load"])
-        start = pd.Timestamp("2024-01-01", tz="UTC")
-        end = pd.Timestamp("2024-01-03", tz="UTC")
-
-        df = source.fetch(start, end)
-
-        assert isinstance(df, pd.DataFrame)
+        df = source.fetch(_utc("2024-01-01"), _utc("2024-01-03"))
         assert len(df) > 0
         assert "load_actual" in df.columns or "load_forecast" in df.columns
         assert df.index.tz is not None
 
     def test_fetch_price_data_germany(self, entsoe_api_key):
-        """Test fetching price data for Germany"""
         source = EntsoeSource("DE_LU", entsoe_api_key, type=["price"])
-        start = pd.Timestamp("2024-01-01", tz="UTC")
-        end = pd.Timestamp("2024-01-02", tz="UTC")
+        df = source.fetch(_utc("2024-01-01"), _utc("2024-01-02"))
+        assert "price" in df.columns and len(df) == 24
 
-        df = source.fetch(start, end)
-
-        assert isinstance(df, pd.DataFrame)
-        assert "price" in df.columns
+    def test_fetch_price_across_15min_go_live(self, entsoe_api_key):
+        for prefer_15min, rows in ((False, 72), (True, 288)):
+            source = EntsoeSource("PL", entsoe_api_key, type=["price"], prefer_15min=prefer_15min)
+            df = source.fetch(_utc("2025-09-29 22:00"), _utc("2025-10-02 22:00"))
+            assert len(df) == rows and df["price"].notna().all()
 
     def test_fetch_generation_data_france(self, entsoe_api_key):
-        """Test fetching generation data for France"""
         source = EntsoeSource("FR", entsoe_api_key, type=["generation"])
-        start = pd.Timestamp("2024-01-01", tz="UTC")
-        end = pd.Timestamp("2024-01-02", tz="UTC")
-
-        df = source.fetch(start, end)
-
-        assert isinstance(df, pd.DataFrame)
-        assert len(df.columns) > 0
-        # Generation columns should start with "generation_"
+        df = source.fetch(_utc("2024-01-01"), _utc("2024-01-02"))
         assert any(col.startswith("generation_") for col in df.columns)
 
     def test_fetch_all_types(self, entsoe_api_key):
-        """Test fetching all data types together"""
         source = EntsoeSource("PL", entsoe_api_key, type=["load", "generation", "price"])
-        start = pd.Timestamp("2024-01-01", tz="UTC")
-        end = pd.Timestamp("2024-01-02", tz="UTC")
-
-        df = source.fetch(start, end)
-
-        assert isinstance(df, pd.DataFrame)
-        # Should have load columns
+        df = source.fetch(_utc("2024-01-01"), _utc("2024-01-02"))
         assert any("load" in col for col in df.columns)
-        # Should have generation columns
         assert any(col.startswith("generation_") for col in df.columns)
-        # Should have price column
         assert "price" in df.columns
+
+    def test_fetch_installed_and_transfer_capacity(self, entsoe_api_key):
+        start, end = _utc("2024-06-01"), _utc("2024-06-03")
+        installed = EntsoeSource("PL", entsoe_api_key, type=["installed_capacity"], prefix="pl").fetch(start, end)
+        assert list(installed.index) == [start]
+        assert installed["pl_installed_capacity_solar"].iloc[0] > 0
+        ntc = EntsoeSource("FR", entsoe_api_key, type=["transfer_capacity"], neighbours=["ES"]).fetch(start, end)
+        assert {"transfer_capacity_export_es", "transfer_capacity_import_es"} <= set(ntc.columns)
+        assert len(ntc) == 48 and ntc.notna().all().all()

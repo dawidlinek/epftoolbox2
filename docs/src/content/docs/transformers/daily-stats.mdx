@@ -1,0 +1,51 @@
+---
+title: DailyStatsTransformer
+description: Per local day minimum, maximum, mean and last value
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Adds the minimum, maximum, mean and last value of each local day to every row of that day, as
+`{column}_day_min`, `{column}_day_max`, `{column}_day_mean` and `{column}_day_last`. The last value is the one in
+the last slot of the day (23:00 for hourly data).
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import DailyStatsTransformer
+
+df = DailyStatsTransformer(columns="price", stats=["min", "max", "last"]).transform(df)
+# price_day_min, price_day_max, price_day_last
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `columns` | str \| List[str] | required | Column name(s) to summarise |
+| `stats` | List[str] | `["min", "max", "mean", "last"]` | Statistics to add |
+| `freq` | str | `"1h"` | Slot length of the data, used to decide whether a day is complete |
+
+## Complete Days Only
+
+A day gets statistics only when every slot it has holds a value: 23, 24 or 25 hours on a time-zone-aware index
+(DST switch days), 24 after [`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/). Days with a
+missing value, and the partial days at either end of the data, get NaN rather than a statistic of part of the day.
+
+## Information Set
+
+The statistics of day D appear on the rows of D and use only day D, never a rolling window that reaches into D+1.
+Whether they are known when a forecast is issued on D depends on the column: the day-ahead prices of D are, so
+`price_day_max` can be used as is (it is the "maximum price of d-1" in the expert model). Realised values aren't:
+
+```python
+df = DailyStatsTransformer(columns="load_actual", stats=["max"]).transform(df)
+df = LagTransformer(columns="load_actual_day_max", lags=[1], freq="day").transform(df)  # load_actual_day_max_d-1
+```
+
+<Aside type="note">
+  The names use `_day_` so they don't collide with ENTSO-E's week-ahead `load_forecast_daily_min`/`_max`, which
+  are forecasts of a different quantity.
+</Aside>
+
+On a UTC index the "days" are UTC days, and the transformer warns.

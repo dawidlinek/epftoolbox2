@@ -1,0 +1,18 @@
+[
+{"code": "PL-DS", "isoCode": "PL-02", "shortName": "DS", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Lower Silesia"}], "officialLanguages": ["PL"]},
+{"code": "PL-KP", "isoCode": "PL-04", "shortName": "KP", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Kuyavia-Pomerania"}], "officialLanguages": ["PL"]},
+{"code": "PL-LB", "isoCode": "PL-06", "shortName": "LB", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Lublin"}], "officialLanguages": ["PL"]},
+{"code": "PL-LD", "isoCode": "PL-10", "shortName": "LD", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Łódź"}], "officialLanguages": ["PL"]},
+{"code": "PL-LU", "isoCode": "PL-08", "shortName": "LU", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Lubusz"}], "officialLanguages": ["PL"]},
+{"code": "PL-MA", "isoCode": "PL-12", "shortName": "MA", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Lesser Poland"}], "officialLanguages": ["PL"]},
+{"code": "PL-MZ", "isoCode": "PL-14", "shortName": "MZ", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Mazovia"}], "officialLanguages": ["PL"]},
+{"code": "PL-OP", "isoCode": "PL-16", "shortName": "OP", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Opole (Upper Silesia)"}], "officialLanguages": ["PL"]},
+{"code": "PL-PD", "isoCode": "PL-18", "shortName": "PD", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Subcarpathia"}], "officialLanguages": ["PL"]},
+{"code": "PL-PK", "isoCode": "PL-20", "shortName": "PK", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Podlaskie"}], "officialLanguages": ["PL"]},
+{"code": "PL-PM", "isoCode": "PL-22", "shortName": "PM", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Pomerania"}], "officialLanguages": ["PL"]},
+{"code": "PL-SK", "isoCode": "PL-24", "shortName": "SK", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Silesia"}], "officialLanguages": ["PL"]},
+{"code": "PL-SL", "isoCode": "PL-26", "shortName": "SL", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Holy Cross"}], "officialLanguages": ["PL"]},
+{"code": "PL-WN", "isoCode": "PL-28", "shortName": "WN", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Warmia-Masuria"}], "officialLanguages": ["PL"]},
+{"code": "PL-WP", "isoCode": "PL-30", "shortName": "WP", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "Greater Poland"}], "officialLanguages": ["PL"]},
+{"code": "PL-ZP", "isoCode": "PL-32", "shortName": "ZP", "category": [{"language": "EN", "text": "voivodship"}], "name": [{"language": "EN", "text": "West Pomerania"}], "officialLanguages": ["PL"]}
+]

@@ -1,17 +1,45 @@
-from typing import List, Optional, Union, Dict, Any
+from datetime import date, datetime
+from typing import List, Optional, Tuple, Union, Dict, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import hashlib
+import json
+import os
+import re
+import numpy as np
 import pandas as pd
 from pathlib import Path
 import yaml
 import importlib
 
+from epftoolbox2.data._market_timezone import bind as _bind_timezone
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers.base import Transformer
+from epftoolbox2.data.transformers.timezone import TimezoneTransformer
 from epftoolbox2.data.validators.base import Validator
-from epftoolbox2.data.cache_manager import CacheManager
+from epftoolbox2.data.validators.result import ValidationResult
+from epftoolbox2.data.cache_manager import (
+    CACHE_FORMAT_VERSION,
+    CacheManager,
+    align_to_local_days,
+    atomic_write,
+    clip_to_range,
+    hold_lock,
+    make_file_lock,
+    settled_until_of,
+    unsettled_boundary,
+    without_ranges,
+    without_settled_until,
+)
 from epftoolbox2.logging import get_logger
-from epftoolbox2._date_utils import resolve_date
+from epftoolbox2._date_utils import _DATE_PATTERN
 
 logger = get_logger(__name__)
+
+# Attributes that are runtime objects, not configuration.
+_RUNTIME_ATTRIBUTES = {"session", "console", "logger"}
+# Configuration that never changes the fetched data and must not end up in cache files.
+_SECRET_ATTRIBUTES = {"api_key"}
+_UNSET_ENV_VAR = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 
 COMPONENT_REGISTRY = {
     "sources": {
@@ -19,50 +47,162 @@ COMPONENT_REGISTRY = {
         "OpenMeteoSource": "epftoolbox2.data.sources.open_meteo",
         "CsvSource": "epftoolbox2.data.sources.csv",
         "CalendarSource": "epftoolbox2.data.sources.calendar",
+        "EpftoolboxBenchmarkSource": "epftoolbox2.data.sources.benchmark",
     },
     "transformers": {
         "TimezoneTransformer": "epftoolbox2.data.transformers.timezone",
         "ResampleTransformer": "epftoolbox2.data.transformers.resample",
         "LagTransformer": "epftoolbox2.data.transformers.lag",
+        "DSTNormalizeTransformer": "epftoolbox2.data.transformers.dst_normalize",
+        "DailyProfileTransformer": "epftoolbox2.data.transformers.daily_profile",
+        "DailyStatsTransformer": "epftoolbox2.data.transformers.daily_stats",
+        "LambdaTransformer": "epftoolbox2.data.transformers.lambda_transformer",
+        "ImputeTransformer": "epftoolbox2.data.transformers.impute",
     },
     "validators": {
-        "ContinuityValidator": "epftoolbox2.data.validators.continuity",
-        "NullCheckValidator": "epftoolbox2.data.validators.null_check",
         "EdaValidator": "epftoolbox2.data.validators.eda",
+        "DSTStructureValidator": "epftoolbox2.data.validators.dst_structure",
+        "CoverageValidator": "epftoolbox2.data.validators.coverage",
+        "PlausibilityValidator": "epftoolbox2.data.validators.plausibility",
     },
 }
+
+
+class DataValidationError(ValueError):
+    """Raised by ``DataPipeline.run`` when a validator fails and ``on_invalid="raise"``."""
 
 
 class DataPipeline:
     """Data pipeline that combines multiple sources and applies transformers.
 
+    Args:
+        sources: Data sources; their outputs are clipped to ``[start, end)`` and joined column-wise. Two sources
+            producing the same column name raise ``ValueError`` (give one a prefix).
+        transformers: Applied in order to the joined source output.
+        validators: Run on the final frame (after the transformers).
+        source_validators: Run on the joined source output before any transformer, e.g. to catch gaps that
+            resampling would interpolate over.
+        timezone: Market time zone (e.g. ``"Europe/Warsaw"``), the single place it needs to be set. ``start`` and
+            a date-only ``end`` passed to ``run`` always cover a whole calendar day, local if set and UTC
+            otherwise: ``start`` begins at that day's midnight and ``end`` runs through the end of its own day
+            (inclusive). A ``datetime.date`` (what YAML makes of an unquoted ``end: 2024-01-31``) counts as a
+            date-only string. If set, date strings and keywords passed to ``run`` are read as local calendar days and
+            naive timestamps are local times. If ``None``, they are UTC calendar days and naive timestamps are
+            UTC. Components whose own zone decides a local
+            calendar day or an issue time — ``TimezoneTransformer.target_tz``,
+            ``OpenMeteoSource.timezone`` and
+            ``CalendarSource.timezone`` (but not ``CsvSource.timezone``, which is the input file's own zone, not
+            the market's) — may leave it unset (``None``) and inherit ``timezone`` instead; an explicitly set,
+            different zone still raises ``ValueError``, since a component computing its own local time in a
+            different zone would silently disagree with it. A component that needs a zone and has neither raises
+            when run.
+        on_invalid: ``"warn"`` (default) logs failed validations and continues; ``"raise"`` raises
+            ``DataValidationError`` after the failing validation stage. Results are kept in ``validation_results``.
+
     Example:
         >>> pipeline = DataPipeline(
         ...     sources=[CsvSource(...), EntsoeSource(...)],
-        ...     transformers=[TimezoneTransformer(target_tz="Europe/Warsaw")]
+        ...     transformers=[TimezoneTransformer()],
+        ...     timezone="Europe/Warsaw",
         ... )
-        >>> df = pipeline.run(start, end)
+        >>> df = pipeline.run("2024-01-01", "2024-06-30")  # 2024-01-01 00:00 .. 2024-06-30 23:00 local
 
     Example:
         >>> pipeline = (
-        ...     DataPipeline()
+        ...     DataPipeline(timezone="Europe/Warsaw")
         ...     .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load"]))
         ...     .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
-        ...     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
-        ...     .add_validator(NullCheckValidator(columns=["load_actual"]))
+        ...     .add_transformer(TimezoneTransformer())
+        ...     .add_validator(CoverageValidator(columns=["load_actual"], min_coverage=1.0))
         ... )
         >>> df = pipeline.run(start, end)
     """
+
+    ON_INVALID = ("warn", "raise")
 
     def __init__(
         self,
         sources: Optional[List[DataSource]] = None,
         transformers: Optional[List[Transformer]] = None,
         validators: Optional[List[Validator]] = None,
+        source_validators: Optional[List[Validator]] = None,
+        timezone: Optional[str] = None,
+        on_invalid: str = "warn",
     ):
         self.sources: List[DataSource] = sources or []
         self.transformers: List[Transformer] = transformers or []
         self.validators: List[Validator] = validators or []
+        self.source_validators: List[Validator] = source_validators or []
+        self.timezone = timezone
+        self.on_invalid = on_invalid
+        self.validation_results: Dict[str, ValidationResult] = {}
+        self._validate_settings()
+
+    def _validate_settings(self) -> None:
+        if self.timezone is not None:
+            try:
+                ZoneInfo(self.timezone)
+            except (ZoneInfoNotFoundError, ValueError, TypeError):
+                raise ValueError(f"Invalid timezone: {self.timezone!r} (use an IANA name such as 'Europe/Warsaw')")
+        self._bind_component_timezones()
+        if self.on_invalid not in self.ON_INVALID:
+            raise ValueError(f"on_invalid must be one of {self.ON_INVALID}, got {self.on_invalid!r}")
+
+    def _bind_component_timezones(self) -> None:
+        """Make ``self.timezone`` the single place the market zone needs to be written.
+
+        Every ``TimezoneTransformer``/``CalendarSource``/``OpenMeteoSource`` whose own zone (``target_tz`` /
+        ``timezone``) is left unset inherits ``self.timezone`` instead, resolved through
+        ``_market_timezone.bind``: the component's private ``_pipeline_timezone`` attribute is set (never the
+        public one, so ``save()`` keeps writing the value the user gave, and a YAML round trip re-resolves the
+        same way given the same ``DataPipeline.timezone``); an explicitly set, different zone still raises.
+        ``CsvSource.timezone`` is the input file's own zone, not the market's, and is not touched.
+
+        ``EntsoeSource`` has no zone parameter of its own (nothing to conflict with, so ``own=None`` always):
+        it only uses the bound zone to anchor a week-ahead daily value (A31, ``load_forecast_daily_min/max``)
+        onto the market's own local day rather than this area's own — see ``EntsoeSource._daily_zone`` — which
+        matters only when it is combined with another area in the same pipeline.
+
+        ``EpftoolboxBenchmarkSource.index_timezone`` is different again: it is a fixed offset the source always
+        has (derived from its ``dataset``, never inherited), so it can't be left unset to agree with
+        ``self.timezone``. A mismatch there is never intentional — the source's UTC index already encodes the
+        benchmark file's local wall-clock time through that exact offset, and re-interpreting it through a
+        different (DST-observing) pipeline zone silently shifts every row's (date, hour) — so it raises too.
+        """
+        from epftoolbox2.data.sources.benchmark import EpftoolboxBenchmarkSource
+        from epftoolbox2.data.sources.calendar import CalendarSource
+        from epftoolbox2.data.sources.entsoe import EntsoeSource
+        from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
+
+        for transformer in self.transformers:
+            if isinstance(transformer, TimezoneTransformer):
+                _bind_timezone(
+                    transformer, transformer.target_tz, self.timezone, "TimezoneTransformer.target_tz", owner=self
+                )
+
+        for source in self.sources:
+            if isinstance(source, (OpenMeteoSource, CalendarSource)):
+                _bind_timezone(source, source.timezone, self.timezone, f"{type(source).__name__}.timezone", owner=self)
+                # A source built with `locations` fetches through its own private per-location instances (see
+                # OpenMeteoBase._configure_locations); their own `timezone` was copied from this source's at
+                # construction (often None too), so each one needs the same binding.
+                for child in getattr(source, "_location_sources", []):
+                    where = f"{type(source).__name__}.timezone (via locations)"
+                    _bind_timezone(child, child.timezone, self.timezone, where, owner=self)
+            elif isinstance(source, EntsoeSource):
+                _bind_timezone(
+                    source, None, self.timezone, "EntsoeSource (for its week-ahead daily values)", owner=self
+                )
+            elif isinstance(source, EpftoolboxBenchmarkSource):
+                if self.timezone is not None and self.timezone != source.index_timezone:
+                    raise ValueError(
+                        f"DataPipeline.timezone={self.timezone!r} does not match "
+                        f"EpftoolboxBenchmarkSource({source.dataset!r}).index_timezone={source.index_timezone!r}. "
+                        "That source's UTC index already encodes its file's local wall-clock time through this "
+                        "fixed offset (see EpftoolboxBenchmarkSource's docs); a DataPipeline.timezone that "
+                        "observes DST reads every row as a different (date, hour). Use "
+                        f"timezone={source.index_timezone!r} for this pipeline."
+                    )
 
     def add_source(self, source: DataSource) -> "DataPipeline":
         if not isinstance(source, DataSource):
@@ -82,143 +222,391 @@ class DataPipeline:
         self.validators.append(validator)
         return self
 
-    def _fetch_with_cache(self, source: DataSource, start: pd.Timestamp, end: pd.Timestamp, cache_manager: CacheManager) -> pd.DataFrame:
+    def add_source_validator(self, validator: Validator) -> "DataPipeline":
+        """Add a validator that runs on the joined source output, before the transformers."""
+        if not isinstance(validator, Validator):
+            raise TypeError("validator must be a Validator instance")
+        self.source_validators.append(validator)
+        return self
+
+    @staticmethod
+    def _fetch_source(
+        source: DataSource, start: pd.Timestamp, end: pd.Timestamp
+    ) -> Tuple[Optional[pd.DataFrame], Optional[pd.Timestamp]]:
+        """``source.fetch(start, end)`` and the instant from which its rows are not settled (``DataSource``), or
+        ``None`` if all of them are. The declaration is read and removed here, before any clip or concat can drop
+        it or pass it on to the output."""
+        df = source.fetch(start, end)
+        if df is None:
+            return None, None
+        settled_until = settled_until_of(df)
+        if settled_until is not None and settled_until >= end:
+            settled_until = None
+        return without_settled_until(df), settled_until
+
+    def _fetch_with_cache(
+        self, source: DataSource, start: pd.Timestamp, end: pd.Timestamp, cache_manager: CacheManager
+    ) -> Tuple[Optional[pd.DataFrame], Optional[pd.Timestamp]]:
+        """The source's rows for ``[start, end)`` from the cache and the API, and the earliest instant a fetch
+        declared its rows unsettled from (``None`` if none did; what the cache holds is settled)."""
         source_config = source.get_cache_config()
         if source_config is None:
-            return source.fetch(start, end)
+            return self._fetch_source(source, start, end)
 
-        cache_key = cache_manager.get_cache_key(source_config)
-        missing_ranges = cache_manager.find_missing_ranges(cache_key, start, end)
-        source_type = source_config.get("source_type", "unknown")
+        source_class = _qualified_name(source)
+        cache_key = cache_manager.get_cache_key(source_config, source_class)
+        source_type = source_config.get("source_type", type(source).__name__)
 
-        if not missing_ranges:
-            logger.info(f"Cache: Full hit for {source_type} source")
-            return cache_manager.read_cached_data(cache_key, start, end)
+        # Without a pipeline zone a source can still say which zone its one-day values are stamped at.
+        day_zone = _cache_day_zone(source, self.timezone)
+        # Held across the fetch: parallel processes wait for the one fetching this source, then read its result.
+        with cache_manager.lock(cache_key):
+            cached = cache_manager.read_cached_data(cache_key, start, end)
+            # Holes are fetched from the start of their local day, see ``align_to_local_days``.
+            missing_ranges = align_to_local_days(
+                cache_manager.find_missing_ranges(cache_key, start, end), start, day_zone
+            )
 
-        if len(missing_ranges) == 1 and missing_ranges[0] == (start, end):
-            logger.info(f"Cache: Miss for {source_type} source")
-        else:
-            logger.info(f"Cache: Partial hit for {source_type} source")
+            if not missing_ranges:
+                logger.info(f"Cache: Full hit for {source_type} source")
+                return (cached if cached is not None else pd.DataFrame()), None
 
-        for missing_start, missing_end in missing_ranges:
-            fresh_df = source.fetch(missing_start, missing_end)
-            if fresh_df is not None and not fresh_df.empty:
-                cache_manager.write_cache(cache_key, fresh_df, missing_start, missing_end, source_config)
+            if len(missing_ranges) == 1 and missing_ranges[0] == (start, end):
+                logger.info(f"Cache: Miss for {source_type} source")
+            else:
+                logger.info(f"Cache: Partial hit for {source_type} source")
 
-        df = cache_manager.read_cached_data(cache_key, start, end)
-        return df if df is not None else pd.DataFrame()
+            parts = []
+            unsettled_from = []
+            # A range widened back to the start of its day also covers rows that are cached. Those are replaced only
+            # by a refetch that returns rows (so a stale stamp inside it cannot stay next to the new one), and kept
+            # when the source answers with nothing for the range (ENTSO-E's "No matching data" is an empty frame).
+            replaced = []
+            for missing_start, missing_end in missing_ranges:
+                fresh_df, settled_until = self._fetch_source(source, missing_start, missing_end)
+                if fresh_df is None or fresh_df.empty:
+                    continue
+                fresh_df = clip_to_range(fresh_df, missing_start, missing_end)
+                if not fresh_df.empty:
+                    replaced.append((missing_start, missing_end))
+                # Records only the part the source actually returned, that is settled and that the source did not
+                # declare unsettled; the rest is still returned now and fetched again next time. `timezone`
+                # floors the unsettled-period cap to this pipeline's market zone's own local midnight (not UTC
+                # midnight), so a later resumed fetch starts exactly there instead of strictly inside a source's
+                # one-day period (e.g. ENTSO-E's A31 daily min/max) — a source that carries such a period's value
+                # forward to cover its fetch's own start would otherwise re-stamp the same day's value a second
+                # time on top of the one already cached.
+                cache_manager.write_cache(
+                    cache_key,
+                    fresh_df,
+                    missing_start,
+                    missing_end,
+                    source_config,
+                    source_class,
+                    timezone=self.timezone,
+                    settled_until=settled_until,
+                )
+                if settled_until is not None:
+                    unsettled_from.append(settled_until)
+                parts.append(fresh_df)
 
-    def _parse_timestamp(self, ts: Union[str, pd.Timestamp]) -> pd.Timestamp:
+            if cached is not None:
+                parts.insert(0, without_ranges(cached, replaced))
+
+        unsettled = min(unsettled_from) if unsettled_from else None
+        parts = [p for p in parts if not p.empty]
+        if not parts:
+            return pd.DataFrame(), unsettled
+        # What is left of the cache and the refetched ranges are disjoint, so there are no duplicate timestamps.
+        return pd.concat(parts).sort_index(kind="stable"), unsettled
+
+    def _parse_timestamp(self, ts: Union[str, date, pd.Timestamp], is_end: bool = False) -> pd.Timestamp:
+        """UTC bound for ``run``. See the class docstring for how dates, keywords and timestamps are read."""
+        tz = self.timezone or "UTC"
+        if isinstance(ts, date) and not isinstance(ts, datetime):
+            # A plain date, such as YAML makes of an unquoted `end: 2024-01-31`, names a whole day like "2024-01-31".
+            ts = ts.isoformat()
         if isinstance(ts, str):
-            ts = resolve_date(ts)  # "today"/"now_d±N" → local ISO date string
-        if isinstance(ts, str):
-            return pd.Timestamp(ts, tz="UTC")
-        return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
+            day = _calendar_day(ts, self.timezone)
+            if day is not None:
+                if is_end:
+                    # end is inclusive: the whole day is included (local if timezone is set, else UTC).
+                    day += pd.Timedelta(days=1)
+                return day.tz_localize(tz, ambiguous=True, nonexistent="shift_forward").tz_convert("UTC")
+        ts = pd.Timestamp(ts)
+        return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize(tz).tz_convert("UTC")
 
-    def run(self, start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp], cache: Union[bool, str] = False) -> pd.DataFrame:
+    def resolve_range(
+        self, start: Union[str, date, pd.Timestamp], end: Union[str, date, pd.Timestamp]
+    ) -> Tuple[pd.Timestamp, pd.Timestamp]:
+        """The half-open UTC range ``[start, end)`` that ``run(start, end)`` returns."""
+        start_ts = self._parse_timestamp(start)
+        end_ts = self._parse_timestamp(end, is_end=True)
+        if end_ts <= start_ts:
+            raise ValueError(f"End timestamp ({end_ts}) must be after start timestamp ({start_ts})")
+        return start_ts, end_ts
+
+    def run(
+        self,
+        start: Union[str, date, pd.Timestamp],
+        end: Union[str, date, pd.Timestamp],
+        cache: Union[bool, str] = False,
+    ) -> pd.DataFrame:
         if not self.sources:
             raise ValueError("At least one data source is required")
+        self._validate_settings()  # settings (e.g. timezone) may have changed via add_transformer since __init__
 
-        start = self._parse_timestamp(start)
-        end = self._parse_timestamp(end)
-
-        if end <= start:
-            raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
+        start, end = self.resolve_range(start, end)
+        self.validation_results = {}
 
         result = self._load_or_fetch_sources(start, end, cache)
         if result.empty:
             return result
 
+        self._run_validators(result, self.source_validators, "source_validators")
         result = self._run_transformers(result)
-        self._run_validators(result)
+        self._run_validators(result, self.validators, "validators")
 
         logger.info(f"Pipeline: Completed with {len(result)} rows")
         return result
 
-    def _load_or_fetch_sources(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]) -> pd.DataFrame:
-        if isinstance(cache, str):
-            cache_file = Path(cache)
-            if cache_file.exists():
-                logger.info(f"Cache: Loading source data from {cache}")
-                result = pd.read_csv(cache_file, index_col=0)
-                result.index = pd.to_datetime(result.index, utc=True)
-                return result
-            result = self._run_sources(start, end, cache)
+    def _load_or_fetch_sources(
+        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str, os.PathLike]
+    ) -> pd.DataFrame:
+        if isinstance(cache, (str, os.PathLike)):
+            return self._run_sources_with_file_cache(start, end, cache)
+        return self._run_sources(start, end, cache)[0]
+
+    def _run_sources_with_file_cache(
+        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[str, os.PathLike]
+    ) -> pd.DataFrame:
+        """Cache the combined source output in one file, reused only for the same sources, dates and settledness
+        (see ``_is_file_cache_stale``), which includes the instant from which a source declared its rows
+        unsettled (``DataSource``)."""
+        fingerprint = self._sources_fingerprint(start, end)
+        digest = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()[:16]
+        path = _resolve_cache_file(cache, digest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path = path.with_name(path.name + ".meta.json")
+
+        with hold_lock(make_file_lock(path.with_name(path.name + ".lock")), str(path)):
+            meta = _read_json(meta_path)
+            fresh = path.exists() and meta.get("fingerprint") == digest
+            stale = fresh and _is_file_cache_stale(meta, end)
+
+            if fresh and not stale:
+                try:
+                    result = _read_frame(path, meta)
+                    logger.info(f"Cache: Loading source data from {path}")
+                    return result
+                except Exception as e:  # noqa: BLE001 - an unreadable cache file is a cache miss
+                    logger.warning(f"Cache: cannot read {path} ({type(e).__name__}: {e}); fetching again")
+            elif stale:
+                logger.info(
+                    f"Cache: {path} was fetched while part of the range was not settled (still within the unsettled "
+                    "period, or declared unsettled by a source); fetching again"
+                )
+            elif path.exists():
+                logger.info(f"Cache: {path} holds data for {_describe_mismatch(meta, fingerprint)}; fetching again")
+
+            result, settled_until = self._run_sources(start, end, cache=False)
             if not result.empty:
-                result.to_csv(cache)
-                logger.info(f"Cache: Saved source data to {cache}")
+                # Invalidate first: a crash between the two writes must not pair old metadata with new data.
+                meta_path.unlink(missing_ok=True)
+                atomic_write(path, lambda tmp: _write_frame(result, tmp, path))
+                meta = {
+                    "fingerprint": digest,
+                    "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+                    "settled_at": unsettled_boundary().isoformat(),
+                    # None when every source's rows were settled up to `end`.
+                    "settled_until": settled_until.isoformat() if settled_until is not None else None,
+                    "columns": [str(c) for c in result.columns],
+                    "dtypes": [str(t) for t in result.dtypes],
+                    "index_name": result.index.name,
+                    "config": fingerprint,
+                }
+                atomic_write(meta_path, lambda tmp: tmp.write_text(json.dumps(meta, indent=2, default=str)))
+                logger.info(f"Cache: Saved source data to {path}")
             return result
-        return self._run_sources(start, end, cache)
 
-    def _run_sources(self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]) -> pd.DataFrame:
+    def _sources_fingerprint(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, Any]:
+        from epftoolbox2 import __version__
+
+        return {
+            "epftoolbox2": __version__,
+            "cache_format": CACHE_FORMAT_VERSION,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "sources": [_component_fingerprint(source) for source in self.sources],
+        }
+
+    def _run_sources(
+        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]
+    ) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
+        """The sources' joined output for ``[start, end)`` and the earliest instant from which any source declared
+        its rows unsettled (``None`` if none did)."""
         cache_manager = CacheManager() if cache is True else None
-        dataframes = []
+        labelled = []
+        unsettled_from = []
 
-        for source in self.sources:
-            df = self._fetch_with_cache(source, start, end, cache_manager) if cache is True else source.fetch(start, end)
-            if df is not None and not df.empty:
-                dataframes.append(df)
+        for number, source in enumerate(self.sources, start=1):
+            if cache_manager is not None:
+                df, settled_until = self._fetch_with_cache(source, start, end, cache_manager)
+            else:
+                df, settled_until = self._fetch_source(source, start, end)
+            if settled_until is not None:
+                unsettled_from.append(settled_until)
+            if df is None or df.empty:
+                continue
+            # Sources may return rows outside the request (ENTSO-E load from start - 1 day, Open-Meteo up to
+            # end + horizon); every path returns exactly [start, end) so cached and uncached runs agree.
+            df = clip_to_range(df, start, end)
+            if not df.empty:
+                labelled.append((f"{type(source).__name__} #{number}", df))
 
-        if not dataframes:
+        unsettled = min(unsettled_from) if unsettled_from else None
+        if not labelled:
             logger.warning("Pipeline: No data returned from any source")
-            return pd.DataFrame()
+            return pd.DataFrame(), unsettled
 
-        return pd.concat(dataframes, axis=1)
+        _check_unique_columns(labelled)
+        return pd.concat([df for _, df in labelled], axis=1), unsettled
 
     def _run_transformers(self, df: pd.DataFrame) -> pd.DataFrame:
         for transformer in self.transformers:
             df = transformer.transform(df)
         return df
 
-    def _run_validators(self, df: pd.DataFrame) -> None:
-        for validator in self.validators:
-            validation_result = validator.validate(df)
-            validator_name = type(validator).__name__
-            if not validation_result.is_valid:
-                for error in validation_result.errors:
-                    logger.warning(f"Validation [{validator_name}]: {error}")
-            for warning in validation_result.warnings:
-                logger.info(f"Validation [{validator_name}]: {warning}")
+    def _run_validators(self, df: pd.DataFrame, validators: List[Validator], stage: str) -> None:
+        """Run one validation stage, store each result in ``validation_results`` and apply ``on_invalid``."""
+        failed = []
+        for validator in validators:
+            label = type(validator).__name__
+            name, n = f"{stage}.{label}", 2
+            while name in self.validation_results:
+                name, n = f"{stage}.{label}#{n}", n + 1
+            result = validator.validate(df)
+            self.validation_results[name] = result
+            if not result.is_valid:
+                failed.append(name)
+                for error in result.errors:
+                    logger.warning(f"Validation [{label}]: {error}")
+            for warning in result.warnings:
+                logger.info(f"Validation [{label}]: {warning}")
 
-    def _serialize_component(self, component: Any) -> Dict[str, Any]:
+        if not failed:
+            return
+        summary = "; ".join(_summarize(name, self.validation_results[name]) for name in failed)
+        if self.on_invalid == "raise":
+            raise DataValidationError(f"Validation failed: {summary}")
+        logger.warning(f"Validation: {len(failed)} validator(s) failed, continuing (on_invalid='warn'): {summary}")
+
+    def _serialize_component(
+        self, component: Any, include_secrets: bool = False, base_dir: Optional[Path] = None
+    ) -> Dict[str, Any]:
         class_name = type(component).__name__
+        refs = getattr(component, "_yaml_refs", {})
         params = {}
-        excluded = {"session", "console", "logger", "lat", "lon"}
-        if hasattr(component, "__dict__"):
-            for key, value in component.__dict__.items():
-                if not key.startswith("_") and key not in excluded:
-                    if isinstance(value, Path):
-                        params[key] = str(value)
-                    elif isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                        params[key] = value
+        for key, value in vars(component).items():
+            if key.startswith("_") or key in _RUNTIME_ATTRIBUTES:
+                continue
+            where = f"{class_name}.{key}"
+            plain = _to_yaml_value(value, where)
+            ref = refs.get(key)
+            unchanged = ref is not None and ref["value"] == plain
+            if unchanged and _ENV_REF.search(str(ref["raw"])):
+                params[key] = ref["raw"]  # written back as ${VAR}, as it was in the loaded YAML
+            elif key in _SECRET_ATTRIBUTES and value and not include_secrets:
+                params[key] = "${" + _secret_env_var(component, key) + "}"
+            elif _is_path_param(key) and isinstance(plain, str) and plain:
+                params[key] = _portable_path(plain, base_dir, was_relative=unchanged and ref["relative"])
+            else:
+                params[key] = plain
         return {"class": class_name, "params": params}
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, include_secrets: bool = False, base_dir: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
+        """Pipeline configuration as plain Python values (see ``save``)."""
+        base = Path(base_dir) if base_dir is not None else None
+
+        def serialize(components):
+            return [self._serialize_component(c, include_secrets, base) for c in components]
+
         return {
-            "sources": [self._serialize_component(s) for s in self.sources],
-            "transformers": [self._serialize_component(t) for t in self.transformers],
-            "validators": [self._serialize_component(v) for v in self.validators],
+            "timezone": self.timezone,
+            "on_invalid": self.on_invalid,
+            "sources": serialize(self.sources),
+            "source_validators": serialize(self.source_validators),
+            "transformers": serialize(self.transformers),
+            "validators": serialize(self.validators),
         }
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: Union[str, Path], include_secrets: bool = False) -> None:
+        """Write the configuration to YAML.
+
+        ``api_key`` is written as ``${<SOURCE>_API_KEY}`` (e.g. ``${ENTSOE_API_KEY}``) and read from the environment
+        on load, unless ``include_secrets=True``. Values loaded from ``${VAR}`` references are written back as the
+        reference. Relative file paths are written relative to the YAML file. Parameters that cannot be represented
+        in YAML (callables, sets, arbitrary objects) raise ``TypeError``.
+        """
         path = Path(path)
-        config = self.to_dict()
+        config = self.to_dict(include_secrets=include_secrets, base_dir=path.parent)
         with open(path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
         logger.info(f"Pipeline: Saved configuration to {path}")
 
     @classmethod
-    def _load_component(cls, component_type: str, config: Dict[str, Any]) -> Any:
+    def _load_component(
+        cls, component_type: str, config: Dict[str, Any], base_dir: Optional[Union[str, Path]] = None
+    ) -> Any:
+        """Build one component; ``${VAR}`` in string values is expanded and, with ``base_dir``, relative file paths
+        are resolved against it."""
         class_name = config["class"]
-        params = config.get("params", {})
+        raw_params = config.get("params") or {}
 
         if class_name not in COMPONENT_REGISTRY[component_type]:
             raise ValueError(f"Unknown {component_type[:-1]}: {class_name}")
 
+        params, refs = {}, {}
+        for key, raw in raw_params.items():
+            value = _expand_env(raw, f"{class_name}.{key}")
+            relative = False
+            if base_dir is not None and _is_path_param(key) and isinstance(value, str) and value:
+                local = os.path.expanduser(value)
+                if not os.path.isabs(local):
+                    value = os.path.normpath(os.path.join(os.path.abspath(base_dir), local))
+                    relative = True
+            if value != raw:
+                refs[key] = {"raw": raw, "value": value, "relative": relative}
+            params[key] = value
+
         module_path = COMPONENT_REGISTRY[component_type][class_name]
         module = importlib.import_module(module_path)
         component_class = getattr(module, class_name)
-        return component_class(**params)
+        component = component_class(**params)
+        if refs:
+            component._yaml_refs = refs
+        return component
+
+    @classmethod
+    def from_dict(cls, config: Dict[str, Any], base_dir: Optional[Union[str, Path]] = None) -> "DataPipeline":
+        """Build a pipeline from a configuration dict as written by ``to_dict``; relative file paths are resolved
+        against ``base_dir`` (``load`` passes the YAML file's directory)."""
+        config = config or {}
+        unknown = set(config) - set(_PIPELINE_KEYS)
+        if unknown:
+            raise ValueError(f"Unknown DataPipeline setting(s) {sorted(unknown)}; expected {list(_PIPELINE_KEYS)}")
+
+        def build(section: str, registry_section: str) -> list:
+            return [cls._load_component(registry_section, c, base_dir) for c in config.get(section) or []]
+
+        return cls(
+            sources=build("sources", "sources"),
+            source_validators=build("source_validators", "validators"),
+            transformers=build("transformers", "transformers"),
+            validators=build("validators", "validators"),
+            timezone=config.get("timezone"),
+            on_invalid=config.get("on_invalid", "warn"),
+        )
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "DataPipeline":
@@ -226,16 +614,272 @@ class DataPipeline:
         with open(path, "r") as f:
             config = yaml.safe_load(f)
 
-        pipeline = cls()
-
-        for source_config in config.get("sources", []):
-            pipeline.add_source(cls._load_component("sources", source_config))
-
-        for transformer_config in config.get("transformers", []):
-            pipeline.add_transformer(cls._load_component("transformers", transformer_config))
-
-        for validator_config in config.get("validators", []):
-            pipeline.add_validator(cls._load_component("validators", validator_config))
-
+        pipeline = cls.from_dict(config, base_dir=path.parent)
         logger.info(f"Pipeline: Loaded configuration from {path}")
         return pipeline
+
+
+_PIPELINE_KEYS = ("timezone", "on_invalid", "sources", "source_validators", "transformers", "validators")
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _now(tz: Optional[str]) -> pd.Timestamp:
+    """Current time in ``tz``, or naive machine-local time when ``tz`` is None."""
+    return pd.Timestamp.now(tz=tz) if tz else pd.Timestamp.now()
+
+
+def _cache_day_zone(source: DataSource, timezone: Optional[str]) -> Optional[str]:
+    """The zone whose local midnights a per-source cache fetches from: the pipeline's ``timezone``, else the zone a
+    source says its one-day values are stamped at (``EntsoeSource._daily_zone``, the area's own zone for a source
+    used without a pipeline zone), else ``None`` (no source-specific day to start from)."""
+    if timezone is not None:
+        return timezone
+    daily_zone = getattr(source, "_daily_zone", None)
+    return daily_zone() if callable(daily_zone) else None
+
+
+def _calendar_day(text: str, tz: Optional[str]) -> Optional[pd.Timestamp]:
+    """Naive midnight of the day a date string ("2024-01-01") or keyword ("today", "now_d-7") names, else None.
+
+    Keywords count days in ``tz`` (the machine's local date when ``tz`` is None, as before).
+    """
+    s = text.strip()
+    match = _DATE_PATTERN.match(s)
+    if match:
+        offset = int(match.group(2)) if match.group(2) else 0
+        return _now(tz).tz_localize(None).normalize() + pd.Timedelta(days=offset)
+    if _DATE_ONLY.match(s):
+        return pd.Timestamp(s)
+    if ":" in s:
+        return None
+    try:
+        ts = pd.Timestamp(s)
+    except ValueError:
+        return None
+    return ts if ts.tzinfo is None and ts == ts.normalize() else None
+
+
+def _check_unique_columns(labelled: List[Tuple[str, pd.DataFrame]]) -> None:
+    owners: Dict[Any, List[str]] = {}
+    for label, df in labelled:
+        duplicated = list(df.columns[df.columns.duplicated()].unique())
+        if duplicated:
+            raise ValueError(f"{label} returned duplicate column names {duplicated}")
+        for column in df.columns:
+            owners.setdefault(column, []).append(label)
+    clashes = [f"{column!r} from {' and '.join(labels)}" for column, labels in owners.items() if len(labels) > 1]
+    if clashes:
+        shown = "; ".join(clashes[:10]) + ("; ..." if len(clashes) > 10 else "")
+        raise ValueError(f"Sources produce the same column names ({shown}). Give the sources distinct prefixes.")
+
+
+def _summarize(name: str, result: ValidationResult) -> str:
+    errors = result.errors[:3] + ([f"... {len(result.errors) - 3} more"] if len(result.errors) > 3 else [])
+    return f"{name}: {', '.join(errors) or 'invalid'}"
+
+
+def _expand_env(value: Any, where: str) -> Any:
+    """Replace ``${VAR}`` in strings (also inside lists and dicts) with the environment variable's value."""
+    if isinstance(value, str):
+
+        def substitute(match: "re.Match[str]") -> str:
+            name = match.group(1)
+            if name not in os.environ:
+                raise ValueError(
+                    f"{where} refers to ${{{name}}}, but the environment variable {name} is not set "
+                    "(set it, or save the pipeline with include_secrets=True)"
+                )
+            return os.environ[name]
+
+        return _ENV_REF.sub(substitute, value)
+    if isinstance(value, list):
+        return [_expand_env(v, where) for v in value]
+    if isinstance(value, dict):
+        return {k: _expand_env(v, f"{where}.{k}") for k, v in value.items()}
+    return value
+
+
+def _is_path_param(name: str) -> bool:
+    return name == "path" or name.endswith(("_path", "_file", "_dir"))
+
+
+def _portable_path(value: str, base_dir: Optional[Path], was_relative: bool) -> str:
+    """Absolute paths stay absolute; relative ones (to the working directory, or to the YAML they were loaded from)
+    are written relative to the directory of the YAML being saved."""
+    local = os.path.expanduser(value)
+    if base_dir is None or (os.path.isabs(local) and not was_relative):
+        return value
+    try:
+        return Path(os.path.relpath(os.path.abspath(local), os.path.abspath(base_dir))).as_posix()
+    except ValueError:  # e.g. different drives on Windows
+        return os.path.abspath(local)
+
+
+def _secret_env_var(component: Any, key: str) -> str:
+    """Environment variable a secret is read from: ``api_key_env`` on the class, else e.g. ENTSOE_API_KEY."""
+    explicit = getattr(type(component), f"{key}_env", None)
+    if explicit:
+        return explicit
+    name = type(component).__name__
+    if name.endswith("Source") and len(name) > len("Source"):
+        name = name[: -len("Source")]
+    return f"{name.upper()}_{key.upper()}"
+
+
+def _to_yaml_value(value: Any, where: str) -> Any:
+    """Plain YAML-safe value (numpy scalars and arrays, tuples, ranges and paths converted); raises otherwise."""
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, np.generic):
+        return _to_yaml_value(value.item(), where)
+    if isinstance(value, np.ndarray):
+        return _to_yaml_value(value.tolist(), where)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple, range)):
+        return [_to_yaml_value(v, where) for v in value]
+    if isinstance(value, dict):
+        if not all(isinstance(k, (str, int)) for k in value):
+            raise TypeError(f"Cannot save {where}: dictionary keys must be strings or integers")
+        return {k: _to_yaml_value(v, f"{where}.{k}") for k, v in value.items()}
+    kind = "a callable" if callable(value) else f"a {type(value).__name__}"
+    raise TypeError(
+        f"Cannot save {where}: it is {kind}, which YAML cannot represent "
+        "(use str, int, float, bool, None, list or dict)"
+    )
+
+
+def _qualified_name(obj: Any) -> str:
+    cls = type(obj)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _fingerprint_value(value: Any) -> Any:
+    """JSON-safe, deterministic stand-in for a parameter value. Files are identified by size and mtime."""
+    if isinstance(value, Path):
+        if value.exists():
+            stat = value.stat()
+            return {"path": str(value.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        return str(value)
+    if isinstance(value, (list, tuple, range)):
+        return [_fingerprint_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _fingerprint_value(v) for k, v in value.items()}
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if hasattr(value, "tolist"):  # numpy scalars and arrays
+        return _fingerprint_value(value.tolist())
+    return repr(value)
+
+
+def _component_fingerprint(component: Any) -> Dict[str, Any]:
+    params = {
+        key: _fingerprint_value(value)
+        for key, value in vars(component).items()
+        if not key.startswith("_") and key not in _RUNTIME_ATTRIBUTES and key not in _SECRET_ATTRIBUTES
+    }
+    fingerprint = {"class": _qualified_name(component), "params": params}
+    # A component may inherit its market zone from DataPipeline.timezone (a private attribute, so it is not in
+    # `params` above); include the value it actually resolved to, so the file cache is invalidated when only the
+    # pipeline's zone changes.
+    market_timezone = getattr(component, "market_timezone", None)
+    if market_timezone is not None:
+        fingerprint["market_timezone"] = market_timezone
+    if isinstance(component, DataSource):
+        fingerprint["cache_config"] = _fingerprint_value(component.get_cache_config())
+    return fingerprint
+
+
+def _resolve_cache_file(cache: Union[str, os.PathLike], digest: str) -> Path:
+    """Expand ``$VAR`` and ``~`` in a cache path. A directory (existing, trailing separator, or a new path without a
+    file suffix) gets one Parquet file per configuration; ``*.parquet`` is Parquet; any other file is CSV."""
+    raw = os.fspath(cache)
+    expanded = os.path.expanduser(os.path.expandvars(raw))
+    unset = _UNSET_ENV_VAR.findall(expanded)
+    if unset:
+        raise ValueError(f"Cache path {raw!r} uses environment variables that are not set: {', '.join(unset)}")
+    path = Path(expanded)
+    if path.is_file():
+        return path
+    if path.is_dir() or raw.endswith(("/", os.sep)) or path.suffix == "":
+        return path / f"data_{digest}.parquet"
+    return path
+
+
+def _is_parquet(path: Path) -> bool:
+    return path.suffix.lower() in (".parquet", ".pq")
+
+
+def _write_frame(df: pd.DataFrame, tmp: Path, path: Path) -> None:
+    if _is_parquet(path):
+        df.to_parquet(tmp)
+    else:
+        df.to_csv(tmp)
+
+
+def _read_frame(path: Path, meta: Dict[str, Any]) -> pd.DataFrame:
+    if _is_parquet(path):
+        return pd.read_parquet(path)
+    df = pd.read_csv(path, index_col=0, float_precision="round_trip")
+    df.index = pd.to_datetime(df.index, utc=True)
+    df.index.name = meta.get("index_name")
+    # CSV loses column names (duplicates get ".1") and dtypes (an all-null column comes back as float).
+    df.columns = meta["columns"]
+    for i, dtype in enumerate(meta["dtypes"]):
+        if str(df.dtypes.iloc[i]) != dtype:
+            df.isetitem(i, df.iloc[:, i].astype(dtype))
+    return df
+
+
+def _read_json(path: Path) -> Dict[str, Any]:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _is_file_cache_stale(meta: Dict[str, Any], end: pd.Timestamp) -> bool:
+    """Whether a matching-fingerprint file cache might now be missing data that has become settled since it was
+    written (a fixed date range whose `end` is in the future would otherwise cache NaN for not-yet-published rows
+    forever, which the per-source cache avoids by never recording the unsettled tail before "now" as covered).
+
+    A file is trusted only if either the whole requested range was already settled when it was fetched (`end` was
+    at or before that fetch's settled boundary, so nothing about it could still change), or the settled boundary
+    has not moved since (same day, or `unsettled_period` unchanged). A file without "settled_at" is always treated
+    as stale.
+
+    A source can also declare that its rows from some instant on are not settled (`DataSource`, e.g. school holidays
+    the API has not published yet). The earliest such instant is stored as "settled_until", and a file whose
+    "settled_until" is before the requested `end` is never reused: the fetch it holds was only settled up to there.
+    A missing value means the sources declared nothing.
+    """
+    settled_until = meta.get("settled_until")
+    if settled_until is not None:
+        try:
+            if pd.Timestamp(settled_until) < end:
+                return True
+        except (TypeError, ValueError):
+            return True
+    settled_at = meta.get("settled_at")
+    if settled_at is None:
+        return True
+    settled_at = pd.Timestamp(settled_at)
+    if end <= settled_at:
+        return False
+    return unsettled_boundary() > settled_at
+
+
+def _describe_mismatch(meta: Dict[str, Any], fingerprint: Dict[str, Any]) -> str:
+    old = meta.get("config")
+    if not old:
+        return "an unknown configuration"
+    if (old.get("start"), old.get("end")) != (fingerprint["start"], fingerprint["end"]):
+        return f"{old.get('start')} .. {old.get('end')}, requested {fingerprint['start']} .. {fingerprint['end']}"
+    if old.get("sources") != fingerprint["sources"]:
+        return "different sources or source parameters"
+    return "a different epftoolbox2 version or cache format"

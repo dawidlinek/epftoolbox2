@@ -1,18 +1,23 @@
+timezone: Europe/Warsaw
+on_invalid: warn
 sources:
 - class: EntsoeSource
   params:
     country_code: PL
-    api_key: YOUR_API_KEY_HERE
+    api_key: ${ENTSOE_API_KEY}
     type:
     - load
     - price
     prefer_15min: false
+    neighbours: null
+    prefix: ''
 - class: OpenMeteoSource
   params:
     latitude: 52.2297
     longitude: 21.0122
-    horizon: 7
-    model: jma_seamless
+    locations: null
+    agg: null
+    keep_locations: false
     columns:
     - temperature_2m
     - rain
@@ -28,12 +33,21 @@ sources:
     - cloud_cover
     - wind_speed_10m
     - wind_direction_10m
+    horizon: null
+    model: jma_seamless
+    temporal_resolution: null
+    api: previous_runs
+    run: '00'
+    timezone: null
     prefix: warsaw
+    strict: false
     proxy_url: null
 - class: CalendarSource
   params:
     country: PL
-    timezone: Europe/Warsaw
+    timezone: null
+    lat: 52.2297
+    lon: 21.0122
     holidays: binary
     weekday: onehot
     hour: false
@@ -41,18 +55,28 @@ sources:
     daylight: true
     prefix: ''
     freq: 1h
+    region: null
+    categories: null
+    bridge_days: false
+    christmas_period: false
+    holiday_distance: 0
+    dst_switch: false
+    regimes: false
+    school_holidays: false
+source_validators: []
 transformers:
 - class: TimezoneTransformer
   params:
-    target_tz: Europe/Warsaw
+    target_tz: null
     daily_columns:
     - load_forecast_daily_min
     - load_forecast_daily_max
+    daily_anchor: null
 - class: ResampleTransformer
   params:
     freq: 1h
-    method: linear
-    columns: null
+    agg: mean
+    fill: ffill
 - class: LagTransformer
   params:
     columns:
@@ -74,7 +98,6 @@ transformers:
     - is_friday
     - is_saturday
     - is_sunday
-    - load_forecast
     - is_holiday
     lags:
     - -7
@@ -86,10 +109,21 @@ transformers:
     - -1
     - 0
     freq: day
+- class: LagTransformer
+  params:
+    columns:
+    - load_forecast
+    lags:
+    - -1
+    freq: day
 validators:
-- class: NullCheckValidator
+- class: CoverageValidator
   params:
     columns:
     - load_actual
     - price
-    allow_nulls: false
+    start: null
+    end: null
+    freq: null
+    min_coverage: 1.0
+    max_gap: null

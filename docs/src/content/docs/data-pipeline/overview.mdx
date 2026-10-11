@@ -3,19 +3,29 @@ title: Data Pipeline Overview
 description: Using DataPipeline to download and process data
 ---
 
-import { Card, CardGrid, LinkCard, Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components';
-
-# Data Pipeline
+import { CardGrid, LinkCard, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
 The `DataPipeline` class combines data sources, transformers, and validators into a cohesive data processing workflow.
 
 ## Components
 
-The pipeline consists of three types of components:
+The pipeline runs in three steps, each backed by a kind of component:
 
-- **Sources** fetch raw data from external APIs or files
-- **Transformers** modify the DataFrame (resample, create lags, convert timezone)
-- **Validators** check data quality without modifying the DataFrame
+<Steps>
+
+1. **Sources fetch data in UTC.** Every source returns a DataFrame with a UTC `DatetimeIndex`. Two sources
+   producing the same column name raise `ValueError` naming both sources, so give one a `prefix`.
+
+2. **Transformers modify the data**, applied in order to the joined source output (resample, create lags, convert
+   timezone, ...).
+
+3. **Validators check quality** without modifying the DataFrame. `validators` run on the final frame, and
+   `source_validators` run on the raw, joined source output, before any transformer. Every result is kept in
+   `pipeline.validation_results`. `DataPipeline(on_invalid="raise")` raises `DataValidationError` on a failure
+   instead of the default (`"warn"`, log and continue). See
+   [Serialization](/epftoolbox2/data-pipeline/serialization/#validators-and-on_invalid).
+
+</Steps>
 
 ## Basic Usage
 
@@ -23,15 +33,16 @@ The pipeline consists of three types of components:
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, TimezoneTransformer
-from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.data.validators import CoverageValidator
 
 pipeline = (
-    DataPipeline()
+    DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load", "price"]))
     .add_source(CalendarSource(country="PL", holidays="binary"))
     .add_transformer(ResampleTransformer(freq="1h"))
-    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
+    # target_tz is left unset: it inherits DataPipeline.timezone above.
+    .add_transformer(TimezoneTransformer())
+    .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
 )
 
 df = pipeline.run(start="2024-01-01", end="2024-06-01", cache=True)
@@ -59,35 +70,42 @@ The `start` and `end` parameters accept multiple formats:
   </TabItem>
   <TabItem label="Keywords">
     ```python
-    df = pipeline.run(start="today", end="today")
+    df = pipeline.run(start="today", end="today_d+1")
     df = pipeline.run(start="2024-01-01", end="today")
     ```
   </TabItem>
 </Tabs>
 
-## Data Flow
+`end` is inclusive: a date-only `end` (a string, a `datetime.date`, or a keyword such as `"today"`) includes that whole
+day, the local day when `timezone` is set and the UTC day otherwise. A `datetime.date` is what YAML makes of an unquoted
+`end: 2024-01-31`, so a workflow file gives the same range with or without quotes. A `pd.Timestamp` or `datetime.datetime`
+is an exact instant, and an `end` given that way is exclusive.
 
-<Steps>
+A date-only `start` begins at that day's midnight, and naive timestamps are taken as UTC. Every source's output is
+clipped to the resolved range, whether it comes from the API or from the cache (see
+[Data Caching](/epftoolbox2/data-pipeline/caching/)).
 
-1. **Sources fetch data in UTC**
+### Timezone (local calendar days)
 
-   All data sources output DataFrames with UTC DatetimeIndex.
+Pass a market time zone to make those days **local calendar days**:
 
-2. **Transformers modify the data**
+```python
+pipeline = DataPipeline(timezone="Europe/Warsaw", sources=[...], transformers=[...])
 
-   Apply resampling, create lags, then convert timezone.
+# 2024-01-01 00:00 local .. 2024-01-03 23:00 local (both days complete, inclusive)
+df = pipeline.run(start="2024-01-01", end="2024-01-03")
+```
 
-3. **Validators check quality**
+With `timezone` set:
+- `start` begins at local midnight, and `end` covers its *whole local day*, correctly sized (23 or 25
+  hours) on a DST-transition day.
+- `"today"` / `"now_d±N"` keywords resolve using the current date **in that zone**.
+- Naive timestamps passed to `run()` are read as local instants, and timezone-aware timestamps are used as given.
 
-   Verify data integrity without modifying the DataFrame.
+Without `timezone` (the default), the day is a UTC one: date strings and keywords mean midnight UTC, and naive
+timestamps are UTC.
 
-</Steps>
-
-<Aside type="tip">
-  Sources always output UTC. Use `TimezoneTransformer` at the end of your pipeline to convert to local time.
-</Aside>
-
-## Pipeline Components
+## Available Components
 
 ### Data Sources
 
@@ -96,6 +114,7 @@ The `start` and `end` parameters accept multiple formats:
   <LinkCard title="OpenMeteoSource" description="Weather forecasts" href="/epftoolbox2/data-sources/openmeteo/" />
   <LinkCard title="CalendarSource" description="Holidays & calendar" href="/epftoolbox2/data-sources/calendar/" />
   <LinkCard title="CsvSource" description="CSV files" href="/epftoolbox2/data-sources/csv/" />
+  <LinkCard title="EpftoolboxBenchmarkSource" description="Lago et al. (2021) benchmark datasets" href="/epftoolbox2/data-sources/epftoolbox-benchmark/" />
 </CardGrid>
 
 ### Transformers
@@ -104,12 +123,18 @@ The `start` and `end` parameters accept multiple formats:
   <LinkCard title="ResampleTransformer" description="Regular frequency" href="/epftoolbox2/transformers/resample/" />
   <LinkCard title="LagTransformer" description="Lagged features" href="/epftoolbox2/transformers/lag/" />
   <LinkCard title="TimezoneTransformer" description="Convert timezone" href="/epftoolbox2/transformers/timezone/" />
+  <LinkCard title="DSTNormalizeTransformer" description="24 slots per local day" href="/epftoolbox2/transformers/dst-normalize/" />
+  <LinkCard title="ImputeTransformer" description="Leak-safe gap filling" href="/epftoolbox2/transformers/impute/" />
+  <LinkCard title="DailyProfileTransformer" description="Spread a day's values across its rows" href="/epftoolbox2/transformers/daily-profile/" />
+  <LinkCard title="DailyStatsTransformer" description="Per-day min/max/mean/last" href="/epftoolbox2/transformers/daily-stats/" />
+  <LinkCard title="LambdaTransformer" description="Custom column arithmetic" href="/epftoolbox2/transformers/lambda-transformer/" />
 </CardGrid>
 
 ### Validators
 
 <CardGrid>
-  <LinkCard title="NullCheckValidator" description="Check for nulls" href="/epftoolbox2/validators/null-check/" />
-  <LinkCard title="ContinuityValidator" description="Check for gaps" href="/epftoolbox2/validators/continuity/" />
+  <LinkCard title="DSTStructureValidator" description="Rows per local day" href="/epftoolbox2/validators/dst-structure/" />
+  <LinkCard title="CoverageValidator" description="Index and per-column outages" href="/epftoolbox2/validators/coverage/" />
+  <LinkCard title="PlausibilityValidator" description="Ranges and frozen values" href="/epftoolbox2/validators/plausibility/" />
   <LinkCard title="EdaValidator" description="EDA statistics" href="/epftoolbox2/validators/eda/" />
 </CardGrid>

@@ -2,7 +2,7 @@
 
 A modern Python library for electricity price forecasting with modular data pipelines and model evaluation. Built as a complete rewrite of the original [epftoolbox](https://github.com/jeslago/epftoolbox), this library provides a flexible, extensible framework for downloading energy market data, building forecasting models, and evaluating their performance.
 
-📖 **[Documentation](https://dawidlinek.github.io/epftoolbox2)** 
+📖 **[Documentation](https://dawidlinek.github.io/epftoolbox2)**
 
 ## Installation
 
@@ -27,15 +27,20 @@ epftoolbox2.verify()
 ```
 ## Key Features
 
-- **Data Sources**: ENTSOE (load, generation, prices), Open-Meteo (weather forecasts), Calendar (holidays, weekday)
-- **Transformers**: Resample, Timezone conversion, Lag features
-- **Validators**: Null checks, Continuity checks, EDA statistics
+- **Data Sources**: ENTSOE (load, generation, day-ahead prices on an hourly or 15-minute grid, cross-border transfer capacity, installed capacity, with `prefix` to combine zones), Open-Meteo (`OpenMeteoSource`, archived weather forecasts as known at a UTC cutoff, with `api="previous_runs"` for a long lead-time-bucket archive or `api="single_runs"` for one exact model run per day, and a `locations` dict to combine several locations into per-location columns, one or more aggregated series per variable via `agg` (mean, optionally population- or capacity-weighted, plus median, min, max and sum), or both), Calendar (national and regional holidays, bridge days, weekday, hour, month, daylight, a 31-entry market-regime catalog with ex-ante dates and sources, opt-in national or regional-share school holidays via the OpenHolidays API), CSV files (CsvSource), EpftoolboxBenchmark (the Lago et al. 2021 datasets NP, PJM, FR, BE, DE, downloaded on demand)
+- **Transformers**: Resample, Timezone conversion, Lag features (local calendar days), DST normalisation to 24 slots a day (DSTNormalize), daily profile and daily min/max/mean/last stats (DailyProfile, DailyStats), custom column arithmetic (Lambda), Impute (leak-safe gap filling)
+- **Presets**: `epftoolbox2.presets`, ready-made predictor lists for the LEAR and expert-model benchmarks from the literature
+- **Validators**: DSTStructure (rows per local day), Coverage (duplicate and unsorted timestamps, per-column outages, missing timestamps and nulls), Plausibility (SDAC price limits, frozen values), EDA statistics
 - **Models**: OLS, LassoCV
-- **Evaluators**: MAE
-- **Exporters**: Excel with conditional formatting, Terminal output
-- **Caching**: Built-in data caching to avoid redundant API calls
-- **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files
-- **Multiprocessing**: Process-based parallelism with inner thread pools
+- **Scalers**: standardisation (default) or variance-stabilising transformations for spiky prices (asinh, N-PIT), fitted per forecast on training data only
+- **Evaluators**: MAE, RMSE, rMAE (relative to a base model)
+- **Exporters**: Excel with conditional formatting, Terminal output, CSV
+- **Caching**: Built-in per-source Parquet cache that fetches only missing ranges, refetches not-yet-published data and is safe for parallel jobs
+- **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files. An optional market timezone makes dates mean local calendar days, duplicate column names across sources raise instead of colliding silently, and `api_key` is written to YAML as an `${ENV_VAR}` reference instead of plain text
+- **Multiprocessing**: Process-based parallelism with inner thread pools. SLURM array mode (one model per task) with `epf report` to merge the results
+- **Safeguards**: The model's input (resolution, time stamps, column names, predictors) is checked before any fit, and forecasts that could not be made are counted per model (`report.forecast_counts()`)
+- **Information Set**: Optional `issue_time` check that every predictor is known at the moment the forecast is issued, with built-in availability rules for the shipped sources and an empirical leakage probe (`epftoolbox2.information_set`)
+- **Result Manifests**: Resumable results (`save_dir`) are fingerprinted with the configuration that produced them (the predictors' ordered layout, data up to `test_end` and its time zone, model params, ...). Resuming into results made with a different configuration raises instead of silently mixing them (`epftoolbox2.results.manifest`)
 - **Extensibility**: Extensible base classes for data sources, transformers, validators, models, evaluators, and exporters
 
 ## Quick Start
@@ -43,28 +48,75 @@ epftoolbox2.verify()
 ### Standalone source use
 
 ```python
+import pandas as pd
 from epftoolbox2.data.sources import EntsoeSource
 
 source = EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"])
-df = source.run("2024-01-01", "2024-06-01", cache=True)
+df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-06-01", tz="UTC"))  # [start, end), UTC
 ```
 
 ### Standalone transformer use
 
 ```python
-from epftoolbox2.data.transformers import ResampleTransformer
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer
 
-transformer = ResampleTransformer(freq="1h")
-df = transformer.run(df)
+df = TimezoneTransformer(target_tz="Europe/Warsaw").transform(df)  # sources return UTC
+df = ResampleTransformer(freq="1h").transform(df)  # aggregates or step-fills; never fills real gaps
 ```
 
 ### Standalone validator use
 
 ```python
-from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.data.validators import CoverageValidator
 
-validator = NullCheckValidator(columns=["load_actual", "price"])
-df = validator.run(df)
+validator = CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0)
+result = validator.validate(df)
+print(result)  # VALID/INVALID with errors, warnings and details; result.stats has one row per column
+```
+
+### Data Pipeline
+
+Download and process electricity market data from ENTSOE, weather forecasts from Open-Meteo, and calendar features.
+
+```python
+from epftoolbox2.pipelines import DataPipeline
+from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, LagTransformer
+from epftoolbox2.data.validators import CoverageValidator
+
+pipeline = (
+    # timezone is the single place the market zone needs to be written: sources/transformers below that
+    # compute their own local time inherit it and leave their own timezone/target_tz unset.
+    DataPipeline(timezone="Europe/Warsaw")  # optional: dates below then mean local calendar days
+    .add_source(EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"]))
+    .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
+    .add_source(CalendarSource("PL", holidays="binary", weekday="onehot", daylight=True))
+    .add_transformer(TimezoneTransformer())
+    .add_transformer(ResampleTransformer(freq="1h"))
+    # load_actual is only known for D once D is over; never offer its same-day (unlagged) value.
+    .add_transformer(LagTransformer(columns=["load_actual"], lags=[1], freq="day"))
+    # calendar features are known arbitrarily far in advance, so d+1..d+7 is safe.
+    .add_transformer(
+        LagTransformer(
+            lags=range(-7, 0),
+            freq="day",
+            columns=[
+                "is_monday",
+                "is_tuesday",
+                "is_wednesday",
+                "is_thursday",
+                "is_friday",
+                "is_saturday",
+                "is_sunday",
+                "is_holiday",
+                "daylight_hours",
+            ],
+        )
+    )
+    .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
+)
+
+df = pipeline.run("2024-01-01", "2024-06-08", cache=True)
 ```
 
 ### Standalone model use
@@ -84,48 +136,29 @@ seasonal_indicators = [
     "daylight_hours_d+{horizon}",
 ]
 
-model = OLSModel(predictors=["load_actual", *seasonal_indicators], name="OLS")
-report = model.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
+model = OLSModel(predictors=["load_actual_d-1", *seasonal_indicators], name="OLS")
+ref = model.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")  # where the forecasts are
 ```
 
 ### Standalone evaluator use
 
 ```python
+import pandas as pd
 from epftoolbox2.evaluators import MAEEvaluator
 
-evaluator = MAEEvaluator()
-report = evaluator.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
+predictions = pd.DataFrame({"prediction": [48.0, 52.5], "actual": [50.0, 51.0]})
+mae = MAEEvaluator().compute(predictions)  # 1.75
 ```
 
 ### Standalone exporter use
 
 ```python
+from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.exporters import ExcelExporter
+from epftoolbox2.results import EvaluationReport
 
-exporter = ExcelExporter("results.xlsx")
-report = exporter.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
-```
-
-### Data Pipeline
-
-Download and process electricity market data from ENTSOE, weather forecasts from Open-Meteo, and calendar features.
-
-```python
-from epftoolbox2.pipelines import DataPipeline
-from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
-from epftoolbox2.data.transformers import ResampleTransformer
-from epftoolbox2.data.validators import NullCheckValidator
-
-pipeline = (
-    DataPipeline()
-    .add_source(EntsoeSource("PL", api_key="YOUR_KEY", type=["load", "price"]))
-    .add_source(OpenMeteoSource(latitude=52.23, longitude=21.01))
-    .add_source(CalendarSource("PL", holidays="binary", weekday="number"))
-    .add_transformer(ResampleTransformer(freq="1h"))
-    .add_validator(NullCheckValidator(columns=["load_actual", "price"]))
-)
-
-df = pipeline.run("2024-01-01", "2024-06-01", cache=True)
+report = EvaluationReport({"OLS": ref}, [MAEEvaluator()])  # the object ModelPipeline.run() returns
+ExcelExporter("results.xlsx").export(report)
 ```
 
 ### Model Pipeline
@@ -139,9 +172,9 @@ from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.exporters import ExcelExporter
 
 pipeline = (
-    ModelPipeline()
-    .add_model(OLSModel(predictors=["load_actual", *seasonal_indicators], name="OLS"))
-    .add_model(LassoCVModel(predictors=["load_actual", *seasonal_indicators], name="Lasso"))
+    ModelPipeline(issue_time="11:45", issue_timezone="Europe/Warsaw")  # issued before the 12:00 CET gate closure
+    .add_model(OLSModel(predictors=["load_actual_d-1", *seasonal_indicators], name="OLS"))
+    .add_model(LassoCVModel(predictors=["load_actual_d-1", *seasonal_indicators], name="Lasso"))
     .add_evaluator(MAEEvaluator())
     .add_exporter(ExcelExporter("results.xlsx"))
 )
@@ -149,8 +182,14 @@ pipeline = (
 report = pipeline.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
 ```
 
+`issue_time` (and optionally `issue_timezone`) checks every predictor against the time the forecast is actually
+issued, before any model is fitted. It raises `InformationSetError` if a predictor uses a value not known yet (e.g.
+same-day `load_actual`). Built-in availability rules cover the shipped sources. See `epftoolbox2.information_set` for
+custom rules, accepted assumptions, and `leakage_probe`, an empirical check that perturbs unknown values and asserts
+forecasts don't move.
+
 
 
 ## Examples
 
-See the `examples/` folder for complete working examples.
+See the `examples/` folder for complete working examples. Each script defines a `main()` that takes the date ranges it uses (and a directory for its output files when it writes any), so it can also be imported and called on a short window, for example `main(data_start="2024-01-01", data_end="2024-03-01")`.

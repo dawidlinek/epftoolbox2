@@ -1,13 +1,11 @@
 ---
 title: TimezoneTransformer
-description: Convert DataFrame index timezone
+description: Convert the index to local time and put daily values on local midnight
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-# TimezoneTransformer
-
-Converts the DataFrame index from UTC to a target timezone.
+Converts the DataFrame index from UTC (what every source returns) to a local time zone, and moves the values of daily columns to local midnight.
 
 ## Basic Usage
 
@@ -18,40 +16,98 @@ transformer = TimezoneTransformer(target_tz="Europe/Warsaw")
 df = transformer.transform(df)
 ```
 
+As part of a `DataPipeline`, `target_tz` can be left unset: it then inherits `DataPipeline.timezone`, so the zone
+is written once instead of in both places.
+
+```python
+pipeline = DataPipeline(timezone="Europe/Warsaw").add_transformer(TimezoneTransformer())
+```
+
 ## Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `target_tz` | str | Yes | Target timezone name |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `target_tz` | str | `None` | Target IANA time zone, e.g. `"Europe/Warsaw"`. `None` inherits `DataPipeline.timezone` when part of a pipeline. Transforming without either raises |
+| `daily_columns` | list[str] \| None | `None` | Column names holding one value per day, matched by exact name or a `f"_{name}"` suffix (so a prefixed neighbour's column, e.g. `fi_load_forecast_daily_min`, is recognised too). `None` means `["load_forecast_daily_min", "load_forecast_daily_max"]` (ENTSO-E week-ahead forecast). A name matching nothing in the frame is skipped |
+| `daily_anchor` | str \| None | `None` | Time zone whose calendar date a daily value belongs to: a UTC offset (`"UTC+02:00"`, `"+01:00"`, `"UTC"`) or an IANA name. `None` uses the resolved `target_tz` itself |
+
+---
+
+## Daily columns
+
+Each `daily_columns` entry matches a column of that exact name, or one ending in `f"_{name}"`, so a prefixed
+neighbour's column (`EntsoeSource(..., prefix="fi")` gives `fi_load_forecast_daily_min`) is recognised under
+the default list without adding every prefix by name.
+
+ENTSO-E's week-ahead load forecast (A31) has one value per day, but its periods start at 00:00 local time **of the area that published it**, whatever that area's UTC offset is, in every zone. In CET (Warsaw) that instant is 00:00 UTC+2 in summer and 23:00 UTC the day before in winter. Without correction a later `ResampleTransformer` would give each winter value to the wrong hours. Further east it is a different offset again: 00:00 EEST (UTC+3) in Helsinki in summer, 00:00 UTC+3 all year in a zone with a fixed offset (e.g. Europe/Istanbul).
+
+<Aside type="tip">
+  `EntsoeSource` already anchors its week-ahead daily value to the **market's own** local midnight, not
+  necessarily the publishing area's, whenever it is part of the same `DataPipeline` (see
+  [EntsoeSource > Week-ahead daily values and neighbouring areas](/epftoolbox2/data-sources/entsoe/#week-ahead-daily-values-and-neighbouring-areas)).
+  The table below (anchored to the market's own zone in every case) therefore already describes this
+  transformer's snap for such a column too. It is a no-op, because the value already sits there. A column from
+  a source that isn't part of that `DataPipeline` (or that anchors to some other, fixed zone regardless of the
+  pipeline) still needs its own `daily_anchor`.
+</Aside>
+
+The rule `TimezoneTransformer` applies:
+
+> A value at timestamp *t* belongs to the calendar date of *t* in `daily_anchor`. It is moved to 00:00 local time (`target_tz`) on that date.
+
+The default anchor (`daily_anchor=None`) is `target_tz` itself, which is right for A31 data in every zone, because that is where ENTSO-E actually anchors it:
+
+| Zone | A31 period start, in local time | Moved to |
+|------|------|------|
+| Europe/Warsaw, winter | 23:00 on D-1 (UTC) → already 00:00 CET on D | 00:00 on D (no-op) |
+| Europe/Warsaw, summer | 22:00 on D-1 (UTC) → already 00:00 CEST on D | 00:00 on D (no-op) |
+| Europe/Helsinki, summer (EEST, UTC+3) | 21:00 on D-1 (UTC) → already 00:00 EEST on D | 00:00 on D (no-op) |
+| Europe/Istanbul (fixed UTC+3) | 21:00 on D-1 (UTC) → already 00:00 on D | 00:00 on D (no-op) |
+
+A fixed `daily_anchor="UTC+02:00"` gets this wrong for any zone whose actual offset isn't UTC+2 at that moment: it silently misplaces every value in EET/EEST zones (FI, EE, LV, LT, BG, GR) every summer, and every value, year-round, in a zone with a fixed UTC+3 offset. Pass an explicit `daily_anchor` only when a daily column's real anchor genuinely differs from `target_tz`, for example a source that anchors to a fixed offset regardless of the pipeline's own zone:
+
+```python
+TimezoneTransformer(target_tz="Europe/Warsaw", daily_columns=["my_daily_value"], daily_anchor="UTC+02:00")
+```
+
+After the move, `ResampleTransformer` spreads each daily value over exactly its own local day (23, 24 or 25 hours).
+
+**Checks:**
+
+- A daily column must hold at most one value per day. If it holds more (typically because `ResampleTransformer` already ran and made it dense), `TimezoneTransformer` raises a `ValueError` instead of collapsing the column to a few values.
+- If the local midnight a value belongs to is not in the index, that row is added (other columns NaN). This is routine at the start of a winter frame: the A31 value for the first local day is stamped an hour before the other sources begin. If the missing midnight lies inside the data, the index has a hole there and a `UserWarning` is emitted.
 
 ---
 
 ## Pipeline Order
 
 <Aside type="caution">
-  The order of transformers matters! Apply `TimezoneTransformer` at the right stage:
-  
-  1. **Before LagTransformer**: Lags are calculated in local time
-  2. **After LagTransformer**: Lags are calculated in UTC
+  Run `TimezoneTransformer` **first**, then `ResampleTransformer`, then `LagTransformer` (and `ImputeTransformer`,
+  if used, after `ResampleTransformer` and before `LagTransformer`):
+
+  1. **Timezone**: local index. Daily values on local midnight.
+  2. **Resample**: one regular grid. Daily values fill their own local day. Bins follow local days.
+  3. **Lag**: `_d-k` / `_d+k` columns on the local grid.
+
+  Resampling before the timezone step aggregates over UTC days and makes daily columns dense, which `TimezoneTransformer` rejects.
+  Day lags shift by local calendar days, which exist only once the index is in local time: on a UTC index they
+  shift by UTC days, so around each DST switch `price_d-1` comes from the wrong local hour and daily features
+  such as `is_monday_d+1` can point at the wrong day. `LagTransformer` warns when it gets day lags on a UTC index.
 </Aside>
-
-### Recommended Pipeline Order
-
-It is recommended to add `ResampleTransformer` **after** `TimezoneTransformer` to fill gaps created by daylight saving time transitions:
 
 ```python
 pipeline = (
-    DataPipeline()
+    DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(...))  # Output: UTC
-    .add_transformer(LagTransformer(...))  # Lags in UTC
-    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))  # Creates DST gaps
+    .add_transformer(TimezoneTransformer())  # target_tz inherits DataPipeline.timezone; creates DST gaps
     .add_transformer(ResampleTransformer(freq="1h"))  # Fills DST gaps
+    .add_transformer(LagTransformer(columns=["price"], lags=[1, 2, 7], freq="day"))  # Lags by local calendar day
 )
 ```
 
-<Aside type="tip">
-  During DST spring-forward, one hour is skipped (e.g., 2:00 AM). `ResampleTransformer` will interpolate to fill this gap.
-</Aside>
+### What happens on DST days
+
+Converting to local time adds and removes nothing: the spring switch day has 23 hourly rows (no 02:00, because that local time doesn't exist) and the autumn switch day has 25 (02:00 twice). `ResampleTransformer` keeps these 23 and 25 hours. It does not invent an 02:00 row.
 
 ---
 

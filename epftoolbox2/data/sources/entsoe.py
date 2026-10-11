@@ -1,10 +1,13 @@
-import warnings
-from typing import List, Dict
+import html
+import re
 import time
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
+from typing import Dict, List, Optional, Tuple, Union
+
+import numpy as np
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
-from bs4.builder import XMLParsedAsHTMLWarning
 from rich.console import Console
 from rich.progress import (
     Progress,
@@ -15,15 +18,22 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from epftoolbox2.logging import get_logger
+from .._market_timezone import resolve as _resolve_timezone
 from .base import DataSource
 
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+# Bump whenever the output for the same parameters changes, so that cached frames are rebuilt instead of served.
+# The cache key also contains the zone a week-ahead daily value (A31) is anchored to, see _daily_zone.
+SCHEMA_VERSION = 3
 
 
 class NoMatchingDataError(Exception):
     """Raised when ENTSOE API returns no matching data"""
 
     pass
+
+
+class EntsoeApiError(RuntimeError):
+    """The ENTSO-E API refused a request or kept failing. The message never contains the API key."""
 
 
 AREAS = {
@@ -130,12 +140,77 @@ AREAS = {
     "DE_AMP_LU": "10Y1001C--00002H",
 }
 
+# Areas that are not bidding zones. Day-ahead prices (A44) exist only per bidding zone, and the API answers
+# "No matching data" for these codes.
+NOT_BIDDING_ZONES = {
+    "DE": "DE_LU (DE_AT_LU before 2018-10-01)",
+    "DE_50HZ": "DE_LU",
+    "DE_AMPRION": "DE_LU",
+    "DE_TENNET": "DE_LU",
+    "DE_TRANSNET": "DE_LU",
+    "DE_AMP_LU": "DE_LU",
+    "LU": "DE_LU",
+    "DK": "DK_1 or DK_2",
+    "DK_CA": "DK_1 or DK_2",
+    "NO": "one of NO_1 ... NO_5",
+    "SE": "one of SE_1 ... SE_4",
+    "IT": "one of the Italian zones (IT_NORD, IT_CNOR, IT_CSUD, IT_SUD, IT_CALA, IT_SICI, IT_SARD)",
+    "IT_MACRO_NORTH": "one of the Italian zones (IT_NORD, IT_CNOR, ...)",
+    "IT_MACRO_SOUTH": "one of the Italian zones (IT_CSUD, IT_SUD, IT_CALA, IT_SICI, IT_SARD)",
+    "IE": "IE_SEM",
+    "GB_NIR": "IE_SEM",
+    "UK": "GB",
+    "CWE": "a single bidding zone such as FR, NL, BE, AT or DE_LU",
+    "PL_CZ": "PL or CZ",
+}
+
+# Local time of each area, used to put daily (and longer) positions on local calendar days. ENTSO-E periods for
+# these resolutions start at local midnight; a period that does not is stepped in UTC instead.
+_DEFAULT_TIMEZONE = "Europe/Brussels"
+AREA_TIMEZONES = {
+    "GB": "Europe/London",
+    "UK": "Europe/London",
+    "GB_IFA": "Europe/London",
+    "GB_IFA2": "Europe/London",
+    "GB_ELECLINK": "Europe/London",
+    "GB_NIR": "Europe/London",
+    "IE": "Europe/Dublin",
+    "IE_SEM": "Europe/Dublin",
+    "PT": "Europe/Lisbon",
+    "IS": "Atlantic/Reykjavik",
+    "FI": "Europe/Helsinki",
+    "EE": "Europe/Tallinn",
+    "LV": "Europe/Riga",
+    "LT": "Europe/Vilnius",
+    "BG": "Europe/Sofia",
+    "GR": "Europe/Athens",
+    "RO": "Europe/Bucharest",
+    "CY": "Asia/Nicosia",
+    "MD": "Europe/Chisinau",
+    "UA": "Europe/Kiev",
+    "UA_DOBTPP": "Europe/Kiev",
+    "UA_BEI": "Europe/Kiev",
+    "UA_IPS": "Europe/Kiev",
+    "TR": "Europe/Istanbul",
+    "BY": "Europe/Minsk",
+    "RU": "Europe/Moscow",
+    "RU_KGD": "Europe/Kaliningrad",
+    "GE": "Asia/Tbilisi",
+}
+
+# ENTSO-E PsrType codes. Column names are the snake_case of these names, e.g. B11 -> hydro_run_of_river_and_pondage.
 PSRTYPE_MAPPINGS = {
+    "A03": "Mixed",
+    "A04": "Generation",
+    "A05": "Load",
     "B01": "Biomass",
     "B02": "Fossil Brown coal/Lignite",
+    "B03": "Fossil Coal-derived gas",
     "B04": "Fossil Gas",
     "B05": "Fossil Hard coal",
     "B06": "Fossil Oil",
+    "B07": "Fossil Oil shale",
+    "B08": "Fossil Peat",
     "B09": "Geothermal",
     "B10": "Hydro Pumped Storage",
     "B11": "Hydro Run-of-river and pondage",
@@ -148,7 +223,26 @@ PSRTYPE_MAPPINGS = {
     "B18": "Wind Offshore",
     "B19": "Wind Onshore",
     "B20": "Other",
+    "B21": "AC Link",
+    "B22": "DC Link",
+    "B23": "Substation",
+    "B24": "Transformer",
+    "B25": "Energy storage",
 }
+
+# Columns holding one value per day (or longer), stamped at the start of that day. A value whose day began before
+# the requested start but still covers it is reported at the start, so that clipping to [start, end) keeps it.
+_PERIOD_COLUMNS = {
+    "load_forecast_daily_min": "P1D",
+    "load_forecast_daily_max": "P1D",
+}
+_PERIOD_COLUMN_PREFIXES = {
+    "installed_capacity_": "P1Y",
+}
+
+VALID_TYPES = ("load", "generation", "price", "transfer_capacity", "installed_capacity")
+
+_RESOLUTION_RE = re.compile(r"^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$")
 
 
 def lookup_area(code: str) -> tuple[str, str]:
@@ -158,14 +252,83 @@ def lookup_area(code: str) -> tuple[str, str]:
     raise ValueError(f"Invalid country code: {code}")
 
 
+def psr_column_name(psr_type: Optional[str]) -> str:
+    """snake_case column stem for a PsrType code; unknown codes are kept as their lower-case code."""
+    name = PSRTYPE_MAPPINGS.get(psr_type, psr_type or "unknown")
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def parse_resolution(text: str) -> Union[pd.Timedelta, pd.DateOffset]:
+    """ISO 8601 duration of an ENTSO-E resolution: a Timedelta for PTnM/PTnH, a calendar DateOffset for PnD/PnM/PnY."""
+    match = _RESOLUTION_RE.match(text or "")
+    if not match or text in ("P", "PT") or not any(match.groups()):
+        raise NotImplementedError(f"Unknown resolution format: {text}")
+    years, months, days, hours, minutes = (int(g) if g else 0 for g in match.groups())
+    if years or months or days:
+        return pd.DateOffset(years=years, months=months, days=days, hours=hours, minutes=minutes)
+    return pd.Timedelta(hours=hours, minutes=minutes)
+
+
+def _child_text(element: Optional[ET.Element], tag: str) -> Optional[str]:
+    if element is None:
+        return None
+    child = element.find(tag)
+    if child is None or child.text is None:
+        return None
+    return child.text.strip()
+
+
+def _combine(parts: List[pd.Series]) -> pd.Series:
+    """Concatenate series; where timestamps repeat (overlapping periods or chunks), the first one wins."""
+    if not parts:
+        return pd.Series(dtype=float)
+    combined = pd.concat(parts).sort_index(kind="stable")
+    return combined[~combined.index.duplicated(keep="first")]
+
+
+def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        return max(0.0, (parsedate_to_datetime(value) - pd.Timestamp.now(tz="UTC")).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _acknowledgement_reason(text: str) -> Optional[str]:
+    """The <Reason><text> of an ENTSO-E Acknowledgement document."""
+    match = re.search(r"<Reason>.*?<text>(.*?)</text>", text or "", re.S)
+    return html.unescape(match.group(1).strip()) if match else None
+
+
 class EntsoeSource(DataSource):
     """
     ENTSOE data source for electricity market data
 
     Supports fetching:
-    - Load: actual load, day-ahead forecast, week-ahead forecast (min/max)
-    - Generation: actual by type, wind/solar forecasts
-    - Price: day-ahead market prices
+    - Load: actual load, day-ahead forecast, week-ahead forecast (daily min/max)
+    - Generation: actual generation and consumption by production type, wind/solar day-ahead forecasts
+    - Price: day-ahead (SDAC) market prices
+    - Transfer capacity: day-ahead forecasted transfer capacity (A61) to and from each of ``neighbours``
+    - Installed capacity: installed generation capacity per production type (A68), one value per year
+
+    ``prefix`` is prepended to every column (``f"{prefix}_{column}"``) so that several zones can be combined.
+
+    ``fetch(start, end)`` returns the half-open range [start, end) with a UTC index. Prices come on a uniform grid:
+    hourly (quarter-hours averaged into hours) with ``prefer_15min=False``, 15-minute (hourly periods step-filled)
+    with ``prefer_15min=True``. Other series keep the resolution ENTSO-E publishes.
+
+    The week-ahead daily columns (``load_forecast_daily_min/max``, A31) hold one value per **this area's own**
+    local day D. When this source is part of a ``DataPipeline``, that value is stamped at the *market's* local
+    midnight of the same day D (see ``_daily_zone``), not this area's own midnight — so a neighbouring area
+    combined into a market pipeline (``EntsoeSource("FI", ..., prefix="fi")`` inside
+    ``DataPipeline(timezone="Europe/Warsaw")``) lands on the market's own local day, matching every other
+    column. Used standalone, or when this area is already the market's own, the value is stamped at this
+    area's own midnight as before (a no-op in the second case).
 
     Example:
         >>> source = EntsoeSource('PL', api_key='your-api-key', type=['load', 'generation', 'price'])
@@ -175,6 +338,15 @@ class EntsoeSource(DataSource):
     """
 
     API_URL = "https://web-api.tp.entsoe.eu/api"
+    REQUEST_TIMEOUT = 60
+    MAX_RETRIES = 5
+    RETRY_BACKOFF_SECONDS = 2.0
+    MAX_RETRY_WAIT_SECONDS = 120.0
+
+    # Set by DataPipeline._bind_component_timezones() when this source is part of a pipeline; never written by
+    # users. Unlike CalendarSource/OpenMeteoSource this source has no zone parameter of its own to conflict with
+    # it — see `market_timezone`/`_daily_zone`.
+    _pipeline_timezone: Optional[str] = None
 
     def __init__(
         self,
@@ -182,12 +354,19 @@ class EntsoeSource(DataSource):
         api_key: str,
         type: List[str],
         prefer_15min: bool = False,
+        neighbours: Optional[Union[List[str], str]] = None,
+        prefix: str = "",
     ):
         self.country_code = country_code
         self.api_key = api_key
         self.type = type
         self.prefer_15min = prefer_15min
+        if isinstance(neighbours, str):
+            neighbours = [n.strip() for n in neighbours.split(",") if n.strip()]
+        self.neighbours = list(neighbours) if neighbours else None
+        self.prefix = prefix or ""
         self._area_name, self._area_code = lookup_area(country_code)
+        self._timezone = AREA_TIMEZONES.get(self._area_name, _DEFAULT_TIMEZONE)
         self.session = requests.Session()
 
         self.console = Console()
@@ -200,16 +379,63 @@ class EntsoeSource(DataSource):
         if hasattr(self, "session") and self.session:
             self.session.close()
 
+    @property
+    def market_timezone(self) -> Optional[str]:
+        """The zone a `DataPipeline` bound onto this source, or `None` when used standalone.
+
+        Unlike `CalendarSource`/`OpenMeteoSource`, this source has no zone parameter of its own: every value it
+        returns is timestamped in UTC from ENTSO-E's own data, and only the week-ahead daily columns need a
+        zone at all, to decide which local day they belong to when this area is combined with others in one
+        market pipeline (see `_daily_zone`).
+        """
+        return _resolve_timezone(None, self)
+
+    def _daily_zone(self) -> str:
+        """Zone a week-ahead daily value's (`load_forecast_daily_min/max`, A31, resolution "P1D") local midnight
+        is stamped at: the zone bound by `DataPipeline.timezone` (see `market_timezone`) when this source is
+        part of one, else this area's own zone (`_timezone`) — unchanged for standalone use, and a no-op
+        whenever this area already *is* the market's (e.g. `EntsoeSource("PL", ...)` in a
+        `DataPipeline(timezone="Europe/Warsaw")`).
+
+        ENTSO-E reports a week-ahead value at *this area's* own local midnight of its own local day D. Stamping
+        it here instead at the *market's* midnight of the same day D means a later `TimezoneTransformer` (whose
+        own default `daily_anchor` is the market zone) does not need to know this source's area at all — its
+        snap for this column is then already a no-op, and the value lands on the market's own local day like
+        every other column, not the neighbour's.
+        """
+        return self.market_timezone or self._timezone
+
     def _validate_config(self):
         if not self.api_key:
             raise ValueError("API key cannot be empty")
         if not self.type:
             raise ValueError("At least one data type must be specified")
 
-        valid_types = {"load", "generation", "price"}
         for t in self.type:
-            if t not in valid_types:
-                raise ValueError(f"Invalid type '{t}'. Must be one of: {valid_types}")
+            if t not in VALID_TYPES:
+                raise ValueError(f"Invalid type '{t}'. Must be one of: {set(VALID_TYPES)}")
+
+        if "price" in self.type and self._area_name in NOT_BIDDING_ZONES:
+            raise ValueError(
+                f"'{self.country_code}' is not a bidding zone; day-ahead prices are published per bidding zone. "
+                f"Use {NOT_BIDDING_ZONES[self._area_name]}."
+            )
+
+        if "transfer_capacity" in self.type:
+            if not self.neighbours:
+                raise ValueError("type 'transfer_capacity' needs neighbours=[...], e.g. neighbours=['DE_LU', 'CZ']")
+            for area in [self.country_code, *self.neighbours]:
+                name, _ = lookup_area(area)
+                if name in NOT_BIDDING_ZONES:
+                    raise ValueError(
+                        f"'{area}' is not a bidding zone; transfer capacities are published between bidding zones. "
+                        f"Use {NOT_BIDDING_ZONES[name]}."
+                    )
+        elif self.neighbours:
+            raise ValueError("neighbours is only used with type 'transfer_capacity'")
+
+        if not isinstance(self.prefix, str):
+            raise ValueError(f"prefix must be a string, got {self.prefix!r}")
 
         return True
 
@@ -227,6 +453,10 @@ class EntsoeSource(DataSource):
         self.logger.info(f"ENTSOE [{self._area_name}]: Start downloading {', '.join(self.type)} data")
 
         all_results = {dtype: [] for dtype in self.type}
+        # Prices are gridded once over the whole requested range (see _prices_to_grid): a 3-month chunk boundary
+        # that lands mid-hour splits that hour's quarter-hours across two API responses, and gridding each chunk
+        # on its own would see an incomplete hour in both and drop it.
+        price_by_resolution: Dict[pd.Timedelta, List[pd.Series]] = {}
 
         with Progress(
             SpinnerColumn(),
@@ -248,26 +478,49 @@ class EntsoeSource(DataSource):
                 chunk_data = self._fetch_chunk(chunk_start, chunk_end)
 
                 for dtype in self.type:
+                    if dtype == "price":
+                        for step, series in chunk_data.get("price", {}).items():
+                            if series is not None and not series.empty:
+                                price_by_resolution.setdefault(step, []).append(series)
+                        continue
                     chunk_df = chunk_data.get(dtype)
                     if chunk_df is not None and not chunk_df.empty:
                         all_results[dtype].append(chunk_df)
                 progress.advance(task)
 
+        if "price" in self.type:
+            merged = {step: _combine(parts) for step, parts in price_by_resolution.items()}
+            graded = self._prices_to_grid(merged)
+            if not graded.empty:
+                all_results["price"].append(pd.DataFrame({"price": graded}))
+
         dataframes = []
         for dtype in self.type:
-            if all_results[dtype]:
-                df = pd.concat(all_results[dtype]).sort_index()
-                if df.index.has_duplicates:
-                    df = df.groupby(level=0).first()
-                if not df.empty:
-                    dataframes.append(df)
+            if not all_results[dtype]:
+                continue
+            # Chunks overlap where the API returns whole days or weeks; the overlapping values are identical.
+            df = pd.concat(all_results[dtype]).sort_index(kind="stable")
+            if df.index.has_duplicates:
+                df = df.groupby(level=0).first()
+            df = self._clip(df, start, end)
+            if df.empty:
+                continue
+            self._warn_on_late_start(dtype, df, start)
+            dataframes.append(df)
 
         elapsed = time.time() - start_time
-        self._log_success(elapsed)
+        if not dataframes:
+            self.logger.warning(
+                f"ENTSOE [{self._area_name}]: no {', '.join(self.type)} data between {start} and {end} "
+                f"({elapsed:.2f} sec)"
+            )
+            return pd.DataFrame()
 
-        if dataframes:
-            return pd.concat(dataframes, axis=1)
-        return pd.DataFrame()
+        self._log_success(elapsed)
+        result = pd.concat(dataframes, axis=1)
+        if self.prefix:
+            result.columns = [f"{self.prefix}_{column}" for column in result.columns]
+        return result
 
     def _generate_chunks(self, start: pd.Timestamp, end: pd.Timestamp, months: int = 3) -> list:
         if months <= 0:
@@ -284,7 +537,7 @@ class EntsoeSource(DataSource):
 
         return chunks
 
-    def _fetch_chunk(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, pd.DataFrame]:
+    def _fetch_chunk(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, Union[pd.DataFrame, Dict]]:
         result = {}
 
         if "load" in self.type:
@@ -294,9 +547,60 @@ class EntsoeSource(DataSource):
             result["generation"] = self._fetch_generation(start, end)
 
         if "price" in self.type:
-            result["price"] = self._fetch_price(start, end)
+            # Ungridded: by native resolution. Gridding happens once in fetch(), over all chunks together.
+            result["price"] = self._fetch_price_raw(start, end)
+
+        if "transfer_capacity" in self.type:
+            result["transfer_capacity"] = self._fetch_transfer_capacity(start, end)
+
+        if "installed_capacity" in self.type:
+            result["installed_capacity"] = self._fetch_installed_capacity(start, end)
 
         return result
+
+    def _clip(self, df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        """Keep [start, end). A daily (or longer) value whose period covers ``start`` is moved to ``start``."""
+        carried = {}
+        for column in df.columns:
+            resolution = self._period_column_resolution(column)
+            if resolution is None:
+                continue
+            values = df[column].dropna()
+            if values.empty or start in values.index:
+                continue
+            before = values[values.index < start]
+            if before.empty:
+                continue
+            period_start = before.index[-1]
+            period_end = (period_start.tz_convert(self._timezone) + parse_resolution(resolution)).tz_convert("UTC")
+            if period_end > start:
+                carried[column] = before.iloc[-1]
+
+        df = df[(df.index >= start) & (df.index < end)].copy()
+        if carried:
+            if start not in df.index:
+                df = df.reindex(df.index.union([start]))
+            for column, value in carried.items():
+                df.loc[start, column] = value
+        return df
+
+    @staticmethod
+    def _period_column_resolution(column: str) -> Optional[str]:
+        if column in _PERIOD_COLUMNS:
+            return _PERIOD_COLUMNS[column]
+        for prefix, resolution in _PERIOD_COLUMN_PREFIXES.items():
+            if column.startswith(prefix):
+                return resolution
+        return None
+
+    def _warn_on_late_start(self, dtype: str, df: pd.DataFrame, start: pd.Timestamp):
+        first = df.index.min()
+        if first - start > pd.Timedelta(days=1):
+            self.logger.warning(
+                f"ENTSOE [{self._area_name}]: {dtype} data starts at {first}, {first - start} after the requested "
+                f"start {start}; earlier periods are not published for this area"
+                + (" (DE_LU starts on 2018-10-01; use DE_AT_LU before)" if self._area_name == "DE_LU" else "")
+            )
 
     def _fetch_load(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         dfs = []
@@ -341,13 +645,14 @@ class EntsoeSource(DataSource):
         if not df_week.empty:
             dfs.append(df_week)
         elif xml is not None:
-            self.logger.warning(f"ENTSOE [{self._area_name}]: A31 (week-ahead forecast) data available but no min/max values found")
+            self.logger.warning(
+                f"ENTSOE [{self._area_name}]: A31 (week-ahead forecast) data available but no min/max values found"
+            )
 
         if not dfs:
             return pd.DataFrame()
 
-        result = pd.concat(dfs, axis=1)
-        return result.truncate(before=start - pd.Timedelta(days=1), after=end)
+        return pd.concat(dfs, axis=1)
 
     def _fetch_generation(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         dfs = []
@@ -374,10 +679,11 @@ class EntsoeSource(DataSource):
         )
         dfs.append(self._parse_generation(xml).add_prefix("generation_").add_suffix("_forecast"))
 
-        result = pd.concat(dfs, axis=1)
-        return result.truncate(before=start, after=end)
+        dfs = [df for df in dfs if not df.empty]
+        return pd.concat(dfs, axis=1) if dfs else pd.DataFrame()
 
-    def _fetch_price(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    def _fetch_price_raw(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[pd.Timedelta, pd.Series]:
+        """Day-ahead prices for one chunk, by native resolution and not yet put on a grid (see fetch())."""
         xml = self._api_request(
             {
                 "documentType": "A44",
@@ -387,195 +693,297 @@ class EntsoeSource(DataSource):
             start,
             end,
         )
+        return self._parse_prices(xml)
 
-        price_dict = self._parse_prices(xml)
+    def _fetch_transfer_capacity(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        """Day-ahead forecasted transfer capacity (A61, contract type A01) per direction and neighbour, in MW.
+        Borders inside a flow-based capacity calculation region publish none ("No matching data")."""
+        columns = {}
+        for neighbour in self.neighbours:
+            neighbour_name, neighbour_code = lookup_area(neighbour)
+            suffix = neighbour_name.lower()
+            for direction, out_domain, in_domain in (
+                ("export", self._area_code, neighbour_code),
+                ("import", neighbour_code, self._area_code),
+            ):
+                xml = self._api_request(
+                    {
+                        "documentType": "A61",
+                        "contract_MarketAgreement.Type": "A01",
+                        "out_Domain": out_domain,
+                        "in_Domain": in_domain,
+                    },
+                    start,
+                    end,
+                )
+                parts = [
+                    series
+                    for meta, series in self._parse_timeseries(xml, "quantity")
+                    if meta["in_domain"] in (None, in_domain) and meta["out_domain"] in (None, out_domain)
+                ]
+                if parts:
+                    columns[f"transfer_capacity_{direction}_{suffix}"] = _combine(parts)
+        return pd.DataFrame(columns) if columns else pd.DataFrame()
 
-        series = pd.Series()
-        order = (
-            ("15min", "30min", "60min")
-            if self.prefer_15min
-            else ("60min", "30min", "15min")
-        )
-        for res in order:
-            if price_dict.get(res) is not None and len(price_dict[res]) > 0:
-                series = price_dict[res]
-                break
-
-        series = series.truncate(before=start, after=end)
-
-        return pd.DataFrame({"price": series})
-
-    def _api_request(self, params: Dict, start: pd.Timestamp, end: pd.Timestamp) -> str:
-        start_str = start.strftime("%Y%m%d%H00")
-        end_str = end.strftime("%Y%m%d%H00")
-
-        params.update(
+    def _fetch_installed_capacity(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        """Installed generation capacity per production type (A68, year-ahead A33): one value per year, stamped at
+        local midnight of 1 January."""
+        xml = self._api_request(
             {
-                "securityToken": self.api_key,
-                "periodStart": start_str,
-                "periodEnd": end_str,
-            }
+                "documentType": "A68",
+                "processType": "A33",
+                "in_Domain": self._area_code,
+            },
+            start,
+            end,
+        )
+        return self._parse_generation(xml).add_prefix("installed_capacity_")
+
+    def _api_request(self, params: Dict, start: pd.Timestamp, end: pd.Timestamp) -> Optional[str]:
+        """GET one document. Returns None for "No matching data"; retries 429/5xx and network errors; raises
+        EntsoeApiError otherwise. The key travels in the SECURITY_TOKEN header, never in the URL."""
+        query = dict(params, periodStart=self._format_time(start), periodEnd=self._format_time(end))
+        label = "/".join(v for v in (params.get("documentType"), params.get("processType")) if v)
+        label = f"{label} {start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} UTC"
+        error = ""
+        fatal = None
+
+        for attempt in range(self.MAX_RETRIES + 1):
+            wait = None
+            try:
+                response = self.session.get(
+                    url=self.API_URL,
+                    params=query,
+                    headers={"SECURITY_TOKEN": self.api_key},
+                    timeout=self.REQUEST_TIMEOUT,
+                )
+            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
+                error = f"{type(exc).__name__}: {exc}"
+            except requests.RequestException as exc:
+                # Not retried. Record the message and raise once we're outside the except block, like the
+                # retries-exhausted raise below: raising here would leave __context__ pointing at exc even
+                # with `from None`, which only clears __cause__ and traceback display.
+                fatal = self._redact(f"ENTSOE [{self._area_name}]: {label} failed: {exc}")
+                break
+            else:
+                status = response.status_code
+                text = response.text
+                if "No matching data found" in text:
+                    self.logger.warning(f"ENTSOE [{self._area_name}]: no matching data for {label}")
+                    return None
+                if status < 400 and "Acknowledgement_MarketDocument" not in text[:1000]:
+                    return text
+                reason = _acknowledgement_reason(text) or response.reason or text[:200]
+                error = f"HTTP {status}: {reason}"
+                if status < 400 or (status != 429 and status < 500):
+                    raise EntsoeApiError(self._redact(f"ENTSOE [{self._area_name}]: {label} failed with {error}"))
+                wait = _retry_after_seconds(response.headers.get("Retry-After"))
+
+            if attempt == self.MAX_RETRIES:
+                break
+            if wait is None:
+                wait = self.RETRY_BACKOFF_SECONDS * 2**attempt
+            wait = min(wait, self.MAX_RETRY_WAIT_SECONDS)
+            self.logger.warning(
+                self._redact(
+                    f"ENTSOE [{self._area_name}]: {label}: {error}; retrying in {wait:.0f} s "
+                    f"({attempt + 1}/{self.MAX_RETRIES})"
+                )
+            )
+            time.sleep(wait)
+
+        if fatal is not None:
+            raise EntsoeApiError(fatal)
+
+        raise EntsoeApiError(
+            self._redact(f"ENTSOE [{self._area_name}]: {label} failed after {self.MAX_RETRIES + 1} attempts: {error}")
         )
 
-        response = self.session.get(url=self.API_URL, params=params, timeout=30)
+    def _redact(self, text: str) -> str:
+        return text.replace(self.api_key, "***") if self.api_key else text
 
-        if "No matching data found" in response.text:
-            return None
+    @staticmethod
+    def _format_time(ts: pd.Timestamp) -> str:
+        return ts.tz_convert("UTC").strftime("%Y%m%d%H%M")
 
-        response.raise_for_status()
-
-        return response.text
-
-    def _parse_loads(self, xml_text: str, process_type: str) -> pd.DataFrame:
-        if xml_text is None:
+    def _parse_loads(self, xml_text: Optional[str], process_type: str) -> pd.DataFrame:
+        parts = self._parse_timeseries(xml_text, "quantity")
+        if not parts:
             return pd.DataFrame()
         if process_type in ["A01", "A16"]:
-            series = []
-            for soup in self._extract_timeseries(xml_text):
-                s = self._parse_timeseries_generic(soup, merge=True)
-                series.append(s)
-            series = pd.concat(series).sort_index() if series else pd.Series()
             col_name = "load_forecast" if process_type == "A01" else "load_actual"
-            return pd.DataFrame({col_name: series})
-        else:
-            series_min_list = []
-            series_max_list = []
-            for soup in self._extract_timeseries(xml_text):
-                t = self._parse_timeseries_generic(soup, merge=True)
-                bsn_type = soup.find("businesstype")
-                if bsn_type and bsn_type.text == "A60":
-                    series_min_list.append(t)
-                elif bsn_type and bsn_type.text == "A61":
-                    series_max_list.append(t)
+            return pd.DataFrame({col_name: _combine([s for _, s in parts])})
 
-            result_dict = {}
-            if series_min_list:
-                series_min = pd.concat(series_min_list).sort_index()
-                result_dict["load_forecast_daily_min"] = series_min
-            if series_max_list:
-                series_max = pd.concat(series_max_list).sort_index()
-                result_dict["load_forecast_daily_max"] = series_max
+        columns = {"A60": "load_forecast_daily_min", "A61": "load_forecast_daily_max"}
+        result = {}
+        for business_type, column in columns.items():
+            selected = [s for meta, s in parts if meta["business_type"] == business_type]
+            if selected:
+                result[column] = _combine(selected)
+        return pd.DataFrame(result) if result else pd.DataFrame()
 
-            return pd.DataFrame(result_dict) if result_dict else pd.DataFrame()
-
-    def _parse_generation(self, xml_text: str) -> pd.DataFrame:
-        if xml_text is None:
+    def _parse_generation(self, xml_text: Optional[str]) -> pd.DataFrame:
+        """One column per production type; series reported in the out-bidding-zone domain (pumping and other
+        consumption) get a ``_consumption`` suffix instead of being mixed into generation."""
+        columns: Dict[str, List[pd.Series]] = {}
+        for meta, series in self._parse_timeseries(xml_text, "quantity"):
+            name = psr_column_name(meta["psr_type"])
+            if meta["out_bidding_zone"] and not meta["in_bidding_zone"]:
+                name += "_consumption"
+            columns.setdefault(name, []).append(series)
+        if not columns:
             return pd.DataFrame()
-        all_series = {}
-        for soup in self._extract_timeseries(xml_text):
-            series = self._parse_timeseries_generic(soup, merge=True)
+        return pd.DataFrame({name: _combine(parts) for name, parts in columns.items()}).sort_index()
 
-            _psrtype = soup.find("psrtype")
-            if _psrtype is not None:
-                psrtype = _psrtype.text
-                psrtype_name = PSRTYPE_MAPPINGS.get(psrtype, psrtype)
-            else:
-                psrtype_name = "unknown"
-
-            psrtype_snake = psrtype_name.lower().replace(" ", "_").replace("/", "_")
-            series.name = psrtype_snake
-
-            if series.name in all_series:
-                all_series[series.name] = pd.concat([all_series[series.name], series]).sort_index()
-            else:
-                all_series[series.name] = series
-
-        for name in all_series:
-            ts = all_series[name]
-            all_series[name] = ts[~ts.index.duplicated(keep="first")]
-
-        df = pd.DataFrame.from_dict(all_series)
-        df.sort_index(inplace=True)
-        return df
-
-    def _parse_prices(self, xml_text: str) -> Dict[str, pd.Series]:
-        series = {"15min": [], "30min": [], "60min": []}
-        if xml_text is None:
-            return series
-
-        for soup in self._extract_timeseries(xml_text):
-            soup_series = self._parse_timeseries_generic(soup, label="price.amount")
-            for key in series.keys():
-                if soup_series[key] is not None:
-                    series[key].append(soup_series[key])
-
-        for freq, freq_series in series.items():
-            try:
-                series[freq] = pd.concat(freq_series).sort_index()
-            except ValueError:
-                series[freq] = pd.Series()
-        return series
-
-    def _parse_timeseries_generic(self, soup, label="quantity", merge=False):
-        series = {"15min": [], "30min": [], "60min": [], "1D": [], "7D": []}
-
-        for period in soup.find_all("period"):
-            data = {}
-
-            start_elem = period.find("start")
-            resolution_elem = period.find("resolution")
-
-            if start_elem is None or resolution_elem is None:
+    def _parse_prices(self, xml_text: Optional[str]) -> Dict[pd.Timedelta, pd.Series]:
+        """Day-ahead prices by native resolution. Only the SDAC series is kept: classificationSequence position 1,
+        or no classificationSequence. DE_LU and AT also publish a separate 15-minute auction as position 2."""
+        by_resolution: Dict[pd.Timedelta, List[pd.Series]] = {}
+        skipped = set()
+        for meta, series in self._parse_timeseries(xml_text, "price.amount"):
+            if meta["sequence"] not in (None, "1"):
+                skipped.add(meta["sequence"])
                 continue
+            step = parse_resolution(meta["resolution"])
+            if not isinstance(step, pd.Timedelta):
+                continue
+            by_resolution.setdefault(step, []).append(series)
+        if skipped and not by_resolution:
+            self.logger.warning(
+                f"ENTSOE [{self._area_name}]: only price series with classificationSequence {sorted(skipped)} were "
+                "published; they are not the day-ahead coupling price and were ignored"
+            )
+        return {step: _combine(parts) for step, parts in by_resolution.items()}
 
-            start = pd.Timestamp(start_elem.text)
-            delta_text = self._resolution_to_timedelta(resolution_elem.text)
-            delta = pd.Timedelta(delta_text)
+    def _prices_to_grid(self, by_resolution: Dict[pd.Timedelta, pd.Series]) -> pd.Series:
+        """Put every period on one grid: 1 h (sub-hourly periods averaged) or 15 min (longer periods step-filled).
+        Where a timestamp is published at several resolutions, the one closest to the grid wins."""
+        target = pd.Timedelta("15min") if self.prefer_15min else pd.Timedelta("1h")
+        result = pd.Series(dtype=float)
+        for step in sorted(by_resolution, key=lambda s: abs(s - target)):
+            series = by_resolution[step]
+            if step < target:
+                groups = series.groupby(series.index.floor(target))
+                means = groups.mean()
+                # an hour with a missing quarter-hour would be a biased mean; leave it missing instead
+                series = means[groups.count() == int(target / step)]
+            elif step > target:
+                k = int(step / target)
+                offsets = np.tile(pd.TimedeltaIndex([target * i for i in range(k)]).to_numpy(), len(series))
+                series = pd.Series(np.repeat(series.to_numpy(), k), index=series.index.repeat(k) + offsets)
+            result = series if result.empty else result.combine_first(series)
+        return result.sort_index()
 
-            for point in period.find_all("point"):
-                value_elem = point.find(label)
-                position_elem = point.find("position")
+    def _parse_timeseries(self, xml_text: Optional[str], value_tag: str) -> List[Tuple[dict, pd.Series]]:
+        """Decode every TimeSeries/Period into (metadata, values indexed by UTC period start).
 
-                if value_elem is None or position_elem is None:
-                    continue
-
-                value = value_elem.text.replace(",", "")
-                position = int(position_elem.text)
-                data[start + (position - 1) * delta] = value
-
-            time_series = pd.Series(data).sort_index()
-
-            if delta_text not in series:
-                series[delta_text] = []
-            series[delta_text].append(time_series)
-
-        for freq, freq_series in series.items():
-            if len(freq_series) > 0:
-                series[freq] = pd.concat(freq_series).sort_index().astype(float)
-            else:
-                series[freq] = None
-
-        if merge:
-            return pd.concat([s for s in series.values() if s is not None])
-        else:
-            return series
-
-    def _extract_timeseries(self, xml_text: str):
+        Positions are mapped from the Period's ``timeInterval`` and ``resolution``. Under curveType A03 ENTSO-E omits
+        a point that repeats the previous value, so omitted positions (including trailing ones up to the end of the
+        Period) are forward-filled; under A01 they stay missing.
+        """
         if not xml_text:
-            return
-        soup = BeautifulSoup(xml_text, "html.parser")
-        for timeseries in soup.find_all("timeseries"):
-            yield timeseries
+            return []
+        root = self._parse_xml(xml_text)
+        out = []
+        for ts in root.iter("TimeSeries"):
+            meta = {
+                "business_type": _child_text(ts, "businessType"),
+                "curve_type": _child_text(ts, "curveType") or "A01",
+                "psr_type": _child_text(ts.find("MktPSRType"), "psrType"),
+                "in_bidding_zone": _child_text(ts, "inBiddingZone_Domain.mRID"),
+                "out_bidding_zone": _child_text(ts, "outBiddingZone_Domain.mRID"),
+                "in_domain": _child_text(ts, "in_Domain.mRID"),
+                "out_domain": _child_text(ts, "out_Domain.mRID"),
+                "sequence": _child_text(ts, "classificationSequence_AttributeInstanceComponent.position"),
+            }
+            for period in ts.iter("Period"):
+                interval = period.find("timeInterval")
+                start_text = _child_text(interval, "start")
+                end_text = _child_text(interval, "end")
+                resolution = _child_text(period, "resolution")
+                if not start_text or not end_text or not resolution:
+                    continue
+                index = self._period_index(pd.Timestamp(start_text), pd.Timestamp(end_text), resolution)
+                values = np.full(len(index), np.nan)
+                for point in period.iter("Point"):
+                    position = _child_text(point, "position")
+                    value = _child_text(point, value_tag)
+                    if position is None or value is None:
+                        continue
+                    position = int(position)
+                    if 1 <= position <= len(index):
+                        values[position - 1] = float(value.replace(",", ""))
+                series = pd.Series(values, index=index)
+                if meta["curve_type"] == "A03":
+                    series = series.ffill()
+                out.append((dict(meta, resolution=resolution), series.dropna()))
+        return out
 
-    def _resolution_to_timedelta(self, res_text: str) -> str:
-        resolutions = {
-            "PT60M": "60min",
-            "PT15M": "15min",
-            "PT30M": "30min",
-            "P1D": "1D",
-            "P7D": "7D",
-        }
-        delta = resolutions.get(res_text)
-        if delta is None:
-            raise NotImplementedError(f"Unknown resolution format: {res_text}")
-        return delta
+    def _period_index(self, start: pd.Timestamp, end: pd.Timestamp, resolution: str) -> pd.DatetimeIndex:
+        """UTC start of every position of a Period. Daily and longer resolutions follow the local calendar of the
+        area (a week with the autumn DST switch lasts 169 hours but still has 7 daily positions).
+
+        A "P1D" period (week-ahead load min/max, A31 — the only daily resolution this source parses) is
+        additionally re-anchored from this area's own local midnight of day D to `_daily_zone()`'s midnight of
+        that same day D, so a neighbouring area's value lands on the market's own local day, not the
+        neighbour's (see `_daily_zone`). Other non-Timedelta resolutions (P1Y installed capacity) are
+        unaffected and keep this area's own zone.
+        """
+        start = start.tz_convert("UTC").as_unit("ns")
+        end = end.tz_convert("UTC").as_unit("ns")
+        step = parse_resolution(resolution)
+        if isinstance(step, pd.Timedelta):
+            return pd.date_range(start, periods=int((end - start) / step), freq=step)
+
+        local_start = start.tz_convert(self._timezone)
+        if local_start == local_start.normalize():
+            stamps = []
+            current, local_end = local_start, end.tz_convert(self._timezone)
+            while current < local_end:
+                stamps.append(current)
+                current = current + step
+            index = pd.DatetimeIndex(stamps)
+            if resolution == "P1D":
+                dates = index.tz_localize(None)
+                index = dates.tz_localize(
+                    self._daily_zone(), ambiguous=np.ones(len(dates), dtype=bool), nonexistent="shift_forward"
+                )
+            return index.tz_convert("UTC")
+
+        # Not aligned with local midnight of the assumed timezone: step in UTC, rounding the number of positions
+        nominal = (start + step) - start
+        count = max(1, round((end - start) / nominal))
+        return pd.DatetimeIndex([start + step * i for i in range(count)])
+
+    def _parse_xml(self, xml_text: str) -> ET.Element:
+        if "<!DOCTYPE" in xml_text or "<!ENTITY" in xml_text:
+            raise EntsoeApiError(f"ENTSOE [{self._area_name}]: refusing to parse a response that declares a DTD")
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError as exc:
+            raise EntsoeApiError(f"ENTSOE [{self._area_name}]: response is not valid XML ({exc})") from None
+        for element in root.iter():
+            element.tag = element.tag.rpartition("}")[2]
+        return root
 
     def _log_success(self, elapsed: float):
         self.logger.info(f"ENTSOE [{self._area_name}]: Download completed successfully in {elapsed:.2f} sec")
 
     def get_cache_config(self) -> dict:
-        return {
+        config = {
             "source_type": "entsoe",
             "area_code": self._area_code,
             "types": sorted(self.type),
+            "prefer_15min": self.prefer_15min,
+            "schema_version": SCHEMA_VERSION,
         }
+        # Added only when set, so that cache keys of sources without them stay the same.
+        if self.neighbours:
+            config["neighbours"] = sorted(lookup_area(n)[0] for n in self.neighbours)
+        if self.prefix:
+            config["prefix"] = self.prefix
+        # Only "load" fetches week-ahead daily values (A31), whose local-midnight anchor depends on this (see
+        # _daily_zone): a pipeline bound to a different market zone must not share a cache entry with another.
+        if "load" in self.type:
+            config["daily_zone"] = self._daily_zone()
+        return config

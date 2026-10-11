@@ -5,8 +5,6 @@ description: Overview of epftoolbox2 - a Python library for electricity price fo
 
 import { Card, CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
 
-# epftoolbox2
-
 A Python library for electricity price forecasting with modular data pipelines and model evaluation. **Epftoolbox2** is a continuation of the original [epftoolbox](https://github.com/jeslago/epftoolbox) project. It provides a modernized, modular architecture while maintaining the core focus on electricity price forecasting research and applications.
 
 
@@ -20,7 +18,7 @@ A Python library for electricity price forecasting with modular data pipelines a
     Resample, create lag features, convert timezones with flexible transformers
   </Card>
   <Card title="Validate Quality" icon="approve-check">
-    Check for nulls, continuity gaps, and view EDA statistics
+    Check for nulls, missing timestamps, and view EDA statistics
   </Card>
   <Card title="Train Models" icon="rocket">
     OLS and LassoCV models with rolling-window evaluation
@@ -32,7 +30,7 @@ A Python library for electricity price forecasting with modular data pipelines a
     Excel with conditional formatting or rich terminal tables
   </Card>
   <Card title="Workflow Orchestration" icon="seti:config">
-    Save full experiments as YAML — data pipeline, model pipeline, run params, and environment settings in one file
+    Save full experiments as YAML: data pipeline, model pipeline, run params, and environment settings in one file
   </Card>
 </CardGrid>
 
@@ -75,7 +73,7 @@ flowchart LR
     Easy to add custom sources, transformers, models, etc.
   </Card>
   <Card title="AI Ready" icon="star">
-    Documentation for AI agents via llms.txt
+    An llms.txt index that points AI agents to the right documentation page
   </Card>
 </CardGrid>
 

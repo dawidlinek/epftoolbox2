@@ -6,13 +6,13 @@ hourly. The model trains 96 sub-models per day (one per 15-min slot) rather
 than the default 24.
 
 Key differences vs. example 03:
-- EntsoeSource(..., prefer_15min=True) to pick 15-min prices when available
 - ResampleTransformer(freq="15min") to align everything to 15-min bins
 - CalendarSource(..., freq="15min") so calendar features are at 15-min too
 - ModelPipeline.run(..., freq="15min") selects the 96-period training loop
 
-Note: DE 15-min data from ENTSOE only includes load, not price.
-This example forecasts load_actual as the target.
+ENTSO-E publishes the DE_LU load every 15 minutes, so this example forecasts load_actual.
+Day-ahead prices are 15-minute from 2025-10-01 only: add type=["price"] and prefer_15min=True to
+EntsoeSource for them (before that date the hourly price is repeated over its four quarter-hours).
 """
 
 import os
@@ -20,38 +20,59 @@ import os
 os.environ["THREADS_PER_PROCESS"] = "16"
 os.environ["MAX_PROCESSES"] = "2"
 
+from pathlib import Path
+
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer, TimezoneTransformer
-from epftoolbox2.data.validators import NullCheckValidator
+from epftoolbox2.data.validators import CoverageValidator
+from epftoolbox2.information_set import InformationSet
 from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
 from epftoolbox2.exporters import ExcelExporter, TerminalExporter, CsvExporter
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_API_KEY_HERE")
 
-DATA_START = "2023-01-01"
-DATA_END = "2024-04-01"
 
-TEST_START = "2024-02-01"
-TEST_END = "2024-03-01"
-
-if __name__ == "__main__":
-
-    df = (
-        DataPipeline()
-        .add_source(EntsoeSource(country_code="DE", api_key=ENTSOE_API_KEY, type=["load", "price"], prefer_15min=True))
-        .add_source(OpenMeteoSource(latitude=52.5200, longitude=13.4050, horizon=7, prefix="berlin"))
+def main(
+    data_start="2023-01-01",
+    data_end="2024-04-01",
+    test_start="2024-02-01",
+    test_end="2024-03-01",
+    output_dir=".",
+):
+    output = Path(output_dir)
+    data_pipeline = (
+        # timezone makes data_start/data_end whole local days
+        DataPipeline(timezone="Europe/Berlin")
+        .add_source(EntsoeSource(country_code="DE_LU", api_key=ENTSOE_API_KEY, type=["load"]))
+        .add_source(OpenMeteoSource(latitude=52.5200, longitude=13.4050, prefix="berlin"))
         .add_source(CalendarSource(country="DE", holidays="binary", weekday="onehot", daylight=True, freq="15min"))
-        .add_transformer(TimezoneTransformer(target_tz="Europe/Berlin"))
-        .add_transformer(ResampleTransformer(freq="15min", columns=["load_forecast_daily_min","load_forecast_daily_max"], method="ffill"))
+        .add_transformer(TimezoneTransformer())
         .add_transformer(ResampleTransformer(freq="15min"))
         .add_transformer(LagTransformer(columns=["load_actual"], lags=[1, 2, 7], freq="day"))
-        .add_transformer(LagTransformer(lags=range(-7, 1), freq="day", columns=["is_monday", "is_tuesday", "daylight_hours", "is_wednesday", "is_thursday", "is_friday", "is_saturday", "is_sunday", "load_forecast", "is_holiday"]))
-        .add_validator(NullCheckValidator(columns=["load_actual"]))
-        .run(start=DATA_START, end=DATA_END, cache=True)
+        .add_transformer(
+            LagTransformer(
+                lags=range(-7, 1),
+                freq="day",
+                columns=[
+                    "is_monday",
+                    "is_tuesday",
+                    "daylight_hours",
+                    "is_wednesday",
+                    "is_thursday",
+                    "is_friday",
+                    "is_saturday",
+                    "is_sunday",
+                    "is_holiday",
+                ],
+            )
+        )
+        .add_transformer(LagTransformer(lags=range(-1, 0), freq="day", columns=["load_forecast"]))
+        .add_validator(CoverageValidator(columns=["load_actual"], min_coverage=1.0))
     )
-    df.to_csv("15min_forecasting_data.csv")
+    df = data_pipeline.run(start=data_start, end=data_end, cache=True)
+    df.to_csv(output / "15min_forecasting_data.csv")
 
     seasonal_indicators = [
         "is_monday_d+{horizon}",
@@ -66,31 +87,38 @@ if __name__ == "__main__":
     ]
 
     predictors = [
-        "load_actual",
         *seasonal_indicators,
         "load_actual_d-1",
         "load_actual_d-7",
         lambda h: f"berlin_temperature_2m_d+{h}",
     ]
 
+    # Forecasts are issued at 11:45, before the 12:00 CET day-ahead gate closure
+    information_set = InformationSet("11:45", "Europe/Berlin").with_source_rules(data_pipeline.sources)
+
     model_pipeline = (
-        ModelPipeline()
+        ModelPipeline(information_set=information_set)
         .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
         .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=7, name="LassoCV"))
         .add_evaluator(MAEEvaluator())
         .add_evaluator(RMSEEvaluator())
         .add_evaluator(rMAEEvaluator(base_model="OLS"))
         .add_exporter(TerminalExporter())
-        .add_exporter(ExcelExporter("15min_workflow_results.xlsx"))
-        .add_exporter(CsvExporter("15min_workflow_results.csv"))
+        .add_exporter(ExcelExporter(output / "15min_workflow_results.xlsx"))
+        .add_exporter(CsvExporter(output / "15min_workflow_results.csv"))
     )
 
     report = model_pipeline.run(
         data=df,
-        test_start=TEST_START,
-        test_end=TEST_END,
+        test_start=test_start,
+        test_end=test_end,
         target="load_actual",
-        horizon=7,
+        horizon=6,  # as far ahead as the weather forecasts go
         freq="15min",
-        save_dir="results_15min",
+        save_dir=output / "results_15min",
     )
+    return report
+
+
+if __name__ == "__main__":
+    main()

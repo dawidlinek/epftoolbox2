@@ -8,12 +8,12 @@ from ..results.report import EvaluationReport
 
 class TerminalExporter(Exporter):
     _SHOW_MAP = {
-        "summary":      ("Summary",           lambda r: r.summary()),
-        "hour":         ("By Hour",            lambda r: r.by_hour()),
-        "horizon":      ("By Horizon",         lambda r: r.by_horizon()),
-        "hour_horizon": ("By Hour × Horizon",  lambda r: r.by_hour_horizon()),
-        "year":         ("By Year",            lambda r: r.by_year()),
-        "year_horizon": ("By Year × Horizon",  lambda r: r.by_year_horizon()),
+        "summary": ("Summary", lambda r: r.summary()),
+        "hour": ("By Hour", lambda r: r.by_hour()),
+        "horizon": ("By Horizon", lambda r: r.by_horizon()),
+        "hour_horizon": ("By Hour × Horizon", lambda r: r.by_hour_horizon()),
+        "year": ("By Year", lambda r: r.by_year()),
+        "year_horizon": ("By Year × Horizon", lambda r: r.by_year_horizon()),
     }
 
     def __init__(self, show: List[str] = None):

@@ -1,8 +1,14 @@
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
+
+from .base import BaseScaler
 
 
-class StandardScaler:
+class StandardScaler(BaseScaler):
+    """Standardise every non-binary predictor and the target to mean 0, standard deviation 1 (the default)."""
+
+    name = "standard"
+
     def __init__(self):
         self._target_mean = 0.0
         self._target_std = 1.0
@@ -13,6 +19,7 @@ class StandardScaler:
         train_y: np.ndarray,
         test_x: np.ndarray,
         scalable_mask: Optional[np.ndarray] = None,
+        columns: Optional[Sequence[str]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         if train_x.dtype == np.float64:
             train_x = train_x.copy()
@@ -45,16 +52,6 @@ class StandardScaler:
         train_y_scaled = (train_y - self._target_mean) / self._target_std
 
         return train_x, train_y_scaled, test_x
-
-    @staticmethod
-    def get_scalable_mask(arr: np.ndarray) -> np.ndarray:
-        mask = np.ones(arr.shape[1], dtype=bool)
-        for i in range(arr.shape[1]):
-            col = arr[:, i]
-            unique = np.unique(col[~np.isnan(col)])
-            if len(unique) <= 2 and np.all((unique == 0) | (unique == 1)):
-                mask[i] = False
-        return mask
 
     def inverse(self, value: float) -> float:
         return value * self._target_std + self._target_mean

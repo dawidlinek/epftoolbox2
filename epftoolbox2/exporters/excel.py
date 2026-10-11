@@ -17,12 +17,31 @@ class ExcelExporter(Exporter):
                     "hour_horizon", "year", "year_horizon", "details". Defaults to all.
         """
         self.path = Path(path)
-        self.sheets = sheets or ["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon", "run_weekday_horizon", "target_weekday_horizon", "details"]
+        self.sheets = sheets or [
+            "summary",
+            "hour",
+            "horizon",
+            "hour_horizon",
+            "year",
+            "year_horizon",
+            "run_weekday_horizon",
+            "target_weekday_horizon",
+            "details",
+        ]
 
     def export(self, report: EvaluationReport) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        agg_sheets = {"summary", "hour", "horizon", "hour_horizon", "year", "year_horizon", "run_weekday_horizon", "target_weekday_horizon"}
+        agg_sheets = {
+            "summary",
+            "hour",
+            "horizon",
+            "hour_horizon",
+            "year",
+            "year_horizon",
+            "run_weekday_horizon",
+            "target_weekday_horizon",
+        }
         needs_agg = bool(set(self.sheets) & agg_sheets)
         agg = report.compute_all() if needs_agg else {}
 
@@ -39,10 +58,22 @@ class ExcelExporter(Exporter):
                 self._write_pivot_sheet(writer, report, "year", agg["year"], "year")
             if "year_horizon" in self.sheets:
                 self._write_matrix_sheet(writer, report, "YearHorizon", agg["year_horizon"], "year", "horizon")
-            if "run_weekday_horizon" in self.sheets and "run_weekday_horizon" in agg and not agg["run_weekday_horizon"].empty:
-                self._write_weekday_horizon_sheet(writer, report, agg["run_weekday_horizon"], "run_weekday", "RunWeekdayHorizon")
-            if "target_weekday_horizon" in self.sheets and "target_weekday_horizon" in agg and not agg["target_weekday_horizon"].empty:
-                self._write_weekday_horizon_sheet(writer, report, agg["target_weekday_horizon"], "target_weekday", "TgtWeekdayHorizon")
+            if (
+                "run_weekday_horizon" in self.sheets
+                and "run_weekday_horizon" in agg
+                and not agg["run_weekday_horizon"].empty
+            ):
+                self._write_weekday_horizon_sheet(
+                    writer, report, agg["run_weekday_horizon"], "run_weekday", "RunWeekdayHorizon"
+                )
+            if (
+                "target_weekday_horizon" in self.sheets
+                and "target_weekday_horizon" in agg
+                and not agg["target_weekday_horizon"].empty
+            ):
+                self._write_weekday_horizon_sheet(
+                    writer, report, agg["target_weekday_horizon"], "target_weekday", "TgtWeekdayHorizon"
+                )
             if "details" in self.sheets:
                 self._write_details(writer, report)
 
@@ -51,7 +82,9 @@ class ExcelExporter(Exporter):
         summary.to_excel(writer, sheet_name=sheet_name, index=False)
         self._apply_color_scale(writer, sheet_name, 2, 2, len(summary), len(summary.columns) - 1)
 
-    def _write_pivot_sheet(self, writer: pd.ExcelWriter, report: EvaluationReport, sheet_prefix: str, data: pd.DataFrame, col_col: str) -> None:
+    def _write_pivot_sheet(
+        self, writer: pd.ExcelWriter, report: EvaluationReport, sheet_prefix: str, data: pd.DataFrame, col_col: str
+    ) -> None:
         metrics = [ev.name for ev in report.evaluators]
 
         for metric in metrics:
@@ -65,7 +98,15 @@ class ExcelExporter(Exporter):
             per_column = col_col == "horizon"
             self._apply_color_scale(writer, sheet_name, 2, 2, len(pivot), len(pivot.columns), per_column=per_column)
 
-    def _write_matrix_sheet(self, writer: pd.ExcelWriter, report: EvaluationReport, sheet_prefix: str, data: pd.DataFrame, row_col: str, col_col: str) -> None:
+    def _write_matrix_sheet(
+        self,
+        writer: pd.ExcelWriter,
+        report: EvaluationReport,
+        sheet_prefix: str,
+        data: pd.DataFrame,
+        row_col: str,
+        col_col: str,
+    ) -> None:
         metrics = [ev.name for ev in report.evaluators]
         models = list(data["model"].unique())
 
@@ -118,9 +159,13 @@ class ExcelExporter(Exporter):
     _WEEKDAY_LABELS = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
 
     _COLOR_SCALE_RULE = ColorScaleRule(
-        start_type="min", start_color="63BE7B",
-        mid_type="percentile", mid_value=50, mid_color="FFEB84",
-        end_type="max", end_color="F8696B",
+        start_type="min",
+        start_color="63BE7B",
+        mid_type="percentile",
+        mid_value=50,
+        mid_color="FFEB84",
+        end_type="max",
+        end_color="F8696B",
     )
 
     def _write_weekday_horizon_sheet(
@@ -165,7 +210,7 @@ class ExcelExporter(Exporter):
         for model_name, model_df in report.iter_details():
             preds = model_df[sort_keys + ["prediction", "actual", "day_in_test"]].copy()
             preds = preds.rename(columns={"prediction": f"prediction_{model_name}"})
-            
+
             if details_df is None:
                 details_df = preds
             else:
@@ -182,7 +227,5 @@ class ExcelExporter(Exporter):
         final_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual"] + pred_cols
 
         details_df = details_df[final_cols]
-        details_df = details_df.sort_values(
-            by=["target_date", "hour", "horizon"]
-        ).reset_index(drop=True)
+        details_df = details_df.sort_values(by=["target_date", "hour", "horizon"]).reset_index(drop=True)
         details_df.to_excel(writer, sheet_name="Details", index=False)

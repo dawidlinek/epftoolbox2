@@ -1,13 +1,9 @@
 ---
 title: ResampleTransformer
-description: Resample data to a regular frequency
+description: Bring every column to one regular frequency without inventing data
 ---
 
-import { Aside } from '@astrojs/starlight/components';
-
-# ResampleTransformer
-
-Resamples data to a specified frequency, applying aggregation (when downsampling) or interpolation (when upsampling).
+Brings every column of a frame to one regular frequency. It aggregates when a column is finer than the target (15 min → 1 h) and repeats a value over its own period when the column is coarser (1 h → 15 min). It does **not** fill missing data and never uses a later value to fill an earlier slot.
 
 ## Basic Usage
 
@@ -22,75 +18,59 @@ df = transformer.transform(df)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `freq` | str | `"1h"` | Pandas frequency string |
-| `method` | str | `"linear"` | Method specifying aggregation and interpolation behavior |
-| `columns` | list[str] \| str \| None | `None` | Columns to interpolate. If None, all columns are interpolated. |
+| `freq` | str | `"1h"` | Target pandas frequency (`"15min"`, `"1h"`, `"1D"`, ...) |
+| `agg` | str \| dict | `"mean"` | Aggregation used when downsampling: `mean`, `sum`, `first`, `last`, `min`, `max`, `median`, or a dict `{column: aggregation}` |
+| `fill` | str \| None \| dict | `"ffill"` | How slots created by upsampling are filled: `"ffill"` (repeat the value inside its own period) or `None` (leave them empty), or a dict `{column: fill}` |
 
-## Frequency Strings
-
-| String | Meaning |
-|--------|---------|
-| `"1h"` | 1 hour |
-| `"30min"` | 30 minutes |
-| `"15min"` | 15 minutes |
-| `"1D"` | 1 day |
-
-## Methods
-
-The `method` parameter controls behavior for **both** directions:
-- **Downsampling** (e.g. 15 min → 1 h) – selects the aggregation function.
-- **Upsampling** (e.g. 1 h → 15 min) – selects how NaN gaps are filled.
-
-| Method | Aggregation (↓) | Fill Method (↑) |
-|--------|----------------|-----------------|
-| `"linear"` | `mean` | Linear interpolation |
-| `"ffill"` | `first` | Forward-fill |
-| `"bfill"` | `last` | Backward-fill |
-| `"sum"` | `sum` | Forward-fill |
-| `"first"` | `first` | Forward-fill |
-| `"last"` | `last` | Backward-fill |
-
-## Selecting Columns
-
-By default, the resampling method is applied to all columns. You can restrict it to specific columns using the `columns` parameter. Other columns will be resampled (introducing NaNs/dropping points) but not processed by the specified method.
+In a dict, columns that are not listed use the `"default"` entry, or `"mean"` / `"ffill"` when there is none:
 
 ```python
-# Interpolate only 'price', leave 'load' with NaNs where gaps occur
-transformer = ResampleTransformer(freq="15min", columns=["price"])
-df = transformer.transform(df)
+# Prices and load are averaged, energy is summed
+ResampleTransformer(freq="1h", agg={"default": "mean", "energy_mwh": "sum"})
+
+# Keep the hourly price only at the full hour when going to 15 minutes
+ResampleTransformer(freq="15min", fill={"price": None})
 ```
 
----
+Non-numeric columns (e.g. `weekday_name`) use `"first"` when the aggregation is numeric-only (`mean`, `sum`, `median`).
 
-## Example: Handling DST Gaps
+## How it works
 
-When converting to a local timezone with daylight saving time, a gap can occur (e.g., 2:00 AM doesn't exist during spring-forward). Use `ResampleTransformer` to fill these gaps:
+Every value is the value of a **period** that starts at its timestamp and lasts as long as the column's own spacing: 15 minutes, one hour, or one local calendar day for daily columns. The spacing is worked out per column from the timestamps of its non-null values, so a frame that mixes hourly prices, 15-minute load and daily A31 values is handled column by column. A column can even change resolution part-way (hourly day-ahead prices before the 15-minute switch, 15-minute prices after it).
+
+**Upsampling** (column coarser than `freq`): each finer slot inside a value's period gets that value, so an hourly price becomes a step: 10:00, 10:15, 10:30 and 10:45 all hold the 10:00 price. Dummies stay 0/1. The last period is completed, so an hourly day becomes 96 quarter-hours. For `sum` columns the value is split evenly across the slots, so totals are kept. With `fill=None` the new slots stay empty.
+
+**Downsampling** (column finer than `freq`): the values inside each target period are combined with `agg`. A period that is not completely covered gives NaN: a missing quarter-hour makes its hour NaN, and the partial first and last local days make a daily mean NaN. You never get a partial sum or a sum of zero for an empty period.
+
+**Nothing else is filled.** A value missing in the source (an outage, a price that isn't published yet) stays missing, and nothing is extrapolated past a column's last value. Gaps therefore stay visible to validators and are dropped by the models instead of being scored against invented actuals.
+
+## Pipeline order: Timezone → Resample → Lag
 
 ```python
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource
-from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, LagTransformer
 
 pipeline = (
     DataPipeline()
-    .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load"]))
-    # First convert to local timezone (creates DST gap)
-    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
-    # Then resample to fill the gap
-    .add_transformer(ResampleTransformer(freq="1h", method="linear"))
+    .add_source(EntsoeSource(country_code="PL", api_key="...", type=["load", "price"]))
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))  # local time, daily values on local midnight
+    .add_transformer(ResampleTransformer(freq="1h"))                  # one regular grid
+    .add_transformer(LagTransformer(columns=["price"], lags=[1, 7], freq="day"))
 )
-
-df = pipeline.run(start="2024-03-30", end="2024-04-01")
-# The missing 2:00 AM hour during DST transition is now filled
 ```
 
-<Aside type="tip">
-  Apply `ResampleTransformer` after `TimezoneTransformer` to handle DST gaps properly.
-</Aside>
+1. **`TimezoneTransformer` first**, so that daily bins (`freq="1D"`) and daily columns follow local calendar days and daily values sit on local midnight. Resampling a UTC frame to `"1D"` aggregates UTC days, and resampling daily columns before the timezone step makes `TimezoneTransformer` raise.
+2. **`ResampleTransformer`** next, to put every column on the same grid.
+3. **`LagTransformer`** last, on the regular local grid.
 
----
+### What happens on DST days
+
+After `TimezoneTransformer`, a local day has 23 hours on the spring switch day and 25 on the autumn one. `ResampleTransformer` keeps that: the spring day has 23 hourly rows (92 quarter-hours) and **no 02:00 row**, because that local time doesn't exist. The autumn day has 25 hourly rows (100 quarter-hours) with 02:00 twice. Nothing is filled in for the "missing" hour, and a daily value covers all 23 or 25 hours of its day.
 
 ## Notes
 
-- Input DataFrame must have a DatetimeIndex
-- Output values are rounded to 3 decimal places
+- The input must have a `DatetimeIndex` without duplicate timestamps. An unsorted index is sorted.
+- Timestamps are period starts (ENTSO-E convention).
+- Output values are not rounded.
+- Numeric columns come out as `float64`.
