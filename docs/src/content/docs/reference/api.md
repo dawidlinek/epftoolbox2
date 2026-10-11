@@ -28,7 +28,11 @@ class DataPipeline:
         cache: Union[bool, str] = False,  # Caching option
     ) -> pd.DataFrame: ...
 
-    def save(self, path: Union[str, Path]) -> None: ...       # Save to YAML
+    def save(
+        self,
+        path: Union[str, Path],
+        include_secrets: bool = False,  # False writes api_key as a ${ENV_VAR} reference
+    ) -> None: ...                      # Save to YAML
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "DataPipeline": ...  # Load from YAML
@@ -40,7 +44,12 @@ class DataPipeline:
 
 ```python
 class ModelPipeline:
-    def __init__(self): ...
+    def __init__(
+        self,
+        information_set: Optional[InformationSet] = None,  # Check every predictor against the issue time
+        issue_time: Optional[str] = None,                  # Shortcut for InformationSet(issue_time, issue_timezone)
+        issue_timezone: str = "Europe/Brussels",           # Zone of issue_time
+    ): ...
 
     def add_model(self, model: BaseModel) -> "ModelPipeline": ...
     def add_evaluator(self, evaluator: Evaluator) -> "ModelPipeline": ...
@@ -56,6 +65,8 @@ class ModelPipeline:
         freq: str = "1h",                 # "1h" or "15min"; must match the data
         save_dir: Optional[str] = None,   # Result cache directory (one JSONL per model)
         forecast_only: bool = False,      # Skip evaluators/exporters; dates default to today
+        allow_manifest_mismatch: bool = False,  # Overwrite a disagreeing manifest and resume anyway
+        require_manifest: bool = False,   # Refuse results in save_dir that have no manifest
     ) -> EvaluationReport: ...
 
     def report(                           # Report from the JSONL files a run wrote to save_dir
@@ -86,18 +97,22 @@ class Workflow:
         self,
         data_start: str,                                      # Data fetch start date
         data_end: str,                                        # Data fetch end date
-        model_test_start: str,                                # Test period start
-        model_test_end: str,                                  # Test period end
+        model_test_start: Optional[str] = None,               # Test period start
+        model_test_end: Optional[str] = None,                 # Test period end
         data_pipeline: Optional[Union[str, Path]] = None,    # Path to data_pipeline.yaml
         model_pipeline: Optional[Union[str, Path]] = None,   # Path to model_pipeline.yaml
         data_cache: Union[bool, str] = False,                 # Data caching option
         model_target: str = "price",                          # Target column
         model_horizon: int = 7,                               # Max forecast horizon
+        model_freq: str = "1h",                               # "1h" or "15min"
+        model_forecast_only: bool = False,                    # Skip evaluators/exporters
         max_processes: Optional[int] = None,                  # Worker process count
         threads_per_process: Optional[int] = None,            # Threads per process
         cache_path: Optional[str] = None,                     # Cache directory (overrides data_cache)
-        model_index: Optional[int] = None,                    # Run only models[model_index]; all models if None
-        model_save_dir: Optional[str] = None,                 # One JSONL per model; required with model_index
+        model_index: Optional[int] = None,                    # Run only models[model_index], all models if None
+        model_save_dir: Optional[str] = None,                 # One JSONL per model, required with model_index
+        model_allow_manifest_mismatch: bool = False,          # Overwrite a disagreeing manifest and resume
+        model_require_manifest: bool = False,                 # Refuse results that have no manifest
     ): ...
 
     def run(self) -> EvaluationReport: ...
@@ -211,7 +226,7 @@ class LagTransformer(Transformer):
 class TimezoneTransformer(Transformer):
     def __init__(
         self,
-        target_tz: str,
+        target_tz: Optional[str] = None,  # None = DataPipeline.timezone
         daily_columns: Optional[List[str]] = None,  # None = ["load_forecast_daily_min", "load_forecast_daily_max"]
         daily_anchor: Optional[str] = None,  # None = the resolved target_tz
     ): ...
@@ -231,7 +246,8 @@ class DailyStatsTransformer(Transformer):
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 
 class ImputeTransformer(Transformer):
-    def __init__(self, columns: Union[str, List[str]], method: str = "ffill",  # "ffill" | "previous_day" | "previous_week"
+    def __init__(self, columns: Union[str, List[str], None] = None,  # at least one column is required
+                 method: str = "ffill",  # "ffill" | "previous_day" | "previous_week"
                  limit: Union[int, str, None] = None, flag: bool = True, suffix: str = ""): ...
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 
