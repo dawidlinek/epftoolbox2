@@ -1791,7 +1791,8 @@ class DataPipeline:
 
 ### Timezone and Date Semantics
 
-- A date-only `start`/`end` (a string, or "today"/"now_d±N") always names a **whole calendar day**: `start`
+- A date-only `start`/`end` (a string, a `datetime.date` such as YAML makes of an unquoted `end: 2024-01-31`, or
+  "today"/"now_d±N") always names a **whole calendar day**: `start`
   begins at that day's midnight and `end` runs through the end of its own day (inclusive). `end="today_d+7"`
   therefore includes all 24 hours of the 7th day ahead, the natural choice for a `horizon=7` forecast-only run.
 - `timezone=None` (default): those days are **UTC** days.

@@ -58,6 +58,9 @@ model_pipeline:
   freq: 1h
 ```
 
+Dates may be quoted or not. YAML reads an unquoted `end: 2024-08-01` as a date and the workflow treats it like the
+string `"2024-08-01"`, so the whole day is included.
+
 **Forecast-only variant**: add `forecast_only: true` and use date keywords so the file runs daily without editing:
 
 ```yaml

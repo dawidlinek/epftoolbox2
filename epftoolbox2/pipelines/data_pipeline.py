@@ -1,3 +1,4 @@
+from datetime import date, datetime
 from typing import List, Optional, Tuple, Union, Dict, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import hashlib
@@ -85,7 +86,8 @@ class DataPipeline:
         timezone: Market time zone (e.g. ``"Europe/Warsaw"``), the single place it needs to be set. ``start`` and
             a date-only ``end`` passed to ``run`` always cover a whole calendar day, local if set and UTC
             otherwise: ``start`` begins at that day's midnight and ``end`` runs through the end of its own day
-            (inclusive). If set, date strings and keywords passed to ``run`` are read as local calendar days and
+            (inclusive). A ``datetime.date`` (what YAML makes of an unquoted ``end: 2024-01-31``) counts as a
+            date-only string. If set, date strings and keywords passed to ``run`` are read as local calendar days and
             naive timestamps are local times. If ``None``, they are UTC calendar days and naive timestamps are
             UTC. Components whose own zone decides a local
             calendar day or an issue time — ``TimezoneTransformer.target_tz``,
@@ -310,9 +312,12 @@ class DataPipeline:
         # Cached and missing ranges are disjoint, so there are no duplicate timestamps to resolve.
         return pd.concat(parts).sort_index(kind="stable"), unsettled
 
-    def _parse_timestamp(self, ts: Union[str, pd.Timestamp], is_end: bool = False) -> pd.Timestamp:
+    def _parse_timestamp(self, ts: Union[str, date, pd.Timestamp], is_end: bool = False) -> pd.Timestamp:
         """UTC bound for ``run``. See the class docstring for how dates, keywords and timestamps are read."""
         tz = self.timezone or "UTC"
+        if isinstance(ts, date) and not isinstance(ts, datetime):
+            # A plain date, such as YAML makes of an unquoted `end: 2024-01-31`, names a whole day like "2024-01-31".
+            ts = ts.isoformat()
         if isinstance(ts, str):
             day = _calendar_day(ts, self.timezone)
             if day is not None:
@@ -324,7 +329,7 @@ class DataPipeline:
         return ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize(tz).tz_convert("UTC")
 
     def resolve_range(
-        self, start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp]
+        self, start: Union[str, date, pd.Timestamp], end: Union[str, date, pd.Timestamp]
     ) -> Tuple[pd.Timestamp, pd.Timestamp]:
         """The half-open UTC range ``[start, end)`` that ``run(start, end)`` returns."""
         start_ts = self._parse_timestamp(start)
@@ -334,7 +339,10 @@ class DataPipeline:
         return start_ts, end_ts
 
     def run(
-        self, start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp], cache: Union[bool, str] = False
+        self,
+        start: Union[str, date, pd.Timestamp],
+        end: Union[str, date, pd.Timestamp],
+        cache: Union[bool, str] = False,
     ) -> pd.DataFrame:
         if not self.sources:
             raise ValueError("At least one data source is required")

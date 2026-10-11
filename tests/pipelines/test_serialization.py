@@ -498,6 +498,63 @@ class TestModelPipelineSerialization:
 # ---------------------------------------------------------------------------
 
 
+class TestWorkflowYamlDates:
+    """YAML reads an unquoted `2024-01-31` as a `datetime.date`, which must mean the same days as the quoted string."""
+
+    @staticmethod
+    def _write(tmp_path, quote):
+        q = '"' if quote else ""
+        DataPipeline(timezone="Europe/Warsaw").add_source(CalendarSource(country="PL")).save(tmp_path / "dp.yaml")
+        ModelPipeline().add_model(OLSModel(predictors=["is_holiday"], name="OLS")).save(tmp_path / "mp.yaml")
+        path = tmp_path / f"exp_{'quoted' if quote else 'bare'}.yaml"
+        path.write_text(
+            "data_pipeline:\n"
+            "  path: dp.yaml\n"
+            f"  start: {q}2024-01-01{q}\n"
+            f"  end: {q}2024-01-31{q}\n"
+            "model_pipeline:\n"
+            "  path: mp.yaml\n"
+            f"  test_start: {q}2024-01-10{q}\n"
+            f"  test_end: {q}2024-01-12{q}\n"
+        )
+        return path
+
+    def test_unquoted_dates_load_as_dates_and_run_the_same_range_as_quoted_ones(self, tmp_path):
+        bare = Workflow.load(self._write(tmp_path, quote=False))
+        quoted = Workflow.load(self._write(tmp_path, quote=True))
+        assert not isinstance(bare.data_end, str)
+        df_bare, df_quoted = bare._run_data(), quoted._run_data()
+        assert df_bare.index.equals(df_quoted.index)
+        assert df_bare.index.max() == pd.Timestamp("2024-01-31 23:00", tz="Europe/Warsaw")
+        assert len(df_bare) == 31 * 24
+
+    def test_unquoted_test_dates_run_the_same_days_as_quoted_ones(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MAX_PROCESSES", "1")
+        monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+        bare = Workflow.load(self._write(tmp_path, quote=False))
+        quoted = Workflow.load(self._write(tmp_path, quote=True))
+        assert not isinstance(bare.model_test_start, str)
+        data = bare._run_data().assign(price=lambda df: np.arange(len(df), dtype=float))
+        data.index = data.index.tz_convert("Europe/Warsaw")
+        kwargs = dict(target="price", horizon=1, freq="1h")
+        refs = [
+            OLSModel(["is_holiday"], training_window=5).run(
+                data, test_start=wf.model_test_start, test_end=wf.model_test_end, **kwargs
+            )
+            for wf in (bare, quoted)
+        ]
+        assert refs[0].count == refs[1].count == 3 * 24
+        key = lambda r: (r["hour"], r["horizon"], r["run_date"])  # noqa: E731
+        assert sorted(refs[0]._results, key=key) == sorted(refs[1]._results, key=key)
+
+    def test_a_saved_workflow_with_dates_reloads_unchanged(self, tmp_path):
+        bare = Workflow.load(self._write(tmp_path, quote=False))
+        out = tmp_path / "saved.yaml"
+        bare.save(out)
+        again = Workflow.load(out)
+        assert again._run_data().index.equals(bare._run_data().index)
+
+
 class TestWorkflowSerialization:
     @pytest.fixture
     def pipeline_yamls(self, tmp_path):

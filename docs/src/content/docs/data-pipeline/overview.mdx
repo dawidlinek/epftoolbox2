@@ -76,8 +76,10 @@ The `start` and `end` parameters accept multiple formats:
   </TabItem>
 </Tabs>
 
-`end` is inclusive: a date-only `end` (a string, or a keyword such as `"today"`) includes that whole day, the local day
-when `timezone` is set and the UTC day otherwise.
+`end` is inclusive: a date-only `end` (a string, a `datetime.date`, or a keyword such as `"today"`) includes that whole
+day, the local day when `timezone` is set and the UTC day otherwise. A `datetime.date` is what YAML makes of an unquoted
+`end: 2024-01-31`, so a workflow file gives the same range with or without quotes. A `pd.Timestamp` or `datetime.datetime`
+is an exact instant, and an `end` given that way is exclusive.
 
 A date-only `start` begins at that day's midnight, and naive timestamps are taken as UTC. Every source's output is
 clipped to the resolved range, whether it comes from the API or from the cache (see

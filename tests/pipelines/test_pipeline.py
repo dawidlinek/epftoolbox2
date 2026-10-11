@@ -1,3 +1,4 @@
+import datetime
 import multiprocessing
 import os
 import time
@@ -877,6 +878,28 @@ class TestDateSemantics:
         assert local.min() == pd.Timestamp("2024-01-01 00:00", tz="Europe/Warsaw")
         assert local.max() == pd.Timestamp("2024-01-03 23:00", tz="Europe/Warsaw")
         assert len(df) == 72
+
+    @pytest.mark.parametrize("timezone", [None, "Europe/Warsaw"])
+    def test_a_plain_date_names_the_same_whole_days_as_its_string(self, timezone):
+        """YAML turns an unquoted `end: 2024-01-31` into a `datetime.date`. It must end through the end of 01-31,
+        as the quoted string does, and not at its midnight (one day short)."""
+        pipe = DataPipeline([RangeSource()], timezone=timezone)
+        quoted = pipe.resolve_range("2024-01-01", "2024-01-31")
+        assert pipe.resolve_range(datetime.date(2024, 1, 1), datetime.date(2024, 1, 31)) == quoted
+        assert quoted[1] - quoted[0] == pd.Timedelta(days=31)
+        df = pipe.run(datetime.date(2024, 1, 1), datetime.date(2024, 1, 31))
+        assert df.index.max() == quoted[1] - pd.Timedelta(hours=1)
+        assert len(df) == 31 * 24
+
+    def test_a_plain_date_end_is_the_whole_local_day_on_a_dst_day(self):
+        pipe = DataPipeline([RangeSource()], timezone="Europe/Warsaw")
+        assert len(pipe.run(datetime.date(2024, 3, 31), datetime.date(2024, 3, 31))) == 23
+
+    def test_a_datetime_or_timestamp_is_still_an_exact_instant(self):
+        pipe = DataPipeline([RangeSource()], timezone="Europe/Warsaw")
+        exact = pipe.resolve_range(datetime.datetime(2024, 1, 1), datetime.datetime(2024, 1, 31))
+        assert exact[1] == pd.Timestamp("2024-01-30 23:00", tz="UTC")
+        assert pipe.resolve_range(pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-31")) == exact
 
     @pytest.mark.parametrize("day, hours", [("2024-03-31", 23), ("2024-10-27", 25), ("2024-06-01", 24)])
     def test_timezone_end_day_is_complete_on_dst_days(self, day, hours):
