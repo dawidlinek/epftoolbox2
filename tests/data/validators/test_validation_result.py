@@ -39,14 +39,14 @@ def test_add_error_marks_result_invalid():
 
 
 def test_results_to_frame_one_row_per_message():
-    ok = ValidationResult(validator="ContinuityValidator")
+    ok = ValidationResult(validator="DSTStructureValidator")
     bad = ValidationResult(is_valid=False, errors=["e1", "e2"], warnings=["w1"], validator="CoverageValidator")
 
     table = results_to_frame([ok, bad])
 
     assert list(table.columns) == ["validator", "valid", "level", "message"]
     assert table.to_dict("records") == [
-        {"validator": "ContinuityValidator", "valid": True, "level": "ok", "message": ""},
+        {"validator": "DSTStructureValidator", "valid": True, "level": "ok", "message": ""},
         {"validator": "CoverageValidator", "valid": False, "level": "error", "message": "e1"},
         {"validator": "CoverageValidator", "valid": False, "level": "error", "message": "e2"},
         {"validator": "CoverageValidator", "valid": False, "level": "warning", "message": "w1"},

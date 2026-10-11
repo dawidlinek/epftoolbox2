@@ -1,49 +1,8 @@
 import pandas as pd
 from epftoolbox2.data.validators import (
-    ContinuityValidator,
     EdaValidator,
     ValidationResult,
 )
-
-
-class TestContinuityValidator:
-    def test_valid_continuous_data(self):
-        index = pd.date_range("2024-01-01", periods=24, freq="1h", tz="UTC")
-        df = pd.DataFrame({"value": range(24)}, index=index)
-
-        validator = ContinuityValidator(freq="1h")
-        result = validator.validate(df)
-
-        assert result.is_valid
-        assert len(result.errors) == 0
-
-    def test_gap_detected(self):
-        index = pd.to_datetime(["2024-01-01 00:00", "2024-01-01 01:00", "2024-01-01 05:00"]).tz_localize("UTC")
-        df = pd.DataFrame({"value": [1, 2, 3]}, index=index)
-
-        validator = ContinuityValidator(freq="1h")
-        result = validator.validate(df)
-
-        assert not result.is_valid
-        assert len(result.errors) == 1
-        assert "gap_count" in result.info
-        assert result.info["gap_count"] == 1
-
-    def test_empty_dataframe(self):
-        df = pd.DataFrame()
-        validator = ContinuityValidator()
-        result = validator.validate(df)
-
-        assert result.is_valid
-        assert len(result.warnings) == 1
-
-    def test_non_datetime_index(self):
-        df = pd.DataFrame({"value": [1, 2, 3]})
-        validator = ContinuityValidator()
-        result = validator.validate(df)
-
-        assert not result.is_valid
-        assert "DatetimeIndex" in result.errors[0]
 
 
 class TestEdaValidator:

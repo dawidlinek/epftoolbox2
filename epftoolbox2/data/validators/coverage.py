@@ -1,8 +1,10 @@
 from typing import List, Optional, Union
 
+import numpy as np
 import pandas as pd
 
 from ._utils import (
+    MAX_LISTED,
     ONE_DAY,
     as_utc,
     column_values,
@@ -20,10 +22,10 @@ from .result import ValidationResult
 
 
 class CoverageValidator(Validator):
-    """Checks per column that a value exists at every expected timestamp of a range.
+    """Checks the index and, per column, that a value exists at every expected timestamp of a range.
 
-    Unlike `ContinuityValidator` (the index alone), coverage is measured on the full `freq` grid, so it catches
-    both an outage of one column on an otherwise complete index and rows missing from the index entirely.
+    Coverage is measured on the full `freq` grid, so it catches both an outage of one column on an otherwise complete
+    index and rows missing from the index entirely. The index itself must be free of duplicate timestamps and sorted.
 
     Args:
         columns: Columns to check. None checks every column.
@@ -37,7 +39,17 @@ class CoverageValidator(Validator):
 
     `start` and `end` accept dates, timestamps and the "today" / "today_d-1" keywords of `DataPipeline.run`; naive
     values are UTC, like pipeline dates. `stats` has one row per column with its step, expected, present and missing
-    counts, coverage, the longest missing run and the first and last value in the range.
+    counts, coverage, the longest missing run, the first and last value in the range and the number of values that
+    lie between the grid points.
+
+    Steps are measured in elapsed time, so a tz-aware local index is on the grid across DST switches (the local clock
+    skips or repeats an hour, the elapsed step stays 1h). Steps of a day or more on a tz-aware index are measured on
+    the local calendar, where a day lasts 23 or 25 hours on switch days. A naive index is taken as it is, so a naive
+    local wall-clock index shows the DST switches as a duplicate timestamp and a missing one.
+
+    Errors: duplicate timestamps, an unsorted index, missing or empty columns, values off the grid (the column mixes
+    resolutions or is not on one `freq` step), coverage below `min_coverage` and a missing run longer than `max_gap`.
+    Warnings: missing timestamps within both limits.
     """
 
     def __init__(
@@ -71,12 +83,14 @@ class CoverageValidator(Validator):
             result.add_error("Index is not a DatetimeIndex")
             return result
 
+        index = df.index
+        self._check_index(index, result)
+
         columns, missing = select_columns(df, self.columns)
         if missing:
             result.add_error(f"Missing required columns: {sorted(missing)}")
             result.info["missing_columns"] = sorted(missing)
 
-        index = df.index
         utc = as_utc(index)
         index_step = infer_step(utc)
         if self._step is None and index_step is None:
@@ -100,9 +114,11 @@ class CoverageValidator(Validator):
                 errors.append(f"Column '{column}' has no values")
                 continue
 
-            lo = grid.to_grid(start) if start is not None else valid[0]
-            hi = grid.to_grid(end) if end is not None else valid[-1] + step
             origin = valid[0] if len(valid) else grid.times.min()
+            lo = grid.to_grid(start) if start is not None else valid[0]
+            # The default end is one step past the last value on the grid, so a stray value between grid points
+            # is reported as such and does not also add a missing timestamp.
+            hi = grid.to_grid(end) if end is not None else valid[(valid - origin) % step == pd.Timedelta(0)][-1] + step
             offset = (lo - origin) % step  # put the grid on the same phase as the column's values
             if offset != pd.Timedelta(0):
                 lo = lo + (step - offset)
@@ -113,6 +129,8 @@ class CoverageValidator(Validator):
 
             present = expected.isin(valid)
             count = int(present.sum())
+            in_range = valid[(valid >= lo) & (valid < hi)]
+            off_grid = in_range[~in_range.isin(expected)]
             run, run_start = longest_run(~present)
             row = {
                 "column": column,
@@ -128,8 +146,14 @@ class CoverageValidator(Validator):
                 "longest_missing_end": grid.shown(expected[run_start + run - 1]) if run else None,
                 "first_valid": grid.shown(expected[present][0]) if count else None,
                 "last_valid": grid.shown(expected[present][-1]) if count else None,
+                "off_grid": len(off_grid),
             }
             rows.append(row)
+            if len(off_grid):
+                errors.append(
+                    f"Column '{column}' has {len(off_grid)} values between the {freq} grid points (first: "
+                    f"{grid.shown(off_grid[0])}): the column mixes resolutions or is not on one {freq} step"
+                )
             if count == 0:
                 errors.append(f"Column '{column}' has no values in [{row['start']}, {row['end']})")
                 continue
@@ -155,10 +179,34 @@ class CoverageValidator(Validator):
             result.info["longest_missing_run"] = {r["column"]: r.get("longest_missing_run", 0) for r in rows}
             result.info["first_valid"] = {r["column"]: r.get("first_valid") for r in rows}
             result.info["last_valid"] = {r["column"]: r.get("last_valid") for r in rows}
+            result.info["off_grid"] = {r["column"]: r.get("off_grid", 0) for r in rows}
         for message in errors:
             result.add_error(message)
         result.warnings.extend(warnings)
         return result
+
+    @staticmethod
+    def _check_index(index: pd.DatetimeIndex, result: ValidationResult) -> None:
+        """Duplicate timestamps and an unsorted index are errors, whatever the columns hold."""
+        duplicated = index.duplicated()
+        result.info["duplicate_count"] = int(duplicated.sum())
+        if duplicated.any():
+            repeated = index[duplicated].unique()
+            result.add_error(
+                f"Index has {int(duplicated.sum())} duplicate timestamps (first: {repeated[0]}, "
+                f"{len(repeated)} distinct timestamps repeated)"
+            )
+            result.info["duplicates"] = list(repeated[:MAX_LISTED])
+
+        unique = index[~duplicated]
+        backward = np.flatnonzero(np.diff(unique.asi8) < 0)
+        result.info["unsorted_count"] = len(backward)
+        if len(backward):
+            first = backward[0]
+            result.add_error(
+                f"Index is not sorted: {len(backward)} timestamps are earlier than the row before "
+                f"(first: {unique[first]} followed by {unique[first + 1]})"
+            )
 
 
 class _Grid:

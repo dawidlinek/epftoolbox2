@@ -1,13 +1,15 @@
 ---
 title: CoverageValidator
-description: Per-column coverage, longest missing run and first/last value over a range
+description: Index checks plus per-column coverage, longest missing run and first/last value over a range
 ---
 
-Measures, per column, which timestamps of a regular grid carry a value: coverage, the longest run of missing timestamps and the first and last value. It finds what the other checks can't:
+Checks the `DatetimeIndex` and measures, per column, which timestamps of a regular grid carry a value: coverage, the longest run of missing timestamps and the first and last value. It finds:
 
-- an **outage of one column on a complete index** (for example three days without prices while load keeps coming), which `ContinuityValidator` can't see.
+- an **outage of one column on a complete index** (for example three days without prices while load keeps coming), which a check of the index alone can't see.
 - **rows missing from the index entirely**, which a null check on the rows present can't see.
 - a column that **starts late or ends early** compared with the range you asked for.
+- **duplicate timestamps** and an **unsorted index**.
+- values that **lie between the grid points**, such as 15-minute data checked against `freq="1h"`.
 
 ## Basic Usage
 
@@ -42,14 +44,18 @@ print(result.stats)
 
 `start` and `end` accept dates, timestamps and the `today` / `today_d-1` keywords of `DataPipeline.run`. They are resolved each time the validator runs, and naive values are UTC, like pipeline dates. The grid follows the phase of the column's values, so a UTC-midnight start works for a local-time frame.
 
+With `end` left at `None`, the range ends one step after the column's last value on the grid.
+
 With `start`/`end` left at `None`, lag columns pass even though they are empty at the edges of the frame by construction, and so do sources that pad the frame (A31 starting the evening before, Open-Meteo running past `end`). Set `start`/`end` when late starts and early ends matter.
 
 ## Output
 
-- **Errors:** missing columns, columns with no values, and columns below `min_coverage` or with a missing run longer than `max_gap`.
+- **Errors:** duplicate timestamps, an unsorted index, missing columns, columns with no values, columns with values between the grid points, and columns below `min_coverage` or with a missing run longer than `max_gap`.
 - **Warnings:** columns with missing timestamps that are still within both limits.
-- **info:** `freq`, `coverage`, `longest_missing_run` (in timestamps), `first_valid`, `last_valid` (all per column).
-- **stats:** `column`, `freq`, `start`, `end`, `expected`, `present`, `missing`, `coverage`, `longest_missing_run`, `longest_missing_start`, `longest_missing_end`, `first_valid`, `last_valid`.
+- **info:** `duplicate_count`, `unsorted_count` and, when there are duplicates, `duplicates` (the first 10 repeated timestamps). Per column: `freq`, `coverage`, `longest_missing_run` (in timestamps), `first_valid`, `last_valid`, `off_grid` (values between the grid points).
+- **stats:** `column`, `freq`, `start`, `end`, `expected`, `present`, `missing`, `coverage`, `longest_missing_run`, `longest_missing_start`, `longest_missing_end`, `first_valid`, `last_valid`, `off_grid`.
+
+The index checks look at the whole index, whichever `columns` you select. A duplicate timestamp or an unsorted index is an error even when every grid point has a value.
 
 ```python
 print(result.errors[0])
@@ -60,9 +66,12 @@ print(result.errors[0])
 
 ## Time Zones
 
-Sub-daily grids run in elapsed time, so DST days have 23/25 hourly timestamps on a local index. Daily grids on a local index follow the local calendar.
+Sub-daily grids run in elapsed time, so a tz-aware local index is on the grid across DST switches: the local clock skips or repeats an hour, the elapsed step stays one hour, and DST days have 23 or 25 hourly timestamps. Steps of a day or more on a tz-aware index follow the local calendar, so daily data at local midnight is on the grid too and a missing local day counts as one missing timestamp even on a 23 or 25 hour day.
+
+A **naive** index is taken as it is. A naive local wall-clock index therefore shows each autumn switch as a duplicate timestamp and each spring switch as a missing one, which is correct: such an index can't represent the repeated hour. [DSTStructureValidator](/epftoolbox2/validators/dst-structure/) checks the rows per local day.
 
 ## When to Use
 
-- On raw source data, before any transformer fills holes: interpolation hides outages.
+- On raw source data, to find missing rows, duplicates and mixed resolutions (for example around the 15-minute SDAC switch on 2025-10-01), before any transformer fills holes: interpolation hides outages.
+- After timezone conversion and resampling, to confirm a regular grid.
 - On the columns the model uses (target and predictors), with the backtest range.

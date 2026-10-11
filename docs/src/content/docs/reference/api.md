@@ -248,9 +248,6 @@ class LambdaTransformer(Transformer):
 ```python
 # Every validator: validate(df: pd.DataFrame) -> ValidationResult
 
-class ContinuityValidator(Validator):
-    def __init__(self, freq: Optional[str] = None): ...  # None = infer
-
 class DSTStructureValidator(Validator):
     def __init__(self, tz: Optional[str] = None, freq: Optional[str] = None,
                  allow_partial_edges: bool = True): ...

@@ -594,28 +594,6 @@ table = results_to_frame([v.validate(df) for v in validators])
 print(table.to_string(index=False))   # columns: validator, valid, level (error/warning/ok), message
 ```
 
-## ContinuityValidator
-
-Checks that the index is a sorted grid with one step, no duplicates and no missing timestamps. Steps are measured in elapsed time, so a tz-aware local index is continuous across DST. Day-or-longer steps on a tz-aware index follow the local calendar. A naive local wall-clock index shows DST switches as a gap and a duplicate.
-
-```python
-from epftoolbox2.data.validators import ContinuityValidator
-
-validator = ContinuityValidator(
-    freq=None,    # Optional. Expected step, e.g. "15min", "1h" (default: None = infer the most common step)
-)
-```
-
-**Errors:**
-- Non-DatetimeIndex
-- Duplicate timestamps. Unsorted index
-- Gaps (steps longer than `freq`), at most 10 listed plus a count of the rest
-- Steps that are not a multiple of `freq` (mixed resolutions, off-grid rows)
-
-**Info:** `expected_freq`, `freq_inferred`, `duplicate_count`, `duplicates`, `unsorted_count`, `gaps` (start, end, duration, missing), `gap_count`, `missing_periods`, `irregular_steps`, `irregular`
-
----
-
 ## DSTStructureValidator
 
 Checks rows per local calendar day: (23, 24 or 25 hours, from the time zone) × periods per hour. Catches naive wall-clock indexes, filled-in or duplicated DST hours, missing hours and missing days.
@@ -638,7 +616,7 @@ validator = DSTStructureValidator(
 
 ## CoverageValidator
 
-Per-column coverage of the `freq` grid over a range: finds an outage of one column on a complete index, rows missing from the index, and late starts / early ends.
+Checks the index (duplicate timestamps, unsorted index) and the per-column coverage of the `freq` grid over a range: finds an outage of one column on a complete index, rows missing from the index, late starts / early ends and values between the grid points (mixed resolutions).
 
 ```python
 from epftoolbox2.data.validators import CoverageValidator
@@ -653,11 +631,11 @@ validator = CoverageValidator(
 )
 ```
 
-`start`/`end` accept dates, timestamps and `today`/`today_d-N` keywords (resolved at validation time, naive = UTC, like `DataPipeline.run`).
+`start`/`end` accept dates, timestamps and `today`/`today_d-N` keywords (resolved at validation time, naive = UTC, like `DataPipeline.run`). Steps are measured in elapsed time, so a tz-aware local index is on the grid across DST. Day-or-longer steps on a tz-aware index follow the local calendar. A naive local wall-clock index shows DST switches as a duplicate and a missing timestamp.
 
-**Errors:** missing or empty columns, coverage below `min_coverage` and a missing run longer than `max_gap`. **Warnings:** missing timestamps within both limits.
-**Info:** `freq`, `coverage`, `longest_missing_run`, `first_valid`, `last_valid` (all per column).
-**Stats:** column, freq, start, end, expected, present, missing, coverage, longest_missing_run, longest_missing_start, longest_missing_end, first_valid, last_valid.
+**Errors:** non-DatetimeIndex, duplicate timestamps, an unsorted index, missing or empty columns, values between the grid points, coverage below `min_coverage` and a missing run longer than `max_gap`. **Warnings:** missing timestamps within both limits.
+**Info:** `duplicate_count`, `unsorted_count`, `duplicates` (first 10, only when found). Per column: `freq`, `coverage`, `longest_missing_run`, `first_valid`, `last_valid`, `off_grid`.
+**Stats:** column, freq, start, end, expected, present, missing, coverage, longest_missing_run, longest_missing_start, longest_missing_end, first_valid, last_valid, off_grid.
 
 ---
 
@@ -1140,8 +1118,9 @@ sources:
     lat: 52.23
     lon: 21.01
 source_validators:               # run on raw source output, before any transformer
-- class: ContinuityValidator
+- class: CoverageValidator
   params:
+    columns: [price]
     freq: 1h
 transformers:
 - class: LagTransformer

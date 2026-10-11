@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.data.validators import ContinuityValidator, CoverageValidator
+from epftoolbox2.data.validators import CoverageValidator
 from tests.synthetic import make_market_data
 
 TZ = "Europe/Warsaw"
@@ -14,13 +14,21 @@ def hourly():
     return pd.DataFrame({"price": 50.0 + np.arange(len(index)), "load": 1000.0}, index=index)
 
 
+def frame(index):
+    return pd.DataFrame({"x": 1.0}, index=index)
+
+
+def hours(n, start="2024-01-01"):
+    return pd.date_range(start, periods=n, freq="1h", tz="UTC")
+
+
 def test_single_column_outage_on_a_continuous_index(hourly):
-    # The review's 3-day price hole: the index is complete, so ContinuityValidator can't see it.
+    # The review's 3-day price hole: the index is complete, so only the column's own values show it.
     hourly.loc[hourly.index[48:120], "price"] = np.nan
-    assert ContinuityValidator().validate(hourly).is_valid
 
     result = CoverageValidator().validate(hourly)
 
+    assert result.info["duplicate_count"] == 0 and result.info["unsorted_count"] == 0
     assert not result.is_valid
     assert len(result.errors) == 1 and "'price'" in result.errors[0]
     assert result.info["coverage"] == {"price": pytest.approx(1 - 72 / 240), "load": 1.0}
@@ -107,6 +115,7 @@ def test_step_is_inferred_per_column_on_a_mixed_resolution_frame():
     as_quarter_hours = CoverageValidator(columns=["price"], freq="15min").validate(df)
 
     assert result.info["freq"] == {"load_actual": "15min", "price": "1h"}
+    assert result.info["off_grid"] == {"load_actual": 0, "price": 0}
     assert result.errors == [result.errors[0]] and "'price'" in result.errors[0]
     assert result.stats.set_index("column").loc["price", "missing"] == 1
     assert as_quarter_hours.stats.loc[0, "coverage"] < 0.3
@@ -136,3 +145,154 @@ def test_missing_and_empty_columns(hourly):
 def test_invalid_min_coverage_raises():
     with pytest.raises(ValueError, match="min_coverage"):
         CoverageValidator(min_coverage=1.5)
+
+
+# Index checks: they hold whichever columns are measured.
+
+
+@pytest.mark.parametrize("columns", [None, ["x"]])
+def test_duplicate_timestamp_is_an_error(columns):
+    idx = hours(6)
+    result = CoverageValidator(columns=columns, freq="1h").validate(frame(idx.append(idx[[3]]).sort_values()))
+
+    assert not result.is_valid
+    assert result.info["duplicate_count"] == 1
+    assert result.info["duplicates"] == [idx[3]]
+    assert len(result.errors) == 1 and "duplicate" in result.errors[0]
+    assert result.stats.loc[0, "missing"] == 0  # every grid point still has a value: only the duplicate is wrong
+
+
+def test_unsorted_index_is_an_error_even_when_every_value_is_present():
+    idx = hours(6)
+    result = CoverageValidator(freq="1h").validate(frame(idx[[0, 2, 1, 3, 4, 5]]))
+
+    assert not result.is_valid
+    assert result.info["unsorted_count"] == 1
+    assert len(result.errors) == 1 and "not sorted" in result.errors[0]
+    assert result.stats.loc[0, "missing"] == 0
+
+
+def test_sorted_unique_index_reports_no_index_problems(hourly):
+    result = CoverageValidator().validate(hourly)
+
+    assert result.is_valid
+    assert result.info["duplicate_count"] == 0 and result.info["unsorted_count"] == 0
+    assert "duplicates" not in result.info
+
+
+def test_missing_timestamp_with_an_inferred_freq():
+    idx = hours(24).delete(5)
+    result = CoverageValidator().validate(frame(idx))
+
+    assert not result.is_valid
+    assert result.info["freq"] == {"x": "1h"}
+    assert result.stats.loc[0, "expected"] == 24 and result.stats.loc[0, "missing"] == 1
+    assert result.stats.loc[0, "longest_missing_start"] == hours(24)[5]
+
+
+def test_infers_quarter_hours_and_finds_sub_hour_holes():
+    q = pd.date_range("2024-01-01", periods=96, freq="15min", tz="UTC")
+    result = CoverageValidator().validate(frame(q.delete([5, 6, 7, 40, 41])))
+
+    assert not result.is_valid
+    assert result.info["freq"] == {"x": "15min"}
+    assert result.stats.loc[0, "expected"] == 96
+    assert result.stats.loc[0, "missing"] == 5
+    assert result.info["longest_missing_run"] == {"x": 3}
+    assert result.stats.loc[0, "longest_missing_start"] == q[5]
+    assert result.stats.loc[0, "longest_missing_end"] == q[7]
+
+
+def test_mixed_resolution_is_invalid():
+    hourly = pd.date_range("2025-09-30", "2025-09-30 23:00", freq="1h", tz="UTC")
+    quarter = pd.date_range("2025-10-01", periods=24 * 4 * 2, freq="15min", tz="UTC")
+    result = CoverageValidator().validate(frame(hourly.append(quarter)))
+
+    assert result.info["freq"] == {"x": "15min"}
+    assert not result.is_valid
+    assert result.stats.loc[0, "missing"] == 24 * 3  # each hourly row is followed by three missing quarter-hours
+
+
+def test_explicit_hourly_freq_on_quarter_hour_data_is_invalid():
+    q = pd.date_range("2024-01-01", periods=96, freq="15min", tz="UTC")
+    result = CoverageValidator(freq="1h").validate(frame(q))
+
+    assert not result.is_valid
+    assert result.info["off_grid"] == {"x": 72}  # 24 of the 96 values lie on the hourly grid
+    assert len(result.errors) == 1 and "between the 1h grid points" in result.errors[0]
+    assert result.stats.loc[0, "missing"] == 0
+
+
+def test_value_between_grid_points_is_an_error_even_when_every_grid_point_has_a_value():
+    idx = hours(10).append(hours(10)[[4]] + pd.Timedelta("30min")).sort_values()
+    result = CoverageValidator().validate(frame(idx))
+
+    assert not result.is_valid
+    assert result.stats.loc[0, "missing"] == 0
+    assert result.info["off_grid"] == {"x": 1}
+    assert result.stats.loc[0, "off_grid"] == 1
+
+
+@pytest.mark.parametrize("freq", ["1h", "15min"])
+def test_local_index_across_both_dst_switches_is_valid(freq):
+    idx = pd.date_range("2024-03-30", "2024-11-01", freq=freq, tz="UTC").tz_convert(TZ)
+    result = CoverageValidator().validate(frame(idx))
+
+    assert result.is_valid, result.errors
+    assert result.info["freq"] == {"x": freq}
+    assert result.info["duplicate_count"] == 0 and result.info["off_grid"] == {"x": 0}
+    assert result.stats.loc[0, "missing"] == 0
+
+
+def test_naive_wall_clock_index_is_invalid():
+    idx = pd.date_range("2024-03-30", "2024-11-01", freq="1h", tz="UTC").tz_convert(TZ).tz_localize(None)
+    result = CoverageValidator(freq="1h").validate(frame(idx))
+
+    assert not result.is_valid
+    assert result.info["duplicate_count"] == 1  # the repeated 02:00 in October
+    assert result.stats.loc[0, "missing"] == 1  # the skipped 02:00 in March
+
+
+def test_daily_local_index_across_both_dst_switches_is_valid():
+    idx = pd.date_range("2024-03-25", "2024-11-05", freq="D", tz=TZ)
+
+    for validator in (CoverageValidator(freq="1D"), CoverageValidator()):
+        result = validator.validate(frame(idx))
+        assert result.is_valid, result.errors
+        assert result.stats.loc[0, "expected"] == len(idx)
+        assert result.info["off_grid"] == {"x": 0}
+
+
+def test_missing_day_on_a_dst_switch_is_one_missing_local_day():
+    idx = pd.date_range("2024-03-28", "2024-04-03", freq="D", tz=TZ)
+    result = CoverageValidator().validate(frame(idx.delete(3)))  # 2024-03-31, the 23-hour day
+
+    assert not result.is_valid
+    assert result.stats.loc[0, "missing"] == 1
+    assert result.stats.loc[0, "longest_missing_start"] == idx[3]
+
+
+def test_empty_frame_warns():
+    result = CoverageValidator().validate(pd.DataFrame())
+
+    assert result.is_valid
+    assert len(result.warnings) == 1
+
+
+def test_non_datetime_index_is_an_error():
+    result = CoverageValidator().validate(pd.DataFrame({"value": [1, 2, 3]}))
+
+    assert not result.is_valid
+    assert "DatetimeIndex" in result.errors[0]
+
+
+def test_single_row_warns():
+    result = CoverageValidator().validate(frame(hours(1)))
+
+    assert result.is_valid
+    assert len(result.warnings) == 1
+
+
+def test_non_fixed_freq_raises():
+    with pytest.raises(ValueError, match="freq"):
+        CoverageValidator(freq="MS")

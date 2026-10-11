@@ -7,7 +7,7 @@ from pathlib import Path
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
 from epftoolbox2.data.sources import CalendarSource, CsvSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
-from epftoolbox2.data.validators import CoverageValidator, ContinuityValidator
+from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.exporters import TerminalExporter, ExcelExporter
@@ -112,7 +112,7 @@ class TestDataPipelineSerialization:
             .add_transformer(ResampleTransformer(freq="1h"))
             .add_transformer(LagTransformer(columns=["price"], lags=[1, 7], freq="day"))
             .add_validator(CoverageValidator(columns=["price"]))
-            .add_validator(ContinuityValidator(freq="1h"))
+            .add_validator(CoverageValidator(freq="1h"))
         )
         path = tmp_path / "dp.yaml"
         original.save(path)
@@ -186,8 +186,7 @@ class TestDataPipelineSerializationFidelity:
             "TimezoneTransformer": TimezoneTransformer("Europe/Berlin", daily_columns=["a"]),
             "ResampleTransformer": ResampleTransformer("15min", agg={"a": "sum"}, fill=None),
             "LagTransformer": LagTransformer(["a"], [1, -2], "15min"),
-            "ContinuityValidator": ContinuityValidator("15min"),
-            "CoverageValidator": CoverageValidator(["a"], min_coverage=0.9),
+            "CoverageValidator": CoverageValidator(["a"], freq="15min", min_coverage=0.9),
             "EdaValidator": EdaValidator(["a"]),
         }
         kind = {name: section for section, names in COMPONENT_REGISTRY.items() for name in names}
@@ -245,7 +244,7 @@ class TestDataPipelineSettingsInYaml:
     def test_pipeline_settings_round_trip(self, tmp_path):
         original = DataPipeline(
             sources=[CalendarSource("PL")],
-            source_validators=[ContinuityValidator("1h")],
+            source_validators=[CoverageValidator(freq="1h")],
             validators=[CoverageValidator(["is_holiday"])],
             timezone="Europe/Warsaw",
             on_invalid="raise",
@@ -255,12 +254,13 @@ class TestDataPipelineSettingsInYaml:
         config = yaml.safe_load(path.read_text())
         assert config["timezone"] == "Europe/Warsaw"
         assert config["on_invalid"] == "raise"
-        assert config["source_validators"][0]["class"] == "ContinuityValidator"
+        assert config["source_validators"][0]["class"] == "CoverageValidator"
 
         loaded = DataPipeline.load(path)
         assert loaded.timezone == "Europe/Warsaw"
         assert loaded.on_invalid == "raise"
-        assert isinstance(loaded.source_validators[0], ContinuityValidator)
+        assert isinstance(loaded.source_validators[0], CoverageValidator)
+        assert loaded.source_validators[0].freq == "1h"
         assert isinstance(loaded.validators[0], CoverageValidator)
 
     def test_yaml_without_settings_keeps_defaults(self, tmp_path):

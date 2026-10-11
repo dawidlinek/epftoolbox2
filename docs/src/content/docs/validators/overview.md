@@ -11,9 +11,8 @@ Validators check a DataFrame without changing it. `validate(df)` returns a `Vali
 
 | Problem | Validator |
 |---------|-----------|
-| Duplicate, unsorted or missing timestamps, mixed resolutions | [ContinuityValidator](/epftoolbox2/validators/continuity/) |
 | A local day with the wrong number of rows (DST days, naive wall-clock index) | [DSTStructureValidator](/epftoolbox2/validators/dst-structure/) |
-| One column missing for a stretch on a complete index, a late start or early end, too many nulls in the columns the model uses | [CoverageValidator](/epftoolbox2/validators/coverage/) |
+| Duplicate or unsorted timestamps, missing timestamps, mixed resolutions, one column missing for a stretch on a complete index, a late start or early end, too many nulls in the columns the model uses | [CoverageValidator](/epftoolbox2/validators/coverage/) |
 | Prices outside the SDAC limits, zero load, frozen values | [PlausibilityValidator](/epftoolbox2/validators/plausibility/) |
 | Summary statistics for a first look | [EdaValidator](/epftoolbox2/validators/eda/) |
 
@@ -43,20 +42,20 @@ class ValidationResult:
 
 ```python
 from epftoolbox2.data.validators import (
-    ContinuityValidator,
     CoverageValidator,
+    DSTStructureValidator,
     results_to_frame,
 )
 
-validators = [ContinuityValidator(), CoverageValidator(columns=["price"], min_coverage=1.0)]
+validators = [DSTStructureValidator(), CoverageValidator(columns=["price"], min_coverage=1.0)]
 results = [v.validate(df) for v in validators]
 print(results_to_frame(results).to_string(index=False))
 ```
 
 ```
-          validator  valid   level  message
-ContinuityValidator   True      ok
-  CoverageValidator  False   error  Column 'price' has values at 168 of 240 expected 1h timestamps ...
+            validator  valid   level  message
+DSTStructureValidator   True      ok
+    CoverageValidator  False   error  Column 'price' has values at 168 of 240 expected 1h timestamps ...
 ```
 
 `results_to_frame` takes a list of results, a list of `(name, result)` pairs or a dict `{name: result}`, and returns one row per error and warning (columns `validator`, `valid`, `level`, `message`). A result without messages gets one `ok` row.

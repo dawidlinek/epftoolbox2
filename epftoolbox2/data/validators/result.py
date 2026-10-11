@@ -57,7 +57,8 @@ def results_to_frame(
     becomes a row (errors first); a result without messages becomes one row with level "ok".
 
     Example:
-        >>> print(results_to_frame([CoverageValidator().validate(df), ContinuityValidator().validate(df)]).to_string())
+        >>> checks = [CoverageValidator(), DSTStructureValidator()]
+        >>> print(results_to_frame([v.validate(df) for v in checks]).to_string())
     """
     items = results.items() if isinstance(results, Mapping) else results
     rows = []

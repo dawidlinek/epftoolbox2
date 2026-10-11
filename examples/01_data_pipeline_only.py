@@ -10,7 +10,7 @@ import os
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer, TimezoneTransformer
-from epftoolbox2.data.validators import CoverageValidator, ContinuityValidator
+from epftoolbox2.data.validators import CoverageValidator
 
 ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY", "YOUR_API_KEY_HERE")
 
@@ -73,7 +73,6 @@ pipeline = (
     )
     .add_transformer(LagTransformer(lags=range(-1, 0), freq="day", columns=["load_forecast"]))
     .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
-    .add_validator(ContinuityValidator())
 )
 
 df = pipeline.run(

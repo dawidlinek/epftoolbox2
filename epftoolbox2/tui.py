@@ -589,15 +589,6 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
-    "ContinuityValidator": [
-        {
-            "name": "freq",
-            "description": "Expected frequency (e.g. 15min, 1h; blank = infer from the data)",
-            "required": False,
-            "default": None,
-            "kind": "text",
-        },
-    ],
     "EdaValidator": [
         {
             "name": "columns",
@@ -1039,7 +1030,6 @@ _TRANSFORMERS = [
     "ImputeTransformer",
 ]
 _VALIDATORS = [
-    "ContinuityValidator",
     "EdaValidator",
     "DSTStructureValidator",
     "CoverageValidator",

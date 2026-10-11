@@ -59,7 +59,6 @@ COMPONENT_REGISTRY = {
         "ImputeTransformer": "epftoolbox2.data.transformers.impute",
     },
     "validators": {
-        "ContinuityValidator": "epftoolbox2.data.validators.continuity",
         "EdaValidator": "epftoolbox2.data.validators.eda",
         "DSTStructureValidator": "epftoolbox2.data.validators.dst_structure",
         "CoverageValidator": "epftoolbox2.data.validators.coverage",

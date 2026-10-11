@@ -50,8 +50,9 @@ sources:
     weekday: onehot
     daylight: true
 source_validators:         # optional; run on raw source output, before any transformer
-- class: ContinuityValidator
+- class: CoverageValidator
   params:
+    columns: [price]
     freq: 1h
 transformers:
 - class: ResampleTransformer

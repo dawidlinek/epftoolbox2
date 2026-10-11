@@ -78,13 +78,11 @@ published together, so the neighbour's price is used only through its lags.
 ```python
 from epftoolbox2.data.validators import (
     CoverageValidator,
-    ContinuityValidator,
     DSTStructureValidator,
     PlausibilityValidator,
 )
 
 pipeline.add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
-pipeline.add_validator(ContinuityValidator())
 pipeline.add_validator(DSTStructureValidator())
 pipeline.add_validator(PlausibilityValidator())
 ```
@@ -125,7 +123,6 @@ from epftoolbox2.data.sources import EntsoeSource, CalendarSource, OpenMeteoSour
 from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import (
     CoverageValidator,
-    ContinuityValidator,
     DSTStructureValidator,
     PlausibilityValidator,
 )
@@ -167,7 +164,6 @@ pipeline = (
         freq="day",
     ))
     .add_validator(CoverageValidator(columns=["load_actual", "price", "de_price"], min_coverage=1.0))
-    .add_validator(ContinuityValidator())
     .add_validator(DSTStructureValidator())
     .add_validator(PlausibilityValidator())
 )

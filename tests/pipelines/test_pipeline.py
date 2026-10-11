@@ -1209,13 +1209,13 @@ class TestDataPipelineSerialization:
     def test_save_and_load(self, tmp_path):
         """Test saving and loading pipeline from YAML"""
         from epftoolbox2.data.sources import CalendarSource
-        from epftoolbox2.data.validators import ContinuityValidator
+        from epftoolbox2.data.validators import CoverageValidator
 
         pipeline = (
             DataPipeline()
             .add_source(CalendarSource(country="PL", holidays="binary", weekday="number"))
             .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
-            .add_validator(ContinuityValidator(freq="1h"))
+            .add_validator(CoverageValidator(freq="1h"))
         )
 
         yaml_path = tmp_path / "pipeline.yaml"
@@ -1230,7 +1230,7 @@ class TestDataPipelineSerialization:
         assert len(loaded.validators) == 1
         assert type(loaded.sources[0]).__name__ == "CalendarSource"
         assert type(loaded.transformers[0]).__name__ == "TimezoneTransformer"
-        assert type(loaded.validators[0]).__name__ == "ContinuityValidator"
+        assert type(loaded.validators[0]).__name__ == "CoverageValidator"
 
     def test_loaded_pipeline_runs(self, tmp_path):
         """Test that loaded pipeline can run successfully"""

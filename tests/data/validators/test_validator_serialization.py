@@ -3,7 +3,6 @@
 import pytest
 
 from epftoolbox2.data.validators import (
-    ContinuityValidator,
     CoverageValidator,
     DSTStructureValidator,
     EdaValidator,
@@ -12,7 +11,7 @@ from epftoolbox2.data.validators import (
 from epftoolbox2.pipelines import DataPipeline
 
 VALIDATORS = [
-    ContinuityValidator(freq="15min"),
+    CoverageValidator(freq="15min"),
     EdaValidator(columns=["price"], verbose=False),
     DSTStructureValidator(tz="Europe/Warsaw", freq="1h", allow_partial_edges=False),
     CoverageValidator(
