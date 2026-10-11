@@ -7,8 +7,12 @@ import pytest
 import requests
 
 from epftoolbox2.data.sources.open_meteo import (
+    DEFAULT_SINGLE_RUNS_HORIZON,
     OpenMeteoSource,
     known_run_hours,
+    max_previous_day,
+    max_previous_runs_horizon,
+    previous_run_lengths,
     publication_delay_hours,
     stored_step_hours,
 )
@@ -24,49 +28,82 @@ FALL = (pd.Timestamp("2024-10-20", tz="UTC"), pd.Timestamp("2024-10-31", tz="UTC
 # ---------------------------------------------------------------------------
 # Synthetic archives: mocked responses that encode each run's own init time in the values
 # ---------------------------------------------------------------------------
-# Previous Runs API: `previous_dayK` at valid time T holds the latest run initialised at or before T - 24K h
-# (Open-Meteo docs). For a model stored every `step_h` hours, Open-Meteo interpolates hourly values from the
-# native points around T, so an off-grid hourly value can depend on the run behind a stored point up to two
-# steps after T. The archive encodes, per cell:
-#   temperature_2m -> latest run init (hours since epoch) among the native points the value depends on
+# Previous Runs API (verified against the live API and the Single Runs API, see open_meteo.py): `previous_dayK`
+# holds, at each stored point P, the latest run initialised at or before P - 24K h *that reaches P* (the shorter
+# 06/18 UTC runs of some models drop out of the deep buckets). A model stored hourly (GFS, ICON, ECMWF IFS 9 km)
+# gives an hourly value at T from the point at T. A model stored every `step_h` hours (JMA 6, ECMWF IFS 0.25 3)
+# is interpolated when read from the four points around T, so an off-grid hourly value depends on the run behind
+# the point up to two steps after T. The archive encodes, per cell:
+#   temperature_2m -> latest run init (hours since epoch) among the stored points the value depends on
 #   wind_speed_10m -> the valid time T (hours since epoch)
+# It is written as plain loops over timestamps, independent of the vectorised `newest_run_init` it tests.
+
+# Every 6-hourly run reaches every point: the default when no model is named.
+UNLIMITED_6H_RUNS = {0: 10**6, 6: 10**6, 12: 10**6, 18: 10**6}
 
 
 def _hours(ts):
     return (ts - EPOCH) / HOUR
 
 
-def _run_init(point, k):
-    return (point - pd.Timedelta(days=k)).floor("6h")
+# Instants below are integer hours since the epoch, which keeps the plain loops fast enough for the tests.
 
 
-def _latest_init(valid, k, step_h):
-    if step_h == 1 or valid.hour % step_h == 0:
-        return _run_init(valid, k)
-    last_point = valid.floor(f"{step_h}h") + pd.Timedelta(hours=2 * step_h)
-    return _run_init(last_point, k)
+def _run_init(point, k, lengths):
+    """Init of the run `previous_dayK` holds at stored `point`; None if no run within three days reaches it."""
+    init = point - 24 * k
+    for _ in range(72):
+        reach = lengths.get(init % 24)
+        if reach is not None and point - init <= reach:
+            return init
+        init -= 1
+    return None
 
 
-def make_archive(step_h=1, latest_run=None, null_columns=(), max_bucket=7):
-    """Return a fake `session.get` that answers Previous Runs requests from the synthetic archive."""
+def _latest_init(valid, k, step_h, lengths):
+    """Newest init among the stored points the hourly value at `valid` depends on; None if one has no run."""
+    if step_h == 1 or valid % step_h == 0:
+        points = [valid]
+    else:
+        first = valid - valid % step_h
+        points = [first + n * step_h for n in (-1, 0, 1, 2)]
+    inits = [_run_init(point, k, lengths) for point in points]
+    return None if None in inits else max(inits)
+
+
+def archive_facts(model):
+    """(stored step, runs by init hour -> length, deepest bucket) the synthetic archive uses for `model`."""
+    lengths = previous_run_lengths(model) or {hour: 10**6 for hour in range(24)}
+    return stored_step_hours(model, 1), lengths, max_previous_day(model)
+
+
+def make_archive(step_h=1, latest_run=None, null_columns=(), max_bucket=7, model=None):
+    """Return a fake `session.get` that answers Previous Runs requests from the synthetic archive.
+
+    With `model`, its stored step, runs and deepest bucket come from the source's tables (the facts verified
+    against the API); otherwise 6-hourly runs that reach every point and the given `step_h` / `max_bucket`.
+    """
+    lengths = UNLIMITED_6H_RUNS
+    if model is not None:
+        step_h, lengths, max_bucket = archive_facts(model)
+    latest = None if latest_run is None else int(_hours(latest_run))
     calls = []
 
     def get(url, params=None, timeout=None):
         calls.append(params)
         times = pd.date_range(params["start_date"], params["end_date"] + " 23:00", freq="1h", tz="UTC")
+        hours = [int(_hours(t)) for t in times]
         hourly = {"time": [t.strftime("%Y-%m-%dT%H:%M") for t in times]}
         for key in params["hourly"]:
             column, k = key.rsplit("_previous_day", 1)
             k = int(k)
             values = []
-            for t in times:
-                init = _latest_init(t, k, step_h)
-                if column in null_columns or k > max_bucket or (latest_run is not None and init > latest_run):
+            for hour in hours:
+                init = None if k > max_bucket else _latest_init(hour, k, step_h, lengths)
+                if init is None or column in null_columns or (latest is not None and init > latest):
                     values.append(None)
-                elif column == "temperature_2m":
-                    values.append(float(_hours(init)))
                 else:
-                    values.append(float(_hours(t)))
+                    values.append(float(init if column == "temperature_2m" else hour))
             hourly[key] = values
         response = Mock()
         response.status_code = 200
@@ -148,7 +185,7 @@ class TestOpenMeteoSourceInit:
         source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
         assert source.latitude == 52.23
         assert source.longitude == 21.01
-        assert source.horizon == 5
+        assert source.horizon is None
         assert source.model == "jma_seamless"
         assert source.prefix == ""
         assert source.api == "previous_runs"
@@ -205,24 +242,52 @@ class TestOpenMeteoSourceInit:
         with pytest.raises(ValueError, match="previous_day"):
             OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=horizon)
 
-    def test_init_horizon_needing_bucket_8_is_rejected(self):
-        # Leak-free d+6 needs previous_day8 for most hours (default model/run), which the API does not serve.
-        with pytest.raises(ValueError, match="previous_day8"):
-            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=6)
+    def test_horizon_above_the_limit_raises_naming_the_limit_and_single_runs(self):
+        # jma_seamless at run 00 in Warsaw can serve d+1..d+6 (see TestMaxPreviousRunsHorizon). A full week cannot
+        # be served without a run initialised after the cutoff.
+        with pytest.raises(ValueError, match=r"horizon=7 is above the largest horizon without look-ahead, 6") as error:
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=7)
+        assert "single_runs" in str(error.value)
+        assert "horizon<=6" in str(error.value)
 
-    def test_default_horizon_is_the_largest_leak_free_one_at_run_00(self):
-        # Verified against the Previous Runs API (Warsaw, jma_seamless): the late hours of d+6 need previous_day8.
-        default = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw")
-        assert default.horizon == 5
-        assert max(default._buckets) <= 7
+    def test_horizon_above_the_limit_raises_for_a_model_with_a_lower_limit(self):
+        # ICON has no previous_day7, so d+6 cannot be served and the limit is 5 at run 00.
+        with pytest.raises(ValueError, match=r"horizon=6 is above the largest horizon without look-ahead, 5"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", model="icon_seamless", horizon=6)
 
-    def test_later_run_allows_horizon_6_but_a_full_week_stays_out_of_reach(self):
-        # With the cutoff at 06:00 UTC the late hours of d+6 are served by previous_day7, but d+7 would need a run
-        # initialised after the cutoff on D itself.
+    def test_horizon_above_the_limit_raises_at_fetch_when_the_zone_comes_from_the_pipeline(self):
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, model="icon_seamless", horizon=6)
+        DataPipeline(sources=[source], timezone="Europe/Warsaw")
+        with pytest.raises(ValueError, match="above the largest horizon without look-ahead, 5"):
+            source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
+
+    def test_horizon_equal_to_the_limit_is_accepted(self):
+        source = OpenMeteoSource(
+            latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", model="icon_seamless", horizon=5
+        )
+        assert source.horizon == 5
+
+    @pytest.mark.parametrize("horizon", [1.5, "5", True])
+    def test_horizon_must_be_a_positive_integer_or_none(self, horizon):
+        with pytest.raises(ValueError, match="Horizon must be a positive integer"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=horizon)
+
+    def test_no_horizon_is_leak_free_when_even_d_plus_1_needs_a_later_run(self):
+        # ICON-D2 has previous_day1 only, and at run 00 d+1's late hours need previous_day2.
+        with pytest.raises(ValueError, match=r"d\+1 cannot be served without look-ahead"):
+            OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", model="icon_d2")
+
+    def test_later_run_does_not_allow_a_full_week(self):
+        # d+7 would need previous_day7 for hours whose run is initialised after D 12:00 UTC.
         source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", run="06", horizon=6)
         assert source.horizon == 6
-        with pytest.raises(ValueError, match="previous_day"):
+        with pytest.raises(ValueError, match="above the largest horizon without look-ahead, 6"):
             OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", run="06", horizon=7)
+
+    def test_single_runs_horizon_none_means_the_modest_default(self):
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", api="single_runs")
+        assert source.horizon is None
+        assert source._effective_horizon() == DEFAULT_SINGLE_RUNS_HORIZON == 5
 
     @pytest.mark.parametrize("horizon", [1, 14])
     def test_single_runs_accepts_horizon_up_to_14(self, horizon):
@@ -283,10 +348,17 @@ class TestOpenMeteoSourceInit:
         assert source.run == "09"
 
     def test_requests_enough_buckets_for_the_fallback(self):
-        # JMA is stored 6-hourly, so the late hours of D+i need previous_day{i+2}.
+        # The late hours of D+5 already need previous_day6, and one spare bucket lets live runs fall back further.
         source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=5)
-        assert max(source._buckets) >= 5
-        assert min(source._buckets) >= 1
+        assert max(source._buckets) == 7
+        assert min(source._buckets) == 1
+
+    def test_never_requests_buckets_the_model_does_not_have(self):
+        # ICON has no previous_day7: with horizon 5 the buckets stop at 6 instead of adding a spare 7.
+        source = OpenMeteoSource(
+            latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", model="icon_seamless", horizon=5
+        )
+        assert max(source._buckets) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +405,237 @@ class TestCutoffForA3HourlyIconEuLikeModel:
         present = df["temperature_2m_d+1"].notna().to_numpy()
         init = from_hours(df["temperature_2m_d+1"][present])
         assert (init <= cutoff[present]).all()
+
+
+# ---------------------------------------------------------------------------
+# The largest horizon without look-ahead (api="previous_runs"), per model, run and market zone
+# ---------------------------------------------------------------------------
+
+WARSAW = "Europe/Warsaw"
+
+
+def oracle_limit(model, timezone, run, days):
+    """The largest horizon whose every local hour, on every issue day in `days`, is served leak-free.
+
+    Plain datetime arithmetic and the archive's own run logic, independent of the source's vectorised code: for
+    each local hour of issue day D and lead i, the smallest previous_dayK (K >= i, within what the model has) whose
+    newest influencing run is at or before D at `run`:00 UTC.
+    """
+    from datetime import datetime, timezone as utc
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(timezone)
+    step_h, lengths, deepest = archive_facts(model)
+
+    def instant(day, hour):
+        naive = datetime(day.year, day.month, day.day, hour)
+        aware = naive.replace(tzinfo=zone)  # fold=0: the first of an ambiguous hour
+        if aware.astimezone(utc.utc).astimezone(zone).replace(tzinfo=None) != naive:
+            return None  # the hour does not exist (spring forward)
+        return int(_hours(pd.Timestamp(aware.astimezone(utc.utc))))
+
+    limit = 0
+    for lead in range(1, 8):
+        for day in days:
+            cutoff = int(_hours(pd.Timestamp(year=day.year, month=day.month, day=day.day, tz="UTC"))) + int(run)
+            for hour in range(24):
+                if instant(day, hour) is None:
+                    continue
+                valid = instant(day + pd.Timedelta(days=lead), hour)
+                if valid is None:
+                    continue
+                inits = (_latest_init(valid, k, step_h, lengths) for k in range(lead, deepest + 1))
+                if not any(init is not None and init <= cutoff for init in inits):
+                    return limit
+        limit = lead
+    return limit
+
+
+# The days around both DST switches of 2024 in each zone, and a quiet day of each offset.
+ORACLE_DAYS = {
+    "Europe/Warsaw": [pd.Timestamp(d) for d in ("2024-01-15", "2024-03-30", "2024-03-31", "2024-04-01", "2024-07-15")]
+    + [pd.Timestamp(d) for d in ("2024-10-26", "2024-10-27", "2024-10-28")],
+    "America/New_York": [
+        pd.Timestamp(d) for d in ("2024-01-15", "2024-03-09", "2024-03-10", "2024-03-11", "2024-07-15")
+    ]
+    + [pd.Timestamp(d) for d in ("2024-11-02", "2024-11-03", "2024-11-04")],
+}
+
+
+class TestMaxPreviousRunsHorizon:
+    @pytest.mark.parametrize(
+        "model, run, expected",
+        [
+            # previous_dayK at T is the run 24K h older, and the runs are 6-hourly: d+6 is served by previous_day7
+            # (the run of D-1 18z at the latest), d+7 never fully.
+            ("gfs_seamless", "00", 6),
+            ("gfs_seamless", "06", 6),
+            ("gfs_seamless", "12", 6),
+            ("gfs_seamless", "18", 7),
+            # ICON has no previous_day7: d+6 cannot be served before the cutoff reaches D 12:00 UTC (then
+            # previous_day6, from the 12z run, covers it).
+            ("icon_seamless", "00", 5),
+            ("icon_seamless", "06", 5),
+            ("icon_seamless", "12", 6),
+            ("icon_global", "00", 5),
+            # JMA is stored every 6 h and interpolated when read, so its last hours reach into points two steps
+            # later. Beyond 132 h only its 00 and 12 UTC runs exist, which keeps d+6 clean at run 00.
+            ("jma_seamless", "00", 6),
+            ("jma_seamless", "06", 6),
+            ("jma_seamless", "12", 6),
+            ("jma_seamless", "18", 6),
+            # ECMWF IFS 0.25 is stored every 3 h, the 9 km model hourly. Both only have 00 and 12 UTC runs beyond 144 h.
+            ("ecmwf_ifs025", "00", 6),
+            ("ecmwf_ifs025", "06", 6),
+            ("ecmwf_ifs", "00", 6),
+            ("ecmwf_ifs", "06", 6),
+            ("ecmwf_ifs", "12", 7),
+            # A model this library has no table for: hourly runs and a 6 h store, the strictest assumptions.
+            ("some_new_model", "00", 5),
+            ("some_new_model", "06", 6),
+        ],
+    )
+    def test_limit_in_warsaw(self, model, run, expected):
+        assert max_previous_runs_horizon(model, WARSAW, run) == expected
+
+    def test_icon_variants_stop_at_the_deepest_bucket_they_have(self):
+        assert max_previous_runs_horizon("icon_eu", WARSAW, "00") == 3
+        assert max_previous_runs_horizon("icon_eu", WARSAW, "18") == 4
+        assert max_previous_runs_horizon("icon_d2", WARSAW, "00") == 0
+        assert max_previous_runs_horizon("icon_d2", WARSAW, "21") == 1
+
+    def test_limit_depends_on_the_market_zone(self):
+        # New York's day starts five hours later in UTC: JMA's last hours of D+6 are served by points of D 06z.
+        assert max_previous_runs_horizon("jma_seamless", "America/New_York", "00") == 5
+        assert max_previous_runs_horizon("jma_seamless", WARSAW, "00") == 6
+        assert max_previous_runs_horizon("gfs_seamless", "America/New_York", "00") == 6
+
+    def test_a_full_week_is_never_served_by_the_runs_of_the_morning(self):
+        # Whatever the model, d+7 has hours that previous_day7 only holds from a run after D 12:00 UTC.
+        for model in ("jma_seamless", "gfs_seamless", "ecmwf_ifs", "ecmwf_ifs025", "icon_seamless", "some_new_model"):
+            for run in ("00", "03", "06", "09"):
+                assert max_previous_runs_horizon(model, WARSAW, run) <= 6
+
+    @pytest.mark.parametrize("timezone", list(ORACLE_DAYS))
+    @pytest.mark.parametrize("run", ["00", "06", "12", "18"])
+    @pytest.mark.parametrize(
+        "model", ["jma_seamless", "gfs_seamless", "icon_seamless", "ecmwf_ifs025", "ecmwf_ifs", "some_new_model"]
+    )
+    def test_limit_matches_a_brute_force_check_of_every_local_hour(self, model, run, timezone):
+        assert max_previous_runs_horizon(model, timezone, run) == oracle_limit(
+            model, timezone, run, ORACLE_DAYS[timezone]
+        )
+
+
+class TestDefaultHorizonIsTheLimit:
+    @pytest.mark.parametrize("run", ["00", "06", "12"])
+    @pytest.mark.parametrize("model", ["jma_seamless", "gfs_seamless", "icon_seamless", "ecmwf_ifs025"])
+    def test_default_horizon_equals_the_limit(self, model, run):
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=WARSAW, model=model, run=run)
+        limit = max_previous_runs_horizon(model, WARSAW, run)
+        assert source.horizon is None
+        assert source._effective_horizon() == limit
+        assert source.get_cache_config()["horizon"] == limit
+
+    def test_default_fetch_returns_exactly_d_plus_1_to_the_limit(self):
+        source = make_source(make_archive(model="icon_seamless"), model="icon_seamless")
+        df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-12", tz="UTC"))
+        limit = max_previous_runs_horizon("icon_seamless", WARSAW, "00")
+        assert limit == 5
+        assert sorted({c.rsplit("_d+", 1)[1] for c in df.columns}, key=int) == [str(i) for i in range(1, limit + 1)]
+
+    def test_default_horizon_fills_every_hour_of_the_last_day(self):
+        # The model's missing buckets (ICON's previous_day7) must never be requested: no NaN from a null bucket.
+        source = make_source(make_archive(model="icon_seamless"), model="icon_seamless", strict=True)
+        df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-14", tz="UTC"))
+        assert df.notna().all().all()
+
+    def test_default_horizon_with_the_zone_taken_from_the_pipeline(self):
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, model="icon_seamless", columns=["temperature_2m"])
+        DataPipeline(sources=[source], timezone=WARSAW)
+        assert source._effective_horizon() == 5
+        assert source.get_cache_config()["horizon"] == 5
+        source.session = Mock()
+        source.session.get.side_effect = make_archive(model="icon_seamless")
+        source.console.quiet = True
+        df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-12", tz="UTC"))
+        assert "temperature_2m_d+5" in df.columns and "temperature_2m_d+6" not in df.columns
+
+    def test_default_and_explicit_horizon_share_a_cache_entry(self):
+        default = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=WARSAW, model="gfs_seamless")
+        explicit = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=WARSAW, model="gfs_seamless", horizon=6)
+        shorter = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=WARSAW, model="gfs_seamless", horizon=5)
+        assert default.get_cache_config() == explicit.get_cache_config()
+        assert default.get_cache_config() != shorter.get_cache_config()
+
+    def test_single_runs_default_fetches_five_leads(self):
+        source = make_source(make_run_archive(), api="single_runs")
+        df = source.fetch(pd.Timestamp("2024-01-10", tz="UTC"), pd.Timestamp("2024-01-11", tz="UTC"))
+        assert sorted({c.rsplit("_d+", 1)[1] for c in df.columns}, key=int) == ["1", "2", "3", "4", "5"]
+
+    def test_yaml_round_trip_keeps_the_default(self, tmp_path):
+        source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=WARSAW, model="gfs_seamless")
+        path = tmp_path / "dp.yaml"
+        DataPipeline().add_source(source).save(path)
+        loaded = DataPipeline.load(path).sources[0]
+        assert loaded.horizon is None
+        assert loaded.get_cache_config() == source.get_cache_config()
+
+
+# Spring and fall switches of New York in 2024 (the Europe/Warsaw ones are SPRING and FALL above).
+NY_SPRING = (pd.Timestamp("2024-03-05", tz="UTC"), pd.Timestamp("2024-03-16", tz="UTC"))
+NY_FALL = (pd.Timestamp("2024-10-30", tz="UTC"), pd.Timestamp("2024-11-10", tz="UTC"))
+
+
+@pytest.mark.parametrize(
+    "timezone, window",
+    [
+        ("Europe/Warsaw", SPRING),
+        ("Europe/Warsaw", FALL),
+        ("America/New_York", NY_SPRING),
+        ("America/New_York", NY_FALL),
+    ],
+    ids=["warsaw-spring", "warsaw-fall", "new-york-spring", "new-york-fall"],
+)
+@pytest.mark.parametrize("run", ["00", "06"])
+@pytest.mark.parametrize("model", ["jma_seamless", "gfs_seamless", "icon_seamless", "ecmwf_ifs025", "ecmwf_ifs"])
+class TestLastDayOfTheDefaultHorizonAroundDst:
+    def test_every_local_hour_up_to_d_plus_limit_comes_from_a_run_at_or_before_the_cutoff(
+        self, model, run, timezone, window
+    ):
+        source = make_source(make_archive(model=model), model=model, run=run, timezone=timezone)
+        df = source.fetch(*window)
+        limit = max_previous_runs_horizon(model, timezone, run)
+        assert f"temperature_2m_d+{limit + 1}" not in df.columns
+        cutoff = cutoff_times(df.index, run, timezone)
+
+        for lead in range(1, limit + 1):
+            column = df[f"temperature_2m_d+{lead}"]
+            present = column.notna().to_numpy()
+            # Every local hour of D+lead exists except (at most) the one spring-forward gap hour, which is NaN.
+            assert present.sum() >= len(df) - 1, f"{model} run={run} {timezone}: d+{lead} has holes"
+            init = from_hours(column[present])
+            assert (init <= cutoff[present]).all(), f"{model} run={run} {timezone}: a value of d+{lead} is late"
+
+
+class TestTheArchiveWouldCatchALeak:
+    def test_one_lead_beyond_the_limit_does_reach_past_the_cutoff(self):
+        # The same synthetic archive, read one lead past the limit by hand: some hour is served by a run after the
+        # cutoff, so the check above is not vacuous.
+        model, run = "gfs_seamless", "00"
+        limit = max_previous_runs_horizon(model, WARSAW, run)
+        step_h, lengths, deepest = archive_facts(model)
+        rows = pd.date_range("2024-03-25", "2024-04-05", freq="1h", tz="UTC")
+        cutoff = cutoff_times(rows, run, WARSAW)
+        late = 0
+        for row, cut in zip(rows, cutoff):
+            local = row.tz_convert(WARSAW).tz_localize(None) + pd.Timedelta(days=limit + 1)
+            valid = local.tz_localize(WARSAW, ambiguous=True, nonexistent="NaT")
+            if pd.isna(valid):
+                continue
+            inits = [_latest_init(int(_hours(valid)), k, step_h, lengths) for k in range(limit + 1, deepest + 1)]
+            late += not any(init <= _hours(cut) for init in inits if init is not None)
+        assert late > 0
 
 
 # ---------------------------------------------------------------------------
@@ -490,14 +793,61 @@ class TestReturnedRange:
         assert list(df.columns) == ["warsaw_temperature_2m_d+1", "warsaw_wind_speed_10m_d+1"]
 
 
-class TestStoredStepHours:
+class TestPreviousRunsTables:
+    @pytest.mark.parametrize("bucket", [1, 4, 7])
+    @pytest.mark.parametrize(
+        "model, expected",
+        [
+            # What temporal_resolution="native" returns for each previous_dayK: JMA GSM and ECMWF IFS 0.25 are stored
+            # at their own 6 h / 3 h points, GFS, ICON and ECMWF IFS 9 km hourly (verified against the live API).
+            ("jma_seamless", 6),
+            ("ecmwf_ifs025", 3),
+            ("ecmwf_ifs04", 3),
+            ("ecmwf_ifs", 1),
+            ("icon_seamless", 1),
+            ("icon_global", 1),
+            ("icon_d2", 1),
+            ("gfs_seamless", 1),
+            ("gfs_global", 1),
+            ("totally_unknown_model", 6),
+        ],
+    )
+    def test_stored_step(self, model, bucket, expected):
+        assert stored_step_hours(model, bucket) == expected
+
     def test_ecmwf_ifs04_is_not_matched_by_the_hourly_ecmwf_ifs_prefix(self):
-        # ecmwf_ifs04 (ECMWF IFS 0.4 deg) is stored 3-hourly (6-hourly beyond 144 h lead). Its name starts with
-        # "ecmwf_ifs", so without its own entry it would match the hourly ecmwf_ifs (9 km) one instead,
-        # understating how far the interpolated hourly value can reach into runs not yet published.
+        # ecmwf_ifs04 (ECMWF IFS 0.4 deg) is stored 3-hourly. Its name starts with "ecmwf_ifs", so without its own
+        # entry it would match the hourly ecmwf_ifs (9 km) one instead, understating how far the interpolated
+        # hourly value can reach into runs not yet published.
         assert stored_step_hours("ecmwf_ifs04", 1) == 3
-        assert stored_step_hours("ecmwf_ifs04", 6) == 6
         assert stored_step_hours("ecmwf_ifs", 1) == 1
+
+    @pytest.mark.parametrize(
+        "model, expected",
+        [
+            ("jma_seamless", 7),
+            ("gfs_seamless", 7),
+            ("ecmwf_ifs025", 7),
+            ("ecmwf_ifs", 7),
+            ("icon_seamless", 6),
+            ("icon_global", 6),
+            ("icon_eu", 4),
+            ("icon_d2", 1),
+            ("totally_unknown_model", 7),
+        ],
+    )
+    def test_deepest_bucket(self, model, expected):
+        assert max_previous_day(model) == expected
+
+    def test_shorter_runs_of_icon_jma_and_ecmwf_drop_out_of_the_deep_buckets(self):
+        # The 06 and 18 UTC runs of these models are shorter than the 00 and 12 UTC ones.
+        for model, short in (("icon_global", 120), ("ecmwf_ifs", 144), ("jma_seamless", 132)):
+            lengths = previous_run_lengths(model)
+            assert lengths[6] == lengths[18] == short < lengths[0] == lengths[12]
+        assert set(previous_run_lengths("gfs_seamless").values()) == {384}
+
+    def test_unknown_model_has_no_run_table(self):
+        assert previous_run_lengths("totally_unknown_model") is None
 
 
 class TestPublicationDelayHours:

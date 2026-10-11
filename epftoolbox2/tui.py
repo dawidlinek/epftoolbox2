@@ -117,10 +117,10 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "horizon",
-            "description": "Forecast horizon in days (max 5 for jma_seamless at run=00 under previous_runs; "
-            "1-14 under single_runs)",
+            "description": "Forecast horizon in days (blank = the largest without look-ahead for the model and run "
+            "under previous_runs, 5 under single_runs; 1-14 under single_runs)",
             "required": False,
-            "default": "5",
+            "default": None,
             "kind": "int",
         },
         {

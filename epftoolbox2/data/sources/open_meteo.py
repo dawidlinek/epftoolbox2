@@ -20,24 +20,48 @@ from ._open_meteo_common import OpenMeteoBase, parse_hourly, parse_run, run_cuto
 MAX_PREVIOUS_DAY = 7
 # The Single Runs API's own limit: leads beyond a run's own length come back null (see OpenMeteoSource.horizon).
 MAX_SINGLE_RUNS_HORIZON = 14
+# What `horizon=None` means under api="single_runs": every lead up to 14 exists, but a run is often much shorter
+# (ICON 7.5 days, JMA's 06/18 runs 5.5), so the cap is a modest, always-filled default rather than the maximum.
+DEFAULT_SINGLE_RUNS_HORIZON = 5
 
-# Time step (hours) at which Open-Meteo stores a model's `previous_dayK` values, as ((max_lead_h, step_h), ...)
-# segments; the first segment whose max_lead_h >= 24K + 6 applies (None = no limit). Hourly output of a coarser
-# store is interpolated across neighbouring stored points (4-point Hermite for temperature-like variables,
-# backward sums/averages for precipitation and radiation). Those neighbours come from *different* runs, so the
-# hourly value at T can depend on the run behind the stored point up to two steps after T. Probed against the
-# Single Runs API: JMA GSM is stored 6-hourly; ICON is hourly to 78 h and 3-hourly beyond. The other entries
-# follow the models' published output steps. Unknown models get the conservative 6 h.
-# Changing this table changes outputs: bump SCHEMA_VERSION.
+# Deepest `previous_dayK` a model has data in. ICON-D2/EU and ICON global stop at their forecast length (verified
+# 2026-10: the deeper buckets come back entirely null). Models not listed here are served down to MAX_PREVIOUS_DAY.
+_MAX_PREVIOUS_DAY_BY_MODEL: Tuple[Tuple[str, int], ...] = (
+    ("icon_d2", 1),
+    ("icon_eu", 4),
+    ("icon_", 6),
+)
+
+# Forecast length (hours) of every run a model has, by UTC initialisation hour. The Previous Runs API fills
+# `previous_dayK` at valid time T from the latest run initialised at or before T - 24K h *that reaches T*, so the
+# 06/18 UTC runs of ICON, ECMWF IFS and JMA (shorter than the 00/12 UTC ones) drop out of the deep buckets. Where
+# a length is not known precisely, the longer (more runs, later init) value is used: a finer run grid can only
+# make the cutoff check stricter. Unknown models get an hourly grid of unlimited runs, the strictest case.
+_RUN_LENGTH_H: Tuple[Tuple[str, Dict[int, int]], ...] = (
+    ("icon_d2", {hour: 48 for hour in range(0, 24, 3)}),
+    ("icon_eu", {0: 120, 6: 120, 12: 120, 18: 120}),
+    ("icon_", {0: 180, 6: 120, 12: 180, 18: 120}),
+    ("ecmwf_ifs", {0: 360, 6: 144, 12: 360, 18: 144}),
+    ("gfs_", {0: 384, 6: 384, 12: 384, 18: 384}),
+    ("jma_", {0: 264, 6: 132, 12: 264, 18: 132}),
+)
+
+# Time step (hours) of the points `previous_dayK` is stored at, as ((max_lead_h, step_h), ...) segments; the first
+# segment whose max_lead_h >= 24K + 6 applies (None = no limit). This is the step of the Previous Runs files
+# themselves, which is what `temporal_resolution="native"` returns, and not the output step of the model: the
+# files of GFS and ICON are hourly (interpolated within each run when the run is stored), so their hourly values
+# are pieces of single runs. JMA GSM (6 h) and ECMWF IFS 0.25 (3 h) are stored at their own coarser points and
+# interpolated when read, with a 4-point Hermite spline (verified against Single Runs: it reproduces the hourly
+# values of a run from its points). The points around one hour then come from different runs, so the hourly
+# value at T depends on the points up to ceil_s(T) + s, up to two steps after T (see `select_buckets`).
+# Unknown models get the conservative 6 h. Changing this table changes outputs: bump SCHEMA_VERSION.
 _STORED_STEP_H: Tuple[Tuple[str, Tuple[Tuple[Optional[int], int], ...]], ...] = (
-    ("icon_d2", ((None, 1),)),
-    ("icon_", ((78, 1), (None, 3))),
-    ("ecmwf_ifs025", ((144, 3), (None, 6))),
-    ("ecmwf_ifs04", ((144, 3), (None, 6))),
+    ("ecmwf_ifs025", ((None, 3),)),
+    ("ecmwf_ifs04", ((None, 3),)),
     ("ecmwf_aifs", ((None, 6),)),
-    ("ecmwf_ifs", ((90, 1), (144, 3), (None, 6))),
-    ("gfs_seamless", ((120, 1), (None, 3))),
-    ("gfs_global", ((120, 1), (None, 3))),
+    ("ecmwf_ifs", ((None, 1),)),
+    ("icon_", ((None, 1),)),
+    ("gfs_", ((None, 1),)),
     ("jma_", ((None, 6),)),
 )
 _DEFAULT_STORED_STEP_H = 6
@@ -52,6 +76,23 @@ def stored_step_hours(model: str, bucket: int) -> int:
                 if max_lead_h is None or lead_h <= max_lead_h:
                     return step_h
     return _DEFAULT_STORED_STEP_H
+
+
+def max_previous_day(model: str) -> int:
+    """Deepest `previous_dayK` bucket that has data for `model` (see `_MAX_PREVIOUS_DAY_BY_MODEL`)."""
+    for prefix, bucket in _MAX_PREVIOUS_DAY_BY_MODEL:
+        if model.startswith(prefix):
+            return bucket
+    return MAX_PREVIOUS_DAY
+
+
+def previous_run_lengths(model: str) -> Optional[Dict[int, int]]:
+    """Forecast length (hours) of each run the Previous Runs API holds for `model`, by UTC init hour (see
+    `_RUN_LENGTH_H`), or None for a model not covered there (then every hourly run counts, the strictest case)."""
+    for prefix, lengths in _RUN_LENGTH_H:
+        if model.startswith(prefix):
+            return lengths
+    return None
 
 
 # Typical hours between a model run's initialisation and its availability, by model family — used only by
@@ -83,11 +124,12 @@ def publication_delay_hours(model: str) -> float:
     return _DEFAULT_PUBLICATION_DELAY_H
 
 
-# Best-effort synoptic run-hour cycles (UTC), for a clear api="single_runs" construction-time error naming valid
-# hours (see OpenMeteoSource.run). Approximate and not exhaustive: a `model` not matched here is not checked
-# here at all, and simply gets whatever the Single Runs API itself returns for that run (an unavailable run is
-# reported per row like any other, see OpenMeteoBase._report_coverage) — it is never silently accepted as
-# "valid" by this table, only left unchecked by it.
+# Best-effort synoptic run-hour cycles (UTC) of the Single Runs API, for a clear api="single_runs" construction-time
+# error naming valid hours (see OpenMeteoSource.run). Approximate and not exhaustive: a `model` not matched here is
+# not checked here at all, and simply gets whatever the Single Runs API itself returns for that run (an unavailable
+# run is reported per row like any other, see OpenMeteoBase._report_coverage) — it is never silently accepted as
+# "valid" by this table, only left unchecked by it. The Previous Runs API has fewer runs for some models, see
+# `_RUN_LENGTH_H`.
 _RUN_HOURS_H: Tuple[Tuple[str, Tuple[int, ...]], ...] = (
     ("icon_d2", tuple(range(0, 24, 3))),
     ("icon_eu", tuple(range(0, 24, 3))),
@@ -106,24 +148,59 @@ def known_run_hours(model: str) -> Optional[Tuple[int, ...]]:
     return None
 
 
-@lru_cache(maxsize=128)
-def _bucket_requirements(model: str, timezone: str, run: str, horizon: int) -> Tuple[Tuple[int, int], ...]:
-    """(smallest, largest) `previous_dayK` needed for each lead 1..horizon, over a full year of hourly rows.
+_HOUR_NS = 3600 * 10**9
+_NO_RUN = np.iinfo(np.int64).max  # a stored point no run reaches: later than any cutoff
 
-    The largest K may exceed MAX_PREVIOUS_DAY; callers reject such a horizon. Rows whose target wall-clock hour
-    does not exist (the spring DST gap) are excluded: they never need a bucket at all, see `shift_local_days`.
+
+def _run_inits(model: str, point_hours: np.ndarray, bucket: int) -> np.ndarray:
+    """Init (hours since the epoch) of the run `previous_day{bucket}` holds at each stored point.
+
+    That is the latest run initialised at or before `point - 24 * bucket` h whose forecast reaches the point (the
+    Previous Runs API takes every point from the run that is `bucket` days older, and the shorter 06/18 UTC runs
+    of some models do not reach the deep buckets). `_NO_RUN` where no run within two days does.
     """
-    rows = pd.date_range("2024-01-01", "2025-01-01", freq="1h", tz="UTC", inclusive="left")
-    cutoff = run_cutoff(rows, timezone, run)
-    needs = []
-    for lead in range(1, horizon + 1):
-        valid = shift_local_days(rows, timezone, lead)
-        chosen = select_buckets(model, valid, cutoff, lead, lead + MAX_PREVIOUS_DAY + 2)
-        usable = chosen[~valid.isna()]
-        if (usable == 0).any():
-            raise ValueError(f"run={run!r} leaves no usable previous_dayK for d+{lead}")
-        needs.append((int(usable.min()), int(usable.max())))
-    return tuple(needs)
+    lengths = previous_run_lengths(model)
+    reach = np.full(24, np.iinfo(np.int64).max, dtype=np.int64) if lengths is None else np.zeros(24, dtype=np.int64)
+    for hour, length in (lengths or {}).items():
+        reach[hour] = length
+
+    result = np.full(len(point_hours), _NO_RUN, dtype=np.int64)
+    pending = np.ones(len(point_hours), dtype=bool)
+    newest = point_hours - 24 * bucket
+    for back in range(48):
+        init = newest - back
+        found = pending & (point_hours - init <= reach[init % 24])
+        result[found] = init[found]
+        pending &= ~found
+        if not pending.any():
+            break
+    return result
+
+
+def newest_run_init(model: str, valid: pd.DatetimeIndex, bucket: int) -> np.ndarray:
+    """Init (UTC nanoseconds since the epoch) of the newest run that can influence `previous_day{bucket}` at each
+    `valid` time, or the largest int64 where no run reaches it. `NaT` in `valid` also gives the largest int64.
+
+    A stored point at P holds the run described in `_run_inits`. With a stored step of one hour the value at T is
+    the point at T. With a coarser step s the file holds a point every s hours and Open-Meteo interpolates hourly
+    values from the four points around T (a 4-point Hermite spline): a time exactly on the grid is its own point,
+    any other time reads the points floor_s(T) - s, floor_s(T), floor_s(T) + s and floor_s(T) + 2s, so the newest
+    run reaches ceil_s(T) + s, up to two steps after T.
+    """
+    missing = np.asarray(valid.isna())
+    hours = np.where(missing, 0, valid.asi8 // _HOUR_NS)
+    step = stored_step_hours(model, bucket)
+    if step == 1:
+        newest = _run_inits(model, hours, bucket)
+    else:
+        floor = hours - hours % step
+        on_grid = hours % step == 0
+        newest = _run_inits(model, floor, bucket)
+        for offset in (-1, 1, 2):
+            reach = np.maximum(newest, _run_inits(model, floor + offset * step, bucket))
+            newest = np.where(on_grid, newest, reach)
+    newest = np.where(newest == _NO_RUN, _NO_RUN, newest * _HOUR_NS)
+    return np.where(missing, _NO_RUN, newest)
 
 
 def select_buckets(
@@ -136,18 +213,51 @@ def select_buckets(
     """Smallest K in [lead, max_bucket] per cell whose value only depends on runs initialised at or before the
     row's own cutoff; 0 if none (including a `valid` cell that is `NaT`, see `shift_local_days`).
 
-    `previous_dayK` at valid time T holds the latest run initialised at or before T - 24K h (Open-Meteo Previous
-    Runs docs). With a stored step s > 1 h the hourly value also depends on stored points up to ceil_s(T) + s, so
-    the latest run that can influence it was initialised at or before ceil_s(T) + s - 24K h.
+    `max_bucket` is capped at the deepest bucket the model has data in (`max_previous_day`). Which runs a bucket's
+    value depends on is `newest_run_init`: `previous_dayK` at valid time T holds the latest run initialised at or
+    before T - 24K h (Open-Meteo Previous Runs docs), taken point by point, plus the interpolation reach of a
+    coarsely stored model.
     """
     chosen = np.zeros(len(valid), dtype=np.int64)
-    for bucket in range(lead, max_bucket + 1):
-        step = stored_step_hours(model, bucket)
-        reach_end = valid if step == 1 else valid.ceil(f"{step}h") + pd.Timedelta(hours=step)
-        latest_init = reach_end - pd.Timedelta(days=bucket)
-        ok = np.asarray(latest_init <= cutoff) & (chosen == 0)
+    cutoff_ns = np.asarray(cutoff.asi8)
+    for bucket in range(lead, min(max_bucket, max_previous_day(model)) + 1):
+        ok = (newest_run_init(model, valid, bucket) <= cutoff_ns) & (chosen == 0)
         chosen[ok] = bucket
     return chosen
+
+
+@lru_cache(maxsize=512)
+def _lead_buckets(model: str, timezone: str, run: str, lead: int) -> Optional[Tuple[int, int]]:
+    """(smallest, largest) `previous_dayK` used for d+`lead` over a full year of hourly rows, or None if some hour
+    of D+`lead` cannot be served leak-free by any bucket the model has.
+
+    Rows whose target wall-clock hour does not exist (the spring DST gap) are excluded: they never need a bucket
+    at all, see `shift_local_days`. A year covers both UTC offsets of a DST zone.
+    """
+    rows = pd.date_range("2024-01-01", "2025-01-01", freq="1h", tz="UTC", inclusive="left")
+    cutoff = run_cutoff(rows, timezone, run)
+    valid = shift_local_days(rows, timezone, lead)
+    chosen = select_buckets(model, valid, cutoff, lead, MAX_PREVIOUS_DAY)
+    usable = chosen[~valid.isna()]
+    if (usable == 0).any():
+        return None
+    return int(usable.min()), int(usable.max())
+
+
+@lru_cache(maxsize=128)
+def max_previous_runs_horizon(model: str, timezone: str, run: str) -> int:
+    """Largest `horizon` without look-ahead under api="previous_runs", for `model`, market `timezone` and `run`.
+
+    Every local hour of D+horizon must be served by a `previous_dayK` bucket (K <= 7, and within what the model
+    has) that only depends on runs initialised at or before D at `run`:00 UTC. `previous_dayK` at T is the run
+    24K h older, so d+7 is only partly servable and never fully for an early `run`. 0 if even d+1 cannot be served.
+    """
+    limit = 0
+    for lead in range(1, MAX_PREVIOUS_DAY + 1):
+        if _lead_buckets(model, timezone, run, lead) is None:
+            break
+        limit = lead
+    return limit
 
 
 class OpenMeteoSource(OpenMeteoBase):
@@ -165,7 +275,9 @@ class OpenMeteoSource(OpenMeteoBase):
     <https://open-meteo.com/en/docs/previous-runs-api>`_, which stores each model's forecast at fixed lead-time
     offsets: for each row and lead i, the source picks the smallest `previous_dayK` (K >= i) bucket whose value
     depends only on runs initialised at or before the cutoff (see ``select_buckets``); some hours therefore come
-    from a run well before D. ``api="single_runs"`` uses the `Single Runs API
+    from a run well before D. How many days ahead that works for depends on the model, `run` and `timezone`
+    (``max_previous_runs_horizon``): ``horizon=None`` (default) takes the largest, an explicit larger one
+    raises. ``api="single_runs"`` uses the `Single Runs API
     <https://open-meteo.com/en/docs/single-runs-api>`_, which stores every run separately: the source requests
     exactly the run initialised at the cutoff and uses it for every row and lead of D. If the archive lacks that
     run, the affected cells are NaN and the coverage report warns — there is no fallback to another run.
@@ -176,7 +288,7 @@ class OpenMeteoSource(OpenMeteoBase):
 
     Example:
         >>> source = OpenMeteoSource(
-        ...     latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", horizon=5, prefix="warsaw"
+        ...     latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", prefix="warsaw"
         ... )
         >>> df = source.fetch(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-02-01", tz="UTC"))
     """
@@ -188,7 +300,7 @@ class OpenMeteoSource(OpenMeteoBase):
     UNAVAILABLE_RUN = "requested model run is not available"
 
     VALID_TEMPORAL_RESOLUTIONS = {None, "native", "hourly_3", "hourly_6"}
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(
         self,
@@ -198,7 +310,7 @@ class OpenMeteoSource(OpenMeteoBase):
         agg: Optional[Union[str, List[str]]] = None,
         keep_locations: bool = False,
         columns: Optional[List[str]] = None,
-        horizon: int = 5,
+        horizon: Optional[int] = None,
         model: str = "jma_seamless",
         temporal_resolution: Optional[str] = None,
         api: str = "previous_runs",
@@ -241,10 +353,12 @@ class OpenMeteoSource(OpenMeteoBase):
                 `{prefix}_{name}_{variable}_d+i` (default: False). Raises if ``agg`` is ``None``: the
                 per-location columns are then already the only output.
             columns: List of weather variables to fetch (default: DEFAULT_COLUMNS)
-            horizon: Days ahead (d+1 .. d+horizon). Under ``api="previous_runs"`` the largest usable horizon
-                depends on the model, `timezone` and `run` (5 for the default JMA model at run="00"); a larger
-                value raises. Under ``api="single_runs"``, 1-14; leads beyond the run's own length come back NaN
-                (reported, see ``strict``).
+            horizon: Days ahead (d+1 .. d+horizon). ``None`` (default): under ``api="previous_runs"`` the
+                largest horizon without look-ahead for `model`, `run` and `timezone` (see
+                ``max_previous_runs_horizon``, 6 for the default JMA model at run="00" in Europe/Warsaw), under
+                ``api="single_runs"`` 5. An explicit value above that limit raises under ``api="previous_runs"``
+                and names the limit. Under ``api="single_runs"``, 1-14. Leads beyond the run's own length come
+                back NaN (reported, see ``strict``).
             model: Weather model to use (default: "jma_seamless")
             temporal_resolution: Temporal resolution of the data. One of:
                 None (default) — hourly (1 h), no parameter sent to API;
@@ -302,10 +416,11 @@ class OpenMeteoSource(OpenMeteoBase):
                 raise ValueError(f"{self.model!r} has no run at {self.run!r} UTC; its runs are at {hours} UTC")
             return True
 
-        if self.horizon > MAX_PREVIOUS_DAY:
+        if self.horizon is not None and self.horizon > MAX_PREVIOUS_DAY:
             raise ValueError(
                 f"Horizon must be at most {MAX_PREVIOUS_DAY}: the Previous Runs API serves previous_day1.."
-                f"previous_day{MAX_PREVIOUS_DAY} only, got {self.horizon}"
+                f"previous_day{MAX_PREVIOUS_DAY} only, got {self.horizon}. Use api='single_runs' for a full week "
+                "(horizon up to 14, leads beyond the run's own length come back NaN)."
             )
 
         # The buckets depend on the market time zone, which may not be known yet (it can be inherited from
@@ -314,22 +429,37 @@ class OpenMeteoSource(OpenMeteoBase):
             self._resolve_buckets(self.timezone)
         return True
 
+    def _effective_horizon(self) -> int:
+        """The horizon actually fetched: `horizon`, or what ``horizon=None`` stands for (see ``horizon``)."""
+        if self.horizon is not None:
+            return self.horizon
+        if self.api == "single_runs":
+            return DEFAULT_SINGLE_RUNS_HORIZON
+        return max_previous_runs_horizon(self.model, self._require_market_timezone(), self.run)
+
     def _resolve_buckets(self, timezone: str) -> None:
         """Work out which previous_dayK buckets to request, for a now-known market `timezone`."""
-        needs = _bucket_requirements(self.model, timezone, self.run, self.horizon)
-        worst = max(high for _, high in needs)
-        if worst > MAX_PREVIOUS_DAY:
-            first_bad = next(lead for lead, (_, high) in enumerate(needs, 1) if high > MAX_PREVIOUS_DAY)
+        limit = max_previous_runs_horizon(self.model, timezone, self.run)
+        where = f"model={self.model!r}, run={self.run!r} UTC, timezone={timezone!r}"
+        if limit == 0:
             raise ValueError(
-                f"horizon={self.horizon} cannot be served without look-ahead: d+{first_bad} needs "
-                f"previous_day{needs[first_bad - 1][1]} for some hours (model={self.model!r}, run={self.run!r} "
-                f"UTC, timezone={timezone!r}), but Open-Meteo serves previous_day1..{MAX_PREVIOUS_DAY} only. Use "
-                f"horizon<={first_bad - 1}, an earlier run if this model publishes one, or api='single_runs' "
-                "(horizon up to 14, leads beyond the run's own length come back NaN)."
+                f"d+1 cannot be served without look-ahead ({where}): some of its hours need runs initialised after "
+                f"D at {self.run}:00 UTC. Use a later run, or api='single_runs'."
             )
+        horizon = limit if self.horizon is None else self.horizon
+        if horizon > limit:
+            raise ValueError(
+                f"horizon={horizon} is above the largest horizon without look-ahead, {limit} ({where}): some hours "
+                f"of d+{limit + 1} would need a run initialised after D at {self.run}:00 UTC, and "
+                f"previous_day1..{MAX_PREVIOUS_DAY} are the only buckets Open-Meteo serves. Use horizon<={limit} "
+                "(horizon=None picks it), a later run, or api='single_runs' for a full week (horizon up to 14, "
+                "leads beyond the run's own length come back NaN)."
+            )
+        needs = [_lead_buckets(self.model, timezone, self.run, lead) for lead in range(1, horizon + 1)]
         low = min(lo for lo, _ in needs)
+        worst = max(high for _, high in needs)
         # One spare bucket lets live runs made before the cutoff fall back further (see _build_features).
-        self._buckets = list(range(low, min(worst + 1, MAX_PREVIOUS_DAY) + 1))
+        self._buckets = list(range(low, min(worst + 1, max_previous_day(self.model)) + 1))
 
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """
@@ -367,7 +497,8 @@ class OpenMeteoSource(OpenMeteoBase):
 
         start_time = time.time()
         # Valid times needed: rows' own times up to end + horizon local days (+1 day for DST and interpolation).
-        chunks = self._generate_chunks(start, end + DateOffset(days=self.horizon + 1), months=3)
+        horizon = self._effective_horizon()
+        chunks = self._generate_chunks(start, end + DateOffset(days=horizon + 1), months=3)
 
         self.logger.info(f"{self._label}: Start downloading weather data")
 
@@ -449,7 +580,7 @@ class OpenMeteoSource(OpenMeteoBase):
         steps = np.diff(table.index.asi8)
         tolerance = pd.Timedelta(int(steps.min()) // 2 if len(steps) else 0)
         max_bucket = max(self._buckets)
-        for lead in range(1, self.horizon + 1):
+        for lead in range(1, self._effective_horizon() + 1):
             target = shift_local_days(rows, self.market_timezone, lead)
             positions = table.index.get_indexer(target, method="nearest", tolerance=tolerance)
             valid = pd.DatetimeIndex(np.where(positions >= 0, table.index.asi8[positions], np.iinfo(np.int64).min))
@@ -484,10 +615,11 @@ class OpenMeteoSource(OpenMeteoBase):
 
         started = time.time()
         cutoff, final = self._cutoff_instants(rows)
-        targets = {lead: shift_local_days(rows, tz, lead) for lead in range(1, self.horizon + 1)}
+        horizon = self._effective_horizon()
+        targets = {lead: shift_local_days(rows, tz, lead) for lead in range(1, horizon + 1)}
         values = {
             f"{column}_d+{lead}": np.full(len(rows), np.nan)
-            for lead in range(1, self.horizon + 1)
+            for lead in range(1, horizon + 1)
             for column in self.columns
         }
 
@@ -549,7 +681,7 @@ class OpenMeteoSource(OpenMeteoBase):
             "models": self.model,
             "timezone": "GMT",
             "run": init.strftime("%Y-%m-%dT%H:%M"),
-            "forecast_days": min(16, self.horizon + 3),
+            "forecast_days": min(16, self._effective_horizon() + 3),
         }
         if self.temporal_resolution is not None:
             params["temporal_resolution"] = self.temporal_resolution

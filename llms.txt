@@ -130,7 +130,7 @@ source = OpenMeteoSource(
     agg=None,                    # Optional. None|"mean"|"median"|"min"|"max"|"sum"|list of these: combine locations (default: None)
     keep_locations=False,        # Optional. With aggregation on, also return each location's own series (default: False)
     columns=None,                # Optional. Weather variables (default: None = DEFAULT_COLUMNS)
-    horizon=5,                   # Optional. Days ahead; see "Horizon limit" below (default: 5)
+    horizon=None,                # Optional. Days ahead. None = the largest without look-ahead, see "Horizon limit" below (default: None)
     model="jma_seamless",        # Optional. Weather model (default: "jma_seamless")
     temporal_resolution=None,    # Optional. None|"hourly_3"|"hourly_6"|"native" (default: None = 1 h)
     api="previous_runs",         # Optional. "previous_runs" (default, long archive) or "single_runs" (one exact run per day)
@@ -142,11 +142,11 @@ source = OpenMeteoSource(
 )
 ```
 
-**`api="previous_runs"` bucket rule:** `previous_dayK` at valid time T comes from the latest run initialised at or before T - 24K h. For each row and lead i the source uses the smallest K >= i whose runs were all initialised at or before the cutoff (`D` at `run`:00 UTC, no delay term: that only matters model-side, see below). For models stored every 3-6 h (JMA, ICON beyond 78 h, ECMWF IFS 0.25) it also accounts for Open-Meteo interpolating across stored points from later runs. Most D+1 hours come from a run of D-1 or D-2.
+**`api="previous_runs"` bucket rule:** `previous_dayK` at valid time T comes from the latest run initialised at or before T - 24K h, hour by hour, and only from runs that reach T (the shorter 06/18 UTC runs of ICON, ECMWF IFS and JMA drop out of the deep buckets). For each row and lead i the source uses the smallest K >= i whose runs were all initialised at or before the cutoff (`D` at `run`:00 UTC, no delay term: that only matters model-side, see below). JMA (6 h) and ECMWF IFS 0.25 (3 h) are stored at coarse points and interpolated when read, so an hourly value also depends on the points up to two steps after it, which the choice accounts for. GFS, ICON and ECMWF IFS 9 km are stored hourly. Most D+1 hours come from a run of D-1 or D-2.
 
 **`api="single_runs"` rule:** requests exactly the run initialised at the cutoff and uses it for every row/lead of D. If the archive lacks that run, the affected cells are NaN (reported, see `strict`). There is no fallback to another run. If `model` is one this library has a known run-hour table for and `run` isn't one of its hours, construction raises immediately naming the valid hours.
 
-**Horizon limit:** under `previous_runs` the API serves previous_day1..7 only. With the defaults (`run="00"`) and a Central European `timezone` the largest horizon is 5 for `jma_seamless`, `icon_seamless`, ECMWF IFS and GFS. A larger one raises `ValueError` naming the limit. Under `single_runs`, 1-14. Leads beyond the run's own length come back NaN.
+**Horizon limit:** `previous_dayK` at T is the run 24K h older, so D+7 is never fully served (its late hours need `previous_day8`, which Open-Meteo does not serve, or a run after the cutoff). At `run="00"` in `Europe/Warsaw` the largest horizon without look-ahead is 6 for `jma_seamless`, `gfs_seamless`, `ecmwf_ifs025` and `ecmwf_ifs`, and 5 for `icon_seamless` (no `previous_day7`) and for any model without a table (hourly runs and a 6 h store assumed). `horizon=None` takes it, `epftoolbox2.data.sources.open_meteo.max_previous_runs_horizon(model, timezone, run)` returns it, and a larger explicit value raises `ValueError` naming the limit and suggesting `api="single_runs"` for a full week. Under `single_runs`, `horizon=None` means 5 and 1-14 is accepted. Leads beyond the run's own length come back NaN.
 
 **Publication delay (model-side, not enforced by the source):** ICON ~4h, GFS ~5h, ECMWF IFS ~8h, JMA ~10h, unknown models a conservative 10h (`epftoolbox2.data.sources.open_meteo.publication_delay_hours`). `run="00"` (default) is known in time for an 11:30 CET issue for every model above. `epftoolbox2.information_set.source_rules` uses this table to flag a `run`/issue-time combination that is too tight.
 
@@ -1423,8 +1423,8 @@ ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 pipeline = (
     DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-    # jma_seamless (default model) is only leak-free up to 5 days ahead at the default run="00"; see "Horizon
-    # limit" under OpenMeteoSource above.
+    # horizon=5 keeps d+1..d+5. The default (None) would take the largest leak-free horizon, 6 for
+    # jma_seamless at the default run="00". See "Horizon limit" under OpenMeteoSource above.
     .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
@@ -1491,7 +1491,7 @@ report = pipeline.run(
     test_start="2024-02-01",
     test_end="2024-03-01",
     target="price",
-    horizon=5,  # matches warsaw_temperature_2m's leak-free horizon (see the OpenMeteoSource in Example 1)
+    horizon=5,  # matches the horizon of warsaw_temperature_2m (see the OpenMeteoSource in Example 1)
     save_dir="results",
 )
 
@@ -1523,8 +1523,8 @@ ENTSOE_API_KEY = os.environ.get("ENTSOE_API_KEY")
 data_pipeline = (
     DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-    # jma_seamless (default model) is only leak-free up to 5 days ahead at the default run="00"; see "Horizon
-    # limit" under OpenMeteoSource above.
+    # horizon=5 keeps d+1..d+5. The default (None) would take the largest leak-free horizon, 6 for
+    # jma_seamless at the default run="00". See "Horizon limit" under OpenMeteoSource above.
     .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
     .add_transformer(ResampleTransformer(freq="1h"))
@@ -1580,7 +1580,7 @@ report = model_pipeline.run(
     test_start="2024-06-01",
     test_end="2024-06-30",
     target="price",
-    horizon=5,  # matches warsaw_temperature_2m's leak-free horizon (see the OpenMeteoSource above)
+    horizon=5,  # matches the horizon of warsaw_temperature_2m (see the OpenMeteoSource above)
     save_dir="results",
 )
 
@@ -1618,8 +1618,8 @@ predictors = [
 (
     DataPipeline(timezone="Europe/Warsaw")
     .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-    # jma_seamless (default model) is only leak-free up to 5 days ahead at the default run="00"; see "Horizon
-    # limit" under OpenMeteoSource above.
+    # horizon=5 keeps d+1..d+5. The default (None) would take the largest leak-free horizon, 6 for
+    # jma_seamless at the default run="00". See "Horizon limit" under OpenMeteoSource above.
     .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw"))
     .add_source(CalendarSource(country="PL", holidays="binary", daylight=True, weekday="onehot"))
     .add_transformer(ResampleTransformer(freq="1h"))
@@ -1660,7 +1660,7 @@ Workflow(
     model_test_start="2024-06-01",
     model_test_end="2024-07-01",
     model_target="price",
-    model_horizon=5,  # matches warsaw_temperature_2m's leak-free horizon (see the OpenMeteoSource above)
+    model_horizon=5,  # matches the horizon of warsaw_temperature_2m (see the OpenMeteoSource above)
     max_processes=4,
     threads_per_process=8,
 ).save("experiment.yaml")
@@ -1697,8 +1697,8 @@ if __name__ == "__main__":
     df = (
         DataPipeline(timezone="Europe/Warsaw")
         .add_source(EntsoeSource(country_code="PL", api_key=ENTSOE_API_KEY, type=["load", "price"]))
-        # jma_seamless (default model) is only leak-free up to 5 days ahead at the default run="00"; see
-        # "Horizon limit" under OpenMeteoSource above.
+        # horizon=5 keeps d+1..d+5. The default (None) would take the largest leak-free horizon, 6 for
+        # jma_seamless at the default run="00". See "Horizon limit" under OpenMeteoSource above.
         .add_source(OpenMeteoSource(latitude=52.2297, longitude=21.0122, horizon=5, prefix="warsaw"))
         .add_source(CalendarSource(country="PL", holidays="binary", weekday="onehot", daylight=True))
         .add_transformer(TimezoneTransformer())
@@ -1733,7 +1733,7 @@ if __name__ == "__main__":
             test_start="today",   # resolve_date("today") → today's ISO date at runtime
             test_end="today",
             target="price",
-            horizon=5,  # matches warsaw_temperature_2m's leak-free horizon (see the OpenMeteoSource above)
+            horizon=5,  # matches the horizon of warsaw_temperature_2m (see the OpenMeteoSource above)
             forecast_only=True,   # skips evaluators and exporters
         )
     )
