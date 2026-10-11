@@ -147,7 +147,7 @@ class OpenMeteoSource(DataSource):
                  agg: Optional[Union[str, List[str]]] = None,  # aggregate several locations; see Data Sources
                  keep_locations: bool = False,
                  columns: Optional[List[str]] = None,
-                 horizon: int = 5,
+                 horizon: Optional[int] = None,  # None: the largest horizon without look-ahead (6 for the default model)
                  model: str = "jma_seamless",
                  temporal_resolution: Optional[str] = None,
                  api: str = "previous_runs",  # "previous_runs" | "single_runs"
