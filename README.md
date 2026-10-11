@@ -74,45 +74,6 @@ result = validator.validate(df)
 print(result)  # VALID/INVALID with errors, warnings and details; result.stats has one row per column
 ```
 
-### Standalone model use
-
-```python
-from epftoolbox2.models import OLSModel
-
-seasonal_indicators = [
-    "is_monday_d+{horizon}",
-    "is_tuesday_d+{horizon}",
-    "is_wednesday_d+{horizon}",
-    "is_thursday_d+{horizon}",
-    "is_friday_d+{horizon}",
-    "is_saturday_d+{horizon}",
-    "is_sunday_d+{horizon}",
-    "is_holiday_d+{horizon}",
-    "daylight_hours_d+{horizon}",
-]
-
-model = OLSModel(predictors=["load_actual_d-1", *seasonal_indicators], name="OLS")
-report = model.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
-```
-
-### Standalone evaluator use
-
-```python
-from epftoolbox2.evaluators import MAEEvaluator
-
-evaluator = MAEEvaluator()
-mae = evaluator.compute(predictions)  # DataFrame with "prediction" and "actual" columns
-```
-
-### Standalone exporter use
-
-```python
-from epftoolbox2.exporters import ExcelExporter
-
-exporter = ExcelExporter("results.xlsx")
-exporter.export(report)  # an EvaluationReport, e.g. from ModelPipeline.run() below
-```
-
 ### Data Pipeline
 
 Download and process electricity market data from ENTSOE, weather forecasts from Open-Meteo, and calendar features.
@@ -155,7 +116,49 @@ pipeline = (
     .add_validator(CoverageValidator(columns=["load_actual", "price"], min_coverage=1.0))
 )
 
-df = pipeline.run("2024-01-01", "2024-06-01", cache=True)
+df = pipeline.run("2024-01-01", "2024-06-08", cache=True)
+```
+
+### Standalone model use
+
+```python
+from epftoolbox2.models import OLSModel
+
+seasonal_indicators = [
+    "is_monday_d+{horizon}",
+    "is_tuesday_d+{horizon}",
+    "is_wednesday_d+{horizon}",
+    "is_thursday_d+{horizon}",
+    "is_friday_d+{horizon}",
+    "is_saturday_d+{horizon}",
+    "is_sunday_d+{horizon}",
+    "is_holiday_d+{horizon}",
+    "daylight_hours_d+{horizon}",
+]
+
+model = OLSModel(predictors=["load_actual_d-1", *seasonal_indicators], name="OLS")
+ref = model.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")  # where the forecasts are
+```
+
+### Standalone evaluator use
+
+```python
+import pandas as pd
+from epftoolbox2.evaluators import MAEEvaluator
+
+predictions = pd.DataFrame({"prediction": [48.0, 52.5], "actual": [50.0, 51.0]})
+mae = MAEEvaluator().compute(predictions)  # 1.75
+```
+
+### Standalone exporter use
+
+```python
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.exporters import ExcelExporter
+from epftoolbox2.results import EvaluationReport
+
+report = EvaluationReport({"OLS": ref}, [MAEEvaluator()])  # the object ModelPipeline.run() returns
+ExcelExporter("results.xlsx").export(report)
 ```
 
 ### Model Pipeline
@@ -169,7 +172,7 @@ from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.exporters import ExcelExporter
 
 pipeline = (
-    ModelPipeline()
+    ModelPipeline(issue_time="11:30", issue_timezone="Europe/Warsaw")  # issued before the 12:00 CET gate closure
     .add_model(OLSModel(predictors=["load_actual_d-1", *seasonal_indicators], name="OLS"))
     .add_model(LassoCVModel(predictors=["load_actual_d-1", *seasonal_indicators], name="Lasso"))
     .add_evaluator(MAEEvaluator())
@@ -179,11 +182,11 @@ pipeline = (
 report = pipeline.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
 ```
 
-Pass `issue_time` (and optionally `issue_timezone`) to check every predictor against the time the forecast is
-actually issued, before any model is fitted, `ModelPipeline(issue_time="11:30", issue_timezone="Europe/Brussels")`
-raises `InformationSetError` if a predictor uses a value not known yet (e.g. same-day `load_actual`). Built-in
-availability rules cover the shipped sources. See `epftoolbox2.information_set` for custom rules, accepted
-assumptions, and `leakage_probe`, an empirical check that perturbs unknown values and asserts forecasts don't move.
+`issue_time` (and optionally `issue_timezone`) checks every predictor against the time the forecast is actually
+issued, before any model is fitted. It raises `InformationSetError` if a predictor uses a value not known yet (e.g.
+same-day `load_actual`). Built-in availability rules cover the shipped sources. See `epftoolbox2.information_set` for
+custom rules, accepted assumptions, and `leakage_probe`, an empirical check that perturbs unknown values and asserts
+forecasts don't move.
 
 
 
