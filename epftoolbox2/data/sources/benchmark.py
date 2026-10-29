@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import requests
 
+from epftoolbox2._date_utils import epoch_ns
 from epftoolbox2.logging import get_logger
 from .base import DataSource
 
@@ -206,7 +207,7 @@ class EpftoolboxBenchmarkSource(DataSource):
             raise ValueError(f"{path}: timestamps are not strictly increasing; the dates were not parsed as expected")
 
         per_day = pd.Series(1, index=local).groupby(local.normalize()).sum()
-        steps = np.diff(local.asi8)
+        steps = np.diff(epoch_ns(local))
         if (per_day != 24).any() or (steps != pd.Timedelta("1h").value).any():
             self.logger.warning(
                 f"Benchmark: {self.dataset}.csv is not a gap-free series of 24 hourly values per day; "

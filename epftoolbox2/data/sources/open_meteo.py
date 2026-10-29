@@ -14,6 +14,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from ..._date_utils import epoch_ns
 from ._open_meteo_common import OpenMeteoBase, parse_hourly, parse_run, run_cutoff, shift_local_days
 
 # The Previous Runs API serves `{variable}_previous_day1` .. `_previous_day7`; day 8 and later come back as nulls.
@@ -196,7 +197,7 @@ def newest_run_init(model: str, valid: pd.DatetimeIndex, bucket: int) -> np.ndar
     run reaches ceil_s(T) + s, up to two steps after T.
     """
     missing = np.asarray(valid.isna())
-    hours = np.where(missing, 0, valid.asi8 // _HOUR_NS)
+    hours = np.where(missing, 0, epoch_ns(valid) // _HOUR_NS)
     step = stored_step_hours(model, bucket)
     if step == 1:
         newest = _run_inits(model, hours, bucket)
@@ -227,7 +228,7 @@ def select_buckets(
     coarsely stored model.
     """
     chosen = np.zeros(len(valid), dtype=np.int64)
-    cutoff_ns = np.asarray(cutoff.asi8)
+    cutoff_ns = epoch_ns(cutoff)
     for bucket in range(lead, min(max_bucket, max_previous_day(model)) + 1):
         ok = (newest_run_init(model, valid, bucket) <= cutoff_ns) & (chosen == 0)
         chosen[ok] = bucket
@@ -585,14 +586,13 @@ class OpenMeteoSource(OpenMeteoBase):
         features = {}
 
         cutoff, final = self._cutoff_instants(rows)
-        steps = np.diff(table.index.asi8)
+        steps = np.diff(epoch_ns(table.index))
         tolerance = pd.Timedelta(int(steps.min()) // 2 if len(steps) else 0)
         max_bucket = max(self._buckets)
         for lead in range(1, self._effective_horizon() + 1):
             target = shift_local_days(rows, self.market_timezone, lead)
             positions = table.index.get_indexer(target, method="nearest", tolerance=tolerance)
-            valid = pd.DatetimeIndex(np.where(positions >= 0, table.index.asi8[positions], np.iinfo(np.int64).min))
-            valid = valid.tz_localize("UTC")
+            valid = table.index.take(positions, allow_fill=True)  # NaT where `target` is not in the table
             buckets = select_buckets(self.model, valid, cutoff, lead, max_bucket)
             buckets[positions < 0] = 0
             for column in self.columns:
@@ -631,7 +631,7 @@ class OpenMeteoSource(OpenMeteoBase):
             for column in self.columns
         }
 
-        groups = pd.Series(np.arange(len(rows))).groupby(cutoff.asi8).indices
+        groups = pd.Series(np.arange(len(rows))).groupby(epoch_ns(cutoff)).indices
         self.logger.info(f"{self._label}: Start downloading {len(groups)} model runs")
         with Progress(
             SpinnerColumn(),
@@ -669,7 +669,7 @@ class OpenMeteoSource(OpenMeteoBase):
         run = self._fetch_run(init)
         if run is None or run.empty:
             return
-        steps = np.diff(run.index.asi8)
+        steps = np.diff(epoch_ns(run.index))
         tolerance = pd.Timedelta(int(steps.min()) // 2 if len(steps) else 0)
         for lead, target in targets.items():
             valid = target[positions]

@@ -158,6 +158,29 @@ class TestFormat:
         with pytest.raises(ValueError, match="can't identify the 'wind' column"):
             fetch_all(source)
 
+    @pytest.mark.parametrize("unit", ["s", "us", "ns"])
+    def test_a_clean_file_gives_no_warning_at_any_resolution(self, tmp_path, monkeypatch, unit):
+        # pandas 3 parses timestamps to microseconds, earlier versions to nanoseconds: the check for hourly
+        # steps must not depend on it (it compared microsecond steps with a nanosecond hour and always warned).
+        real = pd.to_datetime
+        monkeypatch.setattr(pd, "to_datetime", lambda *args, **kwargs: real(*args, **kwargs).as_unit(unit))
+        source = EpftoolboxBenchmarkSource("DE", cache_dir=str(tmp_path))
+        mock_zenodo(source, benchmark_csv("DE", first="2016-03-26", days=3))
+        assert len(fetch_all(source)) == 72
+        source.logger.warning.assert_not_called()
+
+    @pytest.mark.parametrize("unit", ["us", "ns"])
+    def test_a_missing_hour_still_warns_at_any_resolution(self, tmp_path, monkeypatch, unit):
+        real = pd.to_datetime
+        monkeypatch.setattr(pd, "to_datetime", lambda *args, **kwargs: real(*args, **kwargs).as_unit(unit))
+        lines = benchmark_csv("DE", first="2016-03-26", days=3).decode().splitlines()
+        content = "\n".join(lines[:10] + lines[11:]).encode() + b"\n"  # drops 2016-03-26 08:00
+        source = EpftoolboxBenchmarkSource("DE", cache_dir=str(tmp_path))
+        mock_zenodo(source, content)
+        assert len(fetch_all(source)) == 71
+        source.logger.warning.assert_called_once()
+        assert "24 hourly values per day" in source.logger.warning.call_args.args[0]
+
     def test_fixed_offset_index_keeps_24_hours_on_dst_days(self, tmp_path):
         # 2016-03-27 is the spring DST switch in CET/CEST; the file still has a 02:00 row
         source = EpftoolboxBenchmarkSource("DE", cache_dir=str(tmp_path))

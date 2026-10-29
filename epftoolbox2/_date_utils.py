@@ -32,6 +32,16 @@ def resolve_date(s: Any) -> Any:
     return (date.today() + timedelta(days=delta)).isoformat()
 
 
+def epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:
+    """The instants of `index` as int64 nanoseconds since the epoch (`NaT` is the smallest int64).
+
+    `DatetimeIndex.asi8` counts in the index's own resolution. That is nanoseconds up to pandas 2, but
+    microseconds for what pandas 3 creates by default (`date_range`, `to_datetime`, `Timestamp` strings), so
+    arithmetic against nanosecond constants or `pd.Timestamp(int)` (always nanoseconds) must go through this.
+    """
+    return index.as_unit("ns").asi8
+
+
 _UTC_NAMES = {"UTC", "UCT", "GMT", "UNIVERSAL", "ZULU", "GREENWICH", "TZUTC()"}
 
 
