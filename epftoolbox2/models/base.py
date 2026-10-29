@@ -22,7 +22,7 @@ from ..results.ref import ModelResultRef
 from ..results.manifest import build_manifest, check_and_write, manifest_path
 from ..logging import get_logger
 from . import _contract
-from ._worker import _worker_init, _run_day
+from ._worker import _pool_init, _run_day
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -232,7 +232,7 @@ class BaseModel(ABC):
         with ProcessPoolExecutor(
             max_workers=n_processes,
             mp_context=mp_context,
-            initializer=_worker_init,
+            initializer=_pool_init,
             initargs=(
                 hour_arrays,
                 expanded_preds,
