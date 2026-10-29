@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
+from epftoolbox2.exporters import ExcelExporter
 from epftoolbox2.exporters.csv import CsvExporter
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import ModelPipeline
@@ -535,3 +536,23 @@ class TestCsvExporterFreq:
         report = EvaluationReport(results, [])
         with pytest.raises(ValueError, match="frequenc"):
             CsvExporter(tmp_path / "out.csv").export(report)
+
+
+class TestExcelExporterFreq:
+    def test_15min_results_keep_every_quarter_hour(self, tmp_path):
+        results = {
+            "A": _quarter_hour_records("2024-01-01", 1, 1.0),
+            "B": _quarter_hour_records("2024-01-01", 1, -1.0),
+        }
+        path = tmp_path / "out.xlsx"
+        ExcelExporter(path).export(EvaluationReport(results, [MAEEvaluator()]))
+        sheets = pd.read_excel(path, sheet_name=None)
+
+        details = sheets["Details"]
+        assert len(details) == 96
+        assert not details.duplicated(["run_date", "hour", "horizon"]).any()
+        assert sorted(details["hour"]) == list(range(96))
+        assert (details["prediction_A"] - details["actual"] == 1.0).all()
+        assert (details["prediction_B"] - details["actual"] == -1.0).all()
+        # One column per quarter-hour (the sheet keeps the library's name for the period of the day, "hour").
+        assert sheets["hour_MAE"].shape == (2, 1 + 96)
