@@ -54,21 +54,21 @@ import { Steps, Tabs, TabItem, Aside, Badge, Code } from '@astrojs/starlight/com
 
 ---
 
-## Parallel Model Training <Badge text="Python 3.13t+" variant="tip" />
+## Parallel Model Training
 
-Models run in parallel using a **process pool with inner thread pools** - one worker process per group of cores, each using multiple threads internally. This avoids GIL contention and BLAS oversubscription regardless of how many cores you have.
+Models run in a **process pool**: each worker process forecasts whole days, `THREADS_PER_PROCESS` of a day's tasks at a time. `MAX_PROCESSES` × `THREADS_PER_PROCESS` tasks run at once, one per core, and each task runs its BLAS and OpenMP code on one thread.
 
 ```
 ┌─ Process 1 ─────────────┐  ┌─ Process 2 ─────────────┐
-│  16 threads             │  │  16 threads             │
+│  1 task thread          │  │  1 task thread          │
 │  processes days 0..N    │  │  processes days N..M    │
 │  BLAS threads = 1       │  │  BLAS threads = 1       │
 └─────────────────────────┘  └─────────────────────────┘
 ```
 
-For best results use Python 3.14t (free-threading build), which removes the GIL and allows true parallel numpy execution within each process.
+The defaults, one process per usable CPU and one task thread per process, are the fastest setting in most cases. Threads in one process share its GIL, so with the GIL on they are slower than as many processes, often slower than a single thread. The GIL is on in every standard build, and on a free-threaded build (3.13t+) too unless the interpreter starts with `PYTHON_GIL=0`, because importing pandas 2.x turns it back on. With the GIL off, threads are about as fast as processes and share one copy of the data, which saves memory where each process gets its own copy (Windows, below).
 
-### Installing Python 3.14t
+### Installing Python 3.14t (optional)
 
 <Tabs>
   <TabItem label="uv">
@@ -85,31 +85,18 @@ For best results use Python 3.14t (free-threading build), which removes the GIL 
   </TabItem>
 </Tabs>
 
+To keep the GIL off, set it when the interpreter starts: `PYTHON_GIL=0 python script.py` or `python -X gil=0 script.py`. Setting `os.environ["PYTHON_GIL"]` inside the script comes too late.
+
 ### Script Setup
 
-<Aside type="caution">
-  Environment variables must be set **before any imports**, especially before numpy, sklearn, or epftoolbox2. BLAS thread pools are initialized at import time and ignore later changes.
-</Aside>
-
-Place this block at the very top of your script:
+Both variables are read when a model runs, so they can be set anywhere before that. Both are optional:
 
 ```python
 import os
 
-# Enable free-threading (Python 3.13t+)
-os.environ["PYTHON_GIL"] = "0"
+os.environ["MAX_PROCESSES"] = "4"        # worker processes (default: one per usable CPU)
+os.environ["THREADS_PER_PROCESS"] = "1"  # tasks each process runs at once (default: 1)
 
-# Pin BLAS to 1 thread per process, prevents oversubscription
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-
-# Parallelism configuration
-# MAX_PROCESSES × THREADS_PER_PROCESS should equal your physical core count
-os.environ["MAX_PROCESSES"] = "4"         # worker processes
-os.environ["THREADS_PER_PROCESS"] = "16"  # threads per process
-
-# Then import everything else
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.models import OLSModel, LassoCVModel
 ```
@@ -118,11 +105,10 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 
 | Variable | Default | Description |
 |---|---|---|
-| `MAX_PROCESSES` | `cpu_count // THREADS_PER_PROCESS` | Number of worker processes |
-| `THREADS_PER_PROCESS` | `16` | Threads per worker process |
-| `OMP_NUM_THREADS` | system default | OpenMP threads per process. Set to `1` |
-| `MKL_NUM_THREADS` | system default | MKL threads per process. Set to `1` |
-| `OPENBLAS_NUM_THREADS` | system default | OpenBLAS threads per process. Set to `1` |
+| `MAX_PROCESSES` | usable CPUs `// THREADS_PER_PROCESS` | Number of worker processes, never more than the run days (nor 61 on Windows). Usable CPUs are those this process may run on, e.g. a SLURM or `taskset` allocation |
+| `THREADS_PER_PROCESS` | `1` | Tasks each worker process runs at once, on threads |
+
+You don't need `OMP_NUM_THREADS`, `MKL_NUM_THREADS` or `OPENBLAS_NUM_THREADS`: each worker process limits BLAS and OpenMP to one thread per task itself (with `threadpoolctl`), and your own process keeps its settings.
 
 ### Platform Notes
 
@@ -140,5 +126,5 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 </Tabs>
 
 <Aside type="tip">
-  Leave at least one `THREADS_PER_PROCESS` block of cores free for the OS and main process. On a 128-core machine a good starting point is `MAX_PROCESSES=6`, `THREADS_PER_PROCESS=16` (96 cores used).
+  On a shared machine, set `MAX_PROCESSES` below the CPU count to leave cores for others. With `spawn`, each worker process holds its own copy of the data: if memory runs short, use fewer processes.
 </Aside>

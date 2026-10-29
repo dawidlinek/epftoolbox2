@@ -17,7 +17,6 @@ EntsoeSource for them (before that date the hourly price is repeated over its fo
 
 import os
 
-os.environ["THREADS_PER_PROCESS"] = "16"
 os.environ["MAX_PROCESSES"] = "2"
 
 from pathlib import Path

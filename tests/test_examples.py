@@ -43,7 +43,7 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 def load_example(filename: str, monkeypatch):
     """Import examples/<filename> from its path, then set one process and one thread again.
 
-    The examples set MAX_PROCESSES and THREADS_PER_PROCESS while they are imported.
+    The examples set MAX_PROCESSES while they are imported.
     """
     spec = importlib.util.spec_from_file_location(f"example_{Path(filename).stem}", EXAMPLES / filename)
     module = importlib.util.module_from_spec(spec)

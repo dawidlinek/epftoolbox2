@@ -1,10 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 import datetime
 import os
 import traceback
 
 import numpy as np
+from threadpoolctl import ThreadpoolController
 
 from ..scalers.registry import make_scaler
 
@@ -12,6 +13,20 @@ _W_HOUR_ARRAYS: Dict = {}
 _W_EXPANDED_PREDS: Dict = {}
 _W_CONFIG: Dict = {}
 _W_FIT_PREDICT = None
+
+# Native thread pools (BLAS, OpenMP) used by one task. The pool already runs MAX_PROCESSES x THREADS_PER_PROCESS
+# tasks at once, so more threads per task only oversubscribe the cores (an OLS run took 4-40x longer that way).
+NATIVE_THREADS_PER_TASK = 1
+# Read by these libraries when they load, so they cover a library a model imports after the pool started.
+NATIVE_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+_W_THREADPOOLS: Optional[ThreadpoolController] = None
+_W_NATIVE_LIMITS = None  # held for the worker's lifetime
 
 # Reasons a task produces no forecast without being an error. They are counted per model and reported.
 SKIP_TOO_FEW_ROWS = "too_few_rows"
@@ -24,11 +39,34 @@ class TaskFailed(RuntimeError):
     """An unexpected exception inside a worker task; carries the task identity and the worker's traceback."""
 
 
+def _limit_native_threads() -> None:
+    """Limit BLAS and OpenMP to NATIVE_THREADS_PER_TASK threads in this worker process.
+
+    Only for a pool worker: the limits are never restored, and the caller's process must keep its own.
+    """
+    global _W_THREADPOOLS, _W_NATIVE_LIMITS
+    for name in NATIVE_THREAD_ENV_VARS:
+        os.environ[name] = str(NATIVE_THREADS_PER_TASK)
+    # Libraries already loaded ignore the variables: under fork that is everything the parent imported, under
+    # spawn whatever importing this module loaded (numpy's BLAS at least). threadpoolctl sets them directly.
+    _W_THREADPOOLS = ThreadpoolController()
+    _W_NATIVE_LIMITS = _W_THREADPOOLS.limit(limits=NATIVE_THREADS_PER_TASK)
+
+
+def _limit_openmp_in_task_thread() -> None:
+    """The OpenMP limit is per thread (the BLAS ones are per process), so each task thread sets its own."""
+    if _W_THREADPOOLS is not None:
+        _W_THREADPOOLS.limit(limits=NATIVE_THREADS_PER_TASK, user_api="openmp")
+
+
+def _pool_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
+    """Initialiser of the worker pool: limit native threads, then load the data and the model."""
+    _limit_native_threads()
+    _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs)
+
+
 def _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
     global _W_HOUR_ARRAYS, _W_EXPANDED_PREDS, _W_CONFIG, _W_FIT_PREDICT
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     _W_HOUR_ARRAYS = hour_arrays
     _W_EXPANDED_PREDS = expanded_preds
     _W_CONFIG = config
@@ -133,7 +171,7 @@ def _run_day(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
             collect(t, _run_task(t))
         return results, skipped
 
-    with ThreadPoolExecutor(max_workers=threads) as pool:
+    with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
         futures = {pool.submit(_run_task, t): t for t in tasks}
         for future in as_completed(futures):
             collect(futures[future], future.result())

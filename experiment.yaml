@@ -1,6 +1,6 @@
 environment:
   max_processes: 4
-  threads_per_process: 8
+  threads_per_process: 1
 data_pipeline:
   start: '2023-01-01'
   end: '2024-04-01'

@@ -125,21 +125,19 @@ Predictors can be specified in four ways:
 
 ## Parallelism
 
-Models use a **process pool with inner thread pools**. Each worker process handles one forecast day (24 hours × horizon), keeping results consistent and progress tracking stable.
+Models use a **process pool**. Each worker process handles whole forecast days (24 hours × horizon), `THREADS_PER_PROCESS` tasks at a time, and runs each task's BLAS and OpenMP code on one thread, which it sets itself: `OMP_NUM_THREADS` and the like are not needed.
 
 | Variable | Default | Description |
 |---|---|---|
-| `MAX_PROCESSES` | `cpu_count // THREADS_PER_PROCESS` | Worker processes |
-| `THREADS_PER_PROCESS` | `16` | Threads per process |
+| `MAX_PROCESSES` | usable CPUs `// THREADS_PER_PROCESS` | Worker processes |
+| `THREADS_PER_PROCESS` | `1` | Tasks each process runs at once, on threads |
 
 ```python
 import os
 
-# Must be set before any imports
-os.environ["PYTHON_GIL"] = "0"            # Enable free-threading (Python 3.13t+)
+# Read when a model runs; both optional
 os.environ["MAX_PROCESSES"] = "4"
-os.environ["THREADS_PER_PROCESS"] = "16"  # → 4 × 16 = 64 cores
-os.environ["OMP_NUM_THREADS"] = "1"       # Prevent BLAS oversubscription
+os.environ["THREADS_PER_PROCESS"] = "1"  # more only helps with the GIL off (free-threaded build, PYTHON_GIL=0)
 ```
 
 See [Installation](/epftoolbox2/getting-started/installation/#parallel-model-training) for full setup including platform notes.

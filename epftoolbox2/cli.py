@@ -159,7 +159,7 @@ model_pipeline:
 
 # environment:
 #   max_processes: 4
-#   threads_per_process: 2
+#   threads_per_process: 1
 #   model_index: 0   # SLURM array: one model per task; needs model_pipeline.save_dir, then `epf report`
 """
 

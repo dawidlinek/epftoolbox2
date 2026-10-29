@@ -8,7 +8,6 @@ This example demonstrates a complete electricity price forecasting workflow:
 
 import os
 
-os.environ["THREADS_PER_PROCESS"] = "16"
 os.environ["MAX_PROCESSES"] = "2"
 
 from pathlib import Path
