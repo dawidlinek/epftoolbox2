@@ -8,6 +8,7 @@ from .model_pipeline import ModelPipeline
 from ..information_set import InformationSet
 from ..results.report import EvaluationReport
 from ..logging import get_logger
+from ._yaml import dump_yaml
 
 logger = get_logger(__name__)
 
@@ -258,8 +259,8 @@ class Workflow:
 
     def save(self, path: Union[str, Path]) -> None:
         path = Path(path)
-        with open(path, "w") as f:
-            yaml.dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)
+        config = self.to_dict()
+        path.write_text(dump_yaml(config))
         logger.info(f"Workflow: Saved configuration to {path}")
 
     @classmethod

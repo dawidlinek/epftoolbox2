@@ -14,6 +14,7 @@ from ..exporters.base import Exporter
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef
 from ..logging import get_logger
+from ._yaml import dump_yaml
 
 logger = get_logger(__name__)
 
@@ -261,9 +262,8 @@ class ModelPipeline:
 
     def save(self, path: Union[str, Path]) -> None:
         path = Path(path)
-        config = self.to_dict()  # before opening the file: a pipeline that can't be saved must not truncate it
-        with open(path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        # The text is built before the file is opened: a pipeline that can't be saved must not truncate it.
+        path.write_text(dump_yaml(self.to_dict()))
         logger.info(f"Pipeline: Saved configuration to {path}")
 
     @classmethod

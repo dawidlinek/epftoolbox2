@@ -517,8 +517,8 @@ class TestModelPipelineSerialization:
             ModelPipeline().add_model(OLSModel(predictors=lambda horizon: ["x"], name="Bad")).save(path)
         assert path.read_text() == before
 
-    def test_shared_predictor_list_yaml_alias_loads_correctly(self, tmp_path):
-        # Same list object → PyYAML emits alias; both models must load independently
+    def test_shared_predictor_list_is_written_in_full_for_each_model(self, tmp_path):
+        # The same list object used by two models used to be written once as `&id001` and then as `*id001`.
         predictors = ["load_actual", "price_d-1"]
         original = (
             ModelPipeline()
@@ -527,10 +527,25 @@ class TestModelPipelineSerialization:
         )
         path = tmp_path / "mp.yaml"
         original.save(path)
-        loaded = ModelPipeline.load(path)
 
+        text = path.read_text()
+        assert "&id" not in text and "*id" not in text
+        saved = yaml.safe_load(text)["models"]
+        assert [m["params"]["predictors"] for m in saved] == [predictors, predictors]
+        assert text.count("- load_actual") == 2  # inline in both models, not once and a reference
+
+        loaded = ModelPipeline.load(path)
         assert loaded.models[0].predictors == predictors
         assert loaded.models[1].predictors == predictors
+        assert loaded.models[0].predictors is not loaded.models[1].predictors  # editing one leaves the other
+
+    def test_shared_parameter_lists_of_evaluators_and_exporters_are_written_in_full(self, tmp_path):
+        show = ["summary", "horizon"]
+        pipeline = ModelPipeline().add_exporter(TerminalExporter(show=show)).add_exporter(TerminalExporter(show=show))
+        path = tmp_path / "mp.yaml"
+        pipeline.save(path)
+        assert "&id" not in path.read_text() and "*id" not in path.read_text()
+        assert [e.show for e in ModelPipeline.load(path).exporters] == [show, show]
 
     def test_unknown_model_raises_on_load(self, tmp_path):
         path = tmp_path / "bad.yaml"
@@ -782,3 +797,97 @@ class TestWorkflowSerialization:
         assert len(mp.models) == 1
         assert mp.models[0].name == "Inline"
         assert mp.models[0].training_window == 90
+
+
+# ---------------------------------------------------------------------------
+# No YAML anchors and aliases
+# ---------------------------------------------------------------------------
+
+
+class TestYamlWithoutAliases:
+    """An object used twice is written in full each time (`&id001` / `*id001` are valid YAML, but hard to edit)."""
+
+    @staticmethod
+    def assert_no_aliases(text):
+        assert "&id" not in text and "*id" not in text, text
+
+    def test_dump_yaml_writes_shared_objects_in_full(self):
+        from epftoolbox2.pipelines._yaml import dump_yaml
+
+        shared_list, shared_dict = ["a", "b"], {"k": 1}
+        data = {"first": shared_list, "second": shared_list, "d1": shared_dict, "d2": shared_dict}
+        text = dump_yaml(data)
+
+        self.assert_no_aliases(text)
+        assert yaml.safe_load(text) == data
+        assert list(yaml.safe_load(text)) == list(data)  # keys keep their order
+
+    def test_data_pipeline_components_sharing_a_list(self, tmp_path):
+        columns = ["price", "load"]
+        pipeline = (
+            DataPipeline()
+            .add_transformer(LagTransformer(columns, [1], "day"))
+            .add_transformer(LagTransformer(columns, [2], "day"))
+        )
+        path = tmp_path / "dp.yaml"
+        pipeline.save(path)
+
+        self.assert_no_aliases(path.read_text())
+        assert [t.columns for t in DataPipeline.load(path).transformers] == [columns, columns]
+
+    def test_data_pipeline_loaded_with_anchors_and_env_references(self, tmp_path, monkeypatch):
+        # A `${VAR}` reference is written back as it was loaded: the same list object for both components here.
+        monkeypatch.setenv("COLUMN", "price")
+        source = tmp_path / "dp.yaml"
+        source.write_text(
+            "transformers:\n"
+            "- class: LagTransformer\n"
+            '  params: {columns: &c ["${COLUMN}", load], lags: [1], freq: day}\n'
+            "- class: LagTransformer\n"
+            "  params: {columns: *c, lags: [2], freq: day}\n"
+        )
+        saved = tmp_path / "saved.yaml"
+        DataPipeline.load(source).save(saved)
+
+        self.assert_no_aliases(saved.read_text())
+        written = yaml.safe_load(saved.read_text())["transformers"]
+        assert [t["params"]["columns"] for t in written] == [["${COLUMN}", "load"]] * 2
+        assert [t.columns for t in DataPipeline.load(saved).transformers] == [["price", "load"]] * 2
+
+    def test_workflow_loaded_with_anchors_in_its_inline_models(self, tmp_path):
+        source = tmp_path / "experiment.yaml"
+        source.write_text(
+            "data_pipeline: {start: '2024-01-01', end: '2024-02-01'}\n"
+            "model_pipeline:\n"
+            "  test_start: '2024-01-20'\n"
+            "  test_end: '2024-01-25'\n"
+            "  models:\n"
+            "  - class: OLSModel\n"
+            "    params: {predictors: &p [price_d-1, 'load_d+{horizon}'], name: A}\n"
+            "  - class: LassoCVModel\n"
+            "    params: {predictors: *p, name: B}\n"
+        )
+        saved = tmp_path / "saved.yaml"
+        Workflow.load(source).save(saved)
+
+        self.assert_no_aliases(saved.read_text())
+        models = Workflow.load(saved)._build_model_pipeline().models
+        assert [m.name for m in models] == ["A", "B"]
+        assert [m.predictors for m in models] == [["price_d-1", "load_d+{horizon}"]] * 2
+
+    def test_workflow_saved_without_inline_sections_is_unchanged(self, tmp_path):
+        out = tmp_path / "exp.yaml"
+        Workflow(data_start="2024-01-01", data_end="2024-02-01", model_save_dir="results").save(out)
+        config = yaml.safe_load(out.read_text())
+        assert config["data_pipeline"]["start"] == "2024-01-01"
+        assert config["model_pipeline"]["save_dir"] == "results"
+        self.assert_no_aliases(out.read_text())
+
+    def test_workflow_failed_save_leaves_an_existing_file_alone(self, tmp_path):
+        out = tmp_path / "exp.yaml"
+        out.write_text("keep: me\n")
+        workflow = Workflow(data_start="2024-01-01", data_end="2024-02-01")
+        workflow.model_save_dir = object()  # YAML cannot represent it
+        with pytest.raises(yaml.YAMLError):
+            workflow.save(out)
+        assert out.read_text() == "keep: me\n"

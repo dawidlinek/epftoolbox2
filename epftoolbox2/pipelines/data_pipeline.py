@@ -32,6 +32,7 @@ from epftoolbox2.data.cache_manager import (
 )
 from epftoolbox2.logging import get_logger
 from epftoolbox2._date_utils import _DATE_PATTERN
+from ._yaml import dump_yaml
 
 logger = get_logger(__name__)
 
@@ -550,8 +551,7 @@ class DataPipeline:
         """
         path = Path(path)
         config = self.to_dict(include_secrets=include_secrets, base_dir=path.parent)
-        with open(path, "w") as f:
-            yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
+        path.write_text(dump_yaml(config))
         logger.info(f"Pipeline: Saved configuration to {path}")
 
     @classmethod
