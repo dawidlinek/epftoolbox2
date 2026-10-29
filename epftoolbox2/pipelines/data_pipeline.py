@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import re
-import numpy as np
 import pandas as pd
 from pathlib import Path
 import yaml
@@ -32,7 +31,7 @@ from epftoolbox2.data.cache_manager import (
 )
 from epftoolbox2.logging import get_logger
 from epftoolbox2._date_utils import _DATE_PATTERN
-from ._yaml import dump_yaml
+from ._yaml import dump_yaml, to_yaml_value
 
 logger = get_logger(__name__)
 
@@ -512,7 +511,7 @@ class DataPipeline:
             if key.startswith("_") or key in _RUNTIME_ATTRIBUTES:
                 continue
             where = f"{class_name}.{key}"
-            plain = _to_yaml_value(value, where)
+            plain = to_yaml_value(value, where)
             ref = refs.get(key)
             unchanged = ref is not None and ref["value"] == plain
             if unchanged and _ENV_REF.search(str(ref["raw"])):
@@ -725,33 +724,6 @@ def _secret_env_var(component: Any, key: str) -> str:
     if name.endswith("Source") and len(name) > len("Source"):
         name = name[: -len("Source")]
     return f"{name.upper()}_{key.upper()}"
-
-
-def _to_yaml_value(value: Any, where: str) -> Any:
-    """Plain YAML-safe value (numpy scalars and arrays, tuples, ranges and paths converted); raises otherwise."""
-    if value is None or isinstance(value, (bool, str)):
-        return value
-    if isinstance(value, int) and not isinstance(value, bool):
-        return int(value)
-    if isinstance(value, float):
-        return float(value)
-    if isinstance(value, np.generic):
-        return _to_yaml_value(value.item(), where)
-    if isinstance(value, np.ndarray):
-        return _to_yaml_value(value.tolist(), where)
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, (list, tuple, range)):
-        return [_to_yaml_value(v, where) for v in value]
-    if isinstance(value, dict):
-        if not all(isinstance(k, (str, int)) for k in value):
-            raise TypeError(f"Cannot save {where}: dictionary keys must be strings or integers")
-        return {k: _to_yaml_value(v, f"{where}.{k}") for k, v in value.items()}
-    kind = "a callable" if callable(value) else f"a {type(value).__name__}"
-    raise TypeError(
-        f"Cannot save {where}: it is {kind}, which YAML cannot represent "
-        "(use str, int, float, bool, None, list or dict)"
-    )
 
 
 def _qualified_name(obj: Any) -> str:

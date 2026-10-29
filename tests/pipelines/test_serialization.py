@@ -9,7 +9,7 @@ from epftoolbox2.data.sources import CalendarSource, CsvSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.models import OLSModel, LassoCVModel
-from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
 from epftoolbox2.exporters import TerminalExporter, ExcelExporter
 
 
@@ -552,6 +552,122 @@ class TestModelPipelineSerialization:
         path.write_text("models:\n- class: NonExistentModel\n  params: {predictors: [], name: x}\n")
         with pytest.raises(ValueError, match="Unknown model"):
             ModelPipeline.load(path)
+
+
+class TupleParamModel(OLSModel):
+    """A model with a tuple parameter, as a neural network has `hidden=(256, 128)`."""
+
+    def __init__(self, predictors, hidden=(8,), **kwargs):
+        super().__init__(predictors, **kwargs)
+        self.hidden = hidden
+
+    @property
+    def _model_kwargs(self):
+        return {"hidden": self.hidden}
+
+
+@pytest.fixture
+def tuple_param_model(monkeypatch):
+    """Registers TupleParamModel (this module) so that a saved pipeline can name it."""
+    from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY as MODEL_REGISTRY
+
+    monkeypatch.setitem(MODEL_REGISTRY["models"], "TupleParamModel", __name__)
+    return TupleParamModel
+
+
+class TestModelPipelineParameterFidelity:
+    """Every public parameter is written, converted to plain YAML values, or refused: none is silently dropped."""
+
+    def test_tuple_parameter_survives_as_a_list_and_the_model_reloads_with_it(self, tmp_path, tuple_param_model):
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_model(tuple_param_model(["price_d-1"], hidden=(256, 128), name="Net")).save(path)
+
+        assert yaml.safe_load(path.read_text())["models"][0]["params"]["hidden"] == [256, 128]
+        reloaded = ModelPipeline.load(path).models[0]
+        assert isinstance(reloaded, TupleParamModel)
+        assert reloaded.hidden == [256, 128]  # not the default (8,)
+        assert reloaded._model_kwargs == {"hidden": [256, 128]}  # what the worker processes rebuild the model from
+
+    def test_predictors_given_as_a_tuple_are_saved(self, tmp_path):
+        # A tuple used to be dropped, leaving a file that could not be loaded (predictors is required).
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_model(OLSModel(predictors=("price_d-1", "load_d+{horizon}"), name="T")).save(path)
+        assert ModelPipeline.load(path).models[0].predictors == ["price_d-1", "load_d+{horizon}"]
+
+    def test_numpy_values_are_saved_as_plain_python(self, tmp_path, tuple_param_model):
+        model = tuple_param_model(["price_d-1"], hidden=np.array([64, 32]), training_window=np.int64(180), name="Numpy")
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_model(model).add_exporter(TerminalExporter(show=np.array(["summary"]))).save(path)
+
+        assert "!!python" not in path.read_text()
+        loaded = ModelPipeline.load(path)
+        assert loaded.models[0].hidden == [64, 32]
+        assert loaded.models[0].training_window == 180 and type(loaded.models[0].training_window) is int
+        assert loaded.exporters[0].show == ["summary"]
+
+    def test_path_parameter_is_saved_as_a_string(self, tmp_path):
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_exporter(ExcelExporter(path=Path("results") / "out.xlsx")).save(path)
+        assert yaml.safe_load(path.read_text())["exporters"][0]["params"]["path"] == str(Path("results") / "out.xlsx")
+
+    def test_unsupported_model_parameter_raises_naming_model_and_parameter(self, tmp_path, tuple_param_model):
+        model = tuple_param_model(["price_d-1"], hidden={64, 32}, name="WithSet")  # a set cannot be written to YAML
+        path = tmp_path / "mp.yaml"
+        with pytest.raises(TypeError, match=r"TupleParamModel\('WithSet'\)\.hidden"):
+            ModelPipeline().add_model(model).save(path)
+        assert not path.exists()
+
+    def test_callable_model_parameter_raises(self, tmp_path):
+        model = LassoCVModel(["price_d-1"], name="WithFunction")
+        model.cv = lambda n: n
+        with pytest.raises(TypeError, match=r"LassoCVModel\('WithFunction'\)\.cv.*callable"):
+            ModelPipeline().add_model(model).to_dict()
+
+    def test_unsupported_evaluator_and_exporter_parameters_raise(self, tmp_path):
+        evaluator = rMAEEvaluator("Naive")
+        evaluator.base_model = object()
+        with pytest.raises(TypeError, match=r"rMAEEvaluator\.base_model"):
+            ModelPipeline().add_evaluator(evaluator).save(tmp_path / "a.yaml")
+
+        exporter = TerminalExporter()
+        exporter.show = {"summary"}
+        with pytest.raises(TypeError, match=r"TerminalExporter\.show"):
+            ModelPipeline().add_exporter(exporter).save(tmp_path / "b.yaml")
+
+    def test_every_registered_component_round_trips_with_non_default_values(self, tmp_path):
+        from epftoolbox2.exporters import CsvExporter
+        from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY as MODEL_REGISTRY
+
+        originals = {
+            "models": [
+                OLSModel(["price_d-1", "load_d+{horizon}"], training_window=90, name="O", scaler="asinh"),
+                LassoCVModel(["price_d-1"], training_window=60, cv=3, max_iter=77, name="L"),
+            ],
+            "evaluators": [MAEEvaluator(), RMSEEvaluator(), rMAEEvaluator("O")],
+            "exporters": [
+                CsvExporter(str(tmp_path / "out.csv"), extra_columns=["is_holiday"]),
+                ExcelExporter(str(tmp_path / "out.xlsx"), sheets=["summary", "hour"]),
+                TerminalExporter(show=["hour"]),
+            ],
+        }
+        covered = {type(obj).__name__ for objs in originals.values() for obj in objs}
+        assert covered == {name for names in MODEL_REGISTRY.values() for name in names}  # add a new component here
+
+        pipeline = ModelPipeline()
+        pipeline.models, pipeline.evaluators, pipeline.exporters = (
+            originals[kind] for kind in ("models", "evaluators", "exporters")
+        )
+        path = tmp_path / "mp.yaml"
+        pipeline.save(path)
+        loaded = ModelPipeline.load(path)
+
+        def public(obj):
+            return {k: str(v) for k, v in vars(obj).items() if not k.startswith("_")}
+
+        for kind, objs in originals.items():
+            reloaded = getattr(loaded, kind)
+            assert [type(o) for o in reloaded] == [type(o) for o in objs], kind
+            assert [public(o) for o in reloaded] == [public(o) for o in objs], kind
 
 
 # ---------------------------------------------------------------------------

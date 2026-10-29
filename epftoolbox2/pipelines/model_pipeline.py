@@ -14,7 +14,7 @@ from ..exporters.base import Exporter
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef
 from ..logging import get_logger
-from ._yaml import dump_yaml
+from ._yaml import dump_yaml, to_yaml_value
 
 logger = get_logger(__name__)
 
@@ -239,15 +239,12 @@ class ModelPipeline:
     def _serialize_component(self, component: Any) -> Dict[str, Any]:
         class_name = type(component).__name__
         self._check_predictors_can_be_saved(component)
-        params = {}
-        if hasattr(component, "__dict__"):
-            for key, value in component.__dict__.items():
-                if key.startswith("_"):
-                    continue
-                if isinstance(value, Path):
-                    params[key] = str(value)
-                elif isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                    params[key] = value
+        label = f"{class_name}({component.name!r})" if isinstance(component, BaseModel) else class_name
+        params = {
+            key: to_yaml_value(value, f"{label}.{key}")
+            for key, value in getattr(component, "__dict__", {}).items()
+            if not key.startswith("_")
+        }
         return {"class": class_name, "params": params}
 
     def to_dict(self) -> Dict[str, Any]:
