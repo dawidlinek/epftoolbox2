@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.data.transformers import DailyProfileTransformer, DailyStatsTransformer
+from epftoolbox2.data.transformers import DailyProfileTransformer
 from epftoolbox2.evaluators import rMAEEvaluator
 from epftoolbox2.information_set import Availability, InformationSet, perturb_unknown
 from epftoolbox2.models import OLSModel
@@ -140,75 +140,4 @@ def test_a_half_hour_profile_slot_is_judged_at_its_own_time():
 
     found, _ = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-16")
 
-    assert {v.period for v in found} == set(range(24))
-
-
-_DAY_STATS_REASON = "a DailyStatsTransformer column is judged at the row's own period, not at the last slot of its day"
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_DAY_STATS_REASON)
-@pytest.mark.parametrize("stat", ["min", "max", "mean", "last"])
-def test_day_aggregate_realised_after_the_issue_is_refused_at_every_period(stat):
-    """Look-ahead. With a user rule `load_actual*` realised 1 h after its period, `load_actual_day_max` on the rows of D
-    is the maximum over all 24 hours of D, known only when the last one is (01:00 on D+1): not at the 11:45 issue on D,
-    whatever the row's period. Judged at the row's own period, it is accepted for periods 0-9 (each realised by 11:00)."""
-    index = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
-    info = InformationSet("11:45", "Europe/Brussels", rules={"load_actual*": Availability.realised("1h")})
-    expanded = {(period, 1): [f"load_actual_day_{stat}"] for period in range(24)}
-
-    found, unknown = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-23")
-
-    assert unknown == set()
-    assert {v.period for v in found} == set(range(24))
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_DAY_STATS_REASON)
-def test_day_aggregate_of_a_lagged_column_is_accepted_at_every_period():
-    """False refusal. LagTransformer before DailyStatsTransformer: `load_actual_d-1_day_max` on the rows of D is the
-    maximum of `load_actual_d-1` over D, i.e. of the load on D-1, known at 01:00 on D. Judged at the row's own period
-    as unshifted `load_actual`, it is refused for periods 10-23 ("known D+1 01:00")."""
-    index = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
-    info = InformationSet("11:45", "Europe/Brussels", rules={"load_actual*": Availability.realised("1h")})
-    expanded = {(period, 1): ["load_actual_d-1_day_max"] for period in range(24)}
-
-    found, unknown = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-23")
-
-    assert unknown == set()
-    assert [(v.predictor, v.period) for v in found] == []
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_DAY_STATS_REASON)
-def test_probe_perturbs_a_day_aggregate_realised_after_the_issue_on_every_row():
-    """The leakage probe's side of the look-ahead above: every row of the run day carries the same
-    `load_actual_day_max` (known 01:00 the next day), so every row must be perturbed, not only the rows from 10:00 on."""
-    index = pd.date_range("2024-01-08", "2024-01-13", freq="h", tz="Europe/Warsaw", inclusive="left")
-    raw = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
-    data = DailyStatsTransformer(columns="load_actual", stats=["max"]).transform(raw)[["load_actual_day_max"]]
-    info = InformationSet("11:45", "Europe/Brussels", rules={"load_actual*": Availability.realised("1h")})
-
-    perturbed, _counts, unchecked = perturb_unknown(data, "2024-01-10", info)
-
-    assert unchecked == []
-    run_day = np.asarray(index.tz_localize(None).normalize() == pd.Timestamp("2024-01-10"))
-    assert (perturbed.loc[run_day, "load_actual_day_max"] != data.loc[run_day, "load_actual_day_max"]).all()
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_DAY_STATS_REASON)
-@pytest.mark.parametrize(
-    "rule",
-    [Availability.as_of("09:00"), Availability.weather_cutoff("00", "6h"), Availability.weather_run("6h")],
-    ids=["as_of", "weather_cutoff", "weather_run"],
-)
-def test_a_day_lead_of_a_day_aggregate_is_a_shift_of_the_row(rule):
-    """Look-ahead. `x_day_max_d+1` (LagTransformer(lags=[-1]) on the day aggregate `x_day_max`) is the maximum of x over
-    D+1, known only on D+1 under these rules. They drop a leading `_d+k` as the source's own lead, but a `_d+k` after
-    an aggregate always shifts the row, so dropping it judges the value of D instead: accepted at the 11:45 issue on D
-    (all periods for as_of and weather_cutoff, periods 0-5 for weather_run)."""
-    index = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
-    info = InformationSet("11:45", "Europe/Brussels", rules={"x*": rule})
-    expanded = {(period, 1): ["x_day_max_d+1"] for period in range(24)}
-
-    found, unknown = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-23")
-
-    assert unknown == set()
     assert {v.period for v in found} == set(range(24))

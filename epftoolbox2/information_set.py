@@ -3,7 +3,8 @@
 A forecast issued on day D at the issue time (e.g. 11:45 Brussels, before the 12:00 day-ahead gate closure) may
 only use values published by then. Each base column gets an `Availability` rule; predictor names are parsed
 (`x`, `x_d-k`, `x_d+k`, `x_h-k`, ...) to find the base column and the delivery time of the value they hold (a
-DailyProfileTransformer column, `x_h05` or `x_h05_d-1`, is delivered in the slot it names, not at the row); and
+DailyProfileTransformer column, `x_h05` or `x_h05_d-1`, is delivered in the slot it names, not at the row, and a
+DailyStatsTransformer column, `x_day_max` or `x_day_max_d-1`, in the last slot of the day it aggregates); and
 `InformationSet.check` evaluates every expanded predictor for every (period, horizon) before any model is fitted.
 `leakage_probe` tests the same boundary empirically: it perturbs every value that is not yet known at issue time
 and checks that the forecasts don't move.
@@ -38,6 +39,9 @@ _STEP_MINUTES = {"1h": 60, "15min": 15}
 # `_s00`..`_s95` for 15-minute data. No sign, so they never parse as a shift.
 _PROFILE_SLOT = re.compile(r"^(?P<column>.+)_(?P<unit>[hs])(?P<n>\d{2})$")
 _SLOT_MINUTES = {"h": 60, "s": 15}
+# DailyStatsTransformer's suffixes (`data.transformers.daily_stats`): a statistic of the column over the row's whole
+# local day. No sign, so they never parse as a shift.
+_DAY_AGGREGATE = re.compile(r"^(?P<column>.+)_day_(?:min|max|mean|last)$")
 
 
 def _parse_time(value: str) -> int:
@@ -401,6 +405,15 @@ class ResolvedColumn:
         profile = _profile_source(self)
         return None if profile is None else profile[1:]
 
+    @property
+    def day_aggregate(self) -> bool:
+        """Whether `base` names a DailyStatsTransformer column (`x_day_max`, `x_d-1_day_mean`).
+
+        Such a column holds a statistic of its row's whole local day, the same value on every row of that day, so it is
+        known when the last slot of that day is, whatever the row's period.
+        """
+        return _day_aggregate_source(self) is not None
+
 
 def parse_predictor(name: str) -> List[Tuple[str, Tuple[Shift, ...]]]:
     """All readings of a column name as base + suffixes, from the full name to the fully stripped base.
@@ -435,6 +448,29 @@ def _profile_source(col: ResolvedColumn) -> Optional[Tuple[ResolvedColumn, int, 
         return None
     base, shifts = parse_predictor(match["column"])[-1]
     return replace(col, base=base, shifts=shifts), start, length
+
+
+def _day_aggregate_source(col: ResolvedColumn) -> Optional[ResolvedColumn]:
+    """For a DailyStatsTransformer column, the column it aggregates over its row's local day.
+
+    `x_d-1_day_max` (an aggregate of the lag `x_d-1`) aggregates `x` shifted by `_d-1`; the shifts after the aggregate
+    (`col.shifts`) pick the day. None for a column that is not one, and for a column a data source emits under that
+    very name, which its rule describes as it is (an OpenMeteoSource's `is_day` averaged over locations is
+    `is_day_mean`).
+    """
+    if col.layer == "sources" and col.key == col.base:
+        return None
+    match = _DAY_AGGREGATE.match(col.base)
+    if match is None:
+        return None
+    base, shifts = parse_predictor(match["column"])[-1]
+    return replace(col, base=base, shifts=shifts)
+
+
+def _built_from(col: ResolvedColumn) -> Optional[ResolvedColumn]:
+    """The column a DailyProfileTransformer or DailyStatsTransformer column was built from, or None."""
+    profile = _profile_source(col)
+    return profile[0] if profile is not None else _day_aggregate_source(col)
 
 
 # ---------------------------------------------------------------------------
@@ -697,10 +733,11 @@ class InformationSet:
         """An OpenMeteoSource column's own cutoff is a source-side setting, not a data fact: point at it."""
         if col.rule is None or col.rule.kind != "weather_cutoff":
             return ""
-        profile = _profile_source(col)
-        # A profile's shifts after its slot always shift the row; only the column it was built from has a lead.
-        if profile is not None:
-            row_shifts = list(col.shifts) + _shifts_after_source_lead(profile[0].shifts)
+        source = _built_from(col)
+        # The shifts after a profile's slot or a day aggregate always shift the row; only the column it was built from
+        # has a lead.
+        if source is not None:
+            row_shifts = list(col.shifts) + _shifts_after_source_lead(source.shifts)
         else:
             row_shifts = _shifts_after_source_lead(col.shifts)
         if any(s.offset > 0 for s in row_shifts):
@@ -993,11 +1030,20 @@ def _available_array(
         # source's lead), `x_d+1_h05` is `x_d+1` at 05:00 on D. A repeated autumn slot is its first occurrence, the
         # one DailyProfileTransformer copies; a slot skipped in spring moves forward to the switch.
         source, start, length = profile
-        days = sum(s.offset for s in col.shifts if s.unit == "d")
-        elapsed = sum(s.minutes for s in col.shifts if s.unit != "d")
-        reached = day + days + np.floor((np.asarray(minute, dtype=float) + elapsed) / 1440.0)
+        reached = _shifted_day(col.shifts, day, minute)
         slot = np.full(len(reached), float(start))
         return _available_array(source, rule, reached, slot, length, ctx, None, issue_day + reached - day)
+    source = _day_aggregate_source(col)
+    if source is not None:
+        # A day aggregate holds, on every row of a local day, a statistic of the column it was built from over every
+        # slot of that day (23, 24 or 25 hours on a DST index), so it is known when the latest of them is: the day's
+        # last slot (23:00 for hourly data), on the day the shifts after the aggregate reach, none of them a source's
+        # lead. Each rule's availability never decreases with the slot's time, so no earlier slot is known later; a
+        # repeated last slot is its second occurrence.
+        reached = _shifted_day(col.shifts, day, minute)
+        last = np.full(len(reached), 1440.0 - step)
+        second = np.zeros(len(reached), dtype=bool)
+        return _available_array(source, rule, reached, last, step, ctx, second, issue_day + reached - day)
     if rule.kind == "static":
         return np.full(len(day), -np.inf)
     if rule.kind == "as_of":
@@ -1048,6 +1094,14 @@ def _shifts_after_source_lead(shifts: Sequence[Shift]) -> List[Shift]:
     if rest and rest[0].unit == "d" and rest[0].offset > 0:
         rest = rest[1:]
     return rest
+
+
+def _shifted_day(shifts: Sequence[Shift], day: np.ndarray, minute: np.ndarray) -> np.ndarray:
+    """The day (after `ctx.day`) of the row that `shifts` move a row at (`day`, `minute`) to, every shift moving it:
+    the day a profile or a day aggregate is read on. A shift by hours or minutes moves it across midnight."""
+    days = sum(s.offset for s in shifts if s.unit == "d")
+    elapsed = sum(s.minutes for s in shifts if s.unit != "d")
+    return day + days + np.floor((np.asarray(minute, dtype=float) + elapsed) / 1440.0)
 
 
 def _read_day_offset(shifts: Sequence[Shift], minute: np.ndarray) -> np.ndarray:
