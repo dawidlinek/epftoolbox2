@@ -17,9 +17,8 @@ This guide shows you how to download electricity data and run a simple forecast 
    # Set your ENTSOE API key
    os.environ["ENTSOE_API_KEY"] = "your-api-key-here"
 
-   # Optional: Configure multithreading (requires Python 3.13t+)
-   os.environ["PYTHON_GIL"] = "0"
-   os.environ["THREADS_PER_PROCESS"] = "16"
+   # Optional: fewer worker processes for the models (default: one per usable CPU)
+   # os.environ["MAX_PROCESSES"] = "4"
    ```
 
 2. **Download data with DataPipeline**

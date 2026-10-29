@@ -120,7 +120,7 @@ def main(
         model_target="price",
         model_horizon=6,  # as far ahead as the weather forecasts go
         max_processes=4,
-        threads_per_process=8,
+        threads_per_process=1,
     ).save(output / "experiment.yaml")
 
     # -----------------------------------------------------------------------

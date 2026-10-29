@@ -9,7 +9,6 @@ Run 01_data_pipeline_only.py first: it writes the "data_output.csv" this example
 
 import os
 
-os.environ["THREADS_PER_PROCESS"] = "16"
 os.environ["MAX_PROCESSES"] = "2"
 
 from pathlib import Path

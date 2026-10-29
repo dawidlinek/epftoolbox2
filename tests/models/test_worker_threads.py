@@ -6,11 +6,14 @@ variables set inside a forked worker come too late for that (the libraries read 
 worker limits the loaded libraries with threadpoolctl. The caller's own limits must stay as they were.
 """
 
+import os
+
 import numpy as np
 import pytest
 from threadpoolctl import threadpool_info, threadpool_limits
 
 from epftoolbox2.models import LassoCVModel, OLSModel, _worker
+from epftoolbox2.models import base
 from epftoolbox2.models.base import BaseModel
 from tests.synthetic import PREDICTORS, make_market_data
 
@@ -85,3 +88,20 @@ def test_forecasts_are_bitwise_identical_with_one_or_two_processes(monkeypatch, 
 
     assert len(one) == 24 * 2  # periods x run days: two days, so each of the two processes can take one
     assert one == two
+
+
+def test_default_is_one_task_thread_per_process_and_one_process_per_usable_cpu(monkeypatch):
+    monkeypatch.delenv("MAX_PROCESSES", raising=False)
+    monkeypatch.delenv("THREADS_PER_PROCESS", raising=False)
+    monkeypatch.setattr(base, "_usable_cpu_count", lambda: 8)
+    model = OLSModel(PREDICTORS)
+    assert model._executor_config() == (1, 8)
+
+    monkeypatch.setenv("THREADS_PER_PROCESS", "4")
+    assert model._executor_config() == (4, 2)
+    monkeypatch.setenv("MAX_PROCESSES", "3")
+    assert model._executor_config() == (4, 3)
+
+
+def test_usable_cpu_count_is_at_most_the_machine_count():
+    assert 1 <= base._usable_cpu_count() <= (os.cpu_count() or 1)

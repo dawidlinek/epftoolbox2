@@ -35,6 +35,18 @@ SKIP_MISSING_TEST_ROW = "missing_test_row"
 
 _FREQ_TO_PERIODS: Dict[str, int] = {"1h": 24, "15min": 96}
 
+# ProcessPoolExecutor refuses more workers than this on Windows.
+_WINDOWS_MAX_WORKERS = 61
+
+
+def _usable_cpu_count() -> int:
+    """CPUs this process may run on: a SLURM or taskset allocation, not the whole machine."""
+    if hasattr(os, "process_cpu_count"):  # Python 3.13+
+        return os.process_cpu_count() or 1
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0)) or 1
+    return os.cpu_count() or 1
+
 
 class BaseModel(ABC):
     def __init__(
@@ -215,6 +227,9 @@ class BaseModel(ABC):
             tasks_by_day.setdefault(t[2], []).append(t)
 
         threads_per_process, n_processes = self._executor_config()
+        n_processes = min(n_processes, len(tasks_by_day))  # a worker runs whole days; more would sit idle
+        if sys.platform == "win32":
+            n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
 
         config = {
             "offset": self._offset,
@@ -311,8 +326,13 @@ class BaseModel(ABC):
         return expanded
 
     def _executor_config(self) -> tuple:
-        threads = int(os.environ.get("THREADS_PER_PROCESS", "16"))
-        processes = int(os.environ.get("MAX_PROCESSES", max(1, (os.cpu_count() or 1) // threads)))
+        """(threads per process, processes) from THREADS_PER_PROCESS and MAX_PROCESSES.
+
+        Defaults: one task thread per process and one process per usable CPU. Threads in one process share its GIL
+        (on, unless a free-threaded build runs with PYTHON_GIL=0), so they are slower than as many processes.
+        """
+        threads = int(os.environ.get("THREADS_PER_PROCESS", "1"))
+        processes = int(os.environ.get("MAX_PROCESSES", max(1, _usable_cpu_count() // threads)))
         return threads, processes
 
     def _cleanup(self) -> None:

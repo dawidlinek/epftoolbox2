@@ -22,7 +22,6 @@ Output: 120 rows per model (24 hours × 5 horizons).
 
 import os
 
-os.environ["THREADS_PER_PROCESS"] = "8"
 os.environ["MAX_PROCESSES"] = "2"
 
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
