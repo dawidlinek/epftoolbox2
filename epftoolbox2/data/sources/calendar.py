@@ -809,7 +809,7 @@ class CalendarSource(DataSource):
         rows = span.get_indexer(local_dates)[codes]
 
         if self.bridge_days:
-            day_off = holiday | (span.dayofweek >= 5)
+            day_off = holiday | (span.day_of_week >= 5)
             bridge = np.zeros(len(span), dtype=bool)
             bridge[1:-1] = ~day_off[1:-1] & day_off[:-2] & day_off[2:]
             df[f"{self.prefix}is_bridge_day"] = bridge.astype(int)[rows]
@@ -912,7 +912,7 @@ class CalendarSource(DataSource):
         return df
 
     def _add_weekday(self, df: pd.DataFrame, local_index: pd.DatetimeIndex) -> pd.DataFrame:
-        weekday_series = pd.Series(local_index.weekday, index=df.index)
+        weekday_series = pd.Series(local_index.day_of_week, index=df.index)
 
         if self.weekday == "number":
             df[f"{self.prefix}weekday"] = weekday_series

@@ -517,7 +517,7 @@ class EntsoeSource(DataSource):
             return pd.DataFrame()
 
         self._log_success(elapsed)
-        result = pd.concat(dataframes, axis=1)
+        result = pd.concat(dataframes, axis=1, sort=True)
         if self.prefix:
             result.columns = [f"{self.prefix}_{column}" for column in result.columns]
         return result
@@ -652,7 +652,7 @@ class EntsoeSource(DataSource):
         if not dfs:
             return pd.DataFrame()
 
-        return pd.concat(dfs, axis=1)
+        return pd.concat(dfs, axis=1, sort=True)
 
     def _fetch_generation(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         dfs = []
@@ -680,7 +680,7 @@ class EntsoeSource(DataSource):
         dfs.append(self._parse_generation(xml).add_prefix("generation_").add_suffix("_forecast"))
 
         dfs = [df for df in dfs if not df.empty]
-        return pd.concat(dfs, axis=1) if dfs else pd.DataFrame()
+        return pd.concat(dfs, axis=1, sort=True) if dfs else pd.DataFrame()
 
     def _fetch_price_raw(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[pd.Timedelta, pd.Series]:
         """Day-ahead prices for one chunk, by native resolution and not yet put on a grid (see fetch())."""
