@@ -9,10 +9,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.evaluators import rMAEEvaluator
 from epftoolbox2.information_set import Availability, InformationSet, perturb_unknown
 from epftoolbox2.models import OLSModel
-from epftoolbox2.results.report import EvaluationReport
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 
@@ -20,23 +18,6 @@ from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 def single_process(monkeypatch):
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="rMAE divides MAEs computed on different forecast sets")
-def test_rmae_compares_models_on_shared_forecast_keys():
-    def row(run_date, hour, prediction, actual):
-        target = (pd.Timestamp(run_date) + pd.Timedelta(days=1)).date().isoformat()
-        return {"run_date": run_date, "target_date": target, "hour": hour, "horizon": 1, "day_in_test": 0,
-                "prediction": prediction, "actual": actual}  # fmt: skip
-
-    benchmark = [row("2024-01-01", 0, 11.0, 10.0), row("2024-01-01", 1, 19.0, 10.0)]  # errors 1 and 9
-    candidate = [row("2024-01-01", 0, 12.0, 10.0)]  # error 2; the hour-1 forecast is missing
-
-    report = EvaluationReport({"base": benchmark, "model": candidate}, [rMAEEvaluator(base_model="base")])
-    summary = report.summary().set_index("model")
-
-    # On the shared key the candidate's error is 2 vs the benchmark's 1.
-    assert summary.loc["model", "rMAE"] == pytest.approx(2.0)
 
 
 @pytest.mark.xfail(

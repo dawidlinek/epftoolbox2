@@ -168,7 +168,9 @@ Every evaluator must implement:
 - **`name`**: class attribute used as the column header in reports
 - **`compute(self, df, **kwargs) -> float`**: aggregate metric over a DataFrame with `prediction` and `actual` columns
 
-The `**kwargs` may include `model_dfs`: a dict of all model DataFrames for the current data slice, used by cross-model evaluators like `rMAEEvaluator`.
+The frame also carries the forecast keys `run_date`, `target_date` (datetimes), `hour` and `horizon`, which identify each forecast. Metrics that only look at `prediction` and `actual` can ignore them.
+
+The `**kwargs` may include `model_dfs`: a dict of all model DataFrames (same columns) for the current data slice, used by cross-model evaluators like `rMAEEvaluator`. A cross-model metric must join the frames on the forecast keys, because models can produce different forecast sets.
 
 ### Using Custom Evaluators
 
