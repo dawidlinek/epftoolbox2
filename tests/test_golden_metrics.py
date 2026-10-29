@@ -19,8 +19,9 @@ from tests.synthetic import PREDICTORS, make_market_data
 
 GOLDEN_FILE = Path(__file__).parent / "golden" / "synthetic_metrics.json"
 
-# OLS is exact up to float rounding. LassoCV stops at a convergence tolerance and CI resolves a
-# different scikit-learn per Python version (1.7 on 3.10, 1.8 on 3.11+), so it gets more room.
+# OLS is exact up to float rounding. LassoCV stops at a convergence tolerance and the scikit-learn version differs
+# between environments (the lock has 1.8; the 3.15 and newest-dependencies CI runs resolve newer ones), so it gets
+# more room.
 RTOL = {"OLS": 1e-9, "LassoCV": 1e-6}
 
 

@@ -8,7 +8,7 @@ Electricity price forecasting library (a rewrite of Lago et al.'s epftoolbox): d
 - Integration tests need `ENTSOE_API_KEY` and hit real APIs; don't run them unless asked.
 - Example tests (~7 min, live APIs): `ENTSOE_API_KEY=... uv run pytest -m examples -q` runs every `examples/*.py` through its `main(...)` and executes the README and docs quick starts, each on a short window. Give the key on the command line only, never in a file. They are `integration` tests too, so the fast suite skips them. Don't run them unless asked.
 - Docs code check (in the fast suite, offline): `uv run pytest tests/test_docs_code.py -q` compiles every ```python block in README.md and `docs/`, executes its epftoolbox2 imports and binds its calls to the real signatures. A failing block is wrong documentation, so fix the block. Only a block that is not runnable Python opts out, with the fence ```` ```python nocheck ````, and `MAX_OPT_OUTS` in that file caps how many do.
-- `.python-version` pins free-threaded 3.14t locally, but CI runs 3.10–3.14: no syntax newer than 3.10 in the package.
+- `.python-version` pins free-threaded 3.14t locally, but CI runs 3.11–3.14 plus 3.14t and 3.15: no syntax newer than 3.11 in the package. The 3.15 cell and a separate `newest-dependencies` job install the newest releases instead of `uv.lock` (it has no 3.15 wheels), so they can fail on a new upstream release while the locked cells pass.
 - Dependencies live only in `pyproject.toml`. After changing them run `uv lock`; CI fails on a stale lock (`uv lock --check`).
 
 ## Hooks you will see

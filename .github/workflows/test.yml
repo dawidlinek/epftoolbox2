@@ -35,7 +35,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        # 3.14t is the free-threaded build that .python-version pins locally. With the locked pandas, importing
+        # pandas switches the GIL back on, so this cell checks the free-threaded interpreter, not GIL-free running.
+        python-version: ['3.11', '3.12', '3.13', '3.14', '3.14t', '3.15']
+        include:
+          # uv.lock has no 3.15 wheels (numpy, pandas, pyarrow, scipy and scikit-learn stop at cp314), so this cell
+          # resolves the newest versions instead of the locked ones. Drop the flag once the lock has 3.15 wheels.
+          - python-version: '3.15'
+            newest-dependencies: true
 
     steps:
     - name: Checkout code
@@ -47,7 +54,14 @@ jobs:
         python-version: ${{ matrix.python-version }}
 
     - name: Install dependencies
+      if: ${{ !matrix.newest-dependencies }}
       run: uv sync --locked --extra dev
+
+    - name: Install the newest dependencies (uv.lock has no wheels for this Python)
+      if: ${{ matrix.newest-dependencies }}
+      run: |
+        uv lock --upgrade
+        uv sync --extra dev
 
     - name: Run tests
       env:
@@ -61,3 +75,29 @@ jobs:
       with:
         file: ./coverage.xml
         fail_ci_if_error: false
+
+  newest-dependencies:
+    # The other jobs install the versions in uv.lock, so a release that breaks the library (pandas 3.1 did)
+    # stays invisible until someone upgrades. This job resolves the newest versions on every run; the upgraded
+    # lock is not committed.
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up uv with Python 3.14
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: '3.14'
+
+    - name: Resolve the newest dependencies
+      run: uv lock --upgrade
+
+    - name: Install dependencies
+      run: uv sync --extra dev
+
+    - name: Show the installed versions
+      run: uv pip list
+
+    - name: Run tests
+      run: uv run pytest -m "not integration" -q

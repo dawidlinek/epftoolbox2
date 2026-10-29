@@ -7,7 +7,7 @@ name = "epftoolbox2"
 version = "2.3.0"
 description = "Energy Price Forecasting Toolbox 2"
 readme = "README.md"
-license = {text = "GPL-3.0"}
+license = {text = "AGPL-3.0"}
 authors = [
     {name = "Dawid Linek", email = "dawid@linek.dev"}
 ]
@@ -15,17 +15,17 @@ keywords = ["energy", "forecasting", "toolbox", "machine learning", "deep learni
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Scientific/Engineering",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "pandas>=2.0.0",
     "numpy>=2.2.0",
@@ -75,4 +75,4 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
