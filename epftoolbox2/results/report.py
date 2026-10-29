@@ -101,6 +101,21 @@ class EvaluationReport:
             rows.append(row)
         return pd.DataFrame(rows, columns=["model", "planned", "produced", "missing", *reasons])
 
+    def _result_freqs(self) -> Dict[str, str]:
+        """The frequency each model's results were produced at, for the models that have results.
+
+        Read from the result records, which carry it. `ref.freq` is only what the caller said (the default of
+        `ModelPipeline.report` is "1h"), so it is the fallback for records without the key, which are hourly.
+        """
+        freqs: Dict[str, str] = {}
+        for name, ref in self.refs.items():
+            records = self._iter_ref(ref, cols=["freq"])
+            first = next(records, None)
+            records.close()
+            if first is not None:
+                freqs[name] = first.get("freq", ref.freq)
+        return freqs
+
     def iter_details(self) -> Iterator[Tuple[str, pd.DataFrame]]:
         detail_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual", "prediction"]
         for name, ref in self.refs.items():

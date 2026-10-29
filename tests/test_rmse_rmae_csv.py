@@ -8,7 +8,10 @@ import pytest
 
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
 from epftoolbox2.exporters.csv import CsvExporter
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.report import EvaluationReport
+from tests.synthetic import PREDICTORS, make_market_data
 
 
 # ---------------------------------------------------------------------------
@@ -332,3 +335,203 @@ class TestCsvExporter:
             assert df["target_date"].is_monotonic_increasing or (
                 df.sort_values(["target_date", "hour", "horizon"]).reset_index(drop=True).equals(df)
             )
+
+
+# ===========================================================================
+# CsvExporter: pinned hourly output and 15-min results
+# ===========================================================================
+
+
+def _hourly_records(offset):
+    """Two run days x horizons 1-2 x hours 0, 1, 23, with values that are exact in binary floating point."""
+    rows = []
+    for run_date, day_in_test in (("2024-01-01", 0), ("2024-01-02", 1)):
+        for horizon in (1, 2):
+            target_date = (pd.Timestamp(run_date) + pd.Timedelta(days=horizon)).date().isoformat()
+            for hour in (0, 1, 23):
+                actual = 40.0 + hour + 10 * horizon + 5 * day_in_test
+                rows.append(
+                    {
+                        "run_date": run_date,
+                        "target_date": target_date,
+                        "hour": hour,
+                        "horizon": horizon,
+                        "day_in_test": day_in_test,
+                        "actual": actual,
+                        "prediction": actual + offset + hour / 4,
+                    }
+                )
+    return rows
+
+
+# What CsvExporter wrote for these records before 15-min results were handled; hourly files must not change.
+_HOURLY_CSV = """\
+run_date,target_date,hour,horizon,day_in_test,actual,OLS_prediction,OLS_error,Lasso_prediction,Lasso_error,is_holiday,temperature
+2024-01-01,2024-01-02,0,1,0,50.0,51.5,1.5,49.5,-0.5,0,6.0
+2024-01-01,2024-01-02,1,1,0,51.0,52.75,1.75,50.75,-0.25,0,6.25
+2024-01-01,2024-01-02,23,1,0,73.0,80.25,7.25,78.25,5.25,0,11.75
+2024-01-02,2024-01-03,0,1,1,55.0,56.5,1.5,54.5,-0.5,1,12.0
+2024-01-01,2024-01-03,0,2,0,60.0,61.5,1.5,59.5,-0.5,1,12.0
+2024-01-02,2024-01-03,1,1,1,56.0,57.75,1.75,55.75,-0.25,1,12.25
+2024-01-01,2024-01-03,1,2,0,61.0,62.75,1.75,60.75,-0.25,1,12.25
+2024-01-02,2024-01-03,23,1,1,78.0,85.25,7.25,83.25,5.25,1,17.75
+2024-01-01,2024-01-03,23,2,0,83.0,90.25,7.25,88.25,5.25,1,17.75
+2024-01-02,2024-01-04,0,2,1,65.0,66.5,1.5,,,0,18.0
+2024-01-02,2024-01-04,1,2,1,66.0,67.75,1.75,,,0,18.25
+2024-01-02,2024-01-04,23,2,1,88.0,95.25,7.25,,,0,23.75
+"""
+
+
+def _quarter_hour_records(run_date, horizon, offset, periods=range(96)):
+    target_date = (pd.Timestamp(run_date) + pd.Timedelta(days=horizon)).date().isoformat()
+    return [
+        {
+            "run_date": run_date,
+            "target_date": target_date,
+            "hour": p,  # the period of the day: 0-95 at 15 min
+            "horizon": horizon,
+            "day_in_test": 0,
+            "actual": 100.0 + p,
+            "prediction": 100.0 + p + offset,
+            "freq": "15min",
+        }
+        for p in periods
+    ]
+
+
+def _clock_time(period):
+    return f"{period // 4:02d}:{period % 4 * 15:02d}"
+
+
+class TestCsvExporterFreq:
+    def test_hourly_output_is_pinned(self, tmp_path):
+        results = {"OLS": _hourly_records(1.5), "Lasso": _hourly_records(-0.5)[:-3]}
+        index = pd.date_range("2024-01-01", periods=96, freq="h", tz="Europe/Warsaw")
+        source_data = pd.DataFrame(
+            {"is_holiday": (index.day == 3).astype(int), "temperature": np.arange(96) / 4}, index=index
+        )
+        report = EvaluationReport(results, [MAEEvaluator()], source_data=source_data)
+        path = tmp_path / "out.csv"
+        CsvExporter(path, extra_columns=["is_holiday", "temperature"]).export(report)
+        assert path.read_text() == _HOURLY_CSV
+
+    def test_each_quarter_hour_is_one_row_with_its_clock_time(self, tmp_path):
+        results = {
+            "OLS": _quarter_hour_records("2024-01-01", 1, 1.0) + _quarter_hour_records("2024-01-01", 2, 2.0),
+            "Lasso": _quarter_hour_records("2024-01-01", 1, -1.0),
+        }
+        path = tmp_path / "out.csv"
+        CsvExporter(path).export(EvaluationReport(results, [MAEEvaluator()]))
+        df = pd.read_csv(path)
+
+        assert len(df) == 2 * 96
+        assert not df.duplicated(["run_date", "hour", "horizon"]).any()
+        assert sorted(df.loc[df["horizon"] == 1, "hour"]) == list(range(96))
+        assert df["target_time"].tolist() == [_clock_time(p) for p in df["hour"]]
+        h1 = df[df["horizon"] == 1].set_index("hour")
+        assert (h1["OLS_error"] == 1.0).all() and (h1["Lasso_error"] == -1.0).all()
+        assert df.loc[df["horizon"] == 2, "Lasso_prediction"].isna().all()
+        # Rows come out in time order within each target day.
+        assert df.sort_values(["target_date", "hour", "horizon"]).index.is_monotonic_increasing
+
+    def test_extra_columns_follow_the_quarter_hour(self, tmp_path):
+        results = {"M": _quarter_hour_records("2024-01-01", 1, 0.5)}
+        index = pd.date_range("2024-01-02", periods=2 * 96, freq="15min", tz="Europe/Warsaw")
+        source_data = pd.DataFrame({"slot": np.arange(len(index), dtype=float)}, index=index)
+        path = tmp_path / "out.csv"
+        CsvExporter(path, extra_columns=["slot"]).export(EvaluationReport(results, [], source_data=source_data))
+        df = pd.read_csv(path)
+
+        assert len(df) == 96
+        assert df["slot"].tolist() == list(range(96))  # period p of 2024-01-02 is source row p, not a clock hour
+
+    def test_report_from_a_15min_model_run(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MAX_PROCESSES", "1")
+        monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+        data = make_market_data(start="2023-01-01", days=30, freq="15min", horizon=2, noise=1.0, seed=3)
+        path = tmp_path / "out.csv"
+        (
+            ModelPipeline()
+            .add_model(OLSModel(PREDICTORS, training_window=7, name="OLS"))
+            .add_evaluator(MAEEvaluator())
+            .add_exporter(CsvExporter(path, extra_columns=["load"]))
+            .run(data, test_start="2023-01-20", test_end="2023-01-21", target="price", horizon=2, freq="15min")
+        )
+        df = pd.read_csv(path)
+
+        assert len(df) == 2 * 2 * 96  # run days x horizons x periods
+        assert not df.duplicated(["run_date", "hour", "horizon"]).any()
+        assert df["load"].notna().all()
+        assert df["target_time"].tolist() == [_clock_time(p) for p in df["hour"]]
+        wall = data.set_index(data.index.tz_localize(None))
+        stamps = pd.to_datetime(df["target_date"] + " " + df["target_time"])
+        np.testing.assert_allclose(df["actual"], wall.loc[stamps, "price"].to_numpy())
+        np.testing.assert_allclose(df["load"], wall.loc[stamps, "load"].to_numpy())
+
+    @pytest.mark.parametrize(
+        "start, run_day, rows",
+        [
+            ("2023-03-01", "2023-03-25", 92),  # the target day is the spring-forward day: no 02:00-02:45
+            ("2023-10-01", "2023-10-29", 96),  # the run day is the fall-back day
+        ],
+    )
+    def test_15min_run_around_a_dst_switch(self, tmp_path, monkeypatch, start, run_day, rows):
+        monkeypatch.setenv("MAX_PROCESSES", "1")
+        monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+        data = make_market_data(start=start, days=40, freq="15min", horizon=1, noise=1.0, seed=5)
+        path = tmp_path / "out.csv"
+        (
+            ModelPipeline()
+            .add_model(OLSModel(PREDICTORS, training_window=7, name="OLS"))
+            .add_exporter(CsvExporter(path, extra_columns=["load"]))
+            .run(data, test_start=run_day, test_end=run_day, target="price", horizon=1, freq="15min")
+        )
+        df = pd.read_csv(path)
+
+        assert len(df) == rows
+        assert not df.duplicated(["run_date", "hour", "horizon"]).any()
+        assert df["load"].notna().all()
+        wall = data.set_index(data.index.tz_localize(None))
+        stamps = pd.to_datetime(df["target_date"] + " " + df["target_time"])
+        np.testing.assert_allclose(df["load"], wall.loc[stamps, "load"].to_numpy())
+
+    def test_report_over_saved_15min_files_ignores_the_default_freq(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MAX_PROCESSES", "1")
+        monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+        data = make_market_data(start="2023-01-01", days=30, freq="15min", horizon=1, noise=1.0, seed=3)
+        pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=7, name="OLS"))
+        window = {"test_start": "2023-01-20", "test_end": "2023-01-20"}
+        pipeline.run(data, target="price", horizon=1, freq="15min", save_dir=tmp_path / "runs", **window)
+
+        path = tmp_path / "out.csv"
+        merge = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=7, name="OLS"))
+        # freq is left at its "1h" default: the records say 15min and win.
+        merge.add_exporter(CsvExporter(path, extra_columns=["load"])).report(
+            tmp_path / "runs", horizon=1, data=data, **window
+        )
+        df = pd.read_csv(path)
+
+        assert len(df) == 96
+        assert df["load"].notna().all()
+        assert df["target_time"].iloc[5] == "01:15"
+
+    def test_extra_columns_need_15min_source_rows_for_15min_results(self, tmp_path):
+        results = {"M": _quarter_hour_records("2024-01-01", 1, 0.5)}
+        hourly = pd.DataFrame({"slot": np.arange(48.0)}, index=pd.date_range("2024-01-02", periods=48, freq="h"))
+        report = EvaluationReport(results, [], source_data=hourly)
+        with pytest.raises(ValueError, match="15min results"):
+            CsvExporter(tmp_path / "out.csv", extra_columns=["slot"]).export(report)
+
+    def test_result_freqs_are_read_from_the_records(self):
+        results = {
+            "quarter": _quarter_hour_records("2024-01-01", 1, 0.0),
+            "hourly": _hourly_records(0.0),  # records without a freq key are hourly
+            "empty": [],  # no results, no frequency
+        }
+        assert EvaluationReport(results, [])._result_freqs() == {"quarter": "15min", "hourly": "1h"}
+
+    def test_models_with_different_frequencies_do_not_share_a_file(self, tmp_path):
+        results = {"hourly": _hourly_records(0.0), "quarter": _quarter_hour_records("2024-01-01", 1, 0.0)}
+        report = EvaluationReport(results, [])
+        with pytest.raises(ValueError, match="frequenc"):
+            CsvExporter(tmp_path / "out.csv").export(report)
