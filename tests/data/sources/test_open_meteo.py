@@ -6,6 +6,8 @@ import pandas as pd
 import pytest
 import requests
 
+import epftoolbox2.data.sources._open_meteo_common as common_module
+import epftoolbox2.data.sources.open_meteo as open_meteo_module
 from epftoolbox2.data.sources.open_meteo import (
     DEFAULT_SINGLE_RUNS_HORIZON,
     OpenMeteoSource,
@@ -1005,6 +1007,75 @@ class TestSingleRunsFetch:
         source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone="Europe/Warsaw", api="single_runs")
         with pytest.raises(ValueError, match="End timestamp.*must be after start timestamp"):
             source.fetch(pd.Timestamp("2024-01-02", tz="UTC"), pd.Timestamp("2024-01-01", tz="UTC"))
+
+
+# ---------------------------------------------------------------------------
+# Index resolution
+# ---------------------------------------------------------------------------
+# `DatetimeIndex.asi8` counts in the index's own unit: nanoseconds up to pandas 2, microseconds for what pandas 3
+# builds by default (`date_range`, `to_datetime`, `Timestamp` strings). These run on every pandas version by
+# forcing the resolution instead of waiting for a pandas that picks the wrong one.
+
+UNITS = ["s", "ms", "us", "ns"]
+
+
+def fetch_in_unit(monkeypatch, unit, source, start, end):
+    """Fetch with `start`/`end`, every parsed response and every cutoff and target index in the given resolution."""
+
+    def in_unit(function):
+        def wrapped(*args, **kwargs):
+            result = function(*args, **kwargs)
+            return (
+                result.set_axis(result.index.as_unit(unit))
+                if isinstance(result, pd.DataFrame)
+                else result.as_unit(unit)
+            )
+
+        return wrapped
+
+    with monkeypatch.context() as patch:
+        patch.setattr(open_meteo_module, "parse_hourly", in_unit(open_meteo_module.parse_hourly))
+        patch.setattr(open_meteo_module, "shift_local_days", in_unit(open_meteo_module.shift_local_days))
+        patch.setattr(common_module, "run_cutoff", in_unit(common_module.run_cutoff))
+        df = source.fetch(start.as_unit(unit), end.as_unit(unit))
+    return df.set_axis(df.index.as_unit("ns"))
+
+
+@pytest.mark.parametrize("unit", UNITS)
+class TestIndexResolution:
+    def test_select_buckets_is_the_same_at_every_resolution(self, unit):
+        # Same cells as TestIconSeamlessRunGrid: the ICON-D2 03Z run of the issue day starts after the cutoff.
+        valid = pd.date_range("2026-10-05 00:00", periods=6, freq="1h", tz="UTC").as_unit(unit)
+        cutoff = pd.DatetimeIndex([pd.Timestamp("2026-10-04 00:00", tz="UTC")] * len(valid)).as_unit(unit)
+        assert select_buckets("icon_seamless", valid, cutoff, 1, 7).tolist() == [1, 1, 1, 2, 2, 2]
+
+    def test_nat_cell_gets_no_bucket_at_every_resolution(self, unit):
+        valid = pd.DatetimeIndex(["2026-10-05 00:00", "NaT"], tz="UTC").as_unit(unit)
+        cutoff = pd.DatetimeIndex(["2026-10-04 00:00"] * 2, tz="UTC").as_unit(unit)
+        assert select_buckets("icon_seamless", valid, cutoff, 1, 7).tolist() == [1, 0]
+
+    @pytest.mark.parametrize("window", [SPRING, FALL], ids=["spring", "fall"])
+    def test_previous_runs_fetch_is_the_same_at_every_resolution(self, monkeypatch, unit, window):
+        def fetch(resolution):
+            source = make_source(make_archive(model="jma_seamless"), model="jma_seamless")
+            return fetch_in_unit(monkeypatch, resolution, source, *window)
+
+        expected = fetch("ns")
+        assert expected.notna().mean().min() > 0.99  # only the skipped spring hour is empty
+        pd.testing.assert_frame_equal(fetch(unit), expected, check_freq=False)
+
+    def test_single_runs_fetch_is_the_same_at_every_resolution(self, monkeypatch, unit):
+        def fetch(resolution):
+            archive = make_run_archive()
+            source = make_source(archive, api="single_runs", horizon=2, run="06", model="icon_seamless")
+            return fetch_in_unit(monkeypatch, resolution, source, *SPRING), archive
+
+        (expected, _), (actual, archive) = fetch("ns"), fetch(unit)
+        assert expected.notna().mean().min() > 0.99  # only the skipped spring hour is empty
+        pd.testing.assert_frame_equal(actual, expected, check_freq=False)
+        # Each request names the run at the cutoff (D at 06:00 UTC), not a date near 1970.
+        assert {call["run"][11:] for call in archive.calls} == {"06:00"}
+        assert min(call["run"] for call in archive.calls) == "2024-03-25T06:00"
 
 
 # ---------------------------------------------------------------------------

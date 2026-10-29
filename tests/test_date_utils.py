@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2._date_utils import shift_calendar_days
+from epftoolbox2._date_utils import epoch_ns, shift_calendar_days
 from tests.synthetic import calendar_shift
 
 TZ = "Europe/Warsaw"
@@ -88,3 +88,10 @@ def test_keeps_timezone_and_length():
 def test_rejects_unknown_ambiguous_option():
     with pytest.raises(ValueError, match="ambiguous"):
         shift_calendar_days(pd.DatetimeIndex([local("2024-01-01")]), 1, ambiguous="infer")
+
+
+@pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
+def test_epoch_ns_counts_nanoseconds_at_every_resolution(unit):
+    # asi8 counts in the index's own unit (microseconds for what pandas 3 builds by default).
+    index = pd.DatetimeIndex(["2024-03-31 00:00", "NaT", "2024-03-31 01:30"], tz="UTC").as_unit(unit)
+    assert epoch_ns(index).tolist() == [1711843200 * 10**9, np.iinfo(np.int64).min, 1711848600 * 10**9]
