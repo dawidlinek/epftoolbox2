@@ -183,6 +183,46 @@ first occurrence, as the transformer fills them. A `_d+k` after the slot always 
 
 ---
 
+## Day Aggregates
+
+A [`DailyStatsTransformer`](/epftoolbox2/transformers/daily-stats/) column (`_day_min`, `_day_max`, `_day_mean`,
+`_day_last`) holds a statistic of its row's whole local day, the same value on every row of that day, so it is known
+only when the day's last slot is: 23:00 for hourly data and 23:45 for 15-minute data, on the 23- and 25-hour DST days
+as on any other. The check and the probe judge it at that slot, not at the row's period, and the shifts after it
+pick the day, as for profile columns: `load_actual_day_max_d-1` is the maximum of D-1, and
+`load_actual_day_max_h-12` reads D-1's maximum on the rows before noon and D's from noon on. An aggregate of a lag
+(`LagTransformer` before `DailyStatsTransformer`) keeps its lag: `load_actual_d-1_day_max` is also the maximum of D-1.
+
+Aggregates need their own rules too, and a rule that matches one describes the series it was built from (the
+built-in `generation_*` also covers `generation_solar_day_max`):
+
+```python
+from epftoolbox2.information_set import Availability, InformationSet
+
+info = InformationSet(
+    "11:45", "Europe/Brussels",
+    rules={
+        "price_day_*": Availability.published("13:00", days_before=1),
+        "load_actual*": Availability.realised("1h"),
+    },
+)
+```
+
+With these rules `price_day_max` (the expert model's maximum price of D, published 13:00 on D-1) passes at every
+period, `load_actual_day_max` (known 01:00 on D+1) fails at every period, and `load_actual_day_max_d-1` (known 01:00
+on D) passes. A `_d+k` after the aggregate always shifts the row, so `as_of`, `weather_cutoff` and `weather_run` rules
+read `x_day_max_d+1` from D+1, while a `_d+k` before it (`temperature_2m_d+1_day_max`) stays the source's own lead. A
+column a data source emits under such a name, such as an `OpenMeteoSource`'s `is_day` averaged over locations
+(`warsaw_is_day_mean`), is that source's own column and keeps its rule as it is.
+
+<Aside type="caution">
+  The day's last slot can be delivered on the next day of the rule's zone. On the DE benchmark index (`Etc/GMT-1`)
+  with Brussels rules, 23:00 is 00:00 CEST on D+1 in summer, so on summer days `price_day_max` of D is published only
+  at 13:00 on D and is refused at every period, like `price_h23`.
+</Aside>
+
+---
+
 ## Leakage Probe
 
 `InformationSet.check()` is a static analysis of predictor *names*. `leakage_probe` checks the same boundary

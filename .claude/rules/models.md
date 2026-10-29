@@ -23,7 +23,11 @@ each column's publication time to `issue_time` (e.g. a day-ahead price is publis
 used from then on, same-day or older, but never for the day it prices; a `DailyProfileTransformer` column is
 judged at the slot it names, `_hNN` an hour and `_sNN` a quarter-hour, on the day the shifts after it reach,
 never at the row's period: `x_h23_d-1` is x at 23:00 on D-1, `x_d+1_h05` (a profile of a lag) x at 05:00 on D+1,
-and a `_d+k` after the slot is never a source's lead). This convention is independent of
+and a `_d+k` after the slot is never a source's lead; a `DailyStatsTransformer` column (`_day_min`, `_max`,
+`_mean`, `_last`) is judged the same way at the last slot of the day it aggregates, whatever that day's 23, 24 or
+25 hours: realised 1 h, `load_actual_day_max` is known 01:00 on D+1, and `x_d-1_day_max` (an aggregate of a lag)
+and `x_day_max_d-1` when D-1's last slot is; a column a data source emits under such a name, e.g. Open-Meteo's
+`is_day_mean`, is the source's own). This convention is independent of
 the training-target boundary above: don't conflate the two, and don't move either as a side effect of the
 other.
 
