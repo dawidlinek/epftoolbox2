@@ -90,6 +90,10 @@ print(predictions.head())
 # 0  2024-02-01  2024-02-02     0        1       45.23   OLS
 ```
 
+## Order of results
+
+Workers write records as their tasks finish, so the order of the lines in a results file varies with the number of processes, scheduling and resuming. The report does not depend on it: each model's forecasts are evaluated in the order of their forecast key (`run_date`, `target_date`, `horizon`, `hour`), so the same results give the same metrics bit for bit (floating-point sums depend on the order of their terms). `iter_details()` lists a model's rows in that order, and `predictions()` is sorted by model, horizon, hour, then run date.
+
 ## Reports from saved results
 
 `ModelPipeline.report(save_dir, test_start=..., test_end=..., horizon=..., freq=...)` builds a report from the per-model JSONL files a previous run wrote to `save_dir` and runs the evaluators and exporters. `Workflow.report()` / `epf report` use it to merge the results of a SLURM array (see [Workflow](/epftoolbox2/workflow/overview/#run-only-one-model-slurm-arrays)).

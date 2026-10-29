@@ -19,6 +19,18 @@ GROUP_CONFIGS: List[Tuple[str, List[str]]] = [
     ("target_weekday_horizon", ["target_weekday", "horizon"]),
 ]
 
+# The order in which a model's records are evaluated and listed: the forecast key, then the values, so that two
+# records with the same key (or without one) still fall in the same place. Workers write records as tasks finish,
+# which varies with the number of processes, scheduling and resuming, and float sums depend on the order of their
+# terms: a metric over the rows in file order can differ in the last bit between two runs of the same study.
+RECORD_ORDER = ("run_date", "target_date", "horizon", "hour", "prediction", "actual", "day_in_test")
+
+
+def _in_record_order(df: pd.DataFrame, first: Tuple[str, ...] = ()) -> pd.DataFrame:
+    """`df` sorted by `RECORD_ORDER` (after the columns in `first`) with a fresh index; columns it lacks are skipped."""
+    by = [c for c in (*first, *RECORD_ORDER) if c in df.columns]
+    return df.sort_values(by, kind="stable").reset_index(drop=True) if by else df
+
 
 class EvaluationReport:
     def __init__(
@@ -81,7 +93,9 @@ class EvaluationReport:
         df = pd.DataFrame(rows)
         if df.empty:
             return df
-        return df.sort_values(["model", "horizon", "hour"]).reset_index(drop=True)
+        # By model, horizon and hour as before; the date columns only settle rows that tie on those.
+        by = [c for c in ("model", "horizon", "hour", "run_date", "target_date", "prediction") if c in df.columns]
+        return df.sort_values(by, kind="stable").reset_index(drop=True)
 
     def forecast_counts(self) -> pd.DataFrame:
         """Planned vs produced forecasts per model, with one column per skip reason.
@@ -120,7 +134,7 @@ class EvaluationReport:
         detail_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual", "prediction"]
         for name, ref in self.refs.items():
             rows = [{k: r[k] for k in detail_cols if k in r} for r in self._iter_ref(ref, cols=detail_cols)]
-            df = pd.DataFrame(rows)
+            df = _in_record_order(pd.DataFrame(rows))
             yield name, df
             del df, rows
 
@@ -170,7 +184,9 @@ class EvaluationReport:
 
         This is what evaluators receive (whole, or cut into groups). `run_date` and `target_date` are
         datetime64 and `hour` / `horizon` integers, which keeps the frames compact. A key that no record of
-        the model carries is left out of its frame; evaluators that need it (rMAE) say so.
+        the model carries is left out of its frame; evaluators that need it (rMAE) say so. The rows are in
+        `RECORD_ORDER`, not in the order the records were written, so every sum an evaluator takes is the same
+        however the workers happened to finish.
         """
         return {name: self._model_frame(ref) for name, ref in self.refs.items()}
 
@@ -190,7 +206,7 @@ class EvaluationReport:
                     if c.endswith("_date")
                     else values[c]
                 )
-        return pd.DataFrame(frame)
+        return _in_record_order(pd.DataFrame(frame))
 
     def _summary_table(self, model_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         rows = []
