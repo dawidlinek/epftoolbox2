@@ -14,6 +14,7 @@ from ..exporters.base import Exporter
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef
 from ..logging import get_logger
+from ._yaml import dump_yaml, to_yaml_value
 
 logger = get_logger(__name__)
 
@@ -218,22 +219,32 @@ class ModelPipeline:
                 f"result files): {names}"
             )
 
+    @staticmethod
+    def _check_predictors_can_be_saved(component: Any) -> None:
+        """A model built with callable predictors keeps ``predictors == []`` and the function privately, so a plain
+        dump would write an empty list: the reloaded pipeline would be a different study."""
+        predictors = getattr(component, "predictors", None)
+        if getattr(component, "_predictors_fn", None) is not None or callable(predictors):
+            what = "its predictors are a function"
+        elif isinstance(predictors, (list, tuple)) and any(callable(p) for p in predictors):
+            what = "its predictors contain a function"
+        else:
+            return
+        raise TypeError(
+            f"Cannot save model {getattr(component, 'name', type(component).__name__)!r} "
+            f"({type(component).__name__}): {what}, and callable predictors can't be saved to YAML yet. "
+            "List the predictors explicitly instead: strings, with '{horizon}' where a column depends on the horizon."
+        )
+
     def _serialize_component(self, component: Any) -> Dict[str, Any]:
         class_name = type(component).__name__
-        params = {}
-        if hasattr(component, "__dict__"):
-            for key, value in component.__dict__.items():
-                if key.startswith("_"):
-                    continue
-                if key == "predictors" and isinstance(value, list) and any(callable(p) for p in value):
-                    raise ValueError(
-                        f"Cannot serialize {class_name}: 'predictors' contains callable(s). "
-                        "Replace callables with string column names before saving."
-                    )
-                if isinstance(value, Path):
-                    params[key] = str(value)
-                elif isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                    params[key] = value
+        self._check_predictors_can_be_saved(component)
+        label = f"{class_name}({component.name!r})" if isinstance(component, BaseModel) else class_name
+        params = {
+            key: to_yaml_value(value, f"{label}.{key}")
+            for key, value in getattr(component, "__dict__", {}).items()
+            if not key.startswith("_")
+        }
         return {"class": class_name, "params": params}
 
     def to_dict(self) -> Dict[str, Any]:
@@ -248,8 +259,8 @@ class ModelPipeline:
 
     def save(self, path: Union[str, Path]) -> None:
         path = Path(path)
-        with open(path, "w") as f:
-            yaml.dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)
+        # The text is built before the file is opened: a pipeline that can't be saved must not truncate it.
+        path.write_text(dump_yaml(self.to_dict()))
         logger.info(f"Pipeline: Saved configuration to {path}")
 
     @classmethod

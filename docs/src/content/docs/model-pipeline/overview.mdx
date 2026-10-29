@@ -105,7 +105,7 @@ Predictors can be specified in four ways:
     ```
 
     <Aside type="caution">
-      Callables cannot be serialized to YAML. If you need to save the pipeline with `save()` or use `Workflow`, replace callables with `"{horizon}"` string templates.
+      Callables cannot be serialized to YAML: `save()` raises a `TypeError` naming the model. If you need to save the pipeline or use `Workflow`, replace callables with `"{horizon}"` string templates.
     </Aside>
   </TabItem>
   <TabItem label="Loop Generation">

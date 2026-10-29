@@ -9,7 +9,7 @@ from epftoolbox2.data.sources import CalendarSource, CsvSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.models import OLSModel, LassoCVModel
-from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
 from epftoolbox2.exporters import TerminalExporter, ExcelExporter
 
 
@@ -466,13 +466,59 @@ class TestModelPipelineSerialization:
         loaded = ModelPipeline.load(path)
         assert loaded.exporters[0].path == Path("results/out.xlsx")
 
-    def test_callable_predictor_raises_on_save(self, tmp_path):
+    def test_callable_predictor_in_list_raises_on_save(self, tmp_path):
         pipeline = ModelPipeline().add_model(OLSModel(predictors=[lambda h: f"col_d+{h}"], name="Bad"))
-        with pytest.raises(ValueError, match="callable"):
+        with pytest.raises(TypeError, match=r"model 'Bad' .*callable predictors can't be saved to YAML yet"):
             pipeline.save(tmp_path / "mp.yaml")
 
-    def test_shared_predictor_list_yaml_alias_loads_correctly(self, tmp_path):
-        # Same list object → PyYAML emits alias; both models must load independently
+    @pytest.mark.parametrize(
+        "predictors",
+        [
+            pytest.param(lambda horizon: ["price_d-1", f"load_d+{horizon}"], id="horizon"),
+            pytest.param(lambda horizon, hour: [f"load_h{hour:02d}_d+{horizon}"], id="horizon-and-hour"),
+        ],
+    )
+    def test_predictor_function_raises_instead_of_saving_an_empty_list(self, tmp_path, predictors):
+        # BaseModel keeps `predictors == []` and the function privately; a plain dump wrote `predictors: []`,
+        # so the reloaded pipeline was a different study.
+        pipeline = ModelPipeline().add_model(LassoCVModel(predictors=predictors, name="FromFunction"))
+        path = tmp_path / "mp.yaml"
+        with pytest.raises(TypeError) as error:
+            pipeline.save(path)
+        message = str(error.value)
+        assert "'FromFunction'" in message and "LassoCVModel" in message
+        assert "callable predictors can't be saved to YAML yet" in message
+        assert "{horizon}" in message  # tells how to write them explicitly
+        with pytest.raises(TypeError):
+            pipeline.to_dict()
+        assert not path.exists()
+
+    def test_predictor_function_assigned_after_construction_raises(self, tmp_path):
+        model = OLSModel(predictors=["price_d-1"], name="Late")
+        model.predictors = lambda horizon: ["price_d-1"]
+        with pytest.raises(TypeError, match="'Late'"):
+            ModelPipeline().add_model(model).save(tmp_path / "mp.yaml")
+
+    def test_only_the_model_with_a_function_is_named(self, tmp_path):
+        pipeline = (
+            ModelPipeline()
+            .add_model(OLSModel(predictors=["price_d-1"], name="Fine"))
+            .add_model(OLSModel(predictors=lambda horizon: ["price_d-1"], name="Dynamic"))
+        )
+        with pytest.raises(TypeError, match="'Dynamic'") as error:
+            pipeline.save(tmp_path / "mp.yaml")
+        assert "'Fine'" not in str(error.value)
+
+    def test_failed_save_leaves_an_existing_file_alone(self, tmp_path):
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_model(OLSModel(predictors=["price_d-1"], name="Good")).save(path)
+        before = path.read_text()
+        with pytest.raises(TypeError):
+            ModelPipeline().add_model(OLSModel(predictors=lambda horizon: ["x"], name="Bad")).save(path)
+        assert path.read_text() == before
+
+    def test_shared_predictor_list_is_written_in_full_for_each_model(self, tmp_path):
+        # The same list object used by two models used to be written once as `&id001` and then as `*id001`.
         predictors = ["load_actual", "price_d-1"]
         original = (
             ModelPipeline()
@@ -481,16 +527,147 @@ class TestModelPipelineSerialization:
         )
         path = tmp_path / "mp.yaml"
         original.save(path)
-        loaded = ModelPipeline.load(path)
 
+        text = path.read_text()
+        assert "&id" not in text and "*id" not in text
+        saved = yaml.safe_load(text)["models"]
+        assert [m["params"]["predictors"] for m in saved] == [predictors, predictors]
+        assert text.count("- load_actual") == 2  # inline in both models, not once and a reference
+
+        loaded = ModelPipeline.load(path)
         assert loaded.models[0].predictors == predictors
         assert loaded.models[1].predictors == predictors
+        assert loaded.models[0].predictors is not loaded.models[1].predictors  # editing one leaves the other
+
+    def test_shared_parameter_lists_of_evaluators_and_exporters_are_written_in_full(self, tmp_path):
+        show = ["summary", "horizon"]
+        pipeline = ModelPipeline().add_exporter(TerminalExporter(show=show)).add_exporter(TerminalExporter(show=show))
+        path = tmp_path / "mp.yaml"
+        pipeline.save(path)
+        assert "&id" not in path.read_text() and "*id" not in path.read_text()
+        assert [e.show for e in ModelPipeline.load(path).exporters] == [show, show]
 
     def test_unknown_model_raises_on_load(self, tmp_path):
         path = tmp_path / "bad.yaml"
         path.write_text("models:\n- class: NonExistentModel\n  params: {predictors: [], name: x}\n")
         with pytest.raises(ValueError, match="Unknown model"):
             ModelPipeline.load(path)
+
+
+class TupleParamModel(OLSModel):
+    """A model with a tuple parameter, as a neural network has `hidden=(256, 128)`."""
+
+    def __init__(self, predictors, hidden=(8,), **kwargs):
+        super().__init__(predictors, **kwargs)
+        self.hidden = hidden
+
+    @property
+    def _model_kwargs(self):
+        return {"hidden": self.hidden}
+
+
+@pytest.fixture
+def tuple_param_model(monkeypatch):
+    """Registers TupleParamModel (this module) so that a saved pipeline can name it."""
+    from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY as MODEL_REGISTRY
+
+    monkeypatch.setitem(MODEL_REGISTRY["models"], "TupleParamModel", __name__)
+    return TupleParamModel
+
+
+class TestModelPipelineParameterFidelity:
+    """Every public parameter is written, converted to plain YAML values, or refused: none is silently dropped."""
+
+    def test_tuple_parameter_survives_as_a_list_and_the_model_reloads_with_it(self, tmp_path, tuple_param_model):
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_model(tuple_param_model(["price_d-1"], hidden=(256, 128), name="Net")).save(path)
+
+        assert yaml.safe_load(path.read_text())["models"][0]["params"]["hidden"] == [256, 128]
+        reloaded = ModelPipeline.load(path).models[0]
+        assert isinstance(reloaded, TupleParamModel)
+        assert reloaded.hidden == [256, 128]  # not the default (8,)
+        assert reloaded._model_kwargs == {"hidden": [256, 128]}  # what the worker processes rebuild the model from
+
+    def test_predictors_given_as_a_tuple_are_saved(self, tmp_path):
+        # A tuple used to be dropped, leaving a file that could not be loaded (predictors is required).
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_model(OLSModel(predictors=("price_d-1", "load_d+{horizon}"), name="T")).save(path)
+        assert ModelPipeline.load(path).models[0].predictors == ["price_d-1", "load_d+{horizon}"]
+
+    def test_numpy_values_are_saved_as_plain_python(self, tmp_path, tuple_param_model):
+        model = tuple_param_model(["price_d-1"], hidden=np.array([64, 32]), training_window=np.int64(180), name="Numpy")
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_model(model).add_exporter(TerminalExporter(show=np.array(["summary"]))).save(path)
+
+        assert "!!python" not in path.read_text()
+        loaded = ModelPipeline.load(path)
+        assert loaded.models[0].hidden == [64, 32]
+        assert loaded.models[0].training_window == 180 and type(loaded.models[0].training_window) is int
+        assert loaded.exporters[0].show == ["summary"]
+
+    def test_path_parameter_is_saved_as_a_string(self, tmp_path):
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_exporter(ExcelExporter(path=Path("results") / "out.xlsx")).save(path)
+        assert yaml.safe_load(path.read_text())["exporters"][0]["params"]["path"] == str(Path("results") / "out.xlsx")
+
+    def test_unsupported_model_parameter_raises_naming_model_and_parameter(self, tmp_path, tuple_param_model):
+        model = tuple_param_model(["price_d-1"], hidden={64, 32}, name="WithSet")  # a set cannot be written to YAML
+        path = tmp_path / "mp.yaml"
+        with pytest.raises(TypeError, match=r"TupleParamModel\('WithSet'\)\.hidden"):
+            ModelPipeline().add_model(model).save(path)
+        assert not path.exists()
+
+    def test_callable_model_parameter_raises(self, tmp_path):
+        model = LassoCVModel(["price_d-1"], name="WithFunction")
+        model.cv = lambda n: n
+        with pytest.raises(TypeError, match=r"LassoCVModel\('WithFunction'\)\.cv.*callable"):
+            ModelPipeline().add_model(model).to_dict()
+
+    def test_unsupported_evaluator_and_exporter_parameters_raise(self, tmp_path):
+        evaluator = rMAEEvaluator("Naive")
+        evaluator.base_model = object()
+        with pytest.raises(TypeError, match=r"rMAEEvaluator\.base_model"):
+            ModelPipeline().add_evaluator(evaluator).save(tmp_path / "a.yaml")
+
+        exporter = TerminalExporter()
+        exporter.show = {"summary"}
+        with pytest.raises(TypeError, match=r"TerminalExporter\.show"):
+            ModelPipeline().add_exporter(exporter).save(tmp_path / "b.yaml")
+
+    def test_every_registered_component_round_trips_with_non_default_values(self, tmp_path):
+        from epftoolbox2.exporters import CsvExporter
+        from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY as MODEL_REGISTRY
+
+        originals = {
+            "models": [
+                OLSModel(["price_d-1", "load_d+{horizon}"], training_window=90, name="O", scaler="asinh"),
+                LassoCVModel(["price_d-1"], training_window=60, cv=3, max_iter=77, name="L"),
+            ],
+            "evaluators": [MAEEvaluator(), RMSEEvaluator(), rMAEEvaluator("O")],
+            "exporters": [
+                CsvExporter(str(tmp_path / "out.csv"), extra_columns=["is_holiday"]),
+                ExcelExporter(str(tmp_path / "out.xlsx"), sheets=["summary", "hour"]),
+                TerminalExporter(show=["hour"]),
+            ],
+        }
+        covered = {type(obj).__name__ for objs in originals.values() for obj in objs}
+        assert covered == {name for names in MODEL_REGISTRY.values() for name in names}  # add a new component here
+
+        pipeline = ModelPipeline()
+        pipeline.models, pipeline.evaluators, pipeline.exporters = (
+            originals[kind] for kind in ("models", "evaluators", "exporters")
+        )
+        path = tmp_path / "mp.yaml"
+        pipeline.save(path)
+        loaded = ModelPipeline.load(path)
+
+        def public(obj):
+            return {k: str(v) for k, v in vars(obj).items() if not k.startswith("_")}
+
+        for kind, objs in originals.items():
+            reloaded = getattr(loaded, kind)
+            assert [type(o) for o in reloaded] == [type(o) for o in objs], kind
+            assert [public(o) for o in reloaded] == [public(o) for o in objs], kind
 
 
 # ---------------------------------------------------------------------------
@@ -736,3 +913,97 @@ class TestWorkflowSerialization:
         assert len(mp.models) == 1
         assert mp.models[0].name == "Inline"
         assert mp.models[0].training_window == 90
+
+
+# ---------------------------------------------------------------------------
+# No YAML anchors and aliases
+# ---------------------------------------------------------------------------
+
+
+class TestYamlWithoutAliases:
+    """An object used twice is written in full each time (`&id001` / `*id001` are valid YAML, but hard to edit)."""
+
+    @staticmethod
+    def assert_no_aliases(text):
+        assert "&id" not in text and "*id" not in text, text
+
+    def test_dump_yaml_writes_shared_objects_in_full(self):
+        from epftoolbox2.pipelines._yaml import dump_yaml
+
+        shared_list, shared_dict = ["a", "b"], {"k": 1}
+        data = {"first": shared_list, "second": shared_list, "d1": shared_dict, "d2": shared_dict}
+        text = dump_yaml(data)
+
+        self.assert_no_aliases(text)
+        assert yaml.safe_load(text) == data
+        assert list(yaml.safe_load(text)) == list(data)  # keys keep their order
+
+    def test_data_pipeline_components_sharing_a_list(self, tmp_path):
+        columns = ["price", "load"]
+        pipeline = (
+            DataPipeline()
+            .add_transformer(LagTransformer(columns, [1], "day"))
+            .add_transformer(LagTransformer(columns, [2], "day"))
+        )
+        path = tmp_path / "dp.yaml"
+        pipeline.save(path)
+
+        self.assert_no_aliases(path.read_text())
+        assert [t.columns for t in DataPipeline.load(path).transformers] == [columns, columns]
+
+    def test_data_pipeline_loaded_with_anchors_and_env_references(self, tmp_path, monkeypatch):
+        # A `${VAR}` reference is written back as it was loaded: the same list object for both components here.
+        monkeypatch.setenv("COLUMN", "price")
+        source = tmp_path / "dp.yaml"
+        source.write_text(
+            "transformers:\n"
+            "- class: LagTransformer\n"
+            '  params: {columns: &c ["${COLUMN}", load], lags: [1], freq: day}\n'
+            "- class: LagTransformer\n"
+            "  params: {columns: *c, lags: [2], freq: day}\n"
+        )
+        saved = tmp_path / "saved.yaml"
+        DataPipeline.load(source).save(saved)
+
+        self.assert_no_aliases(saved.read_text())
+        written = yaml.safe_load(saved.read_text())["transformers"]
+        assert [t["params"]["columns"] for t in written] == [["${COLUMN}", "load"]] * 2
+        assert [t.columns for t in DataPipeline.load(saved).transformers] == [["price", "load"]] * 2
+
+    def test_workflow_loaded_with_anchors_in_its_inline_models(self, tmp_path):
+        source = tmp_path / "experiment.yaml"
+        source.write_text(
+            "data_pipeline: {start: '2024-01-01', end: '2024-02-01'}\n"
+            "model_pipeline:\n"
+            "  test_start: '2024-01-20'\n"
+            "  test_end: '2024-01-25'\n"
+            "  models:\n"
+            "  - class: OLSModel\n"
+            "    params: {predictors: &p [price_d-1, 'load_d+{horizon}'], name: A}\n"
+            "  - class: LassoCVModel\n"
+            "    params: {predictors: *p, name: B}\n"
+        )
+        saved = tmp_path / "saved.yaml"
+        Workflow.load(source).save(saved)
+
+        self.assert_no_aliases(saved.read_text())
+        models = Workflow.load(saved)._build_model_pipeline().models
+        assert [m.name for m in models] == ["A", "B"]
+        assert [m.predictors for m in models] == [["price_d-1", "load_d+{horizon}"]] * 2
+
+    def test_workflow_saved_without_inline_sections_is_unchanged(self, tmp_path):
+        out = tmp_path / "exp.yaml"
+        Workflow(data_start="2024-01-01", data_end="2024-02-01", model_save_dir="results").save(out)
+        config = yaml.safe_load(out.read_text())
+        assert config["data_pipeline"]["start"] == "2024-01-01"
+        assert config["model_pipeline"]["save_dir"] == "results"
+        self.assert_no_aliases(out.read_text())
+
+    def test_workflow_failed_save_leaves_an_existing_file_alone(self, tmp_path):
+        out = tmp_path / "exp.yaml"
+        out.write_text("keep: me\n")
+        workflow = Workflow(data_start="2024-01-01", data_end="2024-02-01")
+        workflow.model_save_dir = object()  # YAML cannot represent it
+        with pytest.raises(yaml.YAMLError):
+            workflow.save(out)
+        assert out.read_text() == "keep: me\n"
