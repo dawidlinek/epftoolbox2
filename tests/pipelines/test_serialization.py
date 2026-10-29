@@ -466,10 +466,56 @@ class TestModelPipelineSerialization:
         loaded = ModelPipeline.load(path)
         assert loaded.exporters[0].path == Path("results/out.xlsx")
 
-    def test_callable_predictor_raises_on_save(self, tmp_path):
+    def test_callable_predictor_in_list_raises_on_save(self, tmp_path):
         pipeline = ModelPipeline().add_model(OLSModel(predictors=[lambda h: f"col_d+{h}"], name="Bad"))
-        with pytest.raises(ValueError, match="callable"):
+        with pytest.raises(TypeError, match=r"model 'Bad' .*callable predictors can't be saved to YAML yet"):
             pipeline.save(tmp_path / "mp.yaml")
+
+    @pytest.mark.parametrize(
+        "predictors",
+        [
+            pytest.param(lambda horizon: ["price_d-1", f"load_d+{horizon}"], id="horizon"),
+            pytest.param(lambda horizon, hour: [f"load_h{hour:02d}_d+{horizon}"], id="horizon-and-hour"),
+        ],
+    )
+    def test_predictor_function_raises_instead_of_saving_an_empty_list(self, tmp_path, predictors):
+        # BaseModel keeps `predictors == []` and the function privately; a plain dump wrote `predictors: []`,
+        # so the reloaded pipeline was a different study.
+        pipeline = ModelPipeline().add_model(LassoCVModel(predictors=predictors, name="FromFunction"))
+        path = tmp_path / "mp.yaml"
+        with pytest.raises(TypeError) as error:
+            pipeline.save(path)
+        message = str(error.value)
+        assert "'FromFunction'" in message and "LassoCVModel" in message
+        assert "callable predictors can't be saved to YAML yet" in message
+        assert "{horizon}" in message  # tells how to write them explicitly
+        with pytest.raises(TypeError):
+            pipeline.to_dict()
+        assert not path.exists()
+
+    def test_predictor_function_assigned_after_construction_raises(self, tmp_path):
+        model = OLSModel(predictors=["price_d-1"], name="Late")
+        model.predictors = lambda horizon: ["price_d-1"]
+        with pytest.raises(TypeError, match="'Late'"):
+            ModelPipeline().add_model(model).save(tmp_path / "mp.yaml")
+
+    def test_only_the_model_with_a_function_is_named(self, tmp_path):
+        pipeline = (
+            ModelPipeline()
+            .add_model(OLSModel(predictors=["price_d-1"], name="Fine"))
+            .add_model(OLSModel(predictors=lambda horizon: ["price_d-1"], name="Dynamic"))
+        )
+        with pytest.raises(TypeError, match="'Dynamic'") as error:
+            pipeline.save(tmp_path / "mp.yaml")
+        assert "'Fine'" not in str(error.value)
+
+    def test_failed_save_leaves_an_existing_file_alone(self, tmp_path):
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_model(OLSModel(predictors=["price_d-1"], name="Good")).save(path)
+        before = path.read_text()
+        with pytest.raises(TypeError):
+            ModelPipeline().add_model(OLSModel(predictors=lambda horizon: ["x"], name="Bad")).save(path)
+        assert path.read_text() == before
 
     def test_shared_predictor_list_yaml_alias_loads_correctly(self, tmp_path):
         # Same list object → PyYAML emits alias; both models must load independently
