@@ -4,8 +4,20 @@ from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 import pandas as pd
 
-from ..evaluators.base import Evaluator
+from ..evaluators.base import FORECAST_KEYS, Evaluator
 from .ref import ModelResultRef
+
+# (name in compute_all(), grouping columns). `year` is the year of target_date; `run_weekday` and `target_weekday`
+# are the weekday of run_date / target_date.
+GROUP_CONFIGS: List[Tuple[str, List[str]]] = [
+    ("hour", ["hour"]),
+    ("horizon", ["horizon"]),
+    ("hour_horizon", ["hour", "horizon"]),
+    ("year", ["year"]),
+    ("year_horizon", ["year", "horizon"]),
+    ("run_weekday_horizon", ["run_weekday", "horizon"]),
+    ("target_weekday_horizon", ["target_weekday", "horizon"]),
+]
 
 
 class EvaluationReport:
@@ -34,19 +46,7 @@ class EvaluationReport:
                 )
 
     def summary(self) -> pd.DataFrame:
-        model_dfs: Dict[str, pd.DataFrame] = {}
-        for name, ref in self.refs.items():
-            preds, actuals = [], []
-            for r in self._iter_ref(ref, cols=["prediction", "actual"]):
-                preds.append(r["prediction"])
-                actuals.append(r["actual"])
-            model_dfs[name] = pd.DataFrame({"prediction": preds, "actual": actuals})
-            del preds, actuals
-
-        rows = []
-        for name, df in model_dfs.items():
-            rows.append({"model": name, "forecasts": len(df), **self._apply_evaluators(df, model_dfs=model_dfs)})
-        return pd.DataFrame(rows)
+        return self._summary_table(self._model_frames())
 
     def by_hour(self) -> pd.DataFrame:
         return self._compute_grouped(["hour"])
@@ -141,117 +141,77 @@ class EvaluationReport:
                     yield {k: r[k] for k in cols if k in r} if cols else r
 
     def compute_all(self) -> Dict[str, pd.DataFrame]:
-        group_configs = [
-            ("hour", ["hour"]),
-            ("horizon", ["horizon"]),
-            ("hour_horizon", ["hour", "horizon"]),
-            ("year", ["year"]),
-            ("year_horizon", ["year", "horizon"]),
-            ("run_weekday_horizon", ["run_weekday", "horizon"]),
-            ("target_weekday_horizon", ["target_weekday", "horizon"]),
-        ]
-
-        summary_dfs: Dict[str, pd.DataFrame] = {}
-        # config_name -> model_name -> {group_key -> {prediction: [], actual: []}}
-        all_buckets: Dict[str, Dict[str, Dict[tuple, Dict[str, list]]]] = {name: {} for name, _ in group_configs}
-
-        for model_name, ref in self.refs.items():
-            summary_preds: List[float] = []
-            summary_actuals: List[float] = []
-            for config_name, _ in group_configs:
-                all_buckets[config_name][model_name] = {}
-
-            cols_to_read = ["hour", "horizon", "run_date", "target_date", "prediction", "actual"]
-            for r in self._iter_ref(ref, cols=cols_to_read):
-                pred = r["prediction"]
-                actual = r["actual"]
-                year = int(r["target_date"][:4])
-                r["run_weekday"] = pd.Timestamp(r["run_date"]).dayofweek
-                r["target_weekday"] = pd.Timestamp(r["target_date"]).dayofweek
-
-                summary_preds.append(pred)
-                summary_actuals.append(actual)
-
-                for config_name, group_keys in group_configs:
-                    try:
-                        key = tuple(year if k == "year" else r[k] for k in group_keys)
-                    except KeyError:
-                        continue
-                    bucket = all_buckets[config_name][model_name]
-                    if key not in bucket:
-                        bucket[key] = {"prediction": [], "actual": []}
-                    bucket[key]["prediction"].append(pred)
-                    bucket[key]["actual"].append(actual)
-
-            summary_dfs[model_name] = pd.DataFrame({"prediction": summary_preds, "actual": summary_actuals})
-            del summary_preds, summary_actuals
-
-        rows_summary = []
-        for model_name, df in summary_dfs.items():
-            rows_summary.append(
-                {"model": model_name, "forecasts": len(df), **self._apply_evaluators(df, model_dfs=summary_dfs)}
-            )
-
-        rows_by_config: Dict[str, List[Dict]] = {name: [] for name, _ in group_configs}
-        for config_name, group_keys in group_configs:
-            model_buckets = all_buckets[config_name]
-            all_keys = sorted({k for b in model_buckets.values() for k in b})
-            for key in all_keys:
-                model_dfs = {
-                    name: pd.DataFrame(model_buckets[name][key]) for name in model_buckets if key in model_buckets[name]
-                }
-                for name, df in model_dfs.items():
-                    row: Dict = {"model": name}
-                    for k, v in zip(group_keys, key):
-                        row[k] = v
-                    row.update(self._apply_evaluators(df, model_dfs=model_dfs))
-                    rows_by_config[config_name].append(row)
-
-        result: Dict[str, pd.DataFrame] = {"summary": pd.DataFrame(rows_summary)}
-        for config_name, _ in group_configs:
-            result[config_name] = pd.DataFrame(rows_by_config[config_name])
+        model_dfs = self._model_frames()
+        result: Dict[str, pd.DataFrame] = {"summary": self._summary_table(model_dfs)}
+        for config_name, group_keys in GROUP_CONFIGS:
+            result[config_name] = self._grouped_table(model_dfs, group_keys)
         return result
 
     def _compute_grouped(self, group_keys: List[str]) -> pd.DataFrame:
-        needs_year = "year" in group_keys
-        needs_run_weekday = "run_weekday" in group_keys
-        needs_target_weekday = "target_weekday" in group_keys
-        read_keys = [k for k in group_keys if k not in ("year", "run_weekday", "target_weekday")]
-        if needs_year or needs_target_weekday:
-            read_keys.append("target_date")
-        if needs_run_weekday:
-            read_keys.append("run_date")
-        cols_to_read = list(dict.fromkeys(read_keys + ["prediction", "actual"]))
+        return self._grouped_table(self._model_frames(), group_keys)
 
-        all_buckets: Dict[str, Dict[tuple, Dict[str, list]]] = {}
-        for name, ref in self.refs.items():
-            buckets: Dict[tuple, Dict[str, list]] = {}
-            for r in self._iter_ref(ref, cols=cols_to_read):
-                if needs_year:
-                    r["year"] = int(r["target_date"][:4])
-                if needs_run_weekday:
-                    r["run_weekday"] = pd.Timestamp(r["run_date"]).dayofweek
-                if needs_target_weekday:
-                    r["target_weekday"] = pd.Timestamp(r["target_date"]).dayofweek
-                try:
-                    key = tuple(r[k] for k in group_keys)
-                except KeyError:
-                    continue
-                if key not in buckets:
-                    buckets[key] = {"prediction": [], "actual": []}
-                buckets[key]["prediction"].append(r["prediction"])
-                buckets[key]["actual"].append(r["actual"])
-            all_buckets[name] = buckets
+    def _model_frames(self) -> Dict[str, pd.DataFrame]:
+        """One DataFrame per model, read once: `FORECAST_KEYS`, `prediction` and `actual`.
 
+        This is what evaluators receive (whole, or cut into groups). `run_date` and `target_date` are
+        datetime64 and `hour` / `horizon` integers, which keeps the frames compact. A key that no record of
+        the model carries is left out of its frame; evaluators that need it (rMAE) say so.
+        """
+        return {name: self._model_frame(ref) for name, ref in self.refs.items()}
+
+    def _model_frame(self, ref: ModelResultRef) -> pd.DataFrame:
+        columns = [*FORECAST_KEYS, "prediction", "actual"]
+        values: Dict[str, list] = {c: [] for c in columns}
+        for r in self._iter_ref(ref, cols=columns):
+            for c in columns:
+                values[c].append(r.get(c))
+        frame: Dict[str, Union[list, pd.Series]] = {}
+        for c in columns:
+            if c in ("prediction", "actual"):
+                frame[c] = values[c]
+            elif any(v is not None for v in values[c]):
+                frame[c] = (
+                    pd.to_datetime(pd.Series(values[c], dtype="object"), format="ISO8601")
+                    if c.endswith("_date")
+                    else values[c]
+                )
+        return pd.DataFrame(frame)
+
+    def _summary_table(self, model_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         rows = []
-        all_keys = sorted({k for b in all_buckets.values() for k in b})
-        for key in all_keys:
-            model_dfs = {name: pd.DataFrame(all_buckets[name][key]) for name in all_buckets if key in all_buckets[name]}
-            for name, df in model_dfs.items():
-                row = {"model": name}
-                for k, v in zip(group_keys, key):
-                    row[k] = v
-                row.update(self._apply_evaluators(df, model_dfs=model_dfs))
-                rows.append(row)
-
+        for name, df in model_dfs.items():
+            rows.append({"model": name, "forecasts": len(df), **self._apply_evaluators(df, model_dfs=model_dfs)})
         return pd.DataFrame(rows)
+
+    def _grouped_table(self, model_dfs: Dict[str, pd.DataFrame], group_keys: List[str]) -> pd.DataFrame:
+        """One row per (group, model): each model's evaluators run on its own rows of the group, with every
+        model's rows of that group as `model_dfs`. Rows are ordered by group, then by model."""
+        groups = {name: dict(self._split(df, group_keys)) for name, df in model_dfs.items()}
+        rows = []
+        for key in sorted({k for g in groups.values() for k in g}):
+            group_dfs = {name: g[key] for name, g in groups.items() if key in g}
+            for name, df in group_dfs.items():
+                row = {"model": name, **dict(zip(group_keys, key))}
+                row.update(self._apply_evaluators(df, model_dfs=group_dfs))
+                rows.append(row)
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def _split(df: pd.DataFrame, group_keys: List[str]) -> Iterator[Tuple[tuple, pd.DataFrame]]:
+        """Cut one model's frame by `group_keys`. Rows without a value for a key take no part in the grouping."""
+        columns = []
+        for k in group_keys:
+            if k == "year":
+                column = df["target_date"].dt.year if "target_date" in df else None
+            elif k == "run_weekday":
+                column = df["run_date"].dt.dayofweek if "run_date" in df else None
+            elif k == "target_weekday":
+                column = df["target_date"].dt.dayofweek if "target_date" in df else None
+            else:
+                column = df[k] if k in df else None
+            if column is None:
+                return
+            columns.append(column.rename(k))
+        for key, part in df.groupby(columns if len(columns) > 1 else columns[0], sort=False):
+            key = key if isinstance(key, tuple) else (key,)
+            yield tuple(v.item() if hasattr(v, "item") else v for v in key), part

@@ -67,6 +67,27 @@ def two_model_results():
     }
 
 
+def _record(run_date, hour, prediction, actual, horizon=1):
+    """One result record; target_date is run_date + horizon days."""
+    target = (pd.Timestamp(run_date) + pd.Timedelta(days=horizon)).date().isoformat()
+    return {
+        "run_date": run_date,
+        "target_date": target,
+        "hour": hour,
+        "horizon": horizon,
+        "day_in_test": 0,
+        "prediction": prediction,
+        "actual": actual,
+    }
+
+
+def _keyed(rows):
+    """A keyed per-model frame from (run_date, hour, horizon, prediction, actual) rows."""
+    return pd.DataFrame(
+        [_record(run_date, hour, prediction, actual, horizon) for run_date, hour, horizon, prediction, actual in rows]
+    ).assign(run_date=lambda d: pd.to_datetime(d["run_date"]), target_date=lambda d: pd.to_datetime(d["target_date"]))
+
+
 # ===========================================================================
 # RMSEEvaluator
 # ===========================================================================
@@ -140,11 +161,126 @@ class TestRMAEEvaluator:
 
     def test_inf_when_base_mae_zero(self):
         """Should return inf when base model has zero MAE."""
-        df = pd.DataFrame({"prediction": [10], "actual": [20]})
-        perfect = pd.DataFrame({"prediction": [5], "actual": [5]})
+        df = _keyed([("2024-01-01", 0, 1, 10, 20)])
+        perfect = _keyed([("2024-01-01", 0, 1, 5, 5)])
         ev = rMAEEvaluator(base_model="Perfect")
         result = ev.compute(df, model_dfs={"Perfect": perfect})
         assert result == float("inf")
+
+    def test_compares_models_on_shared_forecast_keys(self):
+        """The candidate lacks the hour-1 forecast, so the benchmark's MAE is taken on hour 0 only."""
+        benchmark = [_record("2024-01-01", 0, 11.0, 10.0), _record("2024-01-01", 1, 19.0, 10.0)]  # errors 1 and 9
+        candidate = [_record("2024-01-01", 0, 12.0, 10.0)]  # error 2; the hour-1 forecast is missing
+
+        report = EvaluationReport({"base": benchmark, "model": candidate}, [rMAEEvaluator(base_model="base")])
+        summary = report.summary().set_index("model")
+
+        # On the shared key the candidate's error is 2 vs the benchmark's 1 (not 2 vs the benchmark's mean of 5).
+        assert summary.loc["model", "rMAE"] == pytest.approx(2.0)
+        # The benchmark is scored on the same single key; its own count is still its full count.
+        assert summary.loc["base", "rMAE"] == pytest.approx(1.0)
+        assert summary.loc["base", "forecasts"] == 2
+
+    def test_model_only_forecasts_do_not_enter_the_model_mae(self):
+        """A forecast only the candidate has (here with a huge error) is left out of its MAE."""
+        benchmark = [_record("2024-01-01", 0, 11.0, 10.0)]  # error 1
+        candidate = [_record("2024-01-01", 0, 12.0, 10.0), _record("2024-01-01", 1, 500.0, 10.0)]  # errors 2, 490
+
+        report = EvaluationReport({"base": benchmark, "model": candidate}, [rMAEEvaluator(base_model="base")])
+
+        assert report.summary().set_index("model").loc["model", "rMAE"] == pytest.approx(2.0)
+
+    def test_keys_include_run_date_and_horizon(self):
+        """The same hour on another run date, or at another horizon, is another forecast."""
+        benchmark = [_record("2024-01-01", 0, 11.0, 10.0), _record("2024-01-02", 0, 15.0, 10.0)]  # errors 1, 5
+        candidate = [_record("2024-01-02", 0, 12.0, 10.0), _record("2024-01-02", 0, 30.0, 10.0, horizon=2)]  # 2, 20
+
+        report = EvaluationReport({"base": benchmark, "model": candidate}, [rMAEEvaluator(base_model="base")])
+
+        # Only (2024-01-02, hour 0, horizon 1) is shared: candidate error 2 against benchmark error 5.
+        assert report.summary().set_index("model").loc["model", "rMAE"] == pytest.approx(2 / 5)
+
+    def test_same_forecast_keys_give_the_plain_mae_ratio(self, two_model_results):
+        """With identical keys the result equals the ratio of each model's own MAEs (the old behaviour)."""
+        report = EvaluationReport(two_model_results, [MAEEvaluator(), rMAEEvaluator(base_model="OLS")])
+        summary = report.summary().set_index("model")
+
+        assert summary.loc["Lasso", "rMAE"] == pytest.approx(summary.loc["Lasso", "MAE"] / summary.loc["OLS", "MAE"])
+        assert summary.loc["Lasso", "rMAE"] == pytest.approx(1.0 / 2.25)
+
+    def test_nan_when_no_shared_keys(self):
+        benchmark = [_record("2024-01-01", 0, 11.0, 10.0)]
+        candidate = [_record("2024-01-01", 1, 12.0, 10.0)]
+
+        report = EvaluationReport({"base": benchmark, "model": candidate}, [rMAEEvaluator(base_model="base")])
+        summary = report.summary().set_index("model")
+
+        assert math.isnan(summary.loc["model", "rMAE"])
+        assert summary.loc["base", "rMAE"] == pytest.approx(1.0)
+
+    def test_non_finite_values_drop_the_key_for_both_models(self):
+        """A key whose prediction is NaN on either side is out of both MAEs."""
+        benchmark = [_record("2024-01-01", 0, 11.0, 10.0), _record("2024-01-01", 1, 60.0, 10.0)]  # errors 1, 50
+        candidate = [_record("2024-01-01", 0, 14.0, 10.0), _record("2024-01-01", 1, math.nan, 10.0)]  # errors 4, NaN
+
+        report = EvaluationReport({"base": benchmark, "model": candidate}, [rMAEEvaluator(base_model="base")])
+
+        assert report.summary().set_index("model").loc["model", "rMAE"] == pytest.approx(4.0)
+
+    def test_grouped_tables_use_shared_keys_and_agree_with_compute_all(self):
+        """By hour, the candidate (missing every other day of hour 1) is scored against the benchmark on its keys."""
+        days = [d.date().isoformat() for d in pd.date_range("2024-01-01", periods=4, freq="D")]
+        base_errors = {0: [1.0, 1.0, 1.0, 1.0], 1: [2.0, 4.0, 6.0, 8.0]}
+        model_errors = {0: [2.0, 2.0, 2.0, 2.0], 1: [3.0, None, 3.0, None]}  # hour 1 only on days 0 and 2
+        base, model = [], []
+        for hour in (0, 1):
+            for day, b_err, m_err in zip(days, base_errors[hour], model_errors[hour]):
+                base.append(_record(day, hour, 100.0 + b_err, 100.0))
+                if m_err is not None:
+                    model.append(_record(day, hour, 100.0 + m_err, 100.0))
+        report = EvaluationReport({"base": base, "model": model}, [rMAEEvaluator(base_model="base")])
+
+        by_hour = report.by_hour().set_index(["hour", "model"])["rMAE"]
+        assert by_hour[(0, "model")] == pytest.approx(2.0)
+        # Hour 1 on days 0 and 2: candidate errors 3, 3; benchmark errors 2, 6 (mean 4), not its mean of 5 over all days.
+        assert by_hour[(1, "model")] == pytest.approx(3.0 / 4.0)
+        assert by_hour[(1, "base")] == pytest.approx(1.0)
+
+        from_compute_all = report.compute_all()["hour"].set_index(["hour", "model"])["rMAE"]
+        pd.testing.assert_series_equal(by_hour.sort_index(), from_compute_all.sort_index())
+
+        # The overall number is on the 6 shared keys: hour 0 on four days and hour 1 on two.
+        assert report.summary().set_index("model").loc["model", "rMAE"] == pytest.approx((8 + 6) / (4 + 8))
+
+    def test_raises_when_key_columns_are_missing(self):
+        """Result records without run_date cannot be aligned; say so instead of comparing unaligned rows."""
+        rows = [{k: v for k, v in _record("2024-01-01", 0, 11.0, 10.0).items() if k != "run_date"}]
+        report = EvaluationReport({"base": rows, "model": rows}, [rMAEEvaluator(base_model="base")])
+
+        with pytest.raises(ValueError, match="run_date"):
+            report.summary()
+
+    def test_raises_when_some_keys_are_missing(self):
+        rows = [_record("2024-01-01", 0, 11.0, 10.0), {"prediction": 1.0, "actual": 2.0, "hour": 1, "horizon": 1}]
+        report = EvaluationReport({"base": rows, "model": rows}, [rMAEEvaluator(base_model="base")])
+
+        with pytest.raises(ValueError, match="missing forecast key"):
+            report.summary()
+
+    def test_raises_on_duplicated_keys(self):
+        """The same forecast twice in one model would count twice in the join."""
+        base = [_record("2024-01-01", 0, 11.0, 10.0)]
+        duplicated = [_record("2024-01-01", 0, 12.0, 10.0), _record("2024-01-01", 0, 13.0, 10.0)]
+        report = EvaluationReport({"base": base, "model": duplicated}, [rMAEEvaluator(base_model="base")])
+
+        with pytest.raises(ValueError, match="duplicated"):
+            report.summary()
+
+    def test_other_evaluators_do_not_need_the_keys(self):
+        """A report with only MAE still works on records that carry just prediction and actual."""
+        rows = {"M": [{"prediction": 10.0, "actual": 12.0}, {"prediction": 20.0, "actual": 18.0}]}
+        summary = EvaluationReport(rows, [MAEEvaluator()]).summary()
+        assert summary.loc[0, "MAE"] == pytest.approx(2.0)
 
     def test_grouped_evaluation(self, two_model_results):
         """rMAE should be computed per group in by_horizon."""

@@ -8,7 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
+from epftoolbox2.evaluators import Evaluator, MAEEvaluator, RMSEEvaluator, rMAEEvaluator
+from epftoolbox2.evaluators.base import FORECAST_KEYS
 from epftoolbox2.results.report import EvaluationReport
 
 GROUPINGS = {
@@ -67,3 +68,63 @@ def test_grouped_metrics_match(report, grouping, method):
     from_method = getattr(report, method)()
     assert not from_method.empty
     pd.testing.assert_frame_equal(normalized(from_compute_all), normalized(from_method), check_dtype=False)
+
+
+class Recorder(Evaluator):
+    """Keeps every frame the report hands to an evaluator."""
+
+    name = "seen"
+
+    def __init__(self):
+        self.calls = []
+
+    def compute(self, df, **kwargs):
+        self.calls.append((df, kwargs["model_dfs"]))
+        return float(len(df))
+
+
+def keyed_report():
+    recorder = Recorder()
+    results = {"base": fake_results(1), "model": fake_results(2, skip_every=7)}
+    return EvaluationReport(results, [recorder]), recorder
+
+
+@pytest.mark.parametrize("method", ["summary", "compute_all", *GROUPINGS.values()])
+def test_evaluators_receive_keyed_frames(method):
+    """Every path (summary, compute_all, by_*) hands evaluators frames with the forecast keys, for the model and for
+    every model in `model_dfs`."""
+    report, recorder = keyed_report()
+
+    getattr(report, method)()
+
+    assert recorder.calls
+    for df, model_dfs in recorder.calls:
+        for frame in (df, *model_dfs.values()):
+            assert list(frame.columns) == [*FORECAST_KEYS, "prediction", "actual"]
+            assert pd.api.types.is_datetime64_any_dtype(frame["run_date"])
+            assert pd.api.types.is_datetime64_any_dtype(frame["target_date"])
+            assert not frame[list(FORECAST_KEYS)].isna().any().any()
+            assert not frame.duplicated(list(FORECAST_KEYS)).any()
+
+
+def test_grouped_frames_hold_only_their_group():
+    report, recorder = keyed_report()
+
+    report.by_hour_horizon()
+
+    for df, model_dfs in recorder.calls:
+        hour, horizon = df["hour"].iloc[0], df["horizon"].iloc[0]
+        for frame in model_dfs.values():
+            assert (frame["hour"] == hour).all() and (frame["horizon"] == horizon).all()
+        assert ((df["target_date"] - df["run_date"]).dt.days == horizon).all()
+
+
+def test_summary_frames_hold_every_forecast_of_the_model():
+    report, recorder = keyed_report()
+
+    summary = report.summary()
+
+    (df, model_dfs) = recorder.calls[0]
+    assert {name: len(frame) for name, frame in model_dfs.items()} == dict(zip(summary["model"], summary["forecasts"]))
+    assert len(model_dfs["base"]) == len(fake_results(1))
+    assert len(model_dfs["model"]) == len(fake_results(2, skip_every=7))
