@@ -2,7 +2,8 @@
 
 A forecast issued on day D at the issue time (e.g. 11:45 Brussels, before the 12:00 day-ahead gate closure) may
 only use values published by then. Each base column gets an `Availability` rule; predictor names are parsed
-(`x`, `x_d-k`, `x_d+k`, `x_h-k`, ...) to find the base column and the delivery time of the value they hold; and
+(`x`, `x_d-k`, `x_d+k`, `x_h-k`, ...) to find the base column and the delivery time of the value they hold (a
+DailyProfileTransformer column, `x_h05` or `x_h05_d-1`, is delivered in the slot it names, not at the row); and
 `InformationSet.check` evaluates every expanded predictor for every (period, horizon) before any model is fitted.
 `leakage_probe` tests the same boundary empirically: it perturbs every value that is not yet known at issue time
 and checks that the forecasts don't move.
@@ -33,6 +34,10 @@ _UNKNOWN_POLICIES = ("raise", "warn", "ignore")
 _SUFFIX = re.compile(r"^(?P<base>.+)_(?P<unit>d|h|min|s)(?P<sign>[+-])(?P<n>\d+)$")
 _UNIT_MINUTES = {"d": 1440.0, "h": 60.0, "min": 1.0, "s": 1.0 / 60.0}
 _STEP_MINUTES = {"1h": 60, "15min": 15}
+# DailyProfileTransformer's slot suffixes (`data.transformers._daily.slot_names`): `_h00`..`_h23` for hourly data,
+# `_s00`..`_s95` for 15-minute data. No sign, so they never parse as a shift.
+_PROFILE_SLOT = re.compile(r"^(?P<column>.+)_(?P<unit>[hs])(?P<n>\d{2})$")
+_SLOT_MINUTES = {"h": 60, "s": 15}
 
 
 def _parse_time(value: str) -> int:
@@ -386,6 +391,16 @@ class ResolvedColumn:
     key: Optional[str] = None  # the rule's key (exact name or pattern)
     layer: Optional[str] = None
 
+    @property
+    def slot(self) -> Optional[Tuple[int, int]]:
+        """(start, length) in minutes of the DailyProfileTransformer slot that `base` names, or None.
+
+        `price_h05` holds the price of 05:00-06:00 on its row's local day, the same value on every row of that day,
+        so its availability is that of slot (300, 60), whatever the row's period. `_sNN` is a 15-minute slot.
+        """
+        profile = _profile_source(self)
+        return None if profile is None else profile[1:]
+
 
 def parse_predictor(name: str) -> List[Tuple[str, Tuple[Shift, ...]]]:
     """All readings of a column name as base + suffixes, from the full name to the fully stripped base.
@@ -403,6 +418,23 @@ def parse_predictor(name: str) -> List[Tuple[str, Tuple[Shift, ...]]]:
         current = match["base"]
         chain.append((current, tuple(shifts)))
     return chain
+
+
+def _profile_source(col: ResolvedColumn) -> Optional[Tuple[ResolvedColumn, int, int]]:
+    """For a DailyProfileTransformer column, the column it was built from and its slot (start, length) in minutes.
+
+    `x_d+1_h05` (a profile of the lag `x_d+1`) is built from `x` shifted by `_d+1`, read at 05:00; the shifts after
+    the slot (`col.shifts`) pick the day the slot is read on. None for a column that is not a profile.
+    """
+    match = _PROFILE_SLOT.match(col.base)
+    if match is None:
+        return None
+    length = _SLOT_MINUTES[match["unit"]]
+    start = int(match["n"]) * length
+    if start >= 1440:
+        return None
+    base, shifts = parse_predictor(match["column"])[-1]
+    return replace(col, base=base, shifts=shifts), start, length
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +697,13 @@ class InformationSet:
         """An OpenMeteoSource column's own cutoff is a source-side setting, not a data fact: point at it."""
         if col.rule is None or col.rule.kind != "weather_cutoff":
             return ""
-        if any(s.offset > 0 for s in _shifts_after_source_lead(col.shifts)):
+        profile = _profile_source(col)
+        # A profile's shifts after its slot always shift the row; only the column it was built from has a lead.
+        if profile is not None:
+            row_shifts = list(col.shifts) + _shifts_after_source_lead(profile[0].shifts)
+        else:
+            row_shifts = _shifts_after_source_lead(col.shifts)
+        if any(s.offset > 0 for s in row_shifts):
             return (
                 "a forward shift after the source's own `_d+k` reads the run of a later issue day, which starts "
                 "after the issue time whatever `run` is; drop the forward shift"
@@ -948,6 +986,18 @@ def _available_array(
     after `ctx.day` (`violations` checks many issue days at once; `perturb_unknown` one, `ctx.day` itself).
     `first` marks rows that are not the second occurrence of a repeated autumn wall time (default: all).
     """
+    profile = _profile_source(col)
+    if profile is not None:
+        # A profile column holds, on every row of a local day, the column it was built from at its slot of that day:
+        # `x_h05_d-1` on row D is `x` at 05:00 on D-1 (the shifts after the slot pick the day, and none of them is a
+        # source's lead), `x_d+1_h05` is `x_d+1` at 05:00 on D. A repeated autumn slot is its first occurrence, the
+        # one DailyProfileTransformer copies; a slot skipped in spring moves forward to the switch.
+        source, start, length = profile
+        days = sum(s.offset for s in col.shifts if s.unit == "d")
+        elapsed = sum(s.minutes for s in col.shifts if s.unit != "d")
+        reached = day + days + np.floor((np.asarray(minute, dtype=float) + elapsed) / 1440.0)
+        slot = np.full(len(reached), float(start))
+        return _available_array(source, rule, reached, slot, length, ctx, None, issue_day + reached - day)
     if rule.kind == "static":
         return np.full(len(day), -np.inf)
     if rule.kind == "as_of":

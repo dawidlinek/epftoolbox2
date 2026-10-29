@@ -146,6 +146,43 @@ which columns that affects.
 
 ---
 
+## Profile Columns
+
+A [`DailyProfileTransformer`](/epftoolbox2/transformers/daily-profile/) column holds one slot of its row's local
+day, the same value on every row of that day: `price_h05` is the price of 05:00–06:00 on D, and `_s00` … `_s95` are
+the quarter-hours of 15-minute data. The check and the probe judge it at that slot, not at the row's period, and
+the shifts after the slot pick the day: `load_actual_h23_d-1` is 23:00 on D-1, and `load_actual_h23_h-12` reads
+D-1's profile on the rows before noon and D's from noon on. A profile of a lag (`LagTransformer` before
+`DailyProfileTransformer`) keeps its lag: `load_actual_d+1_h05` is the load at 05:00 on D+1.
+
+Profile columns need their own rules, usually patterns. `price_h05` does not take the rule of `price`, and a rule
+that matches a profile describes the series it was built from, so `generation_*` also covers
+`generation_solar_d+1_h05`:
+
+```python
+from epftoolbox2.information_set import Availability, InformationSet
+
+info = InformationSet(
+    "11:45", "Europe/Brussels",
+    rules={
+        "price_h*": Availability.published("13:00", days_before=1),
+        "load_actual_h*": Availability.realised("1h"),
+    },
+)
+```
+
+With these rules `load_actual_h05` (known 07:00 on D) passes at every period, and `load_actual_h23` (known 01:00
+on D+1) fails at every period. On a DST day the skipped spring slot is NaN, and the repeated autumn slot holds its
+first occurrence, as the transformer fills them. A `_d+k` after the slot always shifts the row, so `as_of`,
+`weather_cutoff` and `weather_run` rules read `x_h05_d+1` from D+1 and never treat it as a source's own lead.
+
+<Aside type="caution">
+  `_hNN` is read as an hour and `_sNN` as a quarter-hour. A profile with another slot length (`freq="30min"`
+  also gives `_sNN` names) cannot be told apart by name and would be judged at the wrong time.
+</Aside>
+
+---
+
 ## Leakage Probe
 
 `InformationSet.check()` is a static analysis of predictor *names*. `leakage_probe` checks the same boundary
