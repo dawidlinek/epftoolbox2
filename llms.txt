@@ -1,6 +1,6 @@
 # epftoolbox2
 
-> Python library for electricity price forecasting research. It downloads market data (ENTSO-E, Open-Meteo, calendars, CSV), builds leak-free features, runs rolling-window forecasts with one model per period of day, horizon and run day, and evaluates them. `DataPipeline` produces one DataFrame, `ModelPipeline` fits models and returns an `EvaluationReport`, and `Workflow` runs both from YAML. Install with `pip install epftoolbox2` (Python 3.10 or newer).
+> Python library for electricity price forecasting research. It downloads market data (ENTSO-E, Open-Meteo, calendars, CSV), builds leak-free features, runs rolling-window forecasts with one model per period of day, horizon and run day, and evaluates them. `DataPipeline` produces one DataFrame, `ModelPipeline` fits models and returns an `EvaluationReport`, and `Workflow` runs both from YAML. Install with `pip install epftoolbox2` (Python 3.11 or newer).
 
 This file is an index. Read the rules below, then open only the pages you need. Links are repo-relative paths to the page sources. The same pages are published at `https://dawidlinek.github.io/epftoolbox2/<slug>/`, where `<slug>` is the path under `docs/src/content/docs/` without its extension, for example `data-pipeline/overview/`.
 
