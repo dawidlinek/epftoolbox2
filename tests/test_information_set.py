@@ -1,5 +1,7 @@
 """Information availability rules, the pre-fit check and the leakage probe (roadmap item 1)."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -16,10 +18,11 @@ from epftoolbox2.information_set import (
     source_rules,
 )
 from epftoolbox2.data.sources.entsoe import EntsoeSource
-from epftoolbox2.data.transformers import LagTransformer
+from epftoolbox2.data.transformers import DailyProfileTransformer, LagTransformer
 from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
+from epftoolbox2.presets import profile_columns
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 WARSAW = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
@@ -778,6 +781,237 @@ def test_shipped_example_predictors_are_flagged():
     found, unknown = violations(shipped, info=info)
     assert unknown == set()
     assert {name for name, _, _ in found} == {"load_actual"}
+
+
+# ---------------------------------------------------------------------------
+# Profile columns (DailyProfileTransformer): judged at the slot they name, not at the row's period
+# ---------------------------------------------------------------------------
+
+LOAD_ACTUAL_PROFILE = {"load_actual_h*": Availability.realised("1h")}
+
+
+def _refused_periods(found) -> dict:
+    out = {}
+    for name, period, _ in found:
+        out.setdefault(name, set()).add(period)
+    return out
+
+
+def test_profile_slot_names():
+    info = InformationSet(rules={"x*": Availability.static()})
+    assert info.resolve("x_h05").slot == (300, 60)
+    assert info.resolve("x_h05_d-1").slot == (300, 60)  # the shift comes after the slot
+    assert info.resolve("x_d+1_h05").slot == (300, 60)  # a profile of the lag x_d+1
+    assert info.resolve("x_s95").slot == (1425, 15)  # DailyProfileTransformer(freq="15min")
+    assert info.resolve("x_h24").slot is None  # not a slot of a day
+    assert info.resolve("x_h-12").slot is None  # an hour lag of x
+    assert info.resolve("x").slot is None
+
+
+def test_profile_slot_published_before_the_issue_is_accepted_at_every_period():
+    """False refusal. On the DE benchmark index (Etc/GMT-1, UTC+1 all year) with Brussels rules, `price_h00` on the
+    rows of D is the price at 00:00 on D (23:00Z on D-1: delivered on D in Brussels, published 13:00 on D-1), known
+    when the forecast is issued at 11:45 Berlin on D. Judged at the row's own period, the row at 23:00 (22:00Z, which
+    is 00:00 CEST on D+1 in summer) reads it as delivered on D+1 and refuses it ("known D 12:00, issued D 10:45")."""
+    index = pd.date_range("2015-05-20", "2015-06-20", freq="h", tz="Etc/GMT-1")
+    info = InformationSet("11:45", "Europe/Berlin", rules={"price_h*": Availability.published("13:00", 1)})
+    expanded = {(period, 1): ["price_h00"] for period in range(24)}
+
+    found, unknown = info.violations(expanded, "price", "1h", index, "2015-06-01", "2015-06-07")
+
+    assert unknown == set()
+    assert [(v.predictor, v.period) for v in found] == []
+
+
+def test_profile_slot_realised_after_the_issue_is_refused_at_every_period():
+    """Look-ahead. With a user rule `load_actual_h*` realised 1 h after its period, `load_actual_h23` on the rows of D
+    is the load at 23:00 on D, known at 01:00 on D+1: not known at the 11:45 issue on D, whatever the row's period.
+    Judged at the row's own period, it is accepted for periods 0-9 (each realised by 11:00)."""
+    index = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
+    info = InformationSet("11:45", "Europe/Brussels", rules={"load_actual_h*": Availability.realised("1h")})
+    expanded = {(period, 1): ["load_actual_h23"] for period in range(24)}
+
+    found, unknown = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-23")
+
+    assert unknown == set()
+    assert {v.period for v in found} == set(range(24))
+
+
+def test_today_s_realised_slots_are_usable_and_the_rest_are_not_at_every_period():
+    """Both directions: realised 1 h after its hour, slot hNN of D is known at NN+2:00 on D, so h00-h09 are known at
+    the 11:45 issue from every period of D and h10-h23 from none, and the message names the slot's own time."""
+    info = InformationSet("11:45", "Europe/Brussels", rules=LOAD_ACTUAL_PROFILE)
+
+    found, unknown = violations(profile_columns("load_actual"), info=info, horizon=1)
+
+    assert unknown == set()
+    assert _refused_periods(found) == {f"load_actual_h{h:02d}": set(range(24)) for h in range(10, 24)}
+    with pytest.raises(InformationSetError, match=r"Periods 0-23.*period 0 is known D\+1 01:00, issued D 11:45"):
+        info.check(expand(["load_actual_h23"], horizon=1), "price", "1h", WARSAW, "2024-01-10", "2024-01-10")
+
+
+def test_a_profile_column_is_read_from_the_day_its_shifts_reach():
+    """`load_actual_h23_d-1` is 23:00 on D-1 (known 01:00 on D) and `price_h05_d+1` the price of 05:00 on D+1
+    (published 13:00 on D). `load_actual_h23_h-12` reads the profile of the row 12 hours earlier: D-1's for periods
+    0-11, D's (23:00 on D, known on D+1) from period 12 on."""
+    rules = {**LOAD_ACTUAL_PROFILE, "price_h*": Availability.published("13:00", 1)}
+    info = InformationSet("11:45", "Europe/Brussels", rules=rules)
+    names = ["load_actual_h23_d-1", "price_h05_d-1", "price_h05", "price_h05_d+1", "load_actual_h23_h-12"]
+
+    found, unknown = violations(names, info=info, horizon=1)
+
+    assert unknown == set()
+    assert _refused_periods(found) == {"price_h05_d+1": set(range(24)), "load_actual_h23_h-12": set(range(12, 24))}
+
+
+def test_quarter_hour_and_hour_slots_on_15_minute_data():
+    """`_sNN` is a quarter-hour (DailyProfileTransformer(freq="15min")) and `_hNN` an hour, whatever the model's freq.
+    Realised 1 h after it ends, quarter-hour 42 (10:30-10:45) is known at the 11:45 issue and quarter-hour 43 is
+    not, nor is hour 10 (known 12:00), from every one of the 96 periods."""
+    index = pd.date_range("2024-01-01", periods=96 * 30, freq="15min", tz="Europe/Warsaw")
+    rules = {"load_actual_s*": Availability.realised("1h"), **LOAD_ACTUAL_PROFILE}
+    info = InformationSet("11:45", "Europe/Brussels", rules=rules)
+    names = ["load_actual_s42", "load_actual_s43", "load_actual_h09", "load_actual_h10"]
+    expanded = {(period, 1): names for period in range(96)}
+
+    found, unknown = info.violations(expanded, "price", "15min", index, "2024-01-10", "2024-01-16")
+
+    assert unknown == set()
+    assert _refused_periods({(v.predictor, v.period, v.horizon) for v in found}) == {
+        "load_actual_s43": set(range(96)),
+        "load_actual_h10": set(range(96)),
+    }
+
+
+def test_a_profile_of_a_shifted_column_holds_the_shifted_value():
+    """LagTransformer before DailyProfileTransformer: `generation_solar_d+1_h05` on row D is `generation_solar_d+1` at
+    05:00 on D, i.e. generation at 05:00 on D+1 (realised, by the built-in `generation_*` rule, at 07:00 on D+1), and
+    `generation_solar_d-1_h23` is 23:00 on D-1 (known 01:00 on D). Reading the slot on D without the shift before it
+    would accept the first at every period."""
+    names = ["generation_solar_d+1_h05", "generation_solar_d-1_h23"]
+    found, unknown = violations(names, horizon=1)
+    assert unknown == set()
+    assert _refused_periods(found) == {"generation_solar_d+1_h05": set(range(24))}
+
+    index = pd.date_range("2024-01-08", "2024-01-13", freq="h", tz="Europe/Warsaw", inclusive="left")
+    perturbed, counts, _ = perturb_unknown(
+        pd.DataFrame(1.0, index=index, columns=names), "2024-01-10", InformationSet()
+    )
+    run_day = np.asarray(index.tz_localize(None).normalize() == pd.Timestamp("2024-01-10"))
+    assert (perturbed.loc[run_day, "generation_solar_d+1_h05"] != 1.0).all()
+    assert (perturbed.loc[run_day, "generation_solar_d-1_h23"] == 1.0).all()
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [Availability.as_of("09:00"), Availability.weather_cutoff("00", "6h"), Availability.weather_run("6h")],
+    ids=["as_of", "weather_cutoff", "weather_run"],
+)
+def test_a_day_lead_of_a_profile_column_is_a_shift_of_the_row(rule):
+    """Look-ahead. `x_h05_d+1` (LagTransformer(lags=[-1]) on the profile column `x_h05`) holds x at 05:00 on D+1, known
+    only on D+1 under these rules. They drop a leading `_d+k` as the source's own lead, but a `_d+k` after a slot
+    suffix always shifts the row, so dropping it judges the value of D instead: accepted at the 11:45 issue on D."""
+    index = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
+    info = InformationSet("11:45", "Europe/Brussels", rules={"x_h*": rule})
+    expanded = {(period, 1): ["x_h05_d+1"] for period in range(24)}
+
+    found, unknown = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-23")
+
+    assert unknown == set()
+    assert {v.period for v in found} == set(range(24))
+    # Without the lead, the same slot of D is known (09:00 snapshot, 06:00Z cutoff, 05:00 run + 6 h) at 11:45.
+    assert violations(["x_h05"], info=info, horizon=1)[0] == set()
+
+
+def test_probe_perturbs_a_profile_slot_realised_after_the_issue_on_every_row():
+    """The leakage probe's side of the look-ahead above: every row of the run day carries the same `load_actual_h23`
+    (23:00 on that day, known 01:00 the next day), so every row must be perturbed, not only the rows from 10:00 on."""
+    index = pd.date_range("2024-01-08", "2024-01-13", freq="h", tz="Europe/Warsaw", inclusive="left")
+    data = pd.DataFrame({"load_actual_h23": 1.0}, index=index)
+    info = InformationSet("11:45", "Europe/Brussels", rules={"load_actual_h*": Availability.realised("1h")})
+
+    perturbed, _counts, unchecked = perturb_unknown(data, "2024-01-10", info)
+
+    assert unchecked == []
+    run_day = np.asarray(index.tz_localize(None).normalize() == pd.Timestamp("2024-01-10"))
+    assert (perturbed.loc[run_day, "load_actual_h23"] != 1.0).all()
+
+
+@pytest.mark.parametrize(
+    "run_day, index, rows", [("2024-03-31", DST_SPRING_WARSAW, 23), ("2024-10-27", DST_FALL_WARSAW, 25)]
+)
+def test_profile_slots_have_one_verdict_on_every_row_of_a_dst_day(run_day, index, rows):
+    """The switch days have 23 and 25 rows, each carrying the day's whole profile. Realised 1 h after its hour, slot 23
+    (known 01:00 the next day) is perturbed on every one of them and refused at every period, including period 2,
+    which has no row or two rows that day; slot 05, and the skipped or repeated slot 02 itself, on none."""
+    names = ["load_actual_h02", "load_actual_h05", "load_actual_h23"]
+    data = pd.DataFrame(1.0, index=index, columns=names)
+    info = InformationSet("11:45", "Europe/Brussels", rules=LOAD_ACTUAL_PROFILE)
+
+    perturbed, _, _ = perturb_unknown(data, run_day, info)
+    found, unknown = violations(names, info=info, horizon=1, start=run_day, end=run_day, index=index)
+
+    day = np.asarray(index.tz_localize(None).normalize() == pd.Timestamp(run_day))
+    assert day.sum() == rows
+    changed = perturbed.loc[day] != 1.0
+    assert changed["load_actual_h23"].all()
+    assert not changed[["load_actual_h02", "load_actual_h05"]].to_numpy().any()
+    assert unknown == set()
+    assert _refused_periods(found) == {"load_actual_h23": set(range(24))}
+
+
+@pytest.mark.parametrize("switch", ["2024-03-31", "2024-10-27"])
+@pytest.mark.parametrize("rule_zone", ["Europe/Brussels", "Atlantic/Cape_Verde"])
+@pytest.mark.parametrize("data_zone", ["Europe/Warsaw", "Etc/GMT-1"])
+def test_profile_verdicts_match_the_delivery_each_cell_holds(data_zone, rule_zone, switch):
+    """Known answer from the data itself. `px` holds its own UTC instant, so every cell of DailyProfileTransformer's
+    profiles (of `px` and of its day lags) and of their day lags says which delivery it holds: on the switch days' 23
+    or 25 rows too, and the repeated autumn slot is its first occurrence, which the transformer copies. A cell is published 13:00 in the rule's zone on
+    the day before its delivery day there, so it is unknown at the 11:45 Brussels issue exactly when that comes later;
+    the probe must perturb exactly those cells and the check refuse exactly those (predictor, issue day) pairs, at every
+    period. Cape Verde (UTC-1) puts Warsaw's two 02:00s of 2024-10-27 on different delivery days, and Etc/GMT-1 (the
+    benchmark index) moves against Brussels at each switch. Cells the transformers leave NaN (the skipped spring slot,
+    a day lag onto a skipped hour) hold no delivery and are not compared."""
+    start = pd.Timestamp(switch) - pd.Timedelta(days=4)
+    index = pd.date_range(start, start + pd.Timedelta(days=9), freq="h", tz=data_zone, inclusive="left")
+    raw = pd.DataFrame({"px": (index.asi8 // 60_000_000_000).astype(float)}, index=index)  # minutes since the epoch
+    columns = ["px", "px_d-1", "px_d+1"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # the 23- and 25-hour days of a DST index
+        data = LagTransformer(columns="px", lags=[1, -1], freq="day").transform(raw)
+        data = DailyProfileTransformer(columns=columns).transform(data)
+        profiles = [name for column in columns for name in profile_columns(column)]
+        data = LagTransformer(columns=profiles, lags=[1, -1], freq="day").transform(data)
+    # The slots around midnight, the DST hour (02:00) and one from the middle of the day.
+    data = data[[name for name in data.columns if any(f"_h{h}" in name for h in ("00", "01", "02", "03", "12", "23"))]]
+    info = InformationSet("11:45", "Europe/Brussels", rules={"px*": Availability.published("13:00", 1, rule_zone)})
+    # When each cell is published: 13:00 in the rule's zone on the day before the delivery day there (NaT for NaN).
+    held = data.notna().to_numpy()
+    delivery = pd.to_datetime(data.to_numpy()[held] * 60, unit="s", utc=True)
+    delivery_day = delivery.tz_convert(rule_zone).normalize().tz_localize(None)
+    published = (delivery_day - pd.Timedelta(days=1) + pd.Timedelta(hours=13)).tz_localize(rule_zone)
+    on_day = np.repeat(index.tz_localize(None).normalize().to_numpy()[:, None], data.shape[1], axis=1)[held]
+    names = np.repeat(np.asarray(data.columns)[None, :], len(index), axis=0)[held]
+    rows = np.repeat(np.asarray(index)[:, None], data.shape[1], axis=1)[held]
+    expanded = {(period, 1): list(data.columns) for period in range(24)}
+
+    wrong = {}
+    for run_day in pd.date_range(pd.Timestamp(switch) - pd.Timedelta(days=2), periods=4, freq="D"):
+        unknown = np.asarray(published > pd.Timestamp(f"{run_day.date()} 11:45", tz="Europe/Brussels"))
+        perturbed, _, _ = perturb_unknown(data, str(run_day.date()), info)
+        mismatch = (perturbed.to_numpy() != data.to_numpy())[held] != unknown
+        for name, row in zip(names[mismatch][:5], rows[mismatch][:5]):
+            wrong.setdefault((str(run_day.date()), "probe"), []).append((name, str(row)))
+
+        found, _ = info.violations(expanded, "price", "1h", index, str(run_day.date()), str(run_day.date()))
+        refused = _refused_periods({(v.predictor, v.period, v.horizon) for v in found if v.role == "predictor"})
+        today = on_day == run_day.to_datetime64()
+        late_today = set(names[today & unknown])
+        assert not late_today & set(names[today & ~unknown]), "every cell of a profile on one day holds one delivery"
+        refused = {name: periods for name, periods in refused.items() if name in set(names[today])}
+        if refused != {name: set(range(24)) for name in late_today}:
+            wrong[(str(run_day.date()), "check")] = sorted(set(refused) ^ late_today)[:5]
+    assert wrong == {}
 
 
 # ---------------------------------------------------------------------------
