@@ -107,6 +107,22 @@ report.leaderboard(benchmark="OLS")
 
 One row per model, sorted by MAE. `n_forecasts` and `MAE` are the model's own, and `n_days`, `n_common` and the rest are on the forecasts it shares with the benchmark. When the models have different forecast sets (even of the same size) the MAE column compares different samples: a warning says so, and `ratio` is the column to read. Without a benchmark (none given, no `DMEvaluator`) it has only `model`, `n_forecasts`, `MAE` and `n_days`.
 
+## Slices and daily values
+
+Does the ranking hold in winter, on spike days, or for the daily maximum? The same machinery answers on a slice of the data:
+
+```python
+by_quarter = report.by_quarter()            # model, year, quarter, forecasts, then every evaluator's columns
+by_price_level = report.by_price_level()    # negative, normal and spike prices
+daily_max = report.aggregate("1D", agg="max")
+daily_tests = daily_max.tests(benchmark="OLS")
+daily_ranks = daily_max.ranks()
+```
+
+- The breakdown tables (`by_quarter()`, `by_day()`, `by_price_level()`) run every evaluator inside each group, on the keys the models share there. With a `DMEvaluator` or an `MCSEvaluator` in the pipeline they print `DM n_days`, `DM n_forecasts` and the rest like `by_year()` does. A group is short, so `verdict` and `in MCS` stay empty below 30 days. See [Working with Results](/epftoolbox2/model-pipeline/results/#breakdowns-by-quarter-day-and-price-level).
+- `aggregate()` gives a report on which the five methods above work as they do on hours: the loss is the error of the daily value, and `n_days` counts run dates (a day has one period, which is a whole day, so nothing is flagged as partial). Only whole days count, each model on its own, and the days a model loses are in `forecast_counts()` of the new report. `tests(by="hour")` raises, since a day has no hours. See [Daily aggregates](/epftoolbox2/model-pipeline/results/#daily-aggregates).
+- `report.join(other)` puts the models of two runs in one report, so that these methods can compare them. Results at different frequencies cannot be joined, for the reason given under One frequency.
+
 ## Which one to report
 
 1. `report.forecast_counts()`: did every model produce what it should?
