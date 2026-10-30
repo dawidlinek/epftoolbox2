@@ -46,9 +46,10 @@ class DataPipeline:
 class ModelPipeline:
     def __init__(
         self,
-        information_set: Optional[InformationSet] = None,  # Check every predictor against the issue time
+        information_set: Optional[InformationSet] = None,  # When inputs become known and forecasts are issued
         issue_time: Optional[str] = None,                  # Shortcut for InformationSet(issue_time, issue_timezone)
         issue_timezone: str = "Europe/Brussels",           # Zone of issue_time
+        availability: Optional[str] = None,                # "none", "warn" or "raise"; default "warn" with an issue time, else "none"
     ): ...
 
     def add_model(self, model: BaseModel) -> "ModelPipeline": ...
@@ -95,6 +96,20 @@ class ModelPipeline:
         positive_control: bool = True,    # False: `ok` only says that no forecast moved
         rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,  # Builds the input from source data
     ) -> VerifyReport: ...
+
+    def explain(                          # What one forecast's predictors hold and when each is known; no side effects
+        self,
+        data: pd.DataFrame,               # The frame the models run on
+        model: str,                       # The model's name
+        test: Optional[Tuple[Any, Any]] = None,  # (first, last) issue day; required for a predictor function of ctx
+        horizon: int = 1,                 # Days ahead of the issue day of the forecast shown
+        hour: int = 12,                   # Its period of the target day: 0-23, or 0-95 for 15-minute data
+        target: str = "price",            # Target column
+        freq: str = "1h",                 # "1h" or "15min"; must match the data
+        echo: bool = True,                # Print the tables
+    ) -> Dict[str, pd.DataFrame]: ...     # "predictors", "grouped"; "lists" for a predictor function of ctx
+
+    availability: str                     # The level in force; assign None to go back to the default
 
     def save(self, path: Union[str, Path]) -> None: ...       # Save to YAML
 
@@ -172,6 +187,7 @@ Pipeline paths are resolved relative to the workflow YAML's directory. `$VAR` in
 class EvaluationReport:
     def summary(self) -> pd.DataFrame: ...          # model, forecasts, one column per evaluator
     def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
+    def availability(self) -> pd.DataFrame: ...     # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
     def by_hour_horizon(self) -> pd.DataFrame: ...
@@ -427,7 +443,9 @@ class Use:                                  # What the function may return inste
     def __init__(self, predictors: Sequence[str], train_on: str = "all"): ...  # "matching" isn't available yet
 ```
 
-`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run.
+`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, and `ModelResultRef.availability_listing` holds the rows behind `report.availability()`.
+
+`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`.
 
 ### Scalers
 

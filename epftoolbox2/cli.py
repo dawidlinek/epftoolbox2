@@ -80,7 +80,7 @@ def _load_data(args: argparse.Namespace):
 
 
 def _load_model_pipeline(args: argparse.Namespace):
-    """The ModelPipeline YAML, with `--issue-time` and `--issue-timezone` applied to its information set."""
+    """The ModelPipeline YAML, with `--issue-time`, `--issue-timezone` and `--availability` applied to it."""
     from .pipelines.model_pipeline import ModelPipeline
 
     mp = ModelPipeline.load(args.yaml)
@@ -93,6 +93,12 @@ def _load_model_pipeline(args: argparse.Namespace):
         if args.issue_timezone:
             settings["issue_timezone"] = args.issue_timezone
         mp.information_set = InformationSet.from_dict(settings)
+    if getattr(args, "availability", None):
+        try:
+            mp.availability = args.availability
+        except ValueError as exc:
+            console.print(f"[red]{escape(str(exc))}[/red]")
+            sys.exit(1)
     return mp
 
 
@@ -333,6 +339,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ZONE",
         help="Zone of --issue-time (default: the YAML's, else Europe/Brussels). Without --issue-time the YAML's issue "
         "time is kept, or 11:45 if the YAML has no information set",
+    )
+    model_p.add_argument(
+        "--availability",
+        choices=("none", "warn", "raise"),  # information_set.AVAILABILITY_LEVELS, without importing pandas for --help
+        help="What a predictor known after the issue time does: warn lists it and goes on (the default with an issue "
+        "time), raise refuses it before fitting, none checks nothing (overrides the YAML)",
     )
     model_p.add_argument("--save-dir", metavar="DIR", help="Directory to save per-model prediction JSONL files")
     model_p.add_argument("--forecast-only", action="store_true", help="Skip evaluation and exporters")

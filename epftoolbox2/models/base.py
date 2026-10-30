@@ -19,12 +19,14 @@ from ..scalers.standard import StandardScaler
 from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef
+from ..results.availability import listing_rows, warn_about
 from ..results.manifest import build_manifest, check_and_write, check_stored_lists, manifest_path
 from ..logging import get_logger
 from . import _contract
 from .context import PredictorPlan, build_plan, mask_digest, takes_ctx
 from ._worker import _pool_init, _run_day
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days
+from ..information_set import check_level
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -86,6 +88,7 @@ class BaseModel(ABC):
         self._freq: str = "1h"
         self._periods_per_day: int = 24
         self._used_predictors: List[str] = []
+        self._availability_listing: List[Dict] = []
 
     def __setattr__(self, key, value):
         # The scaler is kept as a name or {"name", "params"} dict, also when assigned after construction, so a
@@ -121,11 +124,16 @@ class BaseModel(ABC):
         allow_manifest_mismatch: bool = False,
         require_manifest: bool = False,
         plan: Optional[PredictorPlan] = None,
+        availability: str = "raise",
+        warn_listing: bool = True,
     ) -> ModelResultRef:
         """Forecast every period and horizon for each day in [test_start, test_end].
 
-        With `information_set`, every predictor is checked against the issue time before any fit
-        (see epftoolbox2.information_set).
+        With `information_set`, `availability` says what happens to a predictor known after the issue time (see
+        epftoolbox2.information_set): "raise", the default here, refuses it before any fit; "warn" goes on and lists it in
+        a warning, the returned ref and the manifest; "none" does neither. It doesn't change a forecast (see
+        `ModelPipeline`). `ModelPipeline` defaults to "warn" and passes `warn_listing=False`, having warned for all its
+        models at once.
 
         With `save_to`, a manifest is written next to the results (see epftoolbox2.results.manifest) and,
         if one is already there, compared to this run's configuration before anything is resumed.
@@ -136,6 +144,7 @@ class BaseModel(ABC):
         test period, horizon and freq; without it the run builds its own. A model with fixed lists has none.
         """
         self._set_freq(freq)
+        check_level(availability)
 
         if forecast_only:
             test_start = resolve_date(test_start or "today")
@@ -148,10 +157,17 @@ class BaseModel(ABC):
 
         self._target = target
         if plan is None:
-            plan = self._plan_predictors(data, target, horizon, freq, information_set, test_start, test_end)
+            plan = self._plan_predictors(
+                data, target, horizon, freq, information_set, test_start, test_end, availability=availability
+            )
         else:
-            self._check_plan_is_for(plan, data, horizon, freq, information_set, test_start, test_end)
-        expanded = self._check_inputs(data, target, horizon, freq, information_set, test_start, test_end, plan=plan)
+            self._check_plan_is_for(plan, data, horizon, freq, information_set, test_start, test_end, availability)
+        expanded = self._check_inputs(
+            data, target, horizon, freq, information_set, test_start, test_end, plan=plan, availability=availability
+        )
+        listing = self._availability_listing
+        if warn_listing:
+            warn_about({self.name: listing}, stacklevel=3)
         used_columns = list(dict.fromkeys([target, *self._used_predictors]))
 
         self._data = self._preprocess(data[used_columns], horizon, target)
@@ -193,6 +209,7 @@ class BaseModel(ABC):
                 information_set=information_set,
                 predictor_function=None if plan is None else plan.function_record(),
                 predictor_lists=None if plan is None else plan.manifest_lists(plan_masks),
+                availability=self._manifest_availability(information_set, availability, listing),
             )
             if plan is not None:
                 check_stored_lists(
@@ -211,6 +228,8 @@ class BaseModel(ABC):
                 require_manifest=require_manifest,
                 model_name=self.name,
             )
+            if availability != "none" and manifest.availability is not None:
+                listing = manifest.availability["listing"]  # with what earlier runs listed for other test periods
         pending = store.get_missing(all_tasks) if store else all_tasks
 
         skipped: Counter = Counter()
@@ -251,7 +270,15 @@ class BaseModel(ABC):
             produced=produced,
             skipped=dict(skipped),
             predictor_lists=None if plan is None else plan.describe(),
+            availability_listing=listing,
         )
+
+    @staticmethod
+    def _manifest_availability(information_set, availability: str, listing: List[Dict]) -> Optional[Dict]:
+        """What a manifest records about the issue-time check; level "none" adds nothing, as if it had not run."""
+        if information_set is None or availability == "none":
+            return None
+        return {"level": availability, "listing": listing}
 
     def _run_tasks(
         self, tasks, horizon, test_start, n_days, store, in_memory, skipped, skip_examples, plan=None, plan_masks=None
@@ -353,33 +380,46 @@ class BaseModel(ABC):
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
         plan: Optional[PredictorPlan] = None,
+        availability: str = "raise",
     ) -> Dict[Tuple[int, int], List[str]]:
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
 
         Raises ValueError on a frequency mismatch, duplicate timestamps, reserved or colliding column names,
-        a UTC index with existing day-lag (`_d-<k>`) columns, and missing or non-numeric predictors, and
-        InformationSetError (a ValueError) when `information_set` is given and a predictor is not known at
-        issue time. `ModelPipeline` calls it for every model before running any. The row spacing is checked only on
-        the days this run can read (`_contract.read_days`), or on the whole frame without a test window.
+        a UTC index with existing day-lag (`_d-<k>`) columns, and missing or non-numeric predictors. `ModelPipeline` calls
+        it for every model before running any. The row spacing is checked only on the days this run can read
+        (`_contract.read_days`), or on the whole frame without a test window.
+
+        When `information_set` is given, `availability` says what a predictor not known at issue time does: "raise" raises
+        InformationSetError (a ValueError), "warn" keeps it for `_availability_listing`, and "none" doesn't look.
 
         A predictor function of `ctx` is checked through its `plan`, which `_plan_predictors` built after the same data
         contract checks; without one, this builds one to check and drops it.
         """
         self._set_freq(freq)
+        self._availability_listing = []
         if self._ctx_fn is not None:
             if plan is None:
-                plan = self._plan_predictors(data, target, horizon, freq, information_set, test_start, test_end)
+                plan = self._plan_predictors(
+                    data, target, horizon, freq, information_set, test_start, test_end, availability=availability
+                )
             expanded = plan.names_by_pair()
             self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
-            if information_set is not None:
+            if information_set is not None and availability == "raise":
                 plan.check(target, self.name)
+            elif information_set is not None and availability == "warn":
+                self._availability_listing = plan.listing(target, self.name)
             plan.release()
             return expanded
         self._check_frame(data, target, horizon, freq, test_start, test_end)
         expanded = self._precompute_expanded_predictors(horizon)
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
-        if information_set is not None:
+        if information_set is not None and availability == "raise":
             information_set.check(expanded, target, freq, data.index, test_start, test_end, model_name=self.name)
+        elif information_set is not None and availability == "warn":
+            uses = information_set.late_uses(
+                expanded, target, freq, data.index, test_start, test_end, model_name=self.name
+            )
+            self._availability_listing = listing_rows(uses)
         return expanded
 
     def _check_frame(self, data, target, horizon, freq, test_start=None, test_end=None) -> None:
@@ -398,10 +438,12 @@ class BaseModel(ABC):
         test_end: Optional[str] = None,
         issue_days: Optional[Sequence[str]] = None,
         warn_unpublished: bool = True,
+        availability: str = "raise",
     ) -> Optional[PredictorPlan]:
         """The plan of a predictor function of `ctx` for this data and test period, or None for a model with fixed lists.
 
         `issue_days` plans these days instead of [test_start, test_end]: `verify` samples a few to learn the inputs.
+        `availability` is the level `ctx` answers at (see `epftoolbox2.models.context`).
         """
         if self._ctx_fn is None:
             return None
@@ -413,9 +455,11 @@ class BaseModel(ABC):
             raise ValueError(f"{self.name}: a predictor function of `ctx` needs the test period to plan its lists")
         else:
             days = _test_days(test_start, test_end)
-        return build_plan(self._ctx_fn, data, days, horizon, freq, information_set, warn_unpublished)
+        return build_plan(self._ctx_fn, data, days, horizon, freq, information_set, warn_unpublished, availability)
 
-    def _check_plan_is_for(self, plan, data, horizon, freq, information_set, test_start, test_end) -> None:
+    def _check_plan_is_for(
+        self, plan, data, horizon, freq, information_set, test_start, test_end, availability="raise"
+    ) -> None:
         """A plan answers for one function, frame and test period; on another run it would give wrong lists silently."""
         if plan.function is not self._ctx_fn:
             raise ValueError(f"{self.name}: this plan was built for another predictor function")
@@ -430,6 +474,8 @@ class BaseModel(ABC):
             problems.append("freq")
         if information_set is not None and plan.information_set is not information_set:
             problems.append("information set")
+        if information_set is not None and plan.availability != availability:
+            problems.append("availability level")
         if problems:
             raise ValueError(f"{self.name}: this plan was built for another {', '.join(problems)}")
 

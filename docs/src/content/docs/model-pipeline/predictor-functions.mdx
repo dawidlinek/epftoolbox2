@@ -1,6 +1,6 @@
 ---
 title: Predictor Functions
-description: Choose each forecast's predictors with a function of `ctx`, planned before any fit, checked against the issue time and saved by import path
+description: Choose each forecast's predictors with a function of `ctx`, planned before any fit, compared with the issue time and saved by import path
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -79,9 +79,13 @@ the issue time according to the information set, and that value is not NaN.
 
 - A column that isn't in the frame raises `KeyError`, whichever column comes first in the list. A misspelt name would
   otherwise disable an input without a word.
-- A column without an availability rule raises `InformationSetError`, even with `unknown="ignore"`: what can't be told to
-  be known isn't handed out. Declare a rule for it.
+- A column without an availability rule raises `InformationSetError` with `availability="raise"`, even with
+  `unknown="ignore"`: what can't be told to be known isn't handed out. Declare a rule for it. With `"warn"` the answer is True
+  if the value isn't NaN and the column is listed as `no rule`; with `"none"` it is the same answer, unlisted.
 - Without an information set availability isn't checked, only NaN.
+- **The answer is the same at every [level](/epftoolbox2/model-pipeline/information-set/#three-levels)**: `"none"` with an
+  issue time still asks the rules. So a function that passes `"raise"` gets the same lists, and the forecasts are bit for
+  bit the same, at the other levels.
 - After planning, each `published()` argument that was never True over the whole run gives a `UserWarning` saying why, as
   far as can be told. A rule that puts a column after the issue time makes it False on every day, which looks like a
   working run with an input that never switched on.
@@ -94,9 +98,23 @@ publication time; `published` can't replay a day's outage, and a live run may se
 
 ### `value(column)`
 
-The value at the forecast's row, NaN if it is missing. If the information set says it is known only after the issue time it
-raises `InformationSetError`: a function can't read a late value and stay quiet about it. Without an information set it
-returns the value.
+The value at the forecast's row, NaN if it is missing. What happens when the information set says it is known only after the
+issue time, or has no rule for it, depends on the [level](/epftoolbox2/model-pipeline/information-set/#three-levels):
+
+| `availability` | Late, or no rule |
+|---|---|
+| `"raise"` | `InformationSetError`: a function can't read a late value and stay quiet about it |
+| `"warn"` | Returns the value, and the column is listed with its periods and horizons under the role `ctx.value` |
+| `"none"` | Returns the value |
+
+Without an information set it returns the value. A list chosen by a late value is a look-ahead whatever the level, so
+[`verify`](/epftoolbox2/model-pipeline/verification/#at-each-level) reports it as a `leak` at `"warn"` and `"none"`.
+
+<Aside type="caution">
+Don't catch the `InformationSetError` to fall back on another list: at `"raise"` the function then passes, and at `"warn"` it reads
+the value and may return another list, so the level would move a forecast. Ask `ctx.published()` first, which answers alike at
+every level.
+</Aside>
 
 ## As of the issue time: actual value, then forecast
 
@@ -108,7 +126,8 @@ def lear_asof(ctx):  # actual until the issue time, forecast after
 ```
 
 The built-in rule for `load_actual` is one hour after the end of the period, so at 11:45 the actual value of 09:00-10:00
-is known at 11:00 and the one of 10:00-11:00 only at 12:00. A switch at `ctx.period < 11` is refused for period 10.
+is known at 11:00 and the one of 10:00-11:00 only at 12:00. A switch at `ctx.period < 11` uses a late value for period 10:
+it is listed with `availability="warn"` and refused with `"raise"`.
 `ctx.published("load_actual")` as the condition would follow the rule by itself.
 
 The switch applies to every past day of the window as if it were an issue day, because the training rows of a period are
@@ -134,9 +153,13 @@ A function may also return `Use(list, train_on="all")`, which is the plain list.
 
 ## The issue-time check
 
-With an information set, every list is checked before any fit. Availability is computed once per distinct column name,
-however many lists there are, through the same path as a fixed list's check. Only the cells a list actually reads count: a
-list used on Fridays only may hold what is known on Fridays only, which a fixed list may not. A late input is refused with
+With an information set, every list is compared with the issue time before any fit. Availability is computed once per distinct
+column name, however many lists there are, through the same path as a fixed list's check. Only the cells a list actually reads
+count: a list used on Fridays only may hold what is known on Fridays only, which a fixed list may not.
+
+With `availability="warn"`, the default with an information set, a late input is
+[listed](/epftoolbox2/model-pipeline/information-set/#what-warn-lists) per list, with the list's hash, the columns, the periods
+and the horizons, and so is anything the function read that it may not know. With `availability="raise"` it is refused, with
 the model, the list, the columns and the periods:
 
 ```text
@@ -148,9 +171,37 @@ Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too str
 `leakage_probe` and [`ModelPipeline.verify`](/epftoolbox2/model-pipeline/verification/) plan the function on each frame they
 test, and the columns it only reads count as inputs. A late name in a list shows up as `leak`, and so does a cell the function
 read that holds another value in the perturbed frame, whether or not the noise changed its list: `value("x") > 0` keeps its
-list when large positive noise lands on the side the value was on. A late `value()` raises. With `verify`, a column the
-function uses only on issue days outside the sample makes the status `inconclusive`, so a list used on a few days can't pass
-unseen; sample more days.
+list when large positive noise lands on the side the value was on. A late `value()` raises with `availability="raise"` and is a
+`leak` at the other levels. `verify` also plans the whole test period, so what the function uses late on any issue day is a `leak`,
+sampled or not. A column it uses only on issue days outside the sample, known in time by its rule, makes the status
+`inconclusive`, since the probe hasn't seen it; sample more days.
+
+## Seeing the lists
+
+[`pipeline.explain()`](/epftoolbox2/model-pipeline/information-set/#reading-a-models-predictors-explain) plans the function and
+shows what it returned, without fitting anything and with no effect on a later run. `test` is required, since the lists depend
+on the days:
+
+```python
+tables = pipeline.explain(df, model="LEAR_dyn", test=("2024-01-01", "2024-01-31"), horizon=2, hour=12)
+tables["lists"]       # one row per horizon up to `horizon` and list that horizon uses
+tables["predictors"]  # the list used most at this horizon and hour, judged on the days it is used
+```
+
+```text
+lear_dynamic: 6 distinct list(s)
+ horizon  list         hash  forecasts  issue days first issue day last issue day    periods  predictors train_on adds                                                            drops
+       1     1 f6b62cef8abb         45           5      2024-01-01     2024-01-29 0-5, 21-23         175      all          solar_fc_h00_d+1, solar_fc_h01_d+1 … exaa_price_h23_d+1 (48)
+       1     2 4cff2da35536         75           5      2024-01-01     2024-01-29       6-20         199      all      exaa_price_h00_d+1, exaa_price_h01_d+1 … exaa_price_h23_d+1 (24)
+       1     5 ba0f2a367fdd        234          26      2024-01-02     2024-01-31 0-5, 21-23         199      all            solar_fc_h00_d+1, solar_fc_h01_d+1 … solar_fc_h23_d+1 (24)
+       1     6 67ca90a0780b        390          26      2024-01-02     2024-01-31       6-20         223      all    -                                                                -
+       2     3 9366b5b3e283        279          31      2024-01-01     2024-01-31 0-5, 21-23         151      all            solar_fc_h00_d+2, solar_fc_h01_d+2 … solar_fc_h23_d+2 (24)
+       2     4 142fd47b26b7        465          31      2024-01-01     2024-01-31       6-20         175      all    -                                                                -
+```
+
+Here EXAA isn't out on the five Mondays of the month, and at horizon 2 its rule never lets it in, so that horizon has two lists.
+`adds` and `drops` compare a list with the most used list of the same horizon, since `{horizon}` in a name makes the lists of two
+horizons differ anyway. Ties go to the list returned first. A late `value()` doesn't stop the view, at any level.
 
 ## Results
 

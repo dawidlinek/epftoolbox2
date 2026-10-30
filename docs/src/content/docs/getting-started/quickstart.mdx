@@ -122,8 +122,8 @@ This guide shows you how to download electricity data and run a simple forecast 
 
    Before any model is fitted, the information set checks that every predictor is known at 11:45 on the day
    the forecast is issued, which leaves 15 minutes before gate closure and is late enough for JMA's 00 UTC
-   run, available around 09:30 UTC, to count as known in summer too. Today's `load_actual` would be rejected,
-   which is why only its lags are used.
+   run, available around 09:30 UTC, to count as known in summer too. Today's `load_actual` would be listed in
+   `report.availability()` and a warning, and refused with `availability="raise"`, which is why only its lags are used.
 
 4. **Analyze results**
 

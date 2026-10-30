@@ -165,8 +165,9 @@ epf model model_pipeline.yaml \
 | `--horizon N` | Forecast horizon in days (default: `7`) |
 | `--freq {1h,15min}` | Data resolution: one model per hour or per quarter-hour (default: `1h`). Must match the data |
 | `--tz ZONE` | Local time zone of the data (e.g. `Europe/Warsaw`). Overrides the zone named in the file |
-| `--issue-time HH:MM` | Check every predictor against this issue time before fitting ([information set](/epftoolbox2/model-pipeline/information-set/)). Overrides the YAML's `information_set`, or adds one if it has none |
+| `--issue-time HH:MM` | Compare every predictor with this issue time before fitting ([information set](/epftoolbox2/model-pipeline/information-set/)). Overrides the YAML's `information_set`, or adds one if it has none |
 | `--issue-timezone ZONE` | Zone of `--issue-time` (default: the YAML's, else `Europe/Brussels`). Without `--issue-time`, the YAML's issue time is kept, or `11:45` if the YAML has no `information_set` |
+| `--availability {none,warn,raise}` | What a predictor known after the issue time does: `warn` lists it and goes on (the default with an issue time), `raise` refuses it before fitting, `none` checks nothing. Overrides the YAML's. `warn` and `raise` need an issue time |
 | `--save-dir DIR` | Save per-model prediction JSONL files to this directory |
 | `--forecast-only` | Skip evaluators and exporters |
 | `--allow-manifest-mismatch` | Resume even if `--save-dir`'s [manifest](/epftoolbox2/model-pipeline/caching/) disagrees with this run's configuration (overwrites it) |

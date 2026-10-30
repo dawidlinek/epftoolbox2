@@ -13,8 +13,9 @@ Key patterns:
   `end` always includes the whole day it names (local here because `timezone`
   is set, UTC otherwise).
 - ModelPipeline uses forecast_only=True to skip evaluators and exporters.
-- ModelPipeline is given an InformationSet (issue_time + the data sources' rules), so every predictor is
-  checked against what is known at issue time before any fit.
+- ModelPipeline is given an InformationSet (issue_time + the data sources' rules) with availability="raise", so a
+  predictor not known at issue time stops this live forecast before any fit, rather than being listed in a report
+  nobody reads.
 - report.predictions() returns a clean DataFrame with no "actual" column.
 
 Output: 120 rows per model (24 hours × 5 horizons).
@@ -90,7 +91,7 @@ def main(data_start="now_d-735", data_end="today_d+5"):
     information_set = InformationSet("11:45", "Europe/Warsaw").with_source_rules(data_pipeline.sources)
 
     report = (
-        ModelPipeline(information_set=information_set)
+        ModelPipeline(information_set=information_set, availability="raise")
         .add_model(OLSModel(predictors=predictors, training_window=365, name="OLS"))
         .add_model(LassoCVModel(predictors=predictors, training_window=365, cv=7, name="LassoCV"))
         .run(data=df, target="price", horizon=5, forecast_only=True)

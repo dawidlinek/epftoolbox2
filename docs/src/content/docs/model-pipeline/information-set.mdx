@@ -1,17 +1,17 @@
 ---
 title: Information Set
-description: Check that every predictor only uses data known at the time a forecast is issued
+description: Check, at the level you choose, that every predictor only uses data known at the time a forecast is issued
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
 A forecast issued on day D may only use values that are actually known at the moment it is issued, not
 everything that ends up in the historical data. `epftoolbox2.information_set` declares when each column
-becomes known and checks every expanded predictor (and the newest training target) against that boundary
-before any model is fitted.
+becomes known and compares every expanded predictor (and the newest training target) with that boundary
+before any model is fitted. What happens then depends on the [level](#three-levels) you choose.
 
 A [predictor function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) chooses each forecast's list with
-`ctx.published()` and `ctx.value()`, which answer through these rules, and its lists are checked the same way, on the cells
+`ctx.published()` and `ctx.value()`, which answer through these rules, and its lists are compared the same way, on the cells
 each list reads.
 
 **The convention:** a predictor's availability, including a raw, unshifted (lag 0) column such as `price`
@@ -31,8 +31,41 @@ pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
 ```
 
 `issue_time`/`issue_timezone` is a shortcut for `InformationSet(issue_time, issue_timezone)` with the built-in
-availability rules. `ModelPipeline.run()` (and `Workflow.run()`) then check every model's predictors before
-fitting anything and raise `InformationSetError` (a `ValueError`) if one uses a value that is not known yet:
+availability rules. `InformationSet()` with no arguments issues at `11:45` `Europe/Brussels`, 15 minutes before the 12:00
+CET gate closure of the day-ahead auction.
+
+---
+
+## Three levels
+
+```python
+from epftoolbox2.information_set import InformationSet
+from epftoolbox2.pipelines import ModelPipeline
+
+ModelPipeline()                                                          # none: no issue time, no checks
+ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin")        # warn: late predictors listed, run goes on
+ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin", availability="raise")  # raise: late predictors refused
+ModelPipeline(information_set=InformationSet("11:45"), availability="raise")             # the same with your own rules
+```
+
+| `availability` | Default | A predictor (or the newest training target) known after the issue time | A column without a rule |
+|---|---|---|---|
+| `"none"` | without an issue time | Nothing is checked or listed | Nothing |
+| `"warn"` | with an issue time or an information set | Listed, and the run goes on | Listed as `no rule`, whatever `unknown` says |
+| `"raise"` | | `InformationSetError` before any fit | Follows `unknown` |
+
+`"raise"` suits published results and CI. `"none"` with an issue time is allowed: nothing is listed, and the information set
+still answers a [predictor function's](/epftoolbox2/model-pipeline/predictor-functions/#the-issue-time-check) `published()`.
+`"warn"` or `"raise"` without an issue time or an information set raises `ValueError`, and so does an unknown level.
+
+**The level doesn't change a number.** With fixed lists, forecasts and records are bit for bit the same at every level, and so
+are those of a predictor function that passes `"raise"`, as long as it doesn't catch the error a late `ctx.value()` raises and
+choose another list. The manifest doesn't compare the level, so changing only the level resumes a run. `pipeline.verify()` [tests the same boundary at every level](/epftoolbox2/model-pipeline/verification/#at-each-level):
+a late predictor is a `leak` also where `run()` only lists it.
+
+### What `"raise"` says
+
+`ModelPipeline.run()` and `Workflow.run()` check every model's predictors before fitting anything:
 
 ```
 OLS: 98 use(s) of inputs not known at the issue time (11:45 Europe/Brussels on the issue day D):
@@ -42,11 +75,99 @@ Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too str
 with InformationSet(rules={...}).
 ```
 
-`InformationSet()` with no arguments issues at `11:45` `Europe/Brussels`, 15 minutes before the 12:00 CET gate
-closure of the day-ahead auction.
+### What `"warn"` lists
 
-Passing no `issue_time` and no `information_set` (the default) skips the check entirely, so existing pipelines
-are unaffected until you opt in.
+One `UserWarning` for all models before any fit, then a table at the top of what the run reports:
+
+```python
+from epftoolbox2.exporters import TerminalExporter
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
+pipeline.add_model(OLSModel(predictors=["load_actual", "price_d-1", "my_forecast_d+1"], name="OLS"))
+pipeline.add_exporter(TerminalExporter())
+
+report = pipeline.run(df, test_start="2024-01-01", test_end="2024-12-31", horizon=2)
+print(report.availability().to_string(index=False))
+```
+
+```text
+model       predictor      role  status list periods horizons                                 rule     known  issued note
+  OLS     load_actual predictor    late       10-23      1-2 known 1h after the end of the period D+1 01:00 D 11:45
+  OLS my_forecast_d+1 predictor no rule        0-23      1-2
+```
+
+| Column | Meaning |
+|---|---|
+| `model` | The model's name |
+| `predictor` | The column |
+| `role` | `predictor`, `training target` (the newest one is the value of D-1), or what a predictor function read it with: `ctx.value`, `ctx.published` |
+| `status` | `late` or `no rule` |
+| `list` | The hash of the [predictor function's](/epftoolbox2/model-pipeline/predictor-functions/#results) list, which is listed per list. Empty for fixed lists and for what a function only read |
+| `periods`, `horizons` | Exactly the uses of this row: a predictor used at other periods on other horizons gets one row per set of periods |
+| `rule` | What the rule says, empty for `no rule` |
+| `known`, `issued` | Relative to the issue day D, on the day and period it comes latest |
+| `note` | An assumption or setting that would make it known in time |
+
+The table is empty, with the same columns, when there is nothing to list. Otherwise the same rows are in three more places:
+
+- **the warning**, up to five rows per model;
+- **the terminal**: [`TerminalExporter`](/epftoolbox2/exporters/terminal/) prints them first, without `rule`;
+- **the manifest** next to the results, under `availability`, with the level. So `ModelPipeline.report()` after array jobs, and
+  a resumed run, show what the run listed, once. A resumed run lists what a fresh one does. A run over a narrower test period
+  into the same directory keeps what was listed for the records it leaves out, unless the rules changed, in which case
+  this run's rows replace them. A run at level `"none"` lists nothing in its own report and writes nothing there, but leaves what
+  an earlier run wrote, unless the rules changed: results that were flagged don't read as clean because of how they were last
+  resumed.
+
+A column of a data source that needs the index in the market's zone raises `InformationSetError` at `"warn"` too (see below):
+nothing true can be said about it.
+
+### Reading a model's predictors: `explain`
+
+`pipeline.explain()` shows what a forecast's predictors hold, relative to the target day T = D + horizon, and when each is known.
+It is an optional view and has no effect on a later run. Suffixes are relative to the row's date D, so at horizon 2 `price_d-1`
+is `T-3` and `x_d+2` is `T`:
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Warsaw")
+pipeline.add_model(OLSModel(predictors=lear_names, name="LEAR"))
+
+tables = pipeline.explain(df, model="LEAR", test=("2024-01-01", "2024-12-31"), horizon=1, hour=12)
+tables["predictors"]  # one row per predictor
+tables["grouped"]     # what it prints: runs of slots as one row
+```
+
+```text
+LEAR: horizon 1, period 12 (12:00); T = D + 1; issued 11:45 Europe/Warsaw on D; issue days 2024-01-01 … 2024-12-31
+                             predictor   target-relative                                               rule               known status
+    price_h00_d-1 … price_h23_d-1 (24) T-2 00:00 … 23:00 published 13:00 Europe/Brussels on D-1 of delivery           D-2 13:00     ok
+                     load_forecast_d+1           T 12:00 published 10:00 Europe/Brussels on D-1 of delivery             D 10:00     ok
+load_actual_h00 … load_actual_h09 (10) T-1 00:00 … 09:00               known 1h after the end of the period   D 02:00 … D 11:00     ok
+load_actual_h10 … load_actual_h23 (14) T-1 10:00 … 23:00               known 1h after the end of the period D 12:00 … D+1 01:00   late
+                     price_day_max_d-1 T-2 00:00 … 23:00 published 13:00 Europe/Brussels on D-1 of delivery           D-2 13:00     ok
+```
+
+| Argument | Meaning |
+|---|---|
+| `model` | The model's name |
+| `test` | (first, last) issue day to judge on; `None` takes every day of the data, for fixed lists only |
+| `horizon`, `hour` | The forecast shown: days ahead, and the period of the target day (0-23, or 0-95 for 15-minute data) |
+| `target`, `freq`, `echo` | Target column, `"1h"` or `"15min"`, and whether to print |
+
+`target-relative` reads the name the way the check does: a [profile](#profile-columns) at its slot, a [day
+aggregate](#day-aggregates) over the whole day, an hour lag in elapsed time. On a DST day labels stay wall-clock times and
+calendar days, and a day aggregate still ends at 23:00. An hour lag lands on another hour next to a switch, so across such a
+window the label is the usual one and says how many days differ: `T-2 12:00 (else on 1 of 4 days)`. `status` is `ok`,
+`late`, `late on 3 of 10 days`, `no rule`, `no issue time` or `not in data`, judged on every issue day of `test`, and
+`known` is that of the day it comes latest. A period the issue day doesn't have (02:00 on the day clocks go forward) is
+noted under the table. On hourly data `_sNN` can be a slot of any length, so its time is `?`.
+
+For a predictor function it shows [the distinct lists first](/epftoolbox2/model-pipeline/predictor-functions/#seeing-the-lists).
 
 ---
 
@@ -148,10 +269,11 @@ pipeline = ModelPipeline(information_set=info)
   </TabItem>
 </Tabs>
 
-**Unknown columns.** A predictor whose base column has no rule anywhere is, by default, a hard error
-(`unknown="raise"`): a check that silently skipped columns it knows nothing about would report a pass it
+**Unknown columns.** With `availability="raise"`, a predictor whose base column has no rule anywhere is, by default, a hard
+error (`unknown="raise"`): a check that silently skipped columns it knows nothing about would report a pass it
 cannot vouch for. Pass `unknown="warn"` to log instead, or `"ignore"` to skip silently once you've reviewed
-which columns that affects.
+which columns that affects. With `availability="warn"` such a column is listed as `no rule` and is no error, whatever
+`unknown` says. `leakage_probe` and `verify` follow `unknown` at every level, because they can't perturb such a column.
 
 ---
 
@@ -243,8 +365,9 @@ rule for the plain column itself lifts.
 
 ## Leakage Probe
 
-`InformationSet.check()` is a static analysis of predictor *names*. `leakage_probe` checks the same boundary
-empirically, against real data and a real model:
+`InformationSet.check()`, which `availability="raise"` runs, is a static analysis of predictor *names*, and
+`InformationSet.late_uses()`, which `availability="warn"` runs, returns what it refuses. `leakage_probe` checks the same
+boundary empirically, against real data and a real model:
 
 ```python
 from epftoolbox2.information_set import leakage_probe
@@ -281,6 +404,10 @@ result = leakage_probe(model, source_data, run_day="2024-06-03", information_set
 Perturbation is applied to the raw `data` by its own columns' availability, then `rebuild` is called on both
 the original and the perturbed raw data before the model runs.
 
+**`availability`** (default `"raise"`) is the level a predictor function is planned at. With `"raise"` a late `ctx.value()`
+stops the probe with `InformationSetError`. With `"warn"` or `"none"` it returns the value, and the forecasts that read it are in
+`changed` and `late_reads`.
+
 **`positive_control`** tests the probe. A probe that finds nothing is evidence only if its perturbation reaches the
 model, so this one perturbs the freshest values that *are* known, with `perturb_recent`, and reports which forecasts
 moved. `ModelPipeline.verify()` runs both on sampled issue days and turns them into a verdict: see
@@ -304,15 +431,20 @@ model_pipeline:
     issue_time: "11:45"
     issue_timezone: Europe/Brussels
     assumptions: [entsoe_a69_by_10]
+  availability: raise   # none, warn or raise; left out it is warn with an information_set, none without
   models: [...]
 ```
 
-`epf model` accepts `--issue-time HH:MM` and `--issue-timezone ZONE`, which override the YAML's
-`information_set` (or add one if the YAML has none):
+`save()` writes `availability` when you asked for a level, and leaves it out when you didn't, so a file made before the levels
+existed loads with today's default. A file with an issue time and no `availability` therefore warns where it used to
+refuse ([release notes](/epftoolbox2/reference/release-notes/)): add `availability: raise` to keep refusing.
+
+`epf model` accepts `--issue-time HH:MM`, `--issue-timezone ZONE` and `--availability {none,warn,raise}`, which override
+the YAML (or add an information set if the YAML has none):
 
 ```bash
 epf model model_pipeline.yaml --data data.csv --test-start 2024-02-01 --test-end 2024-03-01 \
-  --issue-time 11:45 --issue-timezone Europe/Brussels
+  --issue-time 11:45 --issue-timezone Europe/Brussels --availability raise
 ```
 
 ---
@@ -321,3 +453,4 @@ epf model model_pipeline.yaml --data data.csv --test-start 2024-02-01 --test-end
 
 - [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/): `run()` parameters and the other pre-fit data checks
 - [ModelPipeline Serialization](/epftoolbox2/model-pipeline/serialization/): the full YAML format
+- [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/): `pipeline.verify()`, the probe on sampled issue days

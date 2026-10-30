@@ -216,13 +216,15 @@ The checks above don't know *when* a forecast is issued, so they can't tell a le
 `issue_time` to `ModelPipeline` to add that check:
 
 ```python
-pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")                       # listed
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels", availability="raise")  # refused
 ```
 
-This raises `InformationSetError` before any fit if a predictor (or the newest training target) is not known
-at issue time, using built-in availability rules for the shipped sources (ENTSO-E prices/load/generation,
+Before any fit, a predictor (or the newest training target) not known at issue time is listed in `report.availability()`, a
+warning, the terminal exporter and the manifest, and the run goes on. With `availability="raise"` it raises
+`InformationSetError` instead. The rules are built in for the shipped sources (ENTSO-E prices/load/generation,
 Open-Meteo weather, calendar). See [Information Set](/epftoolbox2/model-pipeline/information-set/) for the
-full rule reference, custom rules, and the empirical `leakage_probe`, and
+levels, the full rule reference, custom rules, `pipeline.explain()` and the empirical `leakage_probe`, and
 [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/) for `pipeline.verify()`, which runs it on sampled
 issue days.
 
@@ -235,6 +237,7 @@ The pipeline returns an `EvaluationReport`:
 ```python
 report.summary()           # Overall metrics, with a `forecasts` count per model
 report.forecast_counts()   # Planned vs produced forecasts and skip reasons
+report.availability()      # Inputs not known at the issue time or without a rule
 report.by_hour()           # Breakdown by hour
 report.by_horizon()        # Breakdown by horizon
 report.by_hour_horizon()   # Combined breakdown

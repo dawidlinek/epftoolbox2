@@ -33,6 +33,8 @@ DEFAULT_ISSUE_TIME = "11:45"
 KINDS = ("static", "realised", "published", "weekly", "weather_run", "as_of", "weather_cutoff")
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 _UNKNOWN_POLICIES = ("raise", "warn", "ignore")
+# What a run does with an input known after the issue time: nothing, list it and go on, or refuse before any fit.
+AVAILABILITY_LEVELS = ("none", "warn", "raise")
 _SUFFIX = re.compile(r"^(?P<base>.+)_(?P<unit>d|h|min|s)(?P<sign>[+-])(?P<n>\d+)$")
 _UNIT_MINUTES = {"d": 1440.0, "h": 60.0, "min": 1.0, "s": 1.0 / 60.0}
 _STEP_MINUTES = {"1h": 60, "15min": 15}
@@ -80,6 +82,13 @@ def _check_zone(zone: str) -> None:
 
 class InformationSetError(ValueError):
     """A predictor or training target uses a value that is not known at issue time."""
+
+
+def check_level(level: str) -> str:
+    """`level` if it is one of `AVAILABILITY_LEVELS`; a `ValueError` otherwise."""
+    if level not in AVAILABILITY_LEVELS:
+        raise ValueError(f"availability must be one of {list(AVAILABILITY_LEVELS)}, got {level!r}")
+    return level
 
 
 # ---------------------------------------------------------------------------
@@ -496,16 +505,24 @@ def _find_rule(name: str, chain: List[Tuple[str, Tuple[Shift, ...]]], rules, lay
 # Information set
 # ---------------------------------------------------------------------------
 
+ROLE_PREDICTOR = "predictor"
+ROLE_TARGET = "training target"
+ROLE_VALUE = "ctx.value"
+ROLE_PUBLISHED = "ctx.published"
+
 
 @dataclass
 class Violation:
+    """One use of a value not known at the issue time (`available` > `issue`), or, for a column without a rule, one use
+    that can't be judged (`column.rule` is None and both times are NaN)."""
+
     predictor: str
     period: int
     horizon: int
     column: ResolvedColumn
     available: float  # minutes after midnight of the issue day, data-local time
     issue: float
-    role: str = "predictor"
+    role: str = ROLE_PREDICTOR
     hint: str = ""
 
 
@@ -664,6 +681,37 @@ class InformationSet:
             raise InformationSetError(self._format(violations, model_name))
         self._log_assumptions(model_name)
 
+    def late_uses(
+        self,
+        expanded: Dict[Tuple[int, int], List[str]],
+        target: str,
+        freq: str,
+        index: pd.DatetimeIndex,
+        test_start: Optional[str] = None,
+        test_end: Optional[str] = None,
+        model_name: str = "Model",
+    ) -> List[Violation]:
+        """What `availability="warn"` lists: every use `check` refuses, and every use of a column without a rule, whatever
+        `unknown` says, instead of an error. A column of a data source on an index in another zone still raises: neither
+        the check nor the listing could say anything true about it."""
+        found, _ = self.violations(expanded, target, freq, index, test_start, test_end)
+        step = _STEP_MINUTES[freq]
+        resolved: Dict[str, ResolvedColumn] = {}
+
+        def no_rule(name: str) -> Optional[ResolvedColumn]:
+            col = resolved.get(name)
+            if col is None:
+                col = resolved[name] = self._resolve_for(name, step)
+            return col if col.rule is None else None
+
+        for (period, hz), predictors in sorted(expanded.items()):
+            for name, role in [(p, ROLE_PREDICTOR) for p in predictors] + [(target, ROLE_TARGET)]:
+                col = no_rule(name)
+                if col is not None:
+                    found.append(Violation(name, period, hz, col, math.nan, math.nan, role))
+        self._log_assumptions(model_name)
+        return found
+
     def _report_unknown(self, unknown: Iterable[str], model_name: str) -> None:
         """Follow the `unknown` policy for columns without a rule."""
         if not unknown:
@@ -702,12 +750,12 @@ class InformationSet:
         resolved: Dict[str, ResolvedColumn] = {}
         unknown = set()
         # The newest training target is the value delivered on D-1 in the same period.
-        uses = {"predictor": 0, "training target": -1}  # role -> the row's day relative to D
+        uses = {ROLE_PREDICTOR: 0, ROLE_TARGET: -1}  # role -> the row's day relative to D
         periods: Dict[Tuple[str, str], set] = {}  # the periods reading each (name, role); the horizon doesn't matter
         for (period, _), predictors in expanded.items():
             for name in predictors:
-                periods.setdefault((name, "predictor"), set()).add(period)
-            periods.setdefault((target, "training target"), set()).add(period)
+                periods.setdefault((name, ROLE_PREDICTOR), set()).add(period)
+            periods.setdefault((target, ROLE_TARGET), set()).add(period)
         for name in [target] + [name for name, _ in periods]:
             if name not in resolved:
                 resolved[name] = self._resolve_for(name, step)
@@ -733,7 +781,7 @@ class InformationSet:
 
         out: List[Violation] = []
         for (period, hz), predictors in sorted(expanded.items()):
-            for name, role in [(p, "predictor") for p in predictors] + [(target, "training target")]:
+            for name, role in [(p, ROLE_PREDICTOR) for p in predictors] + [(target, ROLE_TARGET)]:
                 if (name, role, period) in late:
                     known, issue_minute, hint = late[(name, role, period)]
                     col = resolved[name]
@@ -971,6 +1019,9 @@ class ProbeResult:
     # Column -> cells a predictor function read through `ctx` that hold another value in the perturbed frame. A forecast
     # whose function read one is in `changed`, whichever list the noise happened to leave it with.
     moved_reads: Dict[str, int] = field(default_factory=dict)
+    # Column -> cells a predictor function read with `ctx.value` though they are known only after the issue time, which
+    # only happens when it was planned with `availability` "warn" or "none". Their forecasts are in `changed` too.
+    late_reads: Dict[str, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -983,6 +1034,7 @@ class ProbeResult:
                 f"{len(self.changed)} of {self.forecasts} changed (max |change| {self.max_abs_change:.6g}), "
                 f"e.g. (period, horizon) {self.changed[:10]}; forecasts present in only one run: {self.missing[:10]}. "
                 + (f"Read through ctx and moved: {self.moved_reads}. " if self.moved_reads else "")
+                + (f"Read through ctx though known later: {self.late_reads}. " if self.late_reads else "")
                 + f"Perturbed cells per column: {self.perturbed}"
             )
 
@@ -1000,6 +1052,7 @@ def leakage_probe(
     seed: int = 0,
     rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
     check_target_boundary: bool = False,
+    availability: str = "raise",
 ) -> ProbeResult:
     """Perturb every value not known at issue time on `run_day` and check that the forecasts don't change.
 
@@ -1026,6 +1079,10 @@ def leakage_probe(
     A predictor function of `ctx` is planned on each frame, so a value it reads can move its list. A cell it read that
     differs between the frames counts as a change of the forecasts that read it, in `changed` and `moved_reads`, because
     the noise may well leave a list where it was.
+
+    `availability` is the level the function is planned at. With "raise" a late `ctx.value()` stops the probe with
+    `InformationSetError`; with "warn" or "none" it returns the value, and the forecasts that read it are in `changed` and
+    `late_reads`, whatever the noise did. The boundary tested is the same at every level.
     """
     run_day = str(pd.Timestamp(run_day).date())
     target_from_issue = target if check_target_boundary else None
@@ -1036,27 +1093,39 @@ def leakage_probe(
     if rebuild is not None:
         base, perturbed = rebuild(data), rebuild(perturbed)
 
-    original, read = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set)
-    probed, read_probed = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set)
+    common = (run_day, target, horizon, freq, information_set, availability)
+    original, read, late = _issue_day_forecasts(model, base, *common)
+    probed, read_probed, _ = _issue_day_forecasts(model, perturbed, *common)
     changed, max_abs_change, missing = _compare_forecasts(original, probed, atol)
     read_by, moved_reads = _moved_reads(read, read_probed, atol)
+    late_reads: Dict[str, int] = {}
+    for use in late:
+        late_reads[use.predictor] = late_reads.get(use.predictor, 0) + 1
     return ProbeResult(
         run_day=run_day,
         forecasts=len(original),
-        changed=sorted({*changed, *read_by}),
+        changed=sorted({*changed, *read_by, *((use.period, use.horizon) for use in late)}),
         max_abs_change=max_abs_change,
         perturbed=counts,
         unchecked=unchecked,
         missing=missing,
         moved_reads=moved_reads,
+        late_reads=late_reads,
     )
 
 
 def _issue_day_forecasts(
-    model: Any, frame: pd.DataFrame, run_day: str, target: str, horizon: int, freq: str, information_set: InformationSet
-) -> Tuple[Dict[Tuple[int, int], float], Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]]]:
-    """The model's forecasts issued on `run_day` from `frame`, by (period, horizon), and the cells a predictor function of
-    `ctx` read (see `PredictorPlan.read_cells`).
+    model: Any,
+    frame: pd.DataFrame,
+    run_day: str,
+    target: str,
+    horizon: int,
+    freq: str,
+    information_set: InformationSet,
+    availability: str = "raise",
+) -> Tuple[Dict[Tuple[int, int], float], Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]], List[Violation]]:
+    """The model's forecasts issued on `run_day` from `frame`, by (period, horizon), the cells a predictor function of
+    `ctx` read (see `PredictorPlan.read_cells`), and its reads of values known only later (`PredictorPlan.late_reads`).
 
     Such a function is planned on this very frame, so a value it reads can move its list, and it answers through the
     information set. The run itself gets none, so a late list isn't refused and the forecasts show it.
@@ -1065,11 +1134,22 @@ def _issue_day_forecasts(
     plan_predictors = getattr(m, "_plan_predictors", None)
     plan = None
     if plan_predictors is not None:
-        plan = plan_predictors(frame, target, horizon, freq, information_set, run_day, run_day, warn_unpublished=False)
+        plan = plan_predictors(
+            frame,
+            target,
+            horizon,
+            freq,
+            information_set,
+            run_day,
+            run_day,
+            warn_unpublished=False,
+            availability=availability,
+        )
     extra = {} if plan is None else {"plan": plan}
     read = {} if plan is None else plan.read_cells()  # the run lets go of them
+    late = [] if plan is None else plan.late_reads()
     ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, horizon=horizon, freq=freq, **extra)
-    return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}, read
+    return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}, read, late
 
 
 def _moved_reads(
@@ -1142,6 +1222,7 @@ def positive_control(
     atol: float = 1e-9,
     seed: int = 0,
     rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
+    availability: str = "raise",
 ) -> ControlResult:
     """Perturb the freshest values known at issue time on `run_day` and check that the forecasts do change.
 
@@ -1158,7 +1239,8 @@ def positive_control(
 
     With `rebuild`, days are those of the frame it returns, so a source in UTC is read in the market's zone.
 
-    `model` is a model instance or a zero-argument factory, as in `leakage_probe`.
+    `model` is a model instance or a zero-argument factory, and `availability` the level a predictor function is planned
+    at, as in `leakage_probe`.
     """
     run_day = str(pd.Timestamp(run_day).date())
     names = list(data.columns) if columns is None else list(columns)
@@ -1174,8 +1256,8 @@ def positive_control(
         perturbed, counts, unchecked = perturb_recent(in_market_zone, run_day, information_set, freq, names, seed)
         perturbed.index = data.index
         perturbed = _with_training_data_of(base, rebuild(perturbed), run_day, target)
-    original, _ = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set)
-    other, _ = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set)
+    original, *_ = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set, availability)
+    other, *_ = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set, availability)
     moved, max_abs_change, _ = _compare_forecasts(original, other, atol)
     return ControlResult(
         run_day=run_day,
@@ -1422,7 +1504,14 @@ def _shifted_day(
     shifts: Sequence[Shift], day: np.ndarray, minute: np.ndarray, first: Optional[np.ndarray], ctx: _Context
 ) -> np.ndarray:
     """The local day (after `ctx.day`) of the row that `shifts` read a row at (`day`, `minute`) from, every shift moving
-    it: the day a profile or a day aggregate is read on.
+    it: the day a profile or a day aggregate is read on."""
+    return np.floor(_shifted_wall(shifts, day, minute, first, ctx) / 1440.0)
+
+
+def _shifted_wall(
+    shifts: Sequence[Shift], day: np.ndarray, minute: np.ndarray, first: Optional[np.ndarray], ctx: _Context
+) -> np.ndarray:
+    """The wall-clock minutes after midnight of `ctx.day` of the row that `shifts` read a row at (`day`, `minute`) from.
 
     The outermost shift moves the row first. A day shift keeps the wall-clock time and, like shift_calendar_days, the
     occurrence of a repeated autumn hour. An hour or minute shift is elapsed time, so it runs from the row's instant:
@@ -1433,7 +1522,7 @@ def _shifted_day(
     """
     wall = np.asarray(day, dtype=float) * 1440.0 + np.asarray(minute, dtype=float)
     if ctx.naive or all(s.unit == "d" for s in shifts):
-        return np.floor((wall + sum(s.minutes for s in shifts)) / 1440.0)
+        return wall + sum(s.minutes for s in shifts)
     first = np.zeros(len(wall), dtype=bool) if first is None else first
     for shift in reversed(shifts):
         if shift.unit == "d":
@@ -1448,7 +1537,30 @@ def _shifted_day(
         )
         first = np.asarray(earlier == moved)
         wall = np.asarray((local - ctx.day) / pd.Timedelta(minutes=1), dtype=float)
-    return np.floor(wall / 1440.0)
+    return wall
+
+
+def _delivered_span(
+    col: ResolvedColumn, day: np.ndarray, minute: np.ndarray, step: int, ctx: _Context
+) -> Tuple[np.ndarray, np.ndarray]:
+    """The first and last slot the value of `col` at the row (`day`, `minute`) was delivered in, as wall-clock minutes
+    after midnight of `ctx.day`. `col` needs no rule: this is what its name says, read the way `_available_array` reads it.
+
+    A plain column is delivered in one slot, the row's with its shifts applied. A profile holds the column it was built
+    from at its slot, on the day the shifts after the slot reach, and a day aggregate that column over every slot of that
+    day, so `x_day_max_d-1` runs from 00:00 to the last slot of D-1 on 23-, 24- and 25-hour days alike, and an aggregate
+    of an hour lag (`x_h-12_day_max`) over two days.
+    """
+    day, minute = np.asarray(day), np.asarray(minute, dtype=float)
+    if col.built_from is None:
+        wall = _shifted_wall(col.shifts, day, minute, None, ctx)
+        return wall, wall
+    reached = _shifted_day(col.shifts, day, minute, None, ctx)
+    if col.slot is not None:
+        return _delivered_span(col.built_from, reached, np.full(len(reached), float(col.slot[0])), col.slot[1], ctx)
+    start, _ = _delivered_span(col.built_from, reached, np.zeros(len(reached)), step, ctx)
+    _, end = _delivered_span(col.built_from, reached, np.full(len(reached), 1440.0 - step), step, ctx)
+    return start, end
 
 
 def _read_day_offset(shifts: Sequence[Shift], minute: np.ndarray) -> np.ndarray:
@@ -1503,6 +1615,7 @@ def _ranges(values: Sequence[int]) -> str:
 
 __all__ = [
     "ASSUMPTIONS",
+    "AVAILABILITY_LEVELS",
     "Availability",
     "ControlResult",
     "InformationSet",

@@ -28,6 +28,7 @@ from ..evaluators.dm import DMEvaluator, check_test_settings
 from ..evaluators.economic import EconomicEvaluator
 from ..evaluators.mcs import check_mcs_settings
 from ..logging import get_logger
+from .availability import listing_frame
 from .breakdowns import AGGREGATES, daily_aggregate, price_level, spike_threshold
 from .ref import ModelResultRef
 
@@ -238,6 +239,7 @@ class EvaluationReport:
                 _results=records,
                 produced=len(records),
                 skipped={"incomplete_day": missing},
+                availability_listing=ref.availability_listing,
             )
             if missing:
                 dropped[name] = missing
@@ -742,6 +744,20 @@ class EvaluationReport:
             row.update({reason: ref.skipped.get(reason, 0) for reason in reasons})
             rows.append(row)
         return pd.DataFrame(rows, columns=["model", "planned", "produced", "missing", *reasons])
+
+    def availability(self) -> pd.DataFrame:
+        """The inputs of each model that its rule puts after the issue time or that have no rule, as a run with
+        `availability="warn"` found them. Empty, with the same columns, when there is nothing to list.
+
+        Columns: `model`, `predictor`, `role` (`predictor`, `training target`, or what a predictor function read it with:
+        `ctx.value`, `ctx.published`), `status` (`late` or `no rule`), `list` (the hash of a predictor function's list; empty
+        for fixed lists and for what the function only read), `periods` and `horizons` (the exact uses of the row, such as
+        `10-23` and `1-7`), `rule`, `known` and `issued` (relative to the issue day D, on the day and period it comes
+        latest), and `note` (an assumption or setting that would make it known in time).
+
+        A report built from `save_dir` shows what the manifests hold, for every test period the results were run on.
+        """
+        return listing_frame({name: ref.availability_listing for name, ref in self.refs.items()})
 
     def _result_freqs(self) -> Dict[str, str]:
         """The frequency each model's results were produced at, for the models that have results.

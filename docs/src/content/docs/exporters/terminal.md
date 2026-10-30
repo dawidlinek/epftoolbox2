@@ -40,7 +40,18 @@ exporter = TerminalExporter(show=["summary"])
 
 ## Output
 
+If the run has anything in [`report.availability()`](/epftoolbox2/model-pipeline/information-set/#what-warn-lists), it comes first,
+whatever `show` says: inputs not known at the issue time, or without a rule, with their periods and horizons. The rule itself is left
+out for width. With nothing to list this table isn't printed.
+
 ```
+Availability: inputs not known to be out at the issue time
+┏━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┓
+┃ model ┃ predictor   ┃ status ┃ periods ┃ horizons ┃ known     ┃ issued  ┃
+┡━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━┩
+│ OLS   │ load_actual │ late   │ 10-23   │ 1-7      │ D+1 01:00 │ D 11:45 │
+└───────┴─────────────┴────────┴─────────┴──────────┴───────────┴─────────┘
+
 Summary
 ┏━━━━━━━━━━┳━━━━━━━━━┓
 ┃ model    ┃ MAE     ┃
