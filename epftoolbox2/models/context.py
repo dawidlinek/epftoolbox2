@@ -221,7 +221,7 @@ class _Cells:
                 column = series.to_numpy(dtype=float, na_value=np.nan)
             else:
                 grid = np.full((self.periods, self._n_days), np.nan, dtype=object)
-                column = series.to_numpy()
+                column = series.astype(object).to_numpy()
             grid[self._row_cell] = column[self._rows]
             self._values[name] = grid
         return grid
@@ -284,8 +284,7 @@ class _Cells:
 
     @staticmethod
     def _present(values: np.ndarray) -> np.ndarray:
-        # What a forecast can use: the worker skips a row with an infinite input like one with a missing input.
-        return np.isfinite(values) if values.dtype != object else pd.notna(values)
+        return pd.notna(values)
 
     def value(self, column: str, horizon: int, period: int, position: int, issue_day: datetime.date) -> Any:
         name = _expand(column, horizon)
