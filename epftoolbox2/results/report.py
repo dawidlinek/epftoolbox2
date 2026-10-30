@@ -100,8 +100,13 @@ class EvaluationReport:
         self._read_frames: Dict[str, Tuple[tuple, pd.DataFrame]] = {}
         self._validation = validation
 
+        validation_refs: Dict[str, ModelResultRef] = {}
         for name, v in results_or_refs.items():
             if isinstance(v, ModelResultRef):
+                if v.by_window:  # the ref of a whole run with windows
+                    if VALIDATION in v.by_window:
+                        validation_refs[name] = v.by_window[VALIDATION]
+                    v = v.by_window.get(TEST, v.by_window.get(VALIDATION))
                 self.refs[name] = v
             else:
                 self.refs[name] = ModelResultRef(
@@ -113,6 +118,8 @@ class EvaluationReport:
                     horizon=0,
                     _results=v,
                 )
+        if validation is None and validation_refs and self.window == TEST:
+            self._validation = EvaluationReport(validation_refs, evaluators, source_data=source_data)
 
     @property
     def window(self) -> str:
@@ -275,6 +282,7 @@ class EvaluationReport:
                 skipped={"incomplete_day": missing},
                 availability_listing=ref.availability_listing,
                 window=ref.window,
+                target_before=ref.target_before,
                 windows=ref.windows,
             )
             if missing:
@@ -342,11 +350,11 @@ class EvaluationReport:
             )
         refs = [*self.refs.values(), *other.refs.values()]
         if any(ref.window is not None for ref in refs):
-            periods = {(ref.test_start, ref.test_end) for ref in refs if ref.test_start}
+            periods = {_period_of(ref) for ref in refs} - {None}
             if len(periods) > 1:
                 raise ValueError(
-                    f"These reports are on different {self.window} periods ({sorted(periods)}): compare forecasts of "
-                    "one period, or run them with the same validation= and test=."
+                    f"These reports are on different {self.window} periods ({sorted(periods, key=str)}): compare forecasts "
+                    "of one period, or run them with the same validation= and test=."
                 )
 
     def tests(
@@ -1020,6 +1028,13 @@ def _pair_row(
         "p_value": pair.p_value,
         "mde": pair.mde,
     }
+
+
+def _period_of(ref: ModelResultRef) -> Optional[Tuple[str, str, Optional[str]]]:
+    """(first, last issue day, target cut) of what a ref reads, which `aggregate()` keeps in its windows; None if unknown."""
+    if ref.windows is not None and ref.window is not None:
+        return (*getattr(ref.windows, ref.window), ref.target_before)
+    return (ref.test_start, ref.test_end, ref.target_before) if ref.test_start else None
 
 
 def _daily_records(days: pd.DataFrame, start: pd.Timestamp, window: Optional[str] = None) -> List[Dict[str, Any]]:

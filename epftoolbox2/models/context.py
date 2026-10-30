@@ -385,6 +385,20 @@ class _Cells:
                 out.append((columns, asked, self._why_not_published(sorted(names))))
         return out
 
+    def never_published_on(self, days: np.ndarray) -> List[Tuple[Any, int, str]]:
+        """Each `published` argument asked on `days` (a mask of the issue days) that never answered True there."""
+        asked: Dict[Any, List[Any]] = {}
+        for (columns, _), (names, answers, cells) in self._published.items():
+            entry = asked.setdefault(columns, [set(), 0, False])
+            entry[0].update(names)
+            entry[1] += int((cells & days).sum())
+            entry[2] = entry[2] or bool((answers & cells & days).any())
+        return [
+            (columns, n_asked, self._why_not_published(sorted(names)))
+            for columns, (names, n_asked, answered) in asked.items()
+            if n_asked and not answered
+        ]
+
     def _why_not_published(self, names: List[str]) -> str:
         reasons = []
         for name in names:
@@ -819,6 +833,25 @@ def _warn_never_published(cells: _Cells, fn: Any) -> None:
         warnings.warn(
             f"{function_name(fn)}: ctx.published({shown}) was never True on the {asked} forecast(s) that asked, so the "
             f"function never switched on what it guards: {why}.",
+            UserWarning,
+            stacklevel=4,
+        )
+
+
+def warn_never_published_in(plan: PredictorPlan, window: str, days: Tuple[int, int]) -> None:
+    """What a plain run over one window warns about, for a run of several: a `published()` argument never True in that
+    window, unless it wasn't True anywhere, which `build_plan` has said already."""
+    cells = plan._cells
+    on_days = np.zeros(len(plan.issue_days), dtype=bool)
+    on_days[days[0] : days[1]] = True
+    everywhere = {columns for columns, _, _ in cells.never_published()}
+    for columns, asked, why in cells.never_published_on(on_days):
+        if columns in everywhere:
+            continue
+        shown = repr(columns) if isinstance(columns, str) else f"{list(columns)[:3]}" + (" ..." * (len(columns) > 3))
+        warnings.warn(
+            f"{function_name(plan.function)}: ctx.published({shown}) was never True on the {asked} forecast(s) that asked "
+            f"in the {window} window, so the function never switched on what it guards there: {why}.",
             UserWarning,
             stacklevel=4,
         )

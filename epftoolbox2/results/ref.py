@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from datetime import date
 from pathlib import Path
 from typing import Dict, Iterator, List, Mapping, Optional
 
@@ -50,8 +51,12 @@ class ModelResultRef:
         A resumed JSONL can hold rows from an earlier run with a wider or different test window (its rows are never
         deleted), and a run with validation holds both windows, so each ref keeps to its own. Refs built from plain result
         lists have no window (test_start/test_end are "") and are read as given.
+
+        A window's ref gives `day_in_test` from the window's start as it is now: a record resumed after the start moved
+        holds the old count in the file.
         """
         filter_dates = bool(self.test_start and self.test_end)
+        window_start = date.fromisoformat(self.test_start) if self.window is not None and self.test_start else None
 
         def keep(r: Dict) -> bool:
             if filter_dates and not self.test_start <= r["run_date"] <= self.test_end:
@@ -69,11 +74,19 @@ class ModelResultRef:
                         if line:
                             r = json.loads(line)
                             if keep(r):
-                                yield {k: r[k] for k in cols if k in r} if cols else r
+                                yield self._as_read(r, cols, window_start)
         else:
             for r in self._results or []:
                 if keep(r):
-                    yield {k: r[k] for k in cols if k in r} if cols else r
+                    yield self._as_read(r, cols, window_start)
+
+    @staticmethod
+    def _as_read(r: Dict, cols: Optional[List[str]], window_start: Optional[date]) -> Dict:
+        if window_start is not None and "day_in_test" in r:
+            day_in_window = (date.fromisoformat(r["run_date"]) - window_start).days
+            if r["day_in_test"] != day_in_window:
+                r = {**r, "day_in_test": day_in_window}
+        return {k: r[k] for k in cols if k in r} if cols else r
 
 
 def split_by_window(

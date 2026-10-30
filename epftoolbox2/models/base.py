@@ -21,6 +21,7 @@ from ..results.store import ResultStore
 from ..results.ref import ModelResultRef, split_by_window
 from ..results.availability import listing_rows, warn_about
 from ..results.manifest import (
+    ManifestMismatchError,
     PlannedForecast,
     build_manifest,
     check_and_write,
@@ -32,7 +33,7 @@ from ..results.manifest import (
 from ..results.windows import TEST, RunWindows, mask_key
 from ..logging import get_logger
 from . import _contract
-from .context import PredictorPlan, build_plan, mask_digest, takes_ctx
+from .context import PredictorPlan, build_plan, mask_digest, takes_ctx, warn_never_published_in
 from ._worker import _pool_init, _run_day
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days
 from ..information_set import check_level
@@ -174,8 +175,12 @@ class BaseModel(ABC):
                 raise ValueError("test_start and test_end are required unless forecast_only=True")
             test_start = resolve_date(test_start)
             test_end = resolve_date(test_end)
-        if windows is None and save_to and read_windows(save_to) is not None:
-            windows = RunWindows.fixed(None, (test_start, test_end))
+        if windows is None and save_to:
+            on_file = read_windows(save_to)
+            if on_file is not None:
+                windows = self._as_run_of_test_window(
+                    on_file, test_start, test_end, forecast_only, allow_manifest_mismatch
+                )
 
         self._target = target
         if plan is None:
@@ -273,10 +278,11 @@ class BaseModel(ABC):
                 check_stored_lists(
                     manifest_path(store.path),
                     manifest,
-                    store.iter_lines(cols=["hour", "horizon", "run_date", "predictor_list", "window"]),
+                    store.iter_lines(cols=["hour", "horizon", "run_date", "predictor_list", "window", "actual"]),
                     self._stored_forecast_lookup(plan, masks, windows),
                     allow_mismatch=allow_manifest_mismatch,
                     model_name=self.name,
+                    stored_actual=None if windows is None else self._stored_actual_lookup(first_day),
                 )
 
             if plan is not None and windows is None:
@@ -370,6 +376,40 @@ class BaseModel(ABC):
                     stacklevel=2,
                 )
         return ref
+
+    def _as_run_of_test_window(
+        self, on_file: RunWindows, test_start: str, test_end: str, forecast_only: bool, allow_mismatch: bool
+    ) -> RunWindows:
+        """A plain run into results made with windows is a run of the test window alone, if that is the window on file: it
+        can't say anything about the others, and must not replace it without being asked to."""
+        period = (test_start, test_end)
+        if not allow_mismatch and (on_file.test not in (None, period) or (forecast_only and on_file.test is None)):
+            raise ManifestMismatchError(
+                f"{self.name}: these results were made with the windows {on_file.periods}, and a run on {period} with no "
+                "validation= would change them. Pass validation= and test= to say what the windows are now, use a "
+                "different save_dir, or pass allow_manifest_mismatch=True to resume anyway."
+            )
+        return RunWindows.fixed(None, period)
+
+    def _stored_actual_lookup(self, first_day: datetime.date) -> Callable[[int, int, str], Optional[float]]:
+        """What a fresh run's `actual` is for a key: the worker's last row up to the issue day, whatever row that is."""
+        columns: Dict[Tuple[int, int], np.ndarray] = {}
+
+        def lookup(period: int, horizon: int, run_date: str) -> Optional[float]:
+            day = self._offset + (datetime.date.fromisoformat(run_date) - first_day).days
+            days = self._hour_days.get(period)
+            name = f"{self._target}_d+{horizon}"
+            if days is None or name not in self._hour_data[period].columns:
+                return None
+            row = int(np.searchsorted(days, day, side="right")) - 1
+            if row < 0:
+                return None
+            key = (period, horizon)
+            if key not in columns:
+                columns[key] = self._hour_data[period][name].to_numpy(dtype=np.float64)
+            return float(columns[key][row])
+
+        return lookup
 
     @staticmethod
     def _manifest_availability(
@@ -660,7 +700,11 @@ class BaseModel(ABC):
             raise ValueError(f"{self.name}: a predictor function of `ctx` needs the test period to plan its lists")
         else:
             days = _test_days(test_start, test_end)
-        return build_plan(self._ctx_fn, data, days, horizon, freq, information_set, warn_unpublished, availability)
+        plan = build_plan(self._ctx_fn, data, days, horizon, freq, information_set, warn_unpublished, availability)
+        if windows is not None and warn_unpublished and len(windows.periods) > 1:
+            for name, (start, end) in windows.periods:
+                warn_never_published_in(plan, name, (plan.position_of(start), plan.position_of(end) + 1))
+        return plan
 
     def _check_plan_is_for(
         self, plan, data, horizon, freq, information_set, test_start, test_end, availability="raise", windows=None

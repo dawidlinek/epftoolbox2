@@ -222,6 +222,28 @@ def test_the_trap_each_window_has_its_own_masks(df):
     assert sorted(r["prediction"] for r in in_test) != sorted(r["prediction"] for r in all_records(plain))
 
 
+def test_a_column_read_on_a_later_day_of_the_window_is_read_from_that_window(tmp_path):
+    """A list used on some days reads a column without values on the first of them from a later day of its window."""
+    frame = make_market_data(days=140, horizon=3, noise=5.0, seed=3)
+    day = frame.index.tz_localize(None).normalize()
+    rng = np.random.default_rng(1)
+    late = (rng.random(len(frame)) > 0.5).astype(float)  # binary up to the end of February
+    late[day >= pd.Timestamp("2023-03-01")] = (
+        np.nan
+    )  # nothing in the training window of the list's first test day, Apr 4
+    on = day >= pd.Timestamp("2023-04-03")
+    late[on] = rng.normal(0, 3, int(on.sum()))  # continuous from Apr 3 on: first read for Apr 5
+    frame["late"] = late
+    info = InformationSet("11:45", "Europe/Warsaw", rules={**RULES, "late": Availability.static()})
+
+    def uses_late(ctx):
+        names = ["load_d+{horizon}"]
+        return names + ["late"] if ctx.issue_day.isoformat() in ("2023-03-27", "2023-04-04", "2023-04-05") else names
+
+    make = lambda: ols(uses_late)  # noqa: E731
+    assert_identity(make, frame, ("2023-03-25", "2023-03-27"), T, 1, info=info, level="raise")
+
+
 def test_the_manifest_holds_a_digest_per_window(df, tmp_path):
     pipeline(ols()).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
     manifest = json.loads((tmp_path / "m.manifest.json").read_text())
@@ -652,6 +674,28 @@ def test_skip_counts_are_split_by_window(df):
     assert list(report.forecast_counts()["missing"]) == [1]
 
 
+def test_worker_skips_and_absent_rows_land_in_their_own_window_either_way_round(df):
+    frame = df.copy()
+    wall = frame.index.tz_localize(None)
+    frame.loc[wall.normalize() == pd.Timestamp("2023-04-04"), "load_d+1"] = np.nan  # a test day, skipped in the worker
+    frame = frame[~((wall.normalize() == pd.Timestamp("2023-03-29")) & (wall.hour == 5))]  # a row of a validation day
+    report = pipeline(ols(), evaluators=[MAEEvaluator()]).run(frame, validation=V, test=T, horizon=1)
+    assert report.refs["m"].skipped == {"missing_test_predictors": 24}
+    assert report.validation.refs["m"].skipped == {"missing_test_row": 1}
+    assert report.refs["m"].skipped == pipeline(ols()).run(frame, test=T, horizon=1).refs["m"].skipped
+    assert report.validation.refs["m"].skipped == pipeline(ols()).run(frame, test=V, horizon=1).refs["m"].skipped
+
+
+def test_a_whole_runs_ref_in_a_report_is_split_too(df):
+    """`BaseModel.run` with windows gives the ref of the whole run: a report built from it must not mix the windows."""
+    ref = ols().run(df, horizon=1, windows=RunWindows.resolve(V, T))
+    report = EvaluationReport({"m": ref}, [MAEEvaluator()])
+    assert report.window == "test"
+    assert report.summary().loc[0, "forecasts"] == 3 * 24
+    assert report.predictions()["run_date"].min() == T[0]
+    assert report.validation.predictions()["run_date"].max() == V[1]
+
+
 def test_plain_counts_keep_their_shape(df):
     report = pipeline(ols(), evaluators=[MAEEvaluator()]).run(df, test=T, horizon=1)
     assert list(report.forecast_counts().columns) == ["model", "planned", "produced", "missing"]
@@ -684,6 +728,26 @@ def test_join_of_reports_on_different_windows_raises(df):
     )
     with pytest.raises(ValueError, match="different validation periods"):
         both.validation.join(moved_validation)
+
+
+def test_join_of_aggregates_of_other_periods_raises(df):
+    a = pipeline(ols(name="a")).run(df, validation=V, test=T, horizon=1)
+    b = pipeline(ols(PREDICTORS, name="b")).run(df, validation=V, test=("2023-04-10", "2023-04-12"), horizon=1)
+    with pytest.raises(ValueError, match="different test periods"):
+        a.aggregate().join(b.aggregate())
+    with pytest.raises(ValueError, match="different validation periods"):  # the same days, cut at another test start
+        a.validation.aggregate().join(b.validation.aggregate())
+    c = pipeline(ols(PREDICTORS, name="c")).run(df, validation=V, test=T, horizon=1)
+    assert set(a.aggregate().join(c.aggregate()).summary()["model"]) == {"a", "c"}
+    assert set(a.validation.aggregate().join(c.validation.aggregate()).summary()["model"]) == {"a", "c"}
+
+
+def test_join_of_validation_reports_with_other_cuts_raises(df):
+    validation = ("2023-03-25", "2023-04-01")
+    a = pipeline(ols(name="a")).run(df, validation=validation, test=("2023-04-02", "2023-04-05"), horizon=3)
+    b = pipeline(ols(PREDICTORS, name="b")).run(df, validation=validation, test=("2023-04-04", "2023-04-05"), horizon=3)
+    with pytest.raises(ValueError, match="different validation periods"):
+        a.validation.join(b.validation)
 
 
 def test_join_keeps_the_windows_and_joins_the_validation_reports(df):
@@ -937,12 +1001,74 @@ def test_a_stored_validation_key_whose_mask_would_change_is_refused(tmp_path, pr
         make().run(frame, validation=("2023-03-30", "2023-03-30"), horizon=1, save_dir=str(tmp_path))
 
 
-def test_the_same_mask_after_the_first_day_moved_resumes(df, tmp_path):
-    """Nothing about a stored forecast changes if the column reads the same from the new first day."""
-    pipeline(ols(PREDICTORS)).run(df, validation=V, save_dir=str(tmp_path), horizon=1)
-    before = lines(stored(tmp_path / "m.jsonl"))
-    pipeline(ols(PREDICTORS)).run(df, validation=("2023-03-29", V[1]), save_dir=str(tmp_path), horizon=1)
-    assert lines(stored(tmp_path / "m.jsonl")) == before
+def test_the_same_mask_after_the_first_day_moved_resumes_and_reads_as_fresh(df, tmp_path):
+    """Nothing about a stored forecast changes if the column reads the same from the new first day. Its `day_in_test` in the
+    file keeps the old count, but a report reads it from the window as it is now."""
+    pipeline(ols(PREDICTORS)).run(df, validation=V, save_dir=str(tmp_path / "a"), horizon=1)
+    before = lines(stored(tmp_path / "a" / "m.jsonl"))
+    later = ("2023-03-29", V[1])
+    moved = pipeline(ols(PREDICTORS)).run(df, validation=later, save_dir=str(tmp_path / "a"), horizon=1)
+    assert lines(stored(tmp_path / "a" / "m.jsonl")) == before
+    fresh = pipeline(ols(PREDICTORS)).run(df, validation=later, save_dir=str(tmp_path / "b"), horizon=1)
+    pd.testing.assert_frame_equal(dict(moved.iter_details())["m"], dict(fresh.iter_details())["m"])
+    pd.testing.assert_frame_equal(moved.predictions(), fresh.predictions())
+
+
+@pytest.mark.parametrize("predictors", [["load_d+{horizon}", "flag"], lambda ctx: ["load_d+{horizon}", "flag"]], ids=["fixed list", "ctx function"])  # fmt: skip
+def test_a_file_keeps_one_mask_per_key_whatever_days_its_records_are_on(tmp_path, predictors):
+    """A digest says nothing about which records used it. A run on other days with another mask would overwrite it, and the
+    older records would pass a later check for what they are not."""
+    info, level = (INFO, "raise") if callable(predictors) else (None, None)
+    make = lambda: pipeline(ols(predictors), info=info, level=level)  # noqa: E731
+    frame = with_flag(make_market_data(horizon=3, noise=5.0, seed=3), "2023-04-03")
+    make().run(frame, validation=("2023-04-04", "2023-04-08"), horizon=1, save_dir=str(tmp_path))
+    with pytest.raises(ManifestMismatchError, match="binary columns"):
+        make().run(frame, validation=("2023-04-20", "2023-04-22"), horizon=1, save_dir=str(tmp_path))
+    assert max(r["run_date"] for r in stored(tmp_path / "m.jsonl")) == "2023-04-08"
+
+
+def test_plain_results_whose_last_actuals_were_missing_are_refused(df, tmp_path):
+    """A plain manifest holds no hash of them, so the records are compared with the data."""
+    short = df[df.index.tz_localize(None).normalize() <= pd.Timestamp(T[1])]
+    pipeline(ols()).run(short, test=T, horizon=1, save_dir=str(tmp_path))
+    with pytest.raises(ManifestMismatchError, match="another `actual`"):
+        pipeline(ols()).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
+
+
+def test_plain_results_whose_actuals_were_revised_are_refused(df, tmp_path):
+    pipeline(ols()).run(df, test=T, horizon=1, save_dir=str(tmp_path))
+    revised = df.copy()
+    revised.loc[revised.index.tz_localize(None).normalize() == pd.Timestamp("2023-04-06"), "price"] += 50.0
+    with pytest.raises(ManifestMismatchError, match="another `actual`"):
+        pipeline(ols()).run(revised, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
+
+
+def test_a_plain_run_on_another_period_may_not_replace_the_test_window_on_file(df, tmp_path):
+    pipeline(ols()).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
+    before = lines(stored(tmp_path / "m.jsonl")), read_windows(tmp_path / "m.jsonl")
+    for kwargs in (
+        dict(test=("2023-04-20", "2023-04-20")),
+        dict(test=("2023-04-03", "2023-04-04")),
+        dict(test_start="2023-04-20", test_end="2023-04-20", forecast_only=True),
+    ):
+        with pytest.raises(ManifestMismatchError, match="would change them"):
+            pipeline(ols()).run(df, horizon=1, save_dir=str(tmp_path), **kwargs)
+    assert (lines(stored(tmp_path / "m.jsonl")), read_windows(tmp_path / "m.jsonl")) == before
+
+
+def test_a_plain_run_may_add_the_test_window_to_validation_on_file(df, tmp_path):
+    pipeline(ols()).run(df, validation=V, horizon=1, save_dir=str(tmp_path / "a"))
+    report = pipeline(ols()).run(df, test=T, horizon=1, save_dir=str(tmp_path / "a"))
+    assert read_windows(tmp_path / "a" / "m.jsonl") == RunWindows.resolve(V, T)
+    pipeline(ols()).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path / "b"))
+    assert lines(stored(tmp_path / "a" / "m.jsonl")) == lines(stored(tmp_path / "b" / "m.jsonl"))
+    assert report.window == "test"
+
+
+def test_forecast_only_may_not_add_a_test_window_to_validation_on_file(df, tmp_path):
+    pipeline(ols()).run(df, validation=V, horizon=1, save_dir=str(tmp_path))
+    with pytest.raises(ManifestMismatchError, match="would change them"):
+        pipeline(ols()).run(df, test=T, horizon=1, save_dir=str(tmp_path), forecast_only=True)
 
 
 def test_plain_results_of_fixed_lists_whose_first_day_moved_are_refused(df, tmp_path):
@@ -1126,6 +1252,123 @@ def test_the_manifest_lists_per_window_and_a_merged_report_shows_it(long_frame, 
     assert set(merged.validation.availability()["predictor"]) == {"seasonal"}
 
 
+NO_RULE_INFO = InformationSet("10:30", "UTC", rules=SEASONAL, unknown="ignore")
+
+
+def test_what_has_no_rule_is_listed_only_for_the_window_that_uses_it(long_frame):
+    def in_winter(ctx):
+        if ctx.issue_day.month == 12:
+            ctx.value("read_no_rule")
+            return PREDICTORS + ["listed_no_rule"]
+        return PREDICTORS
+
+    frame = long_frame.assign(listed_no_rule=long_frame["seasonal"], read_no_rule=long_frame["seasonal"])
+    with pytest.warns(UserWarning, match="no rule"):
+        report = pipeline(ols(in_winter, window=14), info=NO_RULE_INFO, level="warn").run(
+            frame, validation=WINTER_V, test=SUMMER_T, horizon=1
+        )
+    assert report.availability().empty
+    listed = report.validation.availability()
+    assert set(listed["status"]) == {"no rule"}
+    assert set(listed["predictor"]) == {"listed_no_rule", "read_no_rule"}
+
+
+def test_a_late_training_target_is_listed_for_its_window_only(long_frame):
+    rules = {**SEASONAL, "price": Availability.published("12:00", -1, "Europe/Brussels")}
+    info = InformationSet("10:30", "UTC", rules=rules)
+    with pytest.warns(UserWarning, match="price"):
+        report = pipeline(OLSModel(PREDICTORS, training_window=14, name="m"), info=info, level="warn").run(
+            long_frame, validation=WINTER_V, test=SUMMER_T, horizon=1
+        )
+    assert report.availability().empty
+    assert set(report.validation.availability()["role"]) == {"training target"}
+
+    def same(ctx):
+        return PREDICTORS
+
+    with pytest.warns(UserWarning, match="price"):
+        report = pipeline(ols(same, window=14), info=info, level="warn").run(
+            long_frame, validation=WINTER_V, test=SUMMER_T, horizon=1
+        )
+    assert report.availability().empty
+    assert set(report.validation.availability()["role"]) == {"training target"}
+
+
+def flagged(frame, tmp_path, level):
+    model = OLSModel(PREDICTORS + ["no_rule_column"], training_window=14, name="m")
+    return pipeline(model, info=NO_RULE_INFO, level=level).run(
+        frame, validation=SUMMER_V, test=SUMMER_T, horizon=1, save_dir=str(tmp_path)
+    )
+
+
+@pytest.mark.parametrize("later_level", ["raise", "none", "warn"])
+def test_what_a_run_listed_per_window_stays_on_file(long_frame, tmp_path, later_level):
+    frame = long_frame.assign(no_rule_column=long_frame["seasonal"])
+    with pytest.warns(UserWarning, match="no rule"):
+        flagged(frame, tmp_path, "warn")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        flagged(frame, tmp_path, later_level)
+    merged = pipeline(OLSModel(PREDICTORS, training_window=14, name="m"))
+    with pytest.warns(UserWarning, match="no rule"):
+        report = merged.report(tmp_path, horizon=1)
+    assert set(report.availability()["predictor"]) == {"no_rule_column"}
+    assert set(report.validation.availability()["predictor"]) == {"no_rule_column"}
+
+
+@pytest.mark.parametrize("later_level", ["none", "warn"])
+def test_what_a_plain_run_listed_stays_on_file_as_the_test_windows(long_frame, tmp_path, later_level):
+    frame = long_frame.assign(no_rule_column=long_frame["seasonal"])
+    model = lambda: OLSModel(PREDICTORS + ["no_rule_column"], training_window=14, name="m")  # noqa: E731
+    with pytest.warns(UserWarning, match="no rule"):
+        pipeline(model(), info=NO_RULE_INFO, level="warn").run(frame, test=SUMMER_T, horizon=1, save_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pipeline(model(), info=NO_RULE_INFO, level=later_level).run(
+            frame, validation=SUMMER_V, test=SUMMER_T, horizon=1, save_dir=str(tmp_path)
+        )
+    merged = pipeline(OLSModel(PREDICTORS, training_window=14, name="m"))
+    with pytest.warns(UserWarning, match="no rule"):
+        report = merged.report(tmp_path, horizon=1)
+    assert set(report.availability()["predictor"]) == {"no_rule_column"}
+    assert set(report.validation.availability()["predictor"]) == (
+        {"no_rule_column"} if later_level == "warn" else set()
+    )
+
+
+def guarded_in_winter_only(ctx):
+    return PREDICTORS + (["seasonal"] if ctx.published("seasonal") and ctx.issue_day.month != 12 else [])
+
+
+def test_an_input_that_never_switches_on_in_a_window_warns_like_a_plain_run(long_frame):
+    """Over the run the guard is True on some days, but a plain run over the winter window would say it never is."""
+    with pytest.warns(UserWarning, match="never True") as plain:
+        pipeline(ols(guarded_in_winter_only, window=14), info=SEASONAL_INFO, level="warn").run(
+            long_frame, test=WINTER_V, horizon=1
+        )
+    assert len([w for w in plain if "never True" in str(w.message)]) == 1
+    with pytest.warns(UserWarning, match="never True .*in the validation window"):
+        pipeline(ols(guarded_in_winter_only, window=14), info=SEASONAL_INFO, level="warn").run(
+            long_frame, validation=WINTER_V, test=SUMMER_T, horizon=1
+        )
+
+
+def guarded_never(ctx):
+    return PREDICTORS + (["seasonal"] if ctx.published("all_nan") else [])
+
+
+def test_an_input_that_never_switches_on_anywhere_warns_once(long_frame):
+    frame = long_frame.assign(all_nan=np.nan)
+    rules = {**SEASONAL, "all_nan": Availability.static()}
+    info = InformationSet("10:30", "UTC", rules=rules)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pipeline(ols(guarded_never, window=14), info=info, level="raise").run(
+            frame, validation=SUMMER_V, test=SUMMER_T, horizon=1
+        )
+    assert len([w for w in caught if "never True" in str(w.message)]) == 1
+
+
 def coarse_between(frame, first, last):
     """Only every third hour between these days, which the data contract refuses wherever a run reads it."""
     wall = frame.index.tz_localize(None)
@@ -1205,6 +1448,16 @@ def test_report_says_what_run_was_told(df, tmp_path):
         make().report(tmp_path, validation=V, test=("2023-04-03", "2023-04-04"), horizon=1)
     with pytest.raises(ValueError, match="not what the results were made with"):
         make().report(tmp_path, validation=("2023-03-20", "2023-03-22"), test=T, horizon=1)
+
+
+def test_report_of_validation_alone_cuts_at_the_test_on_file(df, tmp_path):
+    validation, test = ("2023-04-01", "2023-04-02"), ("2023-04-03", "2023-04-04")
+    make = lambda: pipeline(ols(), evaluators=[MAEEvaluator()])  # noqa: E731
+    full = make().run(df, validation=validation, test=test, horizon=3, save_dir=str(tmp_path))
+    alone = make().report(tmp_path, validation=validation, horizon=3)
+    assert alone.window == "validation"
+    assert alone.predictions()["target_date"].max() == "2023-04-02"
+    pd.testing.assert_frame_equal(alone.predictions(), full.validation.predictions())
 
 
 def test_report_of_a_plain_run_has_no_windows_to_ask_for(df, tmp_path):

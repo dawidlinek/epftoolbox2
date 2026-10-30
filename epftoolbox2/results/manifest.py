@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
 from dataclasses import dataclass, fields
 from datetime import date, datetime, timedelta, timezone
@@ -49,7 +50,7 @@ import pandas as pd
 
 from ..logging import get_logger
 from .availability import merge_listings
-from .windows import TEST, RunWindows
+from .windows import TEST, RunWindows, mask_key
 
 logger = get_logger(__name__)
 
@@ -362,11 +363,14 @@ def check_and_write(
     manifest.write(path)
 
 
+def _same_float(a: Optional[float], b: float) -> bool:
+    return a == b or (a is not None and math.isnan(a) and math.isnan(b))
+
+
 def _compare_data(existing: Manifest, manifest: Manifest, data_hash: Optional[Callable]) -> Optional[List[str]]:
     """What differs in the data the stored forecasts read, for a run with windows; None to compare hashes as a plain run.
 
     Plain results that end on another day are left to that comparison, which refuses them, as one plain run into another.
-    Their last days' `actual` read rows nothing recorded, so they can't be vouched for if the run goes on from there.
     """
     if data_hash is None or manifest.windows is None:
         return None
@@ -416,17 +420,27 @@ def _keep_listing(existing: Manifest, manifest: Manifest) -> None:
     """
     if not existing.availability or manifest.information_set not in (None, existing.information_set):
         return
+    earlier = existing.availability.get("windows")
+    if (
+        earlier is None
+        and existing.windows is None
+        and manifest.windows is not None
+        and existing.availability.get("listing")
+    ):
+        earlier = {TEST: existing.availability["listing"]}  # a plain run's rows are about its test window
     if manifest.availability is None:
-        manifest.availability = existing.availability
+        manifest.availability = dict(existing.availability)
+        if earlier is not None:
+            manifest.availability["windows"] = earlier
         return
     manifest.availability["listing"] = merge_listings(
         existing.availability.get("listing", []), manifest.availability["listing"]
     )
-    earlier = existing.availability.get("windows")
-    if manifest.availability.get("windows") is not None and earlier:
-        later = manifest.availability["windows"]
+    if earlier is not None:
+        later = manifest.availability.get("windows") or {}
         manifest.availability["windows"] = {
-            window: merge_listings(earlier.get(window, []), later.get(window, [])) for window in {*earlier, *later}
+            window: merge_listings(earlier.get(window, []), later.get(window, []))
+            for window in sorted({*earlier, *later})
         }
 
 
@@ -438,6 +452,7 @@ def check_stored_lists(
     *,
     allow_mismatch: bool = False,
     model_name: str = "Model",
+    stored_actual: Optional[Callable[[int, int, str], Optional[float]]] = None,
 ) -> None:
     """Raise `ManifestMismatchError` if a stored forecast isn't what a fresh run would give.
 
@@ -447,6 +462,11 @@ def check_stored_lists(
     changed function or start can move), or if its issue day now falls in another window (a record without a `window` is
     from a plain run, which is the test window). Pending forecasts may change freely: nothing stored depends on them.
 
+    A run with windows keeps one mask per (window, list, period, horizon) in a file, whichever days its records are on: a
+    digest says nothing about which records used it, so a run that overwrote one would let older records pass for what they
+    are not. `stored_actual(period, horizon, run_date)` gives what a fresh run's `actual` would be, for stored records that
+    no `actuals` hash speaks for (plain results, or results without a manifest).
+
     A record without a list hash comes from fixed lists, so nothing can be said about its list. `allow_mismatch` logs
     instead. A function that changed without changing anything stored resumes, with a note.
     """
@@ -455,31 +475,44 @@ def check_stored_lists(
         entry["hash"]: entry.get("binary_masks", {}) for entry in (existing and existing.predictor_lists) or []
     }
     fixed_masks = (existing and existing.binary_masks) or {}
+    windowed = manifest.windows is not None
+    new_masks = {entry["hash"]: entry.get("binary_masks", {}) for entry in manifest.predictor_lists or []}
+    new_fixed_masks = manifest.binary_masks or {}
     # A plain manifest of fixed lists holds no digests, but says on which day their masks were read.
     moved_plain = (
         existing is not None
         and existing.windows is None
-        and manifest.windows is not None
+        and windowed
         and manifest.windows[TEST] is not None
         and manifest.windows[TEST][0] != existing.test_start
     )
-    other_list, other_mask, other_window = [], [], []
+    compare_actuals = stored_actual is not None and (existing is None or existing.windows is None)
+    other_list, other_mask, other_window, other_actual = [], [], [], []
     for record in records:
         period, horizon, run_date = record["hour"], record["horizon"], record["run_date"]
-        expected = planned(period, horizon, run_date)
-        if expected is None:
-            continue
         stored = record.get("predictor_list")
-        if expected.window is not None and record.get("window", TEST) != expected.window:
-            other_window.append((run_date, period, horizon, record.get("window", TEST), expected.window))
-        if expected.list_hash is not None and stored != expected.list_hash:
+        tag = record.get("window", TEST)
+        expected = planned(period, horizon, run_date)
+        if compare_actuals:
+            actual = stored_actual(period, horizon, run_date)
+            if actual is not None and not _same_float(record.get("actual"), actual):
+                other_actual.append((run_date, period, horizon))
+        if expected is not None and expected.window is not None and tag != expected.window:
+            other_window.append((run_date, period, horizon, tag, expected.window))
+        if expected is not None and expected.list_hash is not None and stored != expected.list_hash:
             other_list.append((run_date, period, horizon))
             continue
-        masks = fixed_masks if expected.list_hash is None else stored_masks.get(stored, {})
-        if masks.get(expected.mask_key, expected.mask_digest) != expected.mask_digest or (
-            moved_plain and expected.list_hash is None and expected.window == TEST
-        ):
-            other_mask.append((run_date, period, horizon))
+        if windowed:
+            key = mask_key(tag, period, horizon)
+            kept = (fixed_masks if stored is None else stored_masks.get(stored, {})).get(key)
+            new = (new_fixed_masks if stored is None else new_masks.get(stored, {})).get(key)
+            if (kept is not None and new is not None and kept != new) or (
+                moved_plain and stored is None and tag == TEST
+            ):
+                other_mask.append((run_date, period, horizon))
+        elif expected is not None:
+            if stored_masks.get(stored, {}).get(expected.mask_key, expected.mask_digest) != expected.mask_digest:
+                other_mask.append((run_date, period, horizon))
 
     problems = []
     if other_window:
@@ -496,6 +529,11 @@ def check_stored_lists(
         problems.append(
             f"{len(other_mask)} stored forecast(s) used the same list with other binary columns than a fresh run would "
             f"(its first day in the window moved), e.g. {sorted(other_mask)[:3]}"
+        )
+    if other_actual:
+        problems.append(
+            f"{len(other_actual)} stored forecast(s) hold another `actual` than the data gives now (it has grown or was "
+            f"revised since), e.g. {sorted(other_actual)[:3]}"
         )
     if problems and not allow_mismatch:
         raise ManifestMismatchError(

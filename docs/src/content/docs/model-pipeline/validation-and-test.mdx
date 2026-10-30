@@ -110,12 +110,16 @@ Results resume as usual, and interrupted then resumed equals fresh. On top of th
   raises: keep at least `horizon` days after the validation period in the frame.
 - **A key that would change window or mask raises.** `ManifestMismatchError` says so when a stored forecast's issue day falls in
   another window now (results of `run(df, test=V)` can't become validation records), or when moving a window's first day gives
-  a stored forecast other binary columns than a fresh run would. Pending forecasts may change freely.
+  a stored forecast other binary columns than a fresh run would. One results file keeps one mask per window, list, period and
+  horizon, also for records outside this run's days. Pending forecasts may change freely.
 - **A plain run and a run with windows meet.** `run(df, test=T)` followed by `run(df, validation=V, test=T)` keeps the stored test
-  records, which have no tag and so mean test. The other way round, a plain run resumes as a run of the test window alone, and
-  the windows on file stay recorded.
+  records, which have no tag and so mean test. Their `actual` is compared with the data, since a plain manifest holds no hash of it.
+  The other way round, a plain run resumes as a run of the test window alone. On another period than the test window on file it
+  raises instead of replacing it, as `forecast_only` does: pass `validation=` and `test=` to say what the windows are now.
 - **What is on file stays recorded.** A run that names fewer windows leaves the others in the manifest, like their records in the
   file, and `report.validation` is cut at a test period on file.
+- **`day_in_test`** in the file keeps the count it was written with if a window's start moves with the mask unchanged. A report reads
+  it from the window as it is now.
 
 See [Incremental Training](/epftoolbox2/model-pipeline/caching/#the-manifest) for the manifest.
 

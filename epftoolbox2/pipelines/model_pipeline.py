@@ -19,7 +19,7 @@ from ..results.availability import read_listing, warn_about
 from ..results.manifest import manifest_path, read_windows
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef, split_by_window
-from ..results.windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows, to_period
+from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
 from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
 from ._yaml import dump_yaml, to_yaml_value
@@ -220,13 +220,7 @@ class ModelPipeline:
             refs[model.name] = ref
 
         evaluators = [] if forecast_only else self.evaluators
-        if windows is None:
-            report = EvaluationReport(refs, evaluators, source_data=data)
-        else:
-            by_window = {
-                name: {model: ref.by_window[name] for model, ref in refs.items()} for name, _ in windows.periods
-            }
-            report = self._window_report(by_window, evaluators, data)
+        report = EvaluationReport(refs, evaluators, source_data=data)
 
         if not forecast_only:
             for exporter in self.exporters:
@@ -262,18 +256,6 @@ class ModelPipeline:
             )
         test_start, test_end = to_period(test, TEST)
         return None, test_start, test_end
-
-    @staticmethod
-    def _window_report(
-        refs_by_window: Dict[str, Dict[str, ModelResultRef]], evaluators: List[Evaluator], data: Optional[pd.DataFrame]
-    ) -> EvaluationReport:
-        """The report on the test window, with the validation report as `.validation`, or the validation report itself."""
-        validation = None
-        if VALIDATION in refs_by_window:
-            validation = EvaluationReport(refs_by_window[VALIDATION], evaluators, source_data=data)
-        if TEST not in refs_by_window:
-            return validation
-        return EvaluationReport(refs_by_window[TEST], evaluators, source_data=data, validation=validation)
 
     def _stored_windows(self, paths: Dict[str, Path]) -> Optional[RunWindows]:
         """The windows every shard's manifest records, or None for plain runs; shards that disagree raise."""
@@ -368,25 +350,22 @@ class ModelPipeline:
         for name in missing:
             logger.warning(f"Report: no results for {name}; it is left out")
 
-        by_window: Dict[str, Dict[str, ModelResultRef]] = {}
-        shown_refs = {"": refs}
+        parts = dict(refs)
         if windows is not None:
+            parts = {}
             for name, ref in refs.items():
-                split = split_by_window(
+                ref.by_window = split_by_window(
                     ref,
                     windows,
                     96 if freq == "15min" else 24,
                     listings={w: read_listing(manifest_path(ref.path), w) for w, _ in windows.periods},
                     target_before=stored.target_before,
                 )
-                for window, part in split.items():
-                    by_window.setdefault(window, {})[name] = part
-            shown_refs = by_window
+                parts.update({f"{name} in the {window} window": part for window, part in ref.by_window.items()})
 
         shortfall = {
-            f"{name} in the {window} window" if window else name: ref
-            for window, window_refs in shown_refs.items()
-            for name, ref in window_refs.items()
+            name: ref
+            for name, ref in parts.items()
             if ref.produced is not None and ref.produced + ref.skipped.get(SKIP_TARGET_IN_TEST, 0) < ref.count
         }
         if shortfall:
@@ -401,11 +380,7 @@ class ModelPipeline:
             )
         warn_about({name: ref.availability_listing for name, ref in refs.items()}, stacklevel=3)
 
-        evaluators = [] if forecast_only else self.evaluators
-        if windows is None:
-            report = EvaluationReport(refs, evaluators, source_data=data)
-        else:
-            report = self._window_report(by_window, evaluators, data)
+        report = EvaluationReport(refs, [] if forecast_only else self.evaluators, source_data=data)
         if not forecast_only:
             for exporter in self.exporters:
                 exporter.export(report)
