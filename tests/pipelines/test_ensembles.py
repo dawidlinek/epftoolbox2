@@ -363,17 +363,26 @@ def test_a_tie_in_ranking_goes_to_the_earlier_member_and_in_k_to_the_smaller(tmp
     assert choice_of(report, "smaller")["k"] == 1
 
 
-def test_identical_members_tie_through_the_noise_of_averaging(tmp_path):
-    """Averaging identical members gives another float, by rounding noise alone. That is still a tie."""
+def test_identical_members_tie_through_the_noise_of_averaging():
+    """Averaging identical members gives another float, by rounding noise alone, sometimes a lower MAE. That is still a tie."""
+    ensemble = AverageEnsemble(["a", "b", "c"], top="validation")
+    noise_won = 0
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        actual = rng.normal(50, 20, 240)
+        prediction = actual + rng.normal(0, 5, 240)
+        choice = ensemble.choose(np.column_stack([prediction] * 3), actual)
+        noise_won += choice.k_mae[3] < choice.k_mae[1]
+        assert choice.chosen == ["a"]
+    assert noise_won, "this needs noise that would have won to mean anything"
 
-    def error(run_date, target_date, hour, horizon):
-        return random.Random(f"{run_date} {hour}").random() / 3
 
-    write_members(tmp_path, a=error, b=error, c=error)
-    report = report_of(tmp_path, AverageEnsemble(["a", "b", "c"], top="validation", name="e"))
-    k_mae = report.choices().attrs["k_mae"]["e"][0]
-    assert len(set(k_mae.values())) > 1, "this needs noise to mean anything"
-    assert choice_of(report)["k"] == 1
+def test_a_difference_within_twelve_significant_digits_is_a_tie_and_beyond_them_is_not():
+    actual = np.zeros(4)
+    ensemble = AverageEnsemble(["a", "b"], top=1)
+    assert ensemble.choose(np.column_stack([np.full(4, 1.0), np.full(4, 1.0 - 1e-14)]), actual).chosen == ["a"]
+    assert ensemble.choose(np.column_stack([np.full(4, 1.0), np.full(4, 1.0 - 1e-10)]), actual).chosen == ["b"]
+    assert ensemble.choose(np.column_stack([np.full(4, 1000.0), np.full(4, 1000.0 - 1e-11)]), actual).chosen == ["a"]
 
 
 def test_validation_only_gives_a_row_with_no_test_period_and_no_forecasts(tmp_path):
@@ -427,6 +436,9 @@ def test_validation_test_and_top_k_ensemble_on_identical_keys(df):
     assert set(report.refs) == {"full", "no_wind", "dyn", "top2"}
     validation = report.validation.leaderboard().sort_values("MAE").model.tolist()
     assert set(choice_of(report, "top2")["chosen"]) == set(validation[:2])
+    assert choice_of(report, "top2")["validation_forecasts"] == 4 * DAY, (
+        "days lie between the windows, so all of it serves"
+    )
     assert all(r["run_date"] >= T[0] for r in records_of(report, "top2"))
     board = report.leaderboard(benchmark="full")
     assert (board["n_common"] == 3 * DAY).all()
@@ -1557,6 +1569,37 @@ def test_a_workflow_with_ensembles_in_a_pipeline_file_loads_them(tmp_path):
 # ---------------------------------------------------------------------------------------------------------------------
 # DST
 # ---------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("freq, per_hour", [("1h", 1), ("15min", 4)])
+def test_days_of_23_and_25_hours_in_results_line_up_in_validation_and_in_test(tmp_path, freq, per_hour):
+    """Whatever periods a day holds, 92 or 100 of them too, a key is a key: no period is dropped, moved or matched by position."""
+    short, long = (HV[0], HT[0]), ("2024-05-03", HT[1])
+
+    def periods_of(run_date):
+        return 23 * per_hour if run_date in short else 25 * per_hour if run_date in long else 24 * per_hour
+
+    def records_of_member(error):
+        records = forecasts(HAND.issue_days(), error, tuple(range(25 * per_hour)), windows=HAND, freq=freq)
+        return [r for r in records if r["hour"] < periods_of(r["run_date"])]
+
+    write_member(tmp_path, "a", records_of_member(1.0), HAND, freq=freq)
+    write_member(tmp_path, "b", records_of_member(3.0), HAND, freq=freq)
+    report = report_of(
+        tmp_path,
+        AverageEnsemble(["a", "b"], name="plain"),
+        AverageEnsemble(["a", "b"], top=1, name="e"),
+        members=("a", "b"),
+        freq=freq,
+    )
+    for view, name in ((report, "e"), (report, "plain"), (report.validation, "plain")):
+        assert keyed(records_of(view, name)).keys() == keyed(records_of(view, "a")).keys()
+    served = sum(periods_of(day) for day in days_of(*HV)[:-1])
+    assert choice_of(report)["validation_forecasts"] == served
+    held = pd.Series([r["run_date"] for r in records_of(report, "plain")]).value_counts()
+    assert (held[HT[0]], held[HT[1]], held["2024-05-10"]) == (23 * per_hour, 25 * per_hour, 24 * per_hour)
+    assert all(r["prediction"] == r["actual"] + 2.0 for r in records_of(report, "plain"))
+    assert all(r["prediction"] == r["actual"] + 1.0 for r in records_of(report, "e"))
 
 
 @pytest.mark.parametrize("freq, per_hour", [("1h", 1), ("15min", 4)])
