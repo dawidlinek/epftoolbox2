@@ -22,7 +22,7 @@ from epftoolbox2.data.transformers import DailyProfileTransformer, DailyStatsTra
 from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
-from epftoolbox2.presets import profile_columns
+from epftoolbox2.presets import expert_predictors, lear_predictors, profile_columns
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 WARSAW = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
@@ -1349,6 +1349,202 @@ def test_a_source_column_named_like_a_day_aggregate_keeps_its_own_rule():
 
     assert not info.resolve("warsaw_is_day_mean_d+1").day_aggregate
     assert violations(["warsaw_is_day_mean_d+{horizon}", "warsaw_is_day_max_d+{horizon}"], info=info) == (set(), set())
+
+
+# ---------------------------------------------------------------------------
+# Rules of derived columns: a user's rule on the name, else the rule of the column it was built from
+# ---------------------------------------------------------------------------
+
+
+def test_built_in_rules_judge_derived_columns_through_the_column_they_were_built_from():
+    """No rule written by the user. `generation_*` must not catch an aggregate or a profile of `generation_*_forecast`
+    as realised: `generation_solar_forecast_day_max` takes the forecast's rule, published 18:00 on D-1, known at every
+    period, while the realised `load_actual_day_max` and `generation_solar_day_max` of D are known at none."""
+    known = [
+        "generation_solar_forecast",
+        "generation_solar_forecast_day_max",
+        "generation_solar_forecast_h12",
+        "generation_solar_forecast_day_last_d-1",
+        "load_actual_day_max_d-1",
+        "load_actual_h23_d-1",
+        "load_actual_h05",
+        "price_h05_d-1",
+        "price_h23",
+        "price_day_min",
+        "load_forecast_h05_d+1",
+    ]
+    late = ["load_actual_day_max", "generation_solar_day_max", "load_actual_h23", "price_h05_d+1", "price_day_max_d+1"]
+
+    found, unknown = violations(known + late, horizon=1)
+
+    assert unknown == set()
+    assert _refused_periods(found) == {name: set(range(24)) for name in late}
+    info = InformationSet()
+    assert info.resolve("generation_solar_forecast_day_max").key == "generation_*_forecast"
+    assert info.resolve("generation_solar_forecast_h12").key == "generation_*_forecast"
+    assert info.resolve("generation_solar_day_max").key == "generation_*"
+    col = info.resolve("load_actual_day_max_d-1")
+    assert (col.base, col.shifts, col.key, col.layer) == (
+        "load_actual_day_max",
+        (Shift("d", -1),),
+        "load_actual",
+        "defaults",
+    )
+
+
+@pytest.mark.parametrize("zone", ["Europe/Warsaw", "Etc/GMT-1"])
+@pytest.mark.parametrize("shift", ["", "_d-1", "_d+1", "_d+2"])
+@pytest.mark.parametrize(
+    "column",
+    [
+        "price",
+        "load_actual",
+        "load_forecast",
+        "load_forecast_daily_max",
+        "generation_solar",
+        "generation_solar_forecast",
+    ],
+)
+def test_a_derived_column_has_the_verdict_of_its_column_at_the_slot_it_reads(column, shift, zone):
+    """Nothing loosens through the built-in rules: on the issue days around a switch, at every period, a profile has the
+    verdict of its column at that slot's period and a day aggregate at the day's last period, with the day shift before
+    or after the slot."""
+    index = pd.date_range("2024-03-20", "2024-04-10", freq="h", tz=zone, inclusive="left")
+    every = set(range(24))
+    for day in pd.date_range("2024-03-29", "2024-04-02", freq="D").strftime("%Y-%m-%d"):
+
+        def refused(name):
+            found, unknown = violations([name], horizon=1, start=day, end=day, index=index)
+            assert unknown == set()
+            return _refused_periods(found).get(name, set())
+
+        plain = refused(f"{column}{shift}")
+        for period, names in {
+            5: [f"{column}_h05{shift}", f"{column}{shift}_h05"],
+            23: [
+                f"{column}_h23{shift}",
+                f"{column}{shift}_h23",
+                f"{column}_day_max{shift}",
+                f"{column}{shift}_day_last",
+            ],
+        }.items():
+            for name in names:
+                assert refused(name) == (every if period in plain else set()), (day, name)
+
+
+def test_an_accepted_assumption_reaches_derived_columns():
+    """`generation_solar_forecast_d+1_day_max` is published with the forecast of D+1: at 18:00 on D by the built-in
+    rule, too late, and at 10:00 on D with the assumption, which the refusal points at."""
+    names = ["generation_solar_forecast_d+1_day_max", "generation_solar_forecast_d+1_h05"]
+
+    found, unknown = violations(names, horizon=1)
+    assert unknown == set()
+    assert _refused_periods(found) == {name: set(range(24)) for name in names}
+    with pytest.raises(InformationSetError, match="entsoe_a69_by_10"):
+        InformationSet().check(expand(names, horizon=1), "price", "1h", WARSAW, "2024-01-10", "2024-01-10")
+
+    assumed = InformationSet(assumptions=["entsoe_a69_by_10"])
+    assert violations(names, info=assumed, horizon=1) == (set(), set())
+
+
+def test_the_preset_inputs_resolve_with_built_in_rules_alone():
+    found, unknown = violations(lear_predictors(exogenous=("load_forecast",)), horizon=1)
+    assert (found, unknown) == (set(), set())
+    found, unknown = violations(expert_predictors(exogenous=("load_forecast",)), horizon=1)
+    assert (found, unknown) == (set(), set())
+
+
+def test_a_rule_for_a_plain_column_covers_what_is_built_from_it():
+    info = InformationSet("11:45", "Europe/Brussels", rules={"fuel_ttf": Availability.daily_close("18:00")})
+    names = ["fuel_ttf", "fuel_ttf_day_max", "fuel_ttf_h05", "fuel_ttf_d-1", "fuel_ttf_day_max_d-1", "fuel_ttf_h05_d-1"]
+
+    found, unknown = violations(names, info=info, horizon=1)
+
+    assert unknown == set()
+    assert _refused_periods(found) == {name: set(range(24)) for name in names[:3]}
+
+
+def test_a_derived_column_without_a_rule_reports_the_column_to_declare():
+    found, unknown = violations(["fuel_ttf_day_max", "fuel_ttf_h05_d-1", "fuel_ttf_d-1_day_mean"], horizon=1)
+    assert found == set()
+    assert unknown == {"fuel_ttf"}
+    with pytest.raises(InformationSetError, match=r"no availability rule for column\(s\) \['fuel_ttf'\]"):
+        InformationSet().check(expand(["fuel_ttf_h05"], horizon=1), "price", "1h", WARSAW, "2024-01-10", "2024-01-10")
+
+
+def test_a_user_rule_on_the_derived_name_wins_and_is_read_at_the_slot_or_the_last_slot():
+    """It beats the rule of the column it was built from, and still describes that series: a known-in-advance `price_h*`
+    passes, and a rule that `price_day_*` is realised is judged at the day's last hour, not at the row's period."""
+    info = InformationSet(
+        "11:45",
+        "Europe/Brussels",
+        rules={"price_h05*": Availability.static(), "price_day_*": Availability.realised("1h")},
+    )
+    names = ["price_h05", "price_h05_d+1", "price_h06_d+1", "price_day_max", "price_day_max_d-1"]
+
+    found, unknown = violations(names, info=info, horizon=1)
+
+    assert unknown == set()
+    assert _refused_periods(found) == {"price_h06_d+1": set(range(24)), "price_day_max": set(range(24))}
+    assert info.resolve("price_day_max").key == "price_day_*"
+    assert info.resolve("price_h06").key == "price"
+
+
+def test_an_exact_rule_on_a_shifted_derived_name_describes_that_very_column():
+    """As for any column (`test_user_rules_take_precedence_and_exact_names_beat_suffix_parsing`), `x_h05_d+1` with an
+    exact rule of its own is not parsed: the user declares when this column, as named, is known."""
+    info = InformationSet(rules={"x_h05_d+1": Availability.static()})
+    col = info.resolve("x_h05_d+1")
+    assert (col.base, col.shifts, col.slot, col.key) == ("x_h05_d+1", (), None, "x_h05_d+1")
+    assert violations(["x_h05_d+1"], info=info, horizon=1) == (set(), set())
+
+
+DERIVED_WEATHER = [
+    "warsaw_temperature_2m_d+1_day_max",
+    "warsaw_temperature_2m_d+1_h05",
+    "warsaw_temperature_2m_h05_d-1",
+]
+
+
+@pytest.mark.parametrize("name", DERIVED_WEATHER)
+@pytest.mark.parametrize(
+    "rules", [None, {"*_day_max": Availability.weather_cutoff("00", "6h")}], ids=["source", "user"]
+)
+def test_the_source_zone_guard_reaches_derived_columns(name, rules):
+    """On an index in another zone a row can belong to another market day, so the plain column raises, and what is built
+    from it can't be judged either. A user's rule on the derived name replaces the timing, not that."""
+    info = InformationSet("11:45", "Europe/Brussels", rules=rules).with_source_rules([_warsaw_weather_source()])
+    index = pd.date_range("2024-06-01", "2024-07-01", freq="h", tz="Etc/GMT-1", inclusive="left")
+
+    with pytest.raises(InformationSetError, match="Etc/GMT-1"):
+        violations([name], info=info, horizon=1, start="2024-06-10", end="2024-06-10", index=index)
+    with pytest.raises(InformationSetError, match="Etc/GMT-1"):
+        perturb_unknown(pd.DataFrame({name: 1.0}, index=index), "2024-06-10", info)
+
+
+def test_a_rule_the_user_wrote_for_the_plain_column_lifts_the_guard_of_what_is_built_from_it():
+    """The one way past the guard, as for the plain column itself: the user took over when that series is known."""
+    info = InformationSet(rules={"warsaw_temperature_2m": Availability.static()}).with_source_rules(
+        [_warsaw_weather_source()]
+    )
+    index = pd.date_range("2024-06-01", "2024-07-01", freq="h", tz="Etc/GMT-1", inclusive="left")
+    found = violations(DERIVED_WEATHER, info=info, horizon=1, start="2024-06-10", end="2024-06-10", index=index)
+    assert found == (set(), set())
+
+
+def test_a_derived_weather_column_follows_the_source_s_run():
+    """`run=12` is published in the afternoon, too late for an 11:45 issue, for the plain column and for its aggregate
+    and profile alike. A leading `_d+1` stays the source's lead, so `run=00` passes them."""
+    names = ["warsaw_temperature_2m_d+1", *DERIVED_WEATHER[:2]]
+
+    late = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source(run="12")])
+    found, unknown = violations(names, info=late, horizon=1)
+    assert unknown == set()
+    assert _refused_periods(found) == {name: set(range(24)) for name in names}
+
+    early = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source(run="00")])
+    assert violations(names, info=early, horizon=1) == (set(), set())
+    assert early.resolve(names[1]).layer == "sources"
 
 
 # ---------------------------------------------------------------------------

@@ -396,6 +396,7 @@ class ResolvedColumn:
     rule: Optional[Availability]
     key: Optional[str] = None  # the rule's key (exact name or pattern)
     layer: Optional[str] = None
+    built_from: Optional["ResolvedColumn"] = None  # what `base` was built from, if a transformer's feature (see `slot`)
 
     @property
     def slot(self) -> Optional[Tuple[int, int]]:
@@ -404,8 +405,7 @@ class ResolvedColumn:
         `price_h05` holds the price of 05:00-06:00 on its row's local day, the same value on every row of that day,
         so its availability is that of slot (300, 60), whatever the row's period. `_sNN` is a 15-minute slot.
         """
-        profile = _profile_source(self)
-        return None if profile is None else profile[1:]
+        return _profile_slot(self.base)
 
     @property
     def day_aggregate(self) -> bool:
@@ -414,7 +414,12 @@ class ResolvedColumn:
         Such a column holds a statistic of its row's whole local day, the same value on every row of that day, so it is
         known when the last slot of that day is, whatever the row's period.
         """
-        return _day_aggregate_source(self) is not None
+        return _DAY_AGGREGATE.match(self.base) is not None
+
+    @property
+    def series(self) -> str:
+        """The base column at the bottom of what this was built from: the one a rule would be declared for."""
+        return self.base if self.built_from is None else self.built_from.series
 
 
 def parse_predictor(name: str) -> List[Tuple[str, Tuple[Shift, ...]]]:
@@ -435,40 +440,35 @@ def parse_predictor(name: str) -> List[Tuple[str, Tuple[Shift, ...]]]:
     return chain
 
 
-def _profile_source(col: ResolvedColumn) -> Optional[Tuple[ResolvedColumn, int, int]]:
-    """For a DailyProfileTransformer column, the column it was built from and its slot (start, length) in minutes.
-
-    `x_d+1_h05` (a profile of the lag `x_d+1`) is built from `x` shifted by `_d+1`, read at 05:00; the shifts after
-    the slot (`col.shifts`) pick the day the slot is read on. None for a column that is not a profile.
-    """
-    match = _PROFILE_SLOT.match(col.base)
+def _profile_slot(base: str) -> Optional[Tuple[int, int]]:
+    """(start, length) in minutes of the slot of day a DailyProfileTransformer column `base` names, or None."""
+    match = _PROFILE_SLOT.match(base)
     if match is None:
         return None
     length = _SLOT_MINUTES[match["unit"]]
     start = int(match["n"]) * length
-    if start >= 1440:
-        return None
-    base, shifts = parse_predictor(match["column"])[-1]
-    return replace(col, base=base, shifts=shifts), start, length
+    return (start, length) if start < 1440 else None
 
 
-def _day_aggregate_source(col: ResolvedColumn) -> Optional[ResolvedColumn]:
-    """For a DailyStatsTransformer column, the column it aggregates over its row's local day.
-
-    `x_d-1_day_max` (an aggregate of the lag `x_d-1`) aggregates `x` shifted by `_d-1`; the shifts after the aggregate
-    (`col.shifts`) pick the day. None for a column that is not one.
-    """
-    match = _DAY_AGGREGATE.match(col.base)
-    if match is None:
-        return None
-    base, shifts = parse_predictor(match["column"])[-1]
-    return replace(col, base=base, shifts=shifts)
+def _built_from_name(base: str) -> Optional[str]:
+    """The column a DailyProfileTransformer or DailyStatsTransformer column `base` was built from, with its own shifts
+    (`x_d-1` for `x_d-1_h05` and `x_d-1_day_max`), or None for a column that is neither."""
+    match = _PROFILE_SLOT.match(base) if _profile_slot(base) is not None else _DAY_AGGREGATE.match(base)
+    return None if match is None else match["column"]
 
 
-def _built_from(col: ResolvedColumn) -> Optional[ResolvedColumn]:
-    """The column a DailyProfileTransformer or DailyStatsTransformer column was built from, or None."""
-    profile = _profile_source(col)
-    return profile[0] if profile is not None else _day_aggregate_source(col)
+def _find_rule(name: str, chain: List[Tuple[str, Tuple[Shift, ...]]], rules, layer: str) -> Optional[ResolvedColumn]:
+    """The rule of one layer for a column: exact names from the full name down to the base, then glob patterns from the
+    base up."""
+    for candidate, shifts in chain:
+        if candidate in rules:
+            return ResolvedColumn(name, candidate, shifts, rules[candidate], candidate, layer)
+    patterns = [k for k in rules if any(ch in k for ch in "*?[")]
+    for candidate, shifts in reversed(chain):
+        for pattern in patterns:
+            if fnmatch.fnmatchcase(candidate, pattern):
+                return ResolvedColumn(name, candidate, shifts, rules[pattern], pattern, layer)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -583,19 +583,29 @@ class InformationSet:
 
     def resolve(self, name: str) -> ResolvedColumn:
         """Find the rule for a column: exact names from the full name down to the base, then glob patterns
-        from the base up; layers in order rules > accepted assumptions > sources > defaults."""
+        from the base up; layers in order rules > accepted assumptions > sources > defaults.
+
+        A DailyProfileTransformer or DailyStatsTransformer column first looks for a user's rule on its own name, which
+        describes the series it was built from; otherwise it takes the whole resolution of the column it was built from,
+        so `generation_solar_forecast_day_max` is judged by `generation_*_forecast`, not caught by `generation_*`. Either
+        way the value is read at its slot or the day's last slot, and the built-from column's source zone guard applies.
+        An exact rule on a shifted name (`x_h05_d+1`) describes that very column, as for any other column.
+        """
         chain = parse_predictor(name)
-        for layer, rules in self._layers():
-            for candidate, shifts in chain:
-                if candidate in rules:
-                    return ResolvedColumn(name, candidate, shifts, rules[candidate], candidate, layer)
-            patterns = [k for k in rules if any(ch in k for ch in "*?[")]
-            for candidate, shifts in reversed(chain):
-                for pattern in patterns:
-                    if fnmatch.fnmatchcase(candidate, pattern):
-                        return ResolvedColumn(name, candidate, shifts, rules[pattern], pattern, layer)
         base, shifts = chain[-1]
-        return ResolvedColumn(name, base, shifts, None)
+        column = _built_from_name(base)
+        if column is None:
+            for layer, rules in self._layers():
+                found = _find_rule(name, chain, rules, layer)
+                if found is not None:
+                    return found
+            return ResolvedColumn(name, base, shifts, None)
+        user = _find_rule(name, chain, self.rules, "rules")
+        if user is not None and user.base != base:
+            return user
+        source = self.resolve(column)
+        ruling = source if user is None else user
+        return ResolvedColumn(name, base, shifts, ruling.rule, ruling.key, ruling.layer, source)
 
     # -- the check ------------------------------------------------------------
 
@@ -656,7 +666,7 @@ class InformationSet:
             if name not in resolved:
                 resolved[name] = self.resolve(name)
                 if resolved[name].rule is None:
-                    unknown.add(resolved[name].base)
+                    unknown.add(resolved[name].series)
                 else:
                     self._check_source_zone(resolved[name], index)
 
@@ -703,8 +713,13 @@ class InformationSet:
         The check reads each row's issue day D as a local day of the index's zone. An Open-Meteo column took its
         run from D in the source's market zone, so on a UTC index a row at 22:00Z belongs to the market's next
         day, whose run is published only the next morning: neither the check nor the probe could see that.
-        Zones with the same wall clock on every row (Europe/Berlin and Europe/Warsaw) are the same here.
+        Zones with the same wall clock on every row (Europe/Berlin and Europe/Warsaw) are the same here. A column built
+        from such a column can't be judged either, whatever rule its own name has: only a user's rule for the column
+        itself lifts this.
         """
+        if col.built_from is not None:
+            self._check_source_zone(col.built_from, index)
+            return
         zone = self._source_zones.get(col.key) if col.layer == "sources" and col.key else None
         if zone is None or getattr(index, "tz", None) is None or not len(index):
             return
@@ -731,11 +746,10 @@ class InformationSet:
         """An OpenMeteoSource column's own cutoff is a source-side setting, not a data fact: point at it."""
         if col.rule is None or col.rule.kind != "weather_cutoff":
             return ""
-        source = _built_from(col)
         # The shifts after a profile's slot or a day aggregate always shift the row; only the column it was built from
         # has a lead.
-        if source is not None:
-            row_shifts = list(col.shifts) + _shifts_after_source_lead(source.shifts)
+        if col.built_from is not None:
+            row_shifts = list(col.shifts) + _shifts_after_source_lead(col.built_from.shifts)
         else:
             row_shifts = _shifts_after_source_lead(col.shifts)
         if any(s.offset > 0 for s in row_shifts):
@@ -1022,28 +1036,22 @@ def _available_array(
     after `ctx.day` (`violations` checks many issue days at once; `perturb_unknown` one, `ctx.day` itself).
     `first` marks rows that are not the second occurrence of a repeated autumn wall time (default: all).
     """
-    profile = _profile_source(col)
-    if profile is not None:
+    if col.built_from is not None:
         # A profile column holds, on every row of a local day, the column it was built from at its slot of that day:
         # `x_h05_d-1` on row D is `x` at 05:00 on D-1 (the shifts after the slot pick the day, and none of them is a
         # source's lead), `x_d+1_h05` is `x_d+1` at 05:00 on D. A repeated autumn slot is its first occurrence, the
         # one DailyProfileTransformer copies; a slot skipped in spring moves forward to the switch.
-        source, start, length = profile
+        # A day aggregate holds a statistic of that column over every slot of the day (23, 24 or 25 hours on a DST
+        # index), so it is known when the latest of them is: the day's last slot (23:00 for hourly data), on the day
+        # the shifts after the aggregate reach. Each rule's availability never decreases with the slot's time, so no
+        # earlier slot is known later; a repeated last slot is its second occurrence.
         reached = _shifted_day(col.shifts, day, minute, first, ctx)
-        slot = np.full(len(reached), float(start))
-        copied = np.ones(len(reached), dtype=bool)
-        return _available_array(source, rule, reached, slot, length, ctx, copied, issue_day + reached - day)
-    source = _day_aggregate_source(col)
-    if source is not None:
-        # A day aggregate holds, on every row of a local day, a statistic of the column it was built from over every
-        # slot of that day (23, 24 or 25 hours on a DST index), so it is known when the latest of them is: the day's
-        # last slot (23:00 for hourly data), on the day the shifts after the aggregate reach, none of them a source's
-        # lead. Each rule's availability never decreases with the slot's time, so no earlier slot is known later; a
-        # repeated last slot is its second occurrence.
-        reached = _shifted_day(col.shifts, day, minute, first, ctx)
-        last = np.full(len(reached), 1440.0 - step)
-        second = np.zeros(len(reached), dtype=bool)
-        return _available_array(source, rule, reached, last, step, ctx, second, issue_day + reached - day)
+        slot, length = col.slot or (1440.0 - step, step)
+        slots = np.full(len(reached), float(slot))
+        occurrence = np.full(len(reached), col.slot is not None)
+        return _available_array(
+            col.built_from, rule, reached, slots, length, ctx, occurrence, issue_day + reached - day
+        )
     if rule.kind == "static":
         return np.full(len(day), -np.inf)
     if rule.kind == "as_of":

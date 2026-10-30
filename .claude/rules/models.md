@@ -26,8 +26,12 @@ never at the row's period: `x_h23_d-1` is x at 23:00 on D-1, `x_d+1_h05` (a prof
 and a `_d+k` after the slot is never a source's lead; a `DailyStatsTransformer` column (`_day_min`, `_max`,
 `_mean`, `_last`) is judged the same way at the last slot of the day it aggregates, whatever that day's 23, 24 or
 25 hours: realised 1 h, `load_actual_day_max` is known 01:00 on D+1, and `x_d-1_day_max` (an aggregate of a lag)
-and `x_day_max_d-1` when D-1's last slot is; a column a data source emits under such a name, e.g. Open-Meteo's
-`is_day_mean`, is the source's own). This convention is independent of
+and `x_day_max_d-1` when D-1's last slot is; `is_day_*` is Open-Meteo's `is_day` over locations, never an aggregate).
+Such a column resolves through the column it was built from: a user's rule on its own name first, which describes that
+series and replaces only the timing, else the built-from column's whole resolution, including the assumptions, the
+source's rule and its zone guard (`InformationSet.resolve`, `ResolvedColumn.built_from`). An hour lag of one is read
+from the row's real instant (`_shifted_day`), and the check takes a repeated autumn hour at its second occurrence, the
+row the model forecasts from. This convention is independent of
 the training-target boundary above: don't conflate the two, and don't move either as a side effect of the
 other.
 

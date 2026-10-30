@@ -135,7 +135,9 @@ pipeline = ModelPipeline(information_set=info)
   </TabItem>
   <TabItem label="Rule keys">
     Keys in `rules=` may be exact column names or glob patterns (`fuel_*`), and take precedence over accepted
-    assumptions, rules learned from data sources, and the built-in defaults, in that order.
+    assumptions, rules learned from data sources, and the built-in defaults, in that order. A
+    [profile](#profile-columns) or a [day aggregate](#day-aggregates) takes the rule of the column it was built from,
+    unless a key in `rules=` matches its own name.
   </TabItem>
 </Tabs>
 
@@ -156,9 +158,11 @@ profile of the row 12 elapsed hours earlier: D-1's on the rows before noon and D
 where that boundary moves to 11:00 in autumn and 13:00 in spring. A profile of a lag (`LagTransformer` before
 `DailyProfileTransformer`) keeps its lag: `load_actual_d+1_h05` is the load at 05:00 on D+1.
 
-Profile columns need their own rules, usually patterns. `price_h05` does not take the rule of `price`, and a rule
-that matches a profile describes the series it was built from, so `generation_*` also covers
-`generation_solar_d+1_h05`:
+A profile needs no rule of its own. It takes the whole resolution of the column it was built from: your rules, a data
+source's rule, the built-in rules and accepted assumptions. So `price_h05_d-1` is judged by the rule of `price` and
+`generation_solar_forecast_h12` by that of `generation_*_forecast`, not by `generation_*`, and a rule you write for a
+column covers its profiles too. A key in `rules=` that matches the profile's own name comes first. It still describes
+the series the profile was built from and is read at the slot:
 
 ```python
 from epftoolbox2.information_set import Availability, InformationSet
@@ -166,16 +170,17 @@ from epftoolbox2.information_set import Availability, InformationSet
 info = InformationSet(
     "11:45", "Europe/Brussels",
     rules={
-        "price_h*": Availability.published("13:00", days_before=1),
-        "load_actual_h*": Availability.realised("1h"),
+        "fuel_ttf": Availability.daily_close("18:00"),               # also fuel_ttf_h05, fuel_ttf_day_max, ...
+        "price_h*": Availability.published("12:45", days_before=1),  # only the profiles of price
     },
 )
 ```
 
-With these rules `load_actual_h05` (known 07:00 on D) passes at every period, and `load_actual_h23` (known 01:00
-on D+1) fails at every period. On a DST day the skipped spring slot is NaN, and the repeated autumn slot holds its
-first occurrence, as the transformer fills them. A `_d+k` after the slot always shifts the row, so `as_of`,
-`weather_cutoff` and `weather_run` rules read `x_h05_d+1` from D+1 and never treat it as a source's own lead.
+With the built-in rules `load_actual_h05` (known 07:00 on D) passes at every period, and `load_actual_h23` (known
+01:00 on D+1) fails at every period. On a DST day the skipped spring slot is NaN, and the repeated autumn slot holds
+its first occurrence, as the transformer fills them. A `_d+k` after the slot always shifts the row, so `as_of`,
+`weather_cutoff` and `weather_run` rules read `x_h05_d+1` from D+1 and never treat it as a source's own lead. An exact
+key on a shifted name (`x_h05_d+1`) describes that very column at its row, as for any column.
 
 <Aside type="caution">
   `_hNN` is read as an hour and `_sNN` as a quarter-hour. A profile with another slot length (`freq="30min"`
@@ -195,27 +200,20 @@ pick the day, as for profile columns: `load_actual_day_max_d-1` is the maximum o
 of 11:00 on the 25-hour day and 13:00 on the 23-hour day. An aggregate of a lag
 (`LagTransformer` before `DailyStatsTransformer`) keeps its lag: `load_actual_d-1_day_max` is also the maximum of D-1.
 
-Aggregates need their own rules too, and a rule that matches one describes the series it was built from (the
-built-in `generation_*` also covers `generation_solar_day_max`):
+An aggregate takes its rule as a profile does: a key in `rules=` that matches its own name first, then the whole
+resolution of the column it was built from. With the built-in rules alone `price_day_max` (the expert model's maximum
+price of D, published 13:00 on D-1) passes at every period, `load_actual_day_max` (known 01:00 on D+1) fails at every
+period, `load_actual_day_max_d-1` (known 01:00 on D) passes, and `generation_solar_forecast_day_max` passes as the
+forecast it summarises.
 
-```python
-from epftoolbox2.information_set import Availability, InformationSet
+A `_d+k` after the aggregate always shifts the row, so `as_of`, `weather_cutoff` and `weather_run` rules read
+`x_day_max_d+1` from D+1, while a `_d+k` before it (`temperature_2m_d+1_day_max`) stays the source's own lead.
+`is_day_mean` and `warsaw_is_day_max` are never read as aggregates, whoever's rule covers them: they are an
+`OpenMeteoSource`'s `is_day` averaged over locations.
 
-info = InformationSet(
-    "11:45", "Europe/Brussels",
-    rules={
-        "price_day_*": Availability.published("13:00", days_before=1),
-        "load_actual*": Availability.realised("1h"),
-    },
-)
-```
-
-With these rules `price_day_max` (the expert model's maximum price of D, published 13:00 on D-1) passes at every
-period, `load_actual_day_max` (known 01:00 on D+1) fails at every period, and `load_actual_day_max_d-1` (known 01:00
-on D) passes. A `_d+k` after the aggregate always shifts the row, so `as_of`, `weather_cutoff` and `weather_run` rules
-read `x_day_max_d+1` from D+1, while a `_d+k` before it (`temperature_2m_d+1_day_max`) stays the source's own lead. A
-column a data source emits under such a name, such as an `OpenMeteoSource`'s `is_day` averaged over locations
-(`warsaw_is_day_mean`), is that source's own column and keeps its rule as it is.
+A profile or aggregate of an `OpenMeteoSource` column also gets that source's `run` and its check that the index is in
+the market zone. A key that matches the derived name replaces the source's timing but not the zone check, which only a
+rule for the plain column itself lifts.
 
 <Aside type="caution">
   The day's last slot can be delivered on the next day of the rule's zone. On the DE benchmark index (`Etc/GMT-1`)
