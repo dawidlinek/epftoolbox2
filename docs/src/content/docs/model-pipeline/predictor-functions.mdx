@@ -146,8 +146,11 @@ Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too str
 ```
 
 `leakage_probe` and [`ModelPipeline.verify`](/epftoolbox2/model-pipeline/verification/) plan the function on each frame they
-test, and the columns it only reads count as inputs. So a column whose value moves the choice of a list is probed like any
-other, and a late name in a list shows up as `leak`. A late `value()` raises.
+test, and the columns it only reads count as inputs. A late name in a list shows up as `leak`, and so does a cell the function
+read that holds another value in the perturbed frame, whether or not the noise changed its list: `value("x") > 0` keeps its
+list when large positive noise lands on the side the value was on. A late `value()` raises. With `verify`, a column the
+function uses only on issue days outside the sample makes the status `inconclusive`, so a list used on a few days can't pass
+unseen; sample more days.
 
 ## Results
 

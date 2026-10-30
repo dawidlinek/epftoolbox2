@@ -21,6 +21,7 @@ from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.models.context import build_plan, list_hash
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.manifest import ManifestMismatchError
+from epftoolbox2.verification import sample_issue_days
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 DOCS_PAGE = (
@@ -353,6 +354,18 @@ def test_value_known_after_the_issue_time_is_refused(df):
     with pytest.raises(InformationSetError, match=r"early_d\+1.*known D\+1 10:15, after the issue time") as refused:
         OLSModel(sneaky, training_window=45).run(df, *TEST, horizon=1, information_set=INFO)
     assert any("sneaky" in note and "2023-04-05" in note for note in refused.value.__notes__)
+
+
+def test_only_nan_counts_as_missing_and_a_non_numeric_column_reads_as_itself(df):
+    frame = df.assign(infinite=np.inf, stamp=pd.Timestamp("2023-01-01"), label="x")
+    read = {}
+
+    def reads(ctx):
+        read[ctx.period] = (ctx.published("infinite"), ctx.value("infinite"), ctx.value("stamp"), ctx.value("label"))
+        return PREDICTORS
+
+    OLSModel(reads, training_window=45).run(frame, "2023-04-06", "2023-04-06", horizon=1)
+    assert read[5] == (True, np.inf, pd.Timestamp("2023-01-01"), "x")
 
 
 def test_a_column_without_a_rule_is_not_handed_out_whatever_unknown_says(df):
@@ -847,6 +860,89 @@ def test_verify_finds_a_list_chosen_by_a_value_a_transformer_leaked():
     assert report.status("chooses") == "leak"
 
 
+def positive_signal():
+    source = make_market_data(noise=5.0, seed=7, days=150)
+    source["signal"] = 20.0 + np.random.default_rng(1).normal(0, 2, len(source))
+    rules = InformationSet("11:45", "Europe/Warsaw", rules={**RULES, "signal": Availability.realised("1h")})
+    return source, rules
+
+
+def properly_lagged(frame):
+    return frame.assign(**{"signal_d-1": calendar_shift(frame["signal"], -1)})
+
+
+def stays_on_the_branch_the_noise_lands_on(ctx):
+    return PREDICTORS if ctx.value("signal_d-1") > 0 else PREDICTORS + ["price_d-1"]
+
+
+def test_verify_finds_a_list_chosen_by_a_leaked_value_even_if_the_noise_leaves_the_list_alone():
+    """Large positive noise lands where `> 0` already was, so no forecast moves. The cell the function read did."""
+    source, rules = positive_signal()
+    pipeline = ModelPipeline(information_set=rules).add_model(
+        OLSModel(stays_on_the_branch_the_noise_lands_on, training_window=45, name="gate")
+    )
+    report = pipeline.verify(source, *TEST, horizon=1, days=1, positive_control=False, rebuild=leaking_rebuild)
+    check = report.checks[0]
+    assert report.status("gate") == "leak"
+    assert check.probe.max_abs_change == 0.0  # the forecasts alone say nothing here
+    assert check.probe.moved_reads == {"signal_d-1": 24}
+    assert "read through ctx and moved" in report.problems()[0]
+    with pytest.raises(AssertionError, match="Read through ctx and moved"):
+        check.probe.assert_ok()
+
+
+def test_verify_passes_the_same_function_on_a_properly_built_column():
+    source, rules = positive_signal()
+    pipeline = ModelPipeline(information_set=rules).add_model(
+        OLSModel(stays_on_the_branch_the_noise_lands_on, training_window=45, name="gate")
+    )
+    report = pipeline.verify(source, *TEST, horizon=1, days=2, rebuild=properly_lagged)
+    assert report.status("gate") == "ok", report.problems()
+
+
+def test_asking_whether_a_late_cell_is_published_is_not_reading_it(df):
+    """The answer is False whatever the cell holds, and the probe perturbs that cell."""
+
+    def asks_about_a_late_column(ctx):
+        return PREDICTORS + (["price_d-1"] if ctx.published("early_d+1") else [])
+
+    with pytest.warns(UserWarning, match="never True"):
+        model = OLSModel(asks_about_a_late_column, training_window=45)
+        model.run(df, "2023-04-05", "2023-04-05", horizon=1, information_set=INFO)
+    result = leakage_probe(lambda: OLSModel(asks_about_a_late_column, training_window=45), df, "2023-04-07", INFO)
+    result.assert_ok()
+    assert result.moved_reads == {}
+
+
+def on_sundays_only(ctx):
+    return PREDICTORS + (["signal_d-1"] if ctx.issue_day.weekday() == 6 else ["price_d-1"])
+
+
+def test_verify_does_not_pass_a_column_only_unsampled_days_read():
+    """A fixed list reads the same columns on every sampled day. A function may read a leaking one on Sundays only."""
+    source = make_market_data(noise=5.0, seed=7, days=150)
+    source["signal"] = np.random.default_rng(8).normal(size=len(source))
+    rules = InformationSet("11:45", "Europe/Warsaw", rules={**RULES, "signal": Availability.realised("1h")})
+    week = ("2023-04-03", "2023-04-09")  # 2023-04-09 is the Sunday
+    pipeline = ModelPipeline(information_set=rules).add_model(OLSModel(on_sundays_only, training_window=45, name="m"))
+
+    some_days = pipeline.verify(source, week[0], "2023-04-08", horizon=1, days=1, rebuild=leaking_rebuild)
+    assert some_days.checks[0].not_sampled == []  # that period has no Sunday, so nothing is left unread
+    assert some_days.status("m") == "ok"
+
+    weekdays = next(
+        seed
+        for seed in range(50)
+        if pd.Timestamp(sample_issue_days(source.index, *week, days=1, seed=seed)[0]).weekday() != 6
+    )
+    sampled = pipeline.verify(source, *week, horizon=1, days=1, seed=weekdays, rebuild=leaking_rebuild)
+    assert sampled.status("m") == "inconclusive"
+    assert "['signal_d-1'] only on issue days outside the sample" in sampled.problems()[0]
+
+    every_day = pipeline.verify(source, *week, horizon=1, days=7, rebuild=leaking_rebuild)
+    assert every_day.status("m") == "leak"
+
+
 def test_verify_counts_a_column_a_function_only_reads_as_an_input():
     """A column that only chooses the list is an input like the others: a rule is needed for it to be probed, and a
     target read that way mustn't trip the training boundary."""
@@ -1032,6 +1128,32 @@ def test_a_stored_forecast_whose_binary_columns_a_fresh_run_would_change_raises(
     monkeypatch.setitem(uses_flag_from.__globals__, "FIRST_USE", "2023-04-09")
     with pytest.raises(ManifestMismatchError, match="other binary columns"):
         make().run(frame, "2023-04-08", "2023-04-13", horizon=1, information_set=rules, save_to=str(path))
+
+
+def by_part_of_the_day(ctx):
+    if ctx.period < 12:
+        return NOT_ALWAYS_BINARY if str(ctx.issue_day) < "2023-04-08" else PREDICTORS
+    return NOT_ALWAYS_BINARY if str(ctx.issue_day) >= "2023-04-08" else PREDICTORS
+
+
+def test_a_narrower_run_keeps_the_masks_a_later_resume_compares(df, tmp_path):
+    """The middle run doesn't use the morning's list at all. If it forgot the masks the morning's stored forecasts used,
+    the third run, whose first test day changes them, would resume over them."""
+    frame = df.assign(flag=(np.random.default_rng(0).random(len(df)) > 0.5).astype(float))
+    turned = frame.index.tz_localize(None) >= pd.Timestamp("2023-04-04")
+    frame.loc[turned, "flag"] = frame.loc[turned, "load"]
+    rules = InformationSet("11:45", "Europe/Warsaw", rules={**RULES, "flag": Availability.static()})
+    path = tmp_path / "chain.jsonl"
+
+    def run(start):
+        OLSModel(by_part_of_the_day, training_window=20).run(
+            frame, start, "2023-04-10", horizon=1, information_set=rules, save_to=str(path)
+        )
+
+    run("2023-04-06")
+    run("2023-04-08")
+    with pytest.raises(ManifestMismatchError, match="other binary columns"):
+        run("2023-04-05")
 
 
 def test_results_of_fixed_lists_and_of_a_function_do_not_mix(df, tmp_path):
