@@ -66,8 +66,9 @@ class ModelPipeline:
             `report.availability()`, a warning, the terminal exporter and the manifest. "raise" refuses it before any
             fit, and `unknown` of the information set decides about columns without a rule. "none", the default
             without an issue time, checks and lists nothing; a predictor function still gets its answers from the
-            information set. "warn" and "raise" need an issue time. The level never changes a forecast, and changing it
-            alone resumes a run.
+            information set. "warn" and "raise" need an issue time. The level doesn't change a forecast, unless a
+            predictor function catches the error a late `ctx.value()` raises at "raise" and chooses another list, which it
+            must not do. Changing the level alone resumes a run.
     """
 
     def __init__(

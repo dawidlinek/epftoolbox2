@@ -58,9 +58,9 @@ ModelPipeline(information_set=InformationSet("11:45"), availability="raise")    
 still answers a [predictor function's](/epftoolbox2/model-pipeline/predictor-functions/#the-issue-time-check) `published()`.
 `"warn"` or `"raise"` without an issue time or an information set raises `ValueError`, and so does an unknown level.
 
-**The level never changes a number.** With fixed lists, forecasts and records are bit for bit the same at every level, and so
-are those of a predictor function that passes `"raise"`. The manifest doesn't compare the level, so changing only the level
-resumes a run. `pipeline.verify()` [tests the same boundary at every level](/epftoolbox2/model-pipeline/verification/#at-each-level):
+**The level doesn't change a number.** With fixed lists, forecasts and records are bit for bit the same at every level, and so
+are those of a predictor function that passes `"raise"`, as long as it doesn't catch the error a late `ctx.value()` raises and
+choose another list. The manifest doesn't compare the level, so changing only the level resumes a run. `pipeline.verify()` [tests the same boundary at every level](/epftoolbox2/model-pipeline/verification/#at-each-level):
 a late predictor is a `leak` also where `run()` only lists it.
 
 ### What `"raise"` says
@@ -117,7 +117,9 @@ The table is empty, with the same columns, when there is nothing to list. Otherw
 - **the manifest** next to the results, under `availability`, with the level. So `ModelPipeline.report()` after array jobs, and
   a resumed run, show what the run listed, once. A resumed run lists what a fresh one does. A run over a narrower test period
   into the same directory keeps what was listed for the records it leaves out, unless the rules changed, in which case
-  this run's rows replace them. Level `"none"` writes nothing there, and drops what an earlier run wrote.
+  this run's rows replace them. A run at level `"none"` lists nothing in its own report and writes nothing there, but leaves what
+  an earlier run wrote, unless the rules changed: results that were flagged don't read as clean because of how they were last
+  resumed.
 
 A column of a data source that needs the index in the market's zone raises `InformationSetError` at `"warn"` too (see below):
 nothing true can be said about it.

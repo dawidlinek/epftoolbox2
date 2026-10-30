@@ -189,8 +189,8 @@ report = pipeline.run(df, test_start="2024-04-01", test_end="2024-06-01", target
 `issue_time` (and optionally `issue_timezone`) compares every predictor with the time the forecast is actually
 issued, before any model is fitted. A predictor that uses a value not known yet (e.g. same-day `load_actual`) is listed in
 `report.availability()`, a warning, the terminal exporter and the manifest, and the run goes on. With
-`availability="raise"` it raises `InformationSetError` instead, which suits published results and CI. The level never
-changes a forecast. Built-in availability rules cover the shipped sources. See `epftoolbox2.information_set` for
+`availability="raise"` it raises `InformationSetError` instead, which suits published results and CI. The level doesn't
+change forecasts. Built-in availability rules cover the shipped sources. See `epftoolbox2.information_set` for
 custom rules, accepted assumptions, and `leakage_probe`, an empirical check that perturbs unknown values and asserts
 forecasts don't move. `pipeline.verify(df, test_start, test_end)` (or `epf verify`) runs it on sampled issue days, and
 `pipeline.explain(df, model="OLS", test=("2024-04-01", "2024-06-01"), horizon=1, hour=12)` shows what each predictor holds

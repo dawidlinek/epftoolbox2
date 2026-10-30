@@ -110,6 +110,12 @@ issue time, or has no rule for it, depends on the [level](/epftoolbox2/model-pip
 Without an information set it returns the value. A list chosen by a late value is a look-ahead whatever the level, so
 [`verify`](/epftoolbox2/model-pipeline/verification/#at-each-level) reports it as a `leak` at `"warn"` and `"none"`.
 
+<Aside type="caution">
+Don't catch the `InformationSetError` to fall back on another list: at `"raise"` the function then passes, and at `"warn"` it reads
+the value and may return another list, so the level would move a forecast. Ask `ctx.published()` first, which answers alike at
+every level.
+</Aside>
+
 ## As of the issue time: actual value, then forecast
 
 The second example the function form exists for: use the actual value while it is out and the forecast after that.
@@ -166,8 +172,9 @@ Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too str
 test, and the columns it only reads count as inputs. A late name in a list shows up as `leak`, and so does a cell the function
 read that holds another value in the perturbed frame, whether or not the noise changed its list: `value("x") > 0` keeps its
 list when large positive noise lands on the side the value was on. A late `value()` raises with `availability="raise"` and is a
-`leak` at the other levels. With `verify`, a column the function uses only on issue days outside the sample makes the status
-`inconclusive`, so a list used on a few days can't pass unseen; sample more days.
+`leak` at the other levels. `verify` also plans the whole test period, so what the function uses late on any issue day is a `leak`,
+sampled or not. A column it uses only on issue days outside the sample, known in time by its rule, makes the status
+`inconclusive`, since the probe hasn't seen it; sample more days.
 
 ## Seeing the lists
 

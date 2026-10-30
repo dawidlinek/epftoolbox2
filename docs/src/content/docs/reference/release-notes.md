@@ -23,7 +23,8 @@ Notes for changes that need something from you. The full list of changes of a re
   `ctx.published()` answers as before for every column with a rule.
 
 Unchanged: `BaseModel.run(information_set=...)`, without a pipeline, and `leakage_probe` still default to refusing, and
-`pipeline.verify()` still reports a late predictor as a `leak` at every level.
+`pipeline.verify()` still reports a late predictor as a `leak` at every level, and now also what a predictor function uses late on
+an issue day it didn't sample.
 
 ### New
 
