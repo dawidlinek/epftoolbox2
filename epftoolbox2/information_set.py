@@ -40,8 +40,10 @@ _STEP_MINUTES = {"1h": 60, "15min": 15}
 _PROFILE_SLOT = re.compile(r"^(?P<column>.+)_(?P<unit>[hs])(?P<n>\d{2})$")
 _SLOT_MINUTES = {"h": 60, "s": 15}
 # DailyStatsTransformer's suffixes (`data.transformers.daily_stats`): a statistic of the column over the row's whole
-# local day. No sign, so they never parse as a shift.
-_DAY_AGGREGATE = re.compile(r"^(?P<column>.+)_day_(?:min|max|mean|last)$")
+# local day. No sign, so they never parse as a shift. `is_day_mean` and `warsaw_is_day_max` are not such columns but
+# Open-Meteo's `is_day` aggregated over locations (`_open_meteo_common.aggregated_variable_names`), whoever's rule
+# reads them, so a column named `is` or `..._is` can't be told apart and is read as a plain column.
+_DAY_AGGREGATE = re.compile(r"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:min|max|mean|last)$")
 
 
 def _parse_time(value: str) -> int:
@@ -454,12 +456,8 @@ def _day_aggregate_source(col: ResolvedColumn) -> Optional[ResolvedColumn]:
     """For a DailyStatsTransformer column, the column it aggregates over its row's local day.
 
     `x_d-1_day_max` (an aggregate of the lag `x_d-1`) aggregates `x` shifted by `_d-1`; the shifts after the aggregate
-    (`col.shifts`) pick the day. None for a column that is not one, and for a column a data source emits under that
-    very name, which its rule describes as it is (an OpenMeteoSource's `is_day` averaged over locations is
-    `is_day_mean`).
+    (`col.shifts`) pick the day. None for a column that is not one.
     """
-    if col.layer == "sources" and col.key == col.base:
-        return None
     match = _DAY_AGGREGATE.match(col.base)
     if match is None:
         return None

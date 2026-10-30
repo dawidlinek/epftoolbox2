@@ -1225,6 +1225,36 @@ def test_day_aggregate_verdicts_match_the_latest_delivery_each_cell_holds(data_z
     assert _verdicts_against_held_deliveries(data, rule_zone, switch) == {}
 
 
+@pytest.mark.parametrize("rules", [["warsaw_is_day_mean", "warsaw_is_day_max"], ["warsaw_*"]], ids=["exact", "glob"])
+def test_a_user_rule_for_an_is_day_column_reads_it_as_a_column(rules):
+    """`warsaw_is_day_mean` is Open-Meteo's `is_day` averaged over locations, whoever wrote its rule: under a user's rule
+    too its `_d+1` is the source's lead, known with D's run, and a day aggregate or a profile of it keeps that lead."""
+    cutoff = Availability.weather_cutoff("00", "6h")
+    info = InformationSet("11:45", "Europe/Brussels", rules={name: cutoff for name in rules})
+    names = ["warsaw_is_day_mean_d+1", "warsaw_is_day_max_d+1"]
+    if "warsaw_*" in rules:  # the exact rules don't name these
+        names += ["warsaw_is_day_mean_d+1_day_max", "warsaw_is_day_mean_d+1_h05"]
+
+    assert not info.resolve("warsaw_is_day_mean_d+1").day_aggregate
+    assert violations(names, info=info, horizon=1) == (set(), set())
+
+
+def test_only_is_day_is_excluded_from_the_day_aggregates():
+    """The exclusion is by name, for any layer: `is_day_*` and `{prefix}_is_day_*` are Open-Meteo's. `this_day_max` and
+    `basis_day_max` only end in the same letters, and an exact user rule on a real aggregate doesn't make it a plain
+    column: `load_actual_day_max` judged at the row's own period is the look-ahead these rules exist to stop."""
+    info = InformationSet(rules={"*": Availability.static()})
+    for name in ["is_day_max", "is_day_min", "is_day_mean", "warsaw_is_day_max", "warsaw_is_day_mean_d+1"]:
+        assert not info.resolve(name).day_aggregate, name
+    for name in ["this_day_max", "basis_day_max", "x_day_max", "warsaw_is_day_day_max", "warsaw_is_day_mean_day_max"]:
+        assert info.resolve(name).day_aggregate, name
+
+    exact = InformationSet("11:45", "Europe/Brussels", rules={"load_actual_day_max": Availability.realised("1h")})
+    found, unknown = violations(["load_actual_day_max"], info=exact, horizon=1)
+    assert unknown == set()
+    assert _refused_periods(found) == {"load_actual_day_max": set(range(24))}
+
+
 def test_a_source_column_named_like_a_day_aggregate_keeps_its_own_rule():
     """An OpenMeteoSource's `is_day` averaged over locations is `warsaw_is_day_mean`: a column of its own, which the
     source's rule describes as it is (its `_d+k` is the source's lead), not a day aggregate of `warsaw_is`. So
