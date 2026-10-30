@@ -12,6 +12,7 @@ import pytest
 from epftoolbox2.data.transformers import DailyProfileTransformer
 from epftoolbox2.information_set import Availability, InformationSet, perturb_unknown
 from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 
@@ -122,3 +123,24 @@ def test_a_half_hour_profile_slot_is_judged_at_its_own_time():
     found, _ = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-16")
 
     assert {v.period for v in found} == set(range(24))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="the look-ahead after fall-back above is real, so verify() reports it when it samples these days",
+)
+@pytest.mark.parametrize("run_day", ["2023-10-30", "2023-10-31"])
+@pytest.mark.parametrize("target_as_input", [[], ["price"]], ids=["plain", "target as an input"])
+def test_verify_passes_in_the_days_after_fall_back_dst(run_day, target_as_input):
+    df = make_market_data(start="2023-08-01", days=120, noise=5.0, seed=1)
+    rules = {
+        "load": Availability.published("10:00", 7),
+        "wind": Availability.published("10:00", 7),
+        "is_weekend": Availability.static(),
+        "is_weekday": Availability.static(),
+    }
+    pipeline = ModelPipeline(information_set=InformationSet(rules=rules))
+    pipeline.add_model(OLSModel(PREDICTORS + ["price_d-1"] + target_as_input, training_window=40))
+
+    pipeline.verify(df, run_day, run_day, horizon=2, days=1).assert_ok()

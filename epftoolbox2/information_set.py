@@ -7,7 +7,8 @@ DailyProfileTransformer column, `x_h05` or `x_h05_d-1`, is delivered in the slot
 DailyStatsTransformer column, `x_day_max` or `x_day_max_d-1`, in the last slot of the day it aggregates); and
 `InformationSet.check` evaluates every expanded predictor for every (period, horizon) before any model is fitted.
 `leakage_probe` tests the same boundary empirically: it perturbs every value that is not yet known at issue time
-and checks that the forecasts don't move.
+and checks that the forecasts don't move. `positive_control` tests the probe: it perturbs the freshest values that
+are known, and the forecasts must move, or the perturbation isn't reaching the model at all.
 
 Times are compared as local wall-clock times of the data's time zone, relative to midnight of the issue day D.
 """
@@ -850,6 +851,10 @@ def _issue_minutes(minutes: np.ndarray, zone: str, ctx: _Context) -> np.ndarray:
 # Leakage probe
 # ---------------------------------------------------------------------------
 
+# Read through this rule, a column gives the end of the delivery period of its value, through the same shifts, slots and
+# day aggregates as under its own rule.
+_DELIVERED = Availability.realised("0min")
+
 
 @dataclass
 class ProbeResult:
@@ -922,25 +927,122 @@ def leakage_probe(
     if rebuild is not None:
         base, perturbed = rebuild(data), rebuild(perturbed)
 
-    def forecasts(frame):
-        m = model() if callable(model) and not hasattr(model, "run") else model
-        ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, horizon=horizon, freq=freq)
-        return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}
-
-    original, probed = forecasts(base), forecasts(perturbed)
-    shared = original.keys() & probed.keys()
-    diffs = {k: abs(original[k] - probed[k]) for k in shared}
-    changed = sorted(k for k, d in diffs.items() if not d <= atol)
-    missing = sorted(original.keys() ^ probed.keys())
+    original = _issue_day_forecasts(model, base, run_day, target, horizon, freq)
+    probed = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq)
+    changed, max_abs_change, missing = _compare_forecasts(original, probed, atol)
     return ProbeResult(
         run_day=run_day,
         forecasts=len(original),
         changed=changed,
-        max_abs_change=max(diffs.values(), default=0.0),
+        max_abs_change=max_abs_change,
         perturbed=counts,
         unchecked=unchecked,
         missing=missing,
     )
+
+
+def _issue_day_forecasts(
+    model: Any, frame: pd.DataFrame, run_day: str, target: str, horizon: int, freq: str
+) -> Dict[Tuple[int, int], float]:
+    """The model's forecasts issued on `run_day` from `frame`, by (period, horizon)."""
+    m = model() if callable(model) and not hasattr(model, "run") else model
+    ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, horizon=horizon, freq=freq)
+    return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}
+
+
+def _compare_forecasts(
+    original: Dict[Tuple[int, int], float], other: Dict[Tuple[int, int], float], atol: float
+) -> Tuple[List[Tuple[int, int]], float, List[Tuple[int, int]]]:
+    """The forecasts that differ by more than `atol`, the largest difference, and those present in only one run."""
+    diffs = {k: abs(original[k] - other[k]) for k in original.keys() & other.keys()}
+    changed = sorted(k for k, d in diffs.items() if not d <= atol)
+    return changed, max(diffs.values(), default=0.0), sorted(original.keys() ^ other.keys())
+
+
+@dataclass
+class ControlResult:
+    """Outcome of `positive_control`: forecasts that moved when the freshest known values were perturbed."""
+
+    run_day: str
+    forecasts: int
+    moved: List[Tuple[int, int]]  # (period, horizon)
+    max_abs_change: float
+    perturbed: Dict[str, int]  # column -> number of perturbed cells
+    unchecked: List[str]  # columns without a rule, left unperturbed
+    unmoved: List[Tuple[int, int]] = field(default_factory=list)  # forecasts of both runs that did not move
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.moved)
+
+
+def positive_control(
+    model: Any,
+    data: pd.DataFrame,
+    run_day: str,
+    information_set: InformationSet,
+    target: str = "price",
+    horizon: int = 1,
+    freq: str = "1h",
+    columns: Optional[Sequence[str]] = None,
+    atol: float = 1e-9,
+    seed: int = 0,
+    rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
+) -> ControlResult:
+    """Perturb the freshest values known at issue time on `run_day` and check that the forecasts do change.
+
+    A `leakage_probe` that finds nothing is only evidence if its perturbation reaches the model. The control perturbs
+    what the forecast may legally use from the last day before the issue (see `perturb_recent`), the same way and
+    through the same `rebuild`, and reports which forecasts moved. If none did, the probe's silence means nothing: the
+    model has no such input, or it doesn't read the frame it is given.
+
+    What the model fits on stays as it is. Every model trains on the target, so a control that perturbed it would move
+    every model, whatever its inputs, and could never fail. `target` is therefore left out of `columns`. With `rebuild`
+    the raw target has to be perturbed to reach `price_d-1`, so the rebuilt frame gets its original `target` column
+    back, and its rows older than D-1 too, where a raw value of D-1 lands in `x_d+1`. (The exception is the look-ahead
+    after a fall-back switch, a known issue, which trains the switch hour on D-1's row.)
+
+    With `rebuild`, days are those of the frame it returns, so a source in UTC is read in the market's zone.
+
+    `model` is a model instance or a zero-argument factory, as in `leakage_probe`.
+    """
+    run_day = str(pd.Timestamp(run_day).date())
+    names = list(data.columns) if columns is None else list(columns)
+    if rebuild is None:
+        names = [name for name in names if name != target]
+    if rebuild is None:
+        base = data
+        perturbed, counts, unchecked = perturb_recent(data, run_day, information_set, freq, names, seed)
+    else:
+        base = rebuild(data)
+        both_aware = data.index.tz is not None and base.index.tz is not None
+        in_market_zone = data.tz_convert(base.index.tz) if both_aware else data
+        perturbed, counts, unchecked = perturb_recent(in_market_zone, run_day, information_set, freq, names, seed)
+        perturbed.index = data.index
+        perturbed = _with_training_data_of(base, rebuild(perturbed), run_day, target)
+    original = _issue_day_forecasts(model, base, run_day, target, horizon, freq)
+    other = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq)
+    moved, max_abs_change, _ = _compare_forecasts(original, other, atol)
+    return ControlResult(
+        run_day=run_day,
+        forecasts=len(original),
+        moved=moved,
+        max_abs_change=max_abs_change,
+        perturbed=counts,
+        unchecked=unchecked,
+        unmoved=sorted((original.keys() & other.keys()) - set(moved)),
+    )
+
+
+def _with_training_data_of(base: pd.DataFrame, perturbed: pd.DataFrame, run_day: str, target: str) -> pd.DataFrame:
+    """A copy of `perturbed` with `target` and every row dated before D-1 taken from `base`."""
+    out = perturbed.copy()
+    local = out.index.tz_localize(None) if out.index.tz is not None else out.index
+    older = np.asarray(local.normalize() < pd.Timestamp(run_day) - pd.Timedelta(days=1))
+    out.loc[older, base.columns] = base.loc[older, base.columns]
+    if target in base.columns:
+        out[target] = base[target]
+    return out
 
 
 def perturb_unknown(
@@ -961,20 +1063,7 @@ def perturb_unknown(
     """
     index = data.index
     step = _STEP_MINUTES[freq]
-    # Every zone conversion reads the UTC offsets at the instant it converts (a value's own shifted delivery instant
-    # for its delivery day, its publication instant for the way back), not at run_day's noon or at the row's own
-    # date. They differ across a DST switch whenever the data zone and a rule's zone don't switch together, e.g. a
-    # UTC or fixed-offset (benchmark source) index against Europe/Brussels rules.
-    ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index))
-    issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), information_set.issue_timezone, ctx)
-    ctx = replace(ctx, issue_minute=float(issue[0]))
-    local = index.tz_localize(None) if index.tz is not None else index
-    day = np.asarray((local.normalize() - pd.Timestamp(run_day)) // pd.Timedelta(days=1), dtype=np.int64)
-    minute = np.asarray(local.hour * 60 + local.minute + local.second / 60.0, dtype=float)
-    # Which occurrence of a repeated autumn wall time each row is; a day shift keeps it, like shift_calendar_days.
-    first = np.ones(len(index), dtype=bool)
-    if index.tz is not None:
-        first = index.asi8 == local.tz_localize(index.tz, ambiguous=first, nonexistent="NaT").asi8
+    ctx, day, minute, first = _rows_around_issue(index, run_day, information_set)
     rng = np.random.default_rng(seed)
 
     out = data.copy()
@@ -997,13 +1086,97 @@ def perturb_unknown(
             values[mask] = 1e6 + rng.normal(0.0, 1e4, int(mask.sum()))
             out[name] = values
             counts[name] = int(mask.sum())
-    if unchecked:
-        message = f"leakage_probe: no availability rule for {unchecked}; left unperturbed"
-        if information_set.unknown == "raise":
-            raise InformationSetError(message + ". Declare rules or pass unknown='warn'.")
-        if information_set.unknown == "warn":
-            warnings.warn(message, stacklevel=2)
+    _report_unchecked(unchecked, information_set)
     return out, counts, unchecked
+
+
+def perturb_recent(
+    data: pd.DataFrame,
+    run_day: str,
+    information_set: InformationSet,
+    freq: str = "1h",
+    columns: Optional[Sequence[str]] = None,
+    seed: int = 0,
+) -> Tuple[pd.DataFrame, Dict[str, int], List[str]]:
+    """Copy of `data` where the freshest values known at issue time on `run_day` are replaced by noise.
+
+    The perturbation of `positive_control`, on the other side of the boundary from `perturb_unknown`. That boundary
+    moves back one local day, to the start of D-1: a value is replaced if it is known at the issue time on D, and it is
+    delivered on D-1 or later, or first known on D-1 or later. So `price_d-1` is replaced on D's row, although the price
+    of D-1 was published on D-2, before an issue time simply moved back a day: its delivery day puts it in. So is
+    today's `load_forecast_d+1`, and a slow series' newest value (`x_d-3` published on D-1). `x_d-2` of a day-ahead
+    series is not, nor anything older.
+
+    Only rows dated D-1 or later change: older rows are what the forecast is trained on, and an outlier there would
+    move a fit whatever the forecast's own inputs are. A column with a `static` rule is left alone: a calendar value
+    can't be known late, so perturbing it says nothing about the boundary. A missing value stays missing. Columns
+    without a rule are left alone and listed, as in `perturb_unknown`.
+    """
+    index = data.index
+    step = _STEP_MINUTES[freq]
+    ctx, day, minute, first = _rows_around_issue(index, run_day, information_set)
+    rng = np.random.default_rng(seed)
+
+    out = data.copy()
+    counts: Dict[str, int] = {}
+    unchecked: List[str] = []
+    for name in columns if columns is not None else data.columns:
+        if not pd.api.types.is_numeric_dtype(data[name]) or pd.api.types.is_bool_dtype(data[name]):
+            continue
+        col = information_set.resolve(name)
+        if col.rule is None:
+            unchecked.append(name)
+            continue
+        if col.rule.kind == "static":
+            continue
+        information_set._check_source_zone(col, index)
+        known = _available_array(col, col.rule, day, minute, step, ctx, first) <= ctx.issue_minute
+        # The times are minutes after midnight of D, so -1440 is midnight of D-1, whatever a switch does to that day's
+        # length. `issue_day=day` reads an `as_of` or `weather_cutoff` value at its own row's run, not at D's, which is
+        # all `perturb_unknown` needs to know whether a run is out yet: here it tells yesterday's run from older ones.
+        published = _available_array(col, col.rule, day, minute, step, ctx, first, issue_day=day)
+        delivered = _available_array(col, _DELIVERED, day, minute, step, ctx, first)
+        values = out[name].to_numpy(dtype=float, copy=True)
+        fresh = (day >= -1) & ((published > -1440.0) | (delivered > -1440.0))
+        mask = known & fresh & np.isfinite(values)
+        if mask.any():
+            values[mask] = 1e6 + rng.normal(0.0, 1e4, int(mask.sum()))
+            out[name] = values
+            counts[name] = int(mask.sum())
+    _report_unchecked(unchecked, information_set)
+    return out, counts, unchecked
+
+
+def _rows_around_issue(
+    index: pd.DatetimeIndex, run_day: str, information_set: InformationSet
+) -> Tuple[_Context, np.ndarray, np.ndarray, np.ndarray]:
+    """The context with the issue time on `run_day`, and each row's local day after `run_day`, minute of its day and
+    whether it is not the second occurrence of a repeated autumn wall time."""
+    # Every zone conversion reads the UTC offsets at the instant it converts (a value's own shifted delivery instant
+    # for its delivery day, its publication instant for the way back), not at run_day's noon or at the row's own
+    # date. They differ across a DST switch whenever the data zone and a rule's zone don't switch together, e.g. a
+    # UTC or fixed-offset (benchmark source) index against Europe/Brussels rules.
+    ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index))
+    issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), information_set.issue_timezone, ctx)
+    ctx = replace(ctx, issue_minute=float(issue[0]))
+    local = index.tz_localize(None) if index.tz is not None else index
+    day = np.asarray((local.normalize() - pd.Timestamp(run_day)) // pd.Timedelta(days=1), dtype=np.int64)
+    minute = np.asarray(local.hour * 60 + local.minute + local.second / 60.0, dtype=float)
+    # Which occurrence of a repeated autumn wall time each row is; a day shift keeps it, like shift_calendar_days.
+    first = np.ones(len(index), dtype=bool)
+    if index.tz is not None:
+        first = index.asi8 == local.tz_localize(index.tz, ambiguous=first, nonexistent="NaT").asi8
+    return ctx, day, minute, first
+
+
+def _report_unchecked(unchecked: List[str], information_set: InformationSet) -> None:
+    if not unchecked:
+        return
+    message = f"leakage_probe: no availability rule for {unchecked}; left unperturbed"
+    if information_set.unknown == "raise":
+        raise InformationSetError(message + ". Declare rules or pass unknown='warn'.")
+    if information_set.unknown == "warn":
+        warnings.warn(message, stacklevel=3)
 
 
 def _available_array(
@@ -1157,12 +1330,15 @@ def _ranges(values: Sequence[int]) -> str:
 __all__ = [
     "ASSUMPTIONS",
     "Availability",
+    "ControlResult",
     "InformationSet",
     "InformationSetError",
     "ProbeResult",
     "default_rules",
     "leakage_probe",
     "parse_predictor",
+    "perturb_recent",
     "perturb_unknown",
+    "positive_control",
     "source_rules",
 ]
