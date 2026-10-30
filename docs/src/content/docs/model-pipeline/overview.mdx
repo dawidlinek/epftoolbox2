@@ -184,13 +184,15 @@ Set a model's `scaler` parameter to `"asinh"` or `"npit"` to use a variance-stab
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `data` | DataFrame | Required | Input data with DatetimeIndex |
-| `test_start` | str | Required | Test period start |
-| `test_end` | str | Required | Test period end |
+| `test_start` | str | `None` | Test period start; or `test` |
+| `test_end` | str | `None` | Test period end; or `test` |
 | `target` | str | `"price"` | Target column name |
 | `horizon` | int | `7` | Max forecast horizon (days) |
 | `freq` | str | `"1h"` | Forecasting frequency (e.g., `"15min"`) |
 | `save_dir` | str | `None` | Directory for incremental results |
 | `forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted |
+| `validation` | tuple \| str | `None` | Validation period `(start, end)`, or `"previous_year"`. Alone it forecasts only those days. See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/) |
+| `test` | tuple | `None` | Test period `(start, end)`, the same as `test_start` and `test_end`; giving both raises |
 
 Model names must be unique: they name the result files in `save_dir`.
 

@@ -32,6 +32,7 @@ epftoolbox2.verify()
 - **Presets**: `epftoolbox2.presets`, ready-made predictor lists for the LEAR and expert-model benchmarks from the literature
 - **Validators**: DSTStructure (rows per local day), Coverage (duplicate and unsorted timestamps, per-column outages, missing timestamps and nulls), Plausibility (SDAC price limits, frozen values), EDA statistics
 - **Models**: OLS, LassoCV
+- **Validation and test**: `run(df, validation=(start, end) or "previous_year", test=(start, end))` forecasts both windows in one run and one results file, with each forecast bit for bit what a plain run over its window gives; `report.validation` holds only forecasts whose target day is before the first test issue day, and every report method keeps to its window
 - **Predictor functions**: a function of `ctx` picks each forecast's list (by horizon, period, weekday, or whether an input is out at the issue time), planned before any fit, checked against the issue time, recorded in the results and saved to YAML by import path
 - **Scalers**: standardisation (default) or variance-stabilising transformations for spiky prices (asinh, N-PIT), fitted per forecast on training data only
 - **Evaluators**: MAE, RMSE, rMAE (relative to a base model), Bias, DM (MAE ratio, bootstrap interval and Diebold-Mariano test against a benchmark), MCS (model confidence set), Economic value (battery arbitrage profit)

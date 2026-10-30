@@ -68,6 +68,8 @@ class ModelPipeline:
         forecast_only: bool = False,      # Skip evaluators/exporters; dates default to today
         allow_manifest_mismatch: bool = False,  # Overwrite a disagreeing manifest and resume anyway
         require_manifest: bool = False,   # Refuse results in save_dir that have no manifest
+        validation: Union[Tuple[Any, Any], str, None] = None,  # (start, end) or "previous_year"; alone, only those days
+        test: Optional[Tuple[Any, Any]] = None,  # (start, end), the same as test_start and test_end
     ) -> EvaluationReport: ...
 
     def report(                           # Report from the JSONL files a run wrote to save_dir
@@ -80,6 +82,8 @@ class ModelPipeline:
         forecast_only: bool = False,
         data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns
         allow_missing: bool = False,           # else FileNotFoundError when a model has no results
+        validation: Union[Tuple[Any, Any], str, None] = None,  # What run was told; each must be what the manifests record
+        test: Optional[Tuple[Any, Any]] = None,  # None of the windows: every window the manifests record
     ) -> EvaluationReport: ...
 
     def verify(                           # Leakage probe and positive control on sampled issue days
@@ -165,6 +169,8 @@ class Workflow:
         model_save_dir: Optional[str] = None,                 # One JSONL per model, required with model_index
         model_allow_manifest_mismatch: bool = False,          # Overwrite a disagreeing manifest and resume
         model_require_manifest: bool = False,                 # Refuse results that have no manifest
+        model_validation: Any = None,                         # [start, end] or "previous_year"
+        model_test: Optional[Sequence[Any]] = None,           # [start, end], the same as model_test_start and _end
     ): ...
 
     def run(self) -> EvaluationReport: ...
@@ -185,6 +191,10 @@ Pipeline paths are resolved relative to the workflow YAML's directory. `$VAR` in
 
 ```python
 class EvaluationReport:
+    window: str                                     # "test" or "validation": what this report is on
+    validation: EvaluationReport                    # The validation window; ValueError on a run with none
+    windows: Optional[RunWindows]                   # The windows and segments of the run; None for a plain run
+
     def summary(self) -> pd.DataFrame: ...          # model, forecasts, one column per evaluator
     def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
     def availability(self) -> pd.DataFrame: ...     # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
@@ -249,7 +259,26 @@ class EvaluationReport:
     ) -> pd.DataFrame: ...  # By MAE: model, n_forecasts, MAE, n_days, and with a benchmark n_common, ratio, ci_low, ci_high, p_value, p_holm
 ```
 
-See [Comparing Models](/epftoolbox2/model-pipeline/comparing-models/).
+See [Comparing Models](/epftoolbox2/model-pipeline/comparing-models/). Every method keeps to the report's window, see [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/).
+
+### Windows
+
+```python
+from epftoolbox2.results import RunWindows, Segment, read_windows
+
+class RunWindows:
+    validation: Optional[Tuple[str, str]]   # (first, last) issue day tagged "validation"
+    test: Optional[Tuple[str, str]]         # (first, last) issue day tagged "test"
+    mode: str                               # "fixed" or "previous_year"
+    segments: Tuple[Segment, ...]           # Each test period and what serves it
+
+class Segment:
+    validation: Tuple[str, str]
+    test: Tuple[str, str]
+    def serves(self, run_date: str, target_date: str) -> bool: ...  # In its validation period, target before its test
+
+def read_windows(path: Union[str, Path]) -> Optional[RunWindows]: ...  # From a results JSONL or its manifest; None for a plain run
+```
 
 ---
 
@@ -445,7 +474,7 @@ class Use:                                  # What the function may return inste
 
 `PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, and `ModelResultRef.availability_listing` holds the rows behind `report.availability()`.
 
-`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`.
+`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`.
 
 ### Scalers
 

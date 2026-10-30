@@ -149,13 +149,20 @@ def _describe(row: Mapping[str, Any]) -> str:
     return f"{row['predictor']} is late ({where}; known {row['known']}, issued {row['issued']})"
 
 
-def read_listing(path: Path) -> Optional[List[Dict[str, Any]]]:
-    """The rows a manifest holds, or None if it has none (no manifest, level "none", or results that predate them)."""
+def read_listing(path: Path, window: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    """The rows a manifest holds, or None if it has none (no manifest, level "none", or results that predate them).
+
+    `window` gives the rows of one window of a run with validation.
+    """
     path = Path(path)
     if not path.exists():
         return None
     availability = json.loads(path.read_text()).get("availability")
-    return None if availability is None else list(availability.get("listing", []))
+    if availability is None:
+        return None
+    if window is not None:
+        return list(availability.get("windows", {}).get(window, []))
+    return list(availability.get("listing", []))
 
 
 __all__ = [

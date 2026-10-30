@@ -202,3 +202,9 @@ Workers write records as their tasks finish, so the order of the lines in a resu
 If any model's file has fewer lines than the planned count for `test_start`..`test_end` × `horizon` × `freq` (an array task that failed or never ran), `report()` warns, naming the models and their produced/planned/missing counts, and notes that metrics are then computed on different forecast sets for those models.
 
 What the runs listed in `report.availability()` comes back from their manifests, whichever pipeline builds the report.
+
+After runs with validation, `report(save_dir, validation=..., test=..., horizon=..., freq=...)` takes what `run` was told and returns what `run` returns, with `report.validation`. Each window must be what the manifests record, and with no window at all the report is on every window they record. Results whose manifests record different windows raise `ValueError`. See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/).
+
+## Windows
+
+The report of a run with validation is on the test window, and `report.validation` on the validation window. `report.window` says which one you hold, and every method keeps to it, so nothing of one window is reachable from the other. `forecast_counts()` of a validation report counts as `target_in_test` the forecasts left out because their target day is not before the first test issue day. `report.windows` holds the windows and segments of the run. A plain run's `report.window` is `"test"`, its `report.windows` is `None`, and its `report.validation` raises `ValueError`.

@@ -8,12 +8,14 @@ collide with the model's own target or id columns, predictors that don't exist, 
 
 import datetime
 import re
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 
 from .._date_utils import is_utc_index
+
+DayRange = Tuple[pd.Timestamp, pd.Timestamp]
 
 # Columns the model adds to its working frame; data columns with these names would be shadowed.
 RESERVED_COLUMNS = ("hour", "day")
@@ -67,17 +69,33 @@ def read_days(test_start, test_end, training_window, horizon) -> Optional[Tuple[
         return None
 
 
-def check_index(data: pd.DataFrame, freq: str, days: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None) -> None:
+def read_ranges(periods: Iterable[Tuple[str, str]], training_window, horizon) -> Optional[List[DayRange]]:
+    """`read_days` of several periods of one run, merged where they touch; None if any of them can't be told."""
+    ranges = []
+    for start, end in sorted(periods):
+        days = read_days(start, end, training_window, horizon)
+        if days is None:
+            return None
+        if ranges and days[0] <= ranges[-1][1] + pd.Timedelta(days=1):
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], days[1]))
+        else:
+            ranges.append(days)
+    return ranges
+
+
+def check_index(data: pd.DataFrame, freq: str, days: Union[DayRange, Sequence[DayRange], None] = None) -> None:
     """Raise unless the index is a DatetimeIndex with one row per (local day, period) at resolution `freq`.
 
     The only allowed repeat is the hour that occurs twice when clocks fall back (same wall-clock time,
     different UTC offset). Rows must be `freq` apart throughout, except across gaps (see `_check_spacing`):
     a frame that is 15-minute only in part would otherwise train some periods on far fewer days than others.
 
-    `days` (see `read_days`) limits the spacing checks to those local days, both included, because rows no run
-    can read can't harm it: hourly history before a switch to 15-minute data doesn't block a run inside the
-    15-minute part. Duplicates and slots with several rows are looked for in the whole frame.
+    `days` (see `read_days`, or several ranges of `read_ranges`) limits the spacing checks to those local days, both
+    included, because rows no run can read can't harm it: hourly history before a switch to 15-minute data doesn't block
+    a run inside the 15-minute part. Duplicates and slots with several rows are looked for in the whole frame.
     """
+    if days is not None and isinstance(days[0], pd.Timestamp):
+        days = [days]
     if freq not in _FREQ_STEPS:
         raise ValueError(f"Unsupported freq '{freq}'. Supported: {list(_FREQ_STEPS)}")
     index = data.index
@@ -97,7 +115,10 @@ def check_index(data: pd.DataFrame, freq: str, days: Optional[Tuple[pd.Timestamp
     ordered = index.sort_values()
     if days is not None:
         wall = wall_clock(ordered)
-        ordered = ordered[(wall >= days[0]) & (wall < days[1] + pd.Timedelta(days=1))]
+        readable = np.zeros(len(ordered), dtype=bool)
+        for first, last in days:
+            readable |= (wall >= first) & (wall < last + pd.Timedelta(days=1))
+        ordered = ordered[readable]
     # Elapsed time for a tz-aware index (asi8 is UTC), so DST switches don't make the spacing irregular.
     spacings = np.diff(ordered.as_unit("ns").asi8)
     if len(spacings):
@@ -126,17 +147,18 @@ def check_index(data: pd.DataFrame, freq: str, days: Optional[Tuple[pd.Timestamp
         _check_spacing(ordered, spacings, freq, days)
 
 
-def _checked_days(days: Optional[Tuple[pd.Timestamp, pd.Timestamp]]) -> str:
+def _checked_days(days: Optional[Sequence[DayRange]]) -> str:
     if days is None:
         return ""
-    return f" Only the days this run can read are checked, {days[0].date()} to {days[1].date()}."
+    ranges = " and ".join(f"{first.date()} to {last.date()}" for first, last in days)
+    return f" Only the days this run can read are checked, {ranges}."
 
 
 def _check_spacing(
     ordered: pd.DatetimeIndex,
     spacings: np.ndarray,
     freq: str,
-    days: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None,
+    days: Optional[Sequence[DayRange]] = None,
 ) -> None:
     """Raise unless the rows are `freq` apart throughout, with gaps of whole steps in between.
 

@@ -31,6 +31,7 @@ from ..logging import get_logger
 from .availability import listing_frame
 from .breakdowns import AGGREGATES, daily_aggregate, price_level, spike_threshold
 from .ref import ModelResultRef
+from .windows import TEST, VALIDATION, RunWindows
 
 logger = get_logger(__name__)
 
@@ -79,19 +80,33 @@ def _in_record_order(df: pd.DataFrame, first: Tuple[str, ...] = ()) -> pd.DataFr
 
 
 class EvaluationReport:
+    """Tables and comparisons over the forecasts of one window of a run (see `epftoolbox2.results.windows`).
+
+    Every method reads through `ModelResultRef.iter_records`, so nothing of another window is reachable from a report. The
+    report of a run is the test window, and `report.validation` the validation report. Without a test window the run
+    returns the validation report itself. `report.window` says which one it is.
+    """
+
     def __init__(
         self,
         results_or_refs: Dict[str, Union[ModelResultRef, List[Dict]]],
         evaluators: List[Evaluator],
         source_data: Optional[pd.DataFrame] = None,
+        validation: Optional["EvaluationReport"] = None,
     ):
         self.evaluators = evaluators
         self.source_data = source_data
         self.refs: Dict[str, ModelResultRef] = {}
         self._read_frames: Dict[str, Tuple[tuple, pd.DataFrame]] = {}
+        self._validation = validation
 
+        validation_refs: Dict[str, ModelResultRef] = {}
         for name, v in results_or_refs.items():
             if isinstance(v, ModelResultRef):
+                if v.by_window:  # the ref of a whole run with windows
+                    if VALIDATION in v.by_window:
+                        validation_refs[name] = v.by_window[VALIDATION]
+                    v = v.by_window.get(TEST, v.by_window.get(VALIDATION))
                 self.refs[name] = v
             else:
                 self.refs[name] = ModelResultRef(
@@ -103,6 +118,39 @@ class EvaluationReport:
                     horizon=0,
                     _results=v,
                 )
+        held = sorted({ref.window or TEST for ref in self.refs.values()})
+        if len(held) > 1:
+            shown = {name: ref.window or TEST for name, ref in self.refs.items()}
+            raise ValueError(
+                f"These results are on different windows ({shown}): one report would compare models on different forecasts "
+                "whose roles differ. Build one report per window, from the runs with the same validation= and test=."
+            )
+        if validation is None and self.window == TEST and validation_refs and len(validation_refs) == len(self.refs):
+            self._validation = EvaluationReport(validation_refs, evaluators, source_data=source_data)
+
+    @property
+    def window(self) -> str:
+        """Which window this report is on: `"validation"` or `"test"`. A plain run has only the test window."""
+        return next((ref.window for ref in self.refs.values() if ref.window is not None), TEST)
+
+    @property
+    def validation(self) -> "EvaluationReport":
+        """The report on the validation window of this run: only forecasts whose target day is before the first test issue
+        day, since a user picks from it by hand and a later target would be look-ahead. `forecast_counts()` counts the rest
+        as `target_in_test`. A `ValueError` on a run with no validation."""
+        if self.window == VALIDATION:
+            return self
+        if self._validation is None:
+            raise ValueError(
+                "This report has no validation window: run with validation=(start, end) or validation='previous_year' "
+                "(aggregate() and join() keep it only where they can: call them on report.validation)."
+            )
+        return self._validation
+
+    @property
+    def windows(self) -> Optional[RunWindows]:
+        """The windows and segments of the run behind this report, or None for a plain run."""
+        return next((ref.windows for ref in self.refs.values() if ref.windows is not None), None)
 
     def summary(self) -> pd.DataFrame:
         return self._summary_table(self._model_frames())
@@ -227,19 +275,23 @@ class EvaluationReport:
             if per_hour is None:
                 per_hour = periods_per_hour(frame["hour"].to_numpy()) if "hour" in frame else 1
             days, seen, missing = daily_aggregate(frame, agg, per_hour, periods)
-            records = _daily_records(days, start)
+            records = _daily_records(days, start, ref.window)
             results[name] = ModelResultRef(
                 name=name,
                 path=None,
                 count=seen,
-                test_start="",
-                test_end="",
+                # A plain ref says here what it covers; `windows` does for a ref of a window.
+                test_start=ref.test_start if ref.window is None else "",
+                test_end=ref.test_end if ref.window is None else "",
                 horizon=ref.horizon,
                 freq=DAILY,
                 _results=records,
                 produced=len(records),
                 skipped={"incomplete_day": missing},
                 availability_listing=ref.availability_listing,
+                window=ref.window,
+                target_before=ref.target_before,
+                windows=ref.windows,
             )
             if missing:
                 dropped[name] = missing
@@ -267,6 +319,9 @@ class EvaluationReport:
         hourly and 15-minute results are different times of the day). Every table of the joined report is what one report
         over all the models would give, because all of them are computed on the forecast keys, not on file order.
 
+        Reports on different windows raise `ValueError`, whether they differ in `window` or, for a run with validation, in
+        the days of it. `.validation` of the joined report joins theirs, if both have one.
+
         Args:
             other: The report whose models are added after this report's.
         """
@@ -275,10 +330,15 @@ class EvaluationReport:
         clash = [name for name in other.refs if name in self.refs]
         if clash:
             raise ValueError(f"Both reports have a model named {clash}: rename one before joining.")
+        self._require_same_window(other)
+        validation = None
+        if self.window == TEST and self._validation is not None and other._validation is not None:
+            validation = self._validation.join(other._validation)
         joined = EvaluationReport(
             {**self.refs, **other.refs},
             list(self.evaluators),
             source_data=self.source_data if self.source_data is not None else other.source_data,
+            validation=validation,
         )
         joined._require_one_frequency("Joining reports")
         left, right = [_describe(e) for e in self.evaluators], [_describe(e) for e in other.evaluators]
@@ -289,6 +349,21 @@ class EvaluationReport:
                 stacklevel=2,
             )
         return joined
+
+    def _require_same_window(self, other: "EvaluationReport") -> None:
+        if self.window != other.window:
+            raise ValueError(
+                f"These reports are on different windows ({self.window!r} and {other.window!r}): their forecasts play "
+                "different roles and can't be compared. Join report.validation with another report.validation."
+            )
+        refs = [*self.refs.values(), *other.refs.values()]
+        if any(ref.window is not None for ref in refs):
+            periods = {_period_of(ref) for ref in refs} - {None}
+            if len(periods) > 1:
+                raise ValueError(
+                    f"These reports are on different {self.window} periods ({sorted(periods, key=str)}): compare forecasts "
+                    "of one period, or run them with the same validation= and test=."
+                )
 
     def tests(
         self,
@@ -799,32 +874,7 @@ class EvaluationReport:
         return columns
 
     def _iter_ref(self, ref: ModelResultRef, cols: List[str] = None) -> Iterator[Dict]:
-        # A resumed JSONL can hold rows from an earlier run with a wider or different test window (its
-        # rows are never deleted); filter to this ref's own window so a narrower resume isn't scored on
-        # forecasts outside it. Refs built from plain result lists have no window (test_start/test_end
-        # are "") and are read as given.
-        filter_dates = bool(ref.test_start and ref.test_end)
-
-        def in_window(r: Dict) -> bool:
-            return not filter_dates or ref.test_start <= r["run_date"] <= ref.test_end
-
-        if ref.path is not None:
-            import json
-            from pathlib import Path
-
-            p = Path(ref.path)
-            if p.exists():
-                with open(p) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            r = json.loads(line)
-                            if in_window(r):
-                                yield {k: r[k] for k in cols if k in r} if cols else r
-        else:
-            for r in ref._results or []:
-                if in_window(r):
-                    yield {k: r[k] for k in cols if k in r} if cols else r
+        return ref.iter_records(cols)
 
     def compute_all(self) -> Dict[str, pd.DataFrame]:
         model_dfs = self._model_frames()
@@ -855,7 +905,15 @@ class EvaluationReport:
         if path is None or not path.exists():
             return self._model_frame(ref)
         status = path.stat()
-        fingerprint = (str(path), status.st_mtime_ns, status.st_size, ref.test_start, ref.test_end)
+        fingerprint = (
+            str(path),
+            status.st_mtime_ns,
+            status.st_size,
+            ref.test_start,
+            ref.test_end,
+            ref.window,
+            ref.target_before,
+        )
         cached = self._read_frames.get(name)
         if cached is None or cached[0] != fingerprint:
             cached = (fingerprint, self._model_frame(ref))
@@ -980,7 +1038,14 @@ def _pair_row(
     }
 
 
-def _daily_records(days: pd.DataFrame, start: pd.Timestamp) -> List[Dict[str, Any]]:
+def _period_of(ref: ModelResultRef) -> Optional[Tuple[str, str, Optional[str]]]:
+    """(first, last issue day, target cut) of what a ref reads, which `aggregate()` keeps in its windows; None if unknown."""
+    if ref.windows is not None and ref.window is not None:
+        return (*getattr(ref.windows, ref.window), ref.target_before)
+    return (ref.test_start, ref.test_end, ref.target_before) if ref.test_start else None
+
+
+def _daily_records(days: pd.DataFrame, start: pd.Timestamp, window: Optional[str] = None) -> List[Dict[str, Any]]:
     """Result records for the daily forecasts of `aggregate()`; `day_in_test` counts days from the earliest run date."""
     if days.empty:
         return []
@@ -1005,6 +1070,7 @@ def _daily_records(days: pd.DataFrame, start: pd.Timestamp) -> List[Dict[str, An
             "prediction": prediction,
             "actual": actual,
             "freq": DAILY,
+            **({} if window is None else {"window": window}),
         }
         for run_date, target_date, run_weekday, horizon, day_in_test, prediction, actual in zip(*columns)
     ]

@@ -29,6 +29,9 @@ verified.assert_ok()  # raises AssertionError naming what is wrong
 Calendar     5        120        0         0.0              0 inconclusive
 ```
 
+`verify` probes the period you give it, not the windows of a run. After a run with
+[validation](/epftoolbox2/model-pipeline/validation-and-test/), call it on the validation period and on the test period.
+
 It needs an information set: without `issue_time` or `information_set`, `verify` raises `InformationSetError`.
 
 ---

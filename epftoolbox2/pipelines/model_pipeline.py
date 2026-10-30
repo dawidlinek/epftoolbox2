@@ -16,9 +16,10 @@ from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..exporters.base import Exporter
 from ..results.availability import read_listing, warn_about
-from ..results.manifest import manifest_path
+from ..results.manifest import manifest_path, read_windows
 from ..results.report import EvaluationReport
-from ..results.ref import ModelResultRef
+from ..results.ref import ModelResultRef, split_by_window
+from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
 from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
 from ._yaml import dump_yaml, to_yaml_value
@@ -132,6 +133,8 @@ class ModelPipeline:
         forecast_only: bool = False,
         allow_manifest_mismatch: bool = False,
         require_manifest: bool = False,
+        validation: Union[Tuple[Any, Any], str, None] = None,
+        test: Optional[Tuple[Any, Any]] = None,
     ) -> EvaluationReport:
         """Run every model, then (unless `forecast_only`) the evaluators and exporters.
 
@@ -140,6 +143,18 @@ class ModelPipeline:
         a different configuration raises `ManifestMismatchError`; `allow_manifest_mismatch` overwrites the
         manifest and resumes anyway, and `require_manifest` refuses results that predate the manifest
         feature instead of accepting them with a warning.
+
+        `test=(start, end)` is the test period, the same as `test_start` and `test_end` (passing both raises). With
+        `validation`, each model forecasts the days of both windows in one run, into one results file, and nothing between
+        them. Test and validation records are what a plain run over that window alone gives, apart from a `window` tag: each
+        window reads its binary-column masks from its own first day. `validation=(start, end)` must end before the test
+        starts. `validation="previous_year"` cuts the test period into 12-month segments, each served by the 12 months
+        before it (`report.windows.segments`), and adds one year at the start, tagged "validation". `validation` alone
+        forecasts only those days, and nothing of the test period is computed.
+
+        The report is on the test window, and `report.validation` on the validation window, without forecasts for the first
+        test issue day or later (see `EvaluationReport.validation`). Without a test window the validation report itself
+        is returned. See the docs page on validation and test.
         """
         if not self.models:
             raise ValueError("At least one model is required")
@@ -147,10 +162,13 @@ class ModelPipeline:
         self._check_availability()
         if not forecast_only:
             self._check_benchmarks()
-        if forecast_only:
+        windows, test_start, test_end = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
+        if windows is not None:
+            check_start, check_end = windows.first_day, windows.last_day
+        elif forecast_only:
             check_start, check_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
         else:
-            check_start, check_end = resolve_date(test_start), resolve_date(test_end)
+            check_start, check_end = test_start, test_end
         level = self.availability
         # Check every model's inputs before running any, so a bad predictor in the last model fails in seconds. A
         # predictor function is planned here, once, and the run uses that plan.
@@ -158,9 +176,20 @@ class ModelPipeline:
         plans: Dict[str, PredictorPlan] = {}
         listings: Dict[str, List[Dict]] = {}
         for model in self.models:
-            plan = model._plan_predictors(data, target, horizon, freq, info, check_start, check_end, availability=level)
+            plan = model._plan_predictors(
+                data, target, horizon, freq, info, check_start, check_end, availability=level, windows=windows
+            )
             model._check_inputs(
-                data, target, horizon, freq, info, check_start, check_end, plan=plan, availability=level
+                data,
+                target,
+                horizon,
+                freq,
+                info,
+                check_start,
+                check_end,
+                plan=plan,
+                availability=level,
+                windows=windows,
             )
             listings[model.name] = model._availability_listing
             if plan is not None:
@@ -185,6 +214,7 @@ class ModelPipeline:
                 require_manifest=require_manifest,
                 availability=level,
                 warn_listing=False,
+                windows=windows,
                 **planned,
             )
             refs[model.name] = ref
@@ -198,6 +228,47 @@ class ModelPipeline:
 
         return report
 
+    @staticmethod
+    def _resolve_windows(validation, test, test_start, test_end, forecast_only: bool, required: bool = True):
+        """(the windows of a run with validation or None, first test day, last test day), from `run`'s arguments.
+
+        A `ValueError` if they are given twice, make no sense, or (with `required`) name no window at all.
+        """
+        if test is not None and (test_start is not None or test_end is not None):
+            raise ValueError("Pass the test period once: test=(start, end) or test_start and test_end, not both")
+        if forecast_only and validation is not None:
+            raise ValueError("validation= is for backtests: forecast_only has no actuals to validate on")
+        if test is None and forecast_only:
+            return None, test_start, test_end  # today, unless they say otherwise
+        if test is None and (test_start is not None or test_end is not None):
+            if test_start is None or test_end is None:
+                raise ValueError("test_start and test_end are required unless forecast_only=True")
+            test = (test_start, test_end)
+        if validation is not None:
+            windows = RunWindows.resolve(validation, test)
+            return windows, *(windows.test or (None, None))
+        if test is None:
+            if not required:
+                return None, None, None
+            raise ValueError(
+                "No window to forecast: pass test=(start, end), validation=(start, end) or both (test_start and test_end "
+                "are required unless forecast_only=True)"
+            )
+        test_start, test_end = to_period(test, TEST)
+        return None, test_start, test_end
+
+    def _stored_windows(self, paths: Dict[str, Path]) -> Optional[RunWindows]:
+        """The windows every shard's manifest records, or None for plain runs; shards that disagree raise."""
+        found = {name: read_windows(path) for name, path in paths.items()}
+        distinct = {windows for windows in found.values()}
+        if len(distinct) > 1:
+            shown = "; ".join(f"{name}: {windows}" for name, windows in found.items())
+            raise ValueError(
+                f"These results were made with different windows, so their models can't be reported together ({shown}). "
+                "Run every model with the same validation= and test=."
+            )
+        return next(iter(distinct), None)
+
     def report(
         self,
         save_dir: Union[str, Path],
@@ -208,6 +279,8 @@ class ModelPipeline:
         forecast_only: bool = False,
         data: Optional[pd.DataFrame] = None,
         allow_missing: bool = False,
+        validation: Union[Tuple[Any, Any], str, None] = None,
+        test: Optional[Tuple[Any, Any]] = None,
     ) -> EvaluationReport:
         """Build one report from the per-model JSONL files in `save_dir`, then run evaluators and exporters.
 
@@ -218,19 +291,38 @@ class ModelPipeline:
 
         What the runs listed about inputs known after the issue time comes from the manifests, whatever this pipeline's
         `availability` is: `report.availability()`, one warning and the terminal exporter show it.
+
+        After runs with validation, `validation` and `test` say what `run` was told, and each must be what the manifests
+        record. Without any window the report is on every window they record. Results whose manifests record different
+        windows raise `ValueError`, as they would be compared on different forecasts. The report is what `run` returns: on
+        the test window, with `report.validation`, or the validation report if there is no test window.
         """
         if not self.models:
             raise ValueError("At least one model is required")
         self._check_model_names()
         if not forecast_only:
             self._check_benchmarks()
-        if forecast_only:
-            test_start, test_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
-        elif test_start is None or test_end is None:
-            raise ValueError("test_start and test_end are required unless forecast_only=True")
-        test_start, test_end = resolve_date(test_start), resolve_date(test_end)
-        n_days = (date.fromisoformat(test_end) - date.fromisoformat(test_start)).days + 1
-        planned = n_days * horizon * (96 if freq == "15min" else 24)
+        paths = {model.name: self.results_path(save_dir, model) for model in self.models}
+        stored = self._stored_windows({name: path for name, path in paths.items() if path.exists()})
+        windows, test_start, test_end = self._resolve_windows(
+            validation, test, test_start, test_end, forecast_only, required=stored is None or forecast_only
+        )
+        if stored is not None and not forecast_only:
+            windows = self._windows_to_report(windows, test_start, test_end, stored)
+        elif windows is not None:
+            raise ValueError(
+                f"The results in {save_dir} were made without validation: their manifests record no windows, so there is "
+                "no validation window to report. Run with validation=... first."
+            )
+        if windows is not None:
+            test_start, test_end = windows.first_day, windows.last_day
+            planned = 0
+        else:
+            if forecast_only:
+                test_start, test_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
+            test_start, test_end = resolve_date(test_start), resolve_date(test_end)
+            n_days = (date.fromisoformat(test_end) - date.fromisoformat(test_start)).days + 1
+            planned = n_days * horizon * (96 if freq == "15min" else 24)
 
         refs: Dict[str, ModelResultRef] = {}
         missing = []
@@ -251,13 +343,31 @@ class ModelPipeline:
                 freq=freq,
                 produced=produced,
                 availability_listing=read_listing(manifest_path(path)),
+                windows=windows,
             )
         if missing and not allow_missing:
             raise FileNotFoundError(f"No results for model(s): {', '.join(missing)}. Run them first.")
         for name in missing:
             logger.warning(f"Report: no results for {name}; it is left out")
 
-        shortfall = {name: ref for name, ref in refs.items() if ref.produced is not None and ref.produced < ref.count}
+        parts = dict(refs)
+        if windows is not None:
+            parts = {}
+            for name, ref in refs.items():
+                ref.by_window = split_by_window(
+                    ref,
+                    windows,
+                    96 if freq == "15min" else 24,
+                    listings={w: read_listing(manifest_path(ref.path), w) for w, _ in windows.periods},
+                    target_before=stored.target_before,
+                )
+                parts.update({f"{name} in the {window} window": part for window, part in ref.by_window.items()})
+
+        shortfall = {
+            name: ref
+            for name, ref in parts.items()
+            if ref.produced is not None and ref.produced + ref.skipped.get(SKIP_TARGET_IN_TEST, 0) < ref.count
+        }
         if shortfall:
             details = "; ".join(
                 f"{name} ({ref.produced} of {ref.count}, {ref.count - ref.produced} missing)"
@@ -275,6 +385,28 @@ class ModelPipeline:
             for exporter in self.exporters:
                 exporter.export(report)
         return report
+
+    @staticmethod
+    def _windows_to_report(
+        asked: Optional[RunWindows], test_start: Optional[str], test_end: Optional[str], stored: RunWindows
+    ) -> RunWindows:
+        """What a report covers after runs with windows: what `report` was told, which must be what the manifests record,
+        or all of it if it was told nothing."""
+        if asked is None:
+            if test_start is None:
+                return stored
+            asked = RunWindows.fixed(None, (test_start, test_end))
+        different = [
+            f"{name} {period} (the manifests record {getattr(stored, name)})"
+            for name, period in asked.periods
+            if period != getattr(stored, name)
+        ]
+        if different:
+            raise ValueError(
+                f"These windows are not what the results were made with: {'; '.join(different)}. Pass the windows of the "
+                "run, or none to report what the manifests record."
+            )
+        return stored if asked.validation is not None and asked.test is not None else asked
 
     def verify(
         self,
@@ -315,6 +447,9 @@ class ModelPipeline:
         Only copies of the models run, in memory, so a later `run()` is unaffected. Each issue day costs four one-day
         runs per model, six with `rebuild` or a target among the predictors. A model that isn't deterministic shows up
         as a leak.
+
+        `verify` probes the period you give it, not the windows of a run: to check a validation period as well as a test
+        period, call it on each.
 
         The boundary is the same at every `availability` level: a late predictor is a `leak` also where `run` only lists
         it. With "warn" or "none" a predictor function that reads a late `ctx.value()` is a `leak` too; with "raise" that

@@ -46,6 +46,7 @@ from ..information_set import (
     _fmt_minute,
 )
 from ..results.availability import listing_rows, sort_rows
+from ..results.windows import mask_key
 from ._contract import period_index, wall_clock
 
 _HORIZON = "{horizon}"
@@ -338,8 +339,9 @@ class _Cells:
         value = values[period, position]
         return float(value) if values.dtype != object else value
 
-    def late_reads(self) -> List[Violation]:
-        """Each (column, period, horizon) whose `value` was read though its rule puts it after the issue time."""
+    def late_reads(self, days: Optional[np.ndarray] = None) -> List[Violation]:
+        """Each (column, period, horizon) whose `value` was read though its rule puts it after the issue time, on `days`
+        (a mask of the issue days) if given."""
         out = []
         if self._info is None:
             return out
@@ -348,21 +350,22 @@ class _Cells:
             if col.rule is None:
                 continue
             avail = self.available(name)
+            read = read if days is None else read & days
             late = self._info._late_periods(col, self._periods, avail, self._clock, self._step, used=read)
             for period, known, issue, hint in late:
                 out.append(Violation(name, period, horizon, col, known, issue, ROLE_VALUE, hint))
         return out
 
-    def no_rule_reads(self) -> List[Violation]:
-        """Each (column, period, horizon) read through `ctx` that has no rule."""
+    def no_rule_reads(self, days: Optional[np.ndarray] = None) -> List[Violation]:
+        """Each (column, period, horizon) read through `ctx` that has no rule, on `days` (a mask of the issue days) if given."""
         out = []
         if self._info is None:
             return out
         for (name, horizon), read in self._value_cells.items():
-            out.extend(self._without_rule(name, horizon, read, ROLE_VALUE))
+            out.extend(self._without_rule(name, horizon, read if days is None else read & days, ROLE_VALUE))
         for (_, horizon), (names, _, asked) in self._published.items():
             for name in names:
-                out.extend(self._without_rule(name, horizon, asked, ROLE_PUBLISHED))
+                out.extend(self._without_rule(name, horizon, asked if days is None else asked & days, ROLE_PUBLISHED))
         return out
 
     def _without_rule(self, name: str, horizon: int, cells: np.ndarray, role: str) -> List[Violation]:
@@ -381,6 +384,20 @@ class _Cells:
             if not answered:
                 out.append((columns, asked, self._why_not_published(sorted(names))))
         return out
+
+    def never_published_on(self, days: np.ndarray) -> List[Tuple[Any, int, str]]:
+        """Each `published` argument asked on `days` (a mask of the issue days) that never answered True there."""
+        asked: Dict[Any, List[Any]] = {}
+        for (columns, _), (names, answers, cells) in self._published.items():
+            entry = asked.setdefault(columns, [set(), 0, False])
+            entry[0].update(names)
+            entry[1] += int((cells & days).sum())
+            entry[2] = entry[2] or bool((answers & cells & days).any())
+        return [
+            (columns, n_asked, self._why_not_published(sorted(names)))
+            for columns, (names, n_asked, answered) in asked.items()
+            if n_asked and not answered
+        ]
 
     def _why_not_published(self, names: List[str]) -> str:
         reasons = []
@@ -503,7 +520,7 @@ class PredictorPlan:
     _cells: Optional[_Cells] = field(default=None, repr=False)
     _checked: bool = field(default=False, repr=False)
     availability: str = "raise"
-    _listing: Optional[List[Dict[str, Any]]] = field(default=None, repr=False)
+    _listings: Dict[Tuple[int, Optional[int]], List[Dict[str, Any]]] = field(default_factory=dict, repr=False)
     _positions: Dict[str, int] = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -525,13 +542,23 @@ class PredictorPlan:
             out[pair] = list(names)
         return out
 
-    def describe(self) -> List[Dict[str, Any]]:
-        """One entry per distinct list: its hash, rule, names, and how many forecasts use it where."""
+    def position_of(self, day: str) -> int:
+        """Where an issue day is in `issue_days`."""
+        return self._positions[day]
+
+    def describe(self, days: Tuple[int, Optional[int]] = (0, None)) -> List[Dict[str, Any]]:
+        """One entry per distinct list: its hash, rule, names, and how many forecasts use it where.
+
+        `days` is a (start, stop) slice of `issue_days`, for the part of the plan in one window: a list not used there has
+        no entry.
+        """
+        issue_days = self.issue_days[days[0] : days[1]]
         uses: List[Dict[str, Any]] = [
-            {"forecasts": 0, "horizons": set(), "periods": set(), "days": np.zeros(len(self.issue_days), dtype=bool)}
+            {"forecasts": 0, "horizons": set(), "periods": set(), "days": np.zeros(len(issue_days), dtype=bool)}
             for _ in self.lists
         ]
-        for (period, horizon), ids in self.assignment.items():
+        for (period, horizon), all_ids in self.assignment.items():
+            ids = all_ids[days[0] : days[1]]
             for list_id in np.unique(ids).tolist():
                 on = ids == list_id
                 use = uses[list_id]
@@ -541,7 +568,9 @@ class PredictorPlan:
                 use["days"] |= on
         out = []
         for list_id, use in enumerate(uses):
-            days = np.flatnonzero(use["days"])
+            on_days = np.flatnonzero(use["days"])
+            if not len(on_days):
+                continue
             out.append(
                 {
                     "hash": self.hashes[list_id],
@@ -551,9 +580,9 @@ class PredictorPlan:
                     "forecasts": use["forecasts"],
                     "horizons": sorted(use["horizons"]),
                     "periods": sorted(use["periods"]),
-                    "issue_days": len(days),
-                    "first_issue_day": self.issue_days[days[0]].isoformat(),
-                    "last_issue_day": self.issue_days[days[-1]].isoformat(),
+                    "issue_days": len(on_days),
+                    "first_issue_day": issue_days[on_days[0]].isoformat(),
+                    "last_issue_day": issue_days[on_days[-1]].isoformat(),
                 }
             )
         return out
@@ -565,16 +594,17 @@ class PredictorPlan:
             "fingerprint": function_fingerprint(self.function, self.information_set),
         }
 
-    def manifest_lists(self, masks: Dict[Tuple[int, int, int], np.ndarray]) -> List[Dict[str, Any]]:
-        """`describe()` with a digest of the binary-column mask of each (period, horizon) that uses the list."""
+    def manifest_lists(self, masks: Dict[str, Dict[Tuple[int, int, int], np.ndarray]]) -> List[Dict[str, Any]]:
+        """`describe()` with a digest of the binary-column mask of each (window, period, horizon) that uses the list."""
         entries = self.describe()
         for entry in entries:
             entry["binary_masks"] = {}
-        for (list_id, period, horizon), mask in masks.items():
-            entries[list_id]["binary_masks"][f"{period}-{horizon}"] = mask_digest(mask)
+        for window, window_masks in masks.items():
+            for (list_id, period, horizon), mask in window_masks.items():
+                entries[list_id]["binary_masks"][mask_key(window, period, horizon)] = mask_digest(mask)
         return entries
 
-    def _scan(self, target: str, pairs: Dict[Tuple[int, int], List[str]]):
+    def _scan(self, target: str, pairs: Dict[Tuple[int, int], List[str]], days: Tuple[int, Optional[int]] = (0, None)):
         """The cells, the uses of `target` known after the issue time, the columns without a rule, and the names of the
         lists whose value is known after the issue time on some planned forecast or other.
 
@@ -582,8 +612,10 @@ class PredictorPlan:
         """
         info = self.information_set
         cells = self._cells or _Cells(self.data, info, self.freq, self.issue_days, self.availability)
-        first, last = self.issue_days[0].isoformat(), self.issue_days[-1].isoformat()
-        target_violations, unknown = info.violations(pairs, target, self.freq, self.data.index, first, last)
+        scanned = self.issue_days[days[0] : days[1]]
+        target_violations, unknown = info.violations(
+            pairs, target, self.freq, self.data.index, issue_days=[day.isoformat() for day in scanned]
+        )
         late_names: List[str] = []
         no_rule: List[str] = []
         for name in dict.fromkeys(name for names in self.lists for name in names):
@@ -623,26 +655,33 @@ class PredictorPlan:
         info._log_assumptions(model_name)
         self._checked = True
 
-    def listing(self, target: str, model_name: str = "Model") -> List[Dict[str, Any]]:
+    def listing(
+        self, target: str, model_name: str = "Model", days: Tuple[int, Optional[int]] = (0, None)
+    ) -> List[Dict[str, Any]]:
         """What `check` refuses, and every input without a rule, per list, as the rows of `availability="warn"`.
 
         Besides the lists it holds what the function only read: a `value` known after the issue time, and any column
         without a rule read through `ctx`. A column of a data source on an index in another zone still raises. Built once,
-        so a run reuses what `ModelPipeline` found before any model ran.
+        so a run reuses what `ModelPipeline` found before any model ran. `days` is a (start, stop) slice of `issue_days`, for
+        what one window of a run uses.
         """
-        if self._listing is not None:
-            return self._listing
+        if days in self._listings:
+            return self._listings[days]
         if self.information_set is None or not self.issue_days:
-            self._listing = []
-            return self._listing
+            self._listings[days] = []
+            return self._listings[days]
         pairs = {(period, hz): [] for period, hz in self.assignment}
-        cells, target_uses, _, late_names, no_rule = self._scan(target, pairs)
+        cells, target_uses, _, late_names, no_rule = self._scan(target, pairs, days)
+        on_days = None
+        if days != (0, None):
+            on_days = np.zeros(len(self.issue_days), dtype=bool)
+            on_days[days[0] : days[1]] = True
         col = cells.column(target)
         if col.rule is None:
             target_uses = [Violation(target, p, h, col, float("nan"), float("nan"), ROLE_TARGET) for p, h in pairs]
         rows = listing_rows(target_uses)
-        by_list = self._late_uses(late_names, cells)
-        pairs_of_list = self._pairs_of_lists()
+        by_list = self._late_uses(late_names, cells, on_days)
+        pairs_of_list = self._pairs_of_lists(on_days)
         for list_id, list_hash in enumerate(self.hashes):
             uses = list(by_list.get(list_id, []))
             names = set(self.lists[list_id])
@@ -652,16 +691,16 @@ class PredictorPlan:
                     nan = float("nan")
                     uses.extend(Violation(name, p, h, col, nan, nan) for p, h in pairs_of_list[list_id])
             rows += listing_rows(uses, list_hash)
-        rows += listing_rows([*cells.late_reads(), *cells.no_rule_reads()])
+        rows += listing_rows([*cells.late_reads(on_days), *cells.no_rule_reads(on_days)])
         self.information_set._log_assumptions(model_name)
-        self._listing = sort_rows(rows)
-        return self._listing
+        self._listings[days] = sort_rows(rows)
+        return self._listings[days]
 
-    def _pairs_of_lists(self) -> Dict[int, List[Tuple[int, int]]]:
-        """List id -> the (period, horizon) pairs that use it."""
+    def _pairs_of_lists(self, days: Optional[np.ndarray] = None) -> Dict[int, List[Tuple[int, int]]]:
+        """List id -> the (period, horizon) pairs that use it, on `days` (a mask of the issue days) if given."""
         out: Dict[int, List[Tuple[int, int]]] = {list_id: [] for list_id in range(len(self.lists))}
         for pair, ids in self.assignment.items():
-            for list_id in np.unique(ids).tolist():
+            for list_id in np.unique(ids if days is None else ids[days]).tolist():
                 out[list_id].append(pair)
         return out
 
@@ -669,8 +708,11 @@ class PredictorPlan:
         """The `value` reads of cells known only after the issue time, for `leakage_probe`, until `release`."""
         return [] if self._cells is None else self._cells.late_reads()
 
-    def _late_uses(self, late_names: List[str], cells: _Cells) -> Dict[int, List[Violation]]:
-        """List id -> its uses of values known after the issue time, on the issue day each is latest."""
+    def _late_uses(
+        self, late_names: List[str], cells: _Cells, days: Optional[np.ndarray] = None
+    ) -> Dict[int, List[Violation]]:
+        """List id -> its uses of values known after the issue time, on the issue day each is latest, among `days` (a mask
+        of the issue days) if given."""
         if not late_names:
             return {}
         info = self.information_set
@@ -682,6 +724,8 @@ class PredictorPlan:
             for list_id in (list_id for list_id, names in enumerate(lists) if name in names):
                 for (period, horizon), ids in self.assignment.items():
                     used = ids == list_id
+                    if days is not None:
+                        used = used & days
                     if not used.any():
                         continue
                     row = np.array([period])
@@ -789,6 +833,25 @@ def _warn_never_published(cells: _Cells, fn: Any) -> None:
         warnings.warn(
             f"{function_name(fn)}: ctx.published({shown}) was never True on the {asked} forecast(s) that asked, so the "
             f"function never switched on what it guards: {why}.",
+            UserWarning,
+            stacklevel=4,
+        )
+
+
+def warn_never_published_in(plan: PredictorPlan, window: str, days: Tuple[int, int]) -> None:
+    """What a plain run over one window warns about, for a run of several: a `published()` argument never True in that
+    window, unless it wasn't True anywhere, which `build_plan` has said already."""
+    cells = plan._cells
+    on_days = np.zeros(len(plan.issue_days), dtype=bool)
+    on_days[days[0] : days[1]] = True
+    everywhere = {columns for columns, _, _ in cells.never_published()}
+    for columns, asked, why in cells.never_published_on(on_days):
+        if columns in everywhere:
+            continue
+        shown = repr(columns) if isinstance(columns, str) else f"{list(columns)[:3]}" + (" ..." * (len(columns) > 3))
+        warnings.warn(
+            f"{function_name(plan.function)}: ctx.published({shown}) was never True on the {asked} forecast(s) that asked "
+            f"in the {window} window, so the function never switched on what it guards there: {why}.",
             UserWarning,
             stacklevel=4,
         )
