@@ -21,6 +21,8 @@ class TerminalExporter(Exporter):
 
     def export(self, report: EvaluationReport) -> None:
         console = Console()
+        if report.window != "test":
+            console.print(f"\n[bold]The {report.window} window[/bold]")
         self._print_availability(console, report.availability())
         for key in self.show:
             if key in self._SHOW_MAP:
