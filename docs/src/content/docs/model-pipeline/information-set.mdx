@@ -10,6 +10,10 @@ everything that ends up in the historical data. `epftoolbox2.information_set` de
 becomes known and checks every expanded predictor (and the newest training target) against that boundary
 before any model is fitted.
 
+A [predictor function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) chooses each forecast's list with
+`ctx.published()` and `ctx.value()`, which answer through these rules, and its lists are checked the same way, on the cells
+each list reads.
+
 **The convention:** a predictor's availability, including a raw, unshifted (lag 0) column such as `price`
 used to forecast a different target, is decided purely by comparing its publication time to `issue_time`,
 never by a fixed lag cutoff. This is independent of the model's own training-target boundary (the newest

@@ -95,6 +95,8 @@ report = pipeline.run(
 )
 ```
 
+A [predictor function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/#results) has no fixed list to compare: resuming compares each stored forecast's list and binary columns with what a fresh run would give it, and each record stores its list's hash.
+
 **A `.jsonl` file with no `.manifest.json` next to it** is not
 a mismatch: by default it is accepted with a warning, and a manifest is written from then on. Pass
 `require_manifest=True` to refuse them instead, if you want the stricter guarantee for every results

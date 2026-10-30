@@ -7,7 +7,8 @@ import { Aside } from '@astrojs/starlight/components';
 
 `InformationSet.check()` reads predictor *names*. A column can have a legal name and hold the wrong value, and a model
 can read more than it declares, so a look-ahead can pass that check and give numbers that look fine.
-`ModelPipeline.verify()` tests the boundary against real data and real models instead.
+`ModelPipeline.verify()` tests the boundary against real data and real models instead, including models whose lists come
+from a [predictor function](/epftoolbox2/model-pipeline/predictor-functions/#the-issue-time-check).
 
 ```python
 from epftoolbox2.models import OLSModel

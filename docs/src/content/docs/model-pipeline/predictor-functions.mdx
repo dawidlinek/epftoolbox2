@@ -1,0 +1,194 @@
+---
+title: Predictor Functions
+description: Choose each forecast's predictors with a function of `ctx`, planned before any fit, checked against the issue time and saved by import path
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A model's `predictors` can be a function with one parameter named `ctx`. It gets one planned forecast and returns the
+full list of column names for that forecast, in the usual grammar (`{horizon}` allowed).
+
+```python
+from epftoolbox2 import presets
+from epftoolbox2.information_set import Availability, InformationSet
+from epftoolbox2.models import LassoCVModel, PredictorContext
+from epftoolbox2.pipelines import ModelPipeline
+
+HOURS = [f"h{h:02d}" for h in range(24)]
+lear_x = presets.lear_predictors(["load_forecast"])
+no_tso = [name for name in lear_x if not name.endswith("_d+{horizon}") or not name.startswith("load_forecast")]
+
+info = InformationSet(
+    "11:45",
+    "Europe/Berlin",
+    rules={
+        "solar_fc": Availability.published("08:00", 7),  # our own forecast, made up to a week ahead
+        "exaa_price": Availability.published("10:15", 1),  # the EXAA auction closes at 10:15 the day before delivery
+    },
+)
+```
+
+```python
+def lear_dynamic(ctx):
+    x = list(lear_x) if ctx.horizon == 1 else list(no_tso)  # the TSO forecast exists only for D+1
+    if 6 <= ctx.period <= 20:
+        x += [f"solar_fc_{h}_d+{{horizon}}" for h in HOURS]  # own solar forecast, daylight hours only
+    if ctx.published([f"exaa_price_{h}_d+{{horizon}}" for h in HOURS]):
+        x += [f"exaa_price_{h}_d+{{horizon}}" for h in HOURS]  # EXAA when it is out that day
+    return x
+```
+
+```python
+pipeline = ModelPipeline(information_set=info).add_model(
+    LassoCVModel(predictors=lear_dynamic, training_window=728, name="LEAR_dyn")
+)
+report = pipeline.run(df, test_start="2025-10-01", test_end="2026-09-30", horizon=2, save_dir="runs/de")
+```
+
+`run()` calls the function once for every planned forecast, before anything is fitted, and that one plan is used for the
+whole run. In a rolling window every forecast is its own fit anyway, so nothing else about the run changes: a function
+returning the same list everywhere gives forecasts bit for bit equal to that list written out. A year of hourly forecasts
+takes about a second to plan, far less than one fit of a large list.
+
+Functions `(horizon)` and `(horizon, hour)` are a different, older form: one list per (period, horizon), not per forecast.
+They work as [before](/epftoolbox2/model-pipeline/overview/) and can't be saved. A function is taken for a function of
+`ctx` by its parameter name, so the parameter must be called `ctx`.
+
+## What `ctx` offers
+
+| | |
+|---|---|
+| `ctx.horizon` | Days ahead of the issue day, from 1 |
+| `ctx.period` | Period of the target day: 0-23, or 0-95 for 15-minute data. `ctx.hour` is the same number |
+| `ctx.issue_day` | The local calendar date D the forecast is issued on |
+| `ctx.target_day` | The local calendar date D + horizon it is for |
+| `ctx.target_weekday` | Weekday of the target day, 0 = Monday |
+| `ctx.zone` | The data's time zone name (None for a naive index) |
+| `ctx.freq` | `"1h"` or `"15min"` |
+| `ctx.published(columns)` | Whether the forecast's own cells are known and present, see below |
+| `ctx.value(column)` | The value of the forecast's own cell, see below |
+
+The function never sees the frame. It can read one cell per column: the row of its issue day D and its period, the row the
+model forecasts from. On the day clocks go back that is the second 02:00; on the day they go forward 02:00 has no row, so
+its cell reads as missing.
+
+### `published(columns)`
+
+True if **every** column (one name or several, `{horizon}` expanded) exists, its value at the forecast's row is known by
+the issue time according to the information set, and that value is not NaN.
+
+- A column that isn't in the frame raises `KeyError`, whichever column comes first in the list. A misspelt name would
+  otherwise disable an input without a word.
+- A column without an availability rule raises `InformationSetError`, even with `unknown="ignore"`: what can't be told to
+  be known isn't handed out. Declare a rule for it.
+- Without an information set availability isn't checked, only NaN.
+- After planning, each `published()` argument that was never True over the whole run gives a `UserWarning` saying why, as
+  far as can be told. A rule that puts a column after the issue time makes it False on every day, which looks like a
+  working run with an input that never switched on.
+
+<Aside type="caution" title="What `published` means in a backtest">
+"Not NaN" is the state of the archive you backtest on, not the state of the server at the issue time. A value that came an
+hour late on the day and was backfilled later reads as published. The availability rule is what stands for the usual
+publication time; `published` can't replay a day's outage, and a live run may see a gap the backtest doesn't.
+</Aside>
+
+### `value(column)`
+
+The value at the forecast's row, NaN if it is missing. If the information set says it is known only after the issue time it
+raises `InformationSetError`: a function can't read a late value and stay quiet about it. Without an information set it
+returns the value.
+
+## As of the issue time: actual value, then forecast
+
+The second example the function form exists for: use the actual value while it is out and the forecast after that.
+
+```python
+def lear_asof(ctx):  # actual until the issue time, forecast after
+    return lear_x + ["load_actual" if ctx.period < 10 else "load_forecast"]
+```
+
+The built-in rule for `load_actual` is one hour after the end of the period, so at 11:45 the actual value of 09:00-10:00
+is known at 11:00 and the one of 10:00-11:00 only at 12:00. A switch at `ctx.period < 11` is refused for period 10.
+`ctx.published("load_actual")` as the condition would follow the rule by itself.
+
+The switch applies to every past day of the window as if it were an issue day, because the training rows of a period are
+the same column: the model trains on the same mix it forecasts with.
+
+## How each list trains
+
+The training window, the cut and the newest training target stay as they are: for a forecast issued on D the targets end on
+D-1. A forecast's list decides which columns it reads, and it trains on **the window's rows where those columns exist**, so
+a column missing on some past days costs that list those rows and no other list anything.
+
+A column that starts inside the test period therefore starts with few rows: the first forecasts of a list holding it have
+no training row at all and are counted as `no_finite_training_rows`, and the next ones fit on very few. Guard such a column
+with a condition of your own if that matters.
+
+Binary columns are found once per (list, period, horizon), on the window of the list's first test day, so a later value
+can't change an earlier forecast. A column with no value there is read on the first of the list's test days that has one.
+A list used on every test day of a (period, horizon) is treated exactly as a fixed list is.
+
+A function may also return `Use(list, train_on="all")`, which is the plain list.
+`Use(list, train_on="matching")`, training only on the past days that got the same list, isn't available yet and raises
+`NotImplementedError`.
+
+## The issue-time check
+
+With an information set, every list is checked before any fit. Availability is computed once per distinct column name,
+however many lists there are, through the same path as a fixed list's check. Only the cells a list actually reads count: a
+list used on Fridays only may hold what is known on Fridays only, which a fixed list may not. A late input is refused with
+the model, the list, the columns and the periods:
+
+```text
+LEAR_asof, predictor list 1 of 2 (d6b295b16bb3): 1 use(s) of inputs not known at the issue time (11:45 Europe/Berlin on the issue day D):
+  - predictor load_actual: 'load_actual' is known 1h after the end of the period. Periods 10, horizons 1; e.g. load_actual for period 10 is known D 12:00, issued D 11:45.
+Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too strict for your data, override it with InformationSet(rules={...}).
+```
+
+`leakage_probe` and [`ModelPipeline.verify`](/epftoolbox2/model-pipeline/verification/) plan the function on each frame they
+test, and the columns it only reads count as inputs. So a column whose value moves the choice of a list is probed like any
+other, and a late name in a list shows up as `leak`. A late `value()` raises.
+
+## Results
+
+Each record of a predictor function has one more key, `predictor_list`: a short hash of its ordered list and training rule.
+Fixed lists have no such key.
+
+```python
+# One entry per distinct list: hash, train_on, n_predictors, predictors, forecasts, horizons, periods, issue_days,
+# first_issue_day, last_issue_day.
+report.refs["LEAR_dyn"].predictor_lists
+```
+
+The manifest next to the results stores the function's import path, a fingerprint (a hash of its source and of the
+information set), and every distinct list by hash, so each record can be traced to its names.
+
+Resuming compares what matters directly, for each stored forecast inside the run's test period: the list a fresh run would
+give it and, for that list, the binary columns. Any difference raises `ManifestMismatchError`, also when the source shows no
+change, for example if the function reads a list defined next to it, or a new availability rule moves a `published()`
+answer. A change that leaves every stored forecast alone (a comment, an unrelated rule) resumes with a note. Pending
+forecasts may change freely, as nothing stored depends on them, except that adding a column to the union of the lists changes
+the hash of the data the manifest compares, and that raises too. `allow_manifest_mismatch=True` resumes anyway.
+
+## Saving to YAML
+
+A function at the top level of a module is saved by its import path and loaded by importing it:
+
+```yaml
+models:
+- class: LassoCVModel
+  params:
+    predictors:
+      function: my_study.predictors:lear_dynamic
+    training_window: 728
+    name: LEAR_dyn
+```
+
+`save()` raises `TypeError`, naming the model, for a lambda, a nested function, a bound method, a function of the script
+being run (`__main__`), and anything else that importing doesn't give back. The module must be importable wherever the file
+is loaded (installed, or on `PYTHONPATH`). What a function reads from elsewhere, such as `lear_x`, stays in that module: the
+YAML holds its name, not its lists.
+
+<Aside type="caution">
+Loading such a file imports the module it names, so load only files you trust.
+</Aside>

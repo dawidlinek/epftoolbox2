@@ -34,7 +34,7 @@ model = OLSModel(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `predictors` | List | Required | Predictor specifications (strings, `{horizon}` templates, or callables) |
+| `predictors` | List or function | Required | Predictor specifications (strings, `{horizon}` templates, or callables), or a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) returning the list for each forecast |
 | `training_window` | int | `365` | Days of training data |
 | `name` | str | `"Model"` | Display name for reports |
 | `scaler` | str, dict or scaler | `"standard"` | `"standard"`, `"asinh"` or `"npit"`, or `{"name": ..., "params": {...}}`. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
