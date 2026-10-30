@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,7 @@ from ..evaluators.base import FORECAST_KEYS, Evaluator, SetEvaluator
 from ..evaluators.dm import DMEvaluator, check_test_settings
 from ..evaluators.mcs import check_mcs_settings
 from ..logging import get_logger
+from .breakdowns import price_level, spike_threshold
 from .ref import ModelResultRef
 
 logger = get_logger(__name__)
@@ -48,8 +49,12 @@ GROUP_CONFIGS: List[Tuple[str, List[str]]] = [
 # terms: a metric over the rows in file order can differ in the last bit between two runs of the same study.
 RECORD_ORDER = ("run_date", "target_date", "horizon", "hour", "prediction", "actual", "day_in_test")
 
+# The grouping columns of the breakdowns that are not in `compute_all()`: `by_quarter()` (with `year`), `by_day()` and
+# `by_price_level()`.
+_BREAKDOWN_KEYS = ("quarter", "target_date", "price_level")
+
 # The columns of `summary()` and of the grouped tables that no evaluator wrote.
-_TABLE_KEYS = {"model", "forecasts", *(key for _, keys in GROUP_CONFIGS for key in keys)}
+_TABLE_KEYS = {"model", "forecasts", *(key for _, keys in GROUP_CONFIGS for key in keys), *_BREAKDOWN_KEYS}
 
 # Two-sided size of the `verdict` of `tests()`.
 _TEST_ALPHA = 0.05
@@ -115,6 +120,48 @@ class EvaluationReport:
 
     def by_target_weekday_horizon(self) -> pd.DataFrame:
         return self._compute_grouped(["target_weekday", "horizon"])
+
+    def by_quarter(self) -> pd.DataFrame:
+        """One row per (calendar quarter of the target date, model): `model, year, quarter, forecasts`, then the metrics.
+
+        `forecasts` is the model's own count in that quarter. Every evaluator runs on the quarter alone, so relative
+        metrics and tests compare the models on the forecasts they share inside it. A quarter is short by nature: the
+        tests print `n_days` and say nothing below 30 days.
+        """
+        return self._grouped_table(self._model_frames(), ["year", "quarter"], counts=True)
+
+    def by_day(self) -> pd.DataFrame:
+        """One row per (target date, model): `model, target_date, forecasts`, then the metrics.
+
+        All horizons that forecast the date are in its group. A day holds one run date per horizon, so the tests have
+        almost nothing to run on and their columns stay empty (`n_days` says how many days they had).
+        """
+        return self._grouped_table(self._model_frames(), ["target_date"], counts=True)
+
+    def by_price_level(self, spike: Optional[float] = None) -> pd.DataFrame:
+        """One row per (price level, model): `model, price_level, forecasts`, then the metrics.
+
+        The level of a forecast comes from its actual price alone, never from a prediction: `negative` (actual below 0),
+        `spike` (actual at or above the threshold) and `normal` (the rest). A forecast is in exactly one group; one
+        without a finite actual is in none. The threshold is `min(300, 99th percentile)` of the actual prices of the
+        periods any model forecast (each period once, however many horizons forecast it), unless `spike` gives it. It is
+        one number for all models: `df.attrs` holds `spike_threshold`, `spike_rule` and `spike_quantile`. Every evaluator
+        runs on the group alone, on the keys the models share inside it.
+
+        Args:
+            spike: The price (EUR/MWh) from which a period is a spike, a positive number; by default the rule above.
+        """
+        frames = self._model_frames()
+        threshold, rule, quantile = spike_threshold(frames, spike)
+        labels = {"price_level": lambda df: price_level(df["actual"], threshold)}
+        table = self._grouped_table(frames, ["price_level"], labels=labels, counts=True)
+        table.attrs.update(
+            spike_threshold=threshold,
+            spike_rule=rule,
+            spike_quantile=quantile,
+            levels=f"negative: actual < 0; spike: actual >= {threshold:g}; normal: the rest",
+        )
+        return table
 
     def tests(
         self,
@@ -687,26 +734,47 @@ class EvaluationReport:
             [{"model": name, "forecasts": len(df), **metrics.get(name, {})} for name, df in model_dfs.items()]
         )
 
-    def _grouped_table(self, model_dfs: Dict[str, pd.DataFrame], group_keys: List[str]) -> pd.DataFrame:
+    def _grouped_table(
+        self,
+        model_dfs: Dict[str, pd.DataFrame],
+        group_keys: List[str],
+        labels: Optional[Mapping[str, Callable[[pd.DataFrame], pd.Series]]] = None,
+        counts: bool = False,
+    ) -> pd.DataFrame:
         """One row per (group, model): each model's evaluators run on its own rows of the group, with every
-        model's rows of that group as `model_dfs`. Rows are ordered by group, then by model."""
+        model's rows of that group as `model_dfs`. Rows are ordered by group, then by model.
+
+        `labels` gives a group key that is not a column of the frames or one `_split` knows: a function of a model's frame
+        to the group of each row. `counts` puts each model's number of forecasts in the group in a `forecasts` column
+        after the group keys (the breakdowns that are not in `compute_all()` have it)."""
         self._check_set_evaluators()
-        groups = {name: dict(self._split(df, group_keys)) for name, df in model_dfs.items()}
+        groups = {name: dict(self._split(df, group_keys, labels)) for name, df in model_dfs.items()}
         rows = []
         for key in sorted({k for g in groups.values() for k in g}):
             group_dfs = {name: g[key] for name, g in groups.items() if key in g}
             metrics = self._apply_evaluators(group_dfs, group_keys)
-            for name in group_dfs:
-                rows.append({"model": name, **dict(zip(group_keys, key)), **metrics.get(name, {})})
+            for name, group in group_dfs.items():
+                row = {"model": name, **dict(zip(group_keys, key))}
+                if counts:
+                    row["forecasts"] = len(group)
+                rows.append({**row, **metrics.get(name, {})})
         return pd.DataFrame(rows)
 
     @staticmethod
-    def _split(df: pd.DataFrame, group_keys: List[str]) -> Iterator[Tuple[tuple, pd.DataFrame]]:
+    def _split(
+        df: pd.DataFrame,
+        group_keys: List[str],
+        labels: Optional[Mapping[str, Callable[[pd.DataFrame], pd.Series]]] = None,
+    ) -> Iterator[Tuple[tuple, pd.DataFrame]]:
         """Cut one model's frame by `group_keys`. Rows without a value for a key take no part in the grouping."""
         columns = []
         for k in group_keys:
-            if k == "year":
+            if labels and k in labels:
+                column = labels[k](df)
+            elif k == "year":
                 column = df["target_date"].dt.year if "target_date" in df else None
+            elif k == "quarter":
+                column = df["target_date"].dt.quarter if "target_date" in df else None
             elif k == "run_weekday":
                 column = df["run_date"].dt.dayofweek if "run_date" in df else None
             elif k == "target_weekday":
