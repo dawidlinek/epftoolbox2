@@ -94,6 +94,7 @@ export default defineConfig({
                     items: [
                         { label: 'API Reference', link: '/reference/api/' },
                         { label: 'Extending', link: '/reference/extending/' },
+                        { label: 'Release Notes', link: '/reference/release-notes/' },
                     ],
                 },
             ],

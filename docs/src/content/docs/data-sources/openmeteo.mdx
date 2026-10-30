@@ -71,7 +71,7 @@ The delays are rounded up from the lag that Open-Meteo reports for each model, s
 **Rule of thumb:** pick the latest `run` you know is published before your issue time. `run="00"` (the default) fits an 11:45 CET issue for every model above, all year. JMA is the slowest: 00:00 UTC + 9.6 h = 09:36 UTC, which is 11:36 CEST in summer and 10:36 CET in winter, so both are before 11:45.
 An issue time before 11:36 CEST would make the information-set check reject JMA in summer. For an earlier summer issue, use ICON or GFS, whose 00 UTC runs are published by 06:00 UTC, or ECMWF IFS from 11:00 CEST.
 
-These delays are also built into `epftoolbox2.information_set.source_rules` (see [Information Set](/epftoolbox2/model-pipeline/information-set/)): with a `ModelPipeline(issue_time=...)` information-set check enabled, a `run`/`issue_time` combination that is too tight raises `InformationSetError` before any model is fit, naming the column and suggesting an earlier run or a later issue time.
+These delays are also built into `epftoolbox2.information_set.source_rules` (see [Information Set](/epftoolbox2/model-pipeline/information-set/)): with a `ModelPipeline(issue_time=...)`, a `run`/`issue_time` combination that is too tight is listed in `report.availability()`, and with `availability="raise"` it raises `InformationSetError` before any model is fit. Either way it names the column and suggests an earlier run or a later issue time.
 
 ```python
 source = OpenMeteoSource(latitude=52.2297, longitude=21.0122, timezone="Europe/Warsaw", run="00")

@@ -33,6 +33,21 @@ It needs an information set: without `issue_time` or `information_set`, `verify`
 
 ---
 
+## At each level
+
+The [`availability` level](/epftoolbox2/model-pipeline/information-set/#three-levels) decides what `run()` does about a late input,
+not where the boundary is, so `verify` tests the same boundary at every level. A late predictor is a `leak` also where `run()`
+only lists it, and a pipeline whose `report.availability()` lists something is expected to fail here.
+
+The one difference is a [predictor function](/epftoolbox2/model-pipeline/predictor-functions/#the-issue-time-check) that reads a late
+`ctx.value()`. With `availability="raise"` that read raises `InformationSetError`, as in `run()`. With `"warn"` or `"none"` the function
+gets the value, as in `run()`, and the forecasts that read it are a `leak`, whether or not the noise moved them, so the other
+models still get their row. `verified.checks[i].probe.late_reads` counts those cells per column.
+
+A column without a rule can't be perturbed at any level: it follows `unknown` of the information set, as described below.
+
+---
+
 ## What it does
 
 For each model, `days` issue days are sampled with `seed` from the test period. Every model gets the same days, so they

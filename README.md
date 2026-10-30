@@ -42,7 +42,7 @@ epftoolbox2.verify()
 - **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files. An optional market timezone makes dates mean local calendar days, duplicate column names across sources raise instead of colliding silently, and `api_key` is written to YAML as an `${ENV_VAR}` reference instead of plain text
 - **Multiprocessing**: Process-based parallelism with inner thread pools. SLURM array mode (one model per task) with `epf report` to merge the results
 - **Safeguards**: The model's input (resolution, time stamps, column names, predictors) is checked before any fit, and forecasts that could not be made are counted per model (`report.forecast_counts()`)
-- **Information Set**: Optional `issue_time` check that every predictor is known at the moment the forecast is issued, with built-in availability rules for the shipped sources and an empirical leakage probe (`epftoolbox2.information_set`)
+- **Information Set**: Optional `issue_time` check that every predictor is known at the moment the forecast is issued, at three levels (`availability="none"`, `"warn"`, `"raise"`), with built-in availability rules for the shipped sources, `pipeline.explain()` to read a model's predictors relative to the target day, and an empirical leakage probe (`epftoolbox2.information_set`)
 - **Verification**: `ModelPipeline.verify()` and `epf verify` run the leakage probe on sampled issue days with a positive control: perturbing unknown values must not move a forecast, and perturbing the freshest known ones must, so a check that can't reach a model reports `inconclusive` instead of passing
 - **Result Manifests**: Resumable results (`save_dir`) are fingerprinted with the configuration that produced them (the predictors' ordered layout, data up to `test_end` and its time zone, model params, ...). Resuming into results made with a different configuration raises instead of silently mixing them (`epftoolbox2.results.manifest`)
 - **Extensibility**: Extensible base classes for data sources, transformers, validators, models, evaluators, and exporters
@@ -186,11 +186,15 @@ pipeline = (
 report = pipeline.run(df, test_start="2024-04-01", test_end="2024-06-01", target="price")
 ```
 
-`issue_time` (and optionally `issue_timezone`) checks every predictor against the time the forecast is actually
-issued, before any model is fitted. It raises `InformationSetError` if a predictor uses a value not known yet (e.g.
-same-day `load_actual`). Built-in availability rules cover the shipped sources. See `epftoolbox2.information_set` for
+`issue_time` (and optionally `issue_timezone`) compares every predictor with the time the forecast is actually
+issued, before any model is fitted. A predictor that uses a value not known yet (e.g. same-day `load_actual`) is listed in
+`report.availability()`, a warning, the terminal exporter and the manifest, and the run goes on. With
+`availability="raise"` it raises `InformationSetError` instead, which suits published results and CI. The level never
+changes a forecast. Built-in availability rules cover the shipped sources. See `epftoolbox2.information_set` for
 custom rules, accepted assumptions, and `leakage_probe`, an empirical check that perturbs unknown values and asserts
-forecasts don't move. `pipeline.verify(df, test_start, test_end)` (or `epf verify`) runs it on sampled issue days.
+forecasts don't move. `pipeline.verify(df, test_start, test_end)` (or `epf verify`) runs it on sampled issue days, and
+`pipeline.explain(df, model="OLS", test=("2024-04-01", "2024-06-01"), horizon=1, hour=12)` shows what each predictor holds
+relative to the target day.
 
 
 

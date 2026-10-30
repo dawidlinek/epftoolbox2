@@ -102,6 +102,16 @@ A shortfall is logged as a warning when the model runs, and a model that produce
 
 Models are only comparable on the forecasts they all produced: check that `produced` agrees before comparing metrics.
 
+## Inputs not known at the issue time
+
+`report.availability()` lists what a run with an issue time could not vouch for: every predictor whose rule puts it after the
+issue time and every column without a rule, per model, with its periods and horizons. It is empty, with the same columns, when
+there is nothing to list. See [Information Set](/epftoolbox2/model-pipeline/information-set/#what-warn-lists).
+
+```python
+report.availability()  # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
+```
+
 ## Breakdowns by quarter, day and price level
 
 ```python
@@ -190,3 +200,5 @@ Workers write records as their tasks finish, so the order of the lines in a resu
 `ModelPipeline.report(save_dir, test_start=..., test_end=..., horizon=..., freq=...)` builds a report from the per-model JSONL files a previous run wrote to `save_dir` and runs the evaluators and exporters. `Workflow.report()` / `epf report` use it to merge the results of a SLURM array (see [Workflow](/epftoolbox2/workflow/overview/#run-only-one-model-slurm-arrays)).
 
 If any model's file has fewer lines than the planned count for `test_start`..`test_end` × `horizon` × `freq` (an array task that failed or never ran), `report()` warns, naming the models and their produced/planned/missing counts, and notes that metrics are then computed on different forecast sets for those models.
+
+What the runs listed in `report.availability()` comes back from their manifests, whichever pipeline builds the report.
