@@ -30,6 +30,11 @@ an issue day it didn't sample.
 
 ### New
 
+- `AverageEnsemble(members, top=None | k | "validation", by="validation", name=...)` and `pipeline.add_ensemble()`, from
+  `epftoolbox2.ensembles`: the mean of stored forecasts on identical keys, with the members and their number chosen on validation
+  per test period, `member_missing` in `forecast_counts()` and `report.choices()`. `ModelPipeline.report()` and `epf report` compute
+  ensembles from stored results, and YAML has an `ensembles:` section. A pipeline without ensembles and its files don't change. See
+  [Ensembles](/epftoolbox2/model-pipeline/ensembles/).
 - `run(df, validation=(start, end) | "previous_year", test=(start, end))`: one run per model over both windows, into one results
   file and one manifest. Each forecast is bit for bit what a plain run over its window gives. `report.validation`, `report.window`
   and `report.windows`, also in `ModelPipeline.report()`, `Workflow` YAML and `epf model --validation`. Plain runs and their files

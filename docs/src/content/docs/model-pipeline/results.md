@@ -16,6 +16,9 @@ summary = report.summary()
 # Planned vs produced forecasts per model, and why tasks gave no forecast
 counts = report.forecast_counts()
 
+# What each ensemble chose on validation, per test period served (empty without any that chooses)
+choices = report.choices()
+
 # Breakdown by hour of day
 by_hour = report.by_hour()
 
@@ -94,6 +97,7 @@ A task (period × horizon × run day) that cannot give a forecast is skipped and
 |---|---|
 | `missing_test_predictors` | A predictor is NaN on the issue day's row |
 | `missing_test_row` | The issue day has no row for that period (a gap in the data) |
+| `member_missing` | An [ensemble](/epftoolbox2/model-pipeline/ensembles/) only: a member it averages has no finite prediction for that key |
 | `too_few_rows` | The training window has no rows before the issue day |
 | `no_finite_training_rows` | Every training row has a NaN predictor or target |
 | `fit_error` | The model raised `ValueError` (scikit-learn does this on degenerate input) |

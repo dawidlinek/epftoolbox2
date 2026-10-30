@@ -66,6 +66,7 @@ PUBLIC_PACKAGES = (
     "epftoolbox2.data.transformers",
     "epftoolbox2.data.validators",
     "epftoolbox2.models",
+    "epftoolbox2.ensembles",
     "epftoolbox2.scalers",
     "epftoolbox2.evaluators",
     "epftoolbox2.exporters",

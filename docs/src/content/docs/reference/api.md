@@ -53,6 +53,7 @@ class ModelPipeline:
     ): ...
 
     def add_model(self, model: BaseModel) -> "ModelPipeline": ...
+    def add_ensemble(self, ensemble: Ensemble) -> "ModelPipeline": ...  # Members are resolved when the pipeline runs
     def add_evaluator(self, *evaluators: Evaluator) -> "ModelPipeline": ...  # One or several; chainable
     def add_exporter(self, exporter: Exporter) -> "ModelPipeline": ...
 
@@ -198,6 +199,7 @@ class EvaluationReport:
     def summary(self) -> pd.DataFrame: ...          # model, forecasts, one column per evaluator
     def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
     def availability(self) -> pd.DataFrame: ...     # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
+    def choices(self) -> pd.DataFrame: ...          # ensemble, segment, chosen, k, validation_mae, validation_forecasts, validation_start, validation_end, test_start, test_end; attrs: member_mae, k_mae
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
     def by_hour_horizon(self) -> pd.DataFrame: ...
@@ -279,6 +281,25 @@ class Segment:
 
 def read_windows(path: Union[str, Path]) -> Optional[RunWindows]: ...  # From a results JSONL or its manifest; None for a plain run
 ```
+
+---
+
+## Ensembles
+
+```python
+from epftoolbox2.ensembles import AverageEnsemble, Ensemble
+
+class AverageEnsemble(Ensemble):
+    def __init__(
+        self,
+        members: Sequence[str],             # Names of models or ensembles, resolved when the pipeline runs
+        top: Union[int, str, None] = None,  # None: all of them; k: the best k on validation; "validation": chooses k as well
+        by: str = "validation",             # Where top chooses, the only value
+        name: str = "avg",                  # Unique across models and ensembles
+    ): ...
+```
+
+See [Ensembles](/epftoolbox2/model-pipeline/ensembles/).
 
 ---
 
