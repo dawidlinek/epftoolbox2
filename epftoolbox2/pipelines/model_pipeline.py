@@ -9,6 +9,7 @@ import yaml
 from .._date_utils import resolve_date
 from ..information_set import InformationSet, InformationSetError
 from ..models.base import BaseModel
+from ..models.context import PredictorPlan, importable_path, load_function
 from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..exporters.base import Exporter
@@ -115,13 +116,19 @@ class ModelPipeline:
             check_start, check_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
         else:
             check_start, check_end = resolve_date(test_start), resolve_date(test_end)
-        # Check every model's inputs before running any, so a bad predictor in the last model fails in seconds.
+        # Check every model's inputs before running any, so a bad predictor in the last model fails in seconds. A
+        # predictor function is planned here, once, and the run uses that plan.
+        plans: Dict[str, PredictorPlan] = {}
         for model in self.models:
-            model._check_inputs(data, target, horizon, freq, self.information_set, check_start, check_end)
+            plan = model._plan_predictors(data, target, horizon, freq, self.information_set, check_start, check_end)
+            model._check_inputs(data, target, horizon, freq, self.information_set, check_start, check_end, plan=plan)
+            if plan is not None:
+                plans[model.name] = plan
 
         refs: dict[str, ModelResultRef] = {}
         for model in self.models:
             save_to = str(self.results_path(save_dir, model)) if save_dir else None
+            planned = {"plan": plans[model.name]} if model.name in plans else {}
             ref = model.run(
                 data=data,
                 test_start=test_start,
@@ -134,6 +141,7 @@ class ModelPipeline:
                 information_set=self.information_set,
                 allow_manifest_mismatch=allow_manifest_mismatch,
                 require_manifest=require_manifest,
+                **planned,
             )
             refs[model.name] = ref
 
@@ -343,7 +351,8 @@ class ModelPipeline:
         raise TypeError(
             f"Cannot save model {getattr(component, 'name', type(component).__name__)!r} "
             f"({type(component).__name__}): {what}, and callable predictors can't be saved to YAML yet. "
-            "List the predictors explicitly instead: strings, with '{horizon}' where a column depends on the horizon."
+            "List the predictors explicitly instead: strings, with '{horizon}' where a column depends on the horizon. "
+            "A function of `ctx` at the top level of a module can be saved, by its import path."
         )
 
     def _serialize_component(self, component: Any) -> Dict[str, Any]:
@@ -357,6 +366,8 @@ class ModelPipeline:
             for key, value in getattr(component, "__dict__", {}).items()
             if not key.startswith("_")
         }
+        if getattr(component, "_ctx_fn", None) is not None:
+            params["predictors"] = {"function": importable_path(component._ctx_fn, label)}
         return {"class": class_name, "params": params}
 
     def to_dict(self) -> Dict[str, Any]:
@@ -384,8 +395,16 @@ class ModelPipeline:
             raise ValueError(f"Unknown {kind}: {class_name}")
         if component_type == "evaluators" and isinstance(params.get("strategy"), dict):
             params["strategy"] = cls._load_component("strategies", params["strategy"])
+        if component_type == "models" and isinstance(params.get("predictors"), dict):
+            params["predictors"] = cls._load_predictor_function(class_name, params["predictors"])
         module = importlib.import_module(COMPONENT_REGISTRY[component_type][class_name])
         return getattr(module, class_name)(**params)
+
+    @staticmethod
+    def _load_predictor_function(class_name: str, saved: Dict[str, Any]) -> Callable:
+        if set(saved) != {"function"}:
+            raise ValueError(f"{class_name}: predictors must be a list or {{function: 'module:name'}}, got {saved}")
+        return load_function(saved["function"])
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "ModelPipeline":

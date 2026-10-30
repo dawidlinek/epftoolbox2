@@ -1028,8 +1028,8 @@ def leakage_probe(
     if rebuild is not None:
         base, perturbed = rebuild(data), rebuild(perturbed)
 
-    original = _issue_day_forecasts(model, base, run_day, target, horizon, freq)
-    probed = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq)
+    original = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set)
+    probed = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set)
     changed, max_abs_change, missing = _compare_forecasts(original, probed, atol)
     return ProbeResult(
         run_day=run_day,
@@ -1043,11 +1043,20 @@ def leakage_probe(
 
 
 def _issue_day_forecasts(
-    model: Any, frame: pd.DataFrame, run_day: str, target: str, horizon: int, freq: str
+    model: Any, frame: pd.DataFrame, run_day: str, target: str, horizon: int, freq: str, information_set: InformationSet
 ) -> Dict[Tuple[int, int], float]:
-    """The model's forecasts issued on `run_day` from `frame`, by (period, horizon)."""
+    """The model's forecasts issued on `run_day` from `frame`, by (period, horizon).
+
+    A predictor function of `ctx` is planned on this very frame, so a value it reads can move its list, and it answers
+    through the information set. The run itself gets none, so a late list isn't refused and the forecasts show it.
+    """
     m = model() if callable(model) and not hasattr(model, "run") else model
-    ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, horizon=horizon, freq=freq)
+    plan_predictors = getattr(m, "_plan_predictors", None)
+    plan = None
+    if plan_predictors is not None:
+        plan = plan_predictors(frame, target, horizon, freq, information_set, run_day, run_day, warn_unpublished=False)
+    extra = {} if plan is None else {"plan": plan}
+    ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, horizon=horizon, freq=freq, **extra)
     return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}
 
 
@@ -1121,8 +1130,8 @@ def positive_control(
         perturbed, counts, unchecked = perturb_recent(in_market_zone, run_day, information_set, freq, names, seed)
         perturbed.index = data.index
         perturbed = _with_training_data_of(base, rebuild(perturbed), run_day, target)
-    original = _issue_day_forecasts(model, base, run_day, target, horizon, freq)
-    other = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq)
+    original = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set)
+    other = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set)
     moved, max_abs_change, _ = _compare_forecasts(original, other, atol)
     return ControlResult(
         run_day=run_day,

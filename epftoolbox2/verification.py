@@ -218,8 +218,12 @@ def verify_model(
     features = None if rebuild is None else (lambda frame: rebuild(frame.copy()))
     built = data if features is None else features(data)
     checked = make_model()
-    checked._check_inputs(built, target, horizon, freq)
-    used = list(checked._used_predictors)
+    # A predictor function's inputs are the lists it returns on these days, and whatever it reads to choose them.
+    plan = checked._plan_predictors(
+        built, target, horizon, freq, information_set, issue_days=run_days, warn_unpublished=False
+    )
+    checked._check_inputs(built, target, horizon, freq, plan=plan)
+    used = sorted({*checked._used_predictors, *plan.queried}) if plan is not None else list(checked._used_predictors)
 
     not_from_frame = []
     columns = None
