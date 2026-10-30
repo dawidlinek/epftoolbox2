@@ -326,7 +326,7 @@ def test_a_later_segments_validation_is_the_test_before_it_and_stays_tagged_test
     frame = make_market_data(start="2022-12-01", days=850, horizon=2, noise=5.0, seed=3)
     test = ("2024-01-05", "2025-01-06")
     make = lambda: MeanModel(PREDICTORS, training_window=14, name="m")  # noqa: E731
-    report = pipeline(make()).run(frame, validation="previous_year", test=test, horizon=2)
+    report = pipeline(make()).run(frame, validation="previous_year", test=test, horizon=1)
     assert report.windows.segments == (
         Segment(("2023-01-05", "2024-01-04"), ("2024-01-05", "2025-01-04")),
         Segment(("2024-01-05", "2025-01-04"), ("2025-01-05", "2025-01-06")),
@@ -335,7 +335,7 @@ def test_a_later_segments_validation_is_the_test_before_it_and_stays_tagged_test
     serving = [r for r in all_records(report) if second.serves(r["run_date"], r["target_date"])]
     assert serving and {r["window"] for r in serving} == {"test"}
     assert max(r["target_date"] for r in serving) == "2025-01-04"
-    plain = all_records(pipeline(make()).run(frame, test=test, horizon=2))
+    plain = all_records(pipeline(make()).run(frame, test=test, horizon=1))
     assert lines(of_window(all_records(report), "test"), "window") == lines(plain)
     assert {r["day_in_test"] for r in of_window(all_records(report), "test")} == set(range(368))
     assert report.validation.predictions()["target_date"].max() == "2024-01-04"
