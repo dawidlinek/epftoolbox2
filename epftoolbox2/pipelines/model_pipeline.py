@@ -252,7 +252,11 @@ class ModelPipeline:
           issue day or later (see `epftoolbox2.information_set.perturb_recent`). Every forecast must move on some
           sampled day, and on every day some forecast of each horizon; if not, the probe isn't reaching the model and
           the status is `inconclusive`, which doesn't pass either. So is a model with an input that has no availability
-          rule, which the probe can't perturb.
+          rule, which the probe can't perturb, and a predictor function with an input that no sampled day reads.
+
+        A predictor function of `ctx` is planned on each frame the probe tests, so a list chosen by a value it can't know
+        moves with it. A cell it read that holds another value in the perturbed frame is a `leak` too, whether or not the
+        noise changed its list.
 
         `rebuild` treats `data` as source data, before feature engineering: the perturbation goes into the raw columns
         and `rebuild(frame) -> features` reproduces the transformers. Without it a transformer that writes a future
@@ -302,6 +306,7 @@ class ModelPipeline:
                     seed=seed,
                     control=positive_control,
                     rebuild=rebuild,
+                    test_period=(test_start, test_end),
                 )
             )
         return report

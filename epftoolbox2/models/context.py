@@ -169,8 +169,8 @@ def _expand(name: Any, horizon: int) -> str:
 class _Cells:
     """The cells of every planned forecast's row, by [period, issue day], and whether each is known at the issue time.
 
-    A repeated autumn hour reads its second occurrence, the row the model forecasts from and `InformationSet.violations`
-    judges. A period the day doesn't have (spring) or a row the data lacks is NaN.
+    A repeated autumn hour reads its second occurrence, the row the model forecasts from. A period the day doesn't have
+    (spring) or a row the data lacks is NaN. Whether a cell is known is what `InformationSet.violations` says of it.
     """
 
     def __init__(
@@ -198,7 +198,9 @@ class _Cells:
         self._values: Dict[str, np.ndarray] = {}
         self._available: Dict[str, np.ndarray] = {}
         self._known: Dict[str, np.ndarray] = {}
-        self._published: Dict[Tuple[Any, int], np.ndarray] = {}
+        # (argument of `published`, horizon) -> the names it stands for, its answers, the cells it was asked about.
+        self._published: Dict[Tuple[Any, int], Tuple[List[str], np.ndarray, np.ndarray]] = {}
+        self._value_cells: Dict[Tuple[str, int], np.ndarray] = {}  # (column, horizon) -> the cells `value` read
         # Per argument of `published`, as it was written: the names it stood for, how often it was asked and whether it
         # ever answered True.
         self._asked: Dict[Any, List[Any]] = {}
@@ -206,6 +208,18 @@ class _Cells:
     @property
     def queried(self) -> Set[str]:
         return set(self._values)
+
+    def read_cells(self) -> Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]]:
+        """(column, horizon) -> the cells whose value the function's answers depended on, and the column's cells.
+
+        `published` doesn't depend on the value of a cell known only later: it answers False whatever the cell holds.
+        """
+        read: Dict[Tuple[str, int], np.ndarray] = dict(self._value_cells)
+        for (_, horizon), (names, _, cells) in self._published.items():
+            for name in names:
+                known = cells & self.known(name)
+                read[(name, horizon)] = read[(name, horizon)] | known if (name, horizon) in read else known
+        return {key: (cells, self._values[key[0]]) for key, cells in read.items()}
 
     def values(self, name: str) -> np.ndarray:
         grid = self._values.get(name)
@@ -261,26 +275,29 @@ class _Cells:
         return _fmt_minute(self._clock.minute_of_day(self.available(name)[period, position], position))
 
     def published(self, columns: Any, horizon: int, period: int, position: int) -> bool:
-        grid = self._published.get((columns, horizon))
-        if grid is None:
-            grid = self._published_grid(columns, horizon)
+        entry = self._published.get((columns, horizon))
+        if entry is None:
+            entry = self._published_entry(columns, horizon)
+        _, answers, cells = entry
+        cells[period, position] = True
         asked = self._asked[columns]
         asked[1] += 1
-        if grid[period, position]:
+        if answers[period, position]:
             asked[2] = True
             return True
         return False
 
-    def _published_grid(self, columns: Any, horizon: int) -> np.ndarray:
+    def _published_entry(self, columns: Any, horizon: int) -> Tuple[List[str], np.ndarray, np.ndarray]:
         names = [_expand(name, horizon) for name in ([columns] if isinstance(columns, str) else columns)]
         # Every name, whatever the earlier ones answer: a misspelt one must not hide behind a False.
         values = [self.values(name) for name in names]
-        grid = np.ones((self.periods, self._n_days), dtype=bool)
+        answers = np.ones((self.periods, self._n_days), dtype=bool)
         for name, column in zip(names, values):
-            grid = grid & self.known(name) & self._present(column)
-        self._published[(columns, horizon)] = grid
+            answers = answers & self.known(name) & self._present(column)
+        entry = names, answers, np.zeros_like(answers)
+        self._published[(columns, horizon)] = entry
         self._asked.setdefault(columns, [set(), 0, False])[0].update(names)
-        return grid
+        return entry
 
     @staticmethod
     def _present(values: np.ndarray) -> np.ndarray:
@@ -295,6 +312,10 @@ class _Cells:
                 f"{self.known_at(name, period, position)}, after the issue time ({self._info.issue_time} "
                 f"{self._info.issue_timezone})."
             )
+        cells = self._value_cells.get((name, horizon))
+        if cells is None:
+            cells = self._value_cells[(name, horizon)] = np.zeros(values.shape, dtype=bool)
+        cells[period, position] = True
         value = values[period, position]
         return float(value) if values.dtype != object else value
 
@@ -550,6 +571,11 @@ class PredictorPlan:
                         hint = hint or info._weather_cutoff_hint(col)
                         out.setdefault(list_id, []).append(Violation(name, at, horizon, col, known, issue, hint=hint))
         return out
+
+    def read_cells(self) -> Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]]:
+        """What the function's answers depended on, for `leakage_probe`, until `release`: (column, horizon) -> the cells
+        [period, issue day] it read, and the column's cells."""
+        return {} if self._cells is None else self._cells.read_cells()
 
     def release(self) -> None:
         """Drop the cells read while planning: a loop over many models would otherwise keep them all."""

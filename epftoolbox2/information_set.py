@@ -968,6 +968,9 @@ class ProbeResult:
     perturbed: Dict[str, int]  # column -> number of perturbed cells
     unchecked: List[str]  # columns without a rule, left unperturbed
     missing: List[Tuple[int, int]] = field(default_factory=list)  # forecasts present in only one of the runs
+    # Column -> cells a predictor function read through `ctx` that hold another value in the perturbed frame. A forecast
+    # whose function read one is in `changed`, whichever list the noise happened to leave it with.
+    moved_reads: Dict[str, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -979,7 +982,8 @@ class ProbeResult:
                 f"Forecasts issued on {self.run_day} depend on values not known at issue time: "
                 f"{len(self.changed)} of {self.forecasts} changed (max |change| {self.max_abs_change:.6g}), "
                 f"e.g. (period, horizon) {self.changed[:10]}; forecasts present in only one run: {self.missing[:10]}. "
-                f"Perturbed cells per column: {self.perturbed}"
+                + (f"Read through ctx and moved: {self.moved_reads}. " if self.moved_reads else "")
+                + f"Perturbed cells per column: {self.perturbed}"
             )
 
 
@@ -1018,6 +1022,10 @@ def leakage_probe(
     `check_target_boundary` additionally perturbs `target` for every row on or after `run_day`, regardless
     of its own Availability rule: the model's own boundary (training targets end at D-1) is a deliberate,
     conservative choice that can be stricter than a column's factual publication time.
+
+    A predictor function of `ctx` is planned on each frame, so a value it reads can move its list. A cell it read that
+    differs between the frames counts as a change of the forecasts that read it, in `changed` and `moved_reads`, because
+    the noise may well leave a list where it was.
     """
     run_day = str(pd.Timestamp(run_day).date())
     target_from_issue = target if check_target_boundary else None
@@ -1028,27 +1036,30 @@ def leakage_probe(
     if rebuild is not None:
         base, perturbed = rebuild(data), rebuild(perturbed)
 
-    original = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set)
-    probed = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set)
+    original, read = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set)
+    probed, read_probed = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set)
     changed, max_abs_change, missing = _compare_forecasts(original, probed, atol)
+    read_by, moved_reads = _moved_reads(read, read_probed, atol)
     return ProbeResult(
         run_day=run_day,
         forecasts=len(original),
-        changed=changed,
+        changed=sorted({*changed, *read_by}),
         max_abs_change=max_abs_change,
         perturbed=counts,
         unchecked=unchecked,
         missing=missing,
+        moved_reads=moved_reads,
     )
 
 
 def _issue_day_forecasts(
     model: Any, frame: pd.DataFrame, run_day: str, target: str, horizon: int, freq: str, information_set: InformationSet
-) -> Dict[Tuple[int, int], float]:
-    """The model's forecasts issued on `run_day` from `frame`, by (period, horizon).
+) -> Tuple[Dict[Tuple[int, int], float], Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]]]:
+    """The model's forecasts issued on `run_day` from `frame`, by (period, horizon), and the cells a predictor function of
+    `ctx` read (see `PredictorPlan.read_cells`).
 
-    A predictor function of `ctx` is planned on this very frame, so a value it reads can move its list, and it answers
-    through the information set. The run itself gets none, so a late list isn't refused and the forecasts show it.
+    Such a function is planned on this very frame, so a value it reads can move its list, and it answers through the
+    information set. The run itself gets none, so a late list isn't refused and the forecasts show it.
     """
     m = model() if callable(model) and not hasattr(model, "run") else model
     plan_predictors = getattr(m, "_plan_predictors", None)
@@ -1056,8 +1067,41 @@ def _issue_day_forecasts(
     if plan_predictors is not None:
         plan = plan_predictors(frame, target, horizon, freq, information_set, run_day, run_day, warn_unpublished=False)
     extra = {} if plan is None else {"plan": plan}
+    read = {} if plan is None else plan.read_cells()  # the run lets go of them
     ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, horizon=horizon, freq=freq, **extra)
-    return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}
+    return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}, read
+
+
+def _moved_reads(
+    original: Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]],
+    other: Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]],
+    atol: float,
+) -> Tuple[List[Tuple[int, int]], Dict[str, int]]:
+    """The forecasts (period, horizon) that read a cell through `ctx` holding another value in the other frame, and how
+    many such cells each column has.
+
+    The forecasts alone can't show this. A function choosing its list by `ctx.value("x") > 0` keeps the list when the
+    probe's large positive noise lands on the side the value was already on, so its forecasts stay as they are on most
+    days though the choice depends on a value it can't know.
+    """
+    forecasts, counts = set(), {}
+    for (name, horizon), (cells, values) in original.items():
+        if (name, horizon) not in other:
+            continue
+        other_cells, other_values = other[(name, horizon)]
+        moved = cells & other_cells & _cells_differ(values, other_values, atol)
+        if moved.any():
+            forecasts.update((int(period), horizon) for period in np.nonzero(moved)[0])
+            counts[name] = counts.get(name, 0) + int(moved.sum())
+    return sorted(forecasts), counts
+
+
+def _cells_differ(a: np.ndarray, b: np.ndarray, atol: float) -> np.ndarray:
+    both_missing = pd.isna(a) & pd.isna(b)
+    if a.dtype == object or b.dtype == object:
+        return ~(both_missing | (a == b))
+    with np.errstate(invalid="ignore"):
+        return ~(both_missing | (a == b) | (np.abs(a - b) <= atol))
 
 
 def _compare_forecasts(
@@ -1130,8 +1174,8 @@ def positive_control(
         perturbed, counts, unchecked = perturb_recent(in_market_zone, run_day, information_set, freq, names, seed)
         perturbed.index = data.index
         perturbed = _with_training_data_of(base, rebuild(perturbed), run_day, target)
-    original = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set)
-    other = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set)
+    original, _ = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set)
+    other, _ = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set)
     moved, max_abs_change, _ = _compare_forecasts(original, other, atol)
     return ControlResult(
         run_day=run_day,
