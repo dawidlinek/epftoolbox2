@@ -200,8 +200,15 @@ only when the day's last slot is: 23:00 for hourly data and 23:45 for 15-minute 
 as on any other. The check and the probe judge it at that slot, not at the row's period, and the shifts after it
 pick the day, as for profile columns: `load_actual_day_max_d-1` is the maximum of D-1, and
 `load_actual_day_max_h-12` reads D-1's maximum on the rows before noon and D's from noon on, with the same boundary
-of 11:00 on the 25-hour day and 13:00 on the 23-hour day. An aggregate of a lag
-(`LagTransformer` before `DailyStatsTransformer`) keeps its lag: `load_actual_d-1_day_max` is also the maximum of D-1.
+of 11:00 on the 25-hour day and 13:00 on the 23-hour day.
+
+An aggregate of a lag (`LagTransformer` before `DailyStatsTransformer`) keeps its lag, so `load_actual_d-1_day_max` is
+also judged at the last slot of D-1. It is not the same column as `load_actual_day_max_d-1`, though. It summarises the
+lagged column over the rows of D, so across a DST switch it isn't the maximum of D-1: on the day after the spring
+switch the lag has no value for the skipped 02:00, the day is incomplete and the aggregate is NaN on all 24 rows, so
+all of that day's forecasts are skipped (and reported), and on the day after the autumn switch it leaves out the second
+02:00. Use `load_actual_day_max_d-1`, which lags the finished statistic and only misses its 02:00 row after the spring
+switch.
 
 An aggregate takes its rule as a profile does: a key in `rules=` that matches its own name first, then the whole
 resolution of the column it was built from. With the built-in rules alone `price_day_max` (the expert model's maximum

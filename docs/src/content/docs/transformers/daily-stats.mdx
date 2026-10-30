@@ -43,6 +43,10 @@ df = DailyStatsTransformer(columns="load_actual", stats=["max"]).transform(df)
 df = LagTransformer(columns="load_actual_day_max", lags=[1], freq="day").transform(df)  # load_actual_day_max_d-1
 ```
 
+Lag the statistic, as here, rather than its input. `load_actual_d-1_day_max` (`LagTransformer` first) summarises the
+lagged column over the rows of D, so on the day after the spring switch the skipped 02:00 makes that day incomplete,
+NaN on all 24 rows, and on the day after the autumn switch it leaves out the second 02:00.
+
 The [information set](/epftoolbox2/model-pipeline/information-set/#day-aggregates) judges these columns at the last
 slot of the day they aggregate, not at the row's period, by the rule of the column they were built from. With the
 built-in rule that `load_actual` is realised 1 h after its hour and an 11:45 issue, `load_actual_day_max` is known on
