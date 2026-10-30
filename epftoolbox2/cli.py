@@ -43,6 +43,9 @@ def cmd_report(args: argparse.Namespace) -> None:
     report = wf.report(allow_missing=args.allow_missing)
     counts = report.forecast_counts()
     console.print(counts.to_string(index=False))
+    choices = report.choices()
+    if not choices.empty:
+        console.print(choices.to_string(index=False), markup=False, highlight=False, soft_wrap=True)
 
 
 def cmd_data(args: argparse.Namespace) -> None:

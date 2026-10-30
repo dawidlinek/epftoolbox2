@@ -67,6 +67,20 @@ _PERIODS_PER_HOUR = {"1h": 1, "15min": 4}
 # Two-sided size of the `verdict` of `tests()`.
 _TEST_ALPHA = 0.05
 
+# The columns of `EvaluationReport.choices()`.
+CHOICE_COLUMNS = [
+    "ensemble",
+    "segment",
+    "chosen",
+    "k",
+    "validation_mae",
+    "validation_forecasts",
+    "validation_start",
+    "validation_end",
+    "test_start",
+    "test_end",
+]
+
 
 def metric_columns(table: pd.DataFrame) -> List[str]:
     """The columns of a table of `summary()`, `compute_all()` or `by_*()` that evaluators wrote, in table order."""
@@ -93,12 +107,14 @@ class EvaluationReport:
         evaluators: List[Evaluator],
         source_data: Optional[pd.DataFrame] = None,
         validation: Optional["EvaluationReport"] = None,
+        choices: Optional[Mapping[str, List[Dict[str, Any]]]] = None,
     ):
         self.evaluators = evaluators
         self.source_data = source_data
         self.refs: Dict[str, ModelResultRef] = {}
         self._read_frames: Dict[str, Tuple[tuple, pd.DataFrame]] = {}
         self._validation = validation
+        self._choices = dict(choices or {})
 
         validation_refs: Dict[str, ModelResultRef] = {}
         for name, v in results_or_refs.items():
@@ -125,8 +141,11 @@ class EvaluationReport:
                 f"These results are on different windows ({shown}): one report would compare models on different forecasts "
                 "whose roles differ. Build one report per window, from the runs with the same validation= and test=."
             )
-        if validation is None and self.window == TEST and validation_refs and len(validation_refs) == len(self.refs):
-            self._validation = EvaluationReport(validation_refs, evaluators, source_data=source_data)
+        expected = sum(not ref.test_only for ref in self.refs.values())
+        if validation is None and self.window == TEST and validation_refs and len(validation_refs) == expected:
+            self._validation = EvaluationReport(
+                validation_refs, evaluators, source_data=source_data, choices=self._choices
+            )
 
     @property
     def window(self) -> str:
@@ -308,7 +327,8 @@ class EvaluationReport:
                 "a daily series has one.",
                 stacklevel=2,
             )
-        return EvaluationReport(results, [e for e in self.evaluators if not isinstance(e, EconomicEvaluator)])
+        evaluators = [e for e in self.evaluators if not isinstance(e, EconomicEvaluator)]
+        return EvaluationReport(results, evaluators, choices=self._choices)
 
     def join(self, other: "EvaluationReport") -> "EvaluationReport":
         """A report with the models of both, for results of separate runs that are to be compared.
@@ -327,7 +347,7 @@ class EvaluationReport:
         """
         if not isinstance(other, EvaluationReport):
             raise TypeError(f"join() takes an EvaluationReport, got {type(other).__name__}")
-        clash = [name for name in other.refs if name in self.refs]
+        clash = [name for name in {**other.refs, **other._choices} if name in {**self.refs, **self._choices}]
         if clash:
             raise ValueError(f"Both reports have a model named {clash}: rename one before joining.")
         self._require_same_window(other)
@@ -339,6 +359,7 @@ class EvaluationReport:
             list(self.evaluators),
             source_data=self.source_data if self.source_data is not None else other.source_data,
             validation=validation,
+            choices={**self._choices, **other._choices},
         )
         joined._require_one_frequency("Joining reports")
         left, right = [_describe(e) for e in self.evaluators], [_describe(e) for e in other.evaluators]
@@ -833,6 +854,43 @@ class EvaluationReport:
         A report built from `save_dir` shows what the manifests hold, for every test period the results were run on.
         """
         return listing_frame({name: ref.availability_listing for name, ref in self.refs.items()})
+
+    def choices(self) -> pd.DataFrame:
+        """What each ensemble chose on validation, one row per ensemble and test period served. Empty, with the same columns,
+        when nothing chose anything: a plain average chooses nothing.
+
+        Columns: `ensemble`, `segment` (its place in `report.windows.segments`), `chosen` (the members kept, in member order),
+        `k`, `validation_mae` (of the average of `chosen`), `validation_forecasts` (how many it was scored on: the keys every
+        member holds with a finite prediction and actual, issued in the validation period for a day before the first test
+        issue day), `validation_start`, `validation_end`, and `test_start`, `test_end`, the test period served, which are
+        empty when no test period is known yet.
+
+        `df.attrs` holds, per ensemble and segment, `member_mae` (each member's MAE on those keys) and `k_mae` (with
+        `top="validation"`, the MAE of the average of the best k members). A report of either window shows the same table.
+        """
+        rows = []
+        member_mae: Dict[str, Dict[int, Dict[str, float]]] = {}
+        k_mae: Dict[str, Dict[int, Dict[str, float]]] = {}
+        for ensemble, chosen in self._choices.items():
+            for row in chosen:
+                test = row["test"] or (None, None)
+                rows.append(
+                    {
+                        "ensemble": ensemble,
+                        **{key: row[key] for key in ("segment", "chosen", "k")},
+                        **{key: row[key] for key in ("validation_mae", "validation_forecasts")},
+                        "validation_start": row["validation"][0],
+                        "validation_end": row["validation"][1],
+                        "test_start": test[0],
+                        "test_end": test[1],
+                    }
+                )
+                member_mae.setdefault(ensemble, {})[row["segment"]] = row["member_mae"]
+                if "k_mae" in row:
+                    k_mae.setdefault(ensemble, {})[row["segment"]] = row["k_mae"]
+        table = pd.DataFrame(rows, columns=CHOICE_COLUMNS)
+        table.attrs.update(member_mae=member_mae, k_mae=k_mae)
+        return table
 
     def _result_freqs(self) -> Dict[str, str]:
         """The frequency each model's results were produced at, for the models that have results.

@@ -24,6 +24,7 @@ class TerminalExporter(Exporter):
         if report.window != "test":
             console.print(f"\n[bold]The {report.window} window[/bold]")
         self._print_availability(console, report.availability())
+        self._print_choices(console, report.choices())
         for key in self.show:
             if key in self._SHOW_MAP:
                 title, fn = self._SHOW_MAP[key]
@@ -44,6 +45,19 @@ class TerminalExporter(Exporter):
             table.add_column(str(col), overflow="fold")  # a predictor's name is no use cut short
         for _, row in shown.iterrows():
             table.add_row(*[str(value) for value in row])
+        console.print(table)
+
+    def _print_choices(self, console: Console, choices) -> None:
+        """What was chosen on which days for which test period, whatever `show` asks for, if anything chose anything."""
+        if choices.empty:
+            return
+        console.print("\n[bold]Choices made on validation[/bold]")
+        shown = choices.assign(chosen=choices["chosen"].map(", ".join)).fillna("")
+        table = Table()
+        for col in shown.columns:
+            table.add_column(str(col), overflow="fold")  # a member's name is no use cut short
+        for _, row in shown.iterrows():
+            table.add_row(*[self._format(value) for value in row])
         console.print(table)
 
     def _df_to_table(self, df) -> Table:
