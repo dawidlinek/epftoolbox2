@@ -298,10 +298,11 @@ class BaseModel(ABC):
         Raises ValueError on a frequency mismatch, duplicate timestamps, reserved or colliding column names,
         a UTC index with existing day-lag (`_d-<k>`) columns, and missing or non-numeric predictors, and
         InformationSetError (a ValueError) when `information_set` is given and a predictor is not known at
-        issue time. `ModelPipeline` calls it for every model before running any.
+        issue time. `ModelPipeline` calls it for every model before running any. The row spacing is checked only on
+        the days this run can read (`_contract.read_days`), or on the whole frame without a test window.
         """
         self._set_freq(freq)
-        _contract.check_index(data, freq)
+        _contract.check_index(data, freq, _contract.read_days(test_start, test_end, self.training_window, horizon))
         _contract.check_timezone_with_day_lags(data)
         _contract.check_names(data, target, horizon)
         expanded = self._precompute_expanded_predictors(horizon)

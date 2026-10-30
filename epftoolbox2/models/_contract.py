@@ -6,8 +6,9 @@ in part of the frame (some periods trained on far fewer days), columns that
 collide with the model's own target or id columns, predictors that don't exist, and non-numeric predictors.
 """
 
+import datetime
 import re
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -43,12 +44,39 @@ def target_columns(target: str, horizon: int) -> List[str]:
     return [f"{target}_d+{h}" for h in range(1, horizon + 1)]
 
 
-def check_index(data: pd.DataFrame, freq: str) -> None:
+def read_days(test_start, test_end, training_window, horizon) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
+    """The first and last local day to check for a run, or None when they can't be told: check the whole frame.
+
+    For a test day D and horizon hz the worker reads the rows of days [D - training_window - hz, D], and a row on
+    day D holds its target from day D + hz, so nothing outside [test_start - training_window - horizon,
+    test_end + horizon] reaches a fit or an `actual`. The result is one day wider on each side, so an error in
+    that reasoning ends in a refusal rather than in unchecked rows being read.
+    """
+    if not (_is_int(training_window) and _is_int(horizon)):
+        return None
+    try:
+        first = pd.Timestamp(datetime.date.fromisoformat(test_start))
+        last = pd.Timestamp(datetime.date.fromisoformat(test_end))
+        if last < first:
+            return None
+        return (
+            first - pd.Timedelta(days=int(training_window) + int(horizon) + 1),
+            last + pd.Timedelta(days=int(horizon) + 1),
+        )
+    except (TypeError, ValueError, OverflowError):  # the run reports dates it can't read
+        return None
+
+
+def check_index(data: pd.DataFrame, freq: str, days: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None) -> None:
     """Raise unless the index is a DatetimeIndex with one row per (local day, period) at resolution `freq`.
 
     The only allowed repeat is the hour that occurs twice when clocks fall back (same wall-clock time,
     different UTC offset). Rows must be `freq` apart throughout, except across gaps (see `_check_spacing`):
     a frame that is 15-minute only in part would otherwise train some periods on far fewer days than others.
+
+    `days` (see `read_days`) limits the spacing checks to those local days, both included, because rows no run
+    can read can't harm it: hourly history before a switch to 15-minute data doesn't block a run inside the
+    15-minute part. Duplicates and slots with several rows are looked for in the whole frame.
     """
     if freq not in _FREQ_STEPS:
         raise ValueError(f"Unsupported freq '{freq}'. Supported: {list(_FREQ_STEPS)}")
@@ -67,16 +95,20 @@ def check_index(data: pd.DataFrame, freq: str) -> None:
 
     step = _FREQ_STEPS[freq]
     ordered = index.sort_values()
+    if days is not None:
+        wall = wall_clock(ordered)
+        ordered = ordered[(wall >= days[0]) & (wall < days[1] + pd.Timedelta(days=1))]
     # Elapsed time for a tz-aware index (asi8 is UTC), so DST switches don't make the spacing irregular.
     spacings = np.diff(ordered.as_unit("ns").asi8)
-    values, counts = np.unique(spacings, return_counts=True)
-    common = pd.Timedelta(int(values[np.argmax(counts)]), unit="ns")
-    if common != step:
-        raise ValueError(
-            f"Data rows are most commonly {_fmt_step(common)} apart, but the model runs with freq='{freq}'. "
-            f"Resample the data to {freq} (ResampleTransformer) or pass the matching freq "
-            f"({_suggest_freq(common)})."
-        )
+    if len(spacings):
+        values, counts = np.unique(spacings, return_counts=True)
+        common = pd.Timedelta(int(values[np.argmax(counts)]), unit="ns")
+        if common != step:
+            raise ValueError(
+                f"Data rows are most commonly {_fmt_step(common)} apart, but the model runs with freq='{freq}'. "
+                f"Resample the data to {freq} (ResampleTransformer) or pass the matching freq "
+                f"({_suggest_freq(common)}).{_checked_days(days)}"
+            )
 
     local = wall_clock(index)
     frame = pd.DataFrame({"date": local.normalize().asi8, "period": period_index(index, freq), "wall": local.asi8})
@@ -90,10 +122,22 @@ def check_index(data: pd.DataFrame, freq: str) -> None:
             "one row per day and period, so extra rows would leak the issue day's targets into training. "
             f"Resample the data to {freq} first."
         )
-    _check_spacing(ordered, spacings, freq)
+    if len(spacings):
+        _check_spacing(ordered, spacings, freq, days)
 
 
-def _check_spacing(ordered: pd.DatetimeIndex, spacings: np.ndarray, freq: str) -> None:
+def _checked_days(days: Optional[Tuple[pd.Timestamp, pd.Timestamp]]) -> str:
+    if days is None:
+        return ""
+    return f" Only the days this run can read are checked, {days[0].date()} to {days[1].date()}."
+
+
+def _check_spacing(
+    ordered: pd.DatetimeIndex,
+    spacings: np.ndarray,
+    freq: str,
+    days: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None,
+) -> None:
     """Raise unless the rows are `freq` apart throughout, with gaps of whole steps in between.
 
     `spacings` are the elapsed nanoseconds between consecutive rows of the sorted index `ordered`. Gaps (missing
@@ -110,7 +154,7 @@ def _check_spacing(ordered: pd.DatetimeIndex, spacings: np.ndarray, freq: str) -
             f"Rows {ordered[i]} and {ordered[i + 1]} are {_fmt_step(pd.Timedelta(int(spacings[i]), unit='ns'))} "
             f"apart, not a whole number of {freq} steps ({len(off_grid)} such spacing(s)). Some rows are off the "
             f"{freq} grid (e.g. a :30 row in hourly data), so a period would mix different times of day. Bring the "
-            f"data to one {freq} grid first, e.g. ResampleTransformer(freq='{freq}')."
+            f"data to one {freq} grid first, e.g. ResampleTransformer(freq='{freq}').{_checked_days(days)}"
         )
 
     on_step = spacings == step
@@ -137,7 +181,8 @@ def _check_spacing(ordered: pd.DatetimeIndex, spacings: np.ndarray, freq: str) -
         + (f", and so are {more} rows in {len(stretches) - 1} later stretch(es)" if more else "")
         + ". The periods without rows there would train on fewer days than the others. Bring the whole frame to "
         f"{freq} first, e.g. ResampleTransformer(freq='{freq}') step-fills the coarser rows, or start the data "
-        f"where it is at {freq}."
+        f"where it is at {freq}.{_checked_days(days)}"
+        + (" A training window and test period that stay clear of these rows also work." if days else "")
     )
 
 
@@ -257,6 +302,10 @@ def missing_test_rows(index: pd.DatetimeIndex, freq: str, days: Iterable) -> Lis
     stamps = pd.DatetimeIndex([day + p * step for p, day in absent])
     localized = stamps.tz_localize(index.tz, nonexistent="NaT", ambiguous=np.ones(len(stamps), dtype=bool))
     return [slot for slot, exists in zip(absent, ~localized.isna()) if exists]
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, (int, np.integer)) and not isinstance(value, bool)
 
 
 def _is_numeric(series: pd.Series) -> bool:
