@@ -1,6 +1,7 @@
 """`epf data` → CSV → `epf model` must give the same forecasts as running in-process (review H6)."""
 
 import json
+import sys
 
 import numpy as np
 import pandas as pd
@@ -15,6 +16,7 @@ from epftoolbox2.data.transformers import (
     ResampleTransformer,
     TimezoneTransformer,
 )
+from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.pipelines.data_pipeline import DataPipeline
@@ -279,3 +281,110 @@ def test_tui_asks_for_the_zone_of_a_csv_without_a_zone_name(tmp_path, local_data
     assert len(asked) == 1
     assert str(loaded.index.tz) == "Europe/Warsaw"
     assert loaded.index.equals(local_data.index)
+
+
+# ---------------------------------------------------------------------------
+# epf verify
+# ---------------------------------------------------------------------------
+
+VERIFY_RULES = {
+    "load": Availability.published("10:00", 7),
+    "wind": Availability.published("10:00", 7),
+    "load_actual": Availability.realised("1h"),
+    "is_weekend": Availability.static(),
+    "is_weekday": Availability.static(),
+}
+
+
+@pytest.fixture
+def verify_files(tmp_path, local_data):
+    """Saves the data once and returns a function that saves a pipeline of one model and gives its `epf verify` argv."""
+    data_path = tmp_path / "data.csv"
+    save_frame_csv(local_data.assign(load_actual=local_data["load"]), data_path)
+
+    def argv(predictors, *extra, information_set=None, name="OLS"):
+        yaml_path = tmp_path / "mp.yaml"
+        pipeline = ModelPipeline(information_set=information_set or InformationSet(rules=VERIFY_RULES))
+        pipeline.add_model(OLSModel(predictors, training_window=45, name=name)).save(yaml_path)
+        return ["verify", str(yaml_path), "--data", str(data_path), "--test-start", "2023-03-01", "--test-end"] + [
+            "2023-03-20",
+            "--days",
+            "1",
+            *extra,
+        ]
+
+    return argv
+
+
+def exit_code(monkeypatch, argv):
+    monkeypatch.setattr(sys, "argv", ["epf", *argv])
+    try:
+        cli.main()
+    except SystemExit as stop:
+        return stop.code
+    return 0
+
+
+def test_epf_verify_exits_0_when_the_pipeline_is_clean(monkeypatch, capsys, verify_files):
+    assert exit_code(monkeypatch, verify_files(MODEL_PREDICTORS)) == 0
+    out = capsys.readouterr().out
+    assert "control moved" in out
+    assert "Verification passed" in out
+
+
+def test_epf_verify_exits_1_on_a_leak(monkeypatch, capsys, verify_files):
+    assert exit_code(monkeypatch, verify_files(PREDICTORS + ["load_actual"])) == 1
+    out = capsys.readouterr().out
+    assert "OLS: leak on" in out
+    assert "(period, horizon) [(10, 1)" in out
+    assert "Verification failed" in out
+
+
+def test_epf_verify_exits_1_when_inconclusive_unless_the_control_is_skipped(monkeypatch, capsys, verify_files):
+    calendar = ["is_weekend_d+{horizon}", "is_weekday_d+{horizon}"]
+    assert exit_code(monkeypatch, verify_files(calendar)) == 1
+    assert "inconclusive" in capsys.readouterr().out
+
+    assert exit_code(monkeypatch, verify_files(calendar, "--no-positive-control")) == 0
+
+
+def test_epf_verify_needs_an_information_set_and_takes_one_from_the_flags(monkeypatch, capsys, tmp_path, local_data):
+    data_path = tmp_path / "data.csv"
+    save_frame_csv(local_data, data_path)
+    yaml_path = tmp_path / "mp.yaml"
+    ModelPipeline().add_model(OLSModel(["price_d-1"], training_window=45, name="OLS")).save(yaml_path)
+    argv = [
+        "verify",
+        str(yaml_path),
+        "--data",
+        str(data_path),
+        "--test-start",
+        "2023-03-01",
+        "--test-end",
+        "2023-03-20",
+    ]
+    argv += ["--days", "1"]
+
+    assert exit_code(monkeypatch, argv) == 1
+    assert "needs to know when forecasts are issued" in capsys.readouterr().out
+
+    # The default rules cover the model's columns; the data's other columns have no rule and it doesn't use them.
+    assert exit_code(monkeypatch, [*argv, "--issue-time", "11:45", "--issue-timezone", "Europe/Warsaw"]) == 0
+
+
+def test_epf_verify_passes_its_options_on(monkeypatch, capsys, verify_files):
+    argv = verify_files(MODEL_PREDICTORS, "--horizon", "2", "--seed", "3", "--models", "OLS")
+    assert exit_code(monkeypatch, argv) == 0
+    assert " 48 " in capsys.readouterr().out  # 24 forecasts of each of 2 horizons
+
+    assert exit_code(monkeypatch, verify_files(MODEL_PREDICTORS, "--models", "Nope")) == 1
+    assert "Unknown model(s)" in capsys.readouterr().out
+
+    assert exit_code(monkeypatch, verify_files(MODEL_PREDICTORS, "--days", "0")) == 1
+
+
+def test_epf_verify_exits_1_without_its_data(monkeypatch, capsys, verify_files):
+    argv = verify_files(MODEL_PREDICTORS)
+    argv[argv.index("--data") + 1] = "no_such_file.csv"
+    assert exit_code(monkeypatch, argv) == 1
+    assert "Data file not found" in capsys.readouterr().out
