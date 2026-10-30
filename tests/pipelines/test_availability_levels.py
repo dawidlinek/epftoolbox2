@@ -368,6 +368,19 @@ def test_a_model_run_directly_refuses_by_default(df):
         ols().run(df, *TEST, horizon=1, availability="maybe")
 
 
+def test_the_live_examples_fixture_sees_a_clean_check_at_warn_and_at_raise(df, information_set_checks):
+    """`tests/test_examples.py` shows "the check ran and passed" with it, and most examples now run at the default."""
+    from tests.live import assert_information_set_checked
+
+    pipeline(ols(name="default")).run(df, *TEST, horizon=1)
+    pipeline(ols(name="strict"), level="raise").run(df, *TEST, horizon=1)
+    assert_information_set_checked(information_set_checks, ["default", "strict"])
+
+    information_set_checks.clear()
+    pipeline(ols(PREDICTORS + ["observed"], name="late")).run(df, *TEST, horizon=1)
+    assert information_set_checks == []
+
+
 def test_the_terminal_shows_it_first(df, capsys):
     a_pipeline = (
         pipeline(ols(PREDICTORS + ["observed"]))
