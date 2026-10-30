@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 
+from ..evaluators._compare import ModelFrames
 from ..evaluators.base import FORECAST_KEYS, Evaluator
 from .ref import ModelResultRef
 
@@ -24,6 +25,14 @@ GROUP_CONFIGS: List[Tuple[str, List[str]]] = [
 # which varies with the number of processes, scheduling and resuming, and float sums depend on the order of their
 # terms: a metric over the rows in file order can differ in the last bit between two runs of the same study.
 RECORD_ORDER = ("run_date", "target_date", "horizon", "hour", "prediction", "actual", "day_in_test")
+
+# The columns of `summary()` and of the grouped tables that no evaluator wrote.
+_TABLE_KEYS = {"model", "forecasts", *(key for _, keys in GROUP_CONFIGS for key in keys)}
+
+
+def metric_columns(table: pd.DataFrame) -> List[str]:
+    """The columns of a table of `summary()`, `compute_all()` or `by_*()` that evaluators wrote, in table order."""
+    return [c for c in table.columns if c not in _TABLE_KEYS]
 
 
 def _in_record_order(df: pd.DataFrame, first: Tuple[str, ...] = ()) -> pd.DataFrame:
@@ -138,8 +147,27 @@ class EvaluationReport:
             yield name, df
             del df, rows
 
-    def _apply_evaluators(self, df: pd.DataFrame, **kwargs) -> Dict[str, float]:
-        return {ev.name: ev.compute(df, **kwargs) for ev in self.evaluators}
+    def _apply_evaluators(
+        self, model_dfs: Mapping[str, pd.DataFrame], group_keys: Sequence[str] = ()
+    ) -> Dict[str, Dict[str, Any]]:
+        """`{model: {column: value}}` for one group: each evaluator runs once, on every model's frame of that group."""
+        frames = ModelFrames(model_dfs, group_keys)
+        columns: Dict[str, Dict[str, Any]] = {name: {} for name in model_dfs}
+        written_by: Dict[str, Evaluator] = {}
+        for evaluator in self.evaluators:
+            for name, value in evaluator.compute_group(frames).items():
+                if not isinstance(value, Mapping):
+                    columns[name][evaluator.name] = value
+                    continue
+                for key, part in value.items():
+                    column = evaluator.column_name(key)
+                    if written_by.setdefault(column, evaluator) is not evaluator:
+                        raise ValueError(
+                            f"Two evaluators write the column {column!r}. Keep one in the pipeline; for a second "
+                            "benchmark call report.tests(benchmark=...)."
+                        )
+                    columns[name][column] = part
+        return columns
 
     def _iter_ref(self, ref: ModelResultRef, cols: List[str] = None) -> Iterator[Dict]:
         # A resumed JSONL can hold rows from an earlier run with a wider or different test window (its
@@ -209,10 +237,10 @@ class EvaluationReport:
         return _in_record_order(pd.DataFrame(frame))
 
     def _summary_table(self, model_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-        rows = []
-        for name, df in model_dfs.items():
-            rows.append({"model": name, "forecasts": len(df), **self._apply_evaluators(df, model_dfs=model_dfs)})
-        return pd.DataFrame(rows)
+        metrics = self._apply_evaluators(model_dfs)
+        return pd.DataFrame(
+            [{"model": name, "forecasts": len(df), **metrics.get(name, {})} for name, df in model_dfs.items()]
+        )
 
     def _grouped_table(self, model_dfs: Dict[str, pd.DataFrame], group_keys: List[str]) -> pd.DataFrame:
         """One row per (group, model): each model's evaluators run on its own rows of the group, with every
@@ -221,10 +249,9 @@ class EvaluationReport:
         rows = []
         for key in sorted({k for g in groups.values() for k in g}):
             group_dfs = {name: g[key] for name, g in groups.items() if key in g}
-            for name, df in group_dfs.items():
-                row = {"model": name, **dict(zip(group_keys, key))}
-                row.update(self._apply_evaluators(df, model_dfs=group_dfs))
-                rows.append(row)
+            metrics = self._apply_evaluators(group_dfs, group_keys)
+            for name in group_dfs:
+                rows.append({"model": name, **dict(zip(group_keys, key)), **metrics.get(name, {})})
         return pd.DataFrame(rows)
 
     @staticmethod
