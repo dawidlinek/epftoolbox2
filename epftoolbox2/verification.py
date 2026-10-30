@@ -133,7 +133,8 @@ class VerifyReport:
                         f"{model}: leak on {check.run_day}: {len(probe.changed)} of {probe.forecasts} forecasts depend "
                         f"on values not known at issue time (max |change| {probe.max_abs_change:.6g}), e.g. (period, "
                         f"horizon) {probe.changed[:_EXAMPLES]}; in only one run: {probe.missing[:_EXAMPLES]}"
-                        + (f"; read through ctx and moved: {probe.moved_reads}" if probe.moved_reads else ""),
+                        + (f"; read through ctx and moved: {probe.moved_reads}" if probe.moved_reads else "")
+                        + (f"; read through ctx though known later: {probe.late_reads}" if probe.late_reads else ""),
                     )
                 )
         found += [(INCONCLUSIVE, f"{model}: inconclusive: {line}") for line in _blind_spots(checks)]
@@ -217,11 +218,15 @@ def verify_model(
     control: bool = True,
     rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
     test_period: Optional[Tuple[Any, Any]] = None,
+    availability: str = "raise",
 ) -> List[IssueDayCheck]:
     """Probe (and control) one model on each of `run_days`. The model itself is never run, only copies of it.
 
     `test_period` is the period `run_days` were sampled from. A fixed list reads the same columns on every day, but a
     predictor function may use a column on a few days only, and an input that no sampled day reads is a blind spot.
+
+    `availability` is the level a predictor function is planned at (see `leakage_probe`). The boundary is the same at every
+    level: a late input is a leak whether the pipeline would list it or refuse it.
     """
 
     def make_model():
@@ -233,7 +238,14 @@ def verify_model(
     checked = make_model()
     # A predictor function's inputs are the lists it returns on these days, and whatever it reads to choose them.
     plan = checked._plan_predictors(
-        built, target, horizon, freq, information_set, issue_days=run_days, warn_unpublished=False
+        built,
+        target,
+        horizon,
+        freq,
+        information_set,
+        issue_days=run_days,
+        warn_unpublished=False,
+        availability=availability,
     )
     checked._check_inputs(built, target, horizon, freq, plan=plan)
     used = sorted({*checked._used_predictors, *plan.queried}) if plan is not None else list(checked._used_predictors)
@@ -241,7 +253,7 @@ def verify_model(
     if plan is not None and test_period is not None:
         start, end = resolve_date(test_period[0]), resolve_date(test_period[1])
         whole = checked._plan_predictors(
-            built, target, horizon, freq, information_set, start, end, warn_unpublished=False
+            built, target, horizon, freq, information_set, start, end, warn_unpublished=False, availability=availability
         )
         not_sampled = sorted(({name for names in whole.lists for name in names} | whole.queried) - set(used))
 
@@ -267,7 +279,7 @@ def verify_model(
         return frame if label == target else frame.assign(**{label: frame[target]})
 
     labelled = None if features is None else (lambda frame: with_label(features(frame)))
-    common = dict(horizon=horizon, freq=freq, seed=seed)
+    common = dict(horizon=horizon, freq=freq, seed=seed, availability=availability)
 
     checks = []
     for run_day in run_days:
@@ -363,4 +375,5 @@ def _merge(probe: ProbeResult, other: ProbeResult) -> ProbeResult:
         unchecked=sorted({*probe.unchecked, *other.unchecked}),
         missing=sorted({*probe.missing, *other.missing}),
         moved_reads={**other.moved_reads, **probe.moved_reads},
+        late_reads={**other.late_reads, **probe.late_reads},
     )

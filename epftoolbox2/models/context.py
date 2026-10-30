@@ -10,6 +10,12 @@ the information-set check, the manifest and the records.
 row (issue day D, this period), and only cells the information set says are known at the issue time. They answer through
 the same availability path as `InformationSet.check` (`_IssueClock`), so a profile column is judged at its slot, a day
 aggregate at the last slot of its day, and either through the column it was built from.
+
+`availability` is the pipeline's level. `published` answers alike at every level, so the plan and the forecasts of a model
+that passes "raise" are the same in "warn" and "none"; only what happens around a value that can't be vouched for differs.
+At "raise" `value` of a late column raises, and either method raises on a column without a rule. At "warn" they answer (a
+column without a rule counts as known), and `PredictorPlan.listing` lists what they read. At "none" they answer and nothing
+is listed.
 """
 
 from __future__ import annotations
@@ -30,17 +36,22 @@ import pandas as pd
 from ..information_set import (
     _LATE_ADVICE,
     _STEP_MINUTES,
+    ROLE_PUBLISHED,
+    ROLE_TARGET,
+    ROLE_VALUE,
     InformationSet,
     InformationSetError,
     ResolvedColumn,
     Violation,
     _fmt_minute,
 )
+from ..results.availability import listing_rows, sort_rows
 from ._contract import period_index, wall_clock
 
 _HORIZON = "{horizon}"
 # How many lists an InformationSetError spells out; a late column often sits in every list.
 _LISTS_SHOWN = 5
+_STEP_PERIODS = {freq: 1440 // minutes for freq, minutes in _STEP_MINUTES.items()}
 
 
 @dataclass(frozen=True)
@@ -174,11 +185,17 @@ class _Cells:
     """
 
     def __init__(
-        self, data: pd.DataFrame, information_set: Optional[InformationSet], freq: str, issue_days: Sequence[Any]
+        self,
+        data: pd.DataFrame,
+        information_set: Optional[InformationSet],
+        freq: str,
+        issue_days: Sequence[Any],
+        availability: str = "raise",
     ):
         index = data.index
         self._data = data
         self._info = information_set
+        self._level = availability
         self._step = _STEP_MINUTES[freq]
         self.freq = freq
         self.periods = 1440 // self._step
@@ -260,14 +277,16 @@ class _Cells:
         if grid is None:
             if self._info is None:
                 grid = np.ones((self.periods, self._n_days), dtype=bool)
-            else:
-                if self.column(name).rule is None:
-                    # Whatever `unknown` says about a predictor: what can't be told to be known isn't handed out.
-                    raise InformationSetError(
-                        f"ctx: no availability rule for '{self.column(name).series}' (column '{name}'), so it can't be "
-                        "told whether its value is known at the issue time. Declare one with InformationSet(rules={...})."
-                    )
+            elif self.column(name).rule is not None:
                 grid = self.available(name) <= self._clock.issue
+            elif self._level == "raise":
+                # Whatever `unknown` says about a predictor: what can't be told to be known isn't handed out.
+                raise InformationSetError(
+                    f"ctx: no availability rule for '{self.column(name).series}' (column '{name}'), so it can't be "
+                    "told whether its value is known at the issue time. Declare one with InformationSet(rules={...})."
+                )
+            else:
+                grid = np.ones((self.periods, self._n_days), dtype=bool)  # listed as "no rule" at the level "warn"
             self._known[name] = grid
         return grid
 
@@ -306,7 +325,7 @@ class _Cells:
     def value(self, column: str, horizon: int, period: int, position: int, issue_day: datetime.date) -> Any:
         name = _expand(column, horizon)
         values = self.values(name)
-        if not self.known(name)[period, position]:
+        if self._level == "raise" and not self.known(name)[period, position]:
             raise InformationSetError(
                 f"ctx.value('{name}') on issue day {issue_day}, period {period}: by its availability rule it is known "
                 f"{self.known_at(name, period, position)}, after the issue time ({self._info.issue_time} "
@@ -318,6 +337,42 @@ class _Cells:
         cells[period, position] = True
         value = values[period, position]
         return float(value) if values.dtype != object else value
+
+    def late_reads(self) -> List[Violation]:
+        """Each (column, period, horizon) whose `value` was read though its rule puts it after the issue time."""
+        out = []
+        if self._info is None:
+            return out
+        for (name, horizon), read in self._value_cells.items():
+            col = self.column(name)
+            if col.rule is None:
+                continue
+            avail = self.available(name)
+            late = self._info._late_periods(col, self._periods, avail, self._clock, self._step, used=read)
+            for period, known, issue, hint in late:
+                out.append(Violation(name, period, horizon, col, known, issue, ROLE_VALUE, hint))
+        return out
+
+    def no_rule_reads(self) -> List[Violation]:
+        """Each (column, period, horizon) read through `ctx` that has no rule."""
+        out = []
+        if self._info is None:
+            return out
+        for (name, horizon), read in self._value_cells.items():
+            out.extend(self._without_rule(name, horizon, read, ROLE_VALUE))
+        for (_, horizon), (names, _, asked) in self._published.items():
+            for name in names:
+                out.extend(self._without_rule(name, horizon, asked, ROLE_PUBLISHED))
+        return out
+
+    def _without_rule(self, name: str, horizon: int, cells: np.ndarray, role: str) -> List[Violation]:
+        col = self.column(name)
+        if col.rule is not None:
+            return []
+        return [
+            Violation(name, int(period), horizon, col, float("nan"), float("nan"), role)
+            for period in np.flatnonzero(cells.any(axis=1))
+        ]
 
     def never_published(self) -> List[Tuple[Any, int, str]]:
         """Each `published` argument that never answered True: (argument, times asked, why, as far as can be told)."""
@@ -387,6 +442,9 @@ class PredictorContext:
         `columns` is one name or several, with `{horizon}` expanded. A column that isn't in the frame raises `KeyError`.
         Without an information set availability isn't checked, only NaN. In a backtest "not NaN" is the archive's state,
         not the server's at the issue time: a value that came late and was backfilled reads as published.
+
+        The answer is the same at every `availability` level. A column without a rule raises `InformationSetError` at
+        "raise"; at "warn" and "none" only NaN counts for it, and "warn" lists it as "no rule".
         """
         key = columns if isinstance(columns, str) else tuple(columns)
         return self._cells.published(key, self.horizon, self.period, self._position)
@@ -394,8 +452,9 @@ class PredictorContext:
     def value(self, column: str) -> Any:
         """The value at this forecast's row (D, this period), NaN if missing.
 
-        Raises `InformationSetError` if the information set says it is known only after the issue time, and `KeyError`
-        for a column that isn't in the frame. Without an information set it returns the value.
+        With `availability="raise"` it raises `InformationSetError` if the information set says it is known only after
+        the issue time or has no rule for it. With "warn" it returns the value and the column is listed in the report, and
+        with "none", or without an information set, it returns the value. A column that isn't in the frame raises `KeyError`.
         """
         return self._cells.value(column, self.horizon, self.period, self._position, self.issue_day)
 
@@ -425,6 +484,7 @@ class PredictorPlan:
         queried: The columns the function read through `ctx`.
         calls: How many times the function was called.
         seconds: How long planning took.
+        availability: The level it was planned at, which decides what `ctx` does around a value it can't vouch for.
     """
 
     function: Any
@@ -442,6 +502,8 @@ class PredictorPlan:
     seconds: float = 0.0
     _cells: Optional[_Cells] = field(default=None, repr=False)
     _checked: bool = field(default=False, repr=False)
+    availability: str = "raise"
+    _listing: Optional[List[Dict[str, Any]]] = field(default=None, repr=False)
     _positions: Dict[str, int] = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -512,6 +574,27 @@ class PredictorPlan:
             entries[list_id]["binary_masks"][f"{period}-{horizon}"] = mask_digest(mask)
         return entries
 
+    def _scan(self, target: str, pairs: Dict[Tuple[int, int], List[str]]):
+        """The cells, the uses of `target` known after the issue time, the columns without a rule, and the names of the
+        lists whose value is known after the issue time on some planned forecast or other.
+
+        Availability is computed once per distinct column name, whatever the number of lists.
+        """
+        info = self.information_set
+        cells = self._cells or _Cells(self.data, info, self.freq, self.issue_days, self.availability)
+        first, last = self.issue_days[0].isoformat(), self.issue_days[-1].isoformat()
+        target_violations, unknown = info.violations(pairs, target, self.freq, self.data.index, first, last)
+        late_names: List[str] = []
+        no_rule: List[str] = []
+        for name in dict.fromkeys(name for names in self.lists for name in names):
+            col = cells.column(name)
+            if col.rule is None:
+                no_rule.append(name)
+                unknown.add(col.series)
+            elif (cells.available(name) > cells._clock.issue).any():
+                late_names.append(name)
+        return cells, target_violations, unknown, late_names, no_rule
+
     def check(self, target: str, model_name: str) -> None:
         """Raise `InformationSetError` if a forecast reads a value not known at its issue time, or if the newest training
         target isn't known then.
@@ -523,18 +606,8 @@ class PredictorPlan:
         if self._checked or not self.issue_days:
             return
         info = self.information_set
-        cells = self._cells or _Cells(self.data, info, self.freq, self.issue_days)
-        first, last = self.issue_days[0].isoformat(), self.issue_days[-1].isoformat()
-        boundary = {(period, 1): [] for period in range(cells.periods)}
-        target_violations, unknown = info.violations(boundary, target, self.freq, self.data.index, first, last)
-
-        late_names: List[str] = []
-        for name in dict.fromkeys(name for names in self.lists for name in names):
-            col = cells.column(name)
-            if col.rule is None:
-                unknown.add(col.series)
-            elif (cells.available(name) > cells._clock.issue).any():
-                late_names.append(name)
+        boundary = {(period, 1): [] for period in range(_STEP_PERIODS[self.freq])}
+        cells, target_violations, unknown, late_names, _ = self._scan(target, boundary)
         info._report_unknown(unknown, model_name)
         if target_violations:
             raise InformationSetError(info._format(target_violations, model_name))
@@ -549,6 +622,52 @@ class PredictorPlan:
             raise InformationSetError("\n".join([*parts, _LATE_ADVICE]))
         info._log_assumptions(model_name)
         self._checked = True
+
+    def listing(self, target: str, model_name: str = "Model") -> List[Dict[str, Any]]:
+        """What `check` refuses, and every input without a rule, per list, as the rows of `availability="warn"`.
+
+        Besides the lists it holds what the function only read: a `value` known after the issue time, and any column
+        without a rule read through `ctx`. A column of a data source on an index in another zone still raises. Built once,
+        so a run reuses what `ModelPipeline` found before any model ran.
+        """
+        if self._listing is not None:
+            return self._listing
+        if self.information_set is None or not self.issue_days:
+            self._listing = []
+            return self._listing
+        pairs = {(period, hz): [] for period, hz in self.assignment}
+        cells, target_uses, _, late_names, no_rule = self._scan(target, pairs)
+        col = cells.column(target)
+        if col.rule is None:
+            target_uses = [Violation(target, p, h, col, float("nan"), float("nan"), ROLE_TARGET) for p, h in pairs]
+        rows = listing_rows(target_uses)
+        by_list = self._late_uses(late_names, cells)
+        pairs_of_list = self._pairs_of_lists()
+        for list_id, list_hash in enumerate(self.hashes):
+            uses = list(by_list.get(list_id, []))
+            names = set(self.lists[list_id])
+            for name in no_rule:
+                if name in names:
+                    col = cells.column(name)
+                    nan = float("nan")
+                    uses.extend(Violation(name, p, h, col, nan, nan) for p, h in pairs_of_list[list_id])
+            rows += listing_rows(uses, list_hash)
+        rows += listing_rows([*cells.late_reads(), *cells.no_rule_reads()])
+        self.information_set._log_assumptions(model_name)
+        self._listing = sort_rows(rows)
+        return self._listing
+
+    def _pairs_of_lists(self) -> Dict[int, List[Tuple[int, int]]]:
+        """List id -> the (period, horizon) pairs that use it."""
+        out: Dict[int, List[Tuple[int, int]]] = {list_id: [] for list_id in range(len(self.lists))}
+        for pair, ids in self.assignment.items():
+            for list_id in np.unique(ids).tolist():
+                out[list_id].append(pair)
+        return out
+
+    def late_reads(self) -> List[Violation]:
+        """The `value` reads of cells known only after the issue time, for `leakage_probe`, until `release`."""
+        return [] if self._cells is None else self._cells.late_reads()
 
     def _late_uses(self, late_names: List[str], cells: _Cells) -> Dict[int, List[Violation]]:
         """List id -> its uses of values known after the issue time, on the issue day each is latest."""
@@ -614,13 +733,15 @@ def build_plan(
     freq: str,
     information_set: Optional[InformationSet] = None,
     warn_unpublished: bool = True,
+    availability: str = "raise",
 ) -> PredictorPlan:
     """Evaluate `fn` for every planned forecast. `warn_unpublished` warns for each `published()` argument that was never
-    True over these days, which is meaningless for a sample of days: a wrong rule would silently disable an input."""
+    True over these days, which is meaningless for a sample of days: a wrong rule would silently disable an input.
+    `availability` is the level `ctx` answers at (see the module docstring)."""
     started = time.perf_counter()
     days = list(issue_days)
-    cells = _Cells(data, information_set, freq, days)
-    plan = PredictorPlan(fn, data, information_set, days, horizon, freq, _cells=cells)
+    cells = _Cells(data, information_set, freq, days, availability)
+    plan = PredictorPlan(fn, data, information_set, days, horizon, freq, _cells=cells, availability=availability)
     horizons = range(1, horizon + 1)
     periods = range(cells.periods)
     for hz in horizons:
