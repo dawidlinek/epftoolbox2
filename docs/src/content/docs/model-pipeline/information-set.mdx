@@ -70,7 +70,7 @@ one calendar day back. There is no built-in default rule for weather columns, a 
 name alone doesn't say whether it's a forecast or an observed value. A `DataPipeline`'s sources refine the
 check: `with_source_rules()` (called automatically by `Workflow`) teaches it about a `CalendarSource(prefix=...)`,
 overrides the default week-ahead rule for an `EntsoeSource`'s own columns, and assigns a rule to exactly the
-columns an `OpenMeteoSource` emits:
+columns an `OpenMeteoSource` or an `EpftoolboxBenchmarkSource` emits:
 
 - An `EntsoeSource` with `"load"` in `type` gets its own `load_forecast_daily_min`/`_max` rule (prefixed the
   same way as its other columns), evaluated in the source's own bound market zone (`EntsoeSource._daily_zone`)
@@ -78,6 +78,9 @@ columns an `OpenMeteoSource` emits:
   neighbouring area combined into another market's `DataPipeline` (e.g. `EntsoeSource("FI", ..., prefix="fi")`
   inside `DataPipeline(timezone="Europe/Warsaw")`) is checked in the market's zone, not Finland's own, matching
   where the value is stamped.
+- An `EpftoolboxBenchmarkSource` gets its rules on the files' own wall clock, its `index_timezone`: `price` published
+  13:00 on D-1 and the two exogenous forecasts 10:00 on D-1. That index only labels the wall clock, one hour off the
+  true instants in summer, so a Brussels rule would read the file's 23:00 on D as 00:00 on D+1 all summer.
 - `weather_cutoff(source.run, f"{delay}h")`, `delay` coming from `publication_delay_hours(source.model)`, known
   `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading `_d+k`. A shift after
   the leading `_d+k` moves the day the run is read from: `temperature_2m_d+1_d+1` (a `LagTransformer` with
@@ -135,7 +138,9 @@ pipeline = ModelPipeline(information_set=info)
   </TabItem>
   <TabItem label="Rule keys">
     Keys in `rules=` may be exact column names or glob patterns (`fuel_*`), and take precedence over accepted
-    assumptions, rules learned from data sources, and the built-in defaults, in that order.
+    assumptions, rules learned from data sources, and the built-in defaults, in that order. A
+    [profile](#profile-columns) or a [day aggregate](#day-aggregates) takes the rule of the column it was built from,
+    unless a key in `rules=` matches its own name.
   </TabItem>
 </Tabs>
 
@@ -151,13 +156,16 @@ which columns that affects.
 A [`DailyProfileTransformer`](/epftoolbox2/transformers/daily-profile/) column holds one slot of its row's local
 day, the same value on every row of that day: `price_h05` is the price of 05:00–06:00 on D, and `_s00` … `_s95` are
 the quarter-hours of 15-minute data. The check and the probe judge it at that slot, not at the row's period, and
-the shifts after the slot pick the day: `load_actual_h23_d-1` is 23:00 on D-1, and `load_actual_h23_h-12` reads
-D-1's profile on the rows before noon and D's from noon on. A profile of a lag (`LagTransformer` before
+the shifts after the slot pick the day: `load_actual_h23_d-1` is 23:00 on D-1, and `load_actual_h23_h-12` reads the
+profile of the row 12 elapsed hours earlier: D-1's on the rows before noon and D's from noon on, except on a DST day,
+where that boundary moves to 11:00 in autumn and 13:00 in spring. A profile of a lag (`LagTransformer` before
 `DailyProfileTransformer`) keeps its lag: `load_actual_d+1_h05` is the load at 05:00 on D+1.
 
-Profile columns need their own rules, usually patterns. `price_h05` does not take the rule of `price`, and a rule
-that matches a profile describes the series it was built from, so `generation_*` also covers
-`generation_solar_d+1_h05`:
+A profile needs no rule of its own. It takes the whole resolution of the column it was built from: your rules, a data
+source's rule, the built-in rules and accepted assumptions. So `price_h05_d-1` is judged by the rule of `price` and
+`generation_solar_forecast_h12` by that of `generation_*_forecast`, not by `generation_*`, and a rule you write for a
+column covers its profiles too. A key in `rules=` that matches the profile's own name comes first. It still describes
+the series the profile was built from and is read at the slot:
 
 ```python
 from epftoolbox2.information_set import Availability, InformationSet
@@ -165,20 +173,23 @@ from epftoolbox2.information_set import Availability, InformationSet
 info = InformationSet(
     "11:45", "Europe/Brussels",
     rules={
-        "price_h*": Availability.published("13:00", days_before=1),
-        "load_actual_h*": Availability.realised("1h"),
+        "fuel_ttf": Availability.daily_close("18:00"),               # also fuel_ttf_h05, fuel_ttf_day_max, ...
+        "price_h*": Availability.published("12:45", days_before=1),  # only the profiles of price
     },
 )
 ```
 
-With these rules `load_actual_h05` (known 07:00 on D) passes at every period, and `load_actual_h23` (known 01:00
-on D+1) fails at every period. On a DST day the skipped spring slot is NaN, and the repeated autumn slot holds its
-first occurrence, as the transformer fills them. A `_d+k` after the slot always shifts the row, so `as_of`,
-`weather_cutoff` and `weather_run` rules read `x_h05_d+1` from D+1 and never treat it as a source's own lead.
+With the built-in rules `load_actual_h05` (known 07:00 on D) passes at every period, and `load_actual_h23` (known
+01:00 on D+1) fails at every period. On a DST day the skipped spring slot is NaN, and the repeated autumn slot holds
+its first occurrence, as the transformer fills them. A `_d+k` after the slot always shifts the row, so `as_of`,
+`weather_cutoff` and `weather_run` rules read `x_h05_d+1` from D+1 and never treat it as a source's own lead. An exact
+key on a shifted name (`x_h05_d+1`) describes that very column at its row, as for any column.
 
 <Aside type="caution">
-  `_hNN` is read as an hour and `_sNN` as a quarter-hour. A profile with another slot length (`freq="30min"`
-  also gives `_sNN` names) cannot be told apart by name and would be judged at the wrong time.
+  `_hNN` is read as an hour and `_sNN` as a quarter-hour, which on 15-minute data is all a two-digit `_sNN` can be. A
+  profile with another slot length (`freq="30min"` on hourly data also gives `_sNN` names) cannot be told apart by
+  name, so on an hourly model `_sNN` doesn't take the rule of its column and needs a key of its own in `rules=`. It is
+  then read as a quarter-hour, which for such a profile is the wrong time.
 </Aside>
 
 ---
@@ -190,35 +201,38 @@ A [`DailyStatsTransformer`](/epftoolbox2/transformers/daily-stats/) column (`_da
 only when the day's last slot is: 23:00 for hourly data and 23:45 for 15-minute data, on the 23- and 25-hour DST days
 as on any other. The check and the probe judge it at that slot, not at the row's period, and the shifts after it
 pick the day, as for profile columns: `load_actual_day_max_d-1` is the maximum of D-1, and
-`load_actual_day_max_h-12` reads D-1's maximum on the rows before noon and D's from noon on. An aggregate of a lag
-(`LagTransformer` before `DailyStatsTransformer`) keeps its lag: `load_actual_d-1_day_max` is also the maximum of D-1.
+`load_actual_day_max_h-12` reads D-1's maximum on the rows before noon and D's from noon on, with the same boundary
+of 11:00 on the 25-hour day and 13:00 on the 23-hour day.
 
-Aggregates need their own rules too, and a rule that matches one describes the series it was built from (the
-built-in `generation_*` also covers `generation_solar_day_max`):
+An aggregate of a lag (`LagTransformer` before `DailyStatsTransformer`) keeps its lag, so `load_actual_d-1_day_max` is
+also judged at the last slot of D-1. It is not the same column as `load_actual_day_max_d-1`, though. It summarises the
+lagged column over the rows of D, so across a DST switch it isn't the maximum of D-1: on the day after the spring
+switch the lag has no value for the skipped 02:00, the day is incomplete and the aggregate is NaN on all 24 rows, so
+all of that day's forecasts are skipped (and reported), and on the day after the autumn switch it leaves out the second
+02:00. Use `load_actual_day_max_d-1`, which lags the finished statistic and only misses its 02:00 row after the spring
+switch.
 
-```python
-from epftoolbox2.information_set import Availability, InformationSet
+An aggregate takes its rule as a profile does: a key in `rules=` that matches its own name first, then the whole
+resolution of the column it was built from. With the built-in rules alone `price_day_max` (the expert model's maximum
+price of D, published 13:00 on D-1) passes at every period, `load_actual_day_max` (known 01:00 on D+1) fails at every
+period, `load_actual_day_max_d-1` (known 01:00 on D) passes, and `generation_solar_forecast_day_max` passes as the
+forecast it summarises.
 
-info = InformationSet(
-    "11:45", "Europe/Brussels",
-    rules={
-        "price_day_*": Availability.published("13:00", days_before=1),
-        "load_actual*": Availability.realised("1h"),
-    },
-)
-```
+A `_d+k` after the aggregate always shifts the row, so `as_of`, `weather_cutoff` and `weather_run` rules read
+`x_day_max_d+1` from D+1, while a `_d+k` before it (`temperature_2m_d+1_day_max`) stays the source's own lead.
+`is_day_mean` and `warsaw_is_day_max` are never read as aggregates, whoever's rule covers them: they are an
+`OpenMeteoSource`'s `is_day` averaged over locations.
 
-With these rules `price_day_max` (the expert model's maximum price of D, published 13:00 on D-1) passes at every
-period, `load_actual_day_max` (known 01:00 on D+1) fails at every period, and `load_actual_day_max_d-1` (known 01:00
-on D) passes. A `_d+k` after the aggregate always shifts the row, so `as_of`, `weather_cutoff` and `weather_run` rules
-read `x_day_max_d+1` from D+1, while a `_d+k` before it (`temperature_2m_d+1_day_max`) stays the source's own lead. A
-column a data source emits under such a name, such as an `OpenMeteoSource`'s `is_day` averaged over locations
-(`warsaw_is_day_mean`), is that source's own column and keeps its rule as it is.
+A profile or aggregate of an `OpenMeteoSource` column also gets that source's `run` and its check that the index is in
+the market zone. A key that matches the derived name replaces the source's timing but not the zone check, which only a
+rule for the plain column itself lifts.
 
 <Aside type="caution">
-  The day's last slot can be delivered on the next day of the rule's zone. On the DE benchmark index (`Etc/GMT-1`)
-  with Brussels rules, 23:00 is 00:00 CEST on D+1 in summer, so on summer days `price_day_max` of D is published only
-  at 13:00 on D and is refused at every period, like `price_h23`.
+  The day's last slot can be delivered on the next day of the rule's zone. On an index at a true fixed offset
+  (`Etc/GMT-1`) with Brussels rules, 23:00 is 00:00 CEST on D+1 in summer, so on summer days `price_day_max` of D is
+  published only at 13:00 on D and is refused at every period, like `price_h23`. `EpftoolboxBenchmarkSource` is not
+  such a case, although it uses that zone: its 23:00 is 23:00 on D of the files' wall clock, and its rules
+  (`with_source_rules`) say so, so `price_day_max` and `price_h23` pass all year.
 </Aside>
 
 ---

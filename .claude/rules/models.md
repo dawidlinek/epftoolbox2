@@ -26,8 +26,12 @@ never at the row's period: `x_h23_d-1` is x at 23:00 on D-1, `x_d+1_h05` (a prof
 and a `_d+k` after the slot is never a source's lead; a `DailyStatsTransformer` column (`_day_min`, `_max`,
 `_mean`, `_last`) is judged the same way at the last slot of the day it aggregates, whatever that day's 23, 24 or
 25 hours: realised 1 h, `load_actual_day_max` is known 01:00 on D+1, and `x_d-1_day_max` (an aggregate of a lag)
-and `x_day_max_d-1` when D-1's last slot is; a column a data source emits under such a name, e.g. Open-Meteo's
-`is_day_mean`, is the source's own). This convention is independent of
+and `x_day_max_d-1` when D-1's last slot is; `is_day_*` is Open-Meteo's `is_day` over locations, never an aggregate).
+Such a column resolves through the column it was built from: a user's rule on its own name first, which describes that
+series and replaces only the timing, else the built-from column's whole resolution, including the assumptions, the
+source's rule and its zone guard (`InformationSet.resolve`, `ResolvedColumn.built_from`). An hour lag of one is read
+from the row's real instant (`_shifted_day`), and the check takes a repeated autumn hour at its second occurrence, the
+row the model forecasts from. This convention is independent of
 the training-target boundary above: don't conflate the two, and don't move either as a side effect of the
 other.
 
@@ -44,7 +48,7 @@ other.
   - **Fall-back:** the doubled hour makes "drop the last `1 + hz` rows" drop one day too few. On the next `hz` run days, the hour-2 forecasts train on a target dated on or after the issue day, i.e. look-ahead.
   - **Spring:** the missing hour has no test row on the switch day. The hour-2 forecast is built from the previous day's row but labelled with the switch day's dates, so its `actual` belongs to a different target; for `hz=1` it's dropped.
 - Forecasts disappear silently: `_fit_one_numpy` returns `None` on NaN predictors, too few rows, or `ValueError` from the fit; a crashing day is only `print`ed in `BaseModel.run`. `ModelResultRef.count` reports planned tasks, not produced ones.
-- Profile slot names don't carry their slot length: `information_set` reads `_hNN` as an hour and every two-digit `_sNN` as a quarter-hour, but `DailyProfileTransformer` names every slot length other than one hour `_s` (`_daily.slot_names`). With `freq="30min"` on hourly data, `load_actual_s30` (15:00) is judged as 07:30, a look-ahead pinned in `tests/test_known_issues.py`; three-digit names (`_s000`, 5-minute slots) aren't recognised and are judged at the row's period. Fix direction: names that say their slot length, or a slot length the check is told.
+- Profile slot names don't carry their slot length: `information_set` reads `_hNN` as an hour and every two-digit `_sNN` as a quarter-hour, but `DailyProfileTransformer` names every slot length other than one hour `_s` (`_daily.slot_names`). With `freq="30min"` on hourly data, `load_actual_s30` (15:00) is judged as 07:30, a look-ahead pinned in `tests/test_known_issues.py`; three-digit names (`_s000`, 5-minute slots) aren't recognised and are judged at the row's period. Rule resolution through the built-from column is therefore limited on an hourly model: there `_sNN` needs a user's rule on its own name (`InformationSet._resolve_for`), else it stays a column without a rule. Fix direction: names that say their slot length, or a slot length the check is told.
 - `epftoolbox2/information_set.py` compares availability in data-zone (or rule-zone) wall-clock minutes, not UTC instants, which breaks right at a DST switch in two ways, both pinned in `tests/test_known_issues.py`:
   - **Issue time inside the data zone's repeated autumn hour** (`_issue_minutes`/`_from_zone`, around `perturb_unknown`): a New York index with issue time 01:30 on 2024-11-03 (05:30Z, the earliest reading of that ambiguous wall time) lets a `weather_cutoff` value known at 06:00Z through unperturbed, because 06:00Z converts to New York wall-clock "01:00", read as earlier than the issue's own "01:30" without ever comparing the actual UTC instants.
   - **Wall-clock arithmetic for realised values on a DST index** (`_available_array`'s `realised`/`weather_run` branches, `point + step + delay`): a Warsaw index with issue time 03:30 on the 2024-03-31 spring-forward day (01:30Z) treats `load_actual` at 01:00 CET as known, even though it is truly known only at 02:00Z (00:00Z + 1h step + 1h delay), after the issue. The same wall-clock addition applies to `weather_run` delays and `h` shifts. Fix direction: compare UTC instants throughout, not data-zone wall-clock minutes.

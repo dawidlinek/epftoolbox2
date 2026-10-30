@@ -41,8 +41,9 @@ column:
   profiles only lagged, `load_actual_h05_d-1`, unless the slot is already realised at your issue time.
 
 The [information set](/epftoolbox2/model-pipeline/information-set/#profile-columns) judges a profile column at the
-slot it names, not at the row's period. With a rule that `load_actual_h*` is realised 1 h after its hour and an
-11:45 issue, `load_actual_h05` is known on every row of D and `load_actual_h23` on none.
+slot it names, not at the row's period, by the rule of the column it was built from. With the built-in rule that
+`load_actual` is realised 1 h after its hour and an 11:45 issue, `load_actual_h05` is known on every row of D and
+`load_actual_h23` on none.
 
 <Aside type="caution">
   Leading a profile (`price_h05_d+1`) looks up the prices being forecast. Only lead columns that are known in

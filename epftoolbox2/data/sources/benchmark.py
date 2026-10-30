@@ -71,7 +71,7 @@ class EpftoolboxBenchmarkSource(DataSource):
 
     Columns: `price` and two exogenous series named by meaning (see `DATASETS`), e.g. `load_forecast_amprion`
     and `wind_solar_forecast` for DE. Each exogenous value at (day d, hour h) is the day-ahead forecast for
-    (d, h), available on d-1.
+    (d, h), available on d-1. `InformationSet.with_source_rules` reads these columns on the files' wall clock.
 
     Example:
         >>> source = EpftoolboxBenchmarkSource("DE")

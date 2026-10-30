@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.data.transformers import DailyProfileTransformer, DailyStatsTransformer, DSTNormalizeTransformer
+from epftoolbox2.data.transformers import (
+    DailyProfileTransformer,
+    DailyStatsTransformer,
+    DSTNormalizeTransformer,
+    LagTransformer,
+)
 from epftoolbox2.pipelines import DataPipeline
 
 TZ = "Europe/Warsaw"
@@ -174,3 +179,23 @@ def test_yaml_round_trip(tmp_path, transformer):
     loaded = DataPipeline.load(path).transformers[0]
     assert type(loaded) is type(transformer)
     assert vars(loaded) == vars(transformer)
+
+
+def test_the_lag_of_a_day_statistic_is_not_the_statistic_of_a_lag_across_dst():
+    """What the docs tell users: `x_d-1_day_max` summarises the lag over the rows of D, so the skipped spring 02:00 makes
+    the day after that switch incomplete, and the day after the autumn switch leaves out the second 02:00, here the
+    day's maximum. `x_day_max_d-1` lags the finished statistic and only misses its own 02:00 row in spring."""
+    index = pd.date_range("2024-03-20", "2024-11-05", freq="h", tz="Europe/Warsaw", inclusive="left")
+    values = np.full(len(index), 10.0)
+    values[index.get_loc(pd.Timestamp("2024-10-27 02:00:00+01:00"))] = 99.0
+    df = LagTransformer(columns="x", lags=[1], freq="day").transform(pd.DataFrame({"x": values}, index=index))
+    df = DailyStatsTransformer(columns=["x", "x_d-1"], stats=["max"]).transform(df)
+    df = LagTransformer(columns="x_day_max", lags=[1], freq="day").transform(df)
+
+    spring, autumn = df.loc["2024-04-01"], df.loc["2024-10-28"]
+
+    assert spring["x_d-1_day_max"].isna().all()
+    assert spring["x_day_max_d-1"].isna().sum() == 1
+    assert pd.isna(spring.loc[local("2024-04-01 02:00"), "x_day_max_d-1"])
+    assert (autumn["x_d-1_day_max"] == 10.0).all()
+    assert (autumn["x_day_max_d-1"] == 99.0).all()

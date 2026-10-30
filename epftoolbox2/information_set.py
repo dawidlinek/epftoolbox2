@@ -40,8 +40,10 @@ _STEP_MINUTES = {"1h": 60, "15min": 15}
 _PROFILE_SLOT = re.compile(r"^(?P<column>.+)_(?P<unit>[hs])(?P<n>\d{2})$")
 _SLOT_MINUTES = {"h": 60, "s": 15}
 # DailyStatsTransformer's suffixes (`data.transformers.daily_stats`): a statistic of the column over the row's whole
-# local day. No sign, so they never parse as a shift.
-_DAY_AGGREGATE = re.compile(r"^(?P<column>.+)_day_(?:min|max|mean|last)$")
+# local day. No sign, so they never parse as a shift. `is_day_mean` and `warsaw_is_day_max` are not such columns but
+# Open-Meteo's `is_day` aggregated over locations (`_open_meteo_common.aggregated_variable_names`), whoever's rule
+# reads them, so a column named `is` or `..._is` can't be told apart and is read as a plain column.
+_DAY_AGGREGATE = re.compile(r"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:min|max|mean|last)$")
 
 
 def _parse_time(value: str) -> int:
@@ -281,6 +283,7 @@ def default_rules() -> Dict[str, Availability]:
 
 def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     """Rules for the columns a DataPipeline's sources emit, following their prefixes and column choices."""
+    from .data.sources.benchmark import DATASETS, EpftoolboxBenchmarkSource
     from .data.sources.calendar import CalendarSource
     from .data.sources.entsoe import EntsoeSource
     from .data.sources.open_meteo import OpenMeteoSource
@@ -312,6 +315,19 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             rule = _weather_availability(source)
             for name in _weather_column_names(source):
                 rules[name] = rule
+        elif isinstance(source, EpftoolboxBenchmarkSource):
+            # The files are local wall-clock time, and `index_timezone` only labels that clock (one hour off the true
+            # instants in summer). So a row's delivery day is the day on that same clock: the file's 23:00 on D is
+            # delivered on D, which Brussels rules would read as 00:00 on D+1 all summer.
+            prefix = f"{source.prefix}_" if source.prefix else ""
+            zone = source.index_timezone
+            rules[f"{prefix}price"] = Availability.published(
+                "13:00", 1, timezone=zone, note="day-ahead price of the benchmark files, known the day before delivery"
+            )
+            for name in DATASETS[source.dataset]["exogenous"].values():
+                rules[f"{prefix}{name}"] = Availability.published(
+                    "10:00", 1, timezone=zone, note="day-ahead forecast of the benchmark files, available on d-1"
+                )
     return rules
 
 
@@ -394,6 +410,7 @@ class ResolvedColumn:
     rule: Optional[Availability]
     key: Optional[str] = None  # the rule's key (exact name or pattern)
     layer: Optional[str] = None
+    built_from: Optional["ResolvedColumn"] = None  # what `base` was built from, if a transformer's feature (see `slot`)
 
     @property
     def slot(self) -> Optional[Tuple[int, int]]:
@@ -402,8 +419,7 @@ class ResolvedColumn:
         `price_h05` holds the price of 05:00-06:00 on its row's local day, the same value on every row of that day,
         so its availability is that of slot (300, 60), whatever the row's period. `_sNN` is a 15-minute slot.
         """
-        profile = _profile_source(self)
-        return None if profile is None else profile[1:]
+        return _profile_slot(self.base)
 
     @property
     def day_aggregate(self) -> bool:
@@ -412,7 +428,12 @@ class ResolvedColumn:
         Such a column holds a statistic of its row's whole local day, the same value on every row of that day, so it is
         known when the last slot of that day is, whatever the row's period.
         """
-        return _day_aggregate_source(self) is not None
+        return _DAY_AGGREGATE.match(self.base) is not None
+
+    @property
+    def series(self) -> str:
+        """The base column at the bottom of what this was built from: the one a rule would be declared for."""
+        return self.base if self.built_from is None else self.built_from.series
 
 
 def parse_predictor(name: str) -> List[Tuple[str, Tuple[Shift, ...]]]:
@@ -433,44 +454,35 @@ def parse_predictor(name: str) -> List[Tuple[str, Tuple[Shift, ...]]]:
     return chain
 
 
-def _profile_source(col: ResolvedColumn) -> Optional[Tuple[ResolvedColumn, int, int]]:
-    """For a DailyProfileTransformer column, the column it was built from and its slot (start, length) in minutes.
-
-    `x_d+1_h05` (a profile of the lag `x_d+1`) is built from `x` shifted by `_d+1`, read at 05:00; the shifts after
-    the slot (`col.shifts`) pick the day the slot is read on. None for a column that is not a profile.
-    """
-    match = _PROFILE_SLOT.match(col.base)
+def _profile_slot(base: str) -> Optional[Tuple[int, int]]:
+    """(start, length) in minutes of the slot of day a DailyProfileTransformer column `base` names, or None."""
+    match = _PROFILE_SLOT.match(base)
     if match is None:
         return None
     length = _SLOT_MINUTES[match["unit"]]
     start = int(match["n"]) * length
-    if start >= 1440:
-        return None
-    base, shifts = parse_predictor(match["column"])[-1]
-    return replace(col, base=base, shifts=shifts), start, length
+    return (start, length) if start < 1440 else None
 
 
-def _day_aggregate_source(col: ResolvedColumn) -> Optional[ResolvedColumn]:
-    """For a DailyStatsTransformer column, the column it aggregates over its row's local day.
-
-    `x_d-1_day_max` (an aggregate of the lag `x_d-1`) aggregates `x` shifted by `_d-1`; the shifts after the aggregate
-    (`col.shifts`) pick the day. None for a column that is not one, and for a column a data source emits under that
-    very name, which its rule describes as it is (an OpenMeteoSource's `is_day` averaged over locations is
-    `is_day_mean`).
-    """
-    if col.layer == "sources" and col.key == col.base:
-        return None
-    match = _DAY_AGGREGATE.match(col.base)
-    if match is None:
-        return None
-    base, shifts = parse_predictor(match["column"])[-1]
-    return replace(col, base=base, shifts=shifts)
+def _built_from_name(base: str) -> Optional[str]:
+    """The column a DailyProfileTransformer or DailyStatsTransformer column `base` was built from, with its own shifts
+    (`x_d-1` for `x_d-1_h05` and `x_d-1_day_max`), or None for a column that is neither."""
+    match = _PROFILE_SLOT.match(base) if _profile_slot(base) is not None else _DAY_AGGREGATE.match(base)
+    return None if match is None else match["column"]
 
 
-def _built_from(col: ResolvedColumn) -> Optional[ResolvedColumn]:
-    """The column a DailyProfileTransformer or DailyStatsTransformer column was built from, or None."""
-    profile = _profile_source(col)
-    return profile[0] if profile is not None else _day_aggregate_source(col)
+def _find_rule(name: str, chain: List[Tuple[str, Tuple[Shift, ...]]], rules, layer: str) -> Optional[ResolvedColumn]:
+    """The rule of one layer for a column: exact names from the full name down to the base, then glob patterns from the
+    base up."""
+    for candidate, shifts in chain:
+        if candidate in rules:
+            return ResolvedColumn(name, candidate, shifts, rules[candidate], candidate, layer)
+    patterns = [k for k in rules if any(ch in k for ch in "*?[")]
+    for candidate, shifts in reversed(chain):
+        for pattern in patterns:
+            if fnmatch.fnmatchcase(candidate, pattern):
+                return ResolvedColumn(name, candidate, shifts, rules[pattern], pattern, layer)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -585,19 +597,46 @@ class InformationSet:
 
     def resolve(self, name: str) -> ResolvedColumn:
         """Find the rule for a column: exact names from the full name down to the base, then glob patterns
-        from the base up; layers in order rules > accepted assumptions > sources > defaults."""
+        from the base up; layers in order rules > accepted assumptions > sources > defaults.
+
+        A DailyProfileTransformer or DailyStatsTransformer column first looks for a user's rule on its own name, which
+        describes the series it was built from; otherwise it takes the whole resolution of the column it was built from,
+        so `generation_solar_forecast_day_max` is judged by `generation_*_forecast`, not caught by `generation_*`. Either
+        way the value is read at its slot or the day's last slot, and the built-from column's source zone guard applies.
+        An exact rule on a shifted name (`x_h05_d+1`) describes that very column, as for any other column.
+        """
         chain = parse_predictor(name)
-        for layer, rules in self._layers():
-            for candidate, shifts in chain:
-                if candidate in rules:
-                    return ResolvedColumn(name, candidate, shifts, rules[candidate], candidate, layer)
-            patterns = [k for k in rules if any(ch in k for ch in "*?[")]
-            for candidate, shifts in reversed(chain):
-                for pattern in patterns:
-                    if fnmatch.fnmatchcase(candidate, pattern):
-                        return ResolvedColumn(name, candidate, shifts, rules[pattern], pattern, layer)
         base, shifts = chain[-1]
-        return ResolvedColumn(name, base, shifts, None)
+        column = _built_from_name(base)
+        if column is None:
+            for layer, rules in self._layers():
+                found = _find_rule(name, chain, rules, layer)
+                if found is not None:
+                    return found
+            return ResolvedColumn(name, base, shifts, None)
+        user = _find_rule(name, chain, self.rules, "rules")
+        if user is not None and user.base != base:
+            return user
+        source = self.resolve(column)
+        ruling = source if user is None else user
+        return ResolvedColumn(name, base, shifts, ruling.rule, ruling.key, ruling.layer, source)
+
+    def _resolve_for(self, name: str, step: int) -> ResolvedColumn:
+        """`resolve` for data with slots of `step` minutes.
+
+        Only on 15-minute data is a two-digit `_sNN` column surely a quarter-hour (another slot length is off the grid or
+        has three digits). On hourly data it can be a slot of any length, and reading `load_actual_s30` of a 30-minute
+        profile (15:00) as a quarter-hour (07:30) by the rule of `load_actual` would turn the error for a column without
+        a rule into a silent look-ahead, so there it needs a user's rule on its own name.
+        """
+        col = self.resolve(name)
+        link = col
+        while step != 15 and link.built_from is not None:
+            own = _find_rule(link.name, parse_predictor(link.name), self.rules, "rules")
+            if link.slot is not None and link.slot[1] == _SLOT_MINUTES["s"] and own is None:
+                return ResolvedColumn(name, col.base, col.shifts, None)
+            link = link.built_from
+        return col
 
     # -- the check ------------------------------------------------------------
 
@@ -656,16 +695,16 @@ class InformationSet:
             periods.setdefault((target, "training target"), set()).add(period)
         for name in [target] + [name for name, _ in periods]:
             if name not in resolved:
-                resolved[name] = self.resolve(name)
+                resolved[name] = self._resolve_for(name, step)
                 if resolved[name].rule is None:
-                    unknown.add(resolved[name].base)
+                    unknown.add(resolved[name].series)
                 else:
                     self._check_source_zone(resolved[name], index)
 
         days = self._issue_days(index, test_start, test_end)
         if not len(days):
             return [], unknown
-        ctx = _Context(days[0], self._data_zone(index))
+        ctx = _Context(days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None)
         # Each issue day as days after the first, and its issue time in data-zone minutes after the first's midnight.
         offset = np.asarray((days - days[0]) // pd.Timedelta(days=1), dtype=np.int64)
         issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), self.issue_timezone, ctx)
@@ -685,7 +724,7 @@ class InformationSet:
                 if known <= issue[i]:
                     continue
                 # Minutes after midnight of that issue day, as a context for that day alone would give them.
-                day_ctx = _Context(days[i], ctx.data_zone, float(issue[i] - offset[i] * 1440.0))
+                day_ctx = replace(ctx, day=days[i], issue_minute=float(issue[i] - offset[i] * 1440.0))
                 hint = self._assumption_hint(col, uses[role], period * step, step, day_ctx)
                 late[(name, role, period)] = (float(known - offset[i] * 1440.0), day_ctx.issue_minute, hint)
 
@@ -705,8 +744,13 @@ class InformationSet:
         The check reads each row's issue day D as a local day of the index's zone. An Open-Meteo column took its
         run from D in the source's market zone, so on a UTC index a row at 22:00Z belongs to the market's next
         day, whose run is published only the next morning: neither the check nor the probe could see that.
-        Zones with the same wall clock on every row (Europe/Berlin and Europe/Warsaw) are the same here.
+        Zones with the same wall clock on every row (Europe/Berlin and Europe/Warsaw) are the same here. A column built
+        from such a column can't be judged either, whatever rule its own name has: only a user's rule for the column
+        itself lifts this.
         """
+        if col.built_from is not None:
+            self._check_source_zone(col.built_from, index)
+            return
         zone = self._source_zones.get(col.key) if col.layer == "sources" and col.key else None
         if zone is None or getattr(index, "tz", None) is None or not len(index):
             return
@@ -733,11 +777,10 @@ class InformationSet:
         """An OpenMeteoSource column's own cutoff is a source-side setting, not a data fact: point at it."""
         if col.rule is None or col.rule.kind != "weather_cutoff":
             return ""
-        source = _built_from(col)
         # The shifts after a profile's slot or a day aggregate always shift the row; only the column it was built from
         # has a lead.
-        if source is not None:
-            row_shifts = list(col.shifts) + _shifts_after_source_lead(source.shifts)
+        if col.built_from is not None:
+            row_shifts = list(col.shifts) + _shifts_after_source_lead(col.built_from.shifts)
         else:
             row_shifts = _shifts_after_source_lead(col.shifts)
         if any(s.offset > 0 for s in row_shifts):
@@ -804,6 +847,7 @@ class _Context:
     day: pd.Timestamp  # the issue day D, or (in `violations`) the first issue day of the test period
     data_zone: str
     issue_minute: float = 0.0  # the issue time on `day`; `violations` keeps one per issue day instead
+    naive: bool = False  # the data's index has no zone, so `data_zone` is the issue's and it has no switches
 
     @property
     def weekday(self) -> int:
@@ -964,8 +1008,8 @@ def perturb_unknown(
     # Every zone conversion reads the UTC offsets at the instant it converts (a value's own shifted delivery instant
     # for its delivery day, its publication instant for the way back), not at run_day's noon or at the row's own
     # date. They differ across a DST switch whenever the data zone and a rule's zone don't switch together, e.g. a
-    # UTC or fixed-offset (benchmark source) index against Europe/Brussels rules.
-    ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index))
+    # UTC or fixed-offset index against Europe/Brussels rules.
+    ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index), naive=index.tz is None)
     issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), information_set.issue_timezone, ctx)
     ctx = replace(ctx, issue_minute=float(issue[0]))
     local = index.tz_localize(None) if index.tz is not None else index
@@ -983,7 +1027,7 @@ def perturb_unknown(
     for name in columns if columns is not None else data.columns:
         if not pd.api.types.is_numeric_dtype(data[name]) or pd.api.types.is_bool_dtype(data[name]):
             continue
-        col = information_set.resolve(name)
+        col = information_set._resolve_for(name, step)
         if col.rule is None:
             unchecked.append(name)
             continue
@@ -1023,27 +1067,22 @@ def _available_array(
     after `ctx.day` (`violations` checks many issue days at once; `perturb_unknown` one, `ctx.day` itself).
     `first` marks rows that are not the second occurrence of a repeated autumn wall time (default: all).
     """
-    profile = _profile_source(col)
-    if profile is not None:
+    if col.built_from is not None:
         # A profile column holds, on every row of a local day, the column it was built from at its slot of that day:
         # `x_h05_d-1` on row D is `x` at 05:00 on D-1 (the shifts after the slot pick the day, and none of them is a
         # source's lead), `x_d+1_h05` is `x_d+1` at 05:00 on D. A repeated autumn slot is its first occurrence, the
         # one DailyProfileTransformer copies; a slot skipped in spring moves forward to the switch.
-        source, start, length = profile
-        reached = _shifted_day(col.shifts, day, minute)
-        slot = np.full(len(reached), float(start))
-        return _available_array(source, rule, reached, slot, length, ctx, None, issue_day + reached - day)
-    source = _day_aggregate_source(col)
-    if source is not None:
-        # A day aggregate holds, on every row of a local day, a statistic of the column it was built from over every
-        # slot of that day (23, 24 or 25 hours on a DST index), so it is known when the latest of them is: the day's
-        # last slot (23:00 for hourly data), on the day the shifts after the aggregate reach, none of them a source's
-        # lead. Each rule's availability never decreases with the slot's time, so no earlier slot is known later; a
-        # repeated last slot is its second occurrence.
-        reached = _shifted_day(col.shifts, day, minute)
-        last = np.full(len(reached), 1440.0 - step)
-        second = np.zeros(len(reached), dtype=bool)
-        return _available_array(source, rule, reached, last, step, ctx, second, issue_day + reached - day)
+        # A day aggregate holds a statistic of that column over every slot of the day (23, 24 or 25 hours on a DST
+        # index), so it is known when the latest of them is: the day's last slot (23:00 for hourly data), on the day
+        # the shifts after the aggregate reach. Each rule's availability never decreases with the slot's time, so no
+        # earlier slot is known later; a repeated last slot is its second occurrence.
+        reached = _shifted_day(col.shifts, day, minute, first, ctx)
+        slot, length = col.slot or (1440.0 - step, step)
+        slots = np.full(len(reached), float(slot))
+        occurrence = np.full(len(reached), col.slot is not None)
+        return _available_array(
+            col.built_from, rule, reached, slots, length, ctx, occurrence, issue_day + reached - day
+        )
     if rule.kind == "static":
         return np.full(len(day), -np.inf)
     if rule.kind == "as_of":
@@ -1096,12 +1135,37 @@ def _shifts_after_source_lead(shifts: Sequence[Shift]) -> List[Shift]:
     return rest
 
 
-def _shifted_day(shifts: Sequence[Shift], day: np.ndarray, minute: np.ndarray) -> np.ndarray:
-    """The day (after `ctx.day`) of the row that `shifts` move a row at (`day`, `minute`) to, every shift moving it:
-    the day a profile or a day aggregate is read on. A shift by hours or minutes moves it across midnight."""
-    days = sum(s.offset for s in shifts if s.unit == "d")
-    elapsed = sum(s.minutes for s in shifts if s.unit != "d")
-    return day + days + np.floor((np.asarray(minute, dtype=float) + elapsed) / 1440.0)
+def _shifted_day(
+    shifts: Sequence[Shift], day: np.ndarray, minute: np.ndarray, first: Optional[np.ndarray], ctx: _Context
+) -> np.ndarray:
+    """The local day (after `ctx.day`) of the row that `shifts` read a row at (`day`, `minute`) from, every shift moving
+    it: the day a profile or a day aggregate is read on.
+
+    The outermost shift moves the row first. A day shift keeps the wall-clock time and, like shift_calendar_days, the
+    occurrence of a repeated autumn hour. An hour or minute shift is elapsed time, so it runs from the row's instant:
+    on a 25-hour day 12 hours before 11:00 is 00:00 on that day, on a 23-hour day 12 hours before 12:00 is 23:00 on the
+    day before. A naive index (DSTNormalizeTransformer's 24 slots a day) has no switch to cross, and LagTransformer
+    shifts it on its own clock. `first` is as in `_available_array`, except that None judges a repeated hour at its
+    second occurrence: `violations` passes no rows but (day, period), and the model forecasts from a period's last row.
+    """
+    wall = np.asarray(day, dtype=float) * 1440.0 + np.asarray(minute, dtype=float)
+    if ctx.naive or all(s.unit == "d" for s in shifts):
+        return np.floor((wall + sum(s.minutes for s in shifts)) / 1440.0)
+    first = np.zeros(len(wall), dtype=bool) if first is None else first
+    for shift in reversed(shifts):
+        if shift.unit == "d":
+            wall = wall + shift.minutes
+            continue
+        local = pd.DatetimeIndex(ctx.day + pd.to_timedelta(wall, unit="min"))
+        instants = local.tz_localize(ctx.data_zone, ambiguous=first, nonexistent="shift_forward")
+        moved = instants + pd.Timedelta(minutes=shift.minutes)
+        local = moved.tz_convert(ctx.data_zone).tz_localize(None)
+        earlier = local.tz_localize(
+            ctx.data_zone, ambiguous=np.ones(len(local), dtype=bool), nonexistent="shift_forward"
+        )
+        first = np.asarray(earlier == moved)
+        wall = np.asarray((local - ctx.day) / pd.Timedelta(minutes=1), dtype=float)
+    return np.floor(wall / 1440.0)
 
 
 def _read_day_offset(shifts: Sequence[Shift], minute: np.ndarray) -> np.ndarray:
