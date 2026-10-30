@@ -291,6 +291,84 @@ def test_a_day_that_lacks_a_period_outside_the_switch_hours_is_dropped_in_quarte
     assert sorted(daily(report)) == ["2023-03-25", "2023-03-26"]
 
 
+ORDINARY = {"2023-01-09": "plain", "2023-01-10": "plain", "2023-01-11": "plain", "2023-01-12": "plain"}
+
+
+def test_a_model_that_lacks_a_switch_hour_on_an_ordinary_day_is_not_aggregated_over_fewer_hours():
+    """Without a clock change on 2023-01-10 the hour 02:00 exists. `holes` lacks it, so by its ids alone the day looks
+    like a 23-hour one; but `whole` has all 24, and aggregating `holes` over 23 would score the two against different
+    actuals on one key (a daily minimum can sit at 02:00)."""
+    holes = hourly_study(ORDINARY, skip=lambda r: r["target_date"] == "2023-01-10" and r["hour"] == 2)
+    results = {"whole": hourly_study(ORDINARY), "holes": holes}
+
+    with pytest.warns(UserWarning, match=r"\{'holes': 1\}"):
+        report = EvaluationReport({**results}, [MAEEvaluator()]).aggregate("1D", "min")
+
+    assert sorted(daily(report, "holes")) == ["2023-01-09", "2023-01-11", "2023-01-12"]
+    assert len(daily(report, "whole")) == 4
+    assert report.forecast_counts().set_index("model")["incomplete_day"].to_dict() == {"whole": 0, "holes": 1}
+    # Where both have the day they were scored against the same actual.
+    for target, (_, actual) in daily(report, "holes").items():
+        assert daily(report, "whole")[target][1] == actual
+
+
+def test_the_day_after_the_spring_switch_is_not_aggregated_over_23_hours_when_another_horizon_has_all_24():
+    """In a real run the horizon-1 forecasts of 2023-03-27 come from the switch Sunday, which has no 02:00 row, so they
+    lack the id 2 of a day that has 24 hours. Horizon 2 forecasts all of them."""
+    records = []
+    for target in ("2023-03-27", "2023-03-28"):
+        full = clock_ids("plain")
+        actual = [hourly_price(0, i) for i in full]
+        records += day_records(target, full, actual, [a + 1 for a in actual], horizon=2)
+        ids = [i for i in full if not (i == 2 and target == "2023-03-27")]
+        records += day_records(target, ids, [hourly_price(0, i) for i in ids], [hourly_price(0, i) + 1 for i in ids])
+
+    with pytest.warns(UserWarning, match="left out days"):
+        report = aggregate(records, "mean")
+
+    details = dict(report.iter_details())["m"]
+    assert sorted(zip(details["target_date"], details["horizon"])) == [
+        ("2023-03-27", 2),
+        ("2023-03-28", 1),
+        ("2023-03-28", 2),
+    ]
+    # One actual per target date, whatever the horizon.
+    assert details.groupby("target_date")["actual"].nunique().tolist() == [1, 1]
+    counts = report.forecast_counts().iloc[0]
+    assert (counts["planned"], counts["produced"], counts["missing"]) == (4, 3, 1)
+
+
+def test_a_period_that_no_model_has_at_any_horizon_is_taken_at_its_word():
+    """That is how a clock change looks in the ids, and the ids cannot tell it from the day after the spring switch in a
+    run of horizon 1 alone. Documented: the day is aggregated over the periods it has."""
+    plain = clock_ids("plain")
+    ids = [i for i in plain if i != 2]
+    records = day_records("2023-03-27", ids, [hourly_price(0, i) for i in ids], [hourly_price(0, i) for i in ids])
+
+    report = aggregate(records, "mean")
+
+    assert len(daily(report)) == 1
+    assert report.forecast_counts().iloc[0]["missing"] == 0
+
+
+def test_a_period_with_a_record_but_no_actual_takes_the_day_out_for_every_model():
+    """The autumn switch day of a real run: the ambiguous 02:00 has a record and no actual. The day is not the aggregate of
+    all its hours, whichever model it is."""
+    results = {}
+    for name in ("a", "b"):
+        records = hourly_study(ORDINARY)
+        for r in records:
+            if r["target_date"] == "2023-01-11" and r["hour"] == 2:
+                r["actual"] = float("nan")
+        results[name] = records
+
+    with pytest.warns(UserWarning, match=r"\{'a': 1, 'b': 1\}"):
+        report = EvaluationReport(results, [MAEEvaluator()]).aggregate("1D", "max")
+
+    assert "2023-01-11" not in daily(report, "a") and "2023-01-11" not in daily(report, "b")
+    assert len(daily(report, "a")) == 3
+
+
 def whole_day_cases():
     """(target date, ids, whether a schedule or a daily aggregate can use the day). Sundays carry the clock changes."""
     plain, short, long = clock_ids("plain"), clock_ids("short"), clock_ids("long")

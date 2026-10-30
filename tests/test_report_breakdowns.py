@@ -347,6 +347,20 @@ def test_the_spike_threshold_is_the_99th_percentile_when_it_is_below_300(prices)
     assert counts.to_dict() == {"negative": 20, "normal": 2400 - 20 - 24, "spike": 24}
 
 
+def test_forecasts_without_an_actual_are_counted_in_the_attrs_since_no_group_holds_them(prices):
+    a, b = priced_records(prices, np.ones_like(prices)), priced_records(prices, np.ones_like(prices))
+    for r in a[:3] + a[500:502]:
+        r["actual"] = float("nan")
+    report = EvaluationReport({"a": a, "b": b}, [MAEEvaluator()])
+
+    table = report.by_price_level()
+
+    assert table.attrs["no_level"] == {"a": 5}
+    summary = report.summary().set_index("model")["forecasts"]
+    in_groups = table.groupby("model")["forecasts"].sum()
+    assert (in_groups + pd.Series(table.attrs["no_level"]).reindex(in_groups.index, fill_value=0)).equals(summary)
+
+
 def test_the_level_comes_from_the_actual_price_never_from_the_prediction(prices):
     """`b` predicts 0 where the price is a spike and 1,000 where it is normal: nothing moves between groups."""
     values = prices.reshape(-1)

@@ -76,13 +76,20 @@ def price_level(actual: pd.Series, threshold: float) -> pd.Series:
     return pd.Series(level, index=actual.index)
 
 
-def daily_aggregate(frame: pd.DataFrame, agg: str, per_hour: int) -> Tuple[pd.DataFrame, int, int]:
+def daily_aggregate(
+    frame: pd.DataFrame, agg: str, per_hour: int, periods_in_target: Optional[pd.Series] = None
+) -> Tuple[pd.DataFrame, int, int]:
     """One model's forecasts as one forecast per (run_date, target_date, horizon): `(days, n_seen, n_dropped)`.
 
     The prediction and the actual of a day are each reduced by `agg` over the day's periods. Only whole days count, as
     `evaluators._days.whole_days` judges them (23, 24 or 25 hours; 92, 96 or 100 quarter-hours), with a finite prediction
     and actual in every period. `n_seen` is the number of days with any forecast in `frame` and `n_dropped` how many of
     them were not whole. `days` has `FORECAST_KEYS` (with `hour` 0), `prediction` and `actual`.
+
+    `periods_in_target` maps each target date to the number of distinct periods that any model has a record for at any
+    horizon. A day whose finite periods are fewer is dropped even when its ids look like a clock change: a model that lacks
+    the hour 02:00 on an ordinary Tuesday must not be aggregated over 23 hours while another is aggregated over 24, since
+    the two would be scored against different actuals on the same key.
     """
     if agg not in _REDUCE:
         raise ValueError(f"agg must be one of {list(AGGREGATES)}, got {agg!r}")
@@ -125,6 +132,9 @@ def daily_aggregate(frame: pd.DataFrame, agg: str, per_hour: int) -> Tuple[pd.Da
         reduced_prediction[days] = reduce(prediction[rows].reshape(-1, periods))
         reduced_actual[days] = reduce(actual[rows].reshape(-1, periods))
     whole = np.isfinite(reduced_prediction) & np.isfinite(reduced_actual)
+    if periods_in_target is not None:
+        expected = periods_in_target.reindex(pd.DatetimeIndex(targets[target[first]])).to_numpy()
+        whole &= np.bincount(day, minlength=n) == expected
 
     kept = first[whole]
     days = pd.DataFrame(

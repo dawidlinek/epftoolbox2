@@ -151,8 +151,9 @@ class EvaluationReport:
         `spike` (actual at or above the threshold) and `normal` (the rest). A forecast is in exactly one group; one
         without a finite actual is in none. The threshold is `min(300, 99th percentile)` of the actual prices of the
         periods any model forecast (each period once, however many horizons forecast it), unless `spike` gives it. It is
-        one number for all models: `df.attrs` holds `spike_threshold`, `spike_rule` and `spike_quantile`. Every evaluator
-        runs on the group alone, on the keys the models share inside it.
+        one number for all models: `df.attrs` holds `spike_threshold`, `spike_rule` and `spike_quantile`, and `no_level`,
+        the forecasts per model that are in no group for lack of a finite actual (so the groups add up to `summary()`).
+        Every evaluator runs on the group alone, on the keys the models share inside it.
 
         Args:
             spike: The price (EUR/MWh) from which a period is a spike, a positive number; by default the rule above.
@@ -166,6 +167,11 @@ class EvaluationReport:
             spike_rule=rule,
             spike_quantile=quantile,
             levels=f"negative: actual < 0; spike: actual >= {threshold:g}; normal: the rest",
+            no_level={
+                name: n
+                for name, df in frames.items()
+                if (n := int((~np.isfinite(df["actual"].to_numpy(dtype=float))).sum()))
+            },
         )
         return table
 
@@ -176,10 +182,16 @@ class EvaluationReport:
         the day, which turns hourly or 15-minute forecasts into forecasts of the day's maximum, minimum, mean or spread.
         The new report has `hour` 0 and frequency `"1D"`. A day counts only when all its periods are there, with a
         finite prediction and actual: 23, 24 or 25 hours (92, 96 or 100 quarter-hours), judged by the period ids as
-        `EconomicEvaluator` does. Each model is judged on its own, so a model missing a period loses that day and no
-        other model does. Dropped days are counted, never lost silently: `forecast_counts()` of the new report has them as
-        `missing` and under `incomplete_day`, and a warning names the models. `planned` there is the days with any
-        forecast, so days without a single forecast are in the first report's `forecast_counts()`.
+        `EconomicEvaluator` does, and against the other models: the periods of a target date are every period that any
+        model has a record for, at any horizon, and a day with fewer finite periods is dropped. So a model that lacks 02:00
+        on an ordinary Tuesday is not aggregated over 23 hours while another is aggregated over 24, which would score them
+        against different actuals on one key. A period that no model has at any horizon is taken at its word, since that is
+        how a clock change looks in the ids (a 23-hour day lacks the hour it skips); in a run of horizon 1 alone the day
+        after the spring switch lacks its 02:00 in the same way, and its aggregate is over 23 of its 24 hours. Each model
+        is judged on its own days, so a model missing a period loses that day and no other model does. Dropped days are
+        counted, never lost silently: `forecast_counts()` of the new report has them as `missing` and under
+        `incomplete_day`, and a warning names the models. `planned` there is the days with any forecast, so days without a
+        single forecast are in the first report's `forecast_counts()`.
 
         The evaluators carry over, except `EconomicEvaluator` (a schedule needs the periods of a day), which is left out
         with a warning. `summary()`, `by_*()`, `tests()`, `mcs()`, `ranks()`, `compare()` and `leaderboard()` work;
@@ -201,6 +213,11 @@ class EvaluationReport:
         frames = self._model_frames()
         starts = [df["run_date"].min() for df in frames.values() if "run_date" in df and len(df)]
         start = min(starts) if starts else pd.Timestamp(0)
+        # The periods a target date has: every period that any model has a record for, at any horizon.
+        keyed = [
+            df[["target_date", "hour"]] for df in frames.values() if len(df) and {"target_date", "hour"} <= set(df)
+        ]
+        periods = pd.concat(keyed).drop_duplicates().groupby("target_date").size() if keyed else None
         results: Dict[str, ModelResultRef] = {}
         dropped: Dict[str, int] = {}
         for name, ref in self.refs.items():
@@ -208,7 +225,7 @@ class EvaluationReport:
             per_hour = _PERIODS_PER_HOUR.get(freqs.get(name, ref.freq))
             if per_hour is None:
                 per_hour = periods_per_hour(frame["hour"].to_numpy()) if "hour" in frame else 1
-            days, seen, missing = daily_aggregate(frame, agg, per_hour)
+            days, seen, missing = daily_aggregate(frame, agg, per_hour, periods)
             records = _daily_records(days, start)
             results[name] = ModelResultRef(
                 name=name,
