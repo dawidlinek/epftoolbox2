@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import tempfile
 import os
 
-from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.evaluators import BiasEvaluator, MAEEvaluator, RMSEEvaluator
 from epftoolbox2.results.report import EvaluationReport
 from epftoolbox2.results.ref import ModelResultRef
 from epftoolbox2.pipelines.model_pipeline import ModelPipeline
@@ -134,6 +134,12 @@ class TestModelPipeline:
         result = pipeline.add_evaluator(evaluator)
         assert result is pipeline
         assert len(pipeline.evaluators) == 1
+
+    def test_add_evaluator_takes_several_and_chains(self):
+        mae, rmse, bias = MAEEvaluator(), RMSEEvaluator(), BiasEvaluator()
+        pipeline = ModelPipeline()
+        assert pipeline.add_evaluator(mae, rmse).add_evaluator(bias) is pipeline
+        assert pipeline.evaluators == [mae, rmse, bias]
 
     def test_add_exporter_returns_self(self):
         pipeline = ModelPipeline()

@@ -28,6 +28,14 @@ COMPONENT_REGISTRY = {
         "MAEEvaluator": "epftoolbox2.evaluators.mae",
         "RMSEEvaluator": "epftoolbox2.evaluators.rmse",
         "rMAEEvaluator": "epftoolbox2.evaluators.rmae",
+        "BiasEvaluator": "epftoolbox2.evaluators.bias",
+        "DMEvaluator": "epftoolbox2.evaluators.dm",
+        "MCSEvaluator": "epftoolbox2.evaluators.mcs",
+        "EconomicEvaluator": "epftoolbox2.evaluators.economic",
+    },
+    # What `EconomicEvaluator(strategy=...)` runs; saved inside the evaluator as `{class: ..., params: ...}`.
+    "strategies": {
+        "BatteryArbitrage": "epftoolbox2.evaluators.economic",
     },
     "exporters": {
         "CsvExporter": "epftoolbox2.exporters.csv",
@@ -67,8 +75,8 @@ class ModelPipeline:
         self.models.append(model)
         return self
 
-    def add_evaluator(self, evaluator: Evaluator) -> "ModelPipeline":
-        self.evaluators.append(evaluator)
+    def add_evaluator(self, *evaluators: Evaluator) -> "ModelPipeline":
+        self.evaluators.extend(evaluators)
         return self
 
     def add_exporter(self, exporter: Exporter) -> "ModelPipeline":
@@ -241,7 +249,9 @@ class ModelPipeline:
         self._check_predictors_can_be_saved(component)
         label = f"{class_name}({component.name!r})" if isinstance(component, BaseModel) else class_name
         params = {
-            key: to_yaml_value(value, f"{label}.{key}")
+            key: self._serialize_component(value)
+            if type(value).__name__ in COMPONENT_REGISTRY["strategies"]
+            else to_yaml_value(value, f"{label}.{key}")
             for key, value in getattr(component, "__dict__", {}).items()
             if not key.startswith("_")
         }
@@ -266,9 +276,12 @@ class ModelPipeline:
     @classmethod
     def _load_component(cls, component_type: str, config: Dict[str, Any]) -> Any:
         class_name = config["class"]
-        params = config.get("params", {})
+        params = dict(config.get("params") or {})
         if class_name not in COMPONENT_REGISTRY[component_type]:
-            raise ValueError(f"Unknown {component_type[:-1]}: {class_name}")
+            kind = "strategy" if component_type == "strategies" else component_type[:-1]
+            raise ValueError(f"Unknown {kind}: {class_name}")
+        if component_type == "evaluators" and isinstance(params.get("strategy"), dict):
+            params["strategy"] = cls._load_component("strategies", params["strategy"])
         module = importlib.import_module(COMPONENT_REGISTRY[component_type][class_name])
         return getattr(module, class_name)(**params)
 

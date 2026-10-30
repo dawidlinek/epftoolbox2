@@ -32,6 +32,28 @@ def test_rmae_and_csv_exporter_can_be_built(tmp_path):
     assert exporter.extra_columns == ["is_holiday"]
 
 
+def test_new_evaluators_can_be_built():
+    dm = tui._instantiate("DMEvaluator", {"benchmark": "OLS", "correction": "none", "reps": 100})
+    assert (dm.benchmark, dm.correction, dm.reps) == ("OLS", "none", 100)
+    assert tui._instantiate("MCSEvaluator", {"statistic": "max"}).statistic == "max"
+    assert tui._instantiate("BiasEvaluator", {}).name == "Bias"
+    assert tui._instantiate("EconomicEvaluator", {}).strategy.energy_mwh == 2
+
+
+def test_the_battery_prompt_builds_the_strategy(monkeypatch):
+    class Answer:
+        def ask(self):
+            return "2, 8, 0.85"
+
+    monkeypatch.setattr(tui.questionary, "text", lambda *args, **kwargs: Answer())
+    field = next(f for f in tui.PARAM_SCHEMAS["EconomicEvaluator"] if f["name"] == "strategy")
+
+    strategy = tui._ask_field(field)
+
+    assert (strategy.power_mw, strategy.energy_mwh, strategy.efficiency) == (2, 8, 0.85)
+    assert tui._instantiate("EconomicEvaluator", {"strategy": strategy}).strategy is strategy
+
+
 def test_issue_time_prompt_defaults_to_the_information_set_default(monkeypatch, tmp_path):
     """The wizard offers the same issue time as `InformationSet()`."""
     import pandas as pd

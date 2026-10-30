@@ -9,7 +9,16 @@ from epftoolbox2.data.sources import CalendarSource, CsvSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.models import OLSModel, LassoCVModel
-from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
+from epftoolbox2.evaluators import (
+    BatteryArbitrage,
+    BiasEvaluator,
+    DMEvaluator,
+    EconomicEvaluator,
+    MAEEvaluator,
+    MCSEvaluator,
+    RMSEEvaluator,
+    rMAEEvaluator,
+)
 from epftoolbox2.exporters import TerminalExporter, ExcelExporter
 
 
@@ -634,6 +643,60 @@ class TestModelPipelineParameterFidelity:
         with pytest.raises(TypeError, match=r"TerminalExporter\.show"):
             ModelPipeline().add_exporter(exporter).save(tmp_path / "b.yaml")
 
+    def test_the_strategy_is_saved_inside_the_evaluator_and_reloads(self, tmp_path):
+        path = tmp_path / "mp.yaml"
+        evaluator = EconomicEvaluator(BatteryArbitrage(power_mw=2, energy_mwh=8, efficiency=0.85))
+        ModelPipeline().add_evaluator(evaluator).save(path)
+
+        saved = yaml.safe_load(path.read_text())["evaluators"][0]
+        assert saved == {
+            "class": "EconomicEvaluator",
+            "params": {
+                "strategy": {
+                    "class": "BatteryArbitrage",
+                    "params": {"power_mw": 2, "energy_mwh": 8, "efficiency": 0.85},
+                }
+            },
+        }
+        loaded = ModelPipeline.load(path).evaluators[0]
+        assert isinstance(loaded.strategy, BatteryArbitrage)
+        assert (loaded.strategy.power_mw, loaded.strategy.energy_mwh, loaded.strategy.efficiency) == (2, 8, 0.85)
+
+    def test_the_default_strategy_is_saved_in_full(self, tmp_path):
+        path = tmp_path / "mp.yaml"
+        ModelPipeline().add_evaluator(EconomicEvaluator()).save(path)
+        strategy = yaml.safe_load(path.read_text())["evaluators"][0]["params"]["strategy"]
+        assert strategy == {"class": "BatteryArbitrage", "params": {"power_mw": 1, "energy_mwh": 2, "efficiency": 0.9}}
+
+    def test_an_unknown_strategy_raises_on_load(self, tmp_path):
+        path = tmp_path / "mp.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "evaluators": [
+                        {"class": "EconomicEvaluator", "params": {"strategy": {"class": "Nope", "params": {}}}}
+                    ]
+                }
+            )
+        )
+        with pytest.raises(ValueError, match="Unknown strategy: Nope"):
+            ModelPipeline.load(path)
+
+    def test_an_unregistered_strategy_raises_on_save(self, tmp_path):
+        class MyStrategy:
+            def profit(self, forecast, actual, periods_per_hour=1):
+                return actual.sum(axis=1)
+
+        with pytest.raises(TypeError, match=r"EconomicEvaluator\.strategy"):
+            ModelPipeline().add_evaluator(EconomicEvaluator(MyStrategy())).save(tmp_path / "mp.yaml")
+
+    def test_a_workflow_loads_the_new_evaluators_inline(self):
+        evaluator = ModelPipeline._load_component(
+            "evaluators", {"class": "DMEvaluator", "params": {"benchmark": "O", "correction": None, "lag": 7}}
+        )
+        assert isinstance(evaluator, DMEvaluator)
+        assert (evaluator.benchmark, evaluator.correction, evaluator.lag) == ("O", None, 7)
+
     def test_every_registered_component_round_trips_with_non_default_values(self, tmp_path):
         from epftoolbox2.exporters import CsvExporter
         from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY as MODEL_REGISTRY
@@ -643,14 +706,34 @@ class TestModelPipelineParameterFidelity:
                 OLSModel(["price_d-1", "load_d+{horizon}"], training_window=90, name="O", scaler="asinh"),
                 LassoCVModel(["price_d-1"], training_window=60, cv=3, max_iter=77, name="L"),
             ],
-            "evaluators": [MAEEvaluator(), RMSEEvaluator(), rMAEEvaluator("O")],
+            "evaluators": [
+                MAEEvaluator(),
+                RMSEEvaluator(),
+                rMAEEvaluator("O"),
+                BiasEvaluator(),
+                DMEvaluator(
+                    "O",
+                    variance="hac",
+                    lag=7,
+                    correction=None,
+                    alpha=0.01,
+                    interval=0.9,
+                    block=14,
+                    reps=500,
+                    seed=3,
+                ),
+                MCSEvaluator(alpha=0.25, statistic="max", block=14, reps=2000, seed=5),
+                EconomicEvaluator(BatteryArbitrage(power_mw=2, energy_mwh=8, efficiency=0.85)),
+            ],
             "exporters": [
-                CsvExporter(str(tmp_path / "out.csv"), extra_columns=["is_holiday"]),
+                CsvExporter(
+                    str(tmp_path / "out.csv"), extra_columns=["is_holiday"], summary_path=str(tmp_path / "s.csv")
+                ),
                 ExcelExporter(str(tmp_path / "out.xlsx"), sheets=["summary", "hour"]),
                 TerminalExporter(show=["hour"]),
             ],
         }
-        covered = {type(obj).__name__ for objs in originals.values() for obj in objs}
+        covered = {type(obj).__name__ for objs in originals.values() for obj in objs} | {"BatteryArbitrage"}
         assert covered == {name for names in MODEL_REGISTRY.values() for name in names}  # add a new component here
 
         pipeline = ModelPipeline()
