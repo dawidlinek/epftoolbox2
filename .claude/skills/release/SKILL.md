@@ -38,7 +38,7 @@ prev=$(git log --format=%H --grep='^chore: bump version to' -n1)
 git log "$prev"..HEAD --no-merges --format='%s'
 ```
 
-Group the subjects by prefix (feat, fix, docs, test, chore, ci, style). Put user-visible changes first, and add a "Breaking changes" section if there are any. Show the notes to the user. There is no CHANGELOG file; only create one if the user asks.
+Group the subjects by prefix (feat, fix, docs, test, chore, ci, style). Put user-visible changes first, and add a "Breaking changes" section if there are any. Show the notes to the user. Breaking and other notable changes are kept in `docs/src/content/docs/reference/release-notes.md`: move what has gathered there under the new version's heading and use it as the "Breaking changes" section.
 
 ## 4. Commit
 Commit only `pyproject.toml`, `epftoolbox2/__init__.py` and `uv.lock`, with the message `chore: bump version to X.Y.Z` (the repo's convention). Create a `vX.Y.Z` tag only if the user wants tags.
