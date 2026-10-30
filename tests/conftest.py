@@ -50,19 +50,28 @@ def live_dir(tmp_path, monkeypatch, entsoe_api_key):
 
 @pytest.fixture
 def information_set_checks(monkeypatch):
-    """Record every InformationSet.check call that returns, so a test can show the check ran and passed.
+    """Record every issue-time check that finds nothing, so a test can show the check ran and passed.
 
-    The check raises InformationSetError on a predictor that is not known at issue time, so a recorded call
-    means it did not.
+    `InformationSet.check` (availability="raise") raises InformationSetError on a predictor that is not known at issue
+    time, so a recorded call means it did not. `InformationSet.late_uses` (availability="warn") returns such predictors
+    and any column without a rule, so it is recorded when it returns none.
     """
     from epftoolbox2.information_set import InformationSet
 
     calls = []
-    original = InformationSet.check
+    original_check = InformationSet.check
+    original_late_uses = InformationSet.late_uses
 
     def recording_check(self, expanded, *args, **kwargs):
-        original(self, expanded, *args, **kwargs)
+        original_check(self, expanded, *args, **kwargs)
         calls.append((kwargs.get("model_name"), self.issue_time, self.issue_timezone))
 
+    def recording_late_uses(self, expanded, *args, **kwargs):
+        found = original_late_uses(self, expanded, *args, **kwargs)
+        if not found:
+            calls.append((kwargs.get("model_name"), self.issue_time, self.issue_timezone))
+        return found
+
     monkeypatch.setattr(InformationSet, "check", recording_check)
+    monkeypatch.setattr(InformationSet, "late_uses", recording_late_uses)
     return calls

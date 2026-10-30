@@ -7,12 +7,14 @@ import pandas as pd
 import yaml
 
 from .._date_utils import resolve_date
-from ..information_set import InformationSet, InformationSetError
+from ..information_set import InformationSet, InformationSetError, check_level
 from ..models.base import BaseModel
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..exporters.base import Exporter
+from ..results.availability import read_listing, warn_about
+from ..results.manifest import manifest_path
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef
 from ..verification import VerifyReport, sample_issue_days, verify_model
@@ -52,11 +54,18 @@ class ModelPipeline:
     """Runs models over a test period, then evaluators and exporters.
 
     Args:
-        information_set: Check every predictor against the time the forecast is issued before any fit
-            (see epftoolbox2.information_set). None skips the check.
+        information_set: When each input becomes known and when forecasts are issued
+            (see epftoolbox2.information_set). None means no issue time and no checks.
         issue_time: Shortcut for `information_set=InformationSet(issue_time, issue_timezone)` with the
             built-in availability rules, e.g. "11:45".
         issue_timezone: Zone of `issue_time`.
+        availability: What a run does with a predictor (or the newest training target) that its rule puts after the
+            issue time. "warn", the default with an issue time, goes on and lists it, and any column without a rule, in
+            `report.availability()`, a warning, the terminal exporter and the manifest. "raise" refuses it before any
+            fit, and `unknown` of the information set decides about columns without a rule. "none", the default
+            without an issue time, checks and lists nothing; a predictor function still gets its answers from the
+            information set. "warn" and "raise" need an issue time. The level never changes a forecast, and changing it
+            alone resumes a run.
     """
 
     def __init__(
@@ -64,6 +73,7 @@ class ModelPipeline:
         information_set: Optional[InformationSet] = None,
         issue_time: Optional[str] = None,
         issue_timezone: str = "Europe/Brussels",
+        availability: Optional[str] = None,
     ):
         if issue_time is not None:
             if information_set is not None:
@@ -73,6 +83,27 @@ class ModelPipeline:
         self.evaluators: List[Evaluator] = []
         self.exporters: List[Exporter] = []
         self.information_set: Optional[InformationSet] = information_set
+        self.availability = availability
+
+    @property
+    def availability(self) -> str:
+        """The level in force: the one asked for, else "warn" with an information set and "none" without one."""
+        if self._availability is not None:
+            return self._availability
+        return "warn" if self.information_set is not None else "none"
+
+    @availability.setter
+    def availability(self, level: Optional[str]) -> None:
+        self._availability = None if level is None else check_level(level)
+        self._check_availability()
+
+    def _check_availability(self) -> None:
+        """`information_set` can be set after the level, as `Workflow` and `epf model` do, so `run` asks again."""
+        if self.availability != "none" and self.information_set is None:
+            raise ValueError(
+                f"availability={self.availability!r} checks predictors against the time a forecast is issued: pass "
+                "issue_time or information_set too, or leave availability out."
+            )
 
     def add_model(self, model: BaseModel) -> "ModelPipeline":
         self.models.append(model)
@@ -110,20 +141,28 @@ class ModelPipeline:
         if not self.models:
             raise ValueError("At least one model is required")
         self._check_model_names()
+        self._check_availability()
         if not forecast_only:
             self._check_benchmarks()
         if forecast_only:
             check_start, check_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
         else:
             check_start, check_end = resolve_date(test_start), resolve_date(test_end)
+        level = self.availability
         # Check every model's inputs before running any, so a bad predictor in the last model fails in seconds. A
         # predictor function is planned here, once, and the run uses that plan.
+        info = self.information_set
         plans: Dict[str, PredictorPlan] = {}
+        listings: Dict[str, List[Dict]] = {}
         for model in self.models:
-            plan = model._plan_predictors(data, target, horizon, freq, self.information_set, check_start, check_end)
-            model._check_inputs(data, target, horizon, freq, self.information_set, check_start, check_end, plan=plan)
+            plan = model._plan_predictors(data, target, horizon, freq, info, check_start, check_end, availability=level)
+            model._check_inputs(
+                data, target, horizon, freq, info, check_start, check_end, plan=plan, availability=level
+            )
+            listings[model.name] = model._availability_listing
             if plan is not None:
                 plans[model.name] = plan
+        warn_about(listings, stacklevel=3)  # once, for every model, and before the hours a run can take
 
         refs: dict[str, ModelResultRef] = {}
         for model in self.models:
@@ -141,6 +180,8 @@ class ModelPipeline:
                 information_set=self.information_set,
                 allow_manifest_mismatch=allow_manifest_mismatch,
                 require_manifest=require_manifest,
+                availability=level,
+                warn_listing=False,
                 **planned,
             )
             refs[model.name] = ref
@@ -171,6 +212,9 @@ class ModelPipeline:
         `Workflow(model_index=...)`). The test period, horizon and freq must be those of the runs; they give
         each model's planned forecast count. Raises FileNotFoundError if a model has no results file, unless
         `allow_missing` is set. `data` is only needed by exporters that join source columns.
+
+        What the runs listed about inputs known after the issue time comes from the manifests, whatever this pipeline's
+        `availability` is: `report.availability()`, one warning and the terminal exporter show it.
         """
         if not self.models:
             raise ValueError("At least one model is required")
@@ -203,6 +247,7 @@ class ModelPipeline:
                 horizon=horizon,
                 freq=freq,
                 produced=produced,
+                availability_listing=read_listing(manifest_path(path)),
             )
         if missing and not allow_missing:
             raise FileNotFoundError(f"No results for model(s): {', '.join(missing)}. Run them first.")
@@ -220,6 +265,7 @@ class ModelPipeline:
                 "forecast sets for these models; compare with care.",
                 stacklevel=2,
             )
+        warn_about({name: ref.availability_listing for name, ref in refs.items()}, stacklevel=3)
 
         report = EvaluationReport(refs, [] if forecast_only else self.evaluators, source_data=data)
         if not forecast_only:
@@ -267,6 +313,10 @@ class ModelPipeline:
         runs per model, six with `rebuild` or a target among the predictors. A model that isn't deterministic shows up
         as a leak.
 
+        The boundary is the same at every `availability` level: a late predictor is a `leak` also where `run` only lists
+        it. With "warn" or "none" a predictor function that reads a late `ctx.value()` is a `leak` too; with "raise" that
+        read raises `InformationSetError`.
+
         Args:
             data: The frame the models run on, or the source data with `rebuild`.
             test_start: First issue day to sample from.
@@ -307,6 +357,7 @@ class ModelPipeline:
                     control=positive_control,
                     rebuild=rebuild,
                     test_period=(test_start, test_end),
+                    availability=self.availability,
                 )
             )
         return report
@@ -383,6 +434,8 @@ class ModelPipeline:
         }
         if self.information_set is not None:
             out["information_set"] = self.information_set.to_dict()
+        if self._availability is not None:  # what was asked for; left out, a load takes the default again
+            out["availability"] = self._availability
         return out
 
     def save(self, path: Union[str, Path]) -> None:
@@ -417,7 +470,9 @@ class ModelPipeline:
         with open(path, "r") as f:
             config = yaml.safe_load(f)
         info = config.get("information_set")
-        pipeline = cls(information_set=InformationSet.from_dict(info) if info else None)
+        pipeline = cls(
+            information_set=InformationSet.from_dict(info) if info else None, availability=config.get("availability")
+        )
         for c in config.get("models", []):
             pipeline.add_model(cls._load_component("models", c))
         for c in config.get("evaluators", []):

@@ -732,7 +732,7 @@ def test_the_pipeline_refuses_a_late_list_before_any_fit(df, monkeypatch):
 
     monkeypatch.setattr(OLSModel, "_fit_predict", no_fit)
     pipeline = (
-        ModelPipeline(information_set=INFO)
+        ModelPipeline(information_set=INFO, availability="raise")
         .add_model(OLSModel(PREDICTORS, training_window=45, name="fine"))
         .add_model(OLSModel(late_at_hour_3, training_window=45, name="late"))
     )
@@ -833,7 +833,9 @@ def test_verify_refuses_a_late_value():
     def peeks(ctx):
         return PREDICTORS if ctx.value("secret_d+1") > 0 else PREDICTORS + ["price_d-1"]
 
-    pipeline = ModelPipeline(information_set=rules).add_model(OLSModel(peeks, training_window=45, name="peeks"))
+    pipeline = ModelPipeline(information_set=rules, availability="raise").add_model(
+        OLSModel(peeks, training_window=45, name="peeks")
+    )
     with pytest.raises(InformationSetError, match=r"secret_d\+1"):
         pipeline.verify(frame, *TEST, horizon=1, days=1)
 

@@ -1693,7 +1693,7 @@ def test_the_leakage_probe_passes_the_expert_preset_on_the_benchmark(tmp_path):
 
 def test_model_pipeline_checks_before_fitting(tmp_path):
     df = make_market_data(days=120).rename(columns={"load": "load_actual"})
-    pipeline = ModelPipeline(issue_time="11:45").add_model(
+    pipeline = ModelPipeline(issue_time="11:45", availability="raise").add_model(
         OLSModel(["load_actual", "price_d-1"], training_window=30, name="OLS")
     )
     with pytest.raises(InformationSetError, match="load_actual"):
@@ -1744,6 +1744,7 @@ def test_workflow_inline_information_set_knows_prefixed_calendar_columns(tmp_pat
             "test_end": "2023-03-01",
             "horizon": 1,
             "information_set": {"issue_time": "11:45", "issue_timezone": "Europe/Brussels"},
+            "availability": "raise",
             "models": [
                 {
                     "class": "OLSModel",

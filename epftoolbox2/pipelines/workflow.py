@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 _DP_SECTIONS = ("sources", "transformers", "validators")
 _MP_SECTIONS = ("models", "evaluators", "exporters")
-_MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set")
+_MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set", "availability")
 
 
 class Workflow:
@@ -137,6 +137,8 @@ class Workflow:
         if "information_set" in self._mp_inline:
             info = self._mp_inline["information_set"]
             mp.information_set = InformationSet.from_dict(info) if info else None
+        if "availability" in self._mp_inline:
+            mp.availability = self._mp_inline["availability"]
         if self.model_index is not None and not all_models:
             n = len(mp.models)
             if not 0 <= self.model_index < n:
