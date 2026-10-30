@@ -154,13 +154,14 @@ epf model model_pipeline.yaml \
 | Flag | Description |
 |------|-------------|
 | `--data FILE` | Input CSV file |
-| `--test-start DATE` | Test period start |
+| `--test-start DATE` | Test period start. Required with `--test-end`, unless `--validation` is given |
 | `--test-end DATE` | Test period end |
 
 **Optional flags:**
 
 | Flag | Description |
 |------|-------------|
+| `--validation START END` | Validation period, or `--validation previous_year` for each 12 months of the test period served by the 12 months before them. Without a test period only these days are forecast. See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/) |
 | `--target COL` | Target column name (default: `price`) |
 | `--horizon N` | Forecast horizon in days (default: `7`) |
 | `--freq {1h,15min}` | Data resolution: one model per hour or per quarter-hour (default: `1h`). Must match the data |

@@ -1,0 +1,157 @@
+---
+title: Validation and Test
+description: Forecast a validation and a test period in one run, with records identical to separate runs, and keep every report to its window
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every forecast is refitted on its own rolling window, in validation as in test. The split only decides when choices are
+made: a model's own settings (the lambda of `LassoCVModel`) come from each fit's training window, choices between models or
+lists are made once on the validation period, and the test period uses them without choosing anything.
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline().add_model(OLSModel(predictors=["load_forecast_d+1", "price_d-1"], name="OLS"))
+
+report = pipeline.run(df, validation=("2023-01-06", "2023-12-29"), test=("2024-01-05", "2025-12-26"), horizon=1)
+print(report.summary())             # the test window
+print(report.validation.summary())  # the validation window
+```
+
+| You pass | The run forecasts | It returns |
+|---|---|---|
+| `test=(start, end)` | the test days. `test_start` and `test_end`, also positionally, mean the same, and giving both raises | the test report, as always |
+| `validation=(start, end), test=(start, end)` | the days of both, and nothing between them | the test report, with `report.validation` |
+| `validation="previous_year", test=(start, end)` | the test days and the year before them | the same, with [yearly segments](#a-new-validation-year-for-every-test-year) |
+| `validation=(start, end)` | only those days: nothing of the test period is computed, so you can explore and leave it untouched | the validation report itself, so `.summary()` works on it |
+
+`ValueError` before anything runs: no window at all, a validation period that ends on or after the test start, a reversed
+period, an unknown string, `"previous_year"` without a test period, `validation` with `forecast_only`. A window whose first
+or last day is not in the data raises like a test period does.
+
+## A forecast doesn't depend on the role it plays
+
+One run per model covers both windows, into one results file and one manifest. Test records of
+`run(df, validation=V, test=T)` are bit for bit those of `run(df, test=T)`, and validation records those of
+`run(df, test=V)`, apart from their tag.
+
+- **Records.** A record of a run with validation carries `window` (`"validation"` or `"test"`), decided by its issue day
+  whatever its target day, and its `day_in_test` counts from the start of its own window. A plain run writes no `window`, and a
+  record without one means `"test"`, so old files keep loading.
+- **Binary columns.** A list's mask of columns left unscaled is read from the training window of the first day it is used.
+  With one mask for the run, adding validation days would change the masks, and with them the test forecasts, without a word.
+  So each window reads its masks from its own first day, and the manifest holds a digest of each.
+- **Days between the windows** are not forecast. A predictor function isn't asked about them, the issue-time check
+  doesn't look at them, and the data contract's spacing check reads only what the windows' training windows reach.
+- **A predictor function doesn't see the window.** `ctx` has no way to ask, so a list can't depend on it.
+
+## A new validation year for every test year
+
+With `validation="previous_year"` the test period is cut into consecutive 12-month segments from its start, and each
+segment's validation period is the 12 months before it. The last segment may be partial.
+
+```text
+test=("2024-01-05", "2025-12-26")
+
+segment  validation                 test
+1        2023-01-05 ... 2024-01-04  2024-01-05 ... 2025-01-04
+2        2024-01-05 ... 2025-01-04  2025-01-05 ... 2025-12-26
+```
+
+The run covers one extra year at the start, tagged `"validation"`. The validation days of a later segment are the test days
+of the one before, and they stay tagged `"test"`, since a forecast doesn't depend on the role it plays. Test records equal a
+plain run's here too. Each boundary is the start plus k years, counted from the original start, so a start on 29 February
+gives 28 February in the years without one and 29 February again in the next leap year. A test period shorter than a year is
+one segment, with a whole year before it.
+
+`report.windows` has the windows and segments of a run, and `read_windows(path)` reads them from a results file or its
+manifest. `Segment.serves(run_date, target_date)` says whether a forecast may count for that segment's choices.
+
+```python
+from epftoolbox2.results import read_windows
+
+windows = read_windows("results/ols.jsonl")
+for segment in windows.segments:
+    print(segment.validation, "serves", segment.test)
+print(windows.segments[0].serves("2024-01-03", "2024-01-05"))  # False: its target is a test issue day
+```
+
+## The report keeps to its window
+
+`report` is the test window and `report.validation` the validation window, and `report.window` says which one you hold.
+Every method keeps to it: `summary()`, the `by_*()` tables, `tests()`, `mcs()`, `ranks()`, `compare()`, `leaderboard()`,
+`aggregate()`, `predictions()`, `iter_details()`, `forecast_counts()`, `availability()`, the evaluators and the exporters. A
+run's exporters get the test window, or the validation window if there is no test window. `report.validation` raises
+`ValueError` on a run with no validation, and `join()` raises on reports on different windows (or, for a run with validation,
+other days of the same one).
+
+**`report.validation` holds only forecasts whose target day is before the first test issue day**, because you pick from it by
+hand and a later target would be look-ahead. With `horizon=3` and no gap, some of what was issued on the last three validation
+days is for a test day. Those forecasts stay in the results file, and `forecast_counts()` counts them as `target_in_test`:
+
+```text
+model  planned  produced  missing  target_in_test
+  OLS     8784     8640      144             144
+```
+
+`run(df, validation=V)` alone knows of no test period, so nothing is cut until one is on file: pick the end of `V` with your
+horizon in mind. Skip reasons are split by window too.
+
+## Resuming
+
+Results resume as usual, and interrupted then resumed equals fresh. On top of that:
+
+- **Validation first, test later.** `run(df, validation=V, save_dir=d)` followed by `run(df, validation=V, test=T, save_dir=d)`
+  reuses the validation records, computes only the test ones, and equals a fresh combined run. The frame may have grown in
+  between: what is compared is what the stored records read, the predictors up to their last issue day and the target up to the
+  last day an `actual` of theirs reads. If those last actuals were missing then and exist now, a fresh run would differ, and it
+  raises: keep at least `horizon` days after the validation period in the frame.
+- **A key that would change window or mask raises.** `ManifestMismatchError` says so when a stored forecast's issue day falls in
+  another window now (results of `run(df, test=V)` can't become validation records), or when moving a window's first day gives
+  a stored forecast other binary columns than a fresh run would. Pending forecasts may change freely.
+- **A plain run and a run with windows meet.** `run(df, test=T)` followed by `run(df, validation=V, test=T)` keeps the stored test
+  records, which have no tag and so mean test. The other way round, a plain run resumes as a run of the test window alone, and
+  the windows on file stay recorded.
+- **What is on file stays recorded.** A run that names fewer windows leaves the others in the manifest, like their records in the
+  file, and `report.validation` is cut at a test period on file.
+
+See [Incremental Training](/epftoolbox2/model-pipeline/caching/#the-manifest) for the manifest.
+
+## Checks
+
+The issue-time check, the availability listing, the plan of a predictor function and the data contract cover the days of both
+windows, once. At `availability="warn"` the warning covers the whole run, and `report.availability()` and
+`report.validation.availability()` list what each window uses, so a rule broken only on validation days doesn't show in the test
+report.
+
+<Aside type="caution">
+  `verify()` probes the period you give it, not the windows of a run. To check both, call it on each:
+  `pipeline.verify(df, *VALIDATION, horizon=1)` and `pipeline.verify(df, *TEST, horizon=1)`. See
+  [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/).
+</Aside>
+
+## SLURM arrays, YAML and the CLI
+
+`Workflow` YAML takes the windows next to the other run settings. In array mode each task runs its model over both windows, and
+`epf report` merges them. Shards whose manifests record different windows raise, since their models would be compared on
+different forecasts.
+
+```yaml
+model_pipeline:
+  path: model_pipeline.yaml
+  validation: previous_year     # or ["2023-01-06", "2023-12-29"]
+  test: ["2024-01-05", "2025-12-26"]
+  save_dir: results
+  horizon: 7
+```
+
+`ModelPipeline.report(save_dir, validation=..., test=..., horizon=..., freq=...)` takes what `run` was told, and each window must
+be what the manifests record. With no window at all it reports every window they record. The report is what `run` returns.
+
+```bash
+epf model model_pipeline.yaml --data data.csv --validation 2023-01-06 2023-12-29 --test-start 2024-01-05 --test-end 2025-12-26
+epf model model_pipeline.yaml --data data.csv --validation previous_year --test-start 2024-01-05 --test-end 2025-12-26
+epf model model_pipeline.yaml --data data.csv --validation 2023-01-06 2023-12-29   # validation only
+```

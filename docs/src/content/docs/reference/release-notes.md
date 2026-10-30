@@ -9,6 +9,8 @@ Notes for changes that need something from you. The full list of changes of a re
 
 ### Breaking changes
 
+- **A reversed test period now raises.** `ModelPipeline.run(df, test_start=later, test_end=earlier)` used to run nothing and
+  return an empty report, and now raises `ValueError`, as a reversed `test=` does. So does `ModelPipeline.report()`.
 - **An issue time now warns instead of raising.** `ModelPipeline(issue_time=...)` and `ModelPipeline(information_set=...)` used
   to refuse a predictor known after the issue time with `InformationSetError` before any fit. They now default to
   `availability="warn"`: the run goes on, and the predictor is listed in `report.availability()`, a warning, the terminal exporter and
@@ -28,6 +30,11 @@ an issue day it didn't sample.
 
 ### New
 
+- `run(df, validation=(start, end) | "previous_year", test=(start, end))`: one run per model over both windows, into one results
+  file and one manifest. Each forecast is bit for bit what a plain run over its window gives. `report.validation`, `report.window`
+  and `report.windows`, also in `ModelPipeline.report()`, `Workflow` YAML and `epf model --validation`. Plain runs and their files
+  don't change, `test_start` and `test_end` keep working. See
+  [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/).
 - `availability="none" | "warn" | "raise"` on `ModelPipeline` (and in YAML, and `epf model --availability`).
 - `report.availability()`: the inputs a run can't vouch for, per model, list, period and horizon.
 - `pipeline.explain()`: what a forecast's predictors hold relative to the target day, and when each is known; for a predictor

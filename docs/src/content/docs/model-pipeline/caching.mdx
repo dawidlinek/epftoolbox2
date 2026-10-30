@@ -49,7 +49,9 @@ Each line in `results.jsonl` is a JSON object:
 
 A task is considered already done by its `(hour, horizon, run_date)`, the actual calendar date, not the
 `day_in_test` offset from `test_start`, so extending or shifting `test_start` between runs into the same
-directory can't make an unrelated date look already computed.
+directory can't make an unrelated date look already computed. In a run with
+[validation](/epftoolbox2/model-pipeline/validation-and-test/) a record also has `window`, and its `day_in_test` counts from the
+start of that window.
 
 <Aside type="tip">
   For long training runs, use `save_dir` to avoid losing progress if the script crashes or is interrupted.
@@ -97,6 +99,8 @@ report = pipeline.run(
 
 A [predictor function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/#results) has no fixed list to compare: resuming compares each stored forecast's list and binary columns with what a fresh run would give it, and each record stores its list's hash.
 
+A run with [validation](/epftoolbox2/model-pipeline/validation-and-test/#resuming) adds to the manifest its windows and segments (`windows`), a digest of the binary columns per window (`binary_masks`, under each list for a function, a test mask under the key a plain run gives it) and a hash of the target up to the last day a stored `actual` reads (`actuals`). A plain run's manifest has none of them. Resuming compares each stored forecast's window and mask with what a fresh run would give it, and the data on what the stored forecasts read, so a run with a test period can follow one with only a validation period.
+
 **A `.jsonl` file with no `.manifest.json` next to it** is not
 a mismatch: by default it is accepted with a warning, and a manifest is written from then on. Pass
 `require_manifest=True` to refuse them instead, if you want the stricter guarantee for every results
@@ -108,6 +112,7 @@ report = pipeline.run(..., save_dir="results", require_manifest=True)
 
 <Aside type="caution">
   A `training_window`, predictor list, model hyperparameter, or the data itself changing between runs into
-  the same `save_dir` raises by default. Extending `test_start`/`test_end` to cover more days does not,
-  that's the normal way to grow a resumable run.
+  the same `save_dir` raises by default. Moving `test_start` does not. Moving `test_end` does in a plain run, since the data
+  hash reaches up to it; a run with [windows](/epftoolbox2/model-pipeline/validation-and-test/#resuming) may go on past where
+  the stored forecasts end.
 </Aside>

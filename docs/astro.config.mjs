@@ -68,6 +68,7 @@ export default defineConfig({
                         { label: 'Information Set', link: '/model-pipeline/information-set/' },
                         { label: 'Verifying a Pipeline', link: '/model-pipeline/verification/' },
                         { label: 'Predictor Functions', link: '/model-pipeline/predictor-functions/' },
+                        { label: 'Validation and Test', link: '/model-pipeline/validation-and-test/' },
                         { label: 'Predictor Presets', link: '/model-pipeline/presets/' },
                     ],
                 },

@@ -37,7 +37,7 @@ The CSV contains the following columns:
 - `hour`: period of the day: the hour (0-23) for hourly results, the quarter-hour (0-95) for `freq="15min"` results
 - `target_time`: only for `freq="15min"` results, placed right after `hour`: local start time of that quarter-hour as `HH:MM` (period 5 is `01:15`)
 - `horizon`: forecast horizon (1 to max)
-- `day_in_test`: day index in the test period
+- `day_in_test`: day index in the test period (in a run with validation, in the window the report is on)
 - `actual`: actual observed value
 
 **Per-model columns:**
