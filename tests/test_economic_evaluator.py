@@ -227,6 +227,64 @@ def test_a_day_with_missing_periods_is_not_traded():
     assert evaluate(whole + partial)["profit"] == pytest.approx(PERFECT)
 
 
+@pytest.mark.parametrize("hole", [0, 6, 18, 23])
+def test_one_hole_outside_the_switch_hours_takes_the_day_out(hole):
+    """23 finite forecasts are not a 23-hour day when the hour they lack is not one the clocks can skip."""
+    partial = day_records("2024-01-02", PRICES)
+    del partial[hole]
+    row = evaluate(day_records("2024-01-01", PRICES) + partial)
+    assert row["profit days"] == 1 and row["profit"] == pytest.approx(PERFECT)
+
+
+@pytest.mark.parametrize("switch_hour", [1, 2, 3])
+def test_a_day_without_a_switch_hour_is_a_whole_23_hour_day(switch_hour):
+    """That is what a real run writes around a clock change: ids by the clock, without the hour that has no target."""
+    records = day_records("2024-01-01", PRICES)
+    del records[switch_hour]
+    row = evaluate(records)
+    assert row["profit days"] == 1
+    assert np.isfinite(row["profit"])
+
+
+def test_a_model_that_never_forecasts_one_hour_has_no_whole_day():
+    records = day_records("2024-01-01", PRICES) + day_records("2024-01-02", PRICES)
+    row = evaluate([r for r in records if r["hour"] != 18])
+    assert row["profit days"] == 0 and np.isnan(row["profit"])
+
+
+def test_one_hole_in_a_quarter_hour_day_takes_it_out():
+    prices = np.full(96, 50.0)
+    prices[8:16] = 10.0
+    prices[72:80] = 100.0
+    whole = day_records("2024-01-01", prices)
+    assert evaluate(whole)["profit days"] == 1
+    for holes in ([40], [40, 41, 42, 43], [20, 21, 22, 23]):
+        partial = [r for r in day_records("2024-01-02", prices) if r["hour"] not in holes]
+        assert evaluate(whole + partial)["profit days"] == 1, holes
+
+
+def test_a_quarter_hour_day_without_a_switch_hour_is_whole():
+    prices = np.full(96, 50.0)
+    prices[16:24] = 10.0
+    prices[72:80] = 100.0
+    records = [r for r in day_records("2024-01-01", prices) if r["hour"] not in (8, 9, 10, 11)]
+    row = evaluate(records)
+    assert row["profit days"] == 1
+    assert row["profit"] == pytest.approx(0.25 * (0.9 * 8 * 100 - 8 * 10))
+
+
+def test_twenty_four_quarter_hours_are_not_an_hourly_day():
+    """Read as hourly, they would earn four times what they can."""
+    prices = np.full(96, 50.0)
+    prices[8:16] = 10.0
+    prices[72:80] = 100.0
+    whole = day_records("2024-01-01", prices)
+    kept = day_records("2024-01-02", prices)[:24]
+    row = evaluate(whole + kept)
+    assert row["profit days"] == 1
+    assert row["profit"] == pytest.approx(0.25 * (0.9 * 8 * 100 - 8 * 10))
+
+
 def test_a_non_finite_forecast_takes_the_day_out():
     broken = day_records("2024-01-02", PRICES)
     broken[0]["prediction"] = float("nan")
@@ -235,13 +293,17 @@ def test_a_non_finite_forecast_takes_the_day_out():
     assert row["profit days"] == 1
 
 
+# Run dates whose target day is a Sunday (the switch days of 2024), and the Saturday-to-Sunday day before them.
+SHORT_DAY, LONG_DAY, PLAIN_DAY = "2024-03-30", "2024-10-26", "2024-01-03"
+
+
 def test_days_of_all_lengths_are_traded():
     records = []
-    for i, periods in enumerate((23, 24, 25)):
+    for run_date, periods in ((SHORT_DAY, 23), (PLAIN_DAY, 24), (LONG_DAY, 25)):
         prices = np.full(periods, 50.0)
         prices[1:3] = 10.0
         prices[-3:-1] = 100.0
-        records += day_records(f"2024-01-0{i + 1}", prices)
+        records += day_records(run_date, prices)
     row = evaluate(records)
     assert row["profit days"] == 3
     assert row["profit"] == pytest.approx(3 * (0.9 * 200 - 20))
@@ -249,14 +311,23 @@ def test_days_of_all_lengths_are_traded():
 
 def test_quarter_hour_days_of_all_lengths_are_traded():
     records = []
-    for i, periods in enumerate((92, 96, 100)):
+    for run_date, periods in ((SHORT_DAY, 92), (PLAIN_DAY, 96), (LONG_DAY, 100)):
         prices = np.full(periods, 50.0)
         prices[8:16] = 10.0
         prices[-16:-8] = 100.0
-        records += day_records(f"2024-01-0{i + 1}", prices)
+        records += day_records(run_date, prices)
     row = evaluate(records)
     assert row["profit days"] == 3
     assert row["profit"] == pytest.approx(3 * 0.25 * (0.9 * 8 * 100 - 8 * 10))
+
+
+def test_a_day_numbered_through_counts_as_short_only_on_a_sunday():
+    """Ids 0-22 on a Thursday are a 24-hour day without its last hour, and a whole day has that hour."""
+    prices = np.full(23, 50.0)
+    prices[1:3] = 10.0
+    prices[-3:-1] = 100.0
+    assert evaluate(day_records(SHORT_DAY, prices))["profit days"] == 1
+    assert evaluate(day_records("2024-01-03", prices))["profit days"] == 0
 
 
 def test_periods_are_taken_in_the_order_of_their_id():

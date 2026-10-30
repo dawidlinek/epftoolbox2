@@ -1,12 +1,30 @@
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from .base import FORECAST_KEYS, Evaluator
 
-# Periods of a whole local day -> periods per hour. A day with any other number of periods is not traded.
-_DAY_LENGTHS = {23: 1, 24: 1, 25: 1, 92: 4, 96: 4, 100: 4}
+# The local hours a clock change can fall in: the only periods a whole day may lack.
+_SWITCH_HOURS = (1, 2, 3)
+
+
+def _whole_days(per_hour: int) -> Dict[int, List[Tuple[np.ndarray, bool]]]:
+    """`{periods in the day: [(the period ids such a whole day may hold, whether it must be a Sunday)]}`.
+
+    A real run numbers periods by the clock, so a day of 23 hours lacks the hour it skips, also on the day after the spring
+    switch and on the autumn switch day, when that hour has no target. Other results may number a short day through, and
+    that is also what a day looks like that only lacks its last hour, so it counts only on a Sunday, when clocks change.
+    """
+    clock = np.arange(24 * per_hour)
+    return {
+        24 * per_hour: [(clock, False)],
+        25 * per_hour: [(np.arange(25 * per_hour), False)],
+        23 * per_hour: [
+            (np.arange(23 * per_hour), True),
+            *((np.delete(clock, np.arange(hour * per_hour, (hour + 1) * per_hour)), False) for hour in _SWITCH_HOURS),
+        ],
+    }
 
 
 class BatteryArbitrage:
@@ -73,9 +91,11 @@ class EconomicEvaluator(Evaluator):
 
     Columns: `profit` (EUR over the forecasts' target days), `profit % of perfect` (against the same strategy with
     perfect foresight on the same days) and `profit days` (the target days traded). A target day counts once: with several
-    horizons it earns the mean of what they earn on it. A day counts only when its periods are all there (23, 24, 25 or
-    92, 96, 100 finite forecasts), since a schedule needs the whole day; in a table cut by hour there is none, so the
-    columns are NaN. Each model is scored on its own days: check `profit days` before reading two models side by side.
+    horizons it earns the mean of what they earn on it. A day counts only when its periods are all there, since a schedule
+    needs the whole day: finite forecasts for all of 24 hours (96 quarter-hours), for 25 hours (100) numbered through, or
+    for 23 hours (92) lacking one hour between 01:00 and 04:00, where clocks change, or numbered through on a Sunday. In
+    a table cut by hour no day is whole, so the columns are NaN. Each model is scored on its own days: check `profit days`
+    before reading two models side by side.
 
     Args:
         strategy: The strategy to run, by default `BatteryArbitrage()` (1 MW, 2 MWh, round-trip efficiency 0.9). Any object
@@ -100,7 +120,7 @@ class EconomicEvaluator(Evaluator):
         prediction = np.asarray(df["prediction"], dtype=float)
         actual = np.asarray(df["actual"], dtype=float)
         finite = np.isfinite(prediction) & np.isfinite(actual)
-        target, _ = pd.factorize(df["target_date"].to_numpy()[finite], sort=True)
+        target, target_dates = pd.factorize(df["target_date"].to_numpy()[finite], sort=True)
         horizon, horizons = pd.factorize(df["horizon"].to_numpy()[finite], sort=True)
         if (target < 0).any() or (horizon < 0).any():
             raise ValueError("EconomicEvaluator: a frame has rows with a missing forecast key.")
@@ -113,20 +133,30 @@ class EconomicEvaluator(Evaluator):
         if ((day[1:] == day[:-1]) & (hour[1:] == hour[:-1])).any():
             raise ValueError("EconomicEvaluator needs each forecast key once; the frame has duplicated keys.")
 
+        # The frame says what a period is: the number of finite forecasts of one day cannot, since it may have holes.
+        per_hour = 4 if df["hour"].max() > 24 else 1
         length = np.bincount(day) if len(day) else np.empty(0, dtype=np.int64)
         target_of_day = np.arange(len(length)) // max(len(horizons), 1)
         earned = np.full(len(length), np.nan)
         perfect = np.full(len(length), np.nan)
-        for periods in np.unique(length):
-            per_hour = _DAY_LENGTHS.get(int(periods))
-            if per_hour is None:
-                continue
+        sunday = pd.DatetimeIndex(target_dates).dayofweek == 6
+        for periods, allowed in _whole_days(per_hour).items():
             days = np.flatnonzero(length == periods)
+            if not len(days):
+                continue
             rows = np.isin(day, days)
-            forecast = prediction[rows].reshape(-1, periods)
-            settled = actual[rows].reshape(-1, periods)
-            earned[days] = self.strategy.profit(forecast, settled, per_hour)
-            perfect[days] = self.strategy.profit(settled, settled, per_hour)
+            ids = hour[rows].reshape(-1, periods)
+            on_sunday = sunday[target_of_day[days]]
+            whole = np.any(
+                [(ids == template).all(axis=1) & (on_sunday | ~sunday_only) for template, sunday_only in allowed],
+                axis=0,
+            )
+            if not whole.any():
+                continue
+            forecast = prediction[rows].reshape(-1, periods)[whole]
+            settled = actual[rows].reshape(-1, periods)[whole]
+            earned[days[whole]] = self.strategy.profit(forecast, settled, per_hour)
+            perfect[days[whole]] = self.strategy.profit(settled, settled, per_hour)
 
         traded = np.isfinite(earned)
         if not traded.any():
