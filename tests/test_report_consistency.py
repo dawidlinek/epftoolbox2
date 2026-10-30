@@ -8,7 +8,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.evaluators import Evaluator, MAEEvaluator, RMSEEvaluator, rMAEEvaluator
+from epftoolbox2.evaluators import (
+    BiasEvaluator,
+    DMEvaluator,
+    EconomicEvaluator,
+    Evaluator,
+    MAEEvaluator,
+    MCSEvaluator,
+    RMSEEvaluator,
+    rMAEEvaluator,
+)
 from epftoolbox2.evaluators.base import FORECAST_KEYS
 from epftoolbox2.results.report import EvaluationReport
 
@@ -128,3 +137,60 @@ def test_summary_frames_hold_every_forecast_of_the_model():
     assert {name: len(frame) for name, frame in model_dfs.items()} == dict(zip(summary["model"], summary["forecasts"]))
     assert len(model_dfs["base"]) == len(fake_results(1))
     assert len(model_dfs["model"]) == len(fake_results(2, skip_every=7))
+
+
+SET_LEVEL = pytest.mark.filterwarnings("ignore:The model confidence set needs")
+
+
+@pytest.fixture(scope="module")
+def set_level_report():
+    """Evaluators that see the whole set of models, several columns each, and a model with different forecasts."""
+    evaluators = [
+        MAEEvaluator(),
+        BiasEvaluator(),
+        rMAEEvaluator(base_model="base"),
+        DMEvaluator(benchmark="base", reps=100),
+        MCSEvaluator(reps=100),
+        EconomicEvaluator(),
+    ]
+    results = {"base": fake_results(1), "model": fake_results(2, skip_every=7), "third": fake_results(3)}
+    return EvaluationReport(results, evaluators)
+
+
+@SET_LEVEL
+def test_summary_matches_with_set_level_evaluators(set_level_report):
+    pd.testing.assert_frame_equal(
+        set_level_report.compute_all()["summary"], set_level_report.summary(), check_exact=True
+    )
+
+
+@SET_LEVEL
+@pytest.mark.parametrize("grouping, method", GROUPINGS.items())
+def test_grouped_tables_match_with_set_level_evaluators(set_level_report, grouping, method):
+    from_method = getattr(set_level_report, method)()
+    assert {"DM ratio", "DM p_holm", "MCS p", "in MCS", "profit", "profit % of perfect"} <= set(from_method.columns)
+    pd.testing.assert_frame_equal(set_level_report.compute_all()[grouping], from_method, check_exact=True)
+
+
+@SET_LEVEL
+def test_every_path_runs_on_the_same_group(set_level_report):
+    """Each path gets a group's frames by the same cut: one row of the table is the evaluator on that group alone."""
+    table = set_level_report.by_horizon()
+    frames = {name: df[df["horizon"] == 1] for name, df in set_level_report._model_frames().items()}
+    alone = DMEvaluator(benchmark="base", reps=100).compute_group(frames)
+    row = table[(table["horizon"] == 1) & (table["model"] == "model")].iloc[0]
+    assert row["DM ratio"] == alone["model"]["ratio"]
+    assert row["DM p"] == alone["model"]["p"]
+
+
+@SET_LEVEL
+def test_set_level_tables_do_not_depend_on_the_order_of_the_records(set_level_report):
+    results = {name: ref._results for name, ref in set_level_report.refs.items()}
+    shuffled = {
+        name: [records[i] for i in np.random.default_rng(9).permutation(len(records))]
+        for name, records in results.items()
+    }
+    other = EvaluationReport(shuffled, set_level_report.evaluators)
+
+    pd.testing.assert_frame_equal(other.summary(), set_level_report.summary(), check_exact=True)
+    pd.testing.assert_frame_equal(other.by_horizon(), set_level_report.by_horizon(), check_exact=True)

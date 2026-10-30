@@ -1,12 +1,31 @@
 from __future__ import annotations
 
+import warnings
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
+import numpy as np
 import pandas as pd
 
-from ..evaluators._compare import ModelFrames
+from ..evaluators import stats
+from ..evaluators._compare import (
+    LossPanel,
+    ModelFrames,
+    PairComparison,
+    SetComparison,
+    adjust,
+    compare_pair,
+    compare_set,
+    confidence_set,
+    verdict,
+)
 from ..evaluators.base import FORECAST_KEYS, Evaluator
+from ..evaluators.dm import DMEvaluator, check_test_settings
+from ..evaluators.mcs import check_mcs_settings
+from ..logging import get_logger
 from .ref import ModelResultRef
+
+logger = get_logger(__name__)
 
 # (name in compute_all(), grouping columns). `year` is the year of target_date; `run_weekday` and `target_weekday`
 # are the weekday of run_date / target_date.
@@ -28,6 +47,13 @@ RECORD_ORDER = ("run_date", "target_date", "horizon", "hour", "prediction", "act
 
 # The columns of `summary()` and of the grouped tables that no evaluator wrote.
 _TABLE_KEYS = {"model", "forecasts", *(key for _, keys in GROUP_CONFIGS for key in keys)}
+
+# Test lengths behind the warnings of the comparison tables: below the first a comparison says very little, and below
+# the second it lacks a whole year of seasons.
+_SHORT_TEST_DAYS = 182
+_FULL_TEST_DAYS = 365
+# Two-sided size of the `verdict` of `tests()`.
+_TEST_ALPHA = 0.05
 
 
 def metric_columns(table: pd.DataFrame) -> List[str]:
@@ -51,6 +77,7 @@ class EvaluationReport:
         self.evaluators = evaluators
         self.source_data = source_data
         self.refs: Dict[str, ModelResultRef] = {}
+        self._read_frames: Dict[str, Tuple[tuple, pd.DataFrame]] = {}
 
         for name, v in results_or_refs.items():
             if isinstance(v, ModelResultRef):
@@ -89,6 +116,382 @@ class EvaluationReport:
 
     def by_target_weekday_horizon(self) -> pd.DataFrame:
         return self._compute_grouped(["target_weekday", "horizon"])
+
+    def tests(
+        self,
+        benchmark: Optional[str] = None,
+        horizon: Union[int, str, None] = None,
+        variance: str = "hac",
+        lag: Optional[int] = None,
+        correction: Optional[str] = "holm",
+        by: Optional[str] = None,
+        interval: Optional[float] = 0.95,
+        block: int = 7,
+        reps: int = 4000,
+        seed: int = 0,
+    ) -> pd.DataFrame:
+        """Each model against `benchmark`, on the forecasts the pair shares: MAE ratio, its interval, a DM test.
+
+        One row per (model, horizon): `model, benchmark, horizon, n_days, n_forecasts, mae, mae_benchmark, ratio, ci_low,
+        ci_high, statistic, p_value, p_holm, m, mde, verdict`. A positive statistic means the model is better. `ratio` is
+        `mae / mae_benchmark`, both forecast-weighted on the pair's keys, and `mde` the difference (a share of
+        `mae_benchmark`) this test length would likely detect. Holm runs over the `m` models tested at that horizon, and
+        `verdict` reads `p_holm` at 5 %. `df.attrs` holds the settings.
+
+        Args:
+            benchmark: The reference model; by default the benchmark of the report's `DMEvaluator`.
+            horizon: `None` for one set of rows per horizon, a number for one horizon, `"all"` to average the daily
+                losses of all horizons per run date.
+            variance: `"hac"` (Newey-West) or `"plain"` (epftoolbox's variance).
+            lag: Newey-West lag; the default is `stats.default_lag` of the number of days (5 at 365).
+            correction: `"holm"`, or `None` (`p_holm` empty, `verdict` from `p_value`).
+            by: `"hour"` for one row per (model, horizon, hour), without `m`, `p_holm` and `verdict`: a per-hour DM is a
+                heatmap, never a verdict (it called two seeds of one model different 37 % of the time).
+            interval: Coverage of the bootstrap interval of the ratio (weekly blocks); `None` skips it.
+            block: Block length of that bootstrap, in days.
+            reps: Bootstrap repetitions.
+            seed: Bootstrap seed.
+
+        Warns when a comparison has fewer than 182 days; below 365 days `df.attrs["note"]` says so.
+        """
+        check_test_settings(variance, lag, correction, seed)
+        if by not in (None, "hour"):
+            raise ValueError(f"by must be None or 'hour', got {by!r}")
+        panel = self._panel()
+        benchmark = self._benchmark(benchmark, panel, required=True)
+        models = [m for m in panel.models if m != benchmark]
+        settings = dict(variance=variance, lag=lag, interval=interval, block=block, reps=reps, seed=seed)
+
+        rows: List[Dict[str, Any]] = []
+        for label, keys in self._horizon_slices(panel, horizon, each_horizon=True):
+            if by == "hour":
+                hours = panel.hour[keys]
+                for hour in np.unique(hours):
+                    for model in models:
+                        pair = compare_pair(panel, model, benchmark, keys[hours == hour], **settings)
+                        rows.append(_pair_row(model, benchmark, label, pair, hour=int(hour)))
+                continue
+            pairs = [compare_pair(panel, model, benchmark, keys, **settings) for model in models]
+            p_values = [pair.p_value for pair in pairs]
+            p_holm = adjust(p_values, correction)
+            m = int(np.isfinite(p_values).sum())
+            for model, pair, adjusted in zip(models, pairs, p_holm):
+                row = _pair_row(model, benchmark, label, pair)
+                judged = float(adjusted) if correction == "holm" else pair.p_value
+                row.update(
+                    p_holm=float(adjusted), m=m, mde=pair.mde, verdict=verdict(pair.statistic, judged, _TEST_ALPHA)
+                )
+                rows.append(row)
+
+        columns = list(_PAIR_COLUMNS)
+        if by == "hour":
+            columns.insert(columns.index("n_days"), "hour")
+        else:
+            columns += ["p_holm", "m"]
+        columns += ["mde"] + ([] if by == "hour" else ["verdict"])
+        table = pd.DataFrame(rows, columns=columns)
+        table.attrs.update(
+            benchmark=benchmark, variance=variance, lag=lag, correction=correction, interval=interval, alpha=_TEST_ALPHA
+        )
+        if by == "hour":
+            table.attrs["descriptive"] = (
+                "Per-hour DM is a heatmap, never a verdict: it called two seeds of one model different 37 % of the time "
+                "even after Holm, so this table has no p_holm and no verdict. Use it to see where in the day two models "
+                "differ."
+            )
+        if len(table):
+            # Per hour the switch hour has a day less than the others; the length of the test is what counts.
+            _flag_test_length(table, int(table["n_days"].max() if by == "hour" else table["n_days"].min()))
+        return table
+
+    def mcs(
+        self,
+        alpha: float = 0.10,
+        statistic: str = "R",
+        block: int = 7,
+        reps: int = 1000,
+        seed: int = 0,
+        models: Optional[Sequence[str]] = None,
+        horizon: Union[int, str, None] = None,
+    ) -> pd.DataFrame:
+        """The model confidence set: which models the data cannot tell from the best one.
+
+        One row per model, by MAE: `model, n_days, n_forecasts, mae, ratio_to_best, p_value, in_90, in_75`, with `in_90`
+        the 90 % set (p-value above 0.10) and `in_75` the 75 % set (above 0.25). An `alpha` other than those adds its own
+        column (`alpha=0.05`: `in_95`). The comparison here is the whole set of models, so everything is on the keys all of
+        them hold: `df.attrs` holds `n_days`, `n_forecasts` and `limited_by`, the models that lack forecasts the others
+        have, with how many. If one model cuts the sample, leave it out with `models`.
+
+        Args:
+            alpha: Size of the set the result is built for.
+            statistic: `"R"` (T_R, recommended: seed-stable) or `"max"` (T_max, which keeps models much worse than the
+                best and changes with the seed).
+            block: Mean block length of the stationary bootstrap, in days.
+            reps: Bootstrap repetitions (at least 1,000 recommended).
+            seed: Bootstrap seed.
+            models: The set of models; by default all of them. Fewer than 3 gives NaN with a warning.
+            horizon: A number for one horizon; by default (or `"all"`) the daily losses of all horizons are averaged per
+                run date.
+        """
+        check_mcs_settings(alpha, statistic, seed)
+        panel = self._panel()
+        names = self._chosen_models(panel, models)
+        label, keys = self._pooled_slice(panel, horizon)
+        compared = compare_set(panel, names, keys)
+        daily = compared.daily
+        levels = sorted({0.10, 0.25, float(alpha)})
+        included: Dict[str, Any] = {_set_column(level): np.nan for level in levels}
+        p_values: Any = np.nan
+        if len(names) < 3:
+            warnings.warn(
+                f"The model confidence set needs at least 3 models, got {len(names)}: its columns are NaN.",
+                stacklevel=2,
+            )
+        elif daily.n_days < 2:
+            warnings.warn(_too_few_days(compared), stacklevel=2)
+        else:
+            result = confidence_set(compared, alpha, statistic, block, reps, seed)
+            p_values = result.p_values
+            included = {_set_column(level): result.included(level) for level in levels}
+        mae = daily.mae()
+        best = np.nanmin(mae) if np.isfinite(mae).any() else np.nan
+        table = pd.DataFrame(
+            {
+                "model": names,
+                "n_days": daily.n_days,
+                "n_forecasts": daily.n_forecasts,
+                "mae": mae,
+                "ratio_to_best": mae / best if best else np.nan,
+                "p_value": p_values,
+                **included,
+            }
+        )
+        table = table.sort_values("mae", kind="stable").reset_index(drop=True)
+        return self._finish_set_table(table, compared, label, alpha=alpha, statistic=statistic, reps=reps, seed=seed)
+
+    def ranks(
+        self,
+        block: int = 7,
+        reps: int = 4000,
+        seed: int = 0,
+        level: float = 0.90,
+        horizon: Union[int, str, None] = None,
+        models: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        """How decisive the ranking is: every model's chance of being best and the interval of its rank.
+
+        One row per model, by rank: `model, n_days, n_forecasts, mae, rank, p_best, rank_low, rank_high`. Days are resampled
+        in weekly blocks and the models ranked in each sample. As in `mcs()`, everything is on the keys all the models hold
+        (`df.attrs` holds `n_days`, `n_forecasts`, `limited_by`), and `rank` is by the mean daily loss.
+
+        Args:
+            block: Block length of the bootstrap, in days.
+            reps: Bootstrap repetitions.
+            seed: Bootstrap seed.
+            level: Coverage of the rank interval.
+            horizon: A number for one horizon; by default (or `"all"`) the daily losses of all horizons are averaged per
+                run date.
+            models: The models to rank; by default all of them.
+        """
+        panel = self._panel()
+        names = self._chosen_models(panel, models)
+        label, keys = self._pooled_slice(panel, horizon)
+        compared = compare_set(panel, names, keys)
+        daily = compared.daily
+        columns: Dict[str, Any] = dict.fromkeys(("rank", "p_best", "rank_low", "rank_high"), np.nan)
+        if daily.n_days < 2:
+            warnings.warn(_too_few_days(compared), stacklevel=2)
+        else:
+            found = stats.rank_bootstrap(daily.losses, block=block, reps=reps, seed=seed, level=level)
+            columns = {
+                "rank": found.rank,
+                "p_best": found.p_best,
+                "rank_low": found.rank_low,
+                "rank_high": found.rank_high,
+            }
+        table = pd.DataFrame(
+            {"model": names, "n_days": daily.n_days, "n_forecasts": daily.n_forecasts, "mae": daily.mae(), **columns}
+        )
+        table = table.sort_values(["rank", "mae"], kind="stable").reset_index(drop=True)
+        return self._finish_set_table(table, compared, label, level=level, reps=reps, seed=seed)
+
+    def compare(self, a: str, b: str, horizon: Union[int, str, None] = None) -> pd.DataFrame:
+        """Two models on the forecasts they share, in one row. `ratio` is `mae_a / mae_b`: below 1, `a` is better.
+
+        Columns: `a, b, horizon, n_days, n_forecasts, mae_a, mae_b, ratio, ci_low, ci_high, statistic, p_plain, p_hac,
+        hours_a_better, hours_b_better, hours_tested, mde`. `statistic` is the HAC DM statistic (positive: `a` is better),
+        `p_plain` and `p_hac` its two-sided p-values with the plain and the Newey-West variance. The `hours_*` columns count
+        the hours where a per-hour DM test (plain variance, Holm over the hours) rejects: descriptive, see
+        `df.attrs["descriptive"]`. `mde` is the difference this test length would likely detect, a share of `mae_b`.
+
+        Args:
+            a: One model (the one in the numerator of `ratio`).
+            b: The other (the benchmark of the test).
+            horizon: A number for one horizon; by default (or `"all"`) the daily losses of all horizons are averaged per
+                run date.
+        """
+        panel = self._panel()
+        self._chosen_models(panel, [a, b])
+        label, keys = self._pooled_slice(panel, horizon)
+        hac = compare_pair(panel, a, b, keys)
+        plain = compare_pair(panel, a, b, keys, variance="plain", interval=None)
+
+        shared = panel.common(keys, (a, b))
+        hours = panel.hour[shared]
+        statistics, p_values = [], []
+        for hour in np.unique(hours):
+            daily = panel.daily(shared[hours == hour], (a, b))
+            if daily.n_days >= 2:
+                result = stats.dm_test(daily.losses[:, 0], daily.losses[:, 1], variance="plain")
+                statistics.append(result.statistic)
+                p_values.append(result.p_value)
+        rejected = stats.holm(p_values) < _TEST_ALPHA
+        table = pd.DataFrame(
+            [
+                {
+                    "a": a,
+                    "b": b,
+                    "horizon": label,
+                    "n_days": hac.n_days,
+                    "n_forecasts": hac.n_forecasts,
+                    "mae_a": hac.mae,
+                    "mae_b": hac.mae_benchmark,
+                    "ratio": hac.ratio,
+                    "ci_low": hac.ci_low,
+                    "ci_high": hac.ci_high,
+                    "statistic": hac.statistic,
+                    "p_plain": plain.p_value,
+                    "p_hac": hac.p_value,
+                    "hours_a_better": int((rejected & (np.asarray(statistics) > 0)).sum()),
+                    "hours_b_better": int((rejected & (np.asarray(statistics) < 0)).sum()),
+                    "hours_tested": len(p_values),
+                    "mde": hac.mde,
+                }
+            ]
+        )
+        table.attrs.update(
+            ratio="mae_a / mae_b: below 1, a is better; a positive statistic also means a is better.",
+            descriptive=(
+                "hours_a_better and hours_b_better are descriptive: per-hour DM called two seeds of one model different "
+                "37 % of the time even after Holm. They show where in the day the models differ, not which one is better."
+            ),
+        )
+        _flag_test_length(table, hac.n_days)
+        return table
+
+    def leaderboard(self, benchmark: Optional[str] = None, horizon: Union[int, str, None] = None) -> pd.DataFrame:
+        """One row per model, by MAE, with its comparison against `benchmark` on the forecasts the pair shares.
+
+        `n_forecasts` and `MAE` are the model's own, so with different forecast sets the MAE column compares different
+        samples (a warning says so): read `ratio`, which does not. `n_days` and `n_common` are the days and forecasts of the
+        pair, and `ratio`, `ci_low`, `ci_high`, `p_value` and `p_holm` (Holm over the models compared) are on them, with
+        the defaults of `tests()`. Without a benchmark (none given, no `DMEvaluator`) only `n_days` is added.
+
+        Args:
+            benchmark: The reference model; by default the benchmark of the report's `DMEvaluator`.
+            horizon: A number for one horizon; by default (or `"all"`) the daily losses of all horizons are averaged per
+                run date.
+        """
+        panel = self._panel()
+        benchmark = self._benchmark(benchmark, panel, required=False)
+        _, keys = self._pooled_slice(panel, horizon)
+        rows: List[Dict[str, Any]] = []
+        for model in panel.models:
+            own = panel.common(keys, (model,))
+            daily = panel.daily(own, (model,))
+            mae = float(daily.mae()[0])
+            rows.append({"model": model, "n_forecasts": len(own), "MAE": mae, "n_days": daily.n_days})
+        if len({row["n_forecasts"] for row in rows}) > 1:
+            warnings.warn(
+                "These models have different forecast sets, so their MAEs are on different samples. The ratio "
+                "columns are on the keys of each pair; see report.forecast_counts().",
+                stacklevel=2,
+            )
+        if benchmark is not None:
+            others = [row for row in rows if row["model"] != benchmark]
+            pairs = [compare_pair(panel, row["model"], benchmark, keys) for row in others]
+            p_holm = adjust([pair.p_value for pair in pairs], "holm")
+            for row, pair, adjusted in zip(others, pairs, p_holm):
+                row.update(
+                    n_days=pair.n_days,
+                    n_common=pair.n_forecasts,
+                    ratio=pair.ratio,
+                    ci_low=pair.ci_low,
+                    ci_high=pair.ci_high,
+                    p_value=pair.p_value,
+                    p_holm=float(adjusted),
+                )
+            reference = next(row for row in rows if row["model"] == benchmark)
+            reference.update(n_common=reference["n_forecasts"], ratio=1.0)
+        columns = ["model", "n_forecasts", "MAE", "n_days"]
+        if benchmark is not None:
+            columns += ["n_common", "ratio", "ci_low", "ci_high", "p_value", "p_holm"]
+        table = pd.DataFrame(rows, columns=columns).sort_values("MAE", kind="stable").reset_index(drop=True)
+        table.attrs["benchmark"] = benchmark
+        if len(table):
+            _flag_test_length(table, int(table["n_days"].min()))
+        return table
+
+    # -- what the comparison tables share ---------------------------------------------------------------------------
+
+    def _panel(self) -> LossPanel:
+        return LossPanel(self._model_frames())
+
+    def _benchmark(self, benchmark: Optional[str], panel: LossPanel, required: bool) -> Optional[str]:
+        if benchmark is None:
+            benchmark = next((ev.benchmark for ev in self.evaluators if isinstance(ev, DMEvaluator)), None)
+        if benchmark is None:
+            if required:
+                raise ValueError("No benchmark: pass benchmark=... or add a DMEvaluator to the pipeline.")
+            return None
+        if benchmark not in panel:
+            raise ValueError(f"Unknown benchmark {benchmark!r}; models: {panel.models}")
+        return benchmark
+
+    @staticmethod
+    def _chosen_models(panel: LossPanel, models: Optional[Sequence[str]]) -> List[str]:
+        if models is None:
+            return list(panel.models)
+        names = list(models)
+        unknown = [m for m in names if m not in panel]
+        if unknown:
+            raise ValueError(f"Unknown model(s) {unknown}; models: {panel.models}")
+        if len(set(names)) != len(names):
+            raise ValueError(f"Models are listed twice: {names}")
+        return names
+
+    @staticmethod
+    def _horizon_slices(
+        panel: LossPanel, horizon: Union[int, str, None], each_horizon: bool
+    ) -> List[Tuple[Union[int, str], np.ndarray]]:
+        """`[(label in the table, positions of the keys)]`, one per horizon or one for all of them together."""
+        if horizon == "all" or (horizon is None and not each_horizon):
+            return [("all", panel.rows())]
+        if horizon is None:
+            return [(h, panel.rows(h)) for h in panel.horizons]
+        if isinstance(horizon, str) or horizon not in panel.horizons:
+            raise ValueError(f"horizon must be 'all' or one of {panel.horizons}, got {horizon!r}")
+        return [(int(horizon), panel.rows(horizon))]
+
+    def _pooled_slice(self, panel: LossPanel, horizon: Union[int, str, None]) -> Tuple[Union[int, str], np.ndarray]:
+        """All horizons together unless `horizon` names one; a report with one horizon is labelled with it."""
+        if horizon is None and len(panel.horizons) == 1:
+            horizon = panel.horizons[0]
+        return self._horizon_slices(panel, horizon, each_horizon=False)[0]
+
+    @staticmethod
+    def _finish_set_table(
+        table: pd.DataFrame, compared: SetComparison, label: Union[int, str], **settings
+    ) -> pd.DataFrame:
+        table.attrs.update(
+            n_days=compared.daily.n_days,
+            n_forecasts=compared.daily.n_forecasts,
+            limited_by=compared.limited_by,
+            horizon=label,
+            **settings,
+        )
+        _flag_test_length(table, compared.daily.n_days)
+        return table
 
     def predictions(self) -> pd.DataFrame:
         """Return a tidy DataFrame of predictions only (no actuals required)."""
@@ -216,7 +619,22 @@ class EvaluationReport:
         `RECORD_ORDER`, not in the order the records were written, so every sum an evaluator takes is the same
         however the workers happened to finish.
         """
-        return {name: self._model_frame(ref) for name, ref in self.refs.items()}
+        return {name: self._cached_frame(name, ref) for name, ref in self.refs.items()}
+
+    def _cached_frame(self, name: str, ref: ModelResultRef) -> pd.DataFrame:
+        """`_model_frame(ref)`, read from a results file only when the file changed: parsing the JSONL is the slowest
+        step of a report, and a comparison session calls several of its methods. Results held in memory are always read
+        again, since nothing tells when a list changed."""
+        path = None if ref.path is None else Path(ref.path)
+        if path is None or not path.exists():
+            return self._model_frame(ref)
+        status = path.stat()
+        fingerprint = (str(path), status.st_mtime_ns, status.st_size, ref.test_start, ref.test_end)
+        cached = self._read_frames.get(name)
+        if cached is None or cached[0] != fingerprint:
+            cached = (fingerprint, self._model_frame(ref))
+            self._read_frames[name] = cached
+        return cached[1].copy(deep=False)
 
     def _model_frame(self, ref: ModelResultRef) -> pd.DataFrame:
         columns = [*FORECAST_KEYS, "prediction", "actual"]
@@ -273,3 +691,67 @@ class EvaluationReport:
         for key, part in df.groupby(columns if len(columns) > 1 else columns[0], sort=False):
             key = key if isinstance(key, tuple) else (key,)
             yield tuple(v.item() if hasattr(v, "item") else v for v in key), part
+
+
+_PAIR_COLUMNS = (
+    "model",
+    "benchmark",
+    "horizon",
+    "n_days",
+    "n_forecasts",
+    "mae",
+    "mae_benchmark",
+    "ratio",
+    "ci_low",
+    "ci_high",
+    "statistic",
+    "p_value",
+)
+
+
+def _pair_row(
+    model: str, benchmark: str, horizon: Union[int, str], pair: PairComparison, **extra: Any
+) -> Dict[str, Any]:
+    return {
+        "model": model,
+        "benchmark": benchmark,
+        "horizon": horizon,
+        **extra,
+        "n_days": pair.n_days,
+        "n_forecasts": pair.n_forecasts,
+        "mae": pair.mae,
+        "mae_benchmark": pair.mae_benchmark,
+        "ratio": pair.ratio,
+        "ci_low": pair.ci_low,
+        "ci_high": pair.ci_high,
+        "statistic": pair.statistic,
+        "p_value": pair.p_value,
+        "mde": pair.mde,
+    }
+
+
+def _set_column(alpha: float) -> str:
+    """The table column of the `1 - alpha` confidence set: `in_90` for 0.10."""
+    return f"in_{100 * (1 - alpha):.3g}"
+
+
+def _too_few_days(compared: SetComparison) -> str:
+    return (
+        f"These models share only {compared.daily.n_days} day(s) of forecasts, too few to compare (models short of "
+        f"forecasts: {compared.limited_by}): the result columns are NaN."
+    )
+
+
+def _flag_test_length(table: pd.DataFrame, n_days: int) -> None:
+    """Warn on a very short comparison and leave a note in `table.attrs` on one shorter than a year."""
+    if n_days >= _FULL_TEST_DAYS:
+        return
+    note = (
+        f"The comparison rests on {n_days} days, less than a year: it does not see every season, and even one test year "
+        "only resolves differences of about 5 % of the MAE (see the mde column)."
+    )
+    table.attrs["note"] = note
+    if n_days < _SHORT_TEST_DAYS:
+        warnings.warn(f"{note} Below {_SHORT_TEST_DAYS} days read it as indicative only.", stacklevel=3)
+    else:
+        logger.info(note)
