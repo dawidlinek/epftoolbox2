@@ -33,6 +33,10 @@ cover another span than the results it resumes, so that validation can come firs
 the data the stored forecasts read, up to the end of the span they cover, and its manifest grows to cover both. Resuming
 also compares each stored key's window and mask to what a fresh run would give it (`check_stored_lists`). A window this run
 doesn't name stays recorded, like the records it holds.
+
+An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
+which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
+resume into it.
 """
 
 from __future__ import annotations
@@ -58,6 +62,12 @@ SCHEMA_VERSION = 1
 
 # `predictor_layout_hash` of a predictor function of `ctx`: it never equals the hash of fixed lists.
 PREDICTOR_FUNCTION_LAYOUT = "predictor function: lists are compared per record"
+
+# The `kind` of an ensemble's manifest.
+ENSEMBLE_KIND = "ensemble"
+
+# Who wrote a manifest and when, which says nothing about the results it describes.
+_PROVENANCE_FIELDS = ("package_version", "git_sha", "created_at", "updated_at")
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -287,6 +297,28 @@ def manifest_path(results_path: Path) -> Path:
     return results_path.with_name(results_path.stem + ".manifest.json")
 
 
+def is_ensemble_manifest(path: Union[str, Path]) -> bool:
+    """Whether the manifest at `path` exists and is an ensemble's."""
+    path = Path(path)
+    return path.exists() and json.loads(path.read_text()).get("kind") == ENSEMBLE_KIND
+
+
+def manifest_digest(manifest: Dict[str, Any]) -> str:
+    """A hash of a manifest's content without its provenance: a member re-run to the same results keeps it."""
+    kept = {key: value for key, value in manifest.items() if key not in _PROVENANCE_FIELDS}
+    return hashlib.sha256(json.dumps(kept, sort_keys=True).encode()).hexdigest()
+
+
+def _read_manifest_of_a_model(path: Path, model_name: str) -> Manifest:
+    data = json.loads(path.read_text())
+    if data.get("kind") == ENSEMBLE_KIND:
+        raise ManifestMismatchError(
+            f"{model_name}: {path.name} is an ensemble's, so a model of this name can't resume there. Rename one of them, "
+            "or use a different save_dir."
+        )
+    return Manifest.from_dict(data)
+
+
 def read_windows(path: Union[str, Path]) -> Optional[RunWindows]:
     """The windows and segments a manifest records, or None for a plain run or no manifest.
 
@@ -322,7 +354,7 @@ def check_and_write(
     (`check_stored_lists`) once the configuration is known to agree.
     """
     if path.exists():
-        existing = Manifest.from_dict(json.loads(path.read_text()))
+        existing = _read_manifest_of_a_model(path, model_name)
         data_diffs = _compare_data(existing, manifest, data_hash)
         skip = () if data_diffs is None else ("data_columns_hash",)
         diffs = [*(data_diffs or []), *manifest.differences(existing, skip=skip)]
@@ -484,7 +516,7 @@ def check_stored_lists(
     A record without a list hash comes from fixed lists, so nothing can be said about its list. `allow_mismatch` logs
     instead. A function that changed without changing anything stored resumes, with a note.
     """
-    existing = Manifest.from_dict(json.loads(path.read_text())) if path.exists() else None
+    existing = _read_manifest_of_a_model(path, model_name) if path.exists() else None
     stored_masks = {
         entry["hash"]: entry.get("binary_masks", {}) for entry in (existing and existing.predictor_lists) or []
     }
@@ -571,6 +603,7 @@ def check_stored_lists(
 
 
 __all__ = [
+    "ENSEMBLE_KIND",
     "Manifest",
     "ManifestMismatchError",
     "PAST_THE_FRAME",
@@ -581,6 +614,8 @@ __all__ = [
     "check_stored_lists",
     "hash_columns",
     "hash_predictor_layout",
+    "is_ensemble_manifest",
+    "manifest_digest",
     "manifest_path",
     "read_windows",
 ]
