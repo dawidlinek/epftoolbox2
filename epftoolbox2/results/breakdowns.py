@@ -1,17 +1,29 @@
-"""The parts of the breakdown tables that do not need the report itself.
+"""The parts of the breakdown tables and of `EvaluationReport.aggregate()` that do not need the report itself.
 
-Price levels are read from the actual price alone.
+Price levels are read from the actual price alone. Daily aggregates are made only of whole days, and a whole day is
+judged by `evaluators._days`, the same rule that decides which days `EconomicEvaluator` can schedule.
 """
 
-from typing import Mapping, Optional, Tuple
+from typing import Callable, Dict, Mapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
+from ..evaluators._days import whole_days
+from ..evaluators.base import FORECAST_KEYS
+
+AGGREGATES = ("max", "min", "mean", "spread")
 
 # A spike is a price at or above the lower of these two: evalproto's definition (its Q4), 88 hours a year per market.
 SPIKE_CAP = 300.0
 SPIKE_QUANTILE = 0.99
+
+_REDUCE: Dict[str, Callable[[np.ndarray], np.ndarray]] = {
+    "max": lambda a: a.max(axis=1),
+    "min": lambda a: a.min(axis=1),
+    "mean": lambda a: a.mean(axis=1),
+    "spread": lambda a: a.max(axis=1) - a.min(axis=1),
+}
 
 
 def spike_threshold(model_dfs: Mapping[str, pd.DataFrame], spike: Optional[float] = None) -> Tuple[float, str, float]:
@@ -62,3 +74,67 @@ def price_level(actual: pd.Series, threshold: float) -> pd.Series:
         level = np.where(values < 0, "negative", np.where(values >= threshold, "spike", "normal")).astype(object)
     level[~np.isfinite(values)] = np.nan
     return pd.Series(level, index=actual.index)
+
+
+def daily_aggregate(frame: pd.DataFrame, agg: str, per_hour: int) -> Tuple[pd.DataFrame, int, int]:
+    """One model's forecasts as one forecast per (run_date, target_date, horizon): `(days, n_seen, n_dropped)`.
+
+    The prediction and the actual of a day are each reduced by `agg` over the day's periods. Only whole days count, as
+    `evaluators._days.whole_days` judges them (23, 24 or 25 hours; 92, 96 or 100 quarter-hours), with a finite prediction
+    and actual in every period. `n_seen` is the number of days with any forecast in `frame` and `n_dropped` how many of
+    them were not whole. `days` has `FORECAST_KEYS` (with `hour` 0), `prediction` and `actual`.
+    """
+    if agg not in _REDUCE:
+        raise ValueError(f"agg must be one of {list(AGGREGATES)}, got {agg!r}")
+    empty = pd.DataFrame({c: [] for c in (*FORECAST_KEYS, "prediction", "actual")})
+    if frame.empty:
+        return empty, 0, 0
+    missing = [k for k in FORECAST_KEYS if k not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"Aggregating needs the forecast keys {list(FORECAST_KEYS)}, but the frame lacks {missing}. "
+            "Result records need run_date, target_date, hour and horizon."
+        )
+
+    run, runs = pd.factorize(frame["run_date"].to_numpy(), sort=True)
+    target, targets = pd.factorize(frame["target_date"].to_numpy(), sort=True)
+    horizon, horizons = pd.factorize(frame["horizon"].to_numpy(), sort=True)
+    if (run < 0).any() or (target < 0).any() or (horizon < 0).any() or frame["hour"].isna().any():
+        raise ValueError("Aggregating: a frame has rows with a missing forecast key.")
+    day_key = (run.astype(np.int64) * len(targets) + target) * len(horizons) + horizon
+    hour = frame["hour"].to_numpy(dtype=np.int64)
+    order = np.lexsort((hour, day_key))
+    if ((day_key[order][1:] == day_key[order][:-1]) & (hour[order][1:] == hour[order][:-1])).any():
+        raise ValueError("Aggregating needs each forecast key once; the frame has duplicated keys.")
+    n_seen = len(np.unique(day_key))
+
+    prediction = frame["prediction"].to_numpy(dtype=float)
+    actual = frame["actual"].to_numpy(dtype=float)
+    keep = order[np.isfinite(prediction[order]) & np.isfinite(actual[order])]
+    day_key, hour, prediction, actual = day_key[keep], hour[keep], prediction[keep], actual[keep]
+    run, target, horizon = run[keep], target[keep], horizon[keep]
+    codes, first = np.unique(day_key, return_index=True)
+    day = np.searchsorted(codes, day_key)
+    sunday = pd.DatetimeIndex(targets[target[first]]).dayofweek == 6
+
+    reduce = _REDUCE[agg]
+    n = len(codes)
+    reduced_prediction, reduced_actual = np.full(n, np.nan), np.full(n, np.nan)
+    for periods, days in whole_days(day, hour, sunday, per_hour):
+        rows = np.isin(day, days)
+        reduced_prediction[days] = reduce(prediction[rows].reshape(-1, periods))
+        reduced_actual[days] = reduce(actual[rows].reshape(-1, periods))
+    whole = np.isfinite(reduced_prediction) & np.isfinite(reduced_actual)
+
+    kept = first[whole]
+    days = pd.DataFrame(
+        {
+            "run_date": runs[run[kept]],
+            "target_date": targets[target[kept]],
+            "hour": np.zeros(len(kept), dtype=np.int64),
+            "horizon": horizons[horizon[kept]],
+            "prediction": reduced_prediction[whole],
+            "actual": reduced_actual[whole],
+        }
+    )[[*FORECAST_KEYS, "prediction", "actual"]]
+    return days, n_seen, n_seen - int(whole.sum())

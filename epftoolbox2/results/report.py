@@ -22,11 +22,13 @@ from ..evaluators._compare import (
     short_test_message,
     verdict,
 )
+from ..evaluators._days import periods_per_hour
 from ..evaluators.base import FORECAST_KEYS, Evaluator, SetEvaluator
 from ..evaluators.dm import DMEvaluator, check_test_settings
+from ..evaluators.economic import EconomicEvaluator
 from ..evaluators.mcs import check_mcs_settings
 from ..logging import get_logger
-from .breakdowns import price_level, spike_threshold
+from .breakdowns import AGGREGATES, daily_aggregate, price_level, spike_threshold
 from .ref import ModelResultRef
 
 logger = get_logger(__name__)
@@ -55,6 +57,10 @@ _BREAKDOWN_KEYS = ("quarter", "target_date", "price_level")
 
 # The columns of `summary()` and of the grouped tables that no evaluator wrote.
 _TABLE_KEYS = {"model", "forecasts", *(key for _, keys in GROUP_CONFIGS for key in keys), *_BREAKDOWN_KEYS}
+
+# The frequency of a report made by `aggregate()`, and the periods an hour holds at each frequency of results.
+DAILY = "1D"
+_PERIODS_PER_HOUR = {"1h": 1, "15min": 4}
 
 # Two-sided size of the `verdict` of `tests()`.
 _TEST_ALPHA = 0.05
@@ -163,6 +169,76 @@ class EvaluationReport:
         )
         return table
 
+    def aggregate(self, freq: str = "1D", agg: str = "max") -> "EvaluationReport":
+        """A report on daily aggregates of every model's forecasts and actuals, with the same evaluators.
+
+        For each (run date, target date, horizon) the prediction and the actual are reduced by `agg` over the periods of
+        the day, which turns hourly or 15-minute forecasts into forecasts of the day's maximum, minimum, mean or spread.
+        The new report has `hour` 0 and frequency `"1D"`. A day counts only when all its periods are there, with a
+        finite prediction and actual: 23, 24 or 25 hours (92, 96 or 100 quarter-hours), judged by the period ids as
+        `EconomicEvaluator` does. Each model is judged on its own, so a model missing a period loses that day and no
+        other model does. Dropped days are counted, never lost silently: `forecast_counts()` of the new report has them as
+        `missing` and under `incomplete_day`, and a warning names the models. `planned` there is the days with any
+        forecast, so days without a single forecast are in the first report's `forecast_counts()`.
+
+        The evaluators carry over, except `EconomicEvaluator` (a schedule needs the periods of a day), which is left out
+        with a warning. `summary()`, `by_*()`, `tests()`, `mcs()`, `ranks()`, `compare()` and `leaderboard()` work;
+        `tests(by="hour")` raises, and `compare()` has no per-hour columns. The new report has no `source_data`.
+
+        Args:
+            freq: `"1D"`, the only aggregation so far.
+            agg: `"max"`, `"min"`, `"mean"` or `"spread"` (the maximum minus the minimum of the day).
+        """
+        if freq != DAILY:
+            raise ValueError(f"aggregate() only builds daily series: freq must be {DAILY!r}, got {freq!r}")
+        if agg not in AGGREGATES:
+            raise ValueError(f"agg must be one of {list(AGGREGATES)}, got {agg!r}")
+        freqs = self._result_freqs()
+        if DAILY in freqs.values():
+            raise ValueError(f"These results are daily already ({freqs}): there is nothing to aggregate.")
+        self._require_one_frequency("Aggregating")
+
+        frames = self._model_frames()
+        starts = [df["run_date"].min() for df in frames.values() if "run_date" in df and len(df)]
+        start = min(starts) if starts else pd.Timestamp(0)
+        results: Dict[str, ModelResultRef] = {}
+        dropped: Dict[str, int] = {}
+        for name, ref in self.refs.items():
+            frame = frames[name]
+            per_hour = _PERIODS_PER_HOUR.get(freqs.get(name, ref.freq))
+            if per_hour is None:
+                per_hour = periods_per_hour(frame["hour"].to_numpy()) if "hour" in frame else 1
+            days, seen, missing = daily_aggregate(frame, agg, per_hour)
+            records = _daily_records(days, start)
+            results[name] = ModelResultRef(
+                name=name,
+                path=None,
+                count=seen,
+                test_start="",
+                test_end="",
+                horizon=ref.horizon,
+                freq=DAILY,
+                _results=records,
+                produced=len(records),
+                skipped={"incomplete_day": missing},
+            )
+            if missing:
+                dropped[name] = missing
+
+        if dropped:
+            warnings.warn(
+                f"aggregate({agg!r}) left out days that lack some of their periods (days per model: {dropped}). They "
+                "are in forecast_counts() of the new report as incomplete_day.",
+                stacklevel=2,
+            )
+        if any(isinstance(e, EconomicEvaluator) for e in self.evaluators):
+            warnings.warn(
+                "aggregate() leaves EconomicEvaluator out of the new report: a schedule needs the periods of a day, and "
+                "a daily series has one.",
+                stacklevel=2,
+            )
+        return EvaluationReport(results, [e for e in self.evaluators if not isinstance(e, EconomicEvaluator)])
+
     def tests(
         self,
         benchmark: Optional[str] = None,
@@ -205,6 +281,10 @@ class EvaluationReport:
         check_test_settings(variance, lag, correction, seed, interval)
         if by not in (None, "hour"):
             raise ValueError(f"by must be None or 'hour', got {by!r}")
+        if by == "hour" and self._is_daily():
+            raise ValueError(
+                "by='hour' needs periods within the day, but this report is daily (it comes from aggregate())."
+            )
         panel = self._panel()
         benchmark = self._benchmark(benchmark, panel, required=True)
         models = [m for m in panel.models if m != benchmark]
@@ -397,7 +477,8 @@ class EvaluationReport:
         shared = panel.common(keys, (a, b))
         hours = panel.hour[shared]
         statistics, p_values = [], []
-        for hour in np.unique(hours):
+        daily_series = self._is_daily()
+        for hour in [] if daily_series else np.unique(hours):
             daily = panel.daily(shared[hours == hour], (a, b))
             if daily.n_days >= 2:
                 result = stats.dm_test(daily.losses[:, 0], daily.losses[:, 1], variance="plain")
@@ -420,9 +501,10 @@ class EvaluationReport:
                     "statistic": hac.statistic,
                     "p_plain": plain.p_value,
                     "p_hac": hac.p_value,
-                    "hours_a_better": int((rejected & (np.asarray(statistics) > 0)).sum()),
-                    "hours_b_better": int((rejected & (np.asarray(statistics) < 0)).sum()),
-                    "hours_tested": len(p_values),
+                    # A daily series has no hours in a day: there is no per-hour test to count.
+                    "hours_a_better": np.nan if daily_series else int((rejected & (np.asarray(statistics) > 0)).sum()),
+                    "hours_b_better": np.nan if daily_series else int((rejected & (np.asarray(statistics) < 0)).sum()),
+                    "hours_tested": np.nan if daily_series else len(p_values),
                     "mde": hac.mde,
                 }
             ]
@@ -498,17 +580,24 @@ class EvaluationReport:
     # -- what the comparison tables share ---------------------------------------------------------------------------
 
     def _panel(self) -> LossPanel:
-        self._require_one_frequency()
-        return LossPanel(self._model_frames())
+        freq = self._require_one_frequency()
+        # A daily series has one period a day, and that is a whole day.
+        return LossPanel(self._model_frames(), **({"whole_day_periods": (1,)} if freq == DAILY else {}))
 
-    def _require_one_frequency(self) -> None:
-        """Period 5 of hourly results and of quarter-hour results are different times of the day: they cannot be paired."""
+    def _is_daily(self) -> bool:
+        return DAILY in self._result_freqs().values()
+
+    def _require_one_frequency(self, action: str = "Comparing models") -> Optional[str]:
+        """Period 5 of hourly results and of quarter-hour results are different times of the day: they cannot be paired.
+
+        Returns the one frequency, or None when no model has results."""
         freqs = self._result_freqs()
         if len(set(freqs.values())) > 1:
             raise ValueError(
-                f"Comparing models needs one frequency, but these results have several: {freqs}. Their period ids "
+                f"{action} needs one frequency, but these results have several: {freqs}. Their period ids "
                 "(hour 0-23 vs quarter-hour 0-95) name different times of the day."
             )
+        return next(iter(freqs.values()), None)
 
     def _check_set_evaluators(self) -> None:
         if any(isinstance(evaluator, SetEvaluator) for evaluator in self.evaluators):
@@ -824,6 +913,36 @@ def _pair_row(
         "p_value": pair.p_value,
         "mde": pair.mde,
     }
+
+
+def _daily_records(days: pd.DataFrame, start: pd.Timestamp) -> List[Dict[str, Any]]:
+    """Result records for the daily forecasts of `aggregate()`; `day_in_test` counts days from the earliest run date."""
+    if days.empty:
+        return []
+    run, target = days["run_date"], days["target_date"]
+    columns = (
+        run.dt.strftime("%Y-%m-%d").tolist(),
+        target.dt.strftime("%Y-%m-%d").tolist(),
+        run.dt.dayofweek.tolist(),
+        days["horizon"].tolist(),
+        (run - start).dt.days.tolist(),
+        days["prediction"].tolist(),
+        days["actual"].tolist(),
+    )
+    return [
+        {
+            "run_date": run_date,
+            "target_date": target_date,
+            "run_weekday": run_weekday,
+            "hour": 0,
+            "horizon": horizon,
+            "day_in_test": day_in_test,
+            "prediction": prediction,
+            "actual": actual,
+            "freq": DAILY,
+        }
+        for run_date, target_date, run_weekday, horizon, day_in_test, prediction, actual in zip(*columns)
+    ]
 
 
 def _set_column(alpha: float) -> str:

@@ -77,10 +77,14 @@ class LossPanel:
 
     Raises ValueError when a frame lacks a key column, has a missing key, or holds a key twice (that forecast would count
     twice). A frame without rows is a model without forecasts.
+
+    `whole_day_periods` are the numbers of periods a whole day may have; a day of any other number of shared periods is
+    counted as partial. A panel of daily aggregates has one period a day, so it passes `(1,)`.
     """
 
-    def __init__(self, model_dfs: Mapping[str, pd.DataFrame]):
+    def __init__(self, model_dfs: Mapping[str, pd.DataFrame], whole_day_periods: Sequence[int] = _WHOLE_DAY_PERIODS):
         self.models: List[str] = list(model_dfs)
+        self.whole_day_periods = tuple(whole_day_periods)
         self._column = {name: j for j, name in enumerate(self.models)}
         frames = {name: df for name, df in model_dfs.items() if len(df)}
         for name, df in frames.items():
@@ -192,7 +196,7 @@ class LossPanel:
             day_sum = np.bincount(day, weights=self.errors[rows, self._column[model]], minlength=len(count))[present]
             losses[:, i] = np.bincount(run_position, weights=day_sum / count[present]) / horizons_per_run
             sums[:, i] = np.bincount(run_position, weights=day_sum)
-        partial = int(np.isin(count[present], _WHOLE_DAY_PERIODS, invert=True).sum())
+        partial = int(np.isin(count[present], self.whole_day_periods, invert=True).sum())
         return DailyLosses(losses=losses, sums=sums, n_forecasts=len(rows), partial_days=partial)
 
 
