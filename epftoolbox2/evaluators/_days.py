@@ -52,7 +52,8 @@ def whole_days(day: np.ndarray, hour: np.ndarray, sunday: np.ndarray, per_hour: 
         ids = hour[np.isin(day, days)].reshape(-1, periods)
         on_sunday = sunday[days]
         whole = np.any(
-            [(ids == template).all(axis=1) & (on_sunday | ~sunday_only) for template, sunday_only in allowed], axis=0
+            [(ids == template).all(axis=1) & (on_sunday | (not sunday_only)) for template, sunday_only in allowed],
+            axis=0,
         )
         if whole.any():
             found.append((periods, days[whole]))
