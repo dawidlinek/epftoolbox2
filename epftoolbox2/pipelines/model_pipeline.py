@@ -1,5 +1,5 @@
 from datetime import date
-from typing import List, Optional, Union, Dict, Any
+from typing import Callable, List, Optional, Sequence, Union, Dict, Any
 from pathlib import Path
 import importlib
 import warnings
@@ -7,13 +7,14 @@ import pandas as pd
 import yaml
 
 from .._date_utils import resolve_date
-from ..information_set import InformationSet
+from ..information_set import InformationSet, InformationSetError
 from ..models.base import BaseModel
 from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..exporters.base import Exporter
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef
+from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
 from ._yaml import dump_yaml, to_yaml_value
 
@@ -217,6 +218,95 @@ class ModelPipeline:
             for exporter in self.exporters:
                 exporter.export(report)
         return report
+
+    def verify(
+        self,
+        data: pd.DataFrame,
+        test_start: str,
+        test_end: str,
+        target: str = "price",
+        horizon: int = 1,
+        freq: str = "1h",
+        days: int = 5,
+        seed: int = 0,
+        models: Optional[Sequence[str]] = None,
+        positive_control: bool = True,
+        rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
+    ) -> VerifyReport:
+        """Check on a sample of issue days that no forecast depends on anything unknown when it is issued.
+
+        For each model, `days` issue days are sampled with `seed` from [test_start, test_end] (the same days for every
+        model, whichever ones and in whatever order). On each of them:
+
+        - the leakage probe perturbs every value not known at the issue time, and what the model trains on from the
+          issue day on. Forecasts must not move; if they do, the status is `leak`.
+        - the positive control perturbs the freshest known values: those delivered or first known on the day before the
+          issue day or later (see `epftoolbox2.information_set.perturb_recent`). Every forecast must move on some
+          sampled day, and on every day some forecast of each horizon; if not, the probe isn't reaching the model and
+          the status is `inconclusive`, which doesn't pass either. So is a model with an input that has no availability
+          rule, which the probe can't perturb.
+
+        `rebuild` treats `data` as source data, before feature engineering: the perturbation goes into the raw columns
+        and `rebuild(frame) -> features` reproduces the transformers. Without it a transformer that writes a future
+        value into a legally named column can't be seen, since the check only has the column's name to go by. An input
+        with a non-static rule that `rebuild` doesn't build from its argument is `inconclusive` too.
+
+        Only copies of the models run, in memory, so a later `run()` is unaffected. Each issue day costs four one-day
+        runs per model, six with `rebuild` or a target among the predictors. A model that isn't deterministic shows up
+        as a leak.
+
+        Args:
+            data: The frame the models run on, or the source data with `rebuild`.
+            test_start: First issue day to sample from.
+            test_end: Last issue day to sample from.
+            target: Target column.
+            horizon: Max horizon. Leave no horizon you run out: a leak in another one can't be seen (`run` defaults to 7).
+            freq: "1h" or "15min"; must match the data.
+            days: Issue days per model (all of the period if it has fewer).
+            seed: Picks the issue days and the noise.
+            models: Names of the models to verify. None verifies them all.
+            positive_control: False skips the control, so `ok` only says that no forecast moved.
+            rebuild: Builds the model's input from `data` (see above).
+
+        Raises:
+            InformationSetError: The pipeline has no information set, or a checked column has no rule and the
+                information set's `unknown` is "raise".
+        """
+        if self.information_set is None:
+            raise InformationSetError(
+                "verify() needs to know when forecasts are issued: pass issue_time or information_set to ModelPipeline"
+            )
+        if not self.models:
+            raise ValueError("At least one model is required")
+        self._check_model_names()
+        run_days = sample_issue_days(data.index, test_start, test_end, days, seed)
+        report = VerifyReport(issue_days=run_days)
+        for model in self._select_models(models):
+            report.checks.extend(
+                verify_model(
+                    model,
+                    data,
+                    run_days,
+                    self.information_set,
+                    target=target,
+                    horizon=horizon,
+                    freq=freq,
+                    seed=seed,
+                    control=positive_control,
+                    rebuild=rebuild,
+                )
+            )
+        return report
+
+    def _select_models(self, names: Optional[Sequence[str]]) -> List[BaseModel]:
+        if names is None:
+            return self.models
+        names = [names] if isinstance(names, str) else list(names)
+        by_name = {model.name: model for model in self.models}
+        unknown = [name for name in names if name not in by_name]
+        if unknown:
+            raise ValueError(f"Unknown model(s) {unknown}. The pipeline has: {list(by_name)}")
+        return [by_name[name] for name in dict.fromkeys(names)]
 
     @staticmethod
     def results_path(save_dir: Union[str, Path], model: BaseModel) -> Path:

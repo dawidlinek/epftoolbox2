@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 
 console = Console()
 
@@ -62,9 +63,9 @@ def cmd_data(args: argparse.Namespace) -> None:
     console.print(f"[green]Saved {len(df)} rows →[/green] {output}")
 
 
-def cmd_model(args: argparse.Namespace) -> None:
+def _load_data(args: argparse.Namespace):
+    """The frame `--data` and `--tz` name; exits with code 1 if it can't be read."""
     from ._frame_csv import load_frame_csv
-    from .pipelines.model_pipeline import ModelPipeline
 
     data_path = Path(args.data)
     if not data_path.exists():
@@ -72,10 +73,15 @@ def cmd_model(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     try:
-        df = load_frame_csv(data_path, tz=args.tz)
+        return load_frame_csv(data_path, tz=args.tz)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         sys.exit(1)
+
+
+def _load_model_pipeline(args: argparse.Namespace):
+    """The ModelPipeline YAML, with `--issue-time` and `--issue-timezone` applied to its information set."""
+    from .pipelines.model_pipeline import ModelPipeline
 
     mp = ModelPipeline.load(args.yaml)
     if args.issue_time or args.issue_timezone:
@@ -87,6 +93,12 @@ def cmd_model(args: argparse.Namespace) -> None:
         if args.issue_timezone:
             settings["issue_timezone"] = args.issue_timezone
         mp.information_set = InformationSet.from_dict(settings)
+    return mp
+
+
+def cmd_model(args: argparse.Namespace) -> None:
+    df = _load_data(args)
+    mp = _load_model_pipeline(args)
     mp.run(
         data=df,
         test_start=args.test_start,
@@ -99,6 +111,37 @@ def cmd_model(args: argparse.Namespace) -> None:
         allow_manifest_mismatch=args.allow_manifest_mismatch,
         require_manifest=args.require_manifest,
     )
+
+
+def cmd_verify(args: argparse.Namespace) -> None:
+    df = _load_data(args)
+    mp = _load_model_pipeline(args)
+    try:
+        report = mp.verify(
+            data=df,
+            test_start=args.test_start,
+            test_end=args.test_end,
+            target=args.target,
+            horizon=args.horizon,
+            freq=args.freq,
+            days=args.days,
+            seed=args.seed,
+            models=args.models,
+            positive_control=args.positive_control,
+        )
+    except (ValueError, RuntimeError) as exc:  # ValueError includes InformationSetError
+        console.print(f"[red]Verification failed:[/red] {escape(str(exc))}")
+        sys.exit(1)
+
+    plain = {"markup": False, "highlight": False, "soft_wrap": True}
+    console.print(f"Issue days: {', '.join(report.issue_days)}", **plain)
+    console.print(report.table().to_string(index=False), **plain)
+    for problem in report.problems():
+        console.print(problem, **plain)
+    if not report.ok:
+        console.print("[red]Verification failed.[/red]")
+        sys.exit(1)
+    console.print("[green]Verification passed.[/green]")
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
@@ -304,6 +347,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refuse to resume from a --save-dir that has results but no manifest, instead of warning",
     )
 
+    # -- verify --
+    verify_p = sub.add_parser(
+        "verify", help="Check on sampled issue days that no forecast uses a value unknown when it is issued"
+    )
+    verify_p.add_argument("yaml", metavar="pipeline.yaml", help="Path to ModelPipeline YAML")
+    verify_p.add_argument("--data", required=True, metavar="FILE", help="Input CSV file (from epf data)")
+    verify_p.add_argument("--test-start", required=True, metavar="DATE", help="First issue day to sample from")
+    verify_p.add_argument("--test-end", required=True, metavar="DATE", help="Last issue day to sample from")
+    verify_p.add_argument("--target", default="price", metavar="COL", help="Target column name (default: price)")
+    verify_p.add_argument("--horizon", type=int, default=1, metavar="N", help="Forecast horizon in days (default: 1)")
+    verify_p.add_argument(
+        "--freq",
+        default="1h",
+        choices=["1h", "15min"],
+        help="Resolution of the data and forecasts: one model per hour or per quarter-hour (default: 1h)",
+    )
+    verify_p.add_argument(
+        "--tz",
+        metavar="ZONE",
+        help="Local time zone of the data (e.g. Europe/Warsaw). Files from `epf data` name it in their header; "
+        "other files with UTC offsets need it",
+    )
+    verify_p.add_argument(
+        "--issue-time",
+        metavar="HH:MM",
+        help="Issue time to verify against (overrides the YAML's information set, or adds one if it has none)",
+    )
+    verify_p.add_argument(
+        "--issue-timezone",
+        metavar="ZONE",
+        help="Zone of --issue-time (default: the YAML's, else Europe/Brussels). Without --issue-time the YAML's issue "
+        "time is kept, or 11:45 if the YAML has no information set",
+    )
+    verify_p.add_argument("--days", type=int, default=5, metavar="N", help="Issue days per model (default: 5)")
+    verify_p.add_argument("--seed", type=int, default=0, metavar="N", help="Picks the days and the noise (default: 0)")
+    verify_p.add_argument("--models", nargs="+", metavar="NAME", help="Names of the models to verify (default: all)")
+    verify_p.add_argument(
+        "--no-positive-control",
+        dest="positive_control",
+        action="store_false",
+        help="Skip the check that perturbing what is known moves the forecasts; a pass then only says nothing moved",
+    )
+
     # -- validate --
     val_p = sub.add_parser("validate", help="Validate a pipeline or workflow YAML")
     val_p.add_argument("yaml", metavar="pipeline.yaml", help="Path to YAML file to validate")
@@ -328,6 +414,7 @@ def main() -> None:
         "report": cmd_report,
         "data": cmd_data,
         "model": cmd_model,
+        "verify": cmd_verify,
         "validate": cmd_validate,
         "init": cmd_init,
     }

@@ -81,10 +81,47 @@ class ModelPipeline:
         allow_missing: bool = False,           # else FileNotFoundError when a model has no results
     ) -> EvaluationReport: ...
 
+    def verify(                           # Leakage probe and positive control on sampled issue days
+        self,
+        data: pd.DataFrame,               # The models' input frame, or source data with rebuild
+        test_start: str,                  # First issue day to sample from
+        test_end: str,                    # Last issue day to sample from
+        target: str = "price",            # Target column
+        horizon: int = 1,                 # Max horizon
+        freq: str = "1h",                 # "1h" or "15min"; must match the data
+        days: int = 5,                    # Issue days per model
+        seed: int = 0,                    # Picks the days and the noise
+        models: Optional[Sequence[str]] = None,  # Names of the models to verify; None verifies all
+        positive_control: bool = True,    # False: `ok` only says that no forecast moved
+        rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,  # Builds the input from source data
+    ) -> VerifyReport: ...
+
     def save(self, path: Union[str, Path]) -> None: ...       # Save to YAML
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "ModelPipeline": ...  # Load from YAML
+```
+
+---
+
+## VerifyReport
+
+Returned by `ModelPipeline.verify()`, see [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/).
+
+```python
+class VerifyReport:
+    issue_days: List[str]                 # The sampled issue days
+    checks: List[IssueDayCheck]           # One model's probe and control on one issue day
+
+    @property
+    def ok(self) -> bool: ...             # Every model's status is "ok"
+    @property
+    def models(self) -> List[str]: ...
+
+    def status(self, model: str) -> str: ...    # "ok", "leak" or "inconclusive"
+    def table(self) -> pd.DataFrame: ...        # model, days, forecasts, changed, max change, control moved, status
+    def problems(self) -> List[str]: ...        # One line for each thing that keeps a model from "ok"
+    def assert_ok(self) -> None: ...            # Raises AssertionError naming them
 ```
 
 ---

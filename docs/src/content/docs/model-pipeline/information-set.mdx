@@ -277,6 +277,19 @@ result = leakage_probe(model, source_data, run_day="2024-06-03", information_set
 Perturbation is applied to the raw `data` by its own columns' availability, then `rebuild` is called on both
 the original and the perturbed raw data before the model runs.
 
+**`positive_control`** tests the probe. A probe that finds nothing is evidence only if its perturbation reaches the
+model, so this one perturbs the freshest values that *are* known, with `perturb_recent`, and reports which forecasts
+moved. `ModelPipeline.verify()` runs both on sampled issue days and turns them into a verdict: see
+[Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/).
+
+```python
+from epftoolbox2.information_set import positive_control
+
+control = positive_control(model, data, run_day="2024-06-03", information_set=info, target="price", horizon=7)
+assert control.ok  # at least one forecast moved
+print(control.moved, control.perturbed)
+```
+
 ---
 
 ## YAML and the CLI
