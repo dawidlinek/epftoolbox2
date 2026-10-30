@@ -10,6 +10,7 @@ from .._date_utils import resolve_date
 from ..information_set import InformationSet
 from ..models.base import BaseModel
 from ..evaluators.base import Evaluator
+from ..evaluators.dm import DMEvaluator
 from ..exporters.base import Exporter
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef
@@ -28,6 +29,14 @@ COMPONENT_REGISTRY = {
         "MAEEvaluator": "epftoolbox2.evaluators.mae",
         "RMSEEvaluator": "epftoolbox2.evaluators.rmse",
         "rMAEEvaluator": "epftoolbox2.evaluators.rmae",
+        "BiasEvaluator": "epftoolbox2.evaluators.bias",
+        "DMEvaluator": "epftoolbox2.evaluators.dm",
+        "MCSEvaluator": "epftoolbox2.evaluators.mcs",
+        "EconomicEvaluator": "epftoolbox2.evaluators.economic",
+    },
+    # What `EconomicEvaluator(strategy=...)` runs; saved inside the evaluator as `{class: ..., params: ...}`.
+    "strategies": {
+        "BatteryArbitrage": "epftoolbox2.evaluators.economic",
     },
     "exporters": {
         "CsvExporter": "epftoolbox2.exporters.csv",
@@ -67,8 +76,8 @@ class ModelPipeline:
         self.models.append(model)
         return self
 
-    def add_evaluator(self, evaluator: Evaluator) -> "ModelPipeline":
-        self.evaluators.append(evaluator)
+    def add_evaluator(self, *evaluators: Evaluator) -> "ModelPipeline":
+        self.evaluators.extend(evaluators)
         return self
 
     def add_exporter(self, exporter: Exporter) -> "ModelPipeline":
@@ -99,6 +108,8 @@ class ModelPipeline:
         if not self.models:
             raise ValueError("At least one model is required")
         self._check_model_names()
+        if not forecast_only:
+            self._check_benchmarks()
         if forecast_only:
             check_start, check_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
         else:
@@ -155,6 +166,8 @@ class ModelPipeline:
         if not self.models:
             raise ValueError("At least one model is required")
         self._check_model_names()
+        if not forecast_only:
+            self._check_benchmarks()
         if forecast_only:
             test_start, test_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
         elif test_start is None or test_end is None:
@@ -219,6 +232,13 @@ class ModelPipeline:
                 f"result files): {names}"
             )
 
+    def _check_benchmarks(self) -> None:
+        """A mistyped benchmark would only show as empty columns, after every model has run."""
+        names = [m.name for m in self.models]
+        for evaluator in self.evaluators:
+            if isinstance(evaluator, DMEvaluator) and evaluator.benchmark not in names:
+                raise ValueError(f"DMEvaluator: unknown benchmark {evaluator.benchmark!r}; models: {names}")
+
     @staticmethod
     def _check_predictors_can_be_saved(component: Any) -> None:
         """A model built with callable predictors keeps ``predictors == []`` and the function privately, so a plain
@@ -241,7 +261,9 @@ class ModelPipeline:
         self._check_predictors_can_be_saved(component)
         label = f"{class_name}({component.name!r})" if isinstance(component, BaseModel) else class_name
         params = {
-            key: to_yaml_value(value, f"{label}.{key}")
+            key: self._serialize_component(value)
+            if type(value).__name__ in COMPONENT_REGISTRY["strategies"]
+            else to_yaml_value(value, f"{label}.{key}")
             for key, value in getattr(component, "__dict__", {}).items()
             if not key.startswith("_")
         }
@@ -266,9 +288,12 @@ class ModelPipeline:
     @classmethod
     def _load_component(cls, component_type: str, config: Dict[str, Any]) -> Any:
         class_name = config["class"]
-        params = config.get("params", {})
+        params = dict(config.get("params") or {})
         if class_name not in COMPONENT_REGISTRY[component_type]:
-            raise ValueError(f"Unknown {component_type[:-1]}: {class_name}")
+            kind = "strategy" if component_type == "strategies" else component_type[:-1]
+            raise ValueError(f"Unknown {kind}: {class_name}")
+        if component_type == "evaluators" and isinstance(params.get("strategy"), dict):
+            params["strategy"] = cls._load_component("strategies", params["strategy"])
         module = importlib.import_module(COMPONENT_REGISTRY[component_type][class_name])
         return getattr(module, class_name)(**params)
 

@@ -172,6 +172,37 @@ The frame also carries the forecast keys `run_date`, `target_date` (datetimes), 
 
 The `**kwargs` may include `model_dfs`: a dict of all model DataFrames (same columns) for the current data slice, used by cross-model evaluators like `rMAEEvaluator`. A cross-model metric must join the frames on the forecast keys, because models can produce different forecast sets.
 
+`compute` may return a dict instead of a float. Each entry becomes a column of the tables, named `"{name} {key}"` (the key `""` gives the name alone, as `EconomicEvaluator` does for `profit`):
+
+```python
+class ErrorQuantiles(Evaluator):
+    name = "AE"
+
+    def compute(self, df: pd.DataFrame, **kwargs) -> dict:
+        errors = (df["prediction"] - df["actual"]).abs()
+        return {"p50": errors.quantile(0.5), "p95": errors.quantile(0.95)}  # columns "AE p50", "AE p95"
+```
+
+### Evaluators over a set of models
+
+A metric whose value for a model depends on the others (a test, a confidence set) overrides `compute_group(self, model_dfs) -> dict`, which the report calls once per table group with every model's frame of that group. It returns `{model: float or dict}`. By default it loops `compute`, so most evaluators never need it; this is what `DMEvaluator` and `MCSEvaluator` use. Subclass `SetEvaluator` from `epftoolbox2.evaluators.base` so that you don't have to write `compute` too:
+
+```python
+from epftoolbox2.evaluators.base import SetEvaluator
+
+class BestShare(SetEvaluator):
+    """The share of the models' total MAE that each model holds."""
+
+    name = "MAE share"
+
+    def compute_group(self, model_dfs) -> dict:
+        maes = {name: (df["prediction"] - df["actual"]).abs().mean() for name, df in model_dfs.items()}
+        total = sum(maes.values())
+        return {name: mae / total for name, mae in maes.items()}
+```
+
+A set-level evaluator that compares models must align them on the forecast keys first and print how many it used: the kernels in `epftoolbox2.evaluators.stats` pair by position and drop any index.
+
 ### Using Custom Evaluators
 
 ```python

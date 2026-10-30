@@ -768,6 +768,97 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "BiasEvaluator": [],
+    "DMEvaluator": [
+        {
+            "name": "benchmark",
+            "description": "Name of the model the others are compared with",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "variance",
+            "description": "Variance of the test: hac (Newey-West) or plain (epftoolbox)",
+            "required": False,
+            "default": "hac",
+            "kind": "select",
+            "choices": ["hac", "plain"],
+        },
+        {
+            "name": "lag",
+            "description": "Newey-West lag (empty: chosen from the number of days)",
+            "required": False,
+            "default": None,
+            "kind": "int",
+        },
+        {
+            "name": "correction",
+            "description": "Correction for testing several models",
+            "required": False,
+            "default": "holm",
+            "kind": "select",
+            "choices": ["holm", "none"],
+        },
+        {
+            "name": "alpha",
+            "description": "Size behind the verdict",
+            "required": False,
+            "default": "0.05",
+            "kind": "float",
+        },
+        {
+            "name": "interval",
+            "description": "Coverage of the bootstrap interval of the MAE ratio",
+            "required": False,
+            "default": "0.95",
+            "kind": "float",
+        },
+        {
+            "name": "block",
+            "description": "Bootstrap block length in days",
+            "required": False,
+            "default": "7",
+            "kind": "int",
+        },
+        {"name": "reps", "description": "Bootstrap repetitions", "required": False, "default": "4000", "kind": "int"},
+        {"name": "seed", "description": "Bootstrap seed", "required": False, "default": "0", "kind": "int"},
+    ],
+    "MCSEvaluator": [
+        {
+            "name": "alpha",
+            "description": "Size of the set (0.10: the 90 % set)",
+            "required": False,
+            "default": "0.1",
+            "kind": "float",
+        },
+        {
+            "name": "statistic",
+            "description": "Test statistic: R (recommended) or max",
+            "required": False,
+            "default": "R",
+            "kind": "select",
+            "choices": ["R", "max"],
+        },
+        {
+            "name": "block",
+            "description": "Mean bootstrap block length in days",
+            "required": False,
+            "default": "7",
+            "kind": "int",
+        },
+        {"name": "reps", "description": "Bootstrap repetitions", "required": False, "default": "1000", "kind": "int"},
+        {"name": "seed", "description": "Bootstrap seed", "required": False, "default": "0", "kind": "int"},
+    ],
+    "EconomicEvaluator": [
+        {
+            "name": "strategy",
+            "description": "Battery: power MW, energy MWh, round-trip efficiency",
+            "required": False,
+            "default": None,
+            "kind": "battery",
+        },
+    ],
     "CsvExporter": [
         {"name": "path", "description": "Output CSV file path", "required": True, "default": None, "kind": "text"},
         {
@@ -776,6 +867,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "required": False,
             "default": None,
             "kind": "comma_list",
+        },
+        {
+            "name": "summary_path",
+            "description": "Also write the metric columns to this CSV file (optional)",
+            "required": False,
+            "default": None,
+            "kind": "text",
         },
     ],
     "ExcelExporter": [
@@ -877,6 +975,19 @@ def _ask_field(field: dict, available_columns: Optional[list[str]] = None) -> An
                 return result
             except ValueError:
                 console.print("[red]Please enter comma-separated integers, e.g. 1,2,7 or -7,-1,0[/red]")
+
+    if kind == "battery":
+        from .evaluators import BatteryArbitrage
+
+        raw = questionary.text(label, default="1, 2, 0.9").ask()
+        if raw is None:
+            _abort()
+        try:
+            power, energy, efficiency = (float(x) for x in raw.split(","))
+            return BatteryArbitrage(power_mw=power, energy_mwh=energy, efficiency=efficiency)
+        except ValueError as exc:
+            console.print(f"[red]Please enter three numbers, e.g. 1, 2, 0.9 ({exc})[/red]")
+            return _ask_field(field, available_columns)
 
     if kind == "column_select":
         if available_columns:
@@ -1036,7 +1147,15 @@ _VALIDATORS = [
     "PlausibilityValidator",
 ]
 _MODELS = ["OLSModel", "LassoCVModel"]
-_EVALUATORS = ["MAEEvaluator", "RMSEEvaluator", "rMAEEvaluator"]
+_EVALUATORS = [
+    "MAEEvaluator",
+    "RMSEEvaluator",
+    "rMAEEvaluator",
+    "BiasEvaluator",
+    "DMEvaluator",
+    "MCSEvaluator",
+    "EconomicEvaluator",
+]
 _EXPORTERS = ["TerminalExporter", "ExcelExporter", "CsvExporter"]
 
 

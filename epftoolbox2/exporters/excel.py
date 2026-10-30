@@ -5,7 +5,12 @@ from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.utils import get_column_letter
 
 from .base import Exporter
-from ..results.report import EvaluationReport
+from ..results.report import EvaluationReport, metric_columns
+
+
+def _cell(value):
+    """A table value as openpyxl should write it: NaN as an empty cell, since its `nan` is not a valid Excel number."""
+    return None if pd.isna(value) else value
 
 
 class ExcelExporter(Exporter):
@@ -85,9 +90,7 @@ class ExcelExporter(Exporter):
     def _write_pivot_sheet(
         self, writer: pd.ExcelWriter, report: EvaluationReport, sheet_prefix: str, data: pd.DataFrame, col_col: str
     ) -> None:
-        metrics = [ev.name for ev in report.evaluators]
-
-        for metric in metrics:
+        for metric in metric_columns(data):
             pivot = data.pivot(index="model", columns=col_col, values=metric)
             pivot.columns = [f"{col_col}_{c}" for c in pivot.columns]
             pivot.index.name = metric
@@ -107,10 +110,9 @@ class ExcelExporter(Exporter):
         row_col: str,
         col_col: str,
     ) -> None:
-        metrics = [ev.name for ev in report.evaluators]
         models = list(data["model"].unique())
 
-        for metric in metrics:
+        for metric in metric_columns(data):
             sheet_name = f"{sheet_prefix}_{metric}"[:31]
             ws = writer.book.create_sheet(sheet_name)
 
@@ -124,7 +126,7 @@ class ExcelExporter(Exporter):
                 for r_idx, row_val in enumerate(pivot.index, start=1):
                     ws.cell(row=2 + r_idx, column=col_offset, value=f"{row_col}_{row_val}")
                     for c_idx, col_val in enumerate(pivot.columns, start=1):
-                        ws.cell(row=2 + r_idx, column=col_offset + c_idx, value=pivot.loc[row_val, col_val])
+                        ws.cell(row=2 + r_idx, column=col_offset + c_idx, value=_cell(pivot.loc[row_val, col_val]))
 
                 self._apply_color_scale(writer, sheet_name, 3, col_offset + 1, len(pivot), len(pivot.columns))
                 col_offset += len(pivot.columns) + 2
@@ -176,10 +178,9 @@ class ExcelExporter(Exporter):
         weekday_col: str,
         sheet_prefix: str,
     ) -> None:
-        metrics = [ev.name for ev in report.evaluators]
         models = list(data["model"].unique())
 
-        for metric in metrics:
+        for metric in metric_columns(data):
             sheet_name = f"{sheet_prefix}_{metric}"[:31]
             ws = writer.book.create_sheet(sheet_name)
 
@@ -195,7 +196,7 @@ class ExcelExporter(Exporter):
                     label = self._WEEKDAY_LABELS.get(row_val, str(row_val))
                     ws.cell(row=2 + r_idx, column=col_offset, value=label)
                     for c_idx, col_val in enumerate(pivot.columns, start=1):
-                        ws.cell(row=2 + r_idx, column=col_offset + c_idx, value=pivot.loc[row_val, col_val])
+                        ws.cell(row=2 + r_idx, column=col_offset + c_idx, value=_cell(pivot.loc[row_val, col_val]))
 
                 self._apply_color_scale(writer, sheet_name, 3, col_offset + 1, len(pivot), len(pivot.columns))
                 col_offset += len(pivot.columns) + 2

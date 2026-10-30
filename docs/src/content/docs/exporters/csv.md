@@ -11,6 +11,7 @@ Exports detailed prediction results to a wide-format CSV file. Each row represen
 |-----------|------|---------|-------------|
 | `path` | str | Required | Output CSV file path |
 | `extra_columns` | List[str] | `[]` | Columns from the source dataset to include |
+| `summary_path` | str | `None` | Also write `report.summary()` to this CSV file: one row per model with every evaluator's columns |
 
 ## Basic Usage
 
@@ -18,6 +19,12 @@ Exports detailed prediction results to a wide-format CSV file. Each row represen
 from epftoolbox2.exporters import CsvExporter
 
 exporter = CsvExporter("results.csv")
+```
+
+The file at `path` holds forecasts, not metrics. To get the metric columns (MAE, `DM ratio`, `in MCS`, `profit` and so on) in a CSV file too, pass `summary_path`:
+
+```python
+exporter = CsvExporter("results.csv", summary_path="summary.csv")
 ```
 
 ## Output Format

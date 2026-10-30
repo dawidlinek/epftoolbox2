@@ -61,6 +61,7 @@ export default defineConfig({
                         { label: 'Overview', link: '/model-pipeline/overview/' },
                         { label: 'Examples', link: '/model-pipeline/examples/' },
                         { label: 'Results', link: '/model-pipeline/results/' },
+                        { label: 'Comparing Models', link: '/model-pipeline/comparing-models/' },
                         { label: 'Caching', link: '/model-pipeline/caching/' },
                         { label: 'Serialization', link: '/model-pipeline/serialization/' },
                         { label: 'Forecasting', link: '/model-pipeline/forecasting/' },

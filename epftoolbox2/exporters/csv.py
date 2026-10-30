@@ -16,7 +16,7 @@ def _clock_time(period: int) -> str:
 
 
 class CsvExporter(Exporter):
-    def __init__(self, path: str, extra_columns: Optional[List[str]] = None):
+    def __init__(self, path: str, extra_columns: Optional[List[str]] = None, summary_path: Optional[str] = None):
         """
         Args:
             path: Path to the output CSV file.
@@ -24,16 +24,24 @@ class CsvExporter(Exporter):
                            (e.g. ["is_holiday", "load_forecast"]). Joined by
                            target_date + period of the day (`hour`), which is the
                            hour at 1h and the quarter-hour at 15min.
+            summary_path: Also write `report.summary()`, one row per model with every
+                          evaluator's columns, to this CSV file. `path` holds forecasts, not
+                          metrics, so this is where metric columns go.
 
         With 15min results `hour` holds the period of the day (0-95) and a `target_time`
         column next to it gives that period's local start time as HH:MM.
         """
         self.path = Path(path)
         self.extra_columns = extra_columns or []
+        self.summary_path = Path(summary_path) if summary_path is not None else None
 
     def export(self, report: EvaluationReport) -> None:
         if not report.refs:
             return
+
+        if self.summary_path is not None:
+            self.summary_path.parent.mkdir(parents=True, exist_ok=True)
+            report.summary().to_csv(self.summary_path, index=False)
 
         freq = self._results_freq(report)
         self.path.parent.mkdir(parents=True, exist_ok=True)
