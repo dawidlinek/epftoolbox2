@@ -8,9 +8,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.data.transformers import LagTransformer
+from epftoolbox2.data.transformers import DSTNormalizeTransformer, LagTransformer, ResampleTransformer
 from epftoolbox2.evaluators import MAEEvaluator
-from epftoolbox2.models import OLSModel
+from epftoolbox2.models import OLSModel, _contract
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.pipelines import ModelPipeline
 from tests.synthetic import PREDICTORS, make_market_data
@@ -52,6 +52,142 @@ def test_mixed_resolution_raises_even_when_the_most_common_step_matches():
     df = pd.concat([hourly[hourly.index.date != pd.Timestamp("2023-03-01").date()], quarter[day]]).sort_index()
     with pytest.raises(ValueError, match="more than one row"):
         run_ols(df, freq="1h")
+
+
+class RowCounter(BaseModel):
+    """Forecasts nothing useful; its only 'coefficient' is the number of training rows it was given."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return 0.0, [float(train_x.shape[0])]
+
+
+def training_rows(df, freq, run_day="2023-04-20", training_window=90):
+    ref = RowCounter(PREDICTORS, training_window=training_window).run(
+        df, test_start=run_day, test_end=run_day, horizon=1, freq=freq
+    )
+    assert ref.produced == ref.count
+    return {r["hour"]: int(r["coefficients"][0]) for r in ref._results}
+
+
+def hourly_then_quarter_hour(cutover="2023-04-01"):
+    """15-minute data that has only the :00 rows before `cutover`, like ENTSO-E DE_LU/PL prices (hourly before
+    2025-10-01, 15-minute after). The hourly part spans the 2023-03-26 spring switch."""
+    quarter = make_market_data(days=150, freq="15min")
+    return quarter[(quarter.index >= pd.Timestamp(cutover, tz=quarter.index.tz)) | (quarter.index.minute == 0)]
+
+
+def test_hourly_then_quarter_hour_data_raises_with_quarter_hour_freq():
+    """Rows are most commonly 15 min apart and no quarter-hour slot has two rows, so this passed before: the
+    :15/:30/:45 periods then trained on the 18 post-cutover days of a 90-day window, the :00 ones on all 90."""
+    df = hourly_then_quarter_hour()
+    with pytest.raises(ValueError, match="coarser") as info:
+        run_ols(df, freq="15min", run_day="2023-04-20")
+    message = str(info.value)
+    assert "from 2023-01-01 00:00:00+01:00 to 2023-03-31 23:00:00+02:00" in message
+    assert "1 h apart" in message
+    assert "ResampleTransformer(freq='15min')" in message
+
+
+def hourly_stretches(df, *ranges):
+    """Keep only the :00 rows inside each [start, end) local range."""
+    keep = np.ones(len(df), dtype=bool)
+    for start, end in ranges:
+        inside = (df.index >= pd.Timestamp(start, tz=df.index.tz)) & (df.index < pd.Timestamp(end, tz=df.index.tz))
+        keep &= ~inside | (df.index.minute == 0)
+    return df[keep]
+
+
+def test_hourly_stretches_inside_quarter_hour_data_raise():
+    quarter = make_market_data(days=120, freq="15min")
+    df = hourly_stretches(quarter, ("2023-03-01", "2023-03-03"), ("2023-04-10", "2023-04-12"))
+    with pytest.raises(ValueError, match="coarser") as info:
+        run_ols(df, freq="15min")
+    message = str(info.value)
+    # 00:00 on 2023-03-01 still has 23:45 the day before as its neighbour.
+    assert "47 rows from 2023-03-01 01:00:00+01:00 to 2023-03-02 23:00:00+01:00 are 1 h apart" in message
+    assert "and so are 47 rows in 1 later stretch(es)" in message
+
+
+@pytest.mark.parametrize("end", ["2023-03-01 13:00", "2023-03-02"])  # 3 h and 14 h
+def test_hourly_stretch_shorter_than_a_day_counts_as_a_gap(end):
+    """Like a missing day, it costs each quarter-hour period at most one training day."""
+    df = hourly_stretches(make_market_data(days=120, freq="15min"), ("2023-03-01 10:00", end))
+    _contract.check_index(df, "15min")
+
+
+def test_hourly_stretch_is_refused_from_one_day_of_rows_without_a_neighbour():
+    """The rows at either end of a stretch still have a 15-minute neighbour, so a whole local day leaves 23."""
+    quarter = make_market_data(days=120, freq="15min")
+    _contract.check_index(hourly_stretches(quarter, ("2023-03-01", "2023-03-02")), "15min")
+    with pytest.raises(ValueError, match="24 rows from 2023-03-01 01:00:00\\+01:00 to 2023-03-02 00:00:00\\+01:00"):
+        _contract.check_index(hourly_stretches(quarter, ("2023-03-01", "2023-03-02 01:00")), "15min")
+
+
+@pytest.mark.parametrize("freq", ["1h", "15min"])
+def test_scattered_missing_rows_pass(freq):
+    """Rows lost at random (e.g. by dropna()) leave many rows with both neighbours missing, but unevenly spaced."""
+    df = make_market_data(days=2 * 365, freq=freq)
+    df = df[np.random.default_rng(0).random(len(df)) > 0.2]
+    _contract.check_index(df, freq)
+
+
+def test_daily_rows_before_hourly_ones_raise():
+    hourly = make_market_data(days=120)
+    early = hourly.index < pd.Timestamp("2023-02-01", tz=hourly.index.tz)
+    df = hourly[~early | (hourly.index.hour == 0)]
+    with pytest.raises(ValueError, match="from 2023-01-01 00:00:00\\+01:00 to 2023-01-31 00:00:00\\+01:00"):
+        run_ols(df)
+
+
+def test_rows_off_the_hourly_grid_raise():
+    """A 10:30 row in an hour without a 10:00 row is still one row per (day, hour), but period 10 would then
+    mix 10:00 and 10:30 values."""
+    hourly = make_market_data(days=120)
+    quarter = make_market_data(days=120, freq="15min")
+    moved = hourly.index[(hourly.index.hour == 10) & (hourly.index.month == 2)]
+    df = pd.concat([hourly.drop(index=moved), quarter.loc[moved + pd.Timedelta(minutes=30)]]).sort_index()
+    with pytest.raises(ValueError, match="whole number") as info:
+        run_ols(df)
+    assert "2023-02-01 09:00:00+01:00 and 2023-02-01 10:30:00+01:00" in str(info.value)
+
+
+def test_resampling_the_mixed_frame_gives_every_period_the_same_training_rows():
+    df = ResampleTransformer(freq="15min").transform(hourly_then_quarter_hour())
+    rows = training_rows(df, "15min")
+    # 90-day window. The 02:00-02:45 periods (8-11) have no row on the 2023-03-26 spring switch and no
+    # d+1 target on the day before it.
+    assert rows == {p: 88 if 8 <= p <= 11 else 90 for p in range(96)}
+
+
+@pytest.mark.parametrize("freq", ["1h", "15min"])
+def test_gaps_and_dst_switches_pass_the_resolution_check(freq):
+    """Missing days, missing periods and a lone row between two gaps are gaps, not a coarser resolution. The
+    23/25-hour days (92/100 quarter-hours) of a local index are regular in elapsed time."""
+    df = make_market_data(start="2023-03-01", days=250, freq=freq)
+    per_day = pd.Series(df.index.date).value_counts()
+    slots = 24 if freq == "1h" else 96
+    assert {slots - slots // 24, slots + slots // 24} <= set(per_day)
+    tz = df.index.tz
+    step = pd.Timedelta(freq)
+    lone = pd.Timestamp("2023-06-01 10:00", tz=tz)
+    gaps = [
+        df.index[df.index.date == pd.Timestamp("2023-05-10").date()],  # a whole day
+        pd.DatetimeIndex([pd.Timestamp("2023-05-20 07:00", tz=tz)]),  # one period
+        pd.DatetimeIndex([lone - step, lone + step]),  # a lone row between two gaps
+    ]
+    df = df.drop(index=gaps[0].append(gaps[1:]))
+    rows = training_rows(df, freq, run_day="2023-07-01", training_window=60)
+    # A missing row costs two training rows: its own and the d+1 target of the day before. So 60 days less two
+    # for the missing day, and two more in the periods of 07:00 and of the lone row's dropped neighbours.
+    short = {7, 9, 11} if freq == "1h" else {28, 39, 41}
+    assert rows == {p: 56 if p in short else 58 for p in range(slots)}
+
+
+@pytest.mark.parametrize("freq", ["1h", "15min"])
+def test_dst_normalized_naive_index_passes(freq):
+    df = DSTNormalizeTransformer(freq=freq).transform(make_market_data(start="2023-03-01", days=250, freq=freq))
+    assert df.index.tz is None
+    assert training_rows(df, freq, run_day="2023-07-01", training_window=60)
 
 
 def test_fall_back_dst_repeated_hour_is_allowed():

@@ -1,7 +1,8 @@
 """The data contract a model run checks before any fit.
 
 Every check here turns a failure mode that would otherwise produce wrong or missing forecasts without an error
-into an error: data at a finer resolution than `freq` (look-ahead through the training cut), columns that
+into an error: data at a finer resolution than `freq` (look-ahead through the training cut) or at a coarser one
+in part of the frame (some periods trained on far fewer days), columns that
 collide with the model's own target or id columns, predictors that don't exist, and non-numeric predictors.
 """
 
@@ -18,6 +19,10 @@ RESERVED_COLUMNS = ("hour", "day")
 
 _FREQ_STEPS = {"1h": pd.Timedelta(hours=1), "15min": pd.Timedelta(minutes=15)}
 _DAY_LAG_SUFFIX = re.compile(r"_d-\d+$")
+# A coarser stretch: at least this many consecutive rows, none with a neighbour one `freq` step away, evenly
+# spaced at one multiple of the step and covering at least this span (rows x spacing). Anything less is a gap.
+_MIN_COARSE_ROWS = 3
+_MIN_COARSE_SPAN = pd.Timedelta(days=1)
 
 
 def period_index(index: pd.DatetimeIndex, freq: str) -> np.ndarray:
@@ -42,7 +47,8 @@ def check_index(data: pd.DataFrame, freq: str) -> None:
     """Raise unless the index is a DatetimeIndex with one row per (local day, period) at resolution `freq`.
 
     The only allowed repeat is the hour that occurs twice when clocks fall back (same wall-clock time,
-    different UTC offset).
+    different UTC offset). Rows must be `freq` apart throughout, except across gaps (see `_check_spacing`):
+    a frame that is 15-minute only in part would otherwise train some periods on far fewer days than others.
     """
     if freq not in _FREQ_STEPS:
         raise ValueError(f"Unsupported freq '{freq}'. Supported: {list(_FREQ_STEPS)}")
@@ -60,8 +66,10 @@ def check_index(data: pd.DataFrame, freq: str) -> None:
         return
 
     step = _FREQ_STEPS[freq]
-    diffs = np.diff(np.sort(index.as_unit("ns").asi8))
-    values, counts = np.unique(diffs, return_counts=True)
+    ordered = index.sort_values()
+    # Elapsed time for a tz-aware index (asi8 is UTC), so DST switches don't make the spacing irregular.
+    spacings = np.diff(ordered.as_unit("ns").asi8)
+    values, counts = np.unique(spacings, return_counts=True)
     common = pd.Timedelta(int(values[np.argmax(counts)]), unit="ns")
     if common != step:
         raise ValueError(
@@ -82,6 +90,55 @@ def check_index(data: pd.DataFrame, freq: str) -> None:
             "one row per day and period, so extra rows would leak the issue day's targets into training. "
             f"Resample the data to {freq} first."
         )
+    _check_spacing(ordered, spacings, freq)
+
+
+def _check_spacing(ordered: pd.DatetimeIndex, spacings: np.ndarray, freq: str) -> None:
+    """Raise unless the rows are `freq` apart throughout, with gaps of whole steps in between.
+
+    `spacings` are the elapsed nanoseconds between consecutive rows of the sorted index `ordered`. Gaps (missing
+    days, periods or scattered rows, e.g. after `dropna()`) are allowed: they leave rows whose neighbours are
+    missing, but irregularly. A coarser stretch is rows evenly spaced at one multiple of the step, none with a
+    neighbour one step away, for at least a day (e.g. hourly rows before 15-minute ones): the periods with no
+    row there would train on fewer days than the others.
+    """
+    step = _FREQ_STEPS[freq].value
+    off_grid = np.flatnonzero(spacings % step)
+    if len(off_grid):
+        i = off_grid[0]
+        raise ValueError(
+            f"Rows {ordered[i]} and {ordered[i + 1]} are {_fmt_step(pd.Timedelta(int(spacings[i]), unit='ns'))} "
+            f"apart, not a whole number of {freq} steps ({len(off_grid)} such spacing(s)). Some rows are off the "
+            f"{freq} grid (e.g. a :30 row in hourly data), so a period would mix different times of day. Bring the "
+            f"data to one {freq} grid first, e.g. ResampleTransformer(freq='{freq}')."
+        )
+
+    on_step = spacings == step
+    lone = np.ones(len(ordered), dtype=bool)  # no neighbour one step away
+    lone[:-1] &= ~on_step
+    lone[1:] &= ~on_step
+    # Spacing between two consecutive lone rows (0 elsewhere); a coarser stretch is a run of one repeated value.
+    between = np.where(lone[:-1] & lone[1:], spacings, 0)
+    starts = np.flatnonzero(np.concatenate(([True], between[1:] != between[:-1])))
+    lengths = np.diff(np.append(starts, len(between)))
+    stretches = [
+        (int(s), int(s + n))  # first and last row
+        for s, n in zip(starts, lengths)
+        if between[s] and n + 1 >= _MIN_COARSE_ROWS and int(n + 1) * int(between[s]) >= _MIN_COARSE_SPAN.value
+    ]
+    if not stretches:
+        return
+    first, last = stretches[0]
+    spacing = _fmt_step(pd.Timedelta(int(between[first]), unit="ns"))
+    more = sum(stop - start + 1 for start, stop in stretches[1:])
+    raise ValueError(
+        f"{last - first + 1} rows from {ordered[first]} to {ordered[last]} are {spacing} apart with no row {freq} "
+        f"away: the data is at a coarser resolution there than freq='{freq}'"
+        + (f", and so are {more} rows in {len(stretches) - 1} later stretch(es)" if more else "")
+        + ". The periods without rows there would train on fewer days than the others. Bring the whole frame to "
+        f"{freq} first, e.g. ResampleTransformer(freq='{freq}') step-fills the coarser rows, or start the data "
+        f"where it is at {freq}."
+    )
 
 
 def check_timezone_with_day_lags(data: pd.DataFrame) -> None:
