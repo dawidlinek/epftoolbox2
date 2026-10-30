@@ -25,6 +25,14 @@ to the function) doesn't.
 
 A directory with results but no manifest is not a mismatch. By default it is accepted with a warning and
 a manifest is written for it. Pass `require_manifest=True` for the stricter behaviour of refusing those too.
+
+A run with validation (`epftoolbox2.results.windows`) adds `windows`, the digests of its fixed lists' binary-column masks
+(`binary_masks`; a predictor function's stay with each list, a test mask under the key a plain run gives it) and `actuals`,
+a hash of the target up to the last day a stored `actual` reads. A plain run's manifest has none of them. Such a run may
+cover another span than the results it resumes, so that validation can come first and test later: what is compared then is
+the data the stored forecasts read, up to the end of the span they cover, and its manifest grows to cover both. Resuming
+also compares each stored key's window and mask to what a fresh run would give it (`check_stored_lists`). A window this run
+doesn't name stays recorded, like the records it holds.
 """
 
 from __future__ import annotations
@@ -33,14 +41,15 @@ import hashlib
 import json
 import subprocess
 from dataclasses import dataclass, fields
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 
 from ..logging import get_logger
 from .availability import merge_listings
+from .windows import TEST, RunWindows
 
 logger = get_logger(__name__)
 
@@ -66,6 +75,15 @@ _COMPARED_FIELDS = (
 
 class ManifestMismatchError(ValueError):
     """An existing results directory was produced with a different configuration than this run."""
+
+
+class PlannedForecast(NamedTuple):
+    """What a fresh run would give a stored forecast's key (`check_stored_lists`)."""
+
+    list_hash: Optional[str]  # None for fixed lists
+    mask_digest: str
+    mask_key: str  # where a manifest keeps the digest
+    window: Optional[str] = None  # None in a plain run: the record says nothing about it
 
 
 @dataclass
@@ -95,11 +113,18 @@ class Manifest:
     predictor_lists: Optional[List[Dict[str, Any]]] = None
     # {"level": "warn" or "raise", "listing": rows of `results.availability.listing_rows`}; None at level "none".
     availability: Optional[Dict[str, Any]] = None
+    # A run with validation: `RunWindows.to_dict()`, the masks of fixed lists by `mask_key`, and
+    # {"through": day, "hash": ...}, the target up to the last day a stored `actual` reads.
+    windows: Optional[Dict[str, Any]] = None
+    binary_masks: Optional[Dict[str, str]] = None
+    actuals: Optional[Dict[str, str]] = None
 
-    def differences(self, existing: "Manifest") -> List[str]:
+    def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
         out = []
         for name in _COMPARED_FIELDS:
+            if name in skip:
+                continue
             mine, theirs = getattr(self, name), getattr(existing, name)
             if mine != theirs:
                 out.append(f"{name}: {theirs!r} (existing results) vs {mine!r} (this run)")
@@ -111,6 +136,9 @@ class Manifest:
             del out["predictor_function"], out["predictor_lists"]
         if self.availability is None:  # level "none": nothing to record
             del out["availability"]
+        for name in ("windows", "binary_masks", "actuals"):  # a plain run: nothing to record
+            if out[name] is None:
+                del out[name]
         return out
 
     @classmethod
@@ -190,6 +218,8 @@ def build_manifest(
     predictor_function: Optional[Dict[str, str]] = None,
     predictor_lists: Optional[List[Dict[str, Any]]] = None,
     availability: Optional[Dict[str, Any]] = None,
+    windows: Optional[RunWindows] = None,
+    binary_masks: Optional[Dict[str, str]] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -209,9 +239,16 @@ def build_manifest(
     (not narrowed to the training window) so that resuming with a *different* test_start over the same,
     unchanged data - including a narrower one, as `ModelPipeline.report()`'s callers sometimes do - is not
     itself treated as a configuration change.
+
+    `windows` is a run with validation, whose `test_start` and `test_end` are its first and last issue day.
     """
     now = datetime.now(timezone.utc).isoformat()
-    hashed_rows = data.sort_index().loc[:test_end]
+    ordered = data.sort_index()
+    hashed_rows = ordered.loc[:test_end]
+    actuals = None
+    if windows is not None:
+        through = (date.fromisoformat(test_end) + timedelta(days=horizon)).isoformat()
+        actuals = {"through": through, "hash": hash_columns(ordered.loc[:through], [target])}
     return Manifest(
         model_class=type(model).__name__,
         predictors=sorted(set(used_columns) - {target}),
@@ -233,6 +270,9 @@ def build_manifest(
         predictor_function=predictor_function,
         predictor_lists=predictor_lists,
         availability=availability,
+        windows=None if windows is None else windows.to_dict(),
+        binary_masks=binary_masks,
+        actuals=actuals,
     )
 
 
@@ -240,6 +280,19 @@ def manifest_path(results_path: Path) -> Path:
     """The manifest file for a results JSONL: written next to it, e.g. `ols.jsonl` -> `ols.manifest.json`."""
     results_path = Path(results_path)
     return results_path.with_name(results_path.stem + ".manifest.json")
+
+
+def read_windows(path: Union[str, Path]) -> Optional[RunWindows]:
+    """The windows and segments a manifest records, or None for a plain run or no manifest.
+
+    `path` is a results JSONL or its manifest.
+    """
+    path = Path(path)
+    path = path if path.name.endswith(".manifest.json") else manifest_path(path)
+    if not path.exists():
+        return None
+    windows = json.loads(path.read_text()).get("windows")
+    return None if windows is None else RunWindows.from_dict(windows)
 
 
 def check_and_write(
@@ -250,16 +303,24 @@ def check_and_write(
     allow_mismatch: bool = False,
     require_manifest: bool = False,
     model_name: str = "Model",
+    data_hash: Optional[Callable[[str, Sequence[str]], str]] = None,
+    check_stored: Optional[Callable[[], None]] = None,
 ) -> None:
     """Compare `manifest` to the one at `path` (if any), then write it.
 
     Raises `ManifestMismatchError` when an existing manifest disagrees on the run's configuration and
     `allow_mismatch` is not set, or when results exist with no manifest and `require_manifest` is set.
     A mismatch that is allowed, and a missing manifest, are both logged.
+
+    A run with validation gives `data_hash(last day, columns)`, the hash of its frame up to that day, so that it can be
+    compared on the span the stored forecasts cover, and `check_stored`, which compares those forecasts themselves
+    (`check_stored_lists`) once the configuration is known to agree.
     """
     if path.exists():
         existing = Manifest.from_dict(json.loads(path.read_text()))
-        diffs = manifest.differences(existing)
+        data_diffs = _compare_data(existing, manifest, data_hash)
+        skip = () if data_diffs is None else ("data_columns_hash",)
+        diffs = [*(data_diffs or []), *manifest.differences(existing, skip=skip)]
         if diffs and not allow_mismatch:
             raise ManifestMismatchError(
                 f"{model_name}: the results in {path.parent} were produced with a different configuration "
@@ -271,7 +332,12 @@ def check_and_write(
             )
         if diffs:
             logger.warning(f"{model_name}: manifest mismatch at {path} overridden: {'; '.join(diffs)}")
+        if check_stored is not None:
+            check_stored()
         manifest.created_at = existing.created_at  # keep the first run's provenance
+        if data_diffs == []:
+            _cover_both(existing, manifest, data_hash)
+        _keep_windows(existing, manifest)
         if manifest.predictor_lists is not None and existing.predictor_lists:
             # Records outside this run's test period stay in the file: their hashes must still resolve to their lists, and
             # a wider run later must still find the masks they used.
@@ -280,6 +346,8 @@ def check_and_write(
                 earlier = kept.pop(entry["hash"], {}).get("binary_masks", {})
                 entry["binary_masks"] = {**earlier, **entry.get("binary_masks", {})}
             manifest.predictor_lists += list(kept.values())
+        if manifest.binary_masks is not None and existing.binary_masks:
+            manifest.binary_masks = {**existing.binary_masks, **manifest.binary_masks}
         _keep_listing(existing, manifest)
     elif has_existing_results:
         message = f"{model_name}: {path.parent} has results but no manifest ({path.name} not found)."
@@ -289,7 +357,53 @@ def check_and_write(
                 "manifest, or remove the results to start fresh."
             )
         logger.warning(f"{message} Continuing without checking they match this run's configuration.")
+        if check_stored is not None:
+            check_stored()
     manifest.write(path)
+
+
+def _compare_data(existing: Manifest, manifest: Manifest, data_hash: Optional[Callable]) -> Optional[List[str]]:
+    """What differs in the data the stored forecasts read, for a run with windows; None to compare hashes as a plain run.
+
+    Plain results that end on another day are left to that comparison, which refuses them, as one plain run into another.
+    Their last days' `actual` read rows nothing recorded, so they can't be vouched for if the run goes on from there.
+    """
+    if data_hash is None or manifest.windows is None:
+        return None
+    if existing.windows is None and existing.test_end != manifest.test_end:
+        return None
+    out = []
+    try:
+        stored = data_hash(existing.test_end, [existing.target, *existing.predictors])
+    except KeyError as exc:
+        return [f"data_columns_hash: a column the existing results read is gone: {exc}"]
+    if stored != existing.data_columns_hash:
+        out.append(f"data_columns_hash: the data up to {existing.test_end} is not what the existing results read")
+    if existing.actuals is not None and existing.target == manifest.target:
+        if data_hash(existing.actuals["through"], [existing.target]) != existing.actuals["hash"]:
+            out.append(
+                f"actuals: {existing.target} up to {existing.actuals['through']} is not what the existing results read as "
+                "`actual` (if the data has since grown, its last days had no actual then, and a fresh run would have one)"
+            )
+    return out
+
+
+def _cover_both(existing: Manifest, manifest: Manifest, data_hash: Callable) -> None:
+    """Make the manifest speak for the file: the stored forecasts stay in it, whatever span this run covers."""
+    manifest.test_start = min(existing.test_start, manifest.test_start)
+    manifest.test_end = max(existing.test_end, manifest.test_end)
+    manifest.predictors = sorted({*existing.predictors, *manifest.predictors})
+    manifest.data_columns_hash = data_hash(manifest.test_end, [manifest.target, *manifest.predictors])
+    if manifest.actuals is not None and existing.actuals is not None:
+        through = max(existing.actuals["through"], manifest.actuals["through"])
+        manifest.actuals = {"through": through, "hash": data_hash(through, [manifest.target])}
+
+
+def _keep_windows(existing: Manifest, manifest: Manifest) -> None:
+    if manifest.windows is None or existing.windows is None:
+        return
+    kept = RunWindows.from_dict(manifest.windows).keeping(RunWindows.from_dict(existing.windows))
+    manifest.windows = kept.to_dict()
 
 
 def _keep_listing(existing: Manifest, manifest: Manifest) -> None:
@@ -304,48 +418,75 @@ def _keep_listing(existing: Manifest, manifest: Manifest) -> None:
         return
     if manifest.availability is None:
         manifest.availability = existing.availability
-    else:
-        manifest.availability["listing"] = merge_listings(
-            existing.availability.get("listing", []), manifest.availability["listing"]
-        )
+        return
+    manifest.availability["listing"] = merge_listings(
+        existing.availability.get("listing", []), manifest.availability["listing"]
+    )
+    earlier = existing.availability.get("windows")
+    if manifest.availability.get("windows") is not None and earlier:
+        later = manifest.availability["windows"]
+        manifest.availability["windows"] = {
+            window: merge_listings(earlier.get(window, []), later.get(window, [])) for window in {*earlier, *later}
+        }
 
 
 def check_stored_lists(
     path: Path,
     manifest: Manifest,
     records: Iterable[Dict[str, Any]],
-    planned: Callable[[int, int, str], Optional[Tuple[str, str]]],
+    planned: Callable[[int, int, str], Optional[PlannedForecast]],
     *,
     allow_mismatch: bool = False,
     model_name: str = "Model",
 ) -> None:
-    """Raise `ManifestMismatchError` if a stored forecast isn't what a fresh run of a predictor function would give.
+    """Raise `ManifestMismatchError` if a stored forecast isn't what a fresh run would give.
 
-    `records` are the stored records, and `planned(period, horizon, run_date)` gives the (list hash, mask digest) this
-    run plans for a key, or None for a key outside its test period. A stored forecast differs if it used another list, or
-    if the same list now gets another binary-column mask (it is read from the list's first test day, which a changed
-    function or test start can move). Pending forecasts may change freely: nothing stored depends on them.
+    `records` are the stored records, and `planned(period, horizon, run_date)` gives the `PlannedForecast` of this run for a
+    key, or None for a key outside its windows. A stored forecast differs if it used another list of a predictor function,
+    if the same list now gets another binary-column mask (it is read from the first day of the list in its window, which a
+    changed function or start can move), or if its issue day now falls in another window (a record without a `window` is
+    from a plain run, which is the test window). Pending forecasts may change freely: nothing stored depends on them.
 
-    A record without a list hash comes from fixed lists, so nothing can be said about it. `allow_mismatch` logs instead.
-    A function that changed without changing anything stored resumes, with a note.
+    A record without a list hash comes from fixed lists, so nothing can be said about its list. `allow_mismatch` logs
+    instead. A function that changed without changing anything stored resumes, with a note.
     """
     existing = Manifest.from_dict(json.loads(path.read_text())) if path.exists() else None
     stored_masks = {
         entry["hash"]: entry.get("binary_masks", {}) for entry in (existing and existing.predictor_lists) or []
     }
-    other_list, other_mask = [], []
+    fixed_masks = (existing and existing.binary_masks) or {}
+    # A plain manifest of fixed lists holds no digests, but says on which day their masks were read.
+    moved_plain = (
+        existing is not None
+        and existing.windows is None
+        and manifest.windows is not None
+        and manifest.windows[TEST] is not None
+        and manifest.windows[TEST][0] != existing.test_start
+    )
+    other_list, other_mask, other_window = [], [], []
     for record in records:
         period, horizon, run_date = record["hour"], record["horizon"], record["run_date"]
         expected = planned(period, horizon, run_date)
         if expected is None:
             continue
         stored = record.get("predictor_list")
-        if stored != expected[0]:
+        if expected.window is not None and record.get("window", TEST) != expected.window:
+            other_window.append((run_date, period, horizon, record.get("window", TEST), expected.window))
+        if expected.list_hash is not None and stored != expected.list_hash:
             other_list.append((run_date, period, horizon))
-        elif stored_masks.get(stored, {}).get(f"{period}-{horizon}", expected[1]) != expected[1]:
+            continue
+        masks = fixed_masks if expected.list_hash is None else stored_masks.get(stored, {})
+        if masks.get(expected.mask_key, expected.mask_digest) != expected.mask_digest or (
+            moved_plain and expected.list_hash is None and expected.window == TEST
+        ):
             other_mask.append((run_date, period, horizon))
 
     problems = []
+    if other_window:
+        problems.append(
+            f"{len(other_window)} stored forecast(s) would change window, e.g. (run date, period, horizon, stored as, now) "
+            f"{sorted(other_window)[:3]}"
+        )
     if other_list:
         problems.append(
             f"{len(other_list)} stored forecast(s) used another predictor list than the predictor function returns now, "
@@ -354,7 +495,7 @@ def check_stored_lists(
     if other_mask:
         problems.append(
             f"{len(other_mask)} stored forecast(s) used the same list with other binary columns than a fresh run would "
-            f"(its first test day moved), e.g. {sorted(other_mask)[:3]}"
+            f"(its first day in the window moved), e.g. {sorted(other_mask)[:3]}"
         )
     if problems and not allow_mismatch:
         raise ManifestMismatchError(
@@ -374,10 +515,12 @@ __all__ = [
     "Manifest",
     "ManifestMismatchError",
     "PREDICTOR_FUNCTION_LAYOUT",
+    "PlannedForecast",
     "build_manifest",
     "check_and_write",
     "check_stored_lists",
     "hash_columns",
     "hash_predictor_layout",
     "manifest_path",
+    "read_windows",
 ]
