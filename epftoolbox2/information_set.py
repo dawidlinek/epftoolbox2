@@ -673,9 +673,13 @@ class InformationSet:
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
         model_name: str = "Model",
+        issue_days: Optional[Sequence[str]] = None,
     ) -> None:
-        """Raise InformationSetError if a predictor (or the newest training target) is not known at issue time."""
-        violations, unknown = self.violations(expanded, target, freq, index, test_start, test_end)
+        """Raise InformationSetError if a predictor (or the newest training target) is not known at issue time.
+
+        `issue_days` checks these days instead of [test_start, test_end]: a run with validation forecasts no day between
+        its windows."""
+        violations, unknown = self.violations(expanded, target, freq, index, test_start, test_end, issue_days)
         self._report_unknown(unknown, model_name)
         if violations:
             raise InformationSetError(self._format(violations, model_name))
@@ -690,11 +694,12 @@ class InformationSet:
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
         model_name: str = "Model",
+        issue_days: Optional[Sequence[str]] = None,
     ) -> List[Violation]:
         """What `availability="warn"` lists: every use `check` refuses, and every use of a column without a rule, whatever
         `unknown` says, instead of an error. A column of a data source on an index in another zone still raises: neither
         the check nor the listing could say anything true about it."""
-        found, _ = self.violations(expanded, target, freq, index, test_start, test_end)
+        found, _ = self.violations(expanded, target, freq, index, test_start, test_end, issue_days)
         step = _STEP_MINUTES[freq]
         resolved: Dict[str, ResolvedColumn] = {}
 
@@ -738,10 +743,11 @@ class InformationSet:
         index: pd.DatetimeIndex,
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
+        issue_days: Optional[Sequence[str]] = None,
     ) -> Tuple[List[Violation], set]:
         """All (predictor, period, horizon) uses of values not known at issue time, and unknown base columns.
 
-        Every issue day D of the test period is checked, and each zone conversion uses the UTC offsets at the instant
+        Every issue day D of the test period (or of `issue_days`) is checked, and each zone conversion uses the UTC offsets at the instant
         it converts: when the data zone and a rule's zone don't switch DST together (a UTC or fixed-offset index
         against Brussels rules), a value delivered or published across a switch from D has other offsets than D.
         A violation reports the issue day on which its value comes latest after the issue time.
@@ -764,7 +770,7 @@ class InformationSet:
                 else:
                     self._check_source_zone(resolved[name], index)
 
-        days = self._issue_days(index, test_start, test_end)
+        days = pd.DatetimeIndex(issue_days) if issue_days is not None else self._issue_days(index, test_start, test_end)
         if not len(days):
             return [], unknown
         clock = self._issue_clock(days, index)

@@ -78,10 +78,18 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
 
     Returns the result record, or a skip reason (one of the SKIP_* names, optionally followed by ": detail")
     when no forecast is possible.
+
+    `day_in_test` counts days from the run's first day. In a run with validation `run_days` says what that day is: its
+    window, the days since the start of that window (which the record's `day_in_test` holds) and its place in the plan
+    of a predictor function, which has no days between the windows. Each window has its own binary-column masks. Nothing else
+    depends on the day's window, so a forecast is what a plain run over its window alone gives.
     """
     arrays = _W_HOUR_ARRAYS[hour]
     cfg = _W_CONFIG
     day = cfg["offset"] + day_in_test
+    run_days = cfg.get("run_days")
+    window, day_in_window, position = (None, day_in_test, day_in_test) if run_days is None else run_days[day_in_test]
+    scalable_masks = cfg["scalable_masks"] if window is None else cfg["scalable_masks"][window]
 
     days = arrays["days"]
     day_min = day - cfg["training_window"] - hz
@@ -93,11 +101,11 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     if task_lists is None:
         list_id = None
         predictors = _W_EXPANDED_PREDS[(hour, hz)]
-        scalable_mask = cfg["scalable_masks"][(hour, hz)]
+        scalable_mask = scalable_masks[(hour, hz)]
     else:
-        list_id = int(task_lists[(hour, hz)][day_in_test])
+        list_id = int(task_lists[(hour, hz)][position])
         predictors = _W_EXPANDED_PREDS[list_id]
-        scalable_mask = cfg["scalable_masks"][(list_id, hour, hz)]
+        scalable_mask = scalable_masks[(list_id, hour, hz)]
 
     col_idx = [arrays["col_index"][c] for c in predictors]
     x_full = arrays["x"][mask][:, col_idx]
@@ -149,7 +157,7 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
         "run_weekday": run_date.weekday(),
         "hour": hour,
         "horizon": hz,
-        "day_in_test": day_in_test,
+        "day_in_test": day_in_window,
         "prediction": scaler.inverse(float(pred)),
         "actual": actual,
         "coefficients": coefs,
@@ -157,6 +165,8 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     }
     if list_id is not None:
         record["predictor_list"] = cfg["list_hashes"][list_id]
+    if window is not None:
+        record["window"] = window
     return record
 
 

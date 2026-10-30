@@ -18,9 +18,18 @@ from rich.progress import Progress
 from ..scalers.standard import StandardScaler
 from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore
-from ..results.ref import ModelResultRef
+from ..results.ref import ModelResultRef, split_by_window
 from ..results.availability import listing_rows, warn_about
-from ..results.manifest import build_manifest, check_and_write, check_stored_lists, manifest_path
+from ..results.manifest import (
+    PlannedForecast,
+    build_manifest,
+    check_and_write,
+    check_stored_lists,
+    hash_columns,
+    manifest_path,
+    read_windows,
+)
+from ..results.windows import TEST, RunWindows, mask_key
 from ..logging import get_logger
 from . import _contract
 from .context import PredictorPlan, build_plan, mask_digest, takes_ctx
@@ -89,6 +98,7 @@ class BaseModel(ABC):
         self._periods_per_day: int = 24
         self._used_predictors: List[str] = []
         self._availability_listing: List[Dict] = []
+        self._window_listings: Dict[str, List[Dict]] = {}
 
     def __setattr__(self, key, value):
         # The scaler is kept as a name or {"name", "params"} dict, also when assigned after construction, so a
@@ -126,6 +136,7 @@ class BaseModel(ABC):
         plan: Optional[PredictorPlan] = None,
         availability: str = "raise",
         warn_listing: bool = True,
+        windows: Optional[RunWindows] = None,
     ) -> ModelResultRef:
         """Forecast every period and horizon for each day in [test_start, test_end].
 
@@ -142,11 +153,20 @@ class BaseModel(ABC):
 
         `plan` is what `ModelPipeline` built for a predictor function of `ctx` before any model ran, for this data,
         test period, horizon and freq; without it the run builds its own. A model with fixed lists has none.
+
+        `windows` (what `ModelPipeline.run(validation=..., test=...)` resolves to, see `epftoolbox2.results.windows`)
+        forecasts the days of its windows in place of [test_start, test_end]. The returned ref covers the whole run and its
+        `by_window` holds a ref per window. Its records carry `window`, their `day_in_test` counts from the start of it, and
+        each window reads its binary-column masks from its own first day, which leaves every forecast what a plain run over
+        that window gives. A plain run into results made with windows is treated as a run of the test window alone, so that
+        its records and masks are checked and the windows on file stay recorded.
         """
         self._set_freq(freq)
         check_level(availability)
 
-        if forecast_only:
+        if windows is not None:
+            test_start, test_end = windows.first_day, windows.last_day
+        elif forecast_only:
             test_start = resolve_date(test_start or "today")
             test_end = resolve_date(test_end or "today")
         else:
@@ -154,18 +174,40 @@ class BaseModel(ABC):
                 raise ValueError("test_start and test_end are required unless forecast_only=True")
             test_start = resolve_date(test_start)
             test_end = resolve_date(test_end)
+        if windows is None and save_to and read_windows(save_to) is not None:
+            windows = RunWindows.fixed(None, (test_start, test_end))
 
         self._target = target
         if plan is None:
             plan = self._plan_predictors(
-                data, target, horizon, freq, information_set, test_start, test_end, availability=availability
+                data,
+                target,
+                horizon,
+                freq,
+                information_set,
+                test_start,
+                test_end,
+                availability=availability,
+                windows=windows,
             )
         else:
-            self._check_plan_is_for(plan, data, horizon, freq, information_set, test_start, test_end, availability)
+            self._check_plan_is_for(
+                plan, data, horizon, freq, information_set, test_start, test_end, availability, windows
+            )
         expanded = self._check_inputs(
-            data, target, horizon, freq, information_set, test_start, test_end, plan=plan, availability=availability
+            data,
+            target,
+            horizon,
+            freq,
+            information_set,
+            test_start,
+            test_end,
+            plan=plan,
+            availability=availability,
+            windows=windows,
         )
         listing = self._availability_listing
+        window_listings = self._window_listings
         if warn_listing:
             warn_about({self.name: listing}, stacklevel=3)
         used_columns = list(dict.fromkeys([target, *self._used_predictors]))
@@ -177,22 +219,35 @@ class BaseModel(ABC):
             self._hour_data[hour] = hour_df
             self._hour_days[hour] = hour_df["day"].values
 
-        self._offset = self._resolve_day(test_start, "test_start")
-        test_end_day = self._resolve_day(test_end, "test_end")
-        n_days = test_end_day - self._offset + 1
         first_day = datetime.date.fromisoformat(test_start)
-        test_days = [first_day + datetime.timedelta(days=d) for d in range(n_days)]
+        if windows is None:
+            self._offset = self._resolve_day(test_start, "test_start")
+            test_end_day = self._resolve_day(test_end, "test_end")
+            run_days = list(range(test_end_day - self._offset + 1))
+        else:
+            for name, (start, end) in windows.periods:
+                self._resolve_day(start, f"{name} start")
+                self._resolve_day(end, f"{name} end")
+            self._offset = self._resolve_day(test_start, "first day of the run")
+            run_days = [(datetime.date.fromisoformat(day) - first_day).days for day in windows.issue_days()]
+        n_days = len(run_days)
+        test_days = {d: first_day + datetime.timedelta(days=d) for d in run_days}
         absent_slots = {
             (period, (day.date() - first_day).days)
-            for period, day in _contract.missing_test_rows(self._data.index, freq, test_days)
+            for period, day in _contract.missing_test_rows(self._data.index, freq, test_days.values())
         }
         self._data = None
 
         all_tasks = [
-            (hour, h, d) for d in range(n_days) for h in range(1, horizon + 1) for hour in range(self._periods_per_day)
+            (hour, h, d) for d in run_days for h in range(1, horizon + 1) for hour in range(self._periods_per_day)
         ]
 
-        plan_masks = None if plan is None else self._plan_scalable_masks(plan)
+        window_days = None if windows is None else self._window_days(windows, first_day)
+        if windows is not None:
+            masks = self._window_masks(plan, windows, horizon, first_day)
+        else:
+            masks = None if plan is None else self._plan_scalable_masks(plan)
+        stored_windows = None
 
         store = ResultStore(save_to, test_start=test_start) if save_to else None
         if store:
@@ -208,18 +263,24 @@ class BaseModel(ABC):
                 test_end=test_end,
                 information_set=information_set,
                 predictor_function=None if plan is None else plan.function_record(),
-                predictor_lists=None if plan is None else plan.manifest_lists(plan_masks),
-                availability=self._manifest_availability(information_set, availability, listing),
+                predictor_lists=None if plan is None else plan.manifest_lists(masks if windows else {TEST: masks}),
+                availability=self._manifest_availability(information_set, availability, listing, window_listings),
+                windows=windows,
+                binary_masks=None if windows is None or plan is not None else self._mask_digests(masks),
             )
-            if plan is not None:
+
+            def check_stored():
                 check_stored_lists(
                     manifest_path(store.path),
                     manifest,
-                    store.iter_lines(cols=["hour", "horizon", "run_date", "predictor_list"]),
-                    self._stored_list_lookup(plan, plan_masks),
+                    store.iter_lines(cols=["hour", "horizon", "run_date", "predictor_list", "window"]),
+                    self._stored_forecast_lookup(plan, masks, windows),
                     allow_mismatch=allow_manifest_mismatch,
                     model_name=self.name,
                 )
+
+            if plan is not None and windows is None:
+                check_stored()
             check_and_write(
                 manifest_path(store.path),
                 manifest,
@@ -227,17 +288,24 @@ class BaseModel(ABC):
                 allow_mismatch=allow_manifest_mismatch,
                 require_manifest=require_manifest,
                 model_name=self.name,
+                data_hash=None if windows is None else self._data_hasher(data),
+                check_stored=None if windows is None else check_stored,
             )
             if availability != "none" and manifest.availability is not None:
                 listing = manifest.availability["listing"]  # with what earlier runs listed for other test periods
+                window_listings = manifest.availability.get("windows", window_listings)
+            stored_windows = None if manifest.windows is None else RunWindows.from_dict(manifest.windows)
         pending = store.get_missing(all_tasks) if store else all_tasks
 
         skipped: Counter = Counter()
+        window_skipped: Dict[str, Counter] = {} if windows is None else {name: Counter() for name, _ in windows.periods}
         skip_examples: Dict[str, str] = {}
         tasks = []
         for task in pending:
             if (task[0], task[2]) in absent_slots:
                 skipped[SKIP_MISSING_TEST_ROW] += 1
+                if window_days is not None:
+                    window_skipped[window_days[task[2]][0]][SKIP_MISSING_TEST_ROW] += 1
                 skip_examples.setdefault(SKIP_MISSING_TEST_ROW, f"period {task[0]} on {test_days[task[2]]}")
             else:
                 tasks.append(task)
@@ -246,7 +314,18 @@ class BaseModel(ABC):
         try:
             if tasks:
                 self._run_tasks(
-                    tasks, horizon, test_start, n_days, store, in_memory, skipped, skip_examples, plan, plan_masks
+                    tasks,
+                    horizon,
+                    test_start,
+                    n_days,
+                    store,
+                    in_memory,
+                    skipped,
+                    skip_examples,
+                    plan,
+                    masks,
+                    window_days,
+                    window_skipped,
                 )
         finally:
             if store:
@@ -258,7 +337,7 @@ class BaseModel(ABC):
         produced = len(all_tasks) - len(store.get_missing(all_tasks)) if store else len(in_memory)
         self._report_counts(len(all_tasks), produced, skipped, skip_examples)
 
-        return ModelResultRef(
+        ref = ModelResultRef(
             name=self.name,
             path=store.path if store else None,
             count=len(all_tasks),
@@ -271,25 +350,108 @@ class BaseModel(ABC):
             skipped=dict(skipped),
             predictor_lists=None if plan is None else plan.describe(),
             availability_listing=listing,
+            windows=windows,
         )
+        if windows is not None:
+            ref.by_window = split_by_window(
+                ref,
+                windows,
+                self._periods_per_day,
+                skipped=window_skipped,
+                predictor_lists=None if plan is None else self._window_lists(plan, windows),
+                listings=window_listings,
+                target_before=(stored_windows or windows).target_before,
+            )
+            empty = [name for name, part in ref.by_window.items() if part.produced == 0]
+            if empty:
+                warnings.warn(
+                    f"{self.name}: no forecasts in the {' and '.join(empty)} window of this run. See forecast_counts().",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        return ref
 
     @staticmethod
-    def _manifest_availability(information_set, availability: str, listing: List[Dict]) -> Optional[Dict]:
+    def _manifest_availability(
+        information_set, availability: str, listing: List[Dict], window_listings: Optional[Dict[str, List[Dict]]] = None
+    ) -> Optional[Dict]:
         """What a manifest records about the issue-time check; level "none" adds nothing, as if it had not run."""
         if information_set is None or availability == "none":
             return None
-        return {"level": availability, "listing": listing}
+        recorded = {"level": availability, "listing": listing}
+        if window_listings:
+            recorded["windows"] = window_listings
+        return recorded
+
+    @staticmethod
+    def _data_hasher(data: pd.DataFrame) -> Callable[[str, Sequence[str]], str]:
+        """The hash of `data` up to a day, in some columns: a manifest's, for any span a run with windows compares."""
+        ordered = data.sort_index()
+        return lambda end, columns: hash_columns(ordered.loc[:end], columns)
+
+    @staticmethod
+    def _window_days(windows: RunWindows, first_day: datetime.date) -> Dict[int, Tuple[str, int, int]]:
+        """Each day of the run, counted from `first_day` -> (its window, days since the window's start, place among the
+        run's issue days)."""
+        days = {}
+        position = 0
+        for name, (start, end) in windows.periods:
+            first = (datetime.date.fromisoformat(start) - first_day).days
+            last = (datetime.date.fromisoformat(end) - first_day).days
+            for day in range(first, last + 1):
+                days[day] = (name, day - first, position)
+                position += 1
+        return days
+
+    def _window_masks(self, plan, windows: RunWindows, horizon: int, first_day: datetime.date) -> Dict[str, Dict]:
+        """Window -> its binary-column masks, as a plain run over that window alone computes them, from its first day."""
+        masks = {}
+        for name, (start, end) in windows.periods:
+            offset = self._offset + (datetime.date.fromisoformat(start) - first_day).days
+            if plan is None:
+                masks[name] = self._precompute_scalable_masks(horizon, offset)
+            else:
+                days = (plan.position_of(start), plan.position_of(end) + 1)
+                masks[name] = self._plan_scalable_masks(plan, days, offset)
+        return masks
+
+    @staticmethod
+    def _mask_digests(masks: Dict[str, Dict[Tuple[int, int], np.ndarray]]) -> Dict[str, str]:
+        return {
+            mask_key(window, period, horizon): mask_digest(mask)
+            for window, window_masks in masks.items()
+            for (period, horizon), mask in window_masks.items()
+        }
+
+    @staticmethod
+    def _window_lists(plan: PredictorPlan, windows: RunWindows) -> Dict[str, List[Dict]]:
+        return {
+            name: plan.describe((plan.position_of(start), plan.position_of(end) + 1))
+            for name, (start, end) in windows.periods
+        }
 
     def _run_tasks(
-        self, tasks, horizon, test_start, n_days, store, in_memory, skipped, skip_examples, plan=None, plan_masks=None
+        self,
+        tasks,
+        horizon,
+        test_start,
+        n_days,
+        store,
+        in_memory,
+        skipped,
+        skip_examples,
+        plan=None,
+        masks=None,
+        window_days=None,
+        window_skipped=None,
     ) -> None:
         hour_arrays = self._build_hour_arrays(horizon)
         if plan is None:
             expanded_preds = self._precompute_expanded_predictors(horizon)
-            scalable_masks = self._precompute_scalable_masks(horizon)
+            scalable_masks = self._precompute_scalable_masks(horizon) if masks is None else masks
         else:
             expanded_preds = {list_id: list(names) for list_id, names in enumerate(plan.lists)}
-            scalable_masks = plan_masks
+            scalable_masks = masks
 
         tasks_by_day: Dict[int, list] = {}
         for t in tasks:
@@ -313,6 +475,8 @@ class BaseModel(ABC):
         if plan is not None:
             config["task_lists"] = plan.assignment
             config["list_hashes"] = plan.hashes
+        if window_days is not None:
+            config["run_days"] = window_days
         first_day = datetime.date.fromisoformat(test_start)
 
         mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
@@ -351,6 +515,8 @@ class BaseModel(ABC):
                     for (hour, hz, _), outcome in day_skipped:
                         reason, _, detail = outcome.partition(": ")
                         skipped[reason] += 1
+                        if window_days is not None:
+                            window_skipped[window_days[futures[future]][0]][reason] += 1
                         where = f"period {hour}, horizon {hz}, run date {run_date}"
                         skip_examples.setdefault(reason, f"{where}: {detail}" if detail else where)
                     progress.advance(task_id)
@@ -381,6 +547,7 @@ class BaseModel(ABC):
         test_end: Optional[str] = None,
         plan: Optional[PredictorPlan] = None,
         availability: str = "raise",
+        windows: Optional[RunWindows] = None,
     ) -> Dict[Tuple[int, int], List[str]]:
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
 
@@ -394,13 +561,25 @@ class BaseModel(ABC):
 
         A predictor function of `ctx` is checked through its `plan`, which `_plan_predictors` built after the same data
         contract checks; without one, this builds one to check and drops it.
+
+        `windows` checks the days of its windows, once, in place of [test_start, test_end], and keeps what `availability`
+        "warn" lists for each of them in `_window_listings`.
         """
         self._set_freq(freq)
         self._availability_listing = []
+        self._window_listings = {}
         if self._ctx_fn is not None:
             if plan is None:
                 plan = self._plan_predictors(
-                    data, target, horizon, freq, information_set, test_start, test_end, availability=availability
+                    data,
+                    target,
+                    horizon,
+                    freq,
+                    information_set,
+                    test_start,
+                    test_end,
+                    availability=availability,
+                    windows=windows,
                 )
             expanded = plan.names_by_pair()
             self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
@@ -408,22 +587,44 @@ class BaseModel(ABC):
                 plan.check(target, self.name)
             elif information_set is not None and availability == "warn":
                 self._availability_listing = plan.listing(target, self.name)
+                if windows is not None:
+                    self._window_listings = self._plan_window_listings(plan, target, windows)
             plan.release()
             return expanded
-        self._check_frame(data, target, horizon, freq, test_start, test_end)
+        self._check_frame(data, target, horizon, freq, test_start, test_end, windows)
         expanded = self._precompute_expanded_predictors(horizon)
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
+        days = None if windows is None else windows.issue_days()
         if information_set is not None and availability == "raise":
-            information_set.check(expanded, target, freq, data.index, test_start, test_end, model_name=self.name)
+            information_set.check(
+                expanded, target, freq, data.index, test_start, test_end, model_name=self.name, issue_days=days
+            )
         elif information_set is not None and availability == "warn":
             uses = information_set.late_uses(
-                expanded, target, freq, data.index, test_start, test_end, model_name=self.name
+                expanded, target, freq, data.index, test_start, test_end, model_name=self.name, issue_days=days
             )
             self._availability_listing = listing_rows(uses)
+            for name, (start, end) in windows.periods if windows is not None else ():
+                self._window_listings[name] = listing_rows(
+                    information_set.late_uses(expanded, target, freq, data.index, start, end, model_name=self.name)
+                )
         return expanded
 
-    def _check_frame(self, data, target, horizon, freq, test_start=None, test_end=None) -> None:
-        _contract.check_index(data, freq, _contract.read_days(test_start, test_end, self.training_window, horizon))
+    def _plan_window_listings(self, plan: PredictorPlan, target: str, windows: RunWindows) -> Dict[str, List[Dict]]:
+        """What each window uses. A run of one window uses what the whole plan does, whether or not its cells are gone."""
+        if len(windows.periods) == 1:
+            return {windows.periods[0][0]: plan.listing(target, self.name)}
+        return {
+            name: plan.listing(target, self.name, (plan.position_of(start), plan.position_of(end) + 1))
+            for name, (start, end) in windows.periods
+        }
+
+    def _check_frame(self, data, target, horizon, freq, test_start=None, test_end=None, windows=None) -> None:
+        if windows is None:
+            days = _contract.read_days(test_start, test_end, self.training_window, horizon)
+        else:
+            days = _contract.read_ranges([p for _, p in windows.periods], self.training_window, horizon)
+        _contract.check_index(data, freq, days)
         _contract.check_timezone_with_day_lags(data)
         _contract.check_names(data, target, horizon)
 
@@ -439,17 +640,21 @@ class BaseModel(ABC):
         issue_days: Optional[Sequence[str]] = None,
         warn_unpublished: bool = True,
         availability: str = "raise",
+        windows: Optional[RunWindows] = None,
     ) -> Optional[PredictorPlan]:
         """The plan of a predictor function of `ctx` for this data and test period, or None for a model with fixed lists.
 
         `issue_days` plans these days instead of [test_start, test_end]: `verify` samples a few to learn the inputs.
+        `windows` plans the days of a run with validation, once each and none between them; the function doesn't see them.
         `availability` is the level `ctx` answers at (see `epftoolbox2.models.context`).
         """
         if self._ctx_fn is None:
             return None
         self._set_freq(freq)
-        self._check_frame(data, target, horizon, freq, test_start, test_end)
-        if issue_days is not None:
+        self._check_frame(data, target, horizon, freq, test_start, test_end, windows)
+        if windows is not None:
+            days = [datetime.date.fromisoformat(day) for day in windows.issue_days()]
+        elif issue_days is not None:
             days = [datetime.date.fromisoformat(day) for day in issue_days]
         elif test_start is None or test_end is None:
             raise ValueError(f"{self.name}: a predictor function of `ctx` needs the test period to plan its lists")
@@ -458,7 +663,7 @@ class BaseModel(ABC):
         return build_plan(self._ctx_fn, data, days, horizon, freq, information_set, warn_unpublished, availability)
 
     def _check_plan_is_for(
-        self, plan, data, horizon, freq, information_set, test_start, test_end, availability="raise"
+        self, plan, data, horizon, freq, information_set, test_start, test_end, availability="raise", windows=None
     ) -> None:
         """A plan answers for one function, frame and test period; on another run it would give wrong lists silently."""
         if plan.function is not self._ctx_fn:
@@ -466,7 +671,12 @@ class BaseModel(ABC):
         problems = []
         if plan.data is not data:
             problems.append("data")
-        if plan.issue_days != _test_days(test_start, test_end):
+        planned_days = (
+            _test_days(test_start, test_end)
+            if windows is None
+            else [datetime.date.fromisoformat(day) for day in windows.issue_days()]
+        )
+        if plan.issue_days != planned_days:
             problems.append("test period")
         if plan.horizon != horizon:
             problems.append("horizon")
@@ -479,10 +689,14 @@ class BaseModel(ABC):
         if problems:
             raise ValueError(f"{self.name}: this plan was built for another {', '.join(problems)}")
 
-    def _plan_scalable_masks(self, plan: PredictorPlan) -> Dict[Tuple[int, int, int], np.ndarray]:
+    def _plan_scalable_masks(
+        self, plan: PredictorPlan, days: Tuple[int, Optional[int]] = (0, None), offset: Optional[int] = None
+    ) -> Dict[Tuple[int, int, int], np.ndarray]:
         """(list id, period, horizon) -> which of the list's columns are scaled, from all test days of that list.
 
-        All of them, pending or not, so a resumed run computes what a fresh one does.
+        All of them, pending or not, so a resumed run computes what a fresh one does. `days` is a (start, stop) slice of the
+        plan's issue days and `offset` the day id of its first day, when masks are kept per window: what happens in another
+        window then can't move them.
 
         A list's mask is read from the window of its first test day, so nothing later than a forecast's own issue day
         decides how it is scaled. A list in use on every test day of a (period, horizon) is a fixed list there and gets
@@ -491,38 +705,59 @@ class BaseModel(ABC):
         (`get_scalable_mask` would leave it unscaled for good): it is read from the first of the list's test days that has
         a value for it. Before that day the list's forecasts have no training row, since none has the column.
         """
+        offset = self._offset if offset is None else offset
         masks = {}
-        for (hour, hz), ids in plan.assignment.items():
+        for (hour, hz), all_ids in plan.assignment.items():
+            ids = all_ids[days[0] : days[1]]
             for list_id in np.unique(ids).tolist():
                 predictors = list(plan.lists[list_id])
                 test_days = np.flatnonzero(ids == list_id)
-                sample = self._training_sample(hour, self._offset + test_days[0], hz, predictors)
+                sample = self._training_sample(hour, offset + test_days[0], hz, predictors)
                 mask = StandardScaler.get_scalable_mask(sample)
                 if len(test_days) < len(ids):
                     self._read_columns_without_values(
-                        mask, np.isnan(sample).all(axis=0), hour, hz, predictors, test_days
+                        mask, np.isnan(sample).all(axis=0), hour, hz, predictors, test_days, offset
                     )
                 masks[(list_id, hour, hz)] = mask
         return masks
 
-    def _read_columns_without_values(self, mask, without_values, hour, hz, predictors, test_days) -> None:
+    def _read_columns_without_values(self, mask, without_values, hour, hz, predictors, test_days, offset) -> None:
         for day in test_days[1:]:
             if not without_values.any():
                 return
-            sample = self._training_sample(hour, self._offset + day, hz, predictors)
+            sample = self._training_sample(hour, offset + day, hz, predictors)
             found = without_values & ~np.isnan(sample).all(axis=0)
             if found.any():
                 mask[found] = StandardScaler.get_scalable_mask(sample)[found]
                 without_values &= ~found
 
     @staticmethod
-    def _stored_list_lookup(plan: PredictorPlan, masks: Dict[Tuple[int, int, int], np.ndarray]) -> Callable:
-        """What a fresh run would give a stored forecast's key: (list hash, mask digest), or None if it isn't planned."""
-        digests = {key: mask_digest(mask) for key, mask in masks.items()}
+    def _stored_forecast_lookup(
+        plan: Optional[PredictorPlan], masks: Dict, windows: Optional[RunWindows] = None
+    ) -> Callable[[int, int, str], Optional[PlannedForecast]]:
+        """What a fresh run would give a stored forecast's key, or None if it isn't planned. `masks` are per window in a
+        run with windows."""
+        by_window = {TEST: masks} if windows is None else masks
+        digests = {
+            window: {key: mask_digest(mask) for key, mask in window_masks.items()}
+            for window, window_masks in by_window.items()
+        }
 
-        def lookup(period: int, horizon: int, run_date: str) -> Optional[Tuple[str, str]]:
-            list_id = plan.list_id_of(period, horizon, run_date)
-            return None if list_id is None else (plan.hashes[list_id], digests[(list_id, period, horizon)])
+        def lookup(period: int, horizon: int, run_date: str) -> Optional[PlannedForecast]:
+            window = TEST if windows is None else windows.window_of(run_date)
+            if window is None:
+                return None
+            list_id = None if plan is None else plan.list_id_of(period, horizon, run_date)
+            key = (period, horizon) if plan is None else (list_id, period, horizon)
+            digest = digests[window].get(key)
+            if digest is None:
+                return None
+            return PlannedForecast(
+                None if plan is None else plan.hashes[list_id],
+                digest,
+                mask_key(window, period, horizon),
+                None if windows is None else window,
+            )
 
         return lookup
 
@@ -598,12 +833,15 @@ class BaseModel(ABC):
             }
         return hour_arrays
 
-    def _precompute_scalable_masks(self, horizon: int) -> Dict[Tuple[int, int], np.ndarray]:
+    def _precompute_scalable_masks(
+        self, horizon: int, offset: Optional[int] = None
+    ) -> Dict[Tuple[int, int], np.ndarray]:
+        offset = self._offset if offset is None else offset
         masks = {}
         for hour in range(self._periods_per_day):
             for hz in range(1, horizon + 1):
                 preds = self._expand_predictors(hz, hour=hour)
-                sample_x = self._training_sample(hour, self._offset, hz, preds)
+                sample_x = self._training_sample(hour, offset, hz, preds)
                 masks[(hour, hz)] = StandardScaler.get_scalable_mask(sample_x)
         return masks
 
