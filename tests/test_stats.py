@@ -6,13 +6,16 @@ cross-checks against ``arch.bootstrap.MCS`` run only where arch is installed (it
 """
 
 import math
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 from scipy import stats as sstats
 
+from epftoolbox2.evaluators import stats
 from epftoolbox2.evaluators.stats import (
+    MCSResult,
     block_bootstrap_indices,
     default_lag,
     dm_test,
@@ -68,6 +71,13 @@ def test_newey_west_variance_is_never_negative():
         d += 3 * (-1) ** np.arange(d.size)  # strongly negatively autocorrelated
         for lag in range(d.size):
             assert newey_west_variance(d, lag) >= 0
+
+
+def test_a_fractional_lag_is_refused():
+    with pytest.raises(TypeError):
+        newey_west_variance(np.arange(5.0), 2.5)
+    with pytest.raises(TypeError):
+        dm_test(np.arange(5.0), np.ones(5), lag=2.5)
 
 
 def test_newey_west_variance_rejects_bad_lags_and_values():
@@ -271,6 +281,19 @@ def test_indices_are_reproducible_and_advance_a_generator():
     assert np.array_equal(first, a) and not np.array_equal(first, second)
 
 
+def test_a_seed_is_required():
+    """seed=None would draw from the operating system, and the same data would give different numbers."""
+    losses = daily_losses(50, 3, np.random.default_rng(0))
+    with pytest.raises(ValueError, match="seed"):
+        block_bootstrap_indices(50, 7, 10, None)
+    with pytest.raises(ValueError, match="seed"):
+        ratio_interval(losses[:, 0], losses[:, 1], seed=None)
+    with pytest.raises(ValueError, match="seed"):
+        model_confidence_set(losses, seed=None)
+    with pytest.raises(ValueError, match="seed"):
+        rank_bootstrap(losses, seed=None)
+
+
 def test_block_bootstrap_rejects_bad_arguments():
     with pytest.raises(ValueError, match="integer"):
         block_bootstrap_indices(100, 3.5, 10, 0, kind="circular")
@@ -360,6 +383,85 @@ def test_mcs_is_reproducible_with_a_seed():
     assert np.array_equal(a.p_values, b.p_values) and a.elimination_order == b.elimination_order
 
 
+@pytest.mark.parametrize("statistic", ["R", "max"])
+def test_mcs_does_not_depend_on_how_the_bootstrap_is_chunked(monkeypatch, statistic):
+    """The real chunk size holds 1000 samples of 64 models at once, so split them here to reach the chunk boundaries."""
+    losses = daily_losses(200, 12, np.random.default_rng(25), shift=np.linspace(0, 0.08, 12))
+    whole = model_confidence_set(losses, statistic=statistic, reps=500)
+
+    monkeypatch.setattr(stats, "_CHUNK_ELEMENTS", 12 * 12 * 7)
+    chunked = model_confidence_set(losses, statistic=statistic, reps=500)
+
+    assert np.array_equal(chunked.p_values, whole.p_values)
+    assert chunked.elimination_order == whole.elimination_order
+
+
+def test_mcs_t_r_matches_a_recomputation_at_every_step():
+    """The one-pass bootstrap distribution equals the maximum over the included models recomputed step by step."""
+    losses = daily_losses(150, 9, np.random.default_rng(26), shift=np.linspace(0, 0.06, 9))
+    idx = block_bootstrap_indices(150, 7, 800, 0, kind="stationary")
+
+    res = model_confidence_set(losses, indices=idx)
+
+    mean = losses.mean(0)
+    boot = losses[idx].mean(axis=1)
+    diffs = mean[:, None] - mean[None, :]
+    dev = (boot[:, :, None] - boot[:, None, :]) - diffs
+    sd = np.sqrt((dev**2).mean(0) + np.eye(9))
+    t, z = diffs / sd, dev / sd
+    remaining = np.arange(9)
+    raw = []
+    for worst in res.elimination_order[:-1]:
+        rows, cols = np.ix_(remaining, remaining)
+        t_left = t[rows, cols]
+        assert remaining[np.unravel_index(t_left.argmax(), t_left.shape)[0]] == worst
+        raw.append((z[:, rows, cols].reshape(800, -1).max(axis=1) > t_left.max()).mean())
+        remaining = remaining[remaining != worst]
+    expected = np.maximum.accumulate(raw + [1.0])
+
+    assert res.p_values[list(res.elimination_order)] == pytest.approx(expected, abs=0)
+
+
+def test_mcs_t_max_matches_a_recomputation_at_every_step():
+    """T_max recentres the bootstrap deviations and re-estimates their standard deviation over the included models."""
+    losses = daily_losses(150, 9, np.random.default_rng(29), shift=np.linspace(0, 0.06, 9))
+    idx = block_bootstrap_indices(150, 7, 800, 0, kind="stationary")
+
+    res = model_confidence_set(losses, statistic="max", indices=idx)
+
+    mean = losses.mean(0)
+    boot = losses[idx].mean(axis=1) - mean
+    remaining = np.arange(9)
+    raw = []
+    for worst in res.elimination_order[:-1]:
+        left = boot[:, remaining] - boot[:, remaining].mean(axis=1, keepdims=True)
+        sd = np.sqrt((left**2).mean(axis=0))
+        t = (mean[remaining] - mean[remaining].mean()) / sd
+        assert remaining[t.argmax()] == worst
+        raw.append(((left / sd).max(axis=1) > t.max()).mean())
+        remaining = remaining[remaining != worst]
+    expected = np.maximum.accumulate(raw + [1.0])
+
+    assert res.p_values[list(res.elimination_order)] == pytest.approx(expected, abs=0)
+
+
+def test_mcs_t_max_eliminates_all_models_on_an_exact_tie():
+    losses = daily_losses(200, 3, np.random.default_rng(30), shift=[0.0, 0.01, 0.3])
+    losses = np.column_stack([losses, losses[:, 2]])
+
+    res = model_confidence_set(losses, statistic="max")
+
+    assert set(res.elimination_order[:2]) == {2, 3}
+    assert res.p_values[2] == res.p_values[3]
+
+
+def test_included_means_a_p_value_above_alpha():
+    """The arch convention; p-values are multiples of 1 / reps, so p == alpha does happen."""
+    res = MCSResult(p_values=np.array([0.1, 1.0]), elimination_order=(0, 1), alpha=0.1, statistic="R", n=10, reps=10)
+    assert res.included().tolist() == [False, True]
+    assert res.included(0.05).tolist() == [True, True]
+
+
 def test_mcs_rejects_duplicated_models_and_bad_input():
     losses = daily_losses(100, 3, np.random.default_rng(16))
     with pytest.raises(ValueError, match="identical losses"):
@@ -424,8 +526,6 @@ def test_mcs_agrees_with_arch_under_independent_bootstraps(method):
 
 
 def test_mcs_with_64_models_takes_seconds():
-    import time
-
     losses = daily_losses(365, 64, np.random.default_rng(19), shift=np.linspace(0, 0.2, 64))
     start = time.perf_counter()
     model_confidence_set(losses, reps=1000)
@@ -460,6 +560,30 @@ def test_rank_bootstrap_splits_p_best_between_equal_models():
     assert res.p_best.sum() == pytest.approx(1.0)
     assert res.p_best[:2] == pytest.approx([0.5, 0.5], abs=0.05)
     assert res.rank_low.tolist() == [1, 1, 3] and res.rank_high.tolist() == [2, 2, 3]
+
+
+def test_rank_bootstrap_does_not_depend_on_how_the_bootstrap_is_chunked(monkeypatch):
+    losses = daily_losses(100, 5, np.random.default_rng(27), shift=np.linspace(0, 0.05, 5))
+    whole = rank_bootstrap(losses, reps=300)
+
+    monkeypatch.setattr(stats, "_CHUNK_ELEMENTS", 100 * 5 * 7)
+    chunked = rank_bootstrap(losses, reps=300)
+
+    assert np.array_equal(chunked.p_best, whole.p_best)
+    assert np.array_equal(chunked.rank_low, whole.rank_low) and np.array_equal(chunked.rank_high, whole.rank_high)
+
+
+def test_rank_interval_takes_the_outer_order_statistics():
+    """With 100 samples the 5 % and 95 % positions are 4.95 and 94.05: the interval uses order statistics 4 and 95."""
+    losses = daily_losses(200, 30, np.random.default_rng(28), shift=np.linspace(0, 0.02, 30))
+    idx = block_bootstrap_indices(200, 7, 100, 0)
+
+    res = rank_bootstrap(losses, indices=idx)
+
+    ranks = np.sort(losses[idx].mean(axis=1).argsort(axis=1).argsort(axis=1) + 1, axis=0)
+    assert (ranks[4] != ranks[5]).any() and (ranks[94] != ranks[95]).any()  # the rounding direction matters here
+    assert res.rank_low.tolist() == ranks[4].tolist()
+    assert res.rank_high.tolist() == ranks[95].tolist()
 
 
 def test_rank_bootstrap_follows_the_studys_definition():

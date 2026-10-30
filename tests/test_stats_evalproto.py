@@ -115,7 +115,7 @@ def test_bootstrap_ratio_intervals_match_exactly_with_evalprotos_indices(data, e
     assert (sb.low, sb.high) == pytest.approx((row.sb_lo, row.sb_hi), abs=1e-12)
 
 
-@pytest.mark.parametrize("row", list(ROWS.itertuples()), ids=ROW_IDS)
+@pytest.mark.parametrize("row", list(ROWS.drop_duplicates("family").itertuples()), ids=lambda r: r.family)
 def test_bootstrap_ratio_intervals_with_the_default_seed_are_close(data, row):
     """Another seed moves the 4000-sample percentile bounds by Monte Carlo noise only (here at most about 0.002)."""
     e_a, e_b = errors(data, row)

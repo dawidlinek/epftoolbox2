@@ -38,6 +38,7 @@ Hansen, P. R., Lunde, A. & Nason, J. M. (2011). The model confidence set. Econom
 """
 
 import math
+import operator
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
@@ -60,7 +61,7 @@ __all__ = [
     "ratio_interval",
 ]
 
-SeedLike = Union[int, np.random.Generator, None]
+SeedLike = Union[int, np.random.Generator]
 
 # Upper bound on the number of float64 elements one vectorised bootstrap step holds at once (32 MB).
 _CHUNK_ELEMENTS = 1 << 22
@@ -225,7 +226,7 @@ def _check_indices(indices, n: int) -> np.ndarray:
 def _resample_indices(n: int, block: float, reps: int, seed: SeedLike, kind: str, indices) -> np.ndarray:
     if indices is not None:
         return _check_indices(indices, n)
-    return block_bootstrap_indices(n, block, reps, np.random.default_rng(seed), kind=kind)
+    return block_bootstrap_indices(n, block, reps, seed, kind=kind)
 
 
 def _bootstrap_means(losses: np.ndarray, idx: np.ndarray) -> np.ndarray:
@@ -280,7 +281,7 @@ def newey_west_variance(d, lag: int) -> float:
     """
     d = _as_loss(d, "d")
     n = d.size
-    lag = int(lag)
+    lag = operator.index(lag)
     if n < 1:
         raise ValueError("d is empty")
     if not 0 <= lag < n:
@@ -323,7 +324,7 @@ def dm_test(loss_model, loss_benchmark, variance: str = "hac", lag: Optional[int
             raise ValueError("lag applies only to variance='hac'")
         lag = 0
     elif variance == "hac":
-        lag = default_lag(n) if lag is None else int(lag)
+        lag = default_lag(n) if lag is None else operator.index(lag)
     else:
         raise ValueError(f"variance must be 'hac' or 'plain', got {variance!r}")
     d = lb - lm
@@ -375,9 +376,7 @@ def holm(p_values) -> np.ndarray:
 # --------------------------------------------------------------------------------------------------------------------
 
 
-def block_bootstrap_indices(
-    n: int, block: float, reps: int, rng: SeedLike = None, kind: str = "circular"
-) -> np.ndarray:
+def block_bootstrap_indices(n: int, block: float, reps: int, rng: SeedLike, kind: str = "circular") -> np.ndarray:
     """Indices of ``reps`` block-bootstrap samples of a series of length ``n``, shape ``(reps, n)``.
 
     ``kind="circular"``: circular block bootstrap (Künsch 1989; Politis & Romano 1992). Each sample joins
@@ -396,12 +395,15 @@ def block_bootstrap_indices(
         n: Length of the series.
         block: Block length (circular, a positive integer) or mean block length (stationary, >= 1).
         reps: Number of bootstrap samples.
-        rng: ``numpy.random.Generator`` (advanced in place) or an integer seed.
+        rng: ``numpy.random.Generator`` (advanced in place) or an integer seed. ``None`` is refused: it would draw
+            from the operating system and the numbers could not be reproduced.
         kind: ``"circular"`` or ``"stationary"``.
     """
     n, reps = int(n), int(reps)
     if n < 1 or reps < 1:
         raise ValueError(f"n and reps must be positive, got n={n}, reps={reps}")
+    if rng is None:
+        raise ValueError("a seed or Generator is required: the same data must give the same numbers")
     rng = np.random.default_rng(rng)
     if kind == "circular":
         if int(block) != block or block < 1:
@@ -605,8 +607,9 @@ def model_confidence_set(
             are ignored.
 
     Raises:
-        ValueError: on fewer than 2 models, non-finite losses, or two models with identical losses on every day
-            (their difference has no variance; drop one).
+        ValueError: on fewer than 2 models, non-finite losses, ``"R"`` with two models that have identical losses on
+            every day (their difference has no variance; drop one), or ``"max"`` when a model's bootstrap standard
+            deviation is 0.
     """
     L = _as_losses(losses, min_models=2)
     alpha = _check_level(alpha, "alpha")
@@ -709,7 +712,7 @@ def minimum_detectable_effect(
     alpha = _check_level(alpha, "alpha")
     power = _check_level(power, "power")
     n = lm.size
-    lag = default_lag(n) if lag is None else int(lag)
+    lag = default_lag(n) if lag is None else operator.index(lag)
     m = n if days is None else int(days)
     if m < 1:
         raise ValueError(f"days must be positive, got {m}")
