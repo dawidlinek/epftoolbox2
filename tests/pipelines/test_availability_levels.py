@@ -736,14 +736,35 @@ def test_level_none_adds_nothing_to_the_manifest(df, tmp_path):
     assert set(issued) == expected and issued["information_set"] == INFO.to_dict()
 
 
-def test_a_warn_run_then_none_drops_the_listing_and_warn_again_finds_it(df, tmp_path):
+@pytest.mark.parametrize("info", [INFO, None], ids=["same rules", "no issue time at all"])
+def test_a_re_run_at_none_lists_nothing_but_cannot_take_back_what_a_run_listed(df, tmp_path, info):
+    """Results that were flagged must not read as clean because of how they were last resumed."""
+    predictors = PREDICTORS + ["observed"]
+    listed = pipeline(ols(predictors), level="warn").run(df, *TEST, horizon=1, save_dir=str(tmp_path))
+    records_before = lines(tmp_path / "m.jsonl")
+
+    report = (
+        ModelPipeline(information_set=info, availability="none")
+        .add_model(ols(predictors))
+        .run(df, *TEST, horizon=1, save_dir=str(tmp_path))
+    )
+    assert report.availability().empty
+    assert lines(tmp_path / "m.jsonl") == records_before
+
+    stored = json.loads(manifest_path(tmp_path / "m.jsonl").read_text())["availability"]
+    assert stored["level"] == "warn" and stored["listing"][0]["predictor"] == "observed"
+    merged = (
+        ModelPipeline().add_model(ols(predictors)).report(tmp_path, test_start=TEST[0], test_end=TEST[1], horizon=1)
+    )
+    pd.testing.assert_frame_equal(merged.availability(), listed.availability())
+
+
+def test_a_re_run_at_none_under_other_rules_drops_what_the_old_rules_said(df, tmp_path):
     predictors = PREDICTORS + ["observed"]
     pipeline(ols(predictors), level="warn").run(df, *TEST, horizon=1, save_dir=str(tmp_path))
-    report = pipeline(ols(predictors), level="none").run(df, *TEST, horizon=1, save_dir=str(tmp_path))
-    assert report.availability().empty
+    relaxed = InformationSet("11:45", "Europe/Warsaw", rules={**RULES, "observed": Availability.static()})
+    pipeline(ols(predictors), level="none", info=relaxed).run(df, *TEST, horizon=1, save_dir=str(tmp_path))
     assert "availability" not in json.loads(manifest_path(tmp_path / "m.jsonl").read_text())
-    report = pipeline(ols(predictors), level="warn").run(df, *TEST, horizon=1, save_dir=str(tmp_path))
-    assert rows(report, "predictor") == [["observed"]]
 
 
 # ---------------------------------------------------------------------------

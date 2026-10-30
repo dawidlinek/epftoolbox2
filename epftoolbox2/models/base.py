@@ -131,8 +131,9 @@ class BaseModel(ABC):
 
         With `information_set`, `availability` says what happens to a predictor known after the issue time (see
         epftoolbox2.information_set): "raise", the default here, refuses it before any fit; "warn" goes on and lists it in
-        a warning, the returned ref and the manifest; "none" does neither. It never changes a forecast. `ModelPipeline`
-        defaults to "warn" and passes `warn_listing=False`, having warned for all its models at once.
+        a warning, the returned ref and the manifest; "none" does neither. It doesn't change a forecast (see
+        `ModelPipeline`). `ModelPipeline` defaults to "warn" and passes `warn_listing=False`, having warned for all its
+        models at once.
 
         With `save_to`, a manifest is written next to the results (see epftoolbox2.results.manifest) and,
         if one is already there, compared to this run's configuration before anything is resumed.
@@ -227,7 +228,7 @@ class BaseModel(ABC):
                 require_manifest=require_manifest,
                 model_name=self.name,
             )
-            if manifest.availability is not None:
+            if availability != "none" and manifest.availability is not None:
                 listing = manifest.availability["listing"]  # with what earlier runs listed for other test periods
         pending = store.get_missing(all_tasks) if store else all_tasks
 
@@ -274,7 +275,7 @@ class BaseModel(ABC):
 
     @staticmethod
     def _manifest_availability(information_set, availability: str, listing: List[Dict]) -> Optional[Dict]:
-        """What a manifest records about the issue-time check; level "none" records nothing, as if it had not run."""
+        """What a manifest records about the issue-time check; level "none" adds nothing, as if it had not run."""
         if information_set is None or availability == "none":
             return None
         return {"level": availability, "listing": listing}

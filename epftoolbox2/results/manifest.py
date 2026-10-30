@@ -11,7 +11,7 @@ The information-set settings and the `availability` level are recorded (for prov
 which predictors are allowed before fitting, and don't themselves change what a fitted model predicts. Changing only the
 level between two runs therefore resumes. At the levels "warn" and "raise" the manifest also holds the listing of inputs
 known after the issue time (`epftoolbox2.results.availability`), which is how a report built later can show it; level
-"none" adds nothing.
+"none" adds nothing, and leaves in place what an earlier run wrote.
 
 Provenance fields (package version, git SHA, timestamps) are recorded but never compared: a version bump
 or a new commit does not by itself invalidate a results directory.
@@ -280,13 +280,7 @@ def check_and_write(
                 earlier = kept.pop(entry["hash"], {}).get("binary_masks", {})
                 entry["binary_masks"] = {**earlier, **entry.get("binary_masks", {})}
             manifest.predictor_lists += list(kept.values())
-        if manifest.availability is not None and existing.availability:
-            # The same goes for what an earlier run listed for those records. Rules that changed leave nothing to keep:
-            # what they said may no longer be true, and this run's rows are what the current rules say.
-            if existing.information_set == manifest.information_set:
-                manifest.availability["listing"] = merge_listings(
-                    existing.availability.get("listing", []), manifest.availability["listing"]
-                )
+        _keep_listing(existing, manifest)
     elif has_existing_results:
         message = f"{model_name}: {path.parent} has results but no manifest ({path.name} not found)."
         if require_manifest:
@@ -296,6 +290,24 @@ def check_and_write(
             )
         logger.warning(f"{message} Continuing without checking they match this run's configuration.")
     manifest.write(path)
+
+
+def _keep_listing(existing: Manifest, manifest: Manifest) -> None:
+    """Keep what an earlier run listed: its records stay in the file, and with them the reason to mention it.
+
+    A run over a narrower test period adds its rows to the earlier ones. A run at level "none" looks at nothing, so it can't
+    take anything back, and results that were flagged must not read as clean because of how they were last resumed. Rules that
+    changed leave nothing to keep: what the old ones said may no longer be true, and this run's rows are what the current ones
+    say. Without an information set there are no rules left to say otherwise.
+    """
+    if not existing.availability or manifest.information_set not in (None, existing.information_set):
+        return
+    if manifest.availability is None:
+        manifest.availability = existing.availability
+    else:
+        manifest.availability["listing"] = merge_listings(
+            existing.availability.get("listing", []), manifest.availability["listing"]
+        )
 
 
 def check_stored_lists(
