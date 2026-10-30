@@ -239,6 +239,38 @@ class EvaluationReport:
             )
         return EvaluationReport(results, [e for e in self.evaluators if not isinstance(e, EconomicEvaluator)])
 
+    def join(self, other: "EvaluationReport") -> "EvaluationReport":
+        """A report with the models of both, for results of separate runs that are to be compared.
+
+        The references to the results are kept as they are, and the evaluators are the ones of this report: when `other`
+        has different ones a warning says so, since the columns of its evaluators are lost and its models are scored by
+        these. A model name in both reports raises `ValueError`, and so do results at different frequencies (period 5 of
+        hourly and 15-minute results are different times of the day). Every table of the joined report is what one report
+        over all the models would give, because all of them are computed on the forecast keys, not on file order.
+
+        Args:
+            other: The report whose models are added after this report's.
+        """
+        if not isinstance(other, EvaluationReport):
+            raise TypeError(f"join() takes an EvaluationReport, got {type(other).__name__}")
+        clash = [name for name in other.refs if name in self.refs]
+        if clash:
+            raise ValueError(f"Both reports have a model named {clash}: rename one before joining.")
+        joined = EvaluationReport(
+            {**self.refs, **other.refs},
+            list(self.evaluators),
+            source_data=self.source_data if self.source_data is not None else other.source_data,
+        )
+        joined._require_one_frequency("Joining reports")
+        left, right = [_describe(e) for e in self.evaluators], [_describe(e) for e in other.evaluators]
+        if left != right:
+            warnings.warn(
+                f"The reports have different evaluators, and the joined report uses the left one's: {left} (the other "
+                f"report's: {right}).",
+                stacklevel=2,
+            )
+        return joined
+
     def tests(
         self,
         benchmark: Optional[str] = None,
@@ -943,6 +975,18 @@ def _daily_records(days: pd.DataFrame, start: pd.Timestamp) -> List[Dict[str, An
         }
         for run_date, target_date, run_weekday, horizon, day_in_test, prediction, actual in zip(*columns)
     ]
+
+
+def _describe(obj: Any) -> str:
+    """`Class(public attributes)` of an evaluator and what it holds, to tell whether two reports use the same ones."""
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return repr(obj)
+    if isinstance(obj, (list, tuple)):
+        return "[" + ", ".join(_describe(v) for v in obj) + "]"
+    if isinstance(obj, Mapping):
+        return "{" + ", ".join(f"{k!r}: {_describe(v)}" for k, v in obj.items()) + "}"
+    attributes = {k: v for k, v in getattr(obj, "__dict__", {}).items() if not k.startswith("_")}
+    return f"{type(obj).__name__}({', '.join(f'{k}={_describe(v)}' for k, v in attributes.items())})"
 
 
 def _set_column(alpha: float) -> str:
