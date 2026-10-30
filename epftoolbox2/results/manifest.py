@@ -7,8 +7,11 @@ window, model class and hyperparameters, and the data actually used, including i
 changed, resuming would silently mix forecasts made under two different configurations. That raises
 `ManifestMismatchError` unless the caller explicitly accepts it (`allow_manifest_mismatch=True`).
 
-The information-set settings are recorded (for provenance) but never compared: they gate which predictors
-are allowed before fitting, and don't themselves change what a fitted model predicts.
+The information-set settings and the `availability` level are recorded (for provenance) but never compared: they gate
+which predictors are allowed before fitting, and don't themselves change what a fitted model predicts. Changing only the
+level between two runs therefore resumes. At the levels "warn" and "raise" the manifest also holds the listing of inputs
+known after the issue time (`epftoolbox2.results.availability`), which is how a report built later can show it; level
+"none" adds nothing.
 
 Provenance fields (package version, git SHA, timestamps) are recorded but never compared: a version bump
 or a new commit does not by itself invalidate a results directory.
@@ -37,6 +40,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import pandas as pd
 
 from ..logging import get_logger
+from .availability import merge_listings
 
 logger = get_logger(__name__)
 
@@ -89,6 +93,8 @@ class Manifest:
     # A predictor function of `ctx`: {"path", "fingerprint"} and one entry per distinct list (`PredictorPlan.describe`).
     predictor_function: Optional[Dict[str, str]] = None
     predictor_lists: Optional[List[Dict[str, Any]]] = None
+    # {"level": "warn" or "raise", "listing": rows of `results.availability.listing_rows`}; None at level "none".
+    availability: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest") -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -103,6 +109,8 @@ class Manifest:
         out = {f.name: getattr(self, f.name) for f in fields(self)}
         if self.predictor_function is None:  # fixed lists: nothing to record
             del out["predictor_function"], out["predictor_lists"]
+        if self.availability is None:  # level "none": nothing to record
+            del out["availability"]
         return out
 
     @classmethod
@@ -181,6 +189,7 @@ def build_manifest(
     information_set: Optional[Any],
     predictor_function: Optional[Dict[str, str]] = None,
     predictor_lists: Optional[List[Dict[str, Any]]] = None,
+    availability: Optional[Dict[str, Any]] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -223,6 +232,7 @@ def build_manifest(
         updated_at=now,
         predictor_function=predictor_function,
         predictor_lists=predictor_lists,
+        availability=availability,
     )
 
 
@@ -270,6 +280,13 @@ def check_and_write(
                 earlier = kept.pop(entry["hash"], {}).get("binary_masks", {})
                 entry["binary_masks"] = {**earlier, **entry.get("binary_masks", {})}
             manifest.predictor_lists += list(kept.values())
+        if manifest.availability is not None and existing.availability:
+            # The same goes for what an earlier run listed for those records. Rules that changed leave nothing to keep:
+            # what they said may no longer be true, and this run's rows are what the current rules say.
+            if existing.information_set == manifest.information_set:
+                manifest.availability["listing"] = merge_listings(
+                    existing.availability.get("listing", []), manifest.availability["listing"]
+                )
     elif has_existing_results:
         message = f"{model_name}: {path.parent} has results but no manifest ({path.name} not found)."
         if require_manifest:

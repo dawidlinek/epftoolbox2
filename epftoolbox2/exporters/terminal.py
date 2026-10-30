@@ -21,11 +21,28 @@ class TerminalExporter(Exporter):
 
     def export(self, report: EvaluationReport) -> None:
         console = Console()
+        self._print_availability(console, report.availability())
         for key in self.show:
             if key in self._SHOW_MAP:
                 title, fn = self._SHOW_MAP[key]
                 console.print(f"\n[bold]{title}[/bold]")
                 console.print(self._df_to_table(fn(report)))
+
+    def _print_availability(self, console: Console, listing) -> None:
+        """What the run can't vouch for comes first, whatever `show` asks for, and only if there is something to list."""
+        if listing.empty:
+            return
+        console.print("\n[bold]Availability: inputs not known to be out at the issue time[/bold]")
+        shown = listing.drop(columns="rule")  # `known` says when; the rule itself is in `report.availability()`
+        shown = shown.loc[:, (shown != "").any()]  # `list` and `note` only where they say something
+        if (shown["role"] == "predictor").all():
+            shown = shown.drop(columns="role")
+        table = Table()
+        for col in shown.columns:
+            table.add_column(str(col), overflow="fold")  # a predictor's name is no use cut short
+        for _, row in shown.iterrows():
+            table.add_row(*[str(value) for value in row])
+        console.print(table)
 
     def _df_to_table(self, df) -> Table:
         table = Table()
