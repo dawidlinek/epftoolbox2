@@ -41,7 +41,18 @@ for model_name, details in report.iter_details():
 
 # summary() plus every by_*() breakdown above, computed in one pass over the results (what ExcelExporter uses)
 sheets = report.compute_all()  # {"summary": ..., "hour": ..., ..., "target_weekday_horizon": ...}
+
+# Is a difference real? Each model against a benchmark, the confidence set, rank uncertainty, a pair, an overview
+tests = report.tests(benchmark="OLS")
+confidence_set = report.mcs()
+ranks = report.ranks()
+pair = report.compare("Lasso", "OLS")
+board = report.leaderboard(benchmark="OLS")
 ```
+
+The last five are explained on [Comparing Models](/epftoolbox2/model-pipeline/comparing-models/).
+
+An evaluator may write several columns (`DM ratio`, `DM p`, ...). They appear in `summary()` and every `by_*()` table like any other column, and the exporters write them.
 
 ## Example Output
 

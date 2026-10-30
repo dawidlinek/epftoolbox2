@@ -32,6 +32,8 @@ exporter = ExcelExporter("results.xlsx")
 - `"target_weekday_horizon"` - Target day's weekday × Horizon matrix
 - `"details"` - Details of each prediction
 
+An evaluator with several columns, such as `DMEvaluator`, gets one sheet per column in the breakdowns (`horizon_DM ratio`, `horizon_DM p`, ...). Empty cells are values that do not exist for that group, such as `DM p_holm` in a per-hour sheet.
+
 ## Example
 
 ```python

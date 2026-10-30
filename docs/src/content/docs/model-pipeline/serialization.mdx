@@ -93,6 +93,7 @@ exporters:
 | Anything else (`set`, callable, arbitrary object) | **Raises `TypeError`** naming the model and the parameter. A model, evaluator or exporter parameter is never dropped silently |
 | Callable predictors | **Raises `TypeError`** naming the model. Use `"{horizon}"` string templates instead |
 | Model `scaler` | Saved as a name (`standard`) or a `{name, params}` mapping. A scaler instance is converted when the model is built. A model without `scaler` loads with `standard` |
+| `EconomicEvaluator` `strategy` | Saved inside the evaluator as `{class: BatteryArbitrage, params: {...}}` and rebuilt on load |
 | Private attrs (`_name`) | Excluded |
 
 ## Callable Predictors
@@ -124,4 +125,5 @@ Add to `COMPONENT_REGISTRY` in `model_pipeline.py`:
 COMPONENT_REGISTRY["models"]["MyModel"] = "mypackage.models.my_model"
 COMPONENT_REGISTRY["evaluators"]["MyEvaluator"] = "mypackage.evaluators.my_evaluator"
 COMPONENT_REGISTRY["exporters"]["MyExporter"] = "mypackage.exporters.my_exporter"
+COMPONENT_REGISTRY["strategies"]["MyStrategy"] = "mypackage.strategies.my_strategy"  # for EconomicEvaluator
 ```

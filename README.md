@@ -33,7 +33,8 @@ epftoolbox2.verify()
 - **Validators**: DSTStructure (rows per local day), Coverage (duplicate and unsorted timestamps, per-column outages, missing timestamps and nulls), Plausibility (SDAC price limits, frozen values), EDA statistics
 - **Models**: OLS, LassoCV
 - **Scalers**: standardisation (default) or variance-stabilising transformations for spiky prices (asinh, N-PIT), fitted per forecast on training data only
-- **Evaluators**: MAE, RMSE, rMAE (relative to a base model)
+- **Evaluators**: MAE, RMSE, rMAE (relative to a base model), Bias, DM (MAE ratio, bootstrap interval and Diebold-Mariano test against a benchmark), MCS (model confidence set), Economic value (battery arbitrage profit)
+- **Comparing models**: `report.tests()`, `mcs()`, `ranks()`, `compare()` and `leaderboard()`, each on the forecast keys its models share, printing how many days and forecasts it used, with Holm correction, fixed seeds and the minimum detectable effect
 - **Exporters**: Excel with conditional formatting, Terminal output, CSV
 - **Caching**: Built-in per-source Parquet cache that fetches only missing ranges, refetches not-yet-published data and is safe for parallel jobs
 - **Pipelines**: Data and model pipelines that can be saved and loaded with .yaml files. An optional market timezone makes dates mean local calendar days, duplicate column names across sources raise instead of colliding silently, and `api_key` is written to YAML as an `${ENV_VAR}` reference instead of plain text

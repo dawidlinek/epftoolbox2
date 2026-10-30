@@ -52,7 +52,7 @@ class ModelPipeline:
     ): ...
 
     def add_model(self, model: BaseModel) -> "ModelPipeline": ...
-    def add_evaluator(self, evaluator: Evaluator) -> "ModelPipeline": ...
+    def add_evaluator(self, *evaluators: Evaluator) -> "ModelPipeline": ...  # One or several; chainable
     def add_exporter(self, exporter: Exporter) -> "ModelPipeline": ...
 
     def run(
@@ -140,7 +140,52 @@ class EvaluationReport:
     def by_hour_horizon(self) -> pd.DataFrame: ...
     def by_year(self) -> pd.DataFrame: ...
     def by_year_horizon(self) -> pd.DataFrame: ...
+
+    def tests(
+        self,
+        benchmark: Optional[str] = None,   # Default: the benchmark of the report's DMEvaluator
+        horizon: Union[int, str, None] = None,  # None: per horizon; a number; "all": daily losses averaged per run date
+        variance: str = "hac",             # "hac" (Newey-West) or "plain" (epftoolbox)
+        lag: Optional[int] = None,         # Newey-West lag; None: from the number of days
+        correction: Optional[str] = "holm",  # Over the m models of a horizon; None for none
+        by: Optional[str] = None,          # "hour": per-hour rows, descriptive, no p_holm or verdict
+        interval: Optional[float] = 0.95,  # Coverage of the bootstrap interval of the ratio; None skips it
+        block: int = 7,                    # Bootstrap block length in days
+        reps: int = 4000,
+        seed: int = 0,
+    ) -> pd.DataFrame: ...  # model, benchmark, horizon, n_days, n_forecasts, mae, mae_benchmark, ratio, ci_low, ci_high, statistic, p_value, p_holm, m, mde, verdict
+
+    def mcs(
+        self,
+        alpha: float = 0.10,
+        statistic: str = "R",              # "R" (T_R) or "max" (T_max)
+        block: int = 7,                    # Mean block length of the stationary bootstrap, in days
+        reps: int = 1000,
+        seed: int = 0,
+        models: Optional[Sequence[str]] = None,  # Default: all; fewer than 3 gives NaN with a warning
+        horizon: Union[int, str, None] = None,   # None or "all": daily losses averaged per run date; a number
+    ) -> pd.DataFrame: ...  # model, n_days, n_forecasts, mae, ratio_to_best, p_value, in_90, in_75; attrs: n_days, n_forecasts, limited_by
+
+    def ranks(
+        self,
+        block: int = 7,
+        reps: int = 4000,
+        seed: int = 0,
+        level: float = 0.90,               # Coverage of the rank interval
+        horizon: Union[int, str, None] = None,
+        models: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame: ...  # model, n_days, n_forecasts, mae, rank, p_best, rank_low, rank_high; attrs: n_days, n_forecasts, limited_by
+
+    def compare(
+        self, a: str, b: str, horizon: Union[int, str, None] = None
+    ) -> pd.DataFrame: ...  # One row; ratio = mae_a / mae_b: a, b, horizon, n_days, n_forecasts, mae_a, mae_b, ratio, ci_low, ci_high, statistic, p_plain, p_hac, hours_a_better, hours_b_better, hours_tested, mde
+
+    def leaderboard(
+        self, benchmark: Optional[str] = None, horizon: Union[int, str, None] = None
+    ) -> pd.DataFrame: ...  # By MAE: model, n_forecasts, MAE, n_days, and with a benchmark n_common, ratio, ci_low, ci_high, p_value, p_holm
 ```
+
+See [Comparing Models](/epftoolbox2/model-pipeline/comparing-models/).
 
 ---
 
@@ -339,7 +384,9 @@ See [Scalers and VSTs](/epftoolbox2/models/scalers/).
 ```python
 class Evaluator(ABC):
     name: str
-    def compute(self, df: pd.DataFrame, **kwargs) -> float: ...
+    def compute(self, df: pd.DataFrame, **kwargs) -> float: ...  # A float, or a dict for several columns
+    def compute_group(self, model_dfs: Mapping[str, pd.DataFrame]) -> dict: ...  # Called per table group; loops compute by default
+    def column_name(self, key: str) -> str: ...  # Column of a dict result: "{name} {key}"
 
 class MAEEvaluator(Evaluator):
     name = "MAE"
@@ -350,7 +397,51 @@ class RMSEEvaluator(Evaluator):
 class rMAEEvaluator(Evaluator):
     name = "rMAE"
     def __init__(self, base_model: str): ...  # Name of the benchmark model
+
+class BiasEvaluator(Evaluator):
+    name = "Bias"
+
+class DMEvaluator(Evaluator):
+    name = "DM"  # Columns "DM ratio", "DM ci_low", "DM ci_high", "DM p", "DM p_holm", "DM verdict", "DM n_days", "DM n_forecasts"
+    def __init__(
+        self,
+        benchmark: str,                    # Name of the model the others are compared with
+        variance: str = "hac",             # "hac" (Newey-West) or "plain" (epftoolbox)
+        lag: Optional[int] = None,         # Newey-West lag; None: from the number of days
+        correction: Optional[str] = "holm",  # Over the models of a group; None for none
+        alpha: float = 0.05,               # Size behind "DM verdict"
+        interval: Optional[float] = 0.95,  # Coverage of the bootstrap interval of the ratio; None skips it
+        block: int = 7,                    # Bootstrap block length in days
+        reps: int = 4000,
+        seed: int = 0,
+    ): ...
+
+class MCSEvaluator(Evaluator):
+    name = "MCS"  # Columns "MCS p", "in MCS", "MCS n_days", "MCS n_forecasts"
+    def __init__(
+        self,
+        alpha: float = 0.10,               # Size of the set
+        statistic: str = "R",              # "R" (T_R) or "max" (T_max)
+        block: int = 7,                    # Mean block length of the stationary bootstrap, in days
+        reps: int = 1000,
+        seed: int = 0,
+    ): ...
+
+class EconomicEvaluator(Evaluator):
+    name = "profit"  # Columns "profit", "profit % of perfect", "profit days"
+    def __init__(self, strategy: Optional[BatteryArbitrage] = None): ...  # None: BatteryArbitrage()
+
+class BatteryArbitrage:
+    def __init__(
+        self,
+        power_mw: float = 1,               # Charge and discharge power
+        energy_mwh: float = 2,             # Energy bought per cycle
+        efficiency: float = 0.9,           # Round-trip efficiency
+    ): ...
+    def profit(self, forecast: np.ndarray, actual: np.ndarray, periods_per_hour: int = 1) -> np.ndarray: ...  # Days x periods in, EUR per day out
 ```
+
+`epftoolbox2.evaluators.stats` holds the kernels behind them, for aligned loss series: `dm_test`, `ratio_interval`, `holm`, `model_confidence_set`, `rank_bootstrap`, `minimum_detectable_effect`, `newey_west_variance`, `default_lag`, `block_bootstrap_indices`.
 
 ---
 
@@ -366,6 +457,6 @@ class ExcelExporter(Exporter):
     def export(self, report: EvaluationReport) -> None: ...
 
 class CsvExporter(Exporter):
-    def __init__(self, path: str, extra_columns: List[str] = None): ...
+    def __init__(self, path: str, extra_columns: List[str] = None, summary_path: str = None): ...
     def export(self, report: EvaluationReport) -> None: ...
 ```
