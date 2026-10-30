@@ -317,7 +317,8 @@ class ModelPipeline:
 
         The boundary is the same at every `availability` level: a late predictor is a `leak` also where `run` only lists
         it. With "warn" or "none" a predictor function that reads a late `ctx.value()` is a `leak` too; with "raise" that
-        read raises `InformationSetError`.
+        read raises `InformationSetError`. A predictor function is planned on the whole test period, so what it uses late
+        on any issue day is a `leak`, sampled or not.
 
         Args:
             data: The frame the models run on, or the source data with `rebuild`.

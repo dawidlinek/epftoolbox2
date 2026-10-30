@@ -776,6 +776,57 @@ def test_a_late_value_is_a_leak_where_the_run_would_only_list_it(df, level):
     assert sorted(check.probe.changed) == [(period, 1) for period in range(10, 24)]
 
 
+TWENTY_ONE_DAYS = ("2023-04-10", "2023-04-30")
+UNSAMPLED_DAY = "2023-04-11"  # `days=3` with seed 0 samples none of its periods
+
+
+def late_read_on_one_day(ctx):
+    """Legal on every other forecast, so the column is an input the sample sees, and only one read is late."""
+    if ctx.period == 0:
+        ctx.value("observed")  # known at 02:00
+    if ctx.issue_day.isoformat() == UNSAMPLED_DAY and ctx.period == 23:
+        return PREDICTORS + (["price_d-1"] if ctx.value("observed") > 0 else [])
+    return PREDICTORS + (["price_d-1"] if ctx.issue_day.weekday() >= 5 else [])
+
+
+def late_list_on_one_day(ctx):
+    return PREDICTORS + (["early_d+1"] if ctx.issue_day.isoformat() == UNSAMPLED_DAY else ["price_d-1"])
+
+
+def test_the_day_used_below_is_not_sampled(df):
+    from epftoolbox2.verification import sample_issue_days
+
+    assert UNSAMPLED_DAY not in sample_issue_days(df.index, *TWENTY_ONE_DAYS, days=3, seed=0)
+
+
+@pytest.mark.parametrize("level", ["none", "warn"])
+def test_a_late_value_on_a_day_outside_the_sample_is_a_leak(df, level):
+    """The plan of the whole period says so; only a run at "warn" listing it and `verify` saying `ok` could disagree."""
+    frame = df.drop(columns="mystery")
+    verified = pipeline(ols(late_read_on_one_day), level=level).verify(
+        frame, *TWENTY_ONE_DAYS, horizon=1, days=3, positive_control=False
+    )
+    assert verified.status("m") == "leak"
+    assert "over the whole test period" in " ".join(verified.problems()) and "observed" in " ".join(verified.problems())
+
+
+def test_a_late_value_on_a_day_outside_the_sample_stops_verify_at_raise(df):
+    with pytest.raises(InformationSetError, match=r"ctx\.value\('observed'\)"):
+        pipeline(ols(late_read_on_one_day), level="raise").verify(
+            df.drop(columns="mystery"), *TWENTY_ONE_DAYS, horizon=1, days=3, positive_control=False
+        )
+
+
+@pytest.mark.parametrize("level", AVAILABILITY_LEVELS)
+def test_a_late_list_on_a_day_outside_the_sample_is_a_leak(df, level):
+    frame = df.drop(columns="mystery")
+    verified = pipeline(ols(late_list_on_one_day), level=level).verify(
+        frame, *TWENTY_ONE_DAYS, horizon=1, days=3, positive_control=False
+    )
+    assert verified.status("m") == "leak"
+    assert "early_d+1" in " ".join(verified.problems())
+
+
 def test_a_late_value_stops_verify_at_raise(df):
     with pytest.raises(InformationSetError, match=r"ctx\.value\('observed'\)"):
         pipeline(ols(reads_late), level="raise").verify(df, *TEST, horizon=1, days=1, positive_control=False)

@@ -44,6 +44,10 @@ The one difference is a [predictor function](/epftoolbox2/model-pipeline/predict
 gets the value, as in `run()`, and the forecasts that read it are a `leak`, whether or not the noise moved them, so the other
 models still get their row. `verified.checks[i].probe.late_reads` counts those cells per column.
 
+A predictor function is planned on the whole test period anyway, so at every level what it uses late on any issue day, in a list or
+through `ctx.value()`, is a `leak` even if no sampled day reads it, and `verified.checks[i].late_in_period` names the columns.
+`changed` can then be 0, since nothing was perturbed to see it.
+
 A column without a rule can't be perturbed at any level: it follows `unknown` of the information set, as described below.
 
 ---

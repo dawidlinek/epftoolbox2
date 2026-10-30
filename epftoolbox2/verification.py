@@ -19,6 +19,7 @@ import pandas as pd
 
 from ._date_utils import resolve_date
 from .information_set import (
+    ROLE_TARGET,
     Availability,
     ControlResult,
     InformationSet,
@@ -27,6 +28,7 @@ from .information_set import (
     positive_control,
 )
 from .models._contract import wall_clock
+from .results.availability import LATE
 
 LEAK = "leak"
 INCONCLUSIVE = "inconclusive"
@@ -46,6 +48,9 @@ class IssueDayCheck:
     control: Optional[ControlResult] = None  # None with positive_control=False
     not_from_frame: List[str] = field(default_factory=list)  # inputs a `rebuild` doesn't build from its argument
     not_sampled: List[str] = field(default_factory=list)  # inputs of a predictor function on no sampled issue day
+    late_in_period: List[str] = field(
+        default_factory=list
+    )  # what a predictor function uses late in the whole test period
 
     @property
     def unreached_horizons(self) -> List[int]:
@@ -137,6 +142,16 @@ class VerifyReport:
                         + (f"; read through ctx though known later: {probe.late_reads}" if probe.late_reads else ""),
                     )
                 )
+        late = sorted({name for check in checks for name in check.late_in_period})
+        if late:
+            found.append(
+                (
+                    LEAK,
+                    f"{model}: leak: over the whole test period its predictor function uses {late} though its rule puts "
+                    "them after the issue time, on sampled issue days or not. No perturbation was needed to see it: the "
+                    "plan says so. report.availability() of a run lists where.",
+                )
+            )
         found += [(INCONCLUSIVE, f"{model}: inconclusive: {line}") for line in _blind_spots(checks)]
         return found
 
@@ -226,7 +241,8 @@ def verify_model(
     predictor function may use a column on a few days only, and an input that no sampled day reads is a blind spot.
 
     `availability` is the level a predictor function is planned at (see `leakage_probe`). The boundary is the same at every
-    level: a late input is a leak whether the pipeline would list it or refuse it.
+    level: a late input is a leak whether the pipeline would list it or refuse it. The sample is no shelter for it either: a
+    predictor function is planned on the whole of `test_period` anyway, which says what it uses late on any issue day.
     """
 
     def make_model():
@@ -250,12 +266,16 @@ def verify_model(
     checked._check_inputs(built, target, horizon, freq, plan=plan)
     used = sorted({*checked._used_predictors, *plan.queried}) if plan is not None else list(checked._used_predictors)
     not_sampled: List[str] = []
+    late_in_period: List[str] = []
     if plan is not None and test_period is not None:
         start, end = resolve_date(test_period[0]), resolve_date(test_period[1])
         whole = checked._plan_predictors(
             built, target, horizon, freq, information_set, start, end, warn_unpublished=False, availability=availability
         )
         not_sampled = sorted(({name for names in whole.lists for name in names} | whole.queried) - set(used))
+        late_in_period = sorted(
+            {row["predictor"] for row in whole.listing(target) if row["status"] == LATE and row["role"] != ROLE_TARGET}
+        )
 
     not_from_frame = []
     columns = None
@@ -317,7 +337,11 @@ def verify_model(
             result = positive_control(
                 make_model, frame, run_day, label_rules, label, columns=columns, rebuild=labelled, **common
             )
-        checks.append(IssueDayCheck(model.name, probe.run_day, horizon, probe, result, not_from_frame, not_sampled))
+        checks.append(
+            IssueDayCheck(
+                model.name, probe.run_day, horizon, probe, result, not_from_frame, not_sampled, late_in_period
+            )
+        )
     return checks
 
 
