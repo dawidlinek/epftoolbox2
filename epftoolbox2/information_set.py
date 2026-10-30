@@ -47,6 +47,12 @@ _SLOT_MINUTES = {"h": 60, "s": 15}
 _DAY_AGGREGATE = re.compile(r"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:min|max|mean|last)$")
 
 
+_LATE_ADVICE = (
+    "Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too strict for your data, "
+    "override it with InformationSet(rules={...})."
+)
+
+
 def _parse_time(value: str) -> int:
     match = re.fullmatch(r"(\d{1,2}):(\d{2})", str(value))
     if not match or int(match[1]) > 24 or int(match[2]) > 59:
@@ -653,18 +659,26 @@ class InformationSet:
     ) -> None:
         """Raise InformationSetError if a predictor (or the newest training target) is not known at issue time."""
         violations, unknown = self.violations(expanded, target, freq, index, test_start, test_end)
-        if unknown:
-            message = (
-                f"{model_name}: no availability rule for column(s) {sorted(unknown)}. Declare when they are known, "
-                "e.g. InformationSet(rules={'my_col': Availability.realised('1h')}) or Availability.static(), "
-                "or pass unknown='warn'."
-            )
-            if self.unknown == "raise":
-                raise InformationSetError(message)
-            if self.unknown == "warn":
-                warnings.warn(message, stacklevel=2)
+        self._report_unknown(unknown, model_name)
         if violations:
             raise InformationSetError(self._format(violations, model_name))
+        self._log_assumptions(model_name)
+
+    def _report_unknown(self, unknown: Iterable[str], model_name: str) -> None:
+        """Follow the `unknown` policy for columns without a rule."""
+        if not unknown:
+            return
+        message = (
+            f"{model_name}: no availability rule for column(s) {sorted(unknown)}. Declare when they are known, "
+            "e.g. InformationSet(rules={'my_col': Availability.realised('1h')}) or Availability.static(), "
+            "or pass unknown='warn'."
+        )
+        if self.unknown == "raise":
+            raise InformationSetError(message)
+        if self.unknown == "warn":
+            warnings.warn(message, stacklevel=3)
+
+    def _log_assumptions(self, model_name: str) -> None:
         if self.assumptions:
             logger.info(f"{model_name}: information set accepts assumption(s) {self.assumptions}")
 
@@ -705,10 +719,7 @@ class InformationSet:
         days = self._issue_days(index, test_start, test_end)
         if not len(days):
             return [], unknown
-        ctx = _Context(days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None)
-        # Each issue day as days after the first, and its issue time in data-zone minutes after the first's midnight.
-        offset = np.asarray((days - days[0]) // pd.Timedelta(days=1), dtype=np.int64)
-        issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), self.issue_timezone, ctx)
+        clock = self._issue_clock(days, index)
 
         late: Dict[Tuple[str, str, int], Tuple[float, float, str]] = {}  # (name, role, period) -> its worst day
         for (name, role), rows in periods.items():
@@ -716,18 +727,9 @@ class InformationSet:
             if col.rule is None:
                 continue
             rows = np.array(sorted(rows))
-            issue_day = np.tile(offset, len(rows))
-            minute = np.repeat(rows * step, len(days)).astype(float)
-            avail = _available_array(col, col.rule, issue_day + uses[role], minute, step, ctx, issue_day=issue_day)
-            avail = avail.reshape(len(rows), len(days))
-            worst = (avail - issue).argmax(axis=1)
-            for period, i, known in zip(rows.tolist(), worst, avail[np.arange(len(rows)), worst]):
-                if known <= issue[i]:
-                    continue
-                # Minutes after midnight of that issue day, as a context for that day alone would give them.
-                day_ctx = replace(ctx, day=days[i], issue_minute=float(issue[i] - offset[i] * 1440.0))
-                hint = self._assumption_hint(col, uses[role], period * step, step, day_ctx)
-                late[(name, role, period)] = (float(known - offset[i] * 1440.0), day_ctx.issue_minute, hint)
+            avail = clock.available(col, rows, step, uses[role])
+            for period, known, issue_minute, hint in self._late_periods(col, rows, avail, clock, step, uses[role]):
+                late[(name, role, period)] = (known, issue_minute, hint)
 
         out: List[Violation] = []
         for (period, hz), predictors in sorted(expanded.items()):
@@ -738,6 +740,40 @@ class InformationSet:
                     hint = hint or self._weather_cutoff_hint(col)
                     out.append(Violation(name, period, hz, col, known, issue_minute, role, hint))
         return out, unknown
+
+    def _issue_clock(self, days: pd.DatetimeIndex, index: pd.DatetimeIndex) -> "_IssueClock":
+        """The issue times of these issue days (naive midnights, the first one first) on an index like `index`."""
+        ctx = _Context(days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None)
+        offset = np.asarray((days - days[0]) // pd.Timedelta(days=1), dtype=np.int64)
+        issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), self.issue_timezone, ctx)
+        return _IssueClock(days, ctx, offset, issue)
+
+    def _late_periods(
+        self,
+        col: ResolvedColumn,
+        rows: np.ndarray,
+        avail: np.ndarray,
+        clock: "_IssueClock",
+        step: int,
+        row_day: int = 0,
+        used: Optional[np.ndarray] = None,
+    ) -> List[Tuple[int, float, float, str]]:
+        """(period, known, issue, assumption hint) for each period with a value known after the issue time, on the issue
+        day it is latest; `known` and `issue` are minutes after midnight of that day, as a context for it alone would
+        give them. `avail` is `clock.available(col, rows, step, row_day)`. `used` limits the search to the cells [period,
+        issue day] a forecast actually reads, for lists that hold on some days only."""
+        excess = avail - clock.issue
+        if used is not None:
+            excess = np.where(used, excess, -np.inf)
+        worst = excess.argmax(axis=1)
+        out = []
+        for r, (period, i) in enumerate(zip(rows.tolist(), worst)):
+            if excess[r, i] <= 0:
+                continue
+            day_ctx = replace(clock.ctx, day=clock.days[i], issue_minute=clock.minute_of_day(clock.issue[i], i))
+            hint = self._assumption_hint(col, row_day, period * step, step, day_ctx)
+            out.append((period, clock.minute_of_day(avail[r, i], i), day_ctx.issue_minute, hint))
+        return out
 
     def _check_source_zone(self, col: ResolvedColumn, index: pd.DatetimeIndex) -> None:
         """Raise if `col` is a data source's column whose rule needs the market zone and the index is in another.
@@ -808,7 +844,7 @@ class InformationSet:
     def _data_zone(self, index) -> str:
         return str(index.tz) if getattr(index, "tz", None) is not None else self.issue_timezone
 
-    def _format(self, violations: List[Violation], model_name: str) -> str:
+    def _format(self, violations: List[Violation], model_name: str, advice: bool = True) -> str:
         # One line per base column and rule, listing the predictors that read it.
         grouped: Dict[Tuple[str, str, Optional[str]], List[Violation]] = {}
         for v in violations:
@@ -833,10 +869,8 @@ class InformationSet:
             if hinted:
                 first = next(v for v in items if v.hint)
                 lines.append(f"      {', '.join(dict.fromkeys(hinted))}: {first.hint}")
-        lines.append(
-            "Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too strict for your data, "
-            "override it with InformationSet(rules={...})."
-        )
+        if advice:
+            lines.append(_LATE_ADVICE)
         return "\n".join(lines)
 
 
@@ -853,6 +887,29 @@ class _Context:
     @property
     def weekday(self) -> int:
         return self.day.weekday()
+
+
+@dataclass(frozen=True)
+class _IssueClock:
+    """Issue days and their issue times. `violations` and the `ctx` of a predictor function read availability through
+    it, so they can't disagree about a cell."""
+
+    days: pd.DatetimeIndex
+    ctx: _Context  # its day is the first issue day
+    offset: np.ndarray  # each issue day as days after the first
+    issue: np.ndarray  # its issue time in data-zone minutes after the first's midnight
+
+    def available(self, col: ResolvedColumn, periods: np.ndarray, step: int, row_day: int = 0) -> np.ndarray:
+        """When the value of `col` at the row (D + row_day, period) is known, for every [period, issue day D]."""
+        periods = np.asarray(periods)
+        issue_day = np.tile(self.offset, len(periods))
+        minute = np.repeat(periods * step, len(self.days)).astype(float)
+        avail = _available_array(col, col.rule, issue_day + row_day, minute, step, self.ctx, issue_day=issue_day)
+        return avail.reshape(len(periods), len(self.days))
+
+    def minute_of_day(self, minutes: float, i: int) -> float:
+        """Minutes after the first issue day's midnight -> after the midnight of issue day `i`."""
+        return float(minutes - self.offset[i] * 1440.0)
 
 
 def _available(col: ResolvedColumn, rule: Availability, day: int, row_minute: float, step: int, ctx: _Context) -> float:
