@@ -12,11 +12,13 @@ from ..information_set import InformationSet, InformationSetError, check_level
 from ..models.base import BaseModel
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model
+from ..ensembles._compute import compute
+from ..ensembles.base import Ensemble
 from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..exporters.base import Exporter
 from ..results.availability import read_listing, warn_about
-from ..results.manifest import manifest_path, read_windows
+from ..results.manifest import ManifestMismatchError, is_ensemble_manifest, manifest_path, read_windows
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef, split_by_window
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
@@ -31,6 +33,9 @@ COMPONENT_REGISTRY = {
     "models": {
         "OLSModel": "epftoolbox2.models.ols",
         "LassoCVModel": "epftoolbox2.models.lasso",
+    },
+    "ensembles": {
+        "AverageEnsemble": "epftoolbox2.ensembles.average",
     },
     "evaluators": {
         "MAEEvaluator": "epftoolbox2.evaluators.mae",
@@ -54,7 +59,7 @@ COMPONENT_REGISTRY = {
 
 
 class ModelPipeline:
-    """Runs models over a test period, then evaluators and exporters.
+    """Runs models over a test period, computes ensembles of them, then runs evaluators and exporters.
 
     Args:
         information_set: When each input becomes known and when forecasts are issued
@@ -84,6 +89,7 @@ class ModelPipeline:
                 raise ValueError("Pass either issue_time/issue_timezone or information_set, not both")
             information_set = InformationSet(issue_time, issue_timezone)
         self.models: List[BaseModel] = []
+        self.ensembles: List[Ensemble] = []
         self.evaluators: List[Evaluator] = []
         self.exporters: List[Exporter] = []
         self.information_set: Optional[InformationSet] = information_set
@@ -113,6 +119,18 @@ class ModelPipeline:
         self.models.append(model)
         return self
 
+    def add_ensemble(self, ensemble: Ensemble) -> "ModelPipeline":
+        """Add an ensemble of models or other ensembles of this pipeline, named by `ensemble.members`.
+
+        The members are resolved when the pipeline runs, so the order of `add_model` and `add_ensemble` doesn't matter. See
+        `epftoolbox2.ensembles.AverageEnsemble` and the docs page on ensembles.
+        """
+        if not isinstance(ensemble, Ensemble):
+            raise TypeError(f"add_ensemble takes an ensemble such as AverageEnsemble, got {type(ensemble).__name__}")
+        ensemble._check()
+        self.ensembles.append(ensemble)
+        return self
+
     def add_evaluator(self, *evaluators: Evaluator) -> "ModelPipeline":
         self.evaluators.extend(evaluators)
         return self
@@ -136,7 +154,8 @@ class ModelPipeline:
         validation: Union[Tuple[Any, Any], str, None] = None,
         test: Optional[Tuple[Any, Any]] = None,
     ) -> EvaluationReport:
-        """Run every model, then (unless `forecast_only`) the evaluators and exporters.
+        """Run every model, compute the ensembles from what they stored, then (unless `forecast_only`) run the evaluators
+        and exporters.
 
         With `save_dir`, each model's results are resumable JSONL with a manifest recording the
         configuration that produced them (epftoolbox2.results.manifest). Resuming into results made with
@@ -155,6 +174,10 @@ class ModelPipeline:
         The report is on the test window, and `report.validation` on the validation window, without forecasts for the first
         test issue day or later (see `EvaluationReport.validation`). Without a test window the validation report itself
         is returned. See the docs page on validation and test.
+
+        Ensembles are computed after every model has run, from what the models stored. An ensemble that chooses (`top`) needs a
+        validation window in this run, and a problem with one that shows before any fit raises before any fit. See the docs
+        page on ensembles.
         """
         if not self.models:
             raise ValueError("At least one model is required")
@@ -163,6 +186,8 @@ class ModelPipeline:
         if not forecast_only:
             self._check_benchmarks()
         windows, test_start, test_end = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
+        self._check_ensembles(save_dir)
+        self._refuse_top_without_validation(self.ensembles, windows)
         if windows is not None:
             check_start, check_end = windows.first_day, windows.last_day
         elif forecast_only:
@@ -219,8 +244,15 @@ class ModelPipeline:
             )
             refs[model.name] = ref
 
+        choices: Dict[str, List[Dict]] = {}
+        if self.ensembles:
+            paths = {model.name: self.results_path(save_dir, model) for model in self.models} if save_dir else {}
+            on_file = self._stored_windows(paths)
+            computed, choices = self._compute_ensembles(self._ordered_ensembles(), refs, on_file or windows, save_dir)
+            refs.update(computed)
+
         evaluators = [] if forecast_only else self.evaluators
-        report = EvaluationReport(refs, evaluators, source_data=data)
+        report = EvaluationReport(refs, evaluators, source_data=data, choices=choices)
 
         if not forecast_only:
             for exporter in self.exporters:
@@ -289,6 +321,10 @@ class ModelPipeline:
         each model's planned forecast count. Raises FileNotFoundError if a model has no results file, unless
         `allow_missing` is set. `data` is only needed by exporters that join source columns.
 
+        Ensembles are computed here from the stored results of their members, every time, so they can't go stale, and written
+        next to them. `allow_missing` leaves out an ensemble with a missing member, with a warning: it is never averaged over
+        the members that happen to be there.
+
         What the runs listed about inputs known after the issue time comes from the manifests, whatever this pipeline's
         `availability` is: `report.availability()`, one warning and the terminal exporter show it.
 
@@ -302,6 +338,7 @@ class ModelPipeline:
         self._check_model_names()
         if not forecast_only:
             self._check_benchmarks()
+        self._check_ensembles(save_dir)
         paths = {model.name: self.results_path(save_dir, model) for model in self.models}
         stored = self._stored_windows({name: path for name, path in paths.items() if path.exists()})
         windows, test_start, test_end = self._resolve_windows(
@@ -363,6 +400,18 @@ class ModelPipeline:
                 )
                 parts.update({f"{name} in the {window} window": part for window, part in ref.by_window.items()})
 
+        choices: Dict[str, List[Dict]] = {}
+        reported = self._ensembles_with_their_members(set(refs))
+        if reported:
+            self._refuse_top_without_validation(reported, None if forecast_only else stored)
+            computed, choices = self._compute_ensembles(reported, refs, None if forecast_only else stored, save_dir)
+            refs.update(computed)
+            for name, ref in computed.items():
+                if ref.by_window is None:
+                    parts[name] = ref
+                else:
+                    parts.update({f"{name} in the {window} window": part for window, part in ref.by_window.items()})
+
         shortfall = {
             name: ref
             for name, ref in parts.items()
@@ -380,11 +429,113 @@ class ModelPipeline:
             )
         warn_about({name: ref.availability_listing for name, ref in refs.items()}, stacklevel=3)
 
-        report = EvaluationReport(refs, [] if forecast_only else self.evaluators, source_data=data)
+        report = EvaluationReport(refs, [] if forecast_only else self.evaluators, source_data=data, choices=choices)
         if not forecast_only:
             for exporter in self.exporters:
                 exporter.export(report)
         return report
+
+    def _ordered_ensembles(self) -> List[Ensemble]:
+        """The ensembles, each after the ensembles it is made of; `ValueError` for an unknown member or a cycle."""
+        by_name = {ensemble.name: ensemble for ensemble in self.ensembles}
+        models = {model.name for model in self.models}
+        ordered: Dict[str, Ensemble] = {}
+
+        def visit(ensemble: Ensemble, path: Tuple[str, ...]) -> None:
+            if ensemble.name in ordered:
+                return
+            if ensemble.name in path:
+                raise ValueError(f"These ensembles are members of each other: {' -> '.join([*path, ensemble.name])}")
+            for member in ensemble.members:
+                if member in by_name:
+                    visit(by_name[member], (*path, ensemble.name))
+                elif member not in models:
+                    raise ValueError(
+                        f"Ensemble {ensemble.name!r}: unknown member {member!r}. The pipeline has the models "
+                        f"{sorted(models)} and the ensembles {sorted(by_name)}."
+                    )
+            ordered[ensemble.name] = ensemble
+
+        for ensemble in self.ensembles:
+            visit(ensemble, ())
+        return list(ordered.values())
+
+    def _check_ensembles(self, save_dir: Union[str, Path, None]) -> None:
+        """What can be known about the ensembles before any fit, whatever the windows."""
+        names = {ensemble.name for ensemble in self.ensembles}
+        for ensemble in self._ordered_ensembles():
+            ensemble._check()
+            nested = [member for member in ensemble.members if member in names]
+            if ensemble.needs_validation and nested:
+                raise ValueError(
+                    f"Ensemble {ensemble.name!r} chooses on validation, so it can't have the ensembles {nested} as members: "
+                    "their forecasts are already chosen or averaged on those days. A plain average of ensembles is fine."
+                )
+            if save_dir:
+                path = self.results_path(save_dir, ensemble)
+                if (path.exists() or manifest_path(path).exists()) and not is_ensemble_manifest(manifest_path(path)):
+                    raise ManifestMismatchError(
+                        f"Ensemble {ensemble.name!r} would overwrite {path}, which is not an ensemble's. Rename it, or use a "
+                        "different save_dir."
+                    )
+
+    @staticmethod
+    def _refuse_top_without_validation(ensembles: Sequence[Ensemble], windows: Optional[RunWindows]) -> None:
+        if windows is not None and windows.validation is not None:
+            return
+        for ensemble in ensembles:
+            if ensemble.needs_validation:
+                raise ValueError(
+                    f"Ensemble {ensemble.name!r} chooses its members on validation, and there is no validation window to "
+                    "choose on: run with validation=(start, end) or validation='previous_year'."
+                )
+
+    def _ensembles_with_their_members(self, available: set) -> List[Ensemble]:
+        """The ensembles whose members all have results, in their order; the others are left out with a warning."""
+        reported = []
+        known = set(available)
+        for ensemble in self._ordered_ensembles():
+            lacking = [member for member in ensemble.members if member not in known]
+            if lacking:
+                warnings.warn(
+                    f"Report: ensemble {ensemble.name!r} is left out: no results for its member(s) {lacking}. It is never "
+                    "averaged over the members that happen to be there.",
+                    stacklevel=3,
+                )
+            else:
+                reported.append(ensemble)
+                known.add(ensemble.name)
+        return reported
+
+    def _compute_ensembles(
+        self,
+        ensembles: Sequence[Ensemble],
+        refs: Dict[str, ModelResultRef],
+        stored: Optional[RunWindows],
+        save_dir: Union[str, Path, None],
+    ) -> Tuple[Dict[str, ModelResultRef], Dict[str, List[Dict]]]:
+        """`({name: ref} of what a report shows, {name: rows of report.choices()})`, in the order they were added."""
+        like = next(iter(refs.values()))
+        held = dict(refs)
+        test_only_names: set = set()
+        computed: Dict[str, ModelResultRef] = {}
+        choices: Dict[str, List[Dict]] = {}
+        for ensemble in ensembles:
+            test_only = ensemble.needs_validation or not test_only_names.isdisjoint(ensemble.members)
+            if test_only:
+                test_only_names.add(ensemble.name)
+            path = self.results_path(save_dir, ensemble) if save_dir else None
+            result = compute(ensemble, held, stored, like, path, test_only)
+            held[ensemble.name] = result.ref
+            # A ref with no window to show, as a `top` ensemble has in a validation report, is not a row of its tables.
+            if result.ref.by_window is None or result.ref.by_window:
+                computed[ensemble.name] = result.ref
+            if result.choices:
+                choices[ensemble.name] = result.choices
+        order = [ensemble.name for ensemble in self.ensembles]
+        return {name: computed[name] for name in order if name in computed}, {
+            name: choices[name] for name in order if name in choices
+        }
 
     @staticmethod
     def _windows_to_report(
@@ -557,17 +708,19 @@ class ModelPipeline:
         return Path(save_dir) / f"{model.name.lower().replace(' ', '_')}.jsonl"
 
     def _check_model_names(self) -> None:
-        names = [m.name for m in self.models]
-        stems = [self.results_path("", m).name for m in self.models]
+        named = [*self.models, *self.ensembles]
+        names = [m.name for m in named]
+        stems = [self.results_path("", m).name for m in named]
         if len(set(names)) != len(names) or len(set(stems)) != len(stems):
+            what = "Model and ensemble names" if self.ensembles else "Model names"
             raise ValueError(
-                f"Model names must be unique (also after lower-casing and replacing spaces, since they name the "
+                f"{what} must be unique (also after lower-casing and replacing spaces, since they name the "
                 f"result files): {names}"
             )
 
     def _check_benchmarks(self) -> None:
         """A mistyped benchmark would only show as empty columns, after every model has run."""
-        names = [m.name for m in self.models]
+        names = [m.name for m in [*self.models, *self.ensembles]]
         for evaluator in self.evaluators:
             if isinstance(evaluator, DMEvaluator) and evaluator.benchmark not in names:
                 raise ValueError(f"DMEvaluator: unknown benchmark {evaluator.benchmark!r}; models: {names}")
@@ -608,6 +761,7 @@ class ModelPipeline:
     def to_dict(self) -> Dict[str, Any]:
         out = {
             "models": [self._serialize_component(m) for m in self.models],
+            **({"ensembles": [self._serialize_component(e) for e in self.ensembles]} if self.ensembles else {}),
             "evaluators": [self._serialize_component(e) for e in self.evaluators],
             "exporters": [self._serialize_component(e) for e in self.exporters],
         }
@@ -654,6 +808,8 @@ class ModelPipeline:
         )
         for c in config.get("models", []):
             pipeline.add_model(cls._load_component("models", c))
+        for c in config.get("ensembles", []):
+            pipeline.add_ensemble(cls._load_component("ensembles", c))
         for c in config.get("evaluators", []):
             pipeline.add_evaluator(cls._load_component("evaluators", c))
         for c in config.get("exporters", []):
