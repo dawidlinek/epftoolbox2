@@ -1471,6 +1471,51 @@ def test_a_rule_for_a_plain_column_covers_what_is_built_from_it():
     assert _refused_periods(found) == {name: set(range(24)) for name in names[:3]}
 
 
+@pytest.mark.parametrize(
+    "rules", [None, {"load_actual": Availability.realised("1h")}], ids=["built_in", "user_rule_for_the_plain_column"]
+)
+def test_a_slot_name_of_unknown_length_on_an_hourly_model_still_needs_a_rule_of_its_own(rules):
+    """`_sNN` names every slot length but one hour. With freq="30min" on hourly data `load_actual_s30` is the load at
+    15:00, which a quarter-hour reading puts at 07:30, known at the 11:45 issue. Taking the rule of `load_actual` would
+    turn the error for a column without a rule into that silent look-ahead, so on an hourly model the name needs a
+    rule of its own, and then it is the pinned known issue."""
+    info = InformationSet("11:45", "Europe/Brussels", rules=rules)
+    index = pd.date_range("2024-01-08", "2024-01-13", freq="h", tz="Europe/Warsaw", inclusive="left")
+
+    assert violations(["load_actual_s30", "load_actual_s30_d-1"], info=info, horizon=1) == (
+        set(),
+        {"load_actual_s30"},
+    )
+    with pytest.raises(InformationSetError, match=r"no availability rule for column\(s\) \['load_actual_s30'\]"):
+        info.check(expand(["load_actual_s30"], horizon=1), "price", "1h", WARSAW, "2024-01-10", "2024-01-10")
+    with pytest.raises(InformationSetError, match="load_actual_s30"):
+        perturb_unknown(pd.DataFrame({"load_actual_s30": 1.0}, index=index), "2024-01-10", info)
+
+
+def test_a_quarter_hour_slot_on_a_15_minute_model_takes_the_rule_of_its_column():
+    """On 15-minute data a two-digit `_sNN` can only be a quarter-hour: another slot length is off the data's grid or has
+    three digits. So the built-in rule reaches it: realised 1 h after it ends, quarter-hour 42 (10:30-10:45) is known at
+    the 11:45 issue, and 43 is not, at any of the 96 periods."""
+    index = pd.date_range("2024-01-01", periods=96 * 30, freq="15min", tz="Europe/Warsaw")
+    names = ["load_actual_s42", "load_actual_s43", "price_s95_d-1"]
+    expanded = {(period, 1): names for period in range(96)}
+
+    found, unknown = InformationSet("11:45", "Europe/Brussels").violations(
+        expanded, "price", "15min", index, "2024-01-10", "2024-01-16"
+    )
+
+    assert unknown == set()
+    assert _refused_periods({(v.predictor, v.period, v.horizon) for v in found}) == {"load_actual_s43": set(range(96))}
+    data = pd.DataFrame(1.0, index=index, columns=names)
+    perturbed, _, unchecked = perturb_unknown(
+        data, "2024-01-10", InformationSet("11:45", "Europe/Brussels"), freq="15min"
+    )
+    assert unchecked == []
+    day = np.asarray(index.tz_localize(None).normalize() == pd.Timestamp("2024-01-10"))
+    assert (perturbed.loc[day, "load_actual_s43"] != 1.0).all()
+    assert (perturbed.loc[day, ["load_actual_s42", "price_s95_d-1"]] == 1.0).all().all()
+
+
 def test_a_derived_column_without_a_rule_reports_the_column_to_declare():
     found, unknown = violations(["fuel_ttf_day_max", "fuel_ttf_h05_d-1", "fuel_ttf_d-1_day_mean"], horizon=1)
     assert found == set()

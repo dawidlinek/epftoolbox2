@@ -186,8 +186,10 @@ its first occurrence, as the transformer fills them. A `_d+k` after the slot alw
 key on a shifted name (`x_h05_d+1`) describes that very column at its row, as for any column.
 
 <Aside type="caution">
-  `_hNN` is read as an hour and `_sNN` as a quarter-hour. A profile with another slot length (`freq="30min"`
-  also gives `_sNN` names) cannot be told apart by name and would be judged at the wrong time.
+  `_hNN` is read as an hour and `_sNN` as a quarter-hour, which on 15-minute data is all a two-digit `_sNN` can be. A
+  profile with another slot length (`freq="30min"` on hourly data also gives `_sNN` names) cannot be told apart by
+  name, so on an hourly model `_sNN` doesn't take the rule of its column and needs a key of its own in `rules=`. It is
+  then read as a quarter-hour, which for such a profile is the wrong time.
 </Aside>
 
 ---

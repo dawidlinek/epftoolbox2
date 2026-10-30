@@ -621,6 +621,23 @@ class InformationSet:
         ruling = source if user is None else user
         return ResolvedColumn(name, base, shifts, ruling.rule, ruling.key, ruling.layer, source)
 
+    def _resolve_for(self, name: str, step: int) -> ResolvedColumn:
+        """`resolve` for data with slots of `step` minutes.
+
+        Only on 15-minute data is a two-digit `_sNN` column surely a quarter-hour (another slot length is off the grid or
+        has three digits). On hourly data it can be a slot of any length, and reading `load_actual_s30` of a 30-minute
+        profile (15:00) as a quarter-hour (07:30) by the rule of `load_actual` would turn the error for a column without
+        a rule into a silent look-ahead, so there it needs a user's rule on its own name.
+        """
+        col = self.resolve(name)
+        link = col
+        while step != 15 and link.built_from is not None:
+            own = _find_rule(link.name, parse_predictor(link.name), self.rules, "rules")
+            if link.slot is not None and link.slot[1] == _SLOT_MINUTES["s"] and own is None:
+                return ResolvedColumn(name, col.base, col.shifts, None)
+            link = link.built_from
+        return col
+
     # -- the check ------------------------------------------------------------
 
     def check(
@@ -678,7 +695,7 @@ class InformationSet:
             periods.setdefault((target, "training target"), set()).add(period)
         for name in [target] + [name for name, _ in periods]:
             if name not in resolved:
-                resolved[name] = self.resolve(name)
+                resolved[name] = self._resolve_for(name, step)
                 if resolved[name].rule is None:
                     unknown.add(resolved[name].series)
                 else:
@@ -1010,7 +1027,7 @@ def perturb_unknown(
     for name in columns if columns is not None else data.columns:
         if not pd.api.types.is_numeric_dtype(data[name]) or pd.api.types.is_bool_dtype(data[name]):
             continue
-        col = information_set.resolve(name)
+        col = information_set._resolve_for(name, step)
         if col.rule is None:
             unchecked.append(name)
             continue
