@@ -1,6 +1,7 @@
 from datetime import date
-from typing import Callable, List, Optional, Sequence, Union, Dict, Any
+from typing import Callable, List, Optional, Sequence, Tuple, Union, Dict, Any
 from pathlib import Path
+import copy
 import importlib
 import warnings
 import pandas as pd
@@ -10,6 +11,7 @@ from .._date_utils import resolve_date
 from ..information_set import InformationSet, InformationSetError, check_level
 from ..models.base import BaseModel
 from ..models.context import PredictorPlan, importable_path, load_function
+from ..models.explain import explain_model
 from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..exporters.base import Exporter
@@ -361,6 +363,46 @@ class ModelPipeline:
                 )
             )
         return report
+
+    def explain(
+        self,
+        data: pd.DataFrame,
+        model: str,
+        test: Optional[Tuple[Any, Any]] = None,
+        horizon: int = 1,
+        hour: int = 12,
+        target: str = "price",
+        freq: str = "1h",
+        echo: bool = True,
+    ) -> Dict[str, pd.DataFrame]:
+        """Show what a model's predictors mean for one forecast: an optional view, with no effect on a later run.
+
+        The result has `predictors`, one row per predictor of the forecast of period `hour` at `horizon`: `predictor`,
+        `target-relative` (when its value was delivered, relative to the target day T = D + horizon, so at horizon 2
+        `price_d-1` at hour 12 is `T-3 12:00`), `rule`, `known` (relative to the issue day D, on the issue day it is
+        latest), and `status` (`ok`, `late`, `late on 3 of 10 days`, `no rule`, `no issue time`, `not in data`). `grouped`
+        is the same with runs of slots folded into one row (`price_h00 … price_h23_d-1 (24)`, `T-2 00:00 … 23:00`).
+
+        For a predictor function of `ctx`, `test` is required and `lists` has one row per horizon up to `horizon` and list
+        that horizon uses: how many forecasts and issue days use it, its first and last issue day, its periods, and what it
+        `adds` to and `drops` from the most used list of that horizon. `predictors` then shows the list used most at
+        (`horizon`, `hour`), judged on the days it is used. A late `ctx.value()` doesn't stop the view; see
+        `report.availability()` for what a function read.
+
+        Args:
+            data: The frame the models run on.
+            model: The model's name.
+            test: (first, last) issue day. None takes every day of `data`, for fixed lists only.
+            horizon: Days ahead of the issue day of the forecast shown.
+            hour: Its period of the target day: 0-23, or 0-95 for 15-minute data.
+            target: Target column.
+            freq: "1h" or "15min"; must match the data.
+            echo: Print the tables.
+        """
+        chosen = copy.deepcopy(self._select_models([model])[0])  # planning leaves state on a model; this is only a look
+        if test is not None:
+            test = (resolve_date(test[0]), resolve_date(test[1]))
+        return explain_model(chosen, data, self.information_set, test, horizon, hour, target, freq, echo)
 
     def _select_models(self, names: Optional[Sequence[str]]) -> List[BaseModel]:
         if names is None:

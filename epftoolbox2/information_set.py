@@ -1504,7 +1504,14 @@ def _shifted_day(
     shifts: Sequence[Shift], day: np.ndarray, minute: np.ndarray, first: Optional[np.ndarray], ctx: _Context
 ) -> np.ndarray:
     """The local day (after `ctx.day`) of the row that `shifts` read a row at (`day`, `minute`) from, every shift moving
-    it: the day a profile or a day aggregate is read on.
+    it: the day a profile or a day aggregate is read on."""
+    return np.floor(_shifted_wall(shifts, day, minute, first, ctx) / 1440.0)
+
+
+def _shifted_wall(
+    shifts: Sequence[Shift], day: np.ndarray, minute: np.ndarray, first: Optional[np.ndarray], ctx: _Context
+) -> np.ndarray:
+    """The wall-clock minutes after midnight of `ctx.day` of the row that `shifts` read a row at (`day`, `minute`) from.
 
     The outermost shift moves the row first. A day shift keeps the wall-clock time and, like shift_calendar_days, the
     occurrence of a repeated autumn hour. An hour or minute shift is elapsed time, so it runs from the row's instant:
@@ -1515,7 +1522,7 @@ def _shifted_day(
     """
     wall = np.asarray(day, dtype=float) * 1440.0 + np.asarray(minute, dtype=float)
     if ctx.naive or all(s.unit == "d" for s in shifts):
-        return np.floor((wall + sum(s.minutes for s in shifts)) / 1440.0)
+        return wall + sum(s.minutes for s in shifts)
     first = np.zeros(len(wall), dtype=bool) if first is None else first
     for shift in reversed(shifts):
         if shift.unit == "d":
@@ -1530,7 +1537,30 @@ def _shifted_day(
         )
         first = np.asarray(earlier == moved)
         wall = np.asarray((local - ctx.day) / pd.Timedelta(minutes=1), dtype=float)
-    return np.floor(wall / 1440.0)
+    return wall
+
+
+def _delivered_span(
+    col: ResolvedColumn, day: np.ndarray, minute: np.ndarray, step: int, ctx: _Context
+) -> Tuple[np.ndarray, np.ndarray]:
+    """The first and last slot the value of `col` at the row (`day`, `minute`) was delivered in, as wall-clock minutes
+    after midnight of `ctx.day`. `col` needs no rule: this is what its name says, read the way `_available_array` reads it.
+
+    A plain column is delivered in one slot, the row's with its shifts applied. A profile holds the column it was built
+    from at its slot, on the day the shifts after the slot reach, and a day aggregate that column over every slot of that
+    day, so `x_day_max_d-1` runs from 00:00 to the last slot of D-1 on 23-, 24- and 25-hour days alike, and an aggregate
+    of an hour lag (`x_h-12_day_max`) over two days.
+    """
+    day, minute = np.asarray(day), np.asarray(minute, dtype=float)
+    if col.built_from is None:
+        wall = _shifted_wall(col.shifts, day, minute, None, ctx)
+        return wall, wall
+    reached = _shifted_day(col.shifts, day, minute, None, ctx)
+    if col.slot is not None:
+        return _delivered_span(col.built_from, reached, np.full(len(reached), float(col.slot[0])), col.slot[1], ctx)
+    start, _ = _delivered_span(col.built_from, reached, np.zeros(len(reached)), step, ctx)
+    _, end = _delivered_span(col.built_from, reached, np.full(len(reached), 1440.0 - step), step, ctx)
+    return start, end
 
 
 def _read_day_offset(shifts: Sequence[Shift], minute: np.ndarray) -> np.ndarray:
