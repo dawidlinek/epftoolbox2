@@ -13,6 +13,13 @@ are allowed before fitting, and don't themselves change what a fitted model pred
 Provenance fields (package version, git SHA, timestamps) are recorded but never compared: a version bump
 or a new commit does not by itself invalidate a results directory.
 
+A predictor function of `ctx` has no list per (period, horizon) to hash: which list a forecast uses depends on its day.
+Its manifest records the function (import path, fingerprint of its source and of the information set it answers
+through) and every distinct list by hash, and each record carries its list's hash. Resuming compares what matters
+directly (`check_stored_lists`): the list and binary-column mask a fresh run would give each stored forecast. So editing
+a comment or an unrelated availability rule resumes, with a note, and a change the source can't show (a list defined next
+to the function) doesn't.
+
 A directory with results but no manifest is not a mismatch. By default it is accepted with a warning and
 a manifest is written for it. Pass `require_manifest=True` for the stricter behaviour of refusing those too.
 """
@@ -25,7 +32,7 @@ import subprocess
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -34,6 +41,9 @@ from ..logging import get_logger
 logger = get_logger(__name__)
 
 SCHEMA_VERSION = 1
+
+# `predictor_layout_hash` of a predictor function of `ctx`: it never equals the hash of fixed lists.
+PREDICTOR_FUNCTION_LAYOUT = "predictor function: lists are compared per record"
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -76,6 +86,9 @@ class Manifest:
     created_at: str
     updated_at: str
     schema_version: int = SCHEMA_VERSION
+    # A predictor function of `ctx`: {"path", "fingerprint"} and one entry per distinct list (`PredictorPlan.describe`).
+    predictor_function: Optional[Dict[str, str]] = None
+    predictor_lists: Optional[List[Dict[str, Any]]] = None
 
     def differences(self, existing: "Manifest") -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -87,7 +100,10 @@ class Manifest:
         return out
 
     def to_dict(self) -> Dict[str, Any]:
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        out = {f.name: getattr(self, f.name) for f in fields(self)}
+        if self.predictor_function is None:  # fixed lists: nothing to record
+            del out["predictor_function"], out["predictor_lists"]
+        return out
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Manifest":
@@ -163,6 +179,8 @@ def build_manifest(
     test_start: str,
     test_end: str,
     information_set: Optional[Any],
+    predictor_function: Optional[Dict[str, str]] = None,
+    predictor_lists: Optional[List[Dict[str, Any]]] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -188,7 +206,7 @@ def build_manifest(
     return Manifest(
         model_class=type(model).__name__,
         predictors=sorted(set(used_columns) - {target}),
-        predictor_layout_hash=hash_predictor_layout(expanded),
+        predictor_layout_hash=PREDICTOR_FUNCTION_LAYOUT if predictor_function else hash_predictor_layout(expanded),
         target=target,
         horizon=horizon,
         freq=freq,
@@ -203,6 +221,8 @@ def build_manifest(
         git_sha=_git_sha(),
         created_at=now,
         updated_at=now,
+        predictor_function=predictor_function,
+        predictor_lists=predictor_lists,
     )
 
 
@@ -242,6 +262,10 @@ def check_and_write(
         if diffs:
             logger.warning(f"{model_name}: manifest mismatch at {path} overridden: {'; '.join(diffs)}")
         manifest.created_at = existing.created_at  # keep the first run's provenance
+        if manifest.predictor_lists is not None and existing.predictor_lists:
+            # Records outside this run's test period stay in the file: their hashes must still resolve to their lists.
+            known = {entry["hash"] for entry in manifest.predictor_lists}
+            manifest.predictor_lists += [e for e in existing.predictor_lists if e["hash"] not in known]
     elif has_existing_results:
         message = f"{model_name}: {path.parent} has results but no manifest ({path.name} not found)."
         if require_manifest:
@@ -253,11 +277,73 @@ def check_and_write(
     manifest.write(path)
 
 
+def check_stored_lists(
+    path: Path,
+    manifest: Manifest,
+    records: Iterable[Dict[str, Any]],
+    planned: Callable[[int, int, str], Optional[Tuple[str, str]]],
+    *,
+    allow_mismatch: bool = False,
+    model_name: str = "Model",
+) -> None:
+    """Raise `ManifestMismatchError` if a stored forecast isn't what a fresh run of a predictor function would give.
+
+    `records` are the stored records, and `planned(period, horizon, run_date)` gives the (list hash, mask digest) this
+    run plans for a key, or None for a key outside its test period. A stored forecast differs if it used another list, or
+    if the same list now gets another binary-column mask (it is read from the list's first test day, which a changed
+    function or test start can move). Pending forecasts may change freely: nothing stored depends on them.
+
+    A record without a list hash comes from fixed lists, so nothing can be said about it. `allow_mismatch` logs instead.
+    A function that changed without changing anything stored resumes, with a note.
+    """
+    existing = Manifest.from_dict(json.loads(path.read_text())) if path.exists() else None
+    stored_masks = {
+        entry["hash"]: entry.get("binary_masks", {}) for entry in (existing and existing.predictor_lists) or []
+    }
+    other_list, other_mask = [], []
+    for record in records:
+        period, horizon, run_date = record["hour"], record["horizon"], record["run_date"]
+        expected = planned(period, horizon, run_date)
+        if expected is None:
+            continue
+        stored = record.get("predictor_list")
+        if stored != expected[0]:
+            other_list.append((run_date, period, horizon))
+        elif stored_masks.get(stored, {}).get(f"{period}-{horizon}", expected[1]) != expected[1]:
+            other_mask.append((run_date, period, horizon))
+
+    problems = []
+    if other_list:
+        problems.append(
+            f"{len(other_list)} stored forecast(s) used another predictor list than the predictor function returns now, "
+            f"e.g. (run date, period, horizon) {sorted(other_list)[:3]}"
+        )
+    if other_mask:
+        problems.append(
+            f"{len(other_mask)} stored forecast(s) used the same list with other binary columns than a fresh run would "
+            f"(its first test day moved), e.g. {sorted(other_mask)[:3]}"
+        )
+    if problems and not allow_mismatch:
+        raise ManifestMismatchError(
+            f"{model_name}: {'; '.join(problems)}. Resuming would mix forecasts of two plans in {path.parent}. Use a "
+            "different save_dir, remove the existing results, or pass allow_manifest_mismatch=True to resume anyway."
+        )
+    if problems:
+        logger.warning(f"{model_name}: resuming over a changed plan at {path}: {'; '.join(problems)}")
+    elif existing is not None and existing.predictor_function != manifest.predictor_function:
+        logger.warning(
+            f"{model_name}: the predictor function or its information set changed since {path.name} was written "
+            f"({existing.predictor_function} -> {manifest.predictor_function}), but every stored forecast keeps its list."
+        )
+
+
 __all__ = [
     "Manifest",
     "ManifestMismatchError",
+    "PREDICTOR_FUNCTION_LAYOUT",
     "build_manifest",
     "check_and_write",
+    "check_stored_lists",
     "hash_columns",
     "hash_predictor_layout",
     "manifest_path",

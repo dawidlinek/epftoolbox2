@@ -10,7 +10,8 @@ class ModelResultRef:
     `count` is the number of planned forecasts (periods x horizons x test days). `produced` is how many
     exist after the run (including ones resumed from an earlier run), and `skipped` counts the tasks that
     gave no forecast by reason (e.g. `missing_test_predictors`). `produced` is None for refs built from
-    raw result lists.
+    raw result lists. `predictor_lists` describes each distinct list a predictor function of `ctx` returned, with how
+    many forecasts use it where; it is None for fixed lists.
     """
 
     name: str
@@ -23,3 +24,4 @@ class ModelResultRef:
     _results: Optional[List[Dict]] = field(default=None, repr=False)
     produced: Optional[int] = None
     skipped: Dict[str, int] = field(default_factory=dict)
+    predictor_lists: Optional[List[Dict]] = None
