@@ -33,6 +33,8 @@ DEFAULT_ISSUE_TIME = "11:45"
 KINDS = ("static", "realised", "published", "weekly", "weather_run", "as_of", "weather_cutoff")
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 _UNKNOWN_POLICIES = ("raise", "warn", "ignore")
+# What a run does with an input known after the issue time: nothing, list it and go on, or refuse before any fit.
+AVAILABILITY_LEVELS = ("none", "warn", "raise")
 _SUFFIX = re.compile(r"^(?P<base>.+)_(?P<unit>d|h|min|s)(?P<sign>[+-])(?P<n>\d+)$")
 _UNIT_MINUTES = {"d": 1440.0, "h": 60.0, "min": 1.0, "s": 1.0 / 60.0}
 _STEP_MINUTES = {"1h": 60, "15min": 15}
@@ -80,6 +82,13 @@ def _check_zone(zone: str) -> None:
 
 class InformationSetError(ValueError):
     """A predictor or training target uses a value that is not known at issue time."""
+
+
+def check_level(level: str) -> str:
+    """`level` if it is one of `AVAILABILITY_LEVELS`; a `ValueError` otherwise."""
+    if level not in AVAILABILITY_LEVELS:
+        raise ValueError(f"availability must be one of {list(AVAILABILITY_LEVELS)}, got {level!r}")
+    return level
 
 
 # ---------------------------------------------------------------------------
@@ -496,16 +505,24 @@ def _find_rule(name: str, chain: List[Tuple[str, Tuple[Shift, ...]]], rules, lay
 # Information set
 # ---------------------------------------------------------------------------
 
+ROLE_PREDICTOR = "predictor"
+ROLE_TARGET = "training target"
+ROLE_VALUE = "ctx.value"
+ROLE_PUBLISHED = "ctx.published"
+
 
 @dataclass
 class Violation:
+    """One use of a value not known at the issue time (`available` > `issue`), or, for a column without a rule, one use
+    that can't be judged (`column.rule` is None and both times are NaN)."""
+
     predictor: str
     period: int
     horizon: int
     column: ResolvedColumn
     available: float  # minutes after midnight of the issue day, data-local time
     issue: float
-    role: str = "predictor"
+    role: str = ROLE_PREDICTOR
     hint: str = ""
 
 
@@ -664,6 +681,37 @@ class InformationSet:
             raise InformationSetError(self._format(violations, model_name))
         self._log_assumptions(model_name)
 
+    def late_uses(
+        self,
+        expanded: Dict[Tuple[int, int], List[str]],
+        target: str,
+        freq: str,
+        index: pd.DatetimeIndex,
+        test_start: Optional[str] = None,
+        test_end: Optional[str] = None,
+        model_name: str = "Model",
+    ) -> List[Violation]:
+        """What `availability="warn"` lists: every use `check` refuses, and every use of a column without a rule, whatever
+        `unknown` says, instead of an error. A column of a data source on an index in another zone still raises: neither
+        the check nor the listing could say anything true about it."""
+        found, _ = self.violations(expanded, target, freq, index, test_start, test_end)
+        step = _STEP_MINUTES[freq]
+        resolved: Dict[str, ResolvedColumn] = {}
+
+        def no_rule(name: str) -> Optional[ResolvedColumn]:
+            col = resolved.get(name)
+            if col is None:
+                col = resolved[name] = self._resolve_for(name, step)
+            return col if col.rule is None else None
+
+        for (period, hz), predictors in sorted(expanded.items()):
+            for name, role in [(p, ROLE_PREDICTOR) for p in predictors] + [(target, ROLE_TARGET)]:
+                col = no_rule(name)
+                if col is not None:
+                    found.append(Violation(name, period, hz, col, math.nan, math.nan, role))
+        self._log_assumptions(model_name)
+        return found
+
     def _report_unknown(self, unknown: Iterable[str], model_name: str) -> None:
         """Follow the `unknown` policy for columns without a rule."""
         if not unknown:
@@ -702,12 +750,12 @@ class InformationSet:
         resolved: Dict[str, ResolvedColumn] = {}
         unknown = set()
         # The newest training target is the value delivered on D-1 in the same period.
-        uses = {"predictor": 0, "training target": -1}  # role -> the row's day relative to D
+        uses = {ROLE_PREDICTOR: 0, ROLE_TARGET: -1}  # role -> the row's day relative to D
         periods: Dict[Tuple[str, str], set] = {}  # the periods reading each (name, role); the horizon doesn't matter
         for (period, _), predictors in expanded.items():
             for name in predictors:
-                periods.setdefault((name, "predictor"), set()).add(period)
-            periods.setdefault((target, "training target"), set()).add(period)
+                periods.setdefault((name, ROLE_PREDICTOR), set()).add(period)
+            periods.setdefault((target, ROLE_TARGET), set()).add(period)
         for name in [target] + [name for name, _ in periods]:
             if name not in resolved:
                 resolved[name] = self._resolve_for(name, step)
@@ -733,7 +781,7 @@ class InformationSet:
 
         out: List[Violation] = []
         for (period, hz), predictors in sorted(expanded.items()):
-            for name, role in [(p, "predictor") for p in predictors] + [(target, "training target")]:
+            for name, role in [(p, ROLE_PREDICTOR) for p in predictors] + [(target, ROLE_TARGET)]:
                 if (name, role, period) in late:
                     known, issue_minute, hint = late[(name, role, period)]
                     col = resolved[name]
@@ -1503,6 +1551,7 @@ def _ranges(values: Sequence[int]) -> str:
 
 __all__ = [
     "ASSUMPTIONS",
+    "AVAILABILITY_LEVELS",
     "Availability",
     "ControlResult",
     "InformationSet",
