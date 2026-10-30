@@ -151,8 +151,9 @@ which columns that affects.
 A [`DailyProfileTransformer`](/epftoolbox2/transformers/daily-profile/) column holds one slot of its row's local
 day, the same value on every row of that day: `price_h05` is the price of 05:00–06:00 on D, and `_s00` … `_s95` are
 the quarter-hours of 15-minute data. The check and the probe judge it at that slot, not at the row's period, and
-the shifts after the slot pick the day: `load_actual_h23_d-1` is 23:00 on D-1, and `load_actual_h23_h-12` reads
-D-1's profile on the rows before noon and D's from noon on. A profile of a lag (`LagTransformer` before
+the shifts after the slot pick the day: `load_actual_h23_d-1` is 23:00 on D-1, and `load_actual_h23_h-12` reads the
+profile of the row 12 elapsed hours earlier: D-1's on the rows before noon and D's from noon on, except on a DST day,
+where that boundary moves to 11:00 in autumn and 13:00 in spring. A profile of a lag (`LagTransformer` before
 `DailyProfileTransformer`) keeps its lag: `load_actual_d+1_h05` is the load at 05:00 on D+1.
 
 Profile columns need their own rules, usually patterns. `price_h05` does not take the rule of `price`, and a rule
@@ -190,7 +191,8 @@ A [`DailyStatsTransformer`](/epftoolbox2/transformers/daily-stats/) column (`_da
 only when the day's last slot is: 23:00 for hourly data and 23:45 for 15-minute data, on the 23- and 25-hour DST days
 as on any other. The check and the probe judge it at that slot, not at the row's period, and the shifts after it
 pick the day, as for profile columns: `load_actual_day_max_d-1` is the maximum of D-1, and
-`load_actual_day_max_h-12` reads D-1's maximum on the rows before noon and D's from noon on. An aggregate of a lag
+`load_actual_day_max_h-12` reads D-1's maximum on the rows before noon and D's from noon on, with the same boundary
+of 11:00 on the 25-hour day and 13:00 on the 23-hour day. An aggregate of a lag
 (`LagTransformer` before `DailyStatsTransformer`) keeps its lag: `load_actual_d-1_day_max` is also the maximum of D-1.
 
 Aggregates need their own rules too, and a rule that matches one describes the series it was built from (the

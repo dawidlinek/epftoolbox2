@@ -663,7 +663,7 @@ class InformationSet:
         days = self._issue_days(index, test_start, test_end)
         if not len(days):
             return [], unknown
-        ctx = _Context(days[0], self._data_zone(index))
+        ctx = _Context(days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None)
         # Each issue day as days after the first, and its issue time in data-zone minutes after the first's midnight.
         offset = np.asarray((days - days[0]) // pd.Timedelta(days=1), dtype=np.int64)
         issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), self.issue_timezone, ctx)
@@ -683,7 +683,7 @@ class InformationSet:
                 if known <= issue[i]:
                     continue
                 # Minutes after midnight of that issue day, as a context for that day alone would give them.
-                day_ctx = _Context(days[i], ctx.data_zone, float(issue[i] - offset[i] * 1440.0))
+                day_ctx = replace(ctx, day=days[i], issue_minute=float(issue[i] - offset[i] * 1440.0))
                 hint = self._assumption_hint(col, uses[role], period * step, step, day_ctx)
                 late[(name, role, period)] = (float(known - offset[i] * 1440.0), day_ctx.issue_minute, hint)
 
@@ -802,6 +802,7 @@ class _Context:
     day: pd.Timestamp  # the issue day D, or (in `violations`) the first issue day of the test period
     data_zone: str
     issue_minute: float = 0.0  # the issue time on `day`; `violations` keeps one per issue day instead
+    naive: bool = False  # the data's index has no zone, so `data_zone` is the issue's and it has no switches
 
     @property
     def weekday(self) -> int:
@@ -963,7 +964,7 @@ def perturb_unknown(
     # for its delivery day, its publication instant for the way back), not at run_day's noon or at the row's own
     # date. They differ across a DST switch whenever the data zone and a rule's zone don't switch together, e.g. a
     # UTC or fixed-offset (benchmark source) index against Europe/Brussels rules.
-    ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index))
+    ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index), naive=index.tz is None)
     issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), information_set.issue_timezone, ctx)
     ctx = replace(ctx, issue_minute=float(issue[0]))
     local = index.tz_localize(None) if index.tz is not None else index
@@ -1028,9 +1029,10 @@ def _available_array(
         # source's lead), `x_d+1_h05` is `x_d+1` at 05:00 on D. A repeated autumn slot is its first occurrence, the
         # one DailyProfileTransformer copies; a slot skipped in spring moves forward to the switch.
         source, start, length = profile
-        reached = _shifted_day(col.shifts, day, minute)
+        reached = _shifted_day(col.shifts, day, minute, first, ctx)
         slot = np.full(len(reached), float(start))
-        return _available_array(source, rule, reached, slot, length, ctx, None, issue_day + reached - day)
+        copied = np.ones(len(reached), dtype=bool)
+        return _available_array(source, rule, reached, slot, length, ctx, copied, issue_day + reached - day)
     source = _day_aggregate_source(col)
     if source is not None:
         # A day aggregate holds, on every row of a local day, a statistic of the column it was built from over every
@@ -1038,7 +1040,7 @@ def _available_array(
         # last slot (23:00 for hourly data), on the day the shifts after the aggregate reach, none of them a source's
         # lead. Each rule's availability never decreases with the slot's time, so no earlier slot is known later; a
         # repeated last slot is its second occurrence.
-        reached = _shifted_day(col.shifts, day, minute)
+        reached = _shifted_day(col.shifts, day, minute, first, ctx)
         last = np.full(len(reached), 1440.0 - step)
         second = np.zeros(len(reached), dtype=bool)
         return _available_array(source, rule, reached, last, step, ctx, second, issue_day + reached - day)
@@ -1094,12 +1096,37 @@ def _shifts_after_source_lead(shifts: Sequence[Shift]) -> List[Shift]:
     return rest
 
 
-def _shifted_day(shifts: Sequence[Shift], day: np.ndarray, minute: np.ndarray) -> np.ndarray:
-    """The day (after `ctx.day`) of the row that `shifts` move a row at (`day`, `minute`) to, every shift moving it:
-    the day a profile or a day aggregate is read on. A shift by hours or minutes moves it across midnight."""
-    days = sum(s.offset for s in shifts if s.unit == "d")
-    elapsed = sum(s.minutes for s in shifts if s.unit != "d")
-    return day + days + np.floor((np.asarray(minute, dtype=float) + elapsed) / 1440.0)
+def _shifted_day(
+    shifts: Sequence[Shift], day: np.ndarray, minute: np.ndarray, first: Optional[np.ndarray], ctx: _Context
+) -> np.ndarray:
+    """The local day (after `ctx.day`) of the row that `shifts` read a row at (`day`, `minute`) from, every shift moving
+    it: the day a profile or a day aggregate is read on.
+
+    The outermost shift moves the row first. A day shift keeps the wall-clock time and, like shift_calendar_days, the
+    occurrence of a repeated autumn hour. An hour or minute shift is elapsed time, so it runs from the row's instant:
+    on a 25-hour day 12 hours before 11:00 is 00:00 on that day, on a 23-hour day 12 hours before 12:00 is 23:00 on the
+    day before. A naive index (DSTNormalizeTransformer's 24 slots a day) has no switch to cross, and LagTransformer
+    shifts it on its own clock. `first` is as in `_available_array`, except that None judges a repeated hour at its
+    second occurrence: `violations` passes no rows but (day, period), and the model forecasts from a period's last row.
+    """
+    wall = np.asarray(day, dtype=float) * 1440.0 + np.asarray(minute, dtype=float)
+    if ctx.naive or all(s.unit == "d" for s in shifts):
+        return np.floor((wall + sum(s.minutes for s in shifts)) / 1440.0)
+    first = np.zeros(len(wall), dtype=bool) if first is None else first
+    for shift in reversed(shifts):
+        if shift.unit == "d":
+            wall = wall + shift.minutes
+            continue
+        local = pd.DatetimeIndex(ctx.day + pd.to_timedelta(wall, unit="min"))
+        instants = local.tz_localize(ctx.data_zone, ambiguous=first, nonexistent="shift_forward")
+        moved = instants + pd.Timedelta(minutes=shift.minutes)
+        local = moved.tz_convert(ctx.data_zone).tz_localize(None)
+        earlier = local.tz_localize(
+            ctx.data_zone, ambiguous=np.ones(len(local), dtype=bool), nonexistent="shift_forward"
+        )
+        first = np.asarray(earlier == moved)
+        wall = np.asarray((local - ctx.day) / pd.Timedelta(minutes=1), dtype=float)
+    return np.floor(wall / 1440.0)
 
 
 def _read_day_offset(shifts: Sequence[Shift], minute: np.ndarray) -> np.ndarray:

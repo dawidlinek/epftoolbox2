@@ -988,40 +988,58 @@ def test_profile_verdicts_match_the_delivery_each_cell_holds(data_zone, rule_zon
     assert _verdicts_against_held_deliveries(data, rule_zone, switch) == {}
 
 
-def _verdicts_against_held_deliveries(data: pd.DataFrame, rule_zone: str, switch: str) -> dict:
+def _verdicts_against_held_deliveries(
+    data: pd.DataFrame, rule_zone: str, switch: str, realised: bool = False, freq: str = "1h"
+) -> dict:
     """Where the probe and the check disagree with the delivery each cell of `data` holds (minutes since the epoch), on
     the four issue days around `switch`. Under the rule `px*`, a cell is published 13:00 in `rule_zone` on the day
-    before its delivery day there, so it is unknown at the 11:45 Brussels issue exactly when that comes later; the probe
-    must perturb exactly those cells and the check refuse exactly those (predictor, issue day) pairs, at every period.
-    NaN cells hold no delivery and are not compared."""
+    before its delivery day there (with `realised`, known 1 h after its slot ends), so it is unknown at the 11:45
+    Brussels issue exactly when that comes later; the probe must perturb exactly those cells.
+
+    The check judges a (predictor, period): its verdict must be that of the period's last row that day, the one the
+    model forecasts from, so the second of a repeated autumn hour. A column known, or unknown, on every row of the day
+    has that verdict at every period, even one with no row. NaN cells hold no delivery and are not compared."""
     index = data.index
-    info = InformationSet("11:45", "Europe/Brussels", rules={"px*": Availability.published("13:00", 1, rule_zone)})
-    # When each cell is published: 13:00 in the rule's zone on the day before the delivery day there (NaT for NaN).
+    step = {"1h": 60, "15min": 15}[freq]
+    rule = Availability.realised("1h") if realised else Availability.published("13:00", 1, rule_zone)
+    info = InformationSet("11:45", "Europe/Brussels", rules={"px*": rule})
     held = data.notna().to_numpy()
     delivery = pd.to_datetime(data.to_numpy()[held] * 60, unit="s", utc=True)
-    delivery_day = delivery.tz_convert(rule_zone).normalize().tz_localize(None)
-    published = (delivery_day - pd.Timedelta(days=1) + pd.Timedelta(hours=13)).tz_localize(rule_zone)
-    on_day = np.repeat(index.tz_localize(None).normalize().to_numpy()[:, None], data.shape[1], axis=1)[held]
+    if realised:
+        known = delivery + pd.Timedelta(minutes=step + 60)
+    else:
+        delivery_day = delivery.tz_convert(rule_zone).normalize().tz_localize(None)
+        known = (delivery_day - pd.Timedelta(days=1) + pd.Timedelta(hours=13)).tz_localize(rule_zone)
+    wall = index.tz_localize(None)
+    on_day = np.repeat(wall.normalize().to_numpy()[:, None], data.shape[1], axis=1)[held]
+    period = np.repeat(np.asarray((wall.hour * 60 + wall.minute) // step)[:, None], data.shape[1], axis=1)[held]
     names = np.repeat(np.asarray(data.columns)[None, :], len(index), axis=0)[held]
     rows = np.repeat(np.asarray(index)[:, None], data.shape[1], axis=1)[held]
-    expanded = {(period, 1): list(data.columns) for period in range(24)}
+    every = set(range(1440 // step))
+    expanded = {(p, 1): list(data.columns) for p in every}
 
     wrong = {}
     for run_day in pd.date_range(pd.Timestamp(switch) - pd.Timedelta(days=2), periods=4, freq="D"):
-        unknown = np.asarray(published > pd.Timestamp(f"{run_day.date()} 11:45", tz="Europe/Brussels"))
-        perturbed, _, _ = perturb_unknown(data, str(run_day.date()), info)
+        day = str(run_day.date())
+        unknown = np.asarray(known > pd.Timestamp(f"{day} 11:45", tz="Europe/Brussels"))
+        perturbed, _, _ = perturb_unknown(data, day, info, freq=freq)
         mismatch = (perturbed.to_numpy() != data.to_numpy())[held] != unknown
         for name, row in zip(names[mismatch][:5], rows[mismatch][:5]):
-            wrong.setdefault((str(run_day.date()), "probe"), []).append((name, str(row)))
+            wrong.setdefault((day, "probe"), []).append((name, str(row)))
 
-        found, _ = info.violations(expanded, "price", "1h", index, str(run_day.date()), str(run_day.date()))
+        found, _ = info.violations(expanded, "price", freq, index, day, day)
         refused = _refused_periods({(v.predictor, v.period, v.horizon) for v in found if v.role == "predictor"})
         today = on_day == run_day.to_datetime64()
-        late_today = set(names[today & unknown])
-        assert not late_today & set(names[today & ~unknown]), "every cell of a column on one day holds one delivery"
-        refused = {name: periods for name, periods in refused.items() if name in set(names[today])}
-        if refused != {name: set(range(24)) for name in late_today}:
-            wrong[(str(run_day.date()), "check")] = sorted(set(refused) ^ late_today)[:5]
+        for name in np.unique(names[today]):
+            chosen = today & (names == name)
+            by_period = dict(zip(period[chosen].tolist(), unknown[chosen].tolist()))  # a later row overrides
+            got = refused.get(name, set())
+            if len(set(by_period.values())) == 1:
+                want = every if unknown[chosen][0] else set()
+            else:
+                want, got = {p for p, late in by_period.items() if late}, got & set(by_period)
+            if got != want:
+                wrong[(day, "check", str(name))] = sorted(got ^ want)[:5]
     return wrong
 
 
@@ -1253,6 +1271,66 @@ def test_only_is_day_is_excluded_from_the_day_aggregates():
     found, unknown = violations(["load_actual_day_max"], info=exact, horizon=1)
     assert unknown == set()
     assert _refused_periods(found) == {"load_actual_day_max": set(range(24))}
+
+
+@pytest.mark.parametrize(
+    "run_day, first_refused",
+    [("2024-10-27", 11), ("2024-03-31", 13), ("2024-01-10", 12)],
+    ids=["autumn", "spring", "plain"],
+)
+@pytest.mark.parametrize("name", ["load_actual_day_max_h-12", "load_actual_h23_h-12"])
+def test_an_hour_lag_of_an_aggregate_or_a_profile_reads_the_day_of_the_row_s_real_instant(name, run_day, first_refused):
+    """An hour lag is elapsed time, and 12 hours before a row is not always 12 clock hours. On the 25-hour day 11:00 CET
+    (10:00Z) reads 00:00 CEST of D, whose last hour is known only at 01:00 on D+1; adding the shift to the row's clock
+    minute reads D-1 and lets it through. On the 23-hour day 12:00 CEST (10:00Z) still reads 23:00 CET of D-1."""
+    start = pd.Timestamp(run_day) - pd.Timedelta(days=5)
+    index = pd.date_range(start, start + pd.Timedelta(days=10), freq="h", tz="Europe/Warsaw", inclusive="left")
+    info = InformationSet("11:45", "Europe/Brussels", rules={"load_actual*": Availability.realised("1h")})
+
+    found, unknown = violations([name], info=info, horizon=1, start=run_day, end=run_day, index=index)
+    perturbed, _, _ = perturb_unknown(pd.DataFrame({name: 1.0}, index=index), run_day, info)
+
+    assert unknown == set()
+    assert _refused_periods(found) == {name: set(range(first_refused, 24))}
+    day = perturbed.loc[np.asarray(index.tz_localize(None).normalize() == pd.Timestamp(run_day)), name]
+    assert (day != 1.0).to_numpy().tolist() == (day.index.hour >= first_refused).tolist()
+
+
+def test_an_hour_lag_on_a_naive_index_has_no_switch_to_cross():
+    """DSTNormalizeTransformer gives a naive index, 24 slots on every day, and LagTransformer shifts it on that clock:
+    on the autumn switch day too, 12 hours before 11:00 is 23:00 on the day before."""
+    index = pd.date_range("2024-10-20", "2024-11-03", freq="h", inclusive="left")
+    name = "load_actual_day_max_h-12"
+    info = InformationSet("11:45", "Europe/Brussels", rules={"load_actual*": Availability.realised("1h")})
+
+    found, _ = violations([name], info=info, horizon=1, start="2024-10-27", end="2024-10-27", index=index)
+    perturbed, _, _ = perturb_unknown(pd.DataFrame({name: 1.0}, index=index), "2024-10-27", info)
+
+    assert _refused_periods(found) == {name: set(range(12, 24))}
+    assert perturbed.loc["2024-10-27 11:00", name] == 1.0
+    assert perturbed.loc["2024-10-27 12:00", name] != 1.0
+
+
+@pytest.mark.parametrize("freq", ["1h", "15min"])
+@pytest.mark.parametrize("realised", [True, False], ids=["realised", "published"])
+@pytest.mark.parametrize("switch", ["2024-03-31", "2024-10-27", "2024-07-10"])
+@pytest.mark.parametrize("data_zone", ["Europe/Warsaw", "Etc/GMT-1"])
+def test_hour_lag_verdicts_match_the_delivery_each_cell_holds(data_zone, switch, realised, freq):
+    """Known answer: the hour lags of `px`'s day maximum and of its first and last slots hold their own delivery, one
+    day's on some rows of the day and another's on the rest, around both switches."""
+    start = pd.Timestamp(switch) - pd.Timedelta(days=5)
+    index = pd.date_range(start, start + pd.Timedelta(days=10), freq=freq, tz=data_zone, inclusive="left")
+    raw = pd.DataFrame({"px": (index.asi8 // 60_000_000_000).astype(float)}, index=index)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # the 23- and 25-hour days of a DST index
+        data = DailyStatsTransformer(columns="px", stats=["max"], freq=freq).transform(raw)
+        data = DailyProfileTransformer(columns="px", freq=freq).transform(data)
+    slots = profile_columns("px", freq)
+    columns = ["px_day_max", slots[0], slots[-1]]
+    lags = [3, 6, 12, 24, -12, -24]
+    data = LagTransformer(columns=columns, lags=lags, freq="hour").transform(data[columns]).drop(columns=columns)
+
+    assert _verdicts_against_held_deliveries(data, "Europe/Brussels", switch, realised, freq) == {}
 
 
 def test_a_source_column_named_like_a_day_aggregate_keeps_its_own_rule():
