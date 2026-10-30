@@ -394,16 +394,40 @@ def results_to_frame(results) -> pd.DataFrame: ...  # list, (name, result) pairs
 
 ```python
 class OLSModel(BaseModel):
-    def __init__(self, predictors: List, training_window: int = 365,
+    def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
                  name: str = "Model", scaler: ScalerSpec = "standard"): ...
 
 class LassoCVModel(BaseModel):
-    def __init__(self, predictors: List, training_window: int = 365,
+    def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
                  cv: int = 5, max_iter: int = 10000, name: str = "Model",
                  scaler: ScalerSpec = "standard"): ...
 ```
 
 `ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance.
+
+### Predictor functions
+
+`predictors` may be a function with one parameter named `ctx`, see [Predictor Functions](/epftoolbox2/model-pipeline/predictor-functions/).
+
+```python
+class PredictorContext:                     # What the function gets for one planned forecast
+    horizon: int                            # Days ahead of the issue day, from 1
+    period: int                             # 0-23, or 0-95 for 15-minute data
+    hour: int                               # The same number as period
+    issue_day: datetime.date                # The local calendar date D
+    target_day: datetime.date               # D + horizon
+    target_weekday: int                     # Weekday of target_day, 0 = Monday
+    zone: Optional[str]                     # The data's time zone name
+    freq: str                               # "1h" or "15min"
+
+    def published(self, columns: Union[str, Iterable[str]]) -> bool: ...  # Known at the issue time and not NaN
+    def value(self, column: str) -> Any: ...  # The cell of the forecast's row; raises if known only later
+
+class Use:                                  # What the function may return instead of a plain list
+    def __init__(self, predictors: Sequence[str], train_on: str = "all"): ...  # "matching" isn't available yet
+```
+
+`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run.
 
 ### Scalers
 

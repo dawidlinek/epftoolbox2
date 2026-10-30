@@ -181,6 +181,8 @@ print(predictions.head())
 
 ## Order of results
 
+A [predictor function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/#results) adds `predictor_list` to each record and `predictor_lists` to the model's ref, which says which list its forecasts used.
+
 Workers write records as their tasks finish, so the order of the lines in a results file varies with the number of processes, scheduling and resuming. The report does not depend on it: each model's forecasts are evaluated in the order of their forecast key (`run_date`, `target_date`, `horizon`, `hour`), so the same results give the same metrics bit for bit (floating-point sums depend on the order of their terms). `iter_details()` lists a model's rows in that order, and `predictions()` is sorted by model, horizon, hour, then run date.
 
 ## Reports from saved results

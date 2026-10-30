@@ -7,7 +7,8 @@ import { Aside } from '@astrojs/starlight/components';
 
 `InformationSet.check()` reads predictor *names*. A column can have a legal name and hold the wrong value, and a model
 can read more than it declares, so a look-ahead can pass that check and give numbers that look fine.
-`ModelPipeline.verify()` tests the boundary against real data and real models instead.
+`ModelPipeline.verify()` tests the boundary against real data and real models instead, including models whose lists come
+from a [predictor function](/epftoolbox2/model-pipeline/predictor-functions/#the-issue-time-check).
 
 ```python
 from epftoolbox2.models import OLSModel
@@ -48,7 +49,7 @@ experiments run:
 | `model` | The model's name |
 | `days` | Issue days checked |
 | `forecasts` | Forecasts compared, summed over those days |
-| `changed` | Forecasts that moved under the probe, or exist in only one of its runs |
+| `changed` | Forecasts that moved under the probe, or exist in only one of its runs, or whose [predictor function](/epftoolbox2/model-pipeline/predictor-functions/#the-issue-time-check) read a cell the probe moved |
 | `max change` | Largest move under the probe |
 | `control moved` | Forecasts that moved under the control (missing with `positive_control=False`) |
 | `status` | `ok`, `leak` or `inconclusive` |
@@ -110,7 +111,8 @@ The control asks this of every forecast: each (period, horizon) must move on at 
 some forecast of each horizon must. One forecast moving says little about another, which may read other inputs. A sparse
 model such as a Lasso can drop its fresh inputs for a period on a given day, so it may need more `days`.
 
-`inconclusive` doesn't say a model leaks. It says this check can't vouch for it. These are `inconclusive` too:
+`inconclusive` doesn't say a model leaks. It says this check can't vouch for it. A predictor function with an input that no
+sampled day reads is `inconclusive`, until `days` covers it. These are `inconclusive` too:
 
 - an input with no availability rule (with `InformationSet(unknown="warn")` or `"ignore"`, otherwise it raises), because a
   leak through it can't be seen;

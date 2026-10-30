@@ -19,7 +19,7 @@ Electricity price forecasting library (a rewrite of Lago et al.'s epftoolbox): d
 ## How the pieces fit
 `DataPipeline` (sources → transformers → validators, UTC in, cached per source) produces one DataFrame. `ModelPipeline` fits one model per (period of day, horizon, run day) in a process pool, stores results as JSONL (resumable), then evaluators and exporters run over an `EvaluationReport`. `Workflow` runs both from YAML; `environment.model_index` exists for SLURM array jobs. Component classes must be registered in `COMPONENT_REGISTRY` (`pipelines/data_pipeline.py`, `pipelines/model_pipeline.py`) to load from YAML.
 
-Column suffixes are relative to the row's local date D: `x_d-k` is x on D-k, `x_d+h` is x on D+h as known on D (targets are `{target}_d+{h}`). Predictors may contain `{horizon}`, or be callables `(horizon)` / `(horizon, hour)`; callables can't be saved to YAML.
+Column suffixes are relative to the row's local date D: `x_d-k` is x on D-k, `x_d+h` is x on D+h as known on D (targets are `{target}_d+{h}`). Predictors may contain `{horizon}`, or be callables `(horizon)` / `(horizon, hour)`, which can't be saved to YAML, or a whole-list function of `ctx`, planned per forecast before any fit and saved by import path (`models/context.py`).
 
 Path-scoped rules in `.claude/rules/` load automatically for models, data, evaluation, docs and tests; they hold the invariants and known issues for each area.
 

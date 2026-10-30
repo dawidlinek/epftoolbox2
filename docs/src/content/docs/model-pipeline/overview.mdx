@@ -114,6 +114,17 @@ Predictors can be specified in four ways:
       Callables cannot be serialized to YAML: `save()` raises a `TypeError` naming the model. If you need to save the pipeline or use `Workflow`, replace callables with `"{horizon}"` string templates.
     </Aside>
   </TabItem>
+  <TabItem label="Function of ctx">
+    A function with one parameter named `ctx` returns the whole list for one forecast, chosen by its horizon, period, day or whether an input is out at the issue time. See [Predictor Functions](/epftoolbox2/model-pipeline/predictor-functions/).
+
+    ```python
+    def by_period(ctx):
+        x = ["price_d-1", "load_forecast_d+{horizon}"]
+        if 6 <= ctx.period <= 20:
+            x.append("generation_solar_forecast_d+{horizon}")
+        return x
+    ```
+  </TabItem>
   <TabItem label="Loop Generation">
     Use list comprehensions for many features:
 
