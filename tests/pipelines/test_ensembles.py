@@ -20,7 +20,15 @@ import yaml
 
 from epftoolbox2 import cli
 from epftoolbox2.ensembles import AverageEnsemble, Ensemble
-from epftoolbox2.evaluators import DMEvaluator, MAEEvaluator, MCSEvaluator, RMSEEvaluator, rMAEEvaluator
+from epftoolbox2.evaluators import (
+    BiasEvaluator,
+    DMEvaluator,
+    EconomicEvaluator,
+    MAEEvaluator,
+    MCSEvaluator,
+    RMSEEvaluator,
+    rMAEEvaluator,
+)
 from epftoolbox2.exporters import CsvExporter, ExcelExporter, TerminalExporter
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import BaseModel, OLSModel
@@ -1124,9 +1132,11 @@ def long_report(tmp_path):
     ).add_evaluator(
         MAEEvaluator(),
         RMSEEvaluator(),
+        BiasEvaluator(),
         rMAEEvaluator("a"),
         DMEvaluator(benchmark="a", reps=20),
         MCSEvaluator(reps=20),
+        EconomicEvaluator(),
     )
     return pipeline, tmp_path
 
@@ -1150,6 +1160,9 @@ def test_every_table_holds_an_ensemble_as_a_model_on_common_keys(long_report):
         assert summary.loc["top2", "forecasts"] == summary.loc["a", "forecasts"]
         assert summary.loc["gappy", "rMAE"] > 0 and np.isfinite(summary.loc["top2", "MCS p"])
         assert summary.loc["gappy", "DM n_forecasts"] == len(gappy)
+        assert np.isfinite(summary.loc["top2", "Bias"]) and summary.loc["c", "Bias"] > summary.loc["gappy", "Bias"]
+        assert np.isfinite(summary.loc["top2", "profit"])
+        assert summary.loc["gappy", "profit days"] > 0
 
         tables = (
             report.by_hour(),
