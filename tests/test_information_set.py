@@ -1,5 +1,6 @@
 """Information availability rules, the pre-fit check and the leakage probe (roadmap item 1)."""
 
+import hashlib
 import warnings
 
 import numpy as np
@@ -17,12 +18,18 @@ from epftoolbox2.information_set import (
     perturb_unknown,
     source_rules,
 )
+from epftoolbox2.data.sources.benchmark import EpftoolboxBenchmarkSource
 from epftoolbox2.data.sources.entsoe import EntsoeSource
-from epftoolbox2.data.transformers import DailyProfileTransformer, DailyStatsTransformer, LagTransformer
+from epftoolbox2.data.transformers import (
+    DailyProfileTransformer,
+    DailyStatsTransformer,
+    LagTransformer,
+    TimezoneTransformer,
+)
 from epftoolbox2.data.sources.open_meteo import OpenMeteoSource
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
-from epftoolbox2.presets import expert_predictors, lear_predictors, profile_columns
+from epftoolbox2.presets import WEEKDAYS, expert_predictors, lear_predictors, profile_columns
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 WARSAW = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Warsaw")
@@ -662,7 +669,7 @@ def test_issue_time_is_converted_to_the_data_zone():
 @pytest.mark.parametrize("issue_time", ["11:45", "12:30", "13:30"])
 def test_violations_use_the_delivery_and_publication_instants_own_offsets(data_zone, issue_time):
     """The pre-fit check's counterpart of test_perturbation_uses_the_delivery_and_publication_instants_own_offsets.
-    On a frame whose zone has no DST (UTC, a benchmark source's fixed offset) checked against Brussels-anchored rules,
+    On a frame whose zone has no DST (UTC, a fixed offset) checked against Brussels-anchored rules,
     each conversion must use the offset at the instant it converts, on every issue day. Converting every delivery and
     publication time with the offsets at noon of the issue day D, and letting an earlier day with the same weekday
     and noon offsets stand for a day just before a switch, misjudged predictors near every switch, both ways. Issued
@@ -809,7 +816,7 @@ def test_profile_slot_names():
 
 
 def test_profile_slot_published_before_the_issue_is_accepted_at_every_period():
-    """False refusal. On the DE benchmark index (Etc/GMT-1, UTC+1 all year) with Brussels rules, `price_h00` on the
+    """False refusal. On a true fixed-offset index (Etc/GMT-1, UTC+1 all year) with Brussels rules, `price_h00` on the
     rows of D is the price at 00:00 on D (23:00Z on D-1: delivered on D in Brussels, published 13:00 on D-1), known
     when the forecast is issued at 11:45 Berlin on D. Judged at the row's own period, the row at 23:00 (22:00Z, which
     is 00:00 CEST on D+1 in summer) reads it as delivered on D+1 and refuses it ("known D 12:00, issued D 10:45")."""
@@ -969,8 +976,8 @@ def test_profile_verdicts_match_the_delivery_each_cell_holds(data_zone, rule_zon
     or 25 rows too, and the repeated autumn slot is its first occurrence, which the transformer copies. A cell is published 13:00 in the rule's zone on
     the day before its delivery day there, so it is unknown at the 11:45 Brussels issue exactly when that comes later;
     the probe must perturb exactly those cells and the check refuse exactly those (predictor, issue day) pairs, at every
-    period. Cape Verde (UTC-1) puts Warsaw's two 02:00s of 2024-10-27 on different delivery days, and Etc/GMT-1 (the
-    benchmark index) moves against Brussels at each switch. Cells the transformers leave NaN (the skipped spring slot,
+    period. Cape Verde (UTC-1) puts Warsaw's two 02:00s of 2024-10-27 on different delivery days, and a true Etc/GMT-1
+    index moves against Brussels at each switch. Cells the transformers leave NaN (the skipped spring slot,
     a day lag onto a skipped hour) hold no delivery and are not compared."""
     start = pd.Timestamp(switch) - pd.Timedelta(days=4)
     index = pd.date_range(start, start + pd.Timedelta(days=9), freq="h", tz=data_zone, inclusive="left")
@@ -1228,9 +1235,9 @@ def test_day_aggregate_verdicts_match_the_latest_delivery_each_cell_holds(data_z
     (DailyStatsTransformer, of `px` and of its day lags, and the day lags of those) hold the latest delivery the cell
     aggregates, on the switch days' 23 or 25 rows too. A cell is known when that delivery's price is (published 13:00 in
     the rule's zone on the day before its delivery day there), so the probe must perturb exactly the cells unknown at
-    the 11:45 Brussels issue, and the check refuse exactly those (predictor, issue day) pairs, at every period. On the
-    benchmark index (Etc/GMT-1) the day's last hour, 22:00Z, is delivered on D+1 in Brussels in summer and on D in
-    winter. Days the transformer leaves NaN (a day lag onto a skipped hour makes a day incomplete) are not compared."""
+    the 11:45 Brussels issue, and the check refuse exactly those (predictor, issue day) pairs, at every period. On a true
+    Etc/GMT-1 index the day's last hour, 22:00Z, is delivered on D+1 in Brussels in summer and on D in winter (the
+    benchmark source's index only labels a wall clock, see its rules below). Days the transformer leaves NaN (a day lag onto a skipped hour makes a day incomplete) are not compared."""
     start = pd.Timestamp(switch) - pd.Timedelta(days=4)
     index = pd.date_range(start, start + pd.Timedelta(days=9), freq="h", tz=data_zone, inclusive="left")
     raw = pd.DataFrame({"px": (index.asi8 // 60_000_000_000).astype(float)}, index=index)  # minutes since the epoch
@@ -1548,6 +1555,93 @@ def test_a_derived_weather_column_follows_the_source_s_run():
 
 
 # ---------------------------------------------------------------------------
+# EpftoolboxBenchmarkSource: its index only labels the files' local wall clock
+# ---------------------------------------------------------------------------
+
+
+def _benchmark_de_june_2016(tmp_path):
+    """A synthetic DE.csv in the epftoolbox format, through the source's real parser, on the index the docs prescribe.
+    Known answer: price = day of month * 100 + hour, so the file's 23:00 is the day's maximum and last value."""
+    wall = pd.date_range("2016-05-01", "2016-08-01", freq="h", inclusive="left")
+    price = wall.day * 100.0 + wall.hour
+    file = pd.DataFrame({"Price": price, "Ampirion Load Forecast": 1.0, "PV+Wind Forecast": 2.0}, index=wall)
+    path = tmp_path / "DE.csv"
+    file.rename_axis("Date").to_csv(path)
+    (tmp_path / "DE.csv.md5").write_text(hashlib.md5(path.read_bytes()).hexdigest())
+    source = EpftoolboxBenchmarkSource("DE", cache_dir=str(tmp_path))
+    fetched = source.fetch(pd.Timestamp("2016-05-01", tz="UTC"), pd.Timestamp("2016-08-01", tz="UTC"))
+    return source, TimezoneTransformer(target_tz=source.index_timezone).transform(fetched)
+
+
+def test_benchmark_rules_read_the_source_s_columns_on_its_own_wall_clock(tmp_path):
+    assert {name: rule.timezone for name, rule in source_rules([EpftoolboxBenchmarkSource("PJM")]).items()} == {
+        "price": "Etc/GMT+5",
+        "load_forecast": "Etc/GMT+5",
+        "zonal_load_forecast": "Etc/GMT+5",
+    }
+    rules = source_rules([EpftoolboxBenchmarkSource("DE", prefix="de")])
+    assert set(rules) == {"de_price", "de_load_forecast_amprion", "de_wind_solar_forecast"}
+    assert {(r.kind, r.days_before, r.timezone) for r in rules.values()} == {("published", 1, "Etc/GMT-1")}
+    assert InformationSet().with_source_rules([EpftoolboxBenchmarkSource("DE")]).resolve("price_d-1").layer == "sources"
+
+
+def test_the_expert_preset_passes_on_the_benchmark_all_summer(tmp_path):
+    """The file's 23:00 on D is 23:00 on D, delivered on D and published on D-1, though the index labels it 22:00Z, which
+    in true time would be the first hour of D+1 in Brussels in summer. So D's day statistics and last slot are known at
+    the 11:45 issue, in the check and in the probe, and the forecast of D+1's values is not."""
+    source, data = _benchmark_de_june_2016(tmp_path)
+    assert data.loc["2016-06-15 23:00", "price"].item() == 1523.0  # the file's own row, on its own clock
+    data = DailyProfileTransformer(columns="price").transform(data)
+    data = DailyStatsTransformer(columns="price", stats=["min", "max", "last"]).transform(data)
+    assert (data.loc["2016-06-15", "price_day_max"] == 1523.0).all()
+    data = LagTransformer(columns="price", lags=[1, 6], freq="day").transform(data)
+    exogenous = ["load_forecast_amprion", "wind_solar_forecast"]
+    data = LagTransformer(columns=exogenous, lags=[-1], freq="day").transform(data)
+    for day in WEEKDAYS:
+        data[f"is_{day}_d+1"] = 0.0
+    info = InformationSet("11:45", "Europe/Brussels").with_source_rules([source])
+    names = [name.format(horizon=1) for name in expert_predictors(exogenous=exogenous)]
+    assert set(names) <= set(data.columns)
+
+    found, unknown = violations(
+        [*names, "price_h23"], info=info, horizon=1, start="2016-06-01", end="2016-07-31", index=data.index
+    )
+    late, _ = violations(
+        ["price_d+1", "price_h23_d+1", "price_day_max_d+1", "load_forecast_amprion_d+2"],
+        info=info,
+        horizon=1,
+        start="2016-06-01",
+        end="2016-07-31",
+        index=data.index,
+    )
+    perturbed, _, unchecked = perturb_unknown(data[[*names, "price_h23"]], "2016-06-15", info)
+
+    assert (found, unknown) == (set(), set())
+    assert _refused_periods(late) == {
+        name: set(range(24))
+        for name in ("price_d+1", "price_h23_d+1", "price_day_max_d+1", "load_forecast_amprion_d+2")
+    }
+    assert unchecked == []
+    run_day = np.asarray(data.index.tz_localize(None).normalize() == pd.Timestamp("2016-06-15"))
+    assert (perturbed.loc[run_day].to_numpy() == data.loc[run_day, perturbed.columns].to_numpy()).all()
+
+
+def test_the_leakage_probe_passes_the_expert_preset_on_the_benchmark(tmp_path):
+    """The same inputs against a real model, with the issue on the files' own clock: no forecast moves."""
+    source, data = _benchmark_de_june_2016(tmp_path)
+    data = DailyStatsTransformer(columns="price", stats=["min", "max", "last"]).transform(data)
+    data = LagTransformer(columns="price", lags=[1, 6], freq="day").transform(data)
+    data = LagTransformer(columns="load_forecast_amprion", lags=[-1], freq="day").transform(data)
+    predictors = expert_predictors(exogenous=("load_forecast_amprion",), weekdays=())
+    info = InformationSet("11:45", source.index_timezone).with_source_rules([source])
+
+    result = leakage_probe(OLSModel(predictors, training_window=20), data, "2016-06-15", info, horizon=1)
+
+    result.assert_ok()
+    assert result.forecasts == 24
+
+
+# ---------------------------------------------------------------------------
 # Pipelines
 # ---------------------------------------------------------------------------
 
@@ -1705,7 +1799,7 @@ def test_as_of_perturbation_ignores_a_rows_own_dst_offset():
 )
 def test_perturbation_uses_the_delivery_and_publication_instants_own_offsets(data_zone, issue_time, run_day):
     """Follow-up to test_perturbation_uses_each_rows_own_offset_near_a_dst_switch. On a frame whose zone has no
-    DST (UTC, a benchmark source's fixed offset) checked against Brussels-anchored rules, the Brussels offset moves
+    DST (UTC, a fixed offset) checked against Brussels-anchored rules, the Brussels offset moves
     at the switch but the data zone's doesn't, so each conversion must use the offset at the instant it converts:
     the shifted delivery instant (for its Brussels calendar day) and the publication instant (back to the data
     zone). Taking both from the row's own, unshifted date misjudged cells near every switch, both ways. Run day

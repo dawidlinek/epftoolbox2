@@ -70,7 +70,7 @@ one calendar day back. There is no built-in default rule for weather columns, a 
 name alone doesn't say whether it's a forecast or an observed value. A `DataPipeline`'s sources refine the
 check: `with_source_rules()` (called automatically by `Workflow`) teaches it about a `CalendarSource(prefix=...)`,
 overrides the default week-ahead rule for an `EntsoeSource`'s own columns, and assigns a rule to exactly the
-columns an `OpenMeteoSource` emits:
+columns an `OpenMeteoSource` or an `EpftoolboxBenchmarkSource` emits:
 
 - An `EntsoeSource` with `"load"` in `type` gets its own `load_forecast_daily_min`/`_max` rule (prefixed the
   same way as its other columns), evaluated in the source's own bound market zone (`EntsoeSource._daily_zone`)
@@ -78,6 +78,9 @@ columns an `OpenMeteoSource` emits:
   neighbouring area combined into another market's `DataPipeline` (e.g. `EntsoeSource("FI", ..., prefix="fi")`
   inside `DataPipeline(timezone="Europe/Warsaw")`) is checked in the market's zone, not Finland's own, matching
   where the value is stamped.
+- An `EpftoolboxBenchmarkSource` gets its rules on the files' own wall clock, its `index_timezone`: `price` published
+  13:00 on D-1 and the two exogenous forecasts 10:00 on D-1. That index only labels the wall clock, one hour off the
+  true instants in summer, so a Brussels rule would read the file's 23:00 on D as 00:00 on D+1 all summer.
 - `weather_cutoff(source.run, f"{delay}h")`, `delay` coming from `publication_delay_hours(source.model)`, known
   `delay` after `source.run`:00 UTC on the issue day itself, unaffected by a leading `_d+k`. A shift after
   the leading `_d+k` moves the day the run is read from: `temperature_2m_d+1_d+1` (a `LagTransformer` with
@@ -216,9 +219,11 @@ the market zone. A key that matches the derived name replaces the source's timin
 rule for the plain column itself lifts.
 
 <Aside type="caution">
-  The day's last slot can be delivered on the next day of the rule's zone. On the DE benchmark index (`Etc/GMT-1`)
-  with Brussels rules, 23:00 is 00:00 CEST on D+1 in summer, so on summer days `price_day_max` of D is published only
-  at 13:00 on D and is refused at every period, like `price_h23`.
+  The day's last slot can be delivered on the next day of the rule's zone. On an index at a true fixed offset
+  (`Etc/GMT-1`) with Brussels rules, 23:00 is 00:00 CEST on D+1 in summer, so on summer days `price_day_max` of D is
+  published only at 13:00 on D and is refused at every period, like `price_h23`. `EpftoolboxBenchmarkSource` is not
+  such a case, although it uses that zone: its 23:00 is 23:00 on D of the files' wall clock, and its rules
+  (`with_source_rules`) say so, so `price_day_max` and `price_h23` pass all year.
 </Aside>
 
 ---

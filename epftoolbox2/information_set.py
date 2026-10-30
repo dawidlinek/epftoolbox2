@@ -283,6 +283,7 @@ def default_rules() -> Dict[str, Availability]:
 
 def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     """Rules for the columns a DataPipeline's sources emit, following their prefixes and column choices."""
+    from .data.sources.benchmark import DATASETS, EpftoolboxBenchmarkSource
     from .data.sources.calendar import CalendarSource
     from .data.sources.entsoe import EntsoeSource
     from .data.sources.open_meteo import OpenMeteoSource
@@ -314,6 +315,19 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             rule = _weather_availability(source)
             for name in _weather_column_names(source):
                 rules[name] = rule
+        elif isinstance(source, EpftoolboxBenchmarkSource):
+            # The files are local wall-clock time, and `index_timezone` only labels that clock (one hour off the true
+            # instants in summer). So a row's delivery day is the day on that same clock: the file's 23:00 on D is
+            # delivered on D, which Brussels rules would read as 00:00 on D+1 all summer.
+            prefix = f"{source.prefix}_" if source.prefix else ""
+            zone = source.index_timezone
+            rules[f"{prefix}price"] = Availability.published(
+                "13:00", 1, timezone=zone, note="day-ahead price of the benchmark files, known the day before delivery"
+            )
+            for name in DATASETS[source.dataset]["exogenous"].values():
+                rules[f"{prefix}{name}"] = Availability.published(
+                    "10:00", 1, timezone=zone, note="day-ahead forecast of the benchmark files, available on d-1"
+                )
     return rules
 
 
@@ -977,7 +991,7 @@ def perturb_unknown(
     # Every zone conversion reads the UTC offsets at the instant it converts (a value's own shifted delivery instant
     # for its delivery day, its publication instant for the way back), not at run_day's noon or at the row's own
     # date. They differ across a DST switch whenever the data zone and a rule's zone don't switch together, e.g. a
-    # UTC or fixed-offset (benchmark source) index against Europe/Brussels rules.
+    # UTC or fixed-offset index against Europe/Brussels rules.
     ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index), naive=index.tz is None)
     issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), information_set.issue_timezone, ctx)
     ctx = replace(ctx, issue_minute=float(issue[0]))
