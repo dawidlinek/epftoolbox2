@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import tempfile
 import os
 
-from epftoolbox2.evaluators import BiasEvaluator, MAEEvaluator, RMSEEvaluator
+from epftoolbox2.evaluators import BiasEvaluator, DMEvaluator, MAEEvaluator, RMSEEvaluator
 from epftoolbox2.results.report import EvaluationReport
 from epftoolbox2.results.ref import ModelResultRef
 from epftoolbox2.pipelines.model_pipeline import ModelPipeline
@@ -140,6 +140,12 @@ class TestModelPipeline:
         pipeline = ModelPipeline()
         assert pipeline.add_evaluator(mae, rmse).add_evaluator(bias) is pipeline
         assert pipeline.evaluators == [mae, rmse, bias]
+
+    def test_a_mistyped_benchmark_fails_before_any_model_runs(self, sample_data, mock_model):
+        pipeline = ModelPipeline().add_model(mock_model).add_evaluator(DMEvaluator("nope"))
+        with pytest.raises(ValueError, match="unknown benchmark 'nope'"):
+            pipeline.run(sample_data, test_start="2023-01-02", test_end="2023-01-03")
+        mock_model.run.assert_not_called()
 
     def test_add_exporter_returns_self(self):
         pipeline = ModelPipeline()

@@ -4,7 +4,7 @@ from typing import Dict, Mapping
 
 import pandas as pd
 
-from ._compare import compare_set, confidence_set, panel_of
+from ._compare import MIN_VERDICT_DAYS, compare_set, confidence_set, is_grouped, is_per_hour, panel_of, warn_if_short
 from .base import EvaluatorResult, SetEvaluator
 
 _MIN_MODELS = 3
@@ -17,7 +17,8 @@ class MCSEvaluator(SetEvaluator):
     The loss is the daily mean absolute error, with the daily losses of several horizons averaged per run date. Here the
     model set is the comparison, so one model with few forecasts shrinks the sample of all: check `n_days`, or use
     `report.mcs()`, which names the models that limited the keys and takes a subset. Needs at least three models; with
-    fewer the columns are NaN, with a warning.
+    fewer the columns are NaN, with a warning. `in MCS` is a verdict, so it is empty per hour (the p-values are a heatmap
+    there) and below 30 days. `summary()` warns below 182 days.
 
     Args:
         alpha: Size of the set (0.10 gives the 90 % set).
@@ -69,9 +70,11 @@ class MCSEvaluator(SetEvaluator):
         except ValueError as exc:
             warnings.warn(f"No model confidence set: {exc}. The MCS columns are NaN here.", stacklevel=2)
             return out
-        included = result.included()
-        for name, p, inside in zip(names, result.p_values, included):
-            out[name].update({"p": float(p), "in": bool(inside)})
+        judge = compared.daily.n_days >= MIN_VERDICT_DAYS and not is_per_hour(model_dfs)
+        for name, p, inside in zip(names, result.p_values, result.included()):
+            out[name].update({"p": float(p), "in": bool(inside) if judge else float("nan")})
+        if not is_grouped(model_dfs):
+            warn_if_short(compared.daily.n_days)
         return out
 
 

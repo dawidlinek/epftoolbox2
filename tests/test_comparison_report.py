@@ -11,12 +11,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.evaluators import DMEvaluator, MAEEvaluator, stats
+from epftoolbox2.evaluators import DMEvaluator, EconomicEvaluator, Evaluator, MAEEvaluator, MCSEvaluator, stats
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results import ModelResultRef
 from epftoolbox2.results.report import EvaluationReport
 from tests.forecast_records import KEYS, daily_losses, daily_sums, forecast_records, shared_errors
+from tests.synthetic import PREDICTORS, make_market_data
 
-pytestmark = pytest.mark.filterwarnings("ignore:The comparison rests on")
+pytestmark = [
+    pytest.mark.filterwarnings("ignore:The comparison rests on"),
+    pytest.mark.filterwarnings("ignore:The model confidence set needs"),
+]
 
 YEAR = pd.date_range("2023-01-01", periods=365, freq="D")
 SHORT = pd.date_range("2024-01-01", periods=30, freq="D")
@@ -168,6 +174,99 @@ def test_a_pair_without_shared_keys_is_nan_with_n_zero():
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# Too little data for a claim
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def test_no_interval_when_the_days_fit_in_one_block():
+    """Each circular block is the whole series then: every resample holds all the days, and the interval is a point."""
+    table = EvaluationReport(study(SHORT[:6]), []).tests(benchmark="base", reps=50)
+    assert table["ci_low"].isna().all() and table["ci_high"].isna().all()
+    assert table["ratio"].notna().all()
+
+    larger = EvaluationReport(study(SHORT[:8]), []).tests(benchmark="base", reps=50)
+    assert (larger["ci_low"] < larger["ci_high"]).all()
+
+
+def test_no_verdict_below_thirty_days():
+    results = {
+        "base": forecast_records(1, SHORT[:29], noise=9.0),
+        "better": forecast_records(2, SHORT[:29], noise=1.0),
+    }
+    row = EvaluationReport(results, []).tests(benchmark="base", reps=50).iloc[0]
+    assert row["p_holm"] < 0.05 and row["verdict"] is None
+    results = {
+        "base": forecast_records(1, SHORT[:30], noise=9.0),
+        "better": forecast_records(2, SHORT[:30], noise=1.0),
+    }
+    assert EvaluationReport(results, []).tests(benchmark="base", reps=50).iloc[0]["verdict"] == "better"
+
+
+def test_no_rank_uncertainty_when_the_days_fit_in_one_block():
+    with pytest.warns(UserWarning, match="one bootstrap block"):
+        table = EvaluationReport(study(SHORT[:6]), []).ranks(reps=50)
+    assert table["p_best"].isna().all() and table["rank"].isna().all() and table["mae"].notna().all()
+
+
+def test_no_sets_below_thirty_days():
+    table = EvaluationReport(study(SHORT[:20]), []).mcs(reps=50)
+    assert table["p_value"].notna().all() and table["in_90"].isna().all() and table["in_75"].isna().all()
+
+
+def test_the_daily_test_and_the_ratio_can_disagree_and_then_there_is_no_verdict():
+    """Hand-made: on every tenth day (one period) the model wins by far; on the rest (24 periods) it loses a little."""
+    run_dates = pd.date_range("2023-01-01", periods=400, freq="D")
+    model, base = [], []
+    for i, day in enumerate(run_dates):
+        short = i % 10 == 0
+        wave = 1 + 0.1 * np.sin(i)
+        for hour in range(1 if short else 24):
+            key = {
+                "run_date": day.date().isoformat(),
+                "target_date": (day + pd.Timedelta(days=1)).date().isoformat(),
+                "hour": hour,
+                "horizon": 1,
+                "actual": 50.0,
+            }
+            model.append(dict(key, prediction=50.0 + (0.5 * wave if short else 10.5 * wave)))
+            base.append(dict(key, prediction=50.0 + (40.0 * wave if short else 10.0 * wave)))
+    with pytest.warns(UserWarning, match="only part of their periods"):
+        row = EvaluationReport({"model": model, "base": base}, []).tests(benchmark="base", reps=100).iloc[0]
+
+    assert row["statistic"] > 0 and row["ratio"] > 1 and row["ci_low"] > 1 and row["p_value"] < 0.05
+    assert row["verdict"] is None
+
+
+def test_partial_days_are_flagged_in_every_comparison_table(planted):
+    """Whole days have 23, 24 or 25 periods in common; one hour missing every day still reads as whole, 3 do not."""
+    results = {
+        "base": forecast_records(1, YEAR),
+        "other": forecast_records(2, YEAR),
+        "holes": forecast_records(3, YEAR, drop=lambda r: r["hour"] in (7, 8, 9) and r["day_in_test"] < 50),
+    }
+    report = EvaluationReport(results, [])
+    with pytest.warns(UserWarning, match="only part of their periods"):
+        assert report.tests(benchmark="base", reps=50, interval=None).attrs["partial_days"] == {"holes": 50}
+    with pytest.warns(UserWarning, match="only part of their periods"):
+        assert report.compare("holes", "base").attrs["partial_days"] == {"holes": 50}
+    with pytest.warns(UserWarning, match="only part of their periods"):
+        assert report.mcs(reps=50).attrs["partial_days"] == {"the set": 50}
+    with pytest.warns(UserWarning, match="only part of their periods"):
+        assert report.ranks(reps=50).attrs["partial_days"] == {"the set": 50}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert report.leaderboard(benchmark="base").attrs["partial_days"] == {"holes": 50}
+    assert EvaluationReport(study(), []).tests(benchmark="base", reps=50).attrs["partial_days"] == {}
+
+
+def test_per_hour_rows_are_not_partial_days(full_year):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        table = full_year.tests(benchmark="base", by="hour", interval=None)
+    assert table.attrs["partial_days"] == {}
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # The table of tests()
 # ---------------------------------------------------------------------------------------------------------------------
 
@@ -221,6 +320,12 @@ def test_variance_plain_is_the_plain_test(full_year):
     b = (results["base"]["prediction"] - results["base"]["actual"]).abs().to_numpy().reshape(-1, 24).mean(axis=1)
     assert table.loc["better", "p_value"] == pytest.approx(stats.dm_test(a, b, variance="plain").p_value, rel=1e-9)
     assert table["ci_low"].isna().all()
+
+
+def test_mde_is_the_hac_figure_whatever_the_variance_of_the_test(full_year):
+    plain = full_year.tests(benchmark="base", variance="plain", interval=None)
+    hac = full_year.tests(benchmark="base", interval=None)
+    assert plain["mde"].tolist() == hac["mde"].tolist()
 
 
 def test_the_benchmark_comes_from_the_dm_evaluator_or_it_is_an_error():
@@ -560,6 +665,13 @@ def test_ranks_on_the_keys_of_the_set(planted):
     assert list(table["rank"]) == [1, 2, 3]
 
 
+def test_ranks_of_identical_models_warn():
+    records = forecast_records(1, YEAR)
+    results = {"a": records, "copy": records, "b": forecast_records(2, YEAR)}
+    with pytest.warns(UserWarning, match="'a' and 'copy' have the same losses"):
+        EvaluationReport(results, []).ranks(reps=50)
+
+
 def test_ranks_without_the_limiting_model(planted):
     _, report = planted
     table = report.ranks(reps=100, models=["base", "whole"])
@@ -644,6 +756,16 @@ def test_leaderboard_with_a_benchmark(planted):
     assert reference["ratio"] == 1.0 and reference["n_common"] == 365 * 24 and np.isnan(reference["p_value"])
 
 
+def test_leaderboard_sees_different_samples_of_the_same_size():
+    results = {
+        "a": forecast_records(1, YEAR, drop=lambda r: r["day_in_test"] < 10),
+        "b": forecast_records(2, YEAR, drop=lambda r: r["day_in_test"] >= 355),
+    }
+    with pytest.warns(UserWarning, match="different forecast sets"):
+        table = EvaluationReport(results, []).leaderboard()
+    assert table["n_forecasts"].nunique() == 1
+
+
 def test_leaderboard_without_a_benchmark(full_year):
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
@@ -705,3 +827,74 @@ def test_a_table_cannot_change_what_the_next_table_reads(tmp_path):
     frames = report._model_frames()
     frames["base"]["extra"] = 1.0
     assert "extra" not in report._model_frames()["base"].columns
+
+
+def test_an_evaluator_editing_its_frame_in_place_does_not_change_the_next_table(tmp_path):
+    class Editing(Evaluator):
+        name = "edits"
+
+        def compute(self, df, **kwargs):
+            df["prediction"] -= 1000.0
+            df["prediction"].to_numpy()[:] = 0.0
+            return 0.0
+
+    report = jsonl_report(tmp_path, study(SHORT))
+    report.evaluators = [MAEEvaluator()]
+    before = report.summary()
+
+    report.evaluators = [Editing()]
+    report.summary()
+
+    report.evaluators = [MAEEvaluator()]
+    pd.testing.assert_frame_equal(report.summary(), before, check_exact=True)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Real runs over the clock changes: what a model run writes, not what a test makes up
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def real_run(monkeypatch, start: str, test_start: str, test_end: str) -> EvaluationReport:
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    data = make_market_data(start=start, days=75, noise=5.0, seed=1)
+    pipeline = (
+        ModelPipeline()
+        .add_model(OLSModel(PREDICTORS, training_window=30, name="base"))
+        .add_model(OLSModel(PREDICTORS, training_window=20, name="short"))
+        .add_model(OLSModel(PREDICTORS + ["price_d-1"], training_window=30, name="lag"))
+        .add_evaluator(MAEEvaluator(), DMEvaluator("base", reps=20), MCSEvaluator(reps=20), EconomicEvaluator())
+    )
+    return pipeline.run(data, test_start=test_start, test_end=test_end, target="price", horizon=2)
+
+
+@pytest.mark.parametrize(
+    "start, test_start, test_end, switch_day",
+    [
+        ("2023-02-01", "2023-03-24", "2023-03-29", "2023-03-26"),
+        ("2023-09-01", "2023-10-26", "2023-10-31", "2023-10-29"),
+    ],
+    ids=["spring", "autumn"],
+)
+def test_a_real_run_goes_through_every_table(monkeypatch, start, test_start, test_end, switch_day):
+    report = real_run(monkeypatch, start, test_start, test_end)
+    details = dict(report.iter_details())
+
+    table = report.tests(reps=20, horizon=1).set_index("model")
+    errors = shared_errors(details["short"].to_dict("records"), details["base"].to_dict("records"), horizon=1)
+    # On the switch day the hour-2 forecast has no finite actual, or no row at all.
+    assert 2 not in set(errors[errors["target_date"] == switch_day]["hour"])
+    assert table.loc["short", "n_forecasts"] == len(errors)
+    assert table.loc["short", "n_days"] == errors["run_date"].nunique()
+    assert table.loc["short", "ratio"] == pytest.approx(errors["a"].mean() / errors["b"].mean(), rel=1e-12)
+    daily = daily_losses(errors)
+    assert table.loc["short", "statistic"] == pytest.approx(stats.dm_test(daily["a"], daily["b"]).statistic, rel=1e-10)
+    assert table.attrs["partial_days"] == {}
+
+    # The days around the switch are whole days to the battery: the switch hour is the only hour a day may lack.
+    by_horizon = report.by_horizon()
+    assert (by_horizon[by_horizon["horizon"] == 1]["profit days"] == 6).all()
+    assert by_horizon["profit"].notna().all()
+    # Each target day once: horizons 1 and 2 of 6 run days reach 7 target days.
+    assert (report.summary()["profit days"] == 7).all()
+    report.compute_all()

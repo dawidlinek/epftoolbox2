@@ -24,6 +24,15 @@ from .base import FORECAST_KEYS
 _ACTUAL_TOLERANCE = 1e-9
 # How many sets of bootstrap indices stay in memory. One set is `reps x n` integers (11.7 MB at 4000 x 365).
 _INDEX_SETS = 4
+# Periods of a whole local day; a day with any other number of shared periods is a partial one.
+_WHOLE_DAY_PERIODS = (23, 24, 25, 92, 96, 100)
+# Below this many days nothing here gives a verdict, whatever its p-value: the normal approximation of the DM test
+# rejects a true null 9 % of the time at 30 days, 21 % at 7 and 35 % at 3.
+MIN_VERDICT_DAYS = 30
+# Test lengths behind the messages of the comparison tables: below the first a comparison says very little, and below
+# the second it lacks a whole year of seasons.
+SHORT_TEST_DAYS = 182
+FULL_TEST_DAYS = 365
 
 
 class ModelFrames(dict):
@@ -52,6 +61,11 @@ def panel_of(model_dfs: Mapping[str, pd.DataFrame]) -> "LossPanel":
 def is_per_hour(model_dfs: Mapping[str, pd.DataFrame]) -> bool:
     """Whether this group is one period of the day: its comparisons are a heatmap, never a verdict."""
     return "hour" in getattr(model_dfs, "group_keys", ())
+
+
+def is_grouped(model_dfs: Mapping[str, pd.DataFrame]) -> bool:
+    """Whether this is one group of a breakdown, which is short by nature, rather than the whole test."""
+    return bool(getattr(model_dfs, "group_keys", ()))
 
 
 class LossPanel:
@@ -178,16 +192,19 @@ class LossPanel:
             day_sum = np.bincount(day, weights=self.errors[rows, self._column[model]], minlength=len(count))[present]
             losses[:, i] = np.bincount(run_position, weights=day_sum / count[present]) / horizons_per_run
             sums[:, i] = np.bincount(run_position, weights=day_sum)
-        return DailyLosses(losses=losses, sums=sums, n_forecasts=len(rows))
+        partial = int(np.isin(count[present], _WHOLE_DAY_PERIODS, invert=True).sum())
+        return DailyLosses(losses=losses, sums=sums, n_forecasts=len(rows), partial_days=partial)
 
 
 @dataclass(frozen=True)
 class DailyLosses:
-    """`losses` and `sums` are days x models. `n_forecasts` is the number of keys behind them, for each model."""
+    """`losses` and `sums` are days x models. `n_forecasts` is the number of keys behind them, for each model, and
+    `partial_days` how many (run_date, horizon) among them hold only part of a day."""
 
     losses: np.ndarray
     sums: np.ndarray
     n_forecasts: int
+    partial_days: int = 0
 
     @property
     def n_days(self) -> int:
@@ -236,6 +253,7 @@ class PairComparison:
     statistic: float
     p_value: float
     mde: float
+    partial_days: int = 0
 
 
 def compare_pair(
@@ -254,7 +272,8 @@ def compare_pair(
 
     `mae` and `mae_benchmark` are forecast-weighted and `ratio = mae / mae_benchmark`. The interval resamples daily error
     sums, so it agrees with that ratio on 23 and 25-hour days. The DM test takes daily mean losses. With 24 periods on
-    every day the two are the same thing up to a factor.
+    every day the two are the same thing up to a factor. With days of very different lengths they can disagree: see
+    `verdict`. There is no interval when the days fit in one block: every resample would hold all of them.
     """
     shared = panel.common(rows, (model, benchmark))
     nan = float("nan")
@@ -276,7 +295,7 @@ def compare_pair(
         statistic, p_value = result.statistic, result.p_value
         if mae_benchmark > 0:
             mde = stats.minimum_detectable_effect(loss_model, loss_benchmark, lag=lag)
-    if n_days >= 2 and interval is not None and mae_benchmark > 0:
+    if n_days > block and interval is not None and mae_benchmark > 0:
         with np.errstate(divide="ignore", invalid="ignore"):  # a sample of days on which the benchmark is exact
             found = stats.ratio_interval(
                 daily.sums[:, 0],
@@ -296,6 +315,7 @@ def compare_pair(
         statistic=statistic,
         p_value=p_value,
         mde=mde,
+        partial_days=daily.partial_days,
     )
 
 
@@ -305,13 +325,40 @@ def adjust(p_values: Sequence[float], correction: Optional[str]) -> np.ndarray:
     return stats.holm(p) if correction == "holm" else np.full(p.shape, np.nan)
 
 
-def verdict(statistic: float, p_value: float, alpha: float) -> Optional[str]:
-    """`better`, `worse` or `no difference` for the model against its benchmark; None when nothing was tested."""
-    if math.isnan(p_value):
+def verdict(pair: PairComparison, p_value: float, alpha: float) -> Optional[str]:
+    """`better`, `worse` or `no difference` for a model against its benchmark, `p_value` being the one to read at `alpha`.
+
+    None when nothing was tested, on fewer than `MIN_VERDICT_DAYS` days, and when the test and the ratio point in opposite
+    directions. The test weighs every day the same and the ratio every forecast, so that takes days of very different
+    lengths, and a row must not say `better` next to an interval above 1.
+    """
+    if math.isnan(p_value) or pair.n_days < MIN_VERDICT_DAYS:
         return None
     if p_value >= alpha:
         return "no difference"
-    return "better" if statistic > 0 else "worse"
+    better = pair.statistic > 0
+    if better != (pair.ratio < 1):
+        return None
+    return "better" if better else "worse"
+
+
+def short_test_message(n_days: int) -> Optional[str]:
+    """What to say about a comparison of `n_days` days; None for at least a year."""
+    if n_days >= FULL_TEST_DAYS:
+        return None
+    return (
+        f"The comparison rests on {n_days} days, less than a year: it does not see every season, and even one test year "
+        "only resolves differences of about 5 % of the MAE."
+    )
+
+
+def warn_if_short(n_days: int, stacklevel: int = 2) -> None:
+    """Warn on a very short comparison, for a table that has no `attrs` to leave a note in."""
+    if n_days < SHORT_TEST_DAYS:
+        warnings.warn(
+            f"{short_test_message(n_days)} Below {SHORT_TEST_DAYS} days read it as indicative only.",
+            stacklevel=stacklevel + 1,
+        )
 
 
 @dataclass(frozen=True)

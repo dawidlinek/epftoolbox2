@@ -1,5 +1,7 @@
 """BiasEvaluator, DMEvaluator and MCSEvaluator in the report's tables."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,8 +9,6 @@ import pytest
 from epftoolbox2.evaluators import BiasEvaluator, DMEvaluator, MCSEvaluator, stats
 from epftoolbox2.results.report import EvaluationReport
 from tests.forecast_records import forecast_records, shared_errors
-
-pytestmark = pytest.mark.filterwarnings("ignore:The comparison rests on")
 
 RUN_DATES = pd.date_range("2023-12-01", periods=70, freq="D")
 
@@ -42,6 +42,7 @@ def test_dm_columns_in_the_summary():
         "DM ci_high",
         "DM p",
         "DM p_holm",
+        "DM m",
         "DM verdict",
         "DM n_days",
         "DM n_forecasts",
@@ -50,6 +51,7 @@ def test_dm_columns_in_the_summary():
     assert table.loc["base", "DM verdict"] is None
     assert table.loc["better", "DM verdict"] == "better"
     assert table.loc["better", "DM n_days"] == 70 and table.loc["better", "DM n_forecasts"] == 70 * 24
+    assert (table["DM m"] == 2).all()
     np.testing.assert_allclose(
         table.loc[["better", "same"], "DM p_holm"], stats.holm(table.loc[["better", "same"], "DM p"].to_numpy())
     )
@@ -99,6 +101,31 @@ def test_per_hour_tables_give_no_verdict(method):
     assert table["DM verdict"].isna().all()
     assert table.query("model == 'better'")["DM p"].notna().all()
     assert (table.query("model == 'better'")["DM n_days"] == 70).all()
+
+
+def test_a_small_group_has_no_verdict_and_no_collapsed_interval():
+    """A test window that ends on 3 January gives the new year a group of a few days. Holm cannot save that: the normal
+    approximation rejects a true null a third of the time at this length, and one block covers all the days."""
+    run_dates = pd.date_range("2023-11-15", "2024-01-02", freq="D")
+    table = EvaluationReport(study(run_dates=run_dates), [DMEvaluator("base", reps=50)]).by_year()
+    days = table[(table["year"] == 2024) & (table["model"] == "better")].iloc[0]
+
+    assert days["DM n_days"] == 3
+    assert days["DM verdict"] is None
+    assert np.isnan(days["DM ci_low"]) and np.isnan(days["DM ci_high"])
+    assert np.isfinite(days["DM ratio"]) and np.isfinite(days["DM p"])
+    whole = table[(table["year"] == 2023) & (table["model"] == "better")].iloc[0]
+    assert whole["DM n_days"] == 46 and whole["DM verdict"] == "better" and whole["DM ci_low"] < whole["DM ci_high"]
+
+
+def test_the_summary_warns_on_a_short_test_but_the_breakdowns_do_not():
+    report = EvaluationReport(study(), [DMEvaluator("base", reps=20)])
+    with pytest.warns(UserWarning, match="70 days"):
+        report.summary()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        report.by_year()
+        report.by_hour()
 
 
 def test_dm_without_the_benchmark_warns_and_gives_nan():
@@ -181,6 +208,22 @@ def test_mcs_on_the_keys_of_the_group():
     results["better"] = forecast_records(2, RUN_DATES, noise=4.0, drop=lambda r: r["day_in_test"] < 10)
     table = EvaluationReport(results, [MCSEvaluator(reps=20)]).summary()
     assert (table["MCS n_days"] == 60).all() and (table["MCS n_forecasts"] == 60 * 24).all()
+
+
+def test_mcs_gives_no_set_per_hour_or_on_a_small_group():
+    report = EvaluationReport(study(), [MCSEvaluator(reps=20)])
+    per_hour = report.by_hour()
+    assert per_hour["MCS p"].notna().all() and per_hour["in MCS"].isna().all()
+
+    run_dates = pd.date_range("2023-12-10", "2024-01-20", freq="D")
+    by_year = EvaluationReport(study(run_dates=run_dates), [MCSEvaluator(reps=20)]).by_year()
+    assert by_year[by_year["year"] == 2023]["MCS n_days"].iloc[0] < 30
+    assert by_year[by_year["year"] == 2023]["in MCS"].isna().all()
+
+
+def test_the_summary_warns_on_a_short_set():
+    with pytest.warns(UserWarning, match="70 days"):
+        EvaluationReport(study(), [MCSEvaluator(reps=20)]).summary()
 
 
 @pytest.mark.parametrize("kwargs", [{"alpha": 0}, {"alpha": 1.5}, {"statistic": "x"}, {"seed": None}])

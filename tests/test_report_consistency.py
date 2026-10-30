@@ -139,7 +139,7 @@ def test_summary_frames_hold_every_forecast_of_the_model():
     assert len(model_dfs["model"]) == len(fake_results(2, skip_every=7))
 
 
-SET_LEVEL = pytest.mark.filterwarnings("ignore:The model confidence set needs")
+SET_LEVEL = pytest.mark.filterwarnings("ignore:The model confidence set needs", "ignore:The comparison rests on")
 
 
 @pytest.fixture(scope="module")
@@ -157,19 +157,22 @@ def set_level_report():
     return EvaluationReport(results, evaluators)
 
 
+@pytest.fixture(scope="module")
+def set_level_tables(set_level_report):
+    return set_level_report.compute_all()
+
+
 @SET_LEVEL
-def test_summary_matches_with_set_level_evaluators(set_level_report):
-    pd.testing.assert_frame_equal(
-        set_level_report.compute_all()["summary"], set_level_report.summary(), check_exact=True
-    )
+def test_summary_matches_with_set_level_evaluators(set_level_report, set_level_tables):
+    pd.testing.assert_frame_equal(set_level_tables["summary"], set_level_report.summary(), check_exact=True)
 
 
 @SET_LEVEL
 @pytest.mark.parametrize("grouping, method", GROUPINGS.items())
-def test_grouped_tables_match_with_set_level_evaluators(set_level_report, grouping, method):
+def test_grouped_tables_match_with_set_level_evaluators(set_level_report, set_level_tables, grouping, method):
     from_method = getattr(set_level_report, method)()
     assert {"DM ratio", "DM p_holm", "MCS p", "in MCS", "profit", "profit % of perfect"} <= set(from_method.columns)
-    pd.testing.assert_frame_equal(set_level_report.compute_all()[grouping], from_method, check_exact=True)
+    pd.testing.assert_frame_equal(set_level_tables[grouping], from_method, check_exact=True)
 
 
 @SET_LEVEL

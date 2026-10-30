@@ -9,6 +9,8 @@ import pandas as pd
 
 from ..evaluators import stats
 from ..evaluators._compare import (
+    MIN_VERDICT_DAYS,
+    SHORT_TEST_DAYS,
     LossPanel,
     ModelFrames,
     PairComparison,
@@ -17,9 +19,10 @@ from ..evaluators._compare import (
     compare_pair,
     compare_set,
     confidence_set,
+    short_test_message,
     verdict,
 )
-from ..evaluators.base import FORECAST_KEYS, Evaluator
+from ..evaluators.base import FORECAST_KEYS, Evaluator, SetEvaluator
 from ..evaluators.dm import DMEvaluator, check_test_settings
 from ..evaluators.mcs import check_mcs_settings
 from ..logging import get_logger
@@ -48,10 +51,6 @@ RECORD_ORDER = ("run_date", "target_date", "horizon", "hour", "prediction", "act
 # The columns of `summary()` and of the grouped tables that no evaluator wrote.
 _TABLE_KEYS = {"model", "forecasts", *(key for _, keys in GROUP_CONFIGS for key in keys)}
 
-# Test lengths behind the warnings of the comparison tables: below the first a comparison says very little, and below
-# the second it lacks a whole year of seasons.
-_SHORT_TEST_DAYS = 182
-_FULL_TEST_DAYS = 365
 # Two-sided size of the `verdict` of `tests()`.
 _TEST_ALPHA = 0.05
 
@@ -135,8 +134,10 @@ class EvaluationReport:
         One row per (model, horizon): `model, benchmark, horizon, n_days, n_forecasts, mae, mae_benchmark, ratio, ci_low,
         ci_high, statistic, p_value, p_holm, m, mde, verdict`. A positive statistic means the model is better. `ratio` is
         `mae / mae_benchmark`, both forecast-weighted on the pair's keys, and `mde` the difference (a share of
-        `mae_benchmark`) this test length would likely detect. Holm runs over the `m` models tested at that horizon, and
-        `verdict` reads `p_holm` at 5 %. `df.attrs` holds the settings.
+        `mae_benchmark`) this test length would likely detect, by the Newey-West variance whatever `variance` is. Holm runs
+        over the `m` models tested at that horizon, and `verdict` reads `p_holm` at 5 %. `verdict` is empty below 30 days and
+        when the test and the ratio point in opposite ways, the interval when the days fit in one block. `df.attrs` holds
+        the settings, and `partial_days`: the days per model with only part of their periods in common, with a warning.
 
         Args:
             benchmark: The reference model; by default the benchmark of the report's `DMEvaluator`.
@@ -154,7 +155,7 @@ class EvaluationReport:
 
         Warns when a comparison has fewer than 182 days; below 365 days `df.attrs["note"]` says so.
         """
-        check_test_settings(variance, lag, correction, seed)
+        check_test_settings(variance, lag, correction, seed, interval)
         if by not in (None, "hour"):
             raise ValueError(f"by must be None or 'hour', got {by!r}")
         panel = self._panel()
@@ -163,6 +164,7 @@ class EvaluationReport:
         settings = dict(variance=variance, lag=lag, interval=interval, block=block, reps=reps, seed=seed)
 
         rows: List[Dict[str, Any]] = []
+        partial: Dict[str, int] = {}
         for label, keys in self._horizon_slices(panel, horizon, each_horizon=True):
             if by == "hour":
                 hours = panel.hour[keys]
@@ -178,10 +180,9 @@ class EvaluationReport:
             for model, pair, adjusted in zip(models, pairs, p_holm):
                 row = _pair_row(model, benchmark, label, pair)
                 judged = float(adjusted) if correction == "holm" else pair.p_value
-                row.update(
-                    p_holm=float(adjusted), m=m, mde=pair.mde, verdict=verdict(pair.statistic, judged, _TEST_ALPHA)
-                )
+                row.update(p_holm=float(adjusted), m=m, mde=pair.mde, verdict=verdict(pair, judged, _TEST_ALPHA))
                 rows.append(row)
+                partial[model] = partial.get(model, 0) + pair.partial_days
 
         columns = list(_PAIR_COLUMNS)
         if by == "hour":
@@ -202,6 +203,7 @@ class EvaluationReport:
         if len(table):
             # Per hour the switch hour has a day less than the others; the length of the test is what counts.
             _flag_test_length(table, int(table["n_days"].max() if by == "hour" else table["n_days"].min()))
+        _flag_partial_days(table, partial)
         return table
 
     def mcs(
@@ -218,9 +220,9 @@ class EvaluationReport:
 
         One row per model, by MAE: `model, n_days, n_forecasts, mae, ratio_to_best, p_value, in_90, in_75`, with `in_90`
         the 90 % set (p-value above 0.10) and `in_75` the 75 % set (above 0.25). An `alpha` other than those adds its own
-        column (`alpha=0.05`: `in_95`). The comparison here is the whole set of models, so everything is on the keys all of
-        them hold: `df.attrs` holds `n_days`, `n_forecasts` and `limited_by`, the models that lack forecasts the others
-        have, with how many. If one model cuts the sample, leave it out with `models`.
+        column (`alpha=0.05`: `in_95`). Below 30 days the sets stay empty. The comparison here is the whole set of models,
+        so everything is on the keys all of them hold: `df.attrs` holds `n_days`, `n_forecasts` and `limited_by`, the models
+        that lack forecasts the others have, with how many. If one model cuts the sample, leave it out with `models`.
 
         Args:
             alpha: Size of the set the result is built for.
@@ -252,7 +254,8 @@ class EvaluationReport:
         else:
             result = confidence_set(compared, alpha, statistic, block, reps, seed)
             p_values = result.p_values
-            included = {_set_column(level): result.included(level) for level in levels}
+            if daily.n_days >= MIN_VERDICT_DAYS:
+                included = {_set_column(level): result.included(level) for level in levels}
         mae = daily.mae()
         best = np.nanmin(mae) if np.isfinite(mae).any() else np.nan
         table = pd.DataFrame(
@@ -282,7 +285,8 @@ class EvaluationReport:
 
         One row per model, by rank: `model, n_days, n_forecasts, mae, rank, p_best, rank_low, rank_high`. Days are resampled
         in weekly blocks and the models ranked in each sample. As in `mcs()`, everything is on the keys all the models hold
-        (`df.attrs` holds `n_days`, `n_forecasts`, `limited_by`), and `rank` is by the mean daily loss.
+        (`df.attrs` holds `n_days`, `n_forecasts`, `limited_by`), and `rank` is by the mean daily loss. Models with the same
+        losses on every day are ranked by their order in the report, with a warning.
 
         Args:
             block: Block length of the bootstrap, in days.
@@ -301,7 +305,14 @@ class EvaluationReport:
         columns: Dict[str, Any] = dict.fromkeys(("rank", "p_best", "rank_low", "rank_high"), np.nan)
         if daily.n_days < 2:
             warnings.warn(_too_few_days(compared), stacklevel=2)
+        elif daily.n_days <= block:
+            warnings.warn(
+                f"{daily.n_days} days fit in one bootstrap block of {block}: every resample would hold all of them, so "
+                "there is no rank uncertainty to report and its columns are NaN.",
+                stacklevel=2,
+            )
         else:
+            _warn_on_identical_losses(daily.losses, names)
             found = stats.rank_bootstrap(daily.losses, block=block, reps=reps, seed=seed, level=level)
             columns = {
                 "rank": found.rank,
@@ -377,6 +388,7 @@ class EvaluationReport:
             ),
         )
         _flag_test_length(table, hac.n_days)
+        _flag_partial_days(table, {a: hac.partial_days})
         return table
 
     def leaderboard(self, benchmark: Optional[str] = None, horizon: Union[int, str, None] = None) -> pd.DataFrame:
@@ -401,7 +413,8 @@ class EvaluationReport:
             daily = panel.daily(own, (model,))
             mae = float(daily.mae()[0])
             rows.append({"model": model, "n_forecasts": len(own), "MAE": mae, "n_days": daily.n_days})
-        if len({row["n_forecasts"] for row in rows}) > 1:
+        held = ~np.isnan(panel.errors[keys])
+        if (held != held[:, :1]).any():
             warnings.warn(
                 "These models have different forecast sets, so their MAEs are on different samples. The ratio "
                 "columns are on the keys of each pair; see report.forecast_counts().",
@@ -411,6 +424,7 @@ class EvaluationReport:
             others = [row for row in rows if row["model"] != benchmark]
             pairs = [compare_pair(panel, row["model"], benchmark, keys) for row in others]
             p_holm = adjust([pair.p_value for pair in pairs], "holm")
+            partial = {row["model"]: pair.partial_days for row, pair in zip(others, pairs)}
             for row, pair, adjusted in zip(others, pairs, p_holm):
                 row.update(
                     n_days=pair.n_days,
@@ -430,12 +444,28 @@ class EvaluationReport:
         table.attrs["benchmark"] = benchmark
         if len(table):
             _flag_test_length(table, int(table["n_days"].min()))
+        if benchmark is not None:
+            _flag_partial_days(table, partial)
         return table
 
     # -- what the comparison tables share ---------------------------------------------------------------------------
 
     def _panel(self) -> LossPanel:
+        self._require_one_frequency()
         return LossPanel(self._model_frames())
+
+    def _require_one_frequency(self) -> None:
+        """Period 5 of hourly results and of quarter-hour results are different times of the day: they cannot be paired."""
+        freqs = self._result_freqs()
+        if len(set(freqs.values())) > 1:
+            raise ValueError(
+                f"Comparing models needs one frequency, but these results have several: {freqs}. Their period ids "
+                "(hour 0-23 vs quarter-hour 0-95) name different times of the day."
+            )
+
+    def _check_set_evaluators(self) -> None:
+        if any(isinstance(evaluator, SetEvaluator) for evaluator in self.evaluators):
+            self._require_one_frequency()
 
     def _benchmark(self, benchmark: Optional[str], panel: LossPanel, required: bool) -> Optional[str]:
         if benchmark is None:
@@ -491,6 +521,7 @@ class EvaluationReport:
             **settings,
         )
         _flag_test_length(table, compared.daily.n_days)
+        _flag_partial_days(table, {"the set": compared.daily.partial_days})
         return table
 
     def predictions(self) -> pd.DataFrame:
@@ -556,19 +587,13 @@ class EvaluationReport:
         """`{model: {column: value}}` for one group: each evaluator runs once, on every model's frame of that group."""
         frames = ModelFrames(model_dfs, group_keys)
         columns: Dict[str, Dict[str, Any]] = {name: {} for name in model_dfs}
-        written_by: Dict[str, Evaluator] = {}
+        written_by: Dict[str, Tuple[Evaluator, bool]] = {}
         for evaluator in self.evaluators:
             for name, value in evaluator.compute_group(frames).items():
-                if not isinstance(value, Mapping):
-                    columns[name][evaluator.name] = value
-                    continue
-                for key, part in value.items():
-                    column = evaluator.column_name(key)
-                    if written_by.setdefault(column, evaluator) is not evaluator:
-                        raise ValueError(
-                            f"Two evaluators write the column {column!r}. Keep one in the pipeline; for a second "
-                            "benchmark call report.tests(benchmark=...)."
-                        )
+                several = isinstance(value, Mapping)
+                for key, part in value.items() if several else ((None, value),):
+                    column = evaluator.column_name(key) if several else evaluator.name
+                    _claim_column(written_by, column, evaluator, several)
                     columns[name][column] = part
         return columns
 
@@ -634,7 +659,8 @@ class EvaluationReport:
         if cached is None or cached[0] != fingerprint:
             cached = (fingerprint, self._model_frame(ref))
             self._read_frames[name] = cached
-        return cached[1].copy(deep=False)
+        # A deep copy: an evaluator that edits its frame in place must not change what the next table reads.
+        return cached[1].copy()
 
     def _model_frame(self, ref: ModelResultRef) -> pd.DataFrame:
         columns = [*FORECAST_KEYS, "prediction", "actual"]
@@ -655,6 +681,7 @@ class EvaluationReport:
         return _in_record_order(pd.DataFrame(frame))
 
     def _summary_table(self, model_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        self._check_set_evaluators()
         metrics = self._apply_evaluators(model_dfs)
         return pd.DataFrame(
             [{"model": name, "forecasts": len(df), **metrics.get(name, {})} for name, df in model_dfs.items()]
@@ -663,6 +690,7 @@ class EvaluationReport:
     def _grouped_table(self, model_dfs: Dict[str, pd.DataFrame], group_keys: List[str]) -> pd.DataFrame:
         """One row per (group, model): each model's evaluators run on its own rows of the group, with every
         model's rows of that group as `model_dfs`. Rows are ordered by group, then by model."""
+        self._check_set_evaluators()
         groups = {name: dict(self._split(df, group_keys)) for name, df in model_dfs.items()}
         rows = []
         for key in sorted({k for g in groups.values() for k in g}):
@@ -744,14 +772,59 @@ def _too_few_days(compared: SetComparison) -> str:
 
 def _flag_test_length(table: pd.DataFrame, n_days: int) -> None:
     """Warn on a very short comparison and leave a note in `table.attrs` on one shorter than a year."""
-    if n_days >= _FULL_TEST_DAYS:
+    note = short_test_message(n_days)
+    if note is None:
         return
-    note = (
-        f"The comparison rests on {n_days} days, less than a year: it does not see every season, and even one test year "
-        "only resolves differences of about 5 % of the MAE (see the mde column)."
-    )
     table.attrs["note"] = note
-    if n_days < _SHORT_TEST_DAYS:
-        warnings.warn(f"{note} Below {_SHORT_TEST_DAYS} days read it as indicative only.", stacklevel=3)
+    if n_days < SHORT_TEST_DAYS:
+        warnings.warn(f"{note} Below {SHORT_TEST_DAYS} days read it as indicative only.", stacklevel=3)
     else:
         logger.info(note)
+
+
+def _flag_partial_days(table: pd.DataFrame, partial: Mapping[str, int]) -> None:
+    """Say so when days of a comparison hold only part of their periods: `n_days` counts them like whole ones."""
+    partial = {name: count for name, count in partial.items() if count}
+    table.attrs["partial_days"] = partial
+    if partial:
+        warnings.warn(
+            f"Days with only part of their periods in common (by model or set): {partial}. The DM test weighs every day "
+            "the same and the ratio every forecast, so read them together; see report.forecast_counts().",
+            stacklevel=3,
+        )
+
+
+def _warn_on_identical_losses(losses: np.ndarray, names: Sequence[str]) -> None:
+    columns: Dict[bytes, str] = {}
+    for name, column in zip(names, losses.T):
+        first = columns.setdefault(column.tobytes(), name)
+        if first != name:
+            warnings.warn(
+                f"{first!r} and {name!r} have the same losses on every day: their ranks and chances of being best are "
+                "decided by their order in the report.",
+                stacklevel=3,
+            )
+
+
+def _claim_column(
+    written_by: Dict[str, Tuple[Evaluator, bool]], column: str, evaluator: Evaluator, several: bool
+) -> None:
+    """Refuse a second evaluator on a column an evaluator with several columns wrote, or the other way round.
+
+    Two evaluators of the same name and one value each (two `rMAEEvaluator`s) have always shared their column, and the
+    last one won. That stays, so that such a report keeps its numbers, but no longer silently.
+    """
+    if column in _TABLE_KEYS:
+        raise ValueError(f"An evaluator cannot write the column {column!r}: the report's tables use it.")
+    first, first_several = written_by.setdefault(column, (evaluator, several))
+    if first is evaluator:
+        return
+    if several or first_several:
+        raise ValueError(
+            f"Two evaluators write the column {column!r}. Keep one in the pipeline; for a second benchmark call "
+            "report.tests(benchmark=...)."
+        )
+    warnings.warn(
+        f"Two evaluators write the column {column!r}, and only the last one shows. Give them different names.",
+        stacklevel=4,
+    )

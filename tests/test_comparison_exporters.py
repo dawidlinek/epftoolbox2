@@ -19,6 +19,8 @@ from epftoolbox2.exporters import CsvExporter, ExcelExporter, TerminalExporter
 from epftoolbox2.results.report import EvaluationReport
 from tests.forecast_records import forecast_records
 
+pytestmark = pytest.mark.filterwarnings("ignore:The comparison rests on")
+
 RUN_DATES = pd.date_range("2023-12-01", periods=70, freq="D")
 
 
@@ -109,7 +111,9 @@ def test_a_report_without_set_evaluators_writes_no_summary_file_by_default(tmp_p
     assert [p.name for p in tmp_path.iterdir()] == ["forecasts.csv"]
 
 
-def test_no_warning_on_a_healthy_table(full_report):
+def test_no_warning_on_a_healthy_table():
+    run_dates = pd.date_range("2023-01-01", periods=365, freq="D")
+    report = EvaluationReport(study(run_dates=run_dates), [DMEvaluator("base", reps=20), MCSEvaluator(reps=20)])
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        full_report.compute_all()
+        report.summary()
