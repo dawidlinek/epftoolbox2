@@ -14,7 +14,7 @@ from ._yaml import dump_yaml
 logger = get_logger(__name__)
 
 _DP_SECTIONS = ("sources", "transformers", "validators")
-_MP_SECTIONS = ("models", "evaluators", "exporters")
+_MP_SECTIONS = ("models", "ensembles", "evaluators", "exporters")
 _MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set", "availability")
 
 
@@ -44,8 +44,9 @@ class Workflow:
             save_dir: results/
 
     Array mode requires `save_dir`: each task writes its model's JSONL there (resumable) and skips
-    evaluators and exporters, which need all models. After the array finishes, `report()` (CLI:
-    `epf report experiment.yaml`) merges the files and runs the evaluators and exporters once.
+    ensembles, evaluators and exporters, which need all models. After the array finishes, `report()` (CLI:
+    `epf report experiment.yaml`) merges the files, computes the ensembles from them and runs the evaluators
+    and exporters once.
 
     The windows of a run live in `model_pipeline` as `validation: [start, end]` (or `previous_year`) and
     `test: [start, end]`, next to the older `test_start` and `test_end`, and mean what they mean in
@@ -185,8 +186,8 @@ class Workflow:
             )
         mp = self._build_model_pipeline()
         if array_task:
-            # Evaluators such as rMAE and the exporters need every model; report() runs them after all tasks.
-            mp.evaluators, mp.exporters = [], []
+            # Ensembles, evaluators such as rMAE and the exporters need every model; report() runs them after all tasks.
+            mp.ensembles, mp.evaluators, mp.exporters = [], [], []
         dp = self._build_data_pipeline()
         if mp.information_set is not None:
             # Knows the columns of the configured sources, e.g. a CalendarSource prefix or Open-Meteo variables.
@@ -214,11 +215,13 @@ class Workflow:
         return report
 
     def report(self, allow_missing: bool = False) -> EvaluationReport:
-        """Merge every model's results from `model_save_dir` and run the evaluators and exporters.
+        """Merge every model's results from `model_save_dir`, compute the ensembles from them, and run the
+        evaluators and exporters.
 
         Use after an array job in which each task ran one model. Raises FileNotFoundError if a model's
-        results file is missing, unless `allow_missing` is set. The data pipeline is only run when an
-        exporter joins source columns (CsvExporter `extra_columns`).
+        results file is missing, unless `allow_missing` is set, which leaves out that model and every ensemble
+        it is a member of. The data pipeline is only run when an exporter joins source columns (CsvExporter
+        `extra_columns`).
         """
         save_dir = self._save_dir()
         if save_dir is None:
