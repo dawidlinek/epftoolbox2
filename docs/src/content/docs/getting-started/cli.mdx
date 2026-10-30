@@ -174,6 +174,44 @@ epf model model_pipeline.yaml \
 
 ---
 
+## `epf verify`: Check for leaks
+
+Check on sampled issue days that no forecast depends on anything unknown when it is issued: see [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/). It prints one row per model and what is wrong.
+
+```bash
+epf verify model_pipeline.yaml \
+    --data data.csv \
+    --test-start 2024-01-01 \
+    --test-end 2024-12-31
+```
+
+Exits with code 0 only if every model is `ok`, and with code 1 on a `leak`, an `inconclusive` model, or an error. The YAML needs an `information_set`, or pass `--issue-time`.
+
+**Required flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--data FILE` | Input CSV file, already holding the columns the models use |
+| `--test-start DATE` | First issue day to sample from |
+| `--test-end DATE` | Last issue day to sample from |
+
+**Optional flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--target COL` | Target column name (default: `price`) |
+| `--horizon N` | Forecast horizon in days (default: `1`, while `epf model` defaults to `7`: pass the horizon you run) |
+| `--freq {1h,15min}` | Data resolution: one model per hour or per quarter-hour (default: `1h`). Must match the data |
+| `--tz ZONE` | Local time zone of the data (e.g. `Europe/Warsaw`). Overrides the zone named in the file |
+| `--issue-time HH:MM` | Issue time to verify against. Overrides the YAML's `information_set`, or adds one if it has none |
+| `--issue-timezone ZONE` | Zone of `--issue-time` (default: the YAML's, else `Europe/Brussels`). Without `--issue-time`, the YAML's issue time is kept, or `11:45` if the YAML has no `information_set` |
+| `--days N` | Issue days per model (default: `5`) |
+| `--seed N` | Picks the days and the noise (default: `0`) |
+| `--models NAME [NAME ...]` | Names of the models to verify (default: all) |
+| `--no-positive-control` | Skip the check that perturbing what is known moves the forecasts; a pass then only says nothing moved |
+
+---
+
 ## `epf validate`: Validate any pipeline YAML
 
 Load and parse a YAML file, instantiate all components, and report errors. Without running anything.

@@ -1,0 +1,179 @@
+---
+title: Verifying a Pipeline
+description: Check on sampled issue days that no forecast depends on anything unknown when it is issued
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`InformationSet.check()` reads predictor *names*. A column can have a legal name and hold the wrong value, and a model
+can read more than it declares, so a look-ahead can pass that check and give numbers that look fine.
+`ModelPipeline.verify()` tests the boundary against real data and real models instead.
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
+pipeline.add_model(OLSModel(predictors=["load_forecast_d+1", "price_d-1", "is_monday_d+1"], name="OLS"))
+pipeline.add_model(OLSModel(predictors=["is_monday_d+1", "is_sunday_d+1"], name="Calendar"))
+
+verified = pipeline.verify(df, test_start="2024-01-01", test_end="2024-12-31", horizon=1, days=5)
+print(verified.table().to_string(index=False))
+verified.assert_ok()  # raises AssertionError naming what is wrong
+```
+
+```text
+   model  days  forecasts  changed  max change  control moved       status
+     OLS     5        120        0         0.0            120           ok
+Calendar     5        120        0         0.0              0 inconclusive
+```
+
+It needs an information set: without `issue_time` or `information_set`, `verify` raises `InformationSetError`.
+
+---
+
+## What it does
+
+For each model, `days` issue days are sampled with `seed` from the test period. Every model gets the same days, so they
+don't depend on which models you verify or in what order, and the same seed gives the same table. On each day two
+experiments run:
+
+| Experiment | What is perturbed | Forecasts must | Otherwise |
+|---|---|---|---|
+| Leakage probe | Every value not known at the issue time, and what the model trains on from the issue day on | not move | `leak` |
+| Positive control | The freshest values that are known | move | `inconclusive` |
+
+| Column | Meaning |
+|---|---|
+| `model` | The model's name |
+| `days` | Issue days checked |
+| `forecasts` | Forecasts compared, summed over those days |
+| `changed` | Forecasts that moved under the probe, or exist in only one of its runs |
+| `max change` | Largest move under the probe |
+| `control moved` | Forecasts that moved under the control (missing with `positive_control=False`) |
+| `status` | `ok`, `leak` or `inconclusive` |
+
+`verified.ok` is true only if every model is `ok`, so an `inconclusive` model doesn't pass. `verified.problems()` gives
+one line per thing that is wrong, and `verified.checks` holds each day's `leakage_probe` and `positive_control` result.
+
+Only copies of the models run, in memory, so `verify` has no effect on a later `run()`. Each issue day costs four one-day
+runs per model, six with `rebuild` or with the target among a model's predictors.
+
+### The probe
+
+The probe is [`leakage_probe`](/epftoolbox2/model-pipeline/information-set/#leakage-probe): a value is replaced by noise
+if its availability rule says it isn't known at the issue time on D. A forecast that moves used information from after
+the issue time.
+
+It also replaces the target from D on, whatever its rule says. A day-ahead price of D is published on D-1, so by its rule
+it is known, but training targets end at D-1, so a model that reads or trains on it has crossed its own boundary. Reading
+today's published price to forecast tomorrow is legal when a model declares it, among its predictors or as a feature built
+from it such as `price_day_max`. Those inputs are judged by their rule, and what the model trains on still ends at D-1.
+
+### The positive control
+
+A probe that finds nothing is evidence only if its perturbation reaches the model. The control perturbs the other side of
+the boundary, one local day back, and the forecasts must move. A value is replaced if all of these hold:
+
+- its availability rule says it is known at the issue time on D;
+- it is delivered on D-1 or later, or first known on D-1 or later;
+- it sits on a row dated D-1 or later;
+- its rule isn't `static`, and it isn't missing.
+
+So on D's row, for an issue at 11:45:
+
+| Column | Holds | Replaced | Why |
+|---|---|---|---|
+| `price_d-1` | the price of D-1, published on D-2 | yes | delivered on D-1 |
+| `load_forecast_d+1` | today's forecast for D+1, published at 10:00 on D | yes | delivered on D+1 |
+| `load_actual_d-1` | the load of D-1 | yes | delivered on D-1 |
+| `price_d-2` | the price of D-2, published on D-3 | no | older than D-1 on both counts |
+| `is_monday_d+1` | a calendar value | no | never unknown |
+| `load_forecast_d+2` | a forecast published on D+1 | no | not known yet: that is the probe's |
+
+Moving the issue time back a day would not do: the price of D-1 was published on D-2, so it was known at 11:45 on D-1
+already, and the commonest input of all would never change.
+
+The target is never perturbed in what a model fits on, nor any row older than D-1. Every model trains on the target, so a
+control that changed it would move every model and could never fail. That is what makes it useful:
+
+| Model | Control | Status |
+|---|---|---|
+| Inputs such as `price_d-1` or `load_forecast_d+1` | moves | `ok` |
+| Only calendar inputs | doesn't move | `inconclusive` |
+| Only inputs older than D-1, such as `price_d-7` | doesn't move | `inconclusive` |
+| A fresh input in some periods only | doesn't move the others | `inconclusive` |
+| Ignores the row it is given | doesn't move | `inconclusive` |
+| A `rebuild` that doesn't read its argument | doesn't move | `inconclusive` |
+
+The control asks this of every forecast: each (period, horizon) must move on at least one sampled day, and on every day
+some forecast of each horizon must. One forecast moving says little about another, which may read other inputs. A sparse
+model such as a Lasso can drop its fresh inputs for a period on a given day, so it may need more `days`.
+
+`inconclusive` doesn't say a model leaks. It says this check can't vouch for it. These are `inconclusive` too:
+
+- an input with no availability rule (with `InformationSet(unknown="warn")` or `"ignore"`, otherwise it raises), because a
+  leak through it can't be seen;
+- a horizon with no forecast on any sampled day, because nothing checked it.
+
+`positive_control=False` skips the control, and then `ok` only says that no forecast moved.
+
+---
+
+## Leaks in the data: `rebuild`
+
+On a frame that is already built, a column only has its name to go by. A transformer that writes tomorrow's price into
+`price_d-1` passes: by its name that column is known. To see it, give `verify` the source data and a function that
+reproduces the transformers. The noise then goes into the raw columns, by their own rules, and through your code:
+
+```python
+from epftoolbox2.data.transformers import LagTransformer
+
+
+def rebuild(raw):
+    return LagTransformer(columns=["price"], lags=[1], freq="day").transform(raw)
+
+
+verified = pipeline.verify(source_df, test_start="2024-01-01", test_end="2024-12-31", days=5, rebuild=rebuild)
+```
+
+Every numeric column of the source data needs a rule then, since nothing says which of them a model ends up using. The
+source may be in UTC, as sources return it: days are those of the frame `rebuild` returns.
+
+An input that stays the same whatever the source data holds isn't built from it, so a leak in it can't be seen, and the
+model is `inconclusive`. If it really is known in advance, for example a column computed from the index, declare it:
+`InformationSet(rules={"peak": Availability.static()})`.
+
+---
+
+## Limits
+
+- **It checks the horizons you ask for.** `horizon` defaults to 1 and `run()` to 7, so pass the horizon you run: a leak in
+  another horizon can't be seen.
+- **It samples.** A leak that exists only on some days shows up only if one of them is sampled. Run it on the days around
+  a DST switch on their own: `pipeline.verify(df, "2024-10-26", "2024-10-29", days=4)`.
+- **The look-ahead after a fall-back switch is real.** On the days after the switch, hour 2 of the forecasts trains on a
+  target dated on or after the issue day. `verify` reports this as a leak if it samples those days. It is a known issue of
+  the training cut, not a flaw in your pipeline.
+- **A model must be deterministic.** Two runs of a model with no fixed `random_state` differ, which shows up as a leak.
+- **It trusts your rules.** A rule that says a value is known earlier than it really is keeps that value out of the probe.
+- **A day the model can't forecast at all stops it** with the reason, as `run()` does: `no forecasts produced`.
+
+<Aside type="tip">
+  Columns from an `OpenMeteoSource` or a prefixed source get their rules from the data pipeline:
+  `ModelPipeline(information_set=InformationSet("11:45").with_source_rules(data_pipeline.sources))`. A `Workflow` does
+  this when it runs, but `verify` only knows the information set you give it, and `epf verify` only the rules its YAML
+  lists.
+</Aside>
+
+---
+
+## From the command line
+
+`epf verify` runs it on a ModelPipeline YAML and a CSV, and exits with code 0 only if every model is `ok`:
+
+```bash
+epf verify model_pipeline.yaml --data data.csv --test-start 2024-01-01 --test-end 2024-12-31
+```
+
+See the [CLI reference](/epftoolbox2/getting-started/cli/#epf-verify-check-for-leaks) for its flags.

@@ -205,7 +205,9 @@ pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
 This raises `InformationSetError` before any fit if a predictor (or the newest training target) is not known
 at issue time, using built-in availability rules for the shipped sources (ENTSO-E prices/load/generation,
 Open-Meteo weather, calendar). See [Information Set](/epftoolbox2/model-pipeline/information-set/) for the
-full rule reference, custom rules, and the empirical `leakage_probe`.
+full rule reference, custom rules, and the empirical `leakage_probe`, and
+[Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/) for `pipeline.verify()`, which runs it on sampled
+issue days.
 
 ---
 
