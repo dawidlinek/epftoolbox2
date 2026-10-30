@@ -195,11 +195,19 @@ class RunWindows:
                 return name
         return None
 
+    def would_drop(self, older: "RunWindows") -> Optional[Tuple[str, Period]]:
+        """The window of `older` this run doesn't name and that can't stay next to what it names, or None."""
+        validation, test = self.validation or older.validation, self.test or older.test
+        if validation is None or test is None or validation[1] < test[0]:
+            return None
+        return (VALIDATION, older.validation) if self.validation is None else (TEST, older.test)
+
     def keeping(self, older: "RunWindows") -> "RunWindows":
         """What a manifest records after this run into `older`'s results: records outside a run's windows stay in the file,
-        so a window this run doesn't name stays recorded. Nothing that would make the windows overlap is kept."""
+        so a window this run doesn't name stays recorded. What `would_drop` names isn't kept, which a run refuses unless
+        it is told to go on."""
         validation, test = self.validation or older.validation, self.test or older.test
-        if validation is not None and test is not None and validation[1] >= test[0]:
+        if self.would_drop(older) is not None:
             validation, test = self.validation, self.test
         keeps_mode = self.validation is None or (self.test is None and self.validation == older.validation)
         if (keeps_mode and older.mode or self.mode) == PREVIOUS_YEAR and test is not None:

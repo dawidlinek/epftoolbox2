@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import TYPE_CHECKING, List, Dict, Callable, Sequence, Union, Tuple, Optional
+from typing import TYPE_CHECKING, Any, List, Dict, Callable, Sequence, Union, Tuple, Optional
 
 import datetime
 import gc
@@ -21,6 +21,7 @@ from ..results.store import ResultStore
 from ..results.ref import ModelResultRef, split_by_window
 from ..results.availability import listing_rows, warn_about
 from ..results.manifest import (
+    PAST_THE_FRAME,
     ManifestMismatchError,
     PlannedForecast,
     build_manifest,
@@ -391,16 +392,22 @@ class BaseModel(ABC):
             )
         return RunWindows.fixed(None, period)
 
-    def _stored_actual_lookup(self, first_day: datetime.date) -> Callable[[int, int, str], Optional[float]]:
-        """What a fresh run's `actual` is for a key: the worker's last row up to the issue day, whatever row that is."""
-        columns: Dict[Tuple[int, int], np.ndarray] = {}
+    def _stored_actual_lookup(self, first_day: datetime.date) -> Callable[[int, int, str], Any]:
+        """What a fresh run's `actual` is for a key: the worker's last row up to the issue day, whatever row that is.
 
-        def lookup(period: int, horizon: int, run_date: str) -> Optional[float]:
+        `PAST_THE_FRAME` for an issue day after the frame's last day, which has no such row. The frame's and not the period's:
+        a period's last row can come before the last day, as the hour skipped on a spring switch does."""
+        columns: Dict[Tuple[int, int], np.ndarray] = {}
+        last_day = max((int(days[-1]) for days in self._hour_days.values() if len(days)), default=None)
+
+        def lookup(period: int, horizon: int, run_date: str) -> Any:
             day = self._offset + (datetime.date.fromisoformat(run_date) - first_day).days
             days = self._hour_days.get(period)
             name = f"{self._target}_d+{horizon}"
             if days is None or name not in self._hour_data[period].columns:
                 return None
+            if last_day is not None and day > last_day:
+                return PAST_THE_FRAME
             row = int(np.searchsorted(days, day, side="right")) - 1
             if row < 0:
                 return None

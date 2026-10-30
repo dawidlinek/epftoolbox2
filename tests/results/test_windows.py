@@ -181,6 +181,16 @@ def test_what_would_overlap_is_not_kept():
     assert RunWindows.resolve(runs_into_test).keeping(both) == RunWindows.resolve(runs_into_test)
 
 
+def test_what_a_run_would_drop_is_named():
+    both = RunWindows.resolve(V, T)
+    assert RunWindows.resolve(("2023-04-01", "2023-04-02")).would_drop(both) == ("test", T)
+    assert RunWindows.resolve(None, ("2022-11-01", "2022-11-02")).would_drop(both) == ("validation", V)
+    assert RunWindows.resolve(V).would_drop(both) is None
+    assert RunWindows.resolve(None, T).would_drop(both) is None
+    assert RunWindows.resolve(V, T).would_drop(RunWindows.resolve(None, ("2023-03-07", "2023-03-08"))) is None
+    assert RunWindows.resolve(None, T).would_drop(RunWindows.resolve(V)) is None
+
+
 def test_previous_year_stays_with_its_segments_when_it_can():
     test = ("2024-01-05", "2025-12-26")
     yearly = RunWindows.resolve("previous_year", test)

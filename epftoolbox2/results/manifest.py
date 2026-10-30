@@ -78,6 +78,10 @@ class ManifestMismatchError(ValueError):
     """An existing results directory was produced with a different configuration than this run."""
 
 
+# What `stored_actual` gives for an issue day after the frame's last day: nothing to compare a stored `actual` with.
+PAST_THE_FRAME = object()
+
+
 class PlannedForecast(NamedTuple):
     """What a fresh run would give a stored forecast's key (`check_stored_lists`)."""
 
@@ -338,7 +342,7 @@ def check_and_write(
         manifest.created_at = existing.created_at  # keep the first run's provenance
         if data_diffs == []:
             _cover_both(existing, manifest, data_hash)
-        _keep_windows(existing, manifest)
+        _keep_windows(existing, manifest, allow_mismatch, model_name)
         if manifest.predictor_lists is not None and existing.predictor_lists:
             # Records outside this run's test period stay in the file: their hashes must still resolve to their lists, and
             # a wider run later must still find the masks they used.
@@ -403,11 +407,20 @@ def _cover_both(existing: Manifest, manifest: Manifest, data_hash: Callable) -> 
         manifest.actuals = {"through": through, "hash": data_hash(through, [manifest.target])}
 
 
-def _keep_windows(existing: Manifest, manifest: Manifest) -> None:
+def _keep_windows(existing: Manifest, manifest: Manifest, allow_mismatch: bool, model_name: str) -> None:
+    """A window this run doesn't name stays on file, like its records. If it can't stay next to what this run names, the run
+    must say what the windows are now: dropping it would take its records out of every report without a word."""
     if manifest.windows is None or existing.windows is None:
         return
-    kept = RunWindows.from_dict(manifest.windows).keeping(RunWindows.from_dict(existing.windows))
-    manifest.windows = kept.to_dict()
+    run, on_file = RunWindows.from_dict(manifest.windows), RunWindows.from_dict(existing.windows)
+    dropped = run.would_drop(on_file)
+    if dropped is not None and not allow_mismatch:
+        raise ManifestMismatchError(
+            f"{model_name}: this run on {run.periods} would drop the {dropped[0]} window {dropped[1]} on file, since the "
+            "validation period must end before the test period starts. Pass both validation= and test= to say what the "
+            "windows are now, use a different save_dir, or pass allow_manifest_mismatch=True to resume anyway."
+        )
+    manifest.windows = run.keeping(on_file).to_dict()
 
 
 def _keep_listing(existing: Manifest, manifest: Manifest) -> None:
@@ -452,7 +465,7 @@ def check_stored_lists(
     *,
     allow_mismatch: bool = False,
     model_name: str = "Model",
-    stored_actual: Optional[Callable[[int, int, str], Optional[float]]] = None,
+    stored_actual: Optional[Callable[[int, int, str], Any]] = None,
 ) -> None:
     """Raise `ManifestMismatchError` if a stored forecast isn't what a fresh run would give.
 
@@ -464,8 +477,9 @@ def check_stored_lists(
 
     A run with windows keeps one mask per (window, list, period, horizon) in a file, whichever days its records are on: a
     digest says nothing about which records used it, so a run that overwrote one would let older records pass for what they
-    are not. `stored_actual(period, horizon, run_date)` gives what a fresh run's `actual` would be, for stored records that
-    no `actuals` hash speaks for (plain results, or results without a manifest).
+    are not. `stored_actual(period, horizon, run_date)` gives what a fresh run's `actual` would be, or `PAST_THE_FRAME`, for
+    stored records that no `actuals` hash speaks for (plain results, or results without a manifest). This is the only time
+    they are looked at, since the manifest this run writes has the hash from then on, so what can't be compared is refused.
 
     A record without a list hash comes from fixed lists, so nothing can be said about its list. `allow_mismatch` logs
     instead. A function that changed without changing anything stored resumes, with a note.
@@ -487,7 +501,7 @@ def check_stored_lists(
         and manifest.windows[TEST][0] != existing.test_start
     )
     compare_actuals = stored_actual is not None and (existing is None or existing.windows is None)
-    other_list, other_mask, other_window, other_actual = [], [], [], []
+    other_list, other_mask, other_window, other_actual, past_frame = [], [], [], [], []
     for record in records:
         period, horizon, run_date = record["hour"], record["horizon"], record["run_date"]
         stored = record.get("predictor_list")
@@ -495,7 +509,9 @@ def check_stored_lists(
         expected = planned(period, horizon, run_date)
         if compare_actuals:
             actual = stored_actual(period, horizon, run_date)
-            if actual is not None and not _same_float(record.get("actual"), actual):
+            if actual is PAST_THE_FRAME:
+                past_frame.append((run_date, period, horizon))
+            elif actual is not None and not _same_float(record.get("actual"), actual):
                 other_actual.append((run_date, period, horizon))
         if expected is not None and expected.window is not None and tag != expected.window:
             other_window.append((run_date, period, horizon, tag, expected.window))
@@ -535,6 +551,11 @@ def check_stored_lists(
             f"{len(other_actual)} stored forecast(s) hold another `actual` than the data gives now (it has grown or was "
             f"revised since), e.g. {sorted(other_actual)[:3]}"
         )
+    if past_frame:
+        problems.append(
+            f"{len(past_frame)} stored forecast(s) were issued on days past the end of this frame, so their `actual` can't be "
+            f"compared with it, and later runs would no longer look at them, e.g. {sorted(past_frame)[:3]}"
+        )
     if problems and not allow_mismatch:
         raise ManifestMismatchError(
             f"{model_name}: {'; '.join(problems)}. Resuming would mix forecasts of two plans in {path.parent}. Use a "
@@ -552,6 +573,7 @@ def check_stored_lists(
 __all__ = [
     "Manifest",
     "ManifestMismatchError",
+    "PAST_THE_FRAME",
     "PREDICTOR_FUNCTION_LAYOUT",
     "PlannedForecast",
     "build_manifest",

@@ -118,7 +118,14 @@ class EvaluationReport:
                     horizon=0,
                     _results=v,
                 )
-        if validation is None and validation_refs and self.window == TEST:
+        held = sorted({ref.window or TEST for ref in self.refs.values()})
+        if len(held) > 1:
+            shown = {name: ref.window or TEST for name, ref in self.refs.items()}
+            raise ValueError(
+                f"These results are on different windows ({shown}): one report would compare models on different forecasts "
+                "whose roles differ. Build one report per window, from the runs with the same validation= and test=."
+            )
+        if validation is None and self.window == TEST and validation_refs and len(validation_refs) == len(self.refs):
             self._validation = EvaluationReport(validation_refs, evaluators, source_data=source_data)
 
     @property
@@ -273,8 +280,9 @@ class EvaluationReport:
                 name=name,
                 path=None,
                 count=seen,
-                test_start="",
-                test_end="",
+                # A plain ref says here what it covers; `windows` does for a ref of a window.
+                test_start=ref.test_start if ref.window is None else "",
+                test_end=ref.test_end if ref.window is None else "",
                 horizon=ref.horizon,
                 freq=DAILY,
                 _results=records,
