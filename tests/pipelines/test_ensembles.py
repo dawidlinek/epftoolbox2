@@ -389,7 +389,7 @@ def test_a_difference_within_twelve_significant_digits_is_a_tie_and_beyond_them_
     actual = np.zeros(4)
     ensemble = AverageEnsemble(["a", "b"], top=1)
     assert ensemble.choose(np.column_stack([np.full(4, 1.0), np.full(4, 1.0 - 1e-14)]), actual).chosen == ["a"]
-    assert ensemble.choose(np.column_stack([np.full(4, 1.0), np.full(4, 1.0 - 1e-10)]), actual).chosen == ["b"]
+    assert ensemble.choose(np.column_stack([np.full(4, 1.0), np.full(4, 1.0 - 1e-11)]), actual).chosen == ["b"]
     assert ensemble.choose(np.column_stack([np.full(4, 1000.0), np.full(4, 1000.0 - 1e-11)]), actual).chosen == ["a"]
 
 
