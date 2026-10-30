@@ -66,7 +66,7 @@ print(report.summary())
 
 ## Notes
 
-- **Whole days only.** A schedule needs the whole day, so a day counts only when all its periods have finite forecasts: 23, 24 or 25, or 92, 96 or 100 at 15 minutes. Other days are left out, and `profit days` shows how many were used. In a table cut by hour no day is whole, so the columns are NaN there.
+- **Whole days only.** A schedule needs the whole day, so a day counts only when all its periods have finite forecasts: 24 hours (96 quarter-hours), 25 hours (100) numbered through, or 23 hours (92) lacking one hour between 01:00 and 04:00, where clocks change. A real run numbers periods by the clock and writes that form around a switch (the repeated autumn hour is one period, and the hour that has no target is absent), and a short day numbered through (0-22) counts on a Sunday. Other days are left out, even for one missing hour, and `profit days` shows how many were used. In a table cut by hour no day is whole, so the columns are NaN there.
 - **Each model on its own days.** The columns of two models with different forecasts cover different days. Compare `profit days` before you read them side by side.
 - **A target day counts once.** With several horizons in a group (`summary()`), a target day earns the mean of what its horizons earn, so the sum is what one battery could have earned over those days. `by_horizon()` shows each horizon on its own.
 - A `strategy` can be any object with a method `profit(forecast, actual, periods_per_hour)` that takes days × periods arrays and returns the profit per day. To load from YAML its class must be in `COMPONENT_REGISTRY["strategies"]`.

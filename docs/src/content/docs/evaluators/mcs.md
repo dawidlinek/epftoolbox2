@@ -66,5 +66,6 @@ print(report.summary()[["model", "MAE", "MCS p", "in MCS", "MCS n_days"]])
 
 - Needs at least 3 models. With fewer, or fewer than 2 common days, the columns are NaN, with a warning.
 - Models with the same losses on every day have no valid test. In a table the columns are then NaN with a warning that names the models; `report.mcs()` raises.
-- In the per-hour tables the set is computed per hour, which is descriptive like the per-hour DM.
+- In the per-hour tables `MCS p` is a heatmap, like the per-hour DM, and `in MCS` stays empty. It stays empty too below 30 days.
+- `summary()` warns below 182 days, and results at different frequencies raise `ValueError`.
 - Serializable to YAML and works with `ModelPipeline.save()`/`load()`.

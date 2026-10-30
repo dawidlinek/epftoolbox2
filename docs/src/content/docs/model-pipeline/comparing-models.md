@@ -19,10 +19,11 @@ The same numbers can go into `summary()` and the `by_*()` tables through [`DMEva
 
 - **Common keys.** A forecast is identified by `(run_date, target_date, hour, horizon)`. Each comparison uses the keys its models all hold, with a finite prediction and actual, and nothing else. In `tests()`, `compare()` and `leaderboard()` that is per pair, so a model with missing forecasts leaves the other pairs alone. In `mcs()` and `ranks()` the whole set of models is the comparison, so it is the keys all of them hold.
 - **Every table prints n.** `n_days` and `n_forecasts` are the days and forecasts behind each row. Start with `report.forecast_counts()` to see what each model produced.
-- **Daily loss.** The tests run on the mean absolute error of each (run date, horizon) over the periods that exist on those keys, so DST days with 23 or 25 hours (92 or 100 quarter-hours) work as they are.
+- **Daily loss.** The tests run on the mean absolute error of each (run date, horizon) over the periods that exist on those keys, so DST days work as they are. `df.attrs["partial_days"]` counts the days with only part of their periods in common, with a warning: `n_days` counts them like whole ones, the test weighs every day the same, and the ratio every forecast.
 - **Horizons.** `tests()` has one set of rows per horizon. `horizon="all"` averages the daily losses of all horizons per run date, which is also what the other methods do by default (`horizon=2` picks one).
 - **Two-sided at 5 %.** A positive statistic means the model is better than the benchmark.
 - **Fixed seeds.** Same data, same numbers. The seed is a parameter of every method that resamples.
+- **One frequency.** Results at different frequencies raise `ValueError`: period 5 of an hourly model and of a 15-minute model are different times of the day.
 
 ## Test length
 
@@ -30,8 +31,10 @@ One test year resolves differences of about 5 % of the MAE. Gaps of 1–2 % need
 
 | `n_days` | What happens |
 |----------|--------------|
-| below 182 | A warning, and a note in `df.attrs["note"]` |
 | below 365 | A note in `df.attrs["note"]` |
+| below 182 | Also a warning |
+| below 30 | Also no `verdict` and no confidence sets (`in_90`, ...): the normal approximation of the test rejects a true null 9 % of the time at 30 days and 35 % at 3 |
+| up to one block (7) | Also no interval and no rank uncertainty: one block covers all the days, so every resample is the same |
 
 ## Testing against a benchmark
 
@@ -44,7 +47,8 @@ report.tests(benchmark="OLS")
 
 - **`ratio`** is `mae / mae_benchmark` on the pair's forecasts, with a 95 % bootstrap interval in weekly blocks. Read this first: how large is the difference, and how well is it known?
 - **`p_value`** is the DM test on the daily loss with a Newey-West variance (lag 5 at 365 days). On pairs of seeds of one model it rejected 7.5 % of the time, near the nominal 5 %. `variance="plain"` reproduces the tables of epftoolbox.
-- **`p_holm`** corrects for testing `m` models against one reference, and **`verdict`** reads it at 5 %. In the study the correction turned 12 "better than LEAR" into 8. Holm runs within a horizon; testing several horizons is one more family of tests to keep in mind.
+- **`p_holm`** corrects for testing `m` models against one reference, and **`verdict`** reads it at 5 %. In the study the correction turned 12 "better than LEAR" into 8. Holm runs within a horizon; testing several horizons is one more family of tests to keep in mind. `verdict` stays empty when the test and the ratio point in opposite directions, which takes days of very different lengths.
+- **`mde`** is measured with the Newey-West variance whichever `variance` the test uses, so it does not move with that choice.
 - `benchmark` defaults to the one of the report's `DMEvaluator`. The same comparison on another benchmark is one more call.
 
 ### Per-hour DM is a heatmap
@@ -101,7 +105,7 @@ report.leaderboard(benchmark="OLS")
 # 2    OLS         8760  26.02     365      8760  1.000     NaN      NaN      NaN     NaN
 ```
 
-One row per model, sorted by MAE. `n_forecasts` and `MAE` are the model's own, and `n_days`, `n_common` and the rest are on the forecasts it shares with the benchmark. When the models have different forecast sets the MAE column compares different samples: a warning says so, and `ratio` is the column to read. Without a benchmark (none given, no `DMEvaluator`) it has only `model`, `n_forecasts`, `MAE` and `n_days`.
+One row per model, sorted by MAE. `n_forecasts` and `MAE` are the model's own, and `n_days`, `n_common` and the rest are on the forecasts it shares with the benchmark. When the models have different forecast sets (even of the same size) the MAE column compares different samples: a warning says so, and `ratio` is the column to read. Without a benchmark (none given, no `DMEvaluator`) it has only `model`, `n_forecasts`, `MAE` and `n_days`.
 
 ## Which one to report
 

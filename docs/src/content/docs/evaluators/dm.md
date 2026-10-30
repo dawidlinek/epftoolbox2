@@ -14,7 +14,7 @@ For the forecasts a model and the benchmark share (same `run_date`, `target_date
 - **Daily loss:** the mean absolute error over the periods of one (run date, horizon), whatever their number (23, 24 or 25; 92, 96 or 100). With several horizons in a group, a run date's loss is the mean of its horizons' losses.
 - **DM test:** on the daily losses, with a Newey-West variance (lag ⌊4(n/100)^(2/9)⌋, 5 at 365 days). `variance="plain"` reproduces epftoolbox. Two-sided; a positive statistic means the model is better.
 - **Ratio:** MAE of the model / MAE of the benchmark, both forecast-weighted on the shared forecasts, so below 1 means the model is better. The interval resamples daily error sums in weekly blocks, so it agrees with the ratio on DST days.
-- **Holm:** over the models compared with the benchmark in that group.
+- **Holm:** over the `DM m` models compared with the benchmark in that group.
 
 ## Output columns
 
@@ -24,10 +24,16 @@ For the forecasts a model and the benchmark share (same `run_date`, `target_date
 | `DM ci_low`, `DM ci_high` | Bootstrap interval of the ratio |
 | `DM p` | Two-sided p-value |
 | `DM p_holm` | Holm-adjusted p-value |
+| `DM m` | Models tested in that group |
 | `DM verdict` | `better`, `worse` or `no difference`, from `p_holm` at `alpha` |
 | `DM n_days`, `DM n_forecasts` | Days and forecasts of this pair |
 
-In the per-hour tables (`by_hour`, `by_hour_horizon`, and the sheets of the Excel exporter that follow them) `DM p_holm` and `DM verdict` stay empty: a per-hour DM is a heatmap, never a verdict. It called two seeds of one model different 37 % of the time.
+Some cells stay empty on purpose:
+
+- **Per-hour tables** (`by_hour`, `by_hour_horizon`, and the sheets of the Excel exporter that follow them): `DM p_holm` and `DM verdict`. A per-hour DM is a heatmap, never a verdict: it called two seeds of one model different 37 % of the time.
+- **Fewer than 30 days:** `DM verdict`. The normal approximation of the test rejects a true null 9 % of the time at 30 days and 35 % at 3, and a breakdown can easily hold a group that small (a test that ends on 3 January has a 2024 of three days in `by_year`).
+- **As many days as a bootstrap block, or fewer:** `DM ci_low` and `DM ci_high`. One block then covers all the days, so every resample is the same.
+- **A test and a ratio that point in opposite directions:** `DM verdict`. The test weighs every day the same and the ratio every forecast, so this takes days of very different lengths.
 
 ## Parameters
 
@@ -75,8 +81,10 @@ print(report.summary()[["model", "MAE", "DM ratio", "DM ci_low", "DM ci_high", "
 ## Notes
 
 - One `DMEvaluator` per pipeline: a second one would write the same columns, which raises `ValueError`. For another benchmark call `report.tests(benchmark=...)`.
-- In a group where the benchmark has no forecasts the columns are NaN, with a warning.
+- `ModelPipeline.run()` and `report()` raise before anything else when `benchmark` is not one of the pipeline's models. In a group where the benchmark has no forecasts the columns are NaN, with a warning.
 - A group is tested only with at least 2 days (and more days than `lag`); below that the p-values are NaN, and the ratio is still given.
+- `summary()` warns below 182 days. The breakdowns don't: their groups are short by nature, and `DM n_days` is in the table.
+- Results at different frequencies raise `ValueError`: period 5 of an hourly model and of a 15-minute model are different times of the day.
 - In a group with several horizons (`summary()`, `by_hour()`) the test is `report.tests(horizon="all")`; `by_horizon()` holds the per-horizon tests of `report.tests()`.
 - In `compute_all()` (and so the Excel exporter) the test and bootstrap run once per group, which adds up on many models and horizons (with `MCSEvaluator` as well, about 40 seconds for 50 models over a year). Pass `interval=None` or a smaller `reps` if that matters.
 - Serializable to YAML and works with `ModelPipeline.save()`/`load()`.
