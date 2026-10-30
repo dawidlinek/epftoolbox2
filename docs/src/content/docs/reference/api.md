@@ -140,6 +140,17 @@ class EvaluationReport:
     def by_hour_horizon(self) -> pd.DataFrame: ...
     def by_year(self) -> pd.DataFrame: ...
     def by_year_horizon(self) -> pd.DataFrame: ...
+    def by_quarter(self) -> pd.DataFrame: ...       # model, year, quarter, forecasts, metrics
+    def by_day(self) -> pd.DataFrame: ...           # model, target_date, forecasts, metrics
+    def by_price_level(
+        self, spike: Optional[float] = None        # Price from which a period is a spike; default min(300, 99th percentile of the actuals)
+    ) -> pd.DataFrame: ...                          # model, price_level (negative / normal / spike), forecasts, metrics; attrs: spike_threshold, spike_rule, spike_quantile
+    def aggregate(
+        self,
+        freq: str = "1D",                          # The only aggregation so far
+        agg: str = "max",                          # "max", "min", "mean" or "spread" (max - min) of the day
+    ) -> EvaluationReport: ...                      # Whole days only; hour 0, freq "1D"; dropped days in its forecast_counts()
+    def join(self, other: EvaluationReport) -> EvaluationReport: ...  # Models of both; refs kept, evaluators of this report
 
     def tests(
         self,

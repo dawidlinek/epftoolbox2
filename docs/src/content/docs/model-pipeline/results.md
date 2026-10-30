@@ -35,11 +35,23 @@ by_year_horizon = report.by_year_horizon()
 by_run_weekday_horizon = report.by_run_weekday_horizon()
 by_target_weekday_horizon = report.by_target_weekday_horizon()
 
+# Calendar quarter of the target date (with the year), target date, and price level of the actual price
+by_quarter = report.by_quarter()
+by_day = report.by_day()
+by_price_level = report.by_price_level()
+
+# Daily maximum, minimum, mean or spread of the forecasts, as a report of its own
+daily_max = report.aggregate("1D", agg="max")
+
+# The models of two reports (say, of two runs) in one report
+joined = report.join(other_report)
+
 # Iterate (model_name, DataFrame of per-forecast run_date/target_date/hour/horizon/day_in_test/actual/prediction)
 for model_name, details in report.iter_details():
     ...
 
-# summary() plus every by_*() breakdown above, computed in one pass over the results (what ExcelExporter uses)
+# summary() plus the by_*() breakdowns up to the weekday ones, computed in one pass over the results (what the
+# exporters use; the quarter, day and price-level tables are not among them)
 sheets = report.compute_all()  # {"summary": ..., "hour": ..., ..., "target_weekday_horizon": ...}
 
 # Is a difference real? Each model against a benchmark, the confidence set, rank uncertainty, a pair, an overview
@@ -50,7 +62,7 @@ pair = report.compare("Lasso", "OLS")
 board = report.leaderboard(benchmark="OLS")
 ```
 
-The last five are explained on [Comparing Models](/epftoolbox2/model-pipeline/comparing-models/).
+The last five are explained on [Comparing Models](/epftoolbox2/model-pipeline/comparing-models/), the quarter, day and price-level tables, `aggregate()` and `join()` below.
 
 An evaluator may write several columns (`DM ratio`, `DM p`, ...). They appear in `summary()` and every `by_*()` table like any other column, and the exporters write them.
 
@@ -89,6 +101,71 @@ A task (period × horizon × run day) that cannot give a forecast is skipped and
 A shortfall is logged as a warning when the model runs, and a model that produces nothing raises. Any other exception inside a task stops the run (results already written to `save_dir` are kept, so a rerun resumes).
 
 Models are only comparable on the forecasts they all produced: check that `produced` agrees before comparing metrics.
+
+## Breakdowns by quarter, day and price level
+
+```python
+by_quarter = report.by_quarter()
+by_day = report.by_day()
+by_price_level = report.by_price_level()
+by_price_level = report.by_price_level(spike=250)  # your own spike threshold, in EUR/MWh
+
+print(report.by_quarter())
+#    model  year  quarter  forecasts       MAE      rMAE
+# 0    OLS  2023        1       2136  6.3279  1.0000
+# 1  Lasso  2023        1       2126  4.7142  0.7458
+# 2    OLS  2023        2       2184  6.2534  1.0000
+
+print(report.by_price_level())
+#    model price_level  forecasts      MAE      rMAE
+# 0    OLS    negative         25   5.3657  1.0000
+# 1  Lasso    negative         25   4.8619  0.9061
+# 2    OLS      normal       8647   6.2718  1.0000
+# 3  Lasso      normal       8606   4.8062  0.7671
+# 4    OLS       spike         88   6.0166  1.0000
+# 5  Lasso       spike         88   4.8244  0.8018
+```
+
+They are cut like `by_year()`: each model's forecasts are split into groups, and every evaluator runs on a group alone. A relative metric (`rMAE`) or a test (`DM ...`, `MCS ...`) therefore compares the models on the forecasts they share inside the group, and prints its own `n_days` and `n_forecasts`. These tables also have a `forecasts` column, the model's own number of forecasts in the group: in the example Lasso lacks 10 forecasts in the first quarter and `rMAE` is taken without them. A group is short by nature, so the tests say nothing below 30 days (`DM verdict` and `in MCS` stay empty). They are not in `compute_all()`, so the exporters do not write them.
+
+| Method | Groups | Columns |
+|---|---|---|
+| `by_quarter()` | The calendar quarter of the **target date**, with its year | `year`, `quarter` |
+| `by_day()` | The target date. All horizons that forecast it are in its group, so a group holds one run date per horizon and the tests have little to run on | `target_date` |
+| `by_price_level(spike=None)` | `negative` (actual price below 0), `spike` (at or above the threshold), `normal` (the rest) | `price_level` |
+
+**Price levels come from the actual price alone.** A prediction never decides which group a forecast is in, so a model that misses a spike is scored on it, not excused. A forecast is in exactly one group; one without a finite actual price is in none. The spike threshold is `min(300, 99th percentile)` of the actual prices (the definition of the evaluation-protocol study, which gives about 88 spike hours a year), taken once from the actuals of all the models together, with each period (target date and hour) counted once however many horizons forecast it. It is the same number for every model, so the groups are the same periods for all of them. `df.attrs` holds `spike_threshold`, `spike_rule` and `spike_quantile` (the 99th percentile, NaN when `spike` is given). `spike` replaces the rule with a price you choose; it must be positive, and a negative price is never a spike.
+
+## Daily aggregates
+
+```python
+daily_max = report.aggregate("1D", agg="max")  # "max", "min", "mean" or "spread" (maximum minus minimum)
+
+print(daily_max.summary())
+#    model  forecasts      MAE    rMAE
+# 0    OLS        365  8.1879  1.0000
+# 1  Lasso        324  6.0205  0.7390
+
+print(daily_max.forecast_counts())
+#    model  planned  produced  missing  incomplete_day
+# 0    OLS      365       365        0               0
+# 1  Lasso      365       324       41              41
+```
+
+`aggregate()` turns hourly or 15-minute forecasts into forecasts of a daily quantity: for each (run date, target date, horizon) the prediction and the actual are each reduced by `agg` over the periods of the day. The result is a new `EvaluationReport` with `hour` 0 and frequency `"1D"` and the evaluators of the first report, so `summary()`, `by_*()`, `tests()`, `mcs()`, `ranks()`, `compare()` and `leaderboard()` score the daily maximum (or minimum, mean, spread) the same way as they score hours.
+
+- **Only whole days count.** A day is whole when it has all its periods with a finite prediction and actual: 23, 24 or 25 hours, or 92, 96 or 100 quarter-hours. This is judged by the period ids and not by how many there are, with the rule `EconomicEvaluator` uses for a battery's day: a real run numbers periods by the clock, so a 23-hour day lacks the hour it skips (between 01:00 and 04:00) and a 25-hour day has ids 0-24. A day of 24 forecasts that are not the hours 0-23 is not a day, and ids 0-22 count as a 23-hour day only on a Sunday, when clocks change.
+- **Each model on its own days.** A model that lacks a period loses that day for itself and for nobody else. The comparison tables then use the days the models share and print how many.
+- **Dropped days are counted.** They are in `forecast_counts()` of the new report as `missing` and under `incomplete_day`, and a warning names the models. `planned` there is the number of days with any forecast of the model; days without a single forecast are in the `forecast_counts()` of the report you aggregated. As in the example, models can then have different numbers of forecasts, so compare them with `rMAE` or `tests()`, which use the common days, and not with the raw `MAE` column.
+- **What differs from an hourly report.** `tests(by="hour")` raises (a day has no hours), and the `hours_*` columns of `compare()` are NaN. `EconomicEvaluator` is left out with a warning, since a schedule needs the periods of a day. The new report has no `source_data`, and `day_in_test` counts days from the earliest run date. It is a daily report, so it cannot be joined to an hourly one.
+
+## Joining reports
+
+```python
+joined = report.join(other_report)
+```
+
+`join()` returns a report with the models of both, for results of separate runs that are to be compared (a SLURM array, a model added later). The references to the results are kept as they are, and the evaluators are the ones of the report you call it on: if the other report has different ones, a warning says so, since the columns of its evaluators are lost and its models are scored by yours (an `rMAEEvaluator` with a base model is computed against the left report's base). It raises `ValueError` when a model name is in both reports, or when the results have different frequencies. Every table is computed on forecast keys, so a joined report gives the tables one report over all the models would, bit for bit.
 
 ## Accessing Raw Predictions
 
