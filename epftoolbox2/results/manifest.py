@@ -263,9 +263,13 @@ def check_and_write(
             logger.warning(f"{model_name}: manifest mismatch at {path} overridden: {'; '.join(diffs)}")
         manifest.created_at = existing.created_at  # keep the first run's provenance
         if manifest.predictor_lists is not None and existing.predictor_lists:
-            # Records outside this run's test period stay in the file: their hashes must still resolve to their lists.
-            known = {entry["hash"] for entry in manifest.predictor_lists}
-            manifest.predictor_lists += [e for e in existing.predictor_lists if e["hash"] not in known]
+            # Records outside this run's test period stay in the file: their hashes must still resolve to their lists, and
+            # a wider run later must still find the masks they used.
+            kept = {entry["hash"]: entry for entry in existing.predictor_lists}
+            for entry in manifest.predictor_lists:
+                earlier = kept.pop(entry["hash"], {}).get("binary_masks", {})
+                entry["binary_masks"] = {**earlier, **entry.get("binary_masks", {})}
+            manifest.predictor_lists += list(kept.values())
     elif has_existing_results:
         message = f"{model_name}: {path.parent} has results but no manifest ({path.name} not found)."
         if require_manifest:
