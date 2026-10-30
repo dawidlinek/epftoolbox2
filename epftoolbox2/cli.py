@@ -103,12 +103,29 @@ def _load_model_pipeline(args: argparse.Namespace):
 
 
 def cmd_model(args: argparse.Namespace) -> None:
+    from .results.windows import RunWindows, to_period
+
+    validation = args.validation
+    if validation is not None and len(validation) == 1:
+        validation = validation[0]  # previous_year; anything else is refused below
+    try:
+        if args.test_start is None and args.test_end is None and validation is None:
+            raise ValueError("No window to forecast: pass --test-start and --test-end, --validation, or both")
+        test = None
+        if args.test_start is not None or args.test_end is not None:
+            test = to_period((args.test_start, args.test_end), "test")
+        if validation is not None:
+            RunWindows.resolve(validation, test)
+    except ValueError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        sys.exit(1)
     df = _load_data(args)
     mp = _load_model_pipeline(args)
     mp.run(
         data=df,
         test_start=args.test_start,
         test_end=args.test_end,
+        validation=validation,
         target=args.target,
         horizon=args.horizon,
         freq=args.freq,
@@ -313,8 +330,17 @@ def build_parser() -> argparse.ArgumentParser:
     model_p = sub.add_parser("model", help="Run a model pipeline on an existing CSV dataset")
     model_p.add_argument("yaml", metavar="model_pipeline.yaml", help="Path to ModelPipeline YAML")
     model_p.add_argument("--data", required=True, metavar="FILE", help="Input CSV file (from epf data)")
-    model_p.add_argument("--test-start", required=True, metavar="DATE", help="Test period start date")
-    model_p.add_argument("--test-end", required=True, metavar="DATE", help="Test period end date")
+    model_p.add_argument("--test-start", metavar="DATE", help="Test period start date")
+    model_p.add_argument("--test-end", metavar="DATE", help="Test period end date")
+    model_p.add_argument(
+        "--validation",
+        nargs="+",
+        metavar="PERIOD",
+        help=(
+            "Validation period: START END, or previous_year (each 12 months of the test period served by the 12 months "
+            "before them). Without --test-start and --test-end only these days are forecast."
+        ),
+    )
     model_p.add_argument("--target", default="price", metavar="COL", help="Target column name (default: price)")
     model_p.add_argument("--horizon", type=int, default=7, metavar="N", help="Forecast horizon in days (default: 7)")
     model_p.add_argument(

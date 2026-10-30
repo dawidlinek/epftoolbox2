@@ -1,4 +1,5 @@
-from typing import Optional, Union
+from datetime import datetime
+from typing import Any, Optional, Sequence, Union
 from pathlib import Path
 import os
 import yaml
@@ -15,6 +16,16 @@ logger = get_logger(__name__)
 _DP_SECTIONS = ("sources", "transformers", "validators")
 _MP_SECTIONS = ("models", "evaluators", "exporters")
 _MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set", "availability")
+
+
+def _as_yaml_period(period: Any) -> Any:
+    """A period as YAML takes it: a string stands for itself, and dates in any form become ISO days."""
+    if isinstance(period, str):
+        return period
+    return [
+        day.date().isoformat() if isinstance(day, datetime) else getattr(day, "isoformat", lambda: day)()
+        for day in period
+    ]
 
 
 class Workflow:
@@ -35,6 +46,10 @@ class Workflow:
     Array mode requires `save_dir`: each task writes its model's JSONL there (resumable) and skips
     evaluators and exporters, which need all models. After the array finishes, `report()` (CLI:
     `epf report experiment.yaml`) merges the files and runs the evaluators and exporters once.
+
+    The windows of a run live in `model_pipeline` as `validation: [start, end]` (or `previous_year`) and
+    `test: [start, end]`, next to the older `test_start` and `test_end`, and mean what they mean in
+    `ModelPipeline.run`. A merge raises if the array's tasks ran on different windows.
 
     Example:
         >>> workflow = Workflow(
@@ -72,6 +87,8 @@ class Workflow:
         model_save_dir: Optional[str] = None,
         model_allow_manifest_mismatch: bool = False,
         model_require_manifest: bool = False,
+        model_validation: Any = None,
+        model_test: Optional[Sequence[Any]] = None,
     ):
         self.data_pipeline = str(data_pipeline) if data_pipeline is not None else None
         self.model_pipeline = str(model_pipeline) if model_pipeline is not None else None
@@ -91,6 +108,8 @@ class Workflow:
         self.model_save_dir = str(model_save_dir) if model_save_dir is not None else None
         self.model_allow_manifest_mismatch = model_allow_manifest_mismatch
         self.model_require_manifest = model_require_manifest
+        self.model_validation = model_validation
+        self.model_test = model_test
         self._yaml_dir: Optional[Path] = None  # set by load(), used for relative path resolution
         self._dp_inline: dict = {}  # inline sources/transformers/validators overrides
         self._mp_inline: dict = {}  # inline models/evaluators/exporters overrides
@@ -184,6 +203,8 @@ class Workflow:
             forecast_only=self.model_forecast_only,
             allow_manifest_mismatch=self.model_allow_manifest_mismatch,
             require_manifest=self.model_require_manifest,
+            validation=self.model_validation,
+            test=self.model_test,
         )
         if array_task:
             logger.info(
@@ -213,6 +234,8 @@ class Workflow:
             forecast_only=self.model_forecast_only,
             data=self._run_data() if needs_data else None,
             allow_missing=allow_missing,
+            validation=self.model_validation,
+            test=self.model_test,
         )
 
     def to_dict(self) -> dict:
@@ -246,6 +269,10 @@ class Workflow:
             mp["test_start"] = self.model_test_start
         if self.model_test_end is not None:
             mp["test_end"] = self.model_test_end
+        if self.model_validation is not None:
+            mp["validation"] = _as_yaml_period(self.model_validation)
+        if self.model_test is not None:
+            mp["test"] = _as_yaml_period(self.model_test)
         if self.model_save_dir is not None:
             mp["save_dir"] = self.model_save_dir
         if self.model_allow_manifest_mismatch:
@@ -297,6 +324,8 @@ class Workflow:
             model_save_dir=mp.get("save_dir"),
             model_allow_manifest_mismatch=mp.get("allow_manifest_mismatch", False),
             model_require_manifest=mp.get("require_manifest", False),
+            model_validation=mp.get("validation"),
+            model_test=mp.get("test"),
         )
         workflow._yaml_dir = path.parent
         workflow._dp_inline = {k: dp[k] for k in _DP_SECTIONS if k in dp}
