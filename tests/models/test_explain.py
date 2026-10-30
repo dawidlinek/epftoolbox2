@@ -34,7 +34,7 @@ def single_process(monkeypatch):
 def frame(names, freq="1h", start="2024-03-01", days=240, tz="Europe/Warsaw"):
     first = pd.Timestamp(start, tz=tz)
     index = pd.date_range(first, first + pd.Timedelta(days=days), freq=freq, inclusive="left")
-    return pd.DataFrame(1.0, index=index, columns=names)
+    return pd.DataFrame(1.0, index=index, columns=list(dict.fromkeys(["price", *names])))
 
 
 def explain(names, horizon, hour, freq="1h", test=TEST, info=INFO, echo=False, **frame_options):
@@ -249,8 +249,29 @@ def test_a_window_across_a_switch_gives_the_usual_label_and_says_how_many_days_d
 
 
 def test_a_utc_index_reads_its_own_clock():
-    table = explain(["price_d-1"], 2, 12, tz="UTC")["predictors"]
-    assert table["target-relative"].tolist() == ["T-3 12:00"]
+    table = explain(["load_forecast_d+2", "load_forecast_d+1"], 2, 12, tz="UTC")["predictors"]
+    assert table["target-relative"].tolist() == ["T 12:00", "T-1 12:00"]
+
+
+@pytest.mark.parametrize(
+    "data_freq, explain_freq, hour, message",
+    [
+        ("15min", "1h", 10, "most commonly 15 min apart"),  # would read period 10 as 10:00, not 02:30
+        ("1h", "15min", 36, "most commonly 1 h apart"),
+    ],
+)
+def test_a_frame_at_another_frequency_is_refused_as_run_refuses_it(data_freq, explain_freq, hour, message):
+    pipeline = ModelPipeline(information_set=INFO).add_model(OLSModel(["load_actual"], name="m"))
+    with pytest.raises(ValueError, match=message):
+        pipeline.explain(
+            frame(["load_actual"], data_freq), model="m", test=TEST, hour=hour, freq=explain_freq, echo=False
+        )
+
+
+def test_a_utc_index_with_day_lags_is_refused_as_run_refuses_it():
+    pipeline = ModelPipeline(information_set=INFO).add_model(OLSModel(["price_d-1"], name="m"))
+    with pytest.raises(ValueError, match="UTC"):
+        pipeline.explain(frame(["price_d-1"], tz="UTC"), model="m", test=TEST, echo=False)
 
 
 def test_a_naive_index_has_no_switch_to_cross():

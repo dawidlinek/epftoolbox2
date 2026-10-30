@@ -218,8 +218,6 @@ def explain_model(
 ) -> Dict[str, pd.DataFrame]:
     """The tables of `ModelPipeline.explain`. `model` is the caller's own copy, since planning leaves state on it."""
     model._set_freq(freq)
-    if not isinstance(data.index, pd.DatetimeIndex):
-        raise ValueError(f"Data must have a DatetimeIndex, got {type(data.index).__name__}")
     if not isinstance(horizon, (int, np.integer)) or horizon < 1:
         raise ValueError(f"horizon must be a whole number of days from 1, got {horizon!r}")
     periods = model._periods_per_day
@@ -231,6 +229,8 @@ def explain_model(
         raise ValueError(f"{model.name}: explain() of a predictor function of `ctx` needs test=(start, end) to plan it")
 
     start, end = test if test is not None else (None, None)
+    # What `run` refuses it can't explain: the default freq on 15-minute data would read period 10 as 10:00, not 02:30.
+    model._check_frame(data, target, horizon, freq, start, end)
     days = InformationSet._issue_days(data.index, start, end)
     clock = (info or _NAMES)._issue_clock(days, data.index)
     out: Dict[str, pd.DataFrame] = {}
