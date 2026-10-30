@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import TYPE_CHECKING, List, Dict, Callable, Union, Tuple, Optional
+from typing import TYPE_CHECKING, List, Dict, Callable, Sequence, Union, Tuple, Optional
 
 import datetime
 import gc
@@ -19,9 +19,10 @@ from ..scalers.standard import StandardScaler
 from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef
-from ..results.manifest import build_manifest, check_and_write, manifest_path
+from ..results.manifest import build_manifest, check_and_write, check_stored_lists, manifest_path
 from ..logging import get_logger
 from . import _contract
+from .context import PredictorPlan, build_plan, mask_digest, takes_ctx
 from ._worker import _pool_init, _run_day
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days
 
@@ -39,6 +40,11 @@ _FREQ_TO_PERIODS: Dict[str, int] = {"1h": 24, "15min": 96}
 _WINDOWS_MAX_WORKERS = 61
 
 
+def _test_days(test_start: str, test_end: str) -> List[datetime.date]:
+    first, last = datetime.date.fromisoformat(test_start), datetime.date.fromisoformat(test_end)
+    return [first + datetime.timedelta(days=d) for d in range((last - first).days + 1)]
+
+
 def _usable_cpu_count() -> int:
     """CPUs this process may run on: a SLURM or taskset allocation, not the whole machine."""
     if hasattr(os, "process_cpu_count"):  # Python 3.13+
@@ -51,12 +57,18 @@ def _usable_cpu_count() -> int:
 class BaseModel(ABC):
     def __init__(
         self,
-        predictors: List[Union[str, Callable]],
+        predictors: Union[List[Union[str, Callable]], Callable],
         training_window: int = 365,
         name: str = "Model",
         scaler: ScalerSpec = "standard",
     ):
-        if callable(predictors):
+        # A function of `ctx` is planned per forecast (epftoolbox2.models.context); a `(horizon)` or `(horizon, hour)`
+        # function gives one list per (period, horizon).
+        self._ctx_fn: Optional[Callable] = predictors if callable(predictors) and takes_ctx(predictors) else None
+        if self._ctx_fn is not None:
+            self._predictors_fn = None
+            self.predictors = []
+        elif callable(predictors):
             self._predictors_fn = predictors
             self.predictors = []
         else:
@@ -108,6 +120,7 @@ class BaseModel(ABC):
         information_set: Optional["InformationSet"] = None,
         allow_manifest_mismatch: bool = False,
         require_manifest: bool = False,
+        plan: Optional[PredictorPlan] = None,
     ) -> ModelResultRef:
         """Forecast every period and horizon for each day in [test_start, test_end].
 
@@ -118,6 +131,9 @@ class BaseModel(ABC):
         if one is already there, compared to this run's configuration before anything is resumed.
         `allow_manifest_mismatch` overwrites a disagreeing manifest instead of raising; `require_manifest`
         raises instead of warning when `save_to` has results but no manifest.
+
+        `plan` is what `ModelPipeline` built for a predictor function of `ctx` before any model ran, for this data,
+        test period, horizon and freq; without it the run builds its own. A model with fixed lists has none.
         """
         self._set_freq(freq)
 
@@ -131,7 +147,11 @@ class BaseModel(ABC):
             test_end = resolve_date(test_end)
 
         self._target = target
-        expanded = self._check_inputs(data, target, horizon, freq, information_set, test_start, test_end)
+        if plan is None:
+            plan = self._plan_predictors(data, target, horizon, freq, information_set, test_start, test_end)
+        else:
+            self._check_plan_is_for(plan, data, horizon, freq, information_set, test_start, test_end)
+        expanded = self._check_inputs(data, target, horizon, freq, information_set, test_start, test_end, plan=plan)
         used_columns = list(dict.fromkeys([target, *self._used_predictors]))
 
         self._data = self._preprocess(data[used_columns], horizon, target)
@@ -156,6 +176,8 @@ class BaseModel(ABC):
             (hour, h, d) for d in range(n_days) for h in range(1, horizon + 1) for hour in range(self._periods_per_day)
         ]
 
+        plan_masks = None if plan is None else self._plan_scalable_masks(plan)
+
         store = ResultStore(save_to, test_start=test_start) if save_to else None
         if store:
             manifest = build_manifest(
@@ -169,7 +191,18 @@ class BaseModel(ABC):
                 test_start=test_start,
                 test_end=test_end,
                 information_set=information_set,
+                predictor_function=None if plan is None else plan.function_record(),
+                predictor_lists=None if plan is None else plan.manifest_lists(plan_masks),
             )
+            if plan is not None:
+                check_stored_lists(
+                    manifest_path(store.path),
+                    manifest,
+                    store.iter_lines(cols=["hour", "horizon", "run_date", "predictor_list"]),
+                    self._stored_list_lookup(plan, plan_masks),
+                    allow_mismatch=allow_manifest_mismatch,
+                    model_name=self.name,
+                )
             check_and_write(
                 manifest_path(store.path),
                 manifest,
@@ -193,7 +226,9 @@ class BaseModel(ABC):
         in_memory = None if save_to else []
         try:
             if tasks:
-                self._run_tasks(tasks, horizon, test_start, n_days, store, in_memory, skipped, skip_examples)
+                self._run_tasks(
+                    tasks, horizon, test_start, n_days, store, in_memory, skipped, skip_examples, plan, plan_masks
+                )
         finally:
             if store:
                 store.flush()
@@ -215,12 +250,19 @@ class BaseModel(ABC):
             _results=in_memory,
             produced=produced,
             skipped=dict(skipped),
+            predictor_lists=None if plan is None else plan.describe(),
         )
 
-    def _run_tasks(self, tasks, horizon, test_start, n_days, store, in_memory, skipped, skip_examples) -> None:
+    def _run_tasks(
+        self, tasks, horizon, test_start, n_days, store, in_memory, skipped, skip_examples, plan=None, plan_masks=None
+    ) -> None:
         hour_arrays = self._build_hour_arrays(horizon)
-        expanded_preds = self._precompute_expanded_predictors(horizon)
-        scalable_masks = self._precompute_scalable_masks(horizon)
+        if plan is None:
+            expanded_preds = self._precompute_expanded_predictors(horizon)
+            scalable_masks = self._precompute_scalable_masks(horizon)
+        else:
+            expanded_preds = {list_id: list(names) for list_id, names in enumerate(plan.lists)}
+            scalable_masks = plan_masks
 
         tasks_by_day: Dict[int, list] = {}
         for t in tasks:
@@ -241,6 +283,9 @@ class BaseModel(ABC):
             "threads_per_process": threads_per_process,
             "freq": self._freq,
         }
+        if plan is not None:
+            config["task_lists"] = plan.assignment
+            config["list_hashes"] = plan.hashes
         first_day = datetime.date.fromisoformat(test_start)
 
         mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
@@ -307,6 +352,7 @@ class BaseModel(ABC):
         information_set: Optional["InformationSet"] = None,
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
+        plan: Optional[PredictorPlan] = None,
     ) -> Dict[Tuple[int, int], List[str]]:
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
 
@@ -315,16 +361,124 @@ class BaseModel(ABC):
         InformationSetError (a ValueError) when `information_set` is given and a predictor is not known at
         issue time. `ModelPipeline` calls it for every model before running any. The row spacing is checked only on
         the days this run can read (`_contract.read_days`), or on the whole frame without a test window.
+
+        A predictor function of `ctx` is checked through its `plan`, which `_plan_predictors` built after the same data
+        contract checks; without one, this builds one to check and drops it.
         """
         self._set_freq(freq)
-        _contract.check_index(data, freq, _contract.read_days(test_start, test_end, self.training_window, horizon))
-        _contract.check_timezone_with_day_lags(data)
-        _contract.check_names(data, target, horizon)
+        if self._ctx_fn is not None:
+            if plan is None:
+                plan = self._plan_predictors(data, target, horizon, freq, information_set, test_start, test_end)
+            expanded = plan.names_by_pair()
+            self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
+            if information_set is not None:
+                plan.check(target, self.name)
+            plan.release()
+            return expanded
+        self._check_frame(data, target, horizon, freq, test_start, test_end)
         expanded = self._precompute_expanded_predictors(horizon)
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
         if information_set is not None:
             information_set.check(expanded, target, freq, data.index, test_start, test_end, model_name=self.name)
         return expanded
+
+    def _check_frame(self, data, target, horizon, freq, test_start=None, test_end=None) -> None:
+        _contract.check_index(data, freq, _contract.read_days(test_start, test_end, self.training_window, horizon))
+        _contract.check_timezone_with_day_lags(data)
+        _contract.check_names(data, target, horizon)
+
+    def _plan_predictors(
+        self,
+        data: pd.DataFrame,
+        target: str,
+        horizon: int,
+        freq: str,
+        information_set: Optional["InformationSet"] = None,
+        test_start: Optional[str] = None,
+        test_end: Optional[str] = None,
+        issue_days: Optional[Sequence[str]] = None,
+        warn_unpublished: bool = True,
+    ) -> Optional[PredictorPlan]:
+        """The plan of a predictor function of `ctx` for this data and test period, or None for a model with fixed lists.
+
+        `issue_days` plans these days instead of [test_start, test_end]: `verify` samples a few to learn the inputs.
+        """
+        if self._ctx_fn is None:
+            return None
+        self._set_freq(freq)
+        self._check_frame(data, target, horizon, freq, test_start, test_end)
+        if issue_days is not None:
+            days = [datetime.date.fromisoformat(day) for day in issue_days]
+        elif test_start is None or test_end is None:
+            raise ValueError(f"{self.name}: a predictor function of `ctx` needs the test period to plan its lists")
+        else:
+            days = _test_days(test_start, test_end)
+        return build_plan(self._ctx_fn, data, days, horizon, freq, information_set, warn_unpublished)
+
+    def _check_plan_is_for(self, plan, data, horizon, freq, information_set, test_start, test_end) -> None:
+        """A plan answers for one function, frame and test period; on another run it would give wrong lists silently."""
+        if plan.function is not self._ctx_fn:
+            raise ValueError(f"{self.name}: this plan was built for another predictor function")
+        problems = []
+        if plan.data is not data:
+            problems.append("data")
+        if plan.issue_days != _test_days(test_start, test_end):
+            problems.append("test period")
+        if plan.horizon != horizon:
+            problems.append("horizon")
+        if plan.freq != freq:
+            problems.append("freq")
+        if information_set is not None and plan.information_set is not information_set:
+            problems.append("information set")
+        if problems:
+            raise ValueError(f"{self.name}: this plan was built for another {', '.join(problems)}")
+
+    def _plan_scalable_masks(self, plan: PredictorPlan) -> Dict[Tuple[int, int, int], np.ndarray]:
+        """(list id, period, horizon) -> which of the list's columns are scaled, from all test days of that list.
+
+        All of them, pending or not, so a resumed run computes what a fresh one does.
+
+        A list's mask is read from the window of its first test day, so nothing later than a forecast's own issue day
+        decides how it is scaled. A list in use on every test day of a (period, horizon) is a fixed list there and gets
+        exactly what a fixed list gets, which is what makes a function returning that list identical to it. Any other
+        list may hold a column that only starts with it, and a column with no value can't tell whether it is binary
+        (`get_scalable_mask` would leave it unscaled for good): it is read from the first of the list's test days that has
+        a value for it. Before that day the list's forecasts have no training row, since none has the column.
+        """
+        masks = {}
+        for (hour, hz), ids in plan.assignment.items():
+            for list_id in np.unique(ids).tolist():
+                predictors = list(plan.lists[list_id])
+                test_days = np.flatnonzero(ids == list_id)
+                sample = self._training_sample(hour, self._offset + test_days[0], hz, predictors)
+                mask = StandardScaler.get_scalable_mask(sample)
+                if len(test_days) < len(ids):
+                    self._read_columns_without_values(
+                        mask, np.isnan(sample).all(axis=0), hour, hz, predictors, test_days
+                    )
+                masks[(list_id, hour, hz)] = mask
+        return masks
+
+    def _read_columns_without_values(self, mask, without_values, hour, hz, predictors, test_days) -> None:
+        for day in test_days[1:]:
+            if not without_values.any():
+                return
+            sample = self._training_sample(hour, self._offset + day, hz, predictors)
+            found = without_values & ~np.isnan(sample).all(axis=0)
+            if found.any():
+                mask[found] = StandardScaler.get_scalable_mask(sample)[found]
+                without_values &= ~found
+
+    @staticmethod
+    def _stored_list_lookup(plan: PredictorPlan, masks: Dict[Tuple[int, int, int], np.ndarray]) -> Callable:
+        """What a fresh run would give a stored forecast's key: (list hash, mask digest), or None if it isn't planned."""
+        digests = {key: mask_digest(mask) for key, mask in masks.items()}
+
+        def lookup(period: int, horizon: int, run_date: str) -> Optional[Tuple[str, str]]:
+            list_id = plan.list_id_of(period, horizon, run_date)
+            return None if list_id is None else (plan.hashes[list_id], digests[(list_id, period, horizon)])
+
+        return lookup
 
     def _executor_config(self) -> tuple:
         """(threads per process, processes) from THREADS_PER_PROCESS and MAX_PROCESSES.
@@ -401,16 +555,17 @@ class BaseModel(ABC):
     def _precompute_scalable_masks(self, horizon: int) -> Dict[Tuple[int, int], np.ndarray]:
         masks = {}
         for hour in range(self._periods_per_day):
-            days = self._hour_days[hour]
-            day = self._offset
-            hour_df = self._hour_data[hour]
             for hz in range(1, horizon + 1):
-                day_min = day - self.training_window - hz
-                mask = (days >= day_min) & (days <= day)
                 preds = self._expand_predictors(hz, hour=hour)
-                sample_x = hour_df[mask][preds].to_numpy(dtype=np.float64)[: -(1 + hz)]
+                sample_x = self._training_sample(hour, self._offset, hz, preds)
                 masks[(hour, hz)] = StandardScaler.get_scalable_mask(sample_x)
         return masks
+
+    def _training_sample(self, hour: int, day: int, hz: int, predictors: List[str]) -> np.ndarray:
+        """The training rows of the task (hour, hz, day) in these columns, before dropping missing values."""
+        days = self._hour_days[hour]
+        mask = (days >= day - self.training_window - hz) & (days <= day)
+        return self._hour_data[hour][mask][predictors].to_numpy(dtype=np.float64)[: -(1 + hz)]
 
     def _precompute_expanded_predictors(self, horizon: int) -> Dict[Tuple[int, int], List[str]]:
         return {

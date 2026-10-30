@@ -87,7 +87,19 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     day_min = day - cfg["training_window"] - hz
     mask = (days >= day_min) & (days <= day)
 
-    col_idx = [arrays["col_index"][c] for c in _W_EXPANDED_PREDS[(hour, hz)]]
+    # A fixed list is keyed by (period, horizon). With a predictor function of `ctx` (see epftoolbox2.models.context)
+    # each task has its own list, and each list its own binary-column mask per (period, horizon).
+    task_lists = cfg.get("task_lists")
+    if task_lists is None:
+        list_id = None
+        predictors = _W_EXPANDED_PREDS[(hour, hz)]
+        scalable_mask = cfg["scalable_masks"][(hour, hz)]
+    else:
+        list_id = int(task_lists[(hour, hz)][day_in_test])
+        predictors = _W_EXPANDED_PREDS[list_id]
+        scalable_mask = cfg["scalable_masks"][(list_id, hour, hz)]
+
+    col_idx = [arrays["col_index"][c] for c in predictors]
     x_full = arrays["x"][mask][:, col_idx]
     y_full = arrays["y"][mask][:, hz - 1]
 
@@ -122,8 +134,8 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
         train_x.copy(),
         train_y.copy(),
         test_x.copy(),
-        scalable_mask=cfg["scalable_masks"][(hour, hz)],
-        columns=_W_EXPANDED_PREDS[(hour, hz)],
+        scalable_mask=scalable_mask,
+        columns=predictors,
     )
     try:
         pred, coefs = _W_FIT_PREDICT(train_x, train_y, test_x)
@@ -131,7 +143,7 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
         # scikit-learn raises ValueError on degenerate input (e.g. fewer rows than CV folds); counted, not fatal.
         return f"{SKIP_FIT_ERROR}: {exc}"
 
-    return {
+    record = {
         "run_date": run_date_str,
         "target_date": target_date_str,
         "run_weekday": run_date.weekday(),
@@ -143,6 +155,9 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
         "coefficients": coefs,
         "freq": cfg.get("freq", "1h"),
     }
+    if list_id is not None:
+        record["predictor_list"] = cfg["list_hashes"][list_id]
+    return record
 
 
 def _run_task(task: tuple) -> Union[Dict, str]:
