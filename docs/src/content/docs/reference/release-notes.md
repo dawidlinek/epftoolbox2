@@ -32,14 +32,23 @@ Unchanged: `BaseModel.run(information_set=...)`, without a pipeline, and `leakag
 `pipeline.verify()` still reports a late predictor as a `leak` at every level, and now also what a predictor function uses late on
 an issue day it didn't sample.
 
+### Fixed
+
+- `ModelPipeline.report(test=narrower)` counted every line of a results file as produced, so a shorter period looked complete. It now
+  counts the forecasts inside the period, and `forecast_counts()` and its warning say what is missing.
+
 ### New
 
+- A merged `report()` has the skip reasons in `forecast_counts()`. A run that skipped forecasts records them per window in its
+  manifest (`skipped`), when it finishes; a run with no skips has no such key, and a resume or a run naming one window replaces
+  that window's counts only.
+- A predictor function returning the same names in another order warns: the order is part of a list.
 - `Use(list, train_on="matching")` in a predictor function of `ctx`: a forecast trains only on the past days for which the function
   returned that list and rule, per (period, horizon), after the usual training cut. The function is evaluated on those days too, once
   per (day, period, horizon), before any fit and as of each day's own issue time, which doubles the calls for a year of test and a
   window of 364. The window isn't extended, so such a forecast trains on fewer rows. A forecast with no such day is counted as
-  `no_matching_days`, and fewer days than predictors warns, also in the terminal exporter. Records of such a list gain `training_days`
-  and `matching_days`, and resuming compares the set. `report.training_days()` and the `lists` table of `explain()` show how many days
+  `no_matching_days`, and as many days as predictors or fewer warns, also in the terminal exporter. Records of such a list gain
+  `training_days` and `matching_days`, and resuming compares the set. `report.training_days()` and the `lists` table of `explain()` show how many days
   they train on. Anything without such a list doesn't change. See
   [Predictor Functions](/epftoolbox2/model-pipeline/predictor-functions/#training-only-on-the-days-with-the-same-list).
 - A manifest gains `column_hashes` (each column a run reads, on its own) and `frame_hash` (the whole frame), through `test_end`,

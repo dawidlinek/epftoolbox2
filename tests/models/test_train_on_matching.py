@@ -28,9 +28,10 @@ from epftoolbox2.information_set import (
     perturb_unknown,
 )
 from epftoolbox2.models import LassoCVModel, OLSModel, Use, _worker
-from epftoolbox2.models._worker import _worker_init
+from epftoolbox2.models._worker import NOT_PLANNED, _worker_init, matching_rows
 from epftoolbox2.pipelines import ModelPipeline
-from epftoolbox2.results.manifest import ManifestMismatchError
+from epftoolbox2.models import _contract
+from epftoolbox2.results.manifest import ManifestMismatchError, manifest_digest
 from epftoolbox2.results.matching import training_day_rows
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
@@ -545,9 +546,9 @@ def test_verify_catches_a_matching_forecast_fitted_on_a_target_dated_on_the_issu
     assert not probe.ok
 
 
-def test_a_doubled_autumn_row_leaks_as_it_does_for_a_fixed_list():
-    """`test_known_issues.py` pins this for a fixed list and isn't fixed here. A set keeps what the cut leaves, so a set with
-    the date of the doubled row has the same look-ahead, which the probe shows; a set without it has none."""
+def test_a_probe_sees_the_doubled_autumn_row_in_a_set_holding_its_date_and_none_without_it():
+    """`test_known_issues.py` pins the look-ahead itself, for fixed lists and sets, and it isn't fixed here. A set keeps what the
+    cut leaves, so a set with the date of the doubled row has it, which the probe shows; a set without it has none."""
     data = make_market_data(start="2023-08-01", days=120, noise=5.0, seed=1)
     run_day = "2023-10-30"  # hour 2 of the day before has two rows, and the first stays after the cut
 
@@ -714,7 +715,7 @@ def test_no_matching_days_are_counted_and_too_few_are_warned_about_in_the_termin
     frame, tmp_path, capsys, monkeypatch
 ):
     monkeypatch.setenv("COLUMNS", "200")
-    days = ("2023-04-07", "2023-04-15")
+    days = ("2023-04-07", "2023-04-16")
     pipeline = (
         ModelPipeline(information_set=INFO)
         .add_model(OLSModel(a_list_starts_in_the_test, training_window=WINDOW, name="starts"))
@@ -724,13 +725,14 @@ def test_no_matching_days_are_counted_and_too_few_are_warned_about_in_the_termin
     )
     # The first day of the new list trains on a row at D-1-h: at horizon h it has none on h + 1 issue days.
     skipped = 24 * (2 + 3 + 4)
-    # Then 1, 2, 3 days and so on, for 4 predictors, as far as the test reaches: at horizon 1 the fourth day isn't thin.
-    thin = 24 * (3 + 3 + 2)
+    # Then 1, 2, 3 days and so on for 4 predictors, as far as the test reaches. Four is thin, and at horizon 1 five isn't.
+    thin = 24 * (4 + 4 + 3)
     with pytest.warns(UserWarning, match=rf"starts: {thin} forecast\(s\).*as few as 1 day\(s\) for 4 predictors"):
         report = pipeline.run(frame, test=days, horizon=3, save_dir=tmp_path)
 
     counts = report.forecast_counts().set_index("model")
     assert counts.loc["starts", "no_matching_days"] == skipped
+    assert set(report.training_days().query("predictors == 4 and horizons == '1'")["largest_days"]) == {5}
     assert counts.loc["starts", "produced"] == counts.loc["starts", "planned"] - skipped
     assert counts.loc["fixed", "no_matching_days"] == 0
 
@@ -742,19 +744,21 @@ def test_no_matching_days_are_counted_and_too_few_are_warned_about_in_the_termin
     assert (thin_rows["predictors"] == 4).all()
 
     out = capsys.readouterr().out
-    assert "fewer training days than predictors" in out
+    assert "no more training days than predictors" in out
     assert thin_rows.iloc[0]["list"] in out and str(int(thin_rows.iloc[0]["thin_forecasts"])) in out
 
     # The merge after array jobs says so too, from the files alone.
     with pytest.warns(UserWarning, match=rf"starts: {thin} forecast\(s\).*as few as 1 day\(s\) for 4 predictors"):
         merged = pipeline.report(tmp_path, test=days, horizon=3)
     pd.testing.assert_frame_equal(merged.training_days(), table)
-    assert "fewer training days than predictors" in capsys.readouterr().out
+    pd.testing.assert_frame_equal(merged.forecast_counts(), report.forecast_counts())
+    assert "no more training days than predictors" in capsys.readouterr().out
 
     # Nothing about it for a model that has no such list.
     other = ModelPipeline(information_set=INFO).add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="fixed"))
     alone = other.report(tmp_path, test=days, horizon=3)
     assert alone.training_days().empty and list(alone.training_days().columns) == list(table.columns)
+    assert "no_matching_days" not in alone.forecast_counts().columns
 
 
 # ---------------------------------------------------------------------------
@@ -879,7 +883,7 @@ def test_a_changed_set_on_a_stored_key_raises_though_its_list_is_the_same(frame,
 
     monkeypatch.setitem(globals(), "LIST_CHANGES_ON", datetime.date(2023, 3, 25))
     with pytest.raises(
-        ManifestMismatchError, match=r"240 stored forecast\(s\) of a train_on='matching' list trained on other"
+        ManifestMismatchError, match=r"240 stored forecast\(s\) of a train_on='matching' list have other matching days"
     ):
         make().run(frame, *TEST, horizon=1, information_set=INFO, save_to=str(path))
 
@@ -903,7 +907,7 @@ def test_a_data_change_that_moves_a_value_driven_choice_on_a_past_day_is_caught(
     changed = frame.copy()
     hours = changed.index.tz_localize(None).normalize() == pd.Timestamp("2023-03-20")
     changed.loc[hours, "signal_d-1"] = -np.sign(changed.loc[hours, "signal_d-1"]) * 1e3
-    with pytest.raises(ManifestMismatchError, match="trained on other days"):
+    with pytest.raises(ManifestMismatchError, match="have other matching days"):
         pipeline.run(changed, horizon=1, save_dir=tmp_path, **run)
 
 
@@ -955,12 +959,15 @@ def test_each_window_of_a_run_is_what_a_plain_run_over_it_gives(frame, function)
 def reads_late_in_the_validation_days(ctx):
     if datetime.date(2023, 4, 1) <= ctx.issue_day <= datetime.date(2023, 4, 3) and ctx.period in (5, 6):
         ctx.value("late")
-    return one_list(ctx) if ctx.period == 5 else PREDICTORS
+    if ctx.issue_day == datetime.date(2023, 4, 6) and ctx.period == 7:  # between the windows: only a training day
+        ctx.value("late")
+    return one_list(ctx) if ctx.period in (5, 7) else PREDICTORS
 
 
 def test_what_a_window_lists_is_what_a_plain_run_over_it_lists(frame):
     """Period 5 of the test window trains on the days the function read a late value, which a plain run over it evaluates as
-    training days. Period 6 doesn't, so the test window has nothing to say about it, and the validation window does."""
+    training days. Period 6 doesn't, so the test window has nothing to say about it, and the validation window does. Period 7
+    reads one on a day in neither window, after the validation window, so only the test window lists it."""
     validation, test = ("2023-04-01", "2023-04-03"), ("2023-04-10", "2023-04-12")
     pipeline = ModelPipeline(information_set=INFO).add_model(
         OLSModel(reads_late_in_the_validation_days, training_window=WINDOW, name="m")
@@ -971,7 +978,7 @@ def test_what_a_window_lists_is_what_a_plain_run_over_it_lists(frame):
         with pytest.warns(UserWarning, match="not known"):
             alone = pipeline.run(frame, horizon=1, test=days)
         pd.testing.assert_frame_equal(part.availability(), alone.availability())
-    assert both.availability()["periods"].tolist() == ["5"]
+    assert both.availability()["periods"].tolist() == ["5, 7"]
     assert both.validation.availability()["periods"].tolist() == ["5-6"]
 
 
@@ -1032,7 +1039,7 @@ def test_ensembles_over_matching_models(frame):
     assert report.training_days()["model"].unique().tolist() == ["weekends", "starts"]
 
 
-def test_tables_and_exporters_read_matching_records_and_a_merge_gives_the_same(frame, tmp_path):
+def test_tables_and_exporters_read_matching_records_and_a_merge_gives_the_same(frame, tmp_path, capsys):
     pipeline = (
         ModelPipeline(information_set=INFO)
         .add_model(OLSModel(weekend_split, training_window=WINDOW, name="m"))
@@ -1043,12 +1050,17 @@ def test_tables_and_exporters_read_matching_records_and_a_merge_gives_the_same(f
     )
     report = pipeline.run(frame, test=TEST, horizon=2, save_dir=tmp_path / "runs")
     assert report.summary().iloc[0]["forecasts"] == 480
+    assert report.training_days()["thin_forecasts"].sum() == 0 and not report.training_days().empty
+    assert "training days" not in capsys.readouterr().out  # nothing to warn about, so no table
     assert len(pd.read_csv(tmp_path / "out.csv")) == 480
     assert (tmp_path / "out.xlsx").stat().st_size
     assert len(report.by_hour()) == 24
     merged = pipeline.report(tmp_path / "runs", test=TEST, horizon=2)
     pd.testing.assert_frame_equal(merged.summary(), report.summary())
     pd.testing.assert_frame_equal(merged.training_days(), report.training_days())
+    assert (
+        merged.refs["m"].matching_lists == report.refs["m"].matching_lists
+    )  # the list with train_on="all" isn't there
 
     manifest = json.loads((tmp_path / "runs" / "m.manifest.json").read_text())
     assert {entry["train_on"] for entry in manifest["predictor_lists"]} == {"all", "matching"}
@@ -1091,10 +1103,19 @@ def test_explain_shows_the_smallest_median_and_largest_days_of_a_matching_list(f
 
 
 def test_a_stored_list_this_run_does_not_have_stays_in_the_table_with_no_verdict():
-    rows = training_day_rows("m", [("gone", 3, 1, 5), ("kept", 3, 2, 5), ("kept", 4, 2, 9)], {"kept": 6})
-    assert [(r["list"], r["predictors"], r["thin_forecasts"]) for r in rows] == [("gone", None, 0), ("kept", 6, 1)]
-    assert (rows[1]["smallest_days"], rows[1]["median_days"], rows[1]["largest_days"]) == (5, 7.0, 9)
-    assert (rows[1]["periods"], rows[1]["horizons"], rows[1]["forecasts"]) == ("3-4", "2", 2)
+    uses = [
+        ("gone", 3, 1, 5),
+        ("kept", 3, 2, 0),
+        ("kept", 3, 2, 6),
+        ("kept", 3, 2, 6),
+        ("kept", 4, 2, 7),
+        ("kept", 4, 2, 21),
+    ]
+    rows = training_day_rows("m", uses, {"kept": 6})
+    # Six days for six predictors are thin, seven aren't, and a forecast with no day has no fit to be thin.
+    assert [(r["list"], r["predictors"], r["thin_forecasts"]) for r in rows] == [("gone", None, 0), ("kept", 6, 2)]
+    assert (rows[1]["smallest_days"], rows[1]["median_days"], rows[1]["largest_days"]) == (0, 6.0, 21)
+    assert (rows[1]["periods"], rows[1]["horizons"], rows[1]["forecasts"]) == ("3-4", "2", 5)
 
 
 def test_a_saved_function_with_matching_lists_round_trips(frame, tmp_path):
@@ -1121,3 +1142,290 @@ def test_the_docs_example_trains_weekend_targets_on_about_a_hundred_days():
     weekend = tables["lists"].query("predictors == 2").iloc[0]
     assert weekend["train_on"] == "matching" and weekend["median days"] == 104
     assert tables["lists"].query("predictors == 3").iloc[0]["median days"] == 260
+
+
+# ---------------------------------------------------------------------------
+# What the plan asks and counts
+# ---------------------------------------------------------------------------
+
+
+def test_only_the_matching_forecasts_of_a_pair_are_asked_for_their_windows(frame):
+    last = datetime.date(2023, 4, 10)
+    calls = set()
+
+    def matching_on_the_last_day(ctx):
+        calls.add((ctx.issue_day, ctx.period))
+        return one_list(ctx) if ctx.issue_day == last and ctx.period == 5 else PREDICTORS
+
+    OLSModel(matching_on_the_last_day, training_window=WINDOW)._plan_predictors(
+        frame, "price", 1, "1h", INFO, "2023-04-05", "2023-04-10"
+    )
+    first_test = datetime.date(2023, 4, 5)
+    first_read = last - datetime.timedelta(days=WINDOW + 1)
+    asked = {day for day, period in calls if day < first_test}
+    assert asked == {first_read + datetime.timedelta(days=d) for d in range((first_test - first_read).days)}
+    assert {period for day, period in calls if day < first_test} == {5}
+
+
+def test_the_same_names_with_train_on_all_on_past_days_alone_do_not_match(frame):
+    """The list with `train_on="all"` is on no forecast, so it has no id of its own in the plan."""
+    rows = Rows(frame)
+    first = datetime.date.fromisoformat(TEST[0])
+
+    def label(day, period, horizon):
+        return "all" if day < first and day.weekday() == 0 else "matching"
+
+    def past_mondays_on_all(ctx):
+        return Use(PREDICTORS, train_on=label(ctx.issue_day, ctx.period, ctx.horizon))
+
+    ref = OLSModel(past_mondays_on_all, training_window=WINDOW).run(frame, *TEST, horizon=1, information_set=INFO)
+    names = expanded(PREDICTORS, 1)
+    assert {r["predictor_list"] for r in ref._results} == set(ref.matching_lists)
+    for (day, period, hz), record in by_key(ref._results).items():
+        matched = rows.matched(day, period, hz, label)
+        assert record["training_days"] == len(rows.days(rows.fitted(matched, names, hz))), (day, period)
+        assert record["matching_days"] == rows.digest(matched)
+    assert by_key(ref._results)[("2023-04-05", 12, 1)]["training_days"] == WINDOW - 7  # seven Mondays left out
+
+
+def test_what_the_plan_counts_is_what_the_records_say_in_a_frame_with_holes():
+    data = make_market_data(start="2023-08-01", days=120, noise=5.0, seed=9, horizon=2)
+    rng = np.random.default_rng(0)
+    for column in ("load_d+1", "wind_d+1", "load_d+2", "wind_d+2", "price"):
+        data.loc[rng.random(len(data)) < 0.03, column] = np.nan
+    lost_rows = (data.index.date == datetime.date(2023, 10, 5)) | (
+        (data.index.date == datetime.date(2023, 10, 3)) & (data.index.hour == 5)
+    )
+    data = data[~lost_rows]
+
+    def by_target(ctx):
+        return Use(TWO if ctx.target_weekday % 3 == 0 else [*TWO, "price_d-1"], train_on="matching")
+
+    days = ("2023-10-02", "2023-10-20")
+    model = OLSModel(by_target, training_window=30, name="m")
+    plan = model._plan_predictors(data, "price", 2, "1h", None, *days, warn_unpublished=False)
+    ref = model.run(data, *days, horizon=2, plan=plan)
+
+    checker = OLSModel(by_target, training_window=30, name="m")
+    checker._set_freq("1h")
+    columns = sorted({name for names in plan.lists for name in names})
+    checker._load_periods(data, ["price", *columns], 2, "price")
+    absent = _contract.missing_test_rows(data.index, "1h", plan.issue_days)
+    assert (5, pd.Timestamp("2023-10-03")) in absent
+    counts = checker._matching_day_counts(plan, "price", {(p, day.toordinal()) for p, day in absent})
+    assert len(ref._results) > 500
+    for record in ref._results:
+        count = counts[(record["hour"], record["horizon"])][plan.position_of(record["run_date"])]
+        assert count == record["training_days"], (record["run_date"], record["hour"], record["horizon"])
+    # A forecast with no row to forecast from isn't counted at all, and neither is a day with no rows.
+    assert counts[(5, 1)][plan.position_of("2023-10-03")] == -1
+    assert (counts[(5, 1)][plan.position_of("2023-10-05")], counts[(6, 2)][plan.position_of("2023-10-05")]) == (-1, -1)
+
+
+def test_explain_leaves_out_a_forecast_with_no_row_to_forecast_from(frame):
+    def at_five(ctx):
+        return one_list(ctx) if ctx.period == 5 else PREDICTORS
+
+    last = datetime.date(2023, 4, 14)
+    data = frame[~((frame.index.date == last) & (frame.index.hour == 5))]
+    pipeline = ModelPipeline(information_set=INFO).add_model(OLSModel(at_five, training_window=WINDOW, name="m"))
+    table = pipeline.explain(data, model="m", test=("2023-04-10", str(last)), horizon=1, hour=5, echo=False)["lists"]
+    row = table[table["train_on"] == "matching"].iloc[0]
+    # Counted from the row before it, that forecast would come out a day short, and a -1 would be a count of its own.
+    assert (row["smallest days"], row["median days"], row["largest days"]) == (WINDOW, float(WINDOW), WINDOW)
+
+
+def test_a_row_the_plan_has_no_list_for_raises_rather_than_quietly_not_matching():
+    with pytest.raises(RuntimeError, match="its plan has no list for"):
+        matching_rows(np.array([3]), np.array([0, 0, 0, NOT_PLANNED]), 0, 0)
+
+
+def only_on_training_days(ctx):
+    if ctx.issue_day < datetime.date.fromisoformat(TEST[0]):
+        ctx.value("signal_d-1")
+        ctx.value("no_rule_value")
+        ctx.published("no_rule_published")
+    return one_list(ctx)
+
+
+def test_what_the_function_only_reads_on_training_days_is_recorded_and_listed(frame, tmp_path):
+    data = frame.assign(no_rule_value=1.0, no_rule_published=1.0)
+    pipeline = ModelPipeline(information_set=INFO).add_model(
+        OLSModel(only_on_training_days, training_window=WINDOW, name="m")
+    )
+    with pytest.warns(UserWarning, match="not known"):
+        report = pipeline.run(data, test=TEST, horizon=1, save_dir=tmp_path)
+    manifest = json.loads((tmp_path / "m.manifest.json").read_text())
+    assert {"signal_d-1", "no_rule_value", "no_rule_published"} <= set(manifest["column_hashes"])
+    listed = report.availability().set_index("predictor")
+    assert (listed.loc["no_rule_value", "status"], listed.loc["no_rule_value", "role"]) == ("no rule", "ctx.value")
+    assert (listed.loc["no_rule_published", "status"], listed.loc["no_rule_published", "role"]) == (
+        "no rule",
+        "ctx.published",
+    )
+    assert listed.loc["no_rule_value", "periods"] == "0-23"
+
+
+# ---------------------------------------------------------------------------
+# The order of a list
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("train_on", ["all", "matching"])
+def test_the_same_names_in_another_order_warn_whatever_the_rule(frame, train_on):
+    def by_day(ctx):
+        return Use(PREDICTORS if ctx.issue_day.day % 2 else PREDICTORS[::-1], train_on=train_on)
+
+    with pytest.warns(UserWarning, match="another order.*Sort the names"):
+        OLSModel(by_day, training_window=WINDOW)._plan_predictors(frame, "price", 1, "1h", INFO, *TEST)
+
+
+def test_another_order_on_training_days_alone_warns_and_other_lists_do_not(frame, recwarn):
+    first = datetime.date.fromisoformat(TEST[0])
+
+    def past_days_reversed(ctx):
+        return Use(PREDICTORS[::-1] if ctx.issue_day < first else PREDICTORS, train_on="matching")
+
+    with pytest.warns(UserWarning, match="another order"):
+        OLSModel(past_days_reversed, training_window=WINDOW)._plan_predictors(frame, "price", 1, "1h", INFO, *TEST)
+
+    recwarn.clear()
+    OLSModel(mixed_lists, training_window=WINDOW)._plan_predictors(frame, "price", 1, "1h", INFO, *TEST)
+    OLSModel(weekend_split, training_window=WINDOW)._plan_predictors(frame, "price", 1, "1h", INFO, *TEST)
+    assert not [w for w in recwarn if "another order" in str(w.message)]
+
+
+# ---------------------------------------------------------------------------
+# What a fit can't do on few rows
+# ---------------------------------------------------------------------------
+
+
+def test_lasso_below_its_cv_rows_is_counted_as_a_fit_error_and_the_warning_says_it_can_be(frame):
+    model = LassoCVModel(a_list_starts_in_the_test, training_window=WINDOW, cv=5, name="lasso")
+    with pytest.warns(UserWarning, match=r"lasso: 96 forecast\(s\).*a fit can fail.*fit_error"):
+        ref = model.run(frame, "2023-04-12", "2023-04-16", horizon=1, information_set=INFO)
+    assert ref.skipped == {"fit_error": 96}  # 1, 2, 3 and 4 days fail, and 5 days fit
+    assert {r["training_days"] for r in ref._results} == {5}
+
+
+# ---------------------------------------------------------------------------
+# What a merged report says
+# ---------------------------------------------------------------------------
+
+
+def test_a_report_on_part_of_a_run_counts_the_forecasts_of_that_part(frame, tmp_path):
+    pipeline = (
+        ModelPipeline(information_set=INFO)
+        .add_model(OLSModel(a_list_starts_in_the_test, training_window=WINDOW, name="starts"))
+        .add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="fixed"))
+        .add_evaluator(MAEEvaluator())
+    )
+    with pytest.warns(UserWarning, match="no more days"):
+        wide = pipeline.run(frame, test=("2023-04-07", "2023-04-16"), horizon=2, save_dir=tmp_path)
+    assert "no_matching_days" in wide.forecast_counts().columns
+
+    # At horizon 1 the new list has no forecast on 10 and 11 April, at horizon 2 none up to the 12th: 5 days of 6.
+    part = ("2023-04-10", "2023-04-12")
+    with pytest.warns(UserWarning, match=r"starts \(24 of 144, 120 missing\)"):
+        narrower = pipeline.report(tmp_path, test=part, horizon=2)
+    counts = narrower.forecast_counts().set_index("model")
+    forecasts = narrower.summary().set_index("model")["forecasts"]
+    assert counts["produced"].to_dict() == forecasts.to_dict() == {"starts": 24, "fixed": 144}
+    assert counts["planned"].to_dict() == {"starts": 144, "fixed": 144}
+    assert counts["missing"].to_dict() == {"starts": 120, "fixed": 0}
+    # What the manifest says is about the run's period, so this report doesn't pretend it is about this part.
+    assert "no_matching_days" not in counts.columns
+
+    whole = pipeline.report(tmp_path, test=("2023-04-07", "2023-04-16"), horizon=2)
+    pd.testing.assert_frame_equal(whole.forecast_counts(), wide.forecast_counts())
+
+
+class FailsOnFewRows(OLSModel):
+    """A ValueError from the fit, as scikit-learn raises on degenerate input, below a number of rows the environment gives."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        if train_x.shape[0] < int(os.environ.get("FIT_ERROR_BELOW", 0)):
+            raise ValueError("too few rows for this model")
+        return super()._fit_predict(train_x, train_y, test_x)
+
+
+def manifest_of(path):
+    return json.loads((Path(path) / "m.manifest.json").read_text())
+
+
+def test_skip_counts_go_in_the_manifest_per_window_and_a_run_replaces_its_own(frame, tmp_path, monkeypatch):
+    validation, test = ("2023-03-31", "2023-04-03"), ("2023-04-10", "2023-04-14")
+    pipeline = ModelPipeline(information_set=INFO).add_model(
+        FailsOnFewRows(weekend_split, training_window=WINDOW, name="m")
+    )
+
+    monkeypatch.setenv("FIT_ERROR_BELOW", "20")  # the weekend list's forecasts have fewer rows than that
+    report = pipeline.run(frame, horizon=1, validation=validation, test=test, save_dir=tmp_path)
+    in_test = report.forecast_counts().iloc[0]["fit_error"]
+    in_validation = report.validation.forecast_counts().iloc[0]["fit_error"]
+    assert in_test == 24 and in_validation == 48  # the Friday in the test; the Friday and Saturday in validation
+    assert manifest_of(tmp_path)["skipped"] == {"test": {"fit_error": 24}, "validation": {"fit_error": 48}}
+
+    merged = pipeline.report(tmp_path, validation=validation, test=test, horizon=1)
+    pd.testing.assert_frame_equal(merged.forecast_counts(), report.forecast_counts())
+    pd.testing.assert_frame_equal(merged.validation.forecast_counts(), report.validation.forecast_counts())
+
+    # A resume tries them again, and what it finds replaces the counts: here the same.
+    resumed = pipeline.run(frame, horizon=1, validation=validation, test=test, save_dir=tmp_path)
+    assert resumed.forecast_counts().iloc[0]["fit_error"] == 24
+    assert manifest_of(tmp_path)["skipped"] == {"test": {"fit_error": 24}, "validation": {"fit_error": 48}}
+
+    # A run naming one window replaces that window's alone.
+    monkeypatch.delenv("FIT_ERROR_BELOW")
+    pipeline.run(frame, horizon=1, test=test, save_dir=tmp_path)
+    assert manifest_of(tmp_path)["skipped"] == {"validation": {"fit_error": 48}}
+    merged = pipeline.report(tmp_path, validation=validation, test=test, horizon=1)
+    assert "fit_error" not in merged.forecast_counts().columns
+    assert merged.validation.forecast_counts().iloc[0]["fit_error"] == 48
+
+    # And nothing skipped leaves no key at all.
+    pipeline.run(frame, horizon=1, validation=validation, test=test, save_dir=tmp_path)
+    assert "skipped" not in manifest_of(tmp_path)
+
+
+def test_a_crash_records_no_skips_so_what_is_missing_is_not_explained_away(frame, tmp_path, monkeypatch):
+    days = ("2023-04-07", "2023-04-14")
+    data = frame.iloc[:2800]
+    real_pool(monkeypatch, 1)
+
+    def pipeline():
+        return ModelPipeline(information_set=INFO).add_model(
+            CrashesAfterSomeFits(a_list_starts_in_the_test, training_window=WINDOW, name="m")
+        )
+
+    monkeypatch.setenv("CRASH_AFTER", "100")
+    with pytest.raises(RuntimeError, match="the machine went down"):
+        pipeline().run(data, test=days, horizon=1, save_dir=tmp_path)
+    monkeypatch.delenv("CRASH_AFTER")
+    assert "skipped" not in manifest_of(tmp_path)
+    with pytest.warns(UserWarning, match=r"m \(\d+ of 192, \d+ missing\)"):
+        crashed = pipeline().report(tmp_path, test=days, horizon=1)
+    assert "no_matching_days" not in crashed.forecast_counts().columns
+
+    # The run finished this time: 2 days without a forecast, and the merge can name them.
+    pipeline().run(data, test=days, horizon=1, save_dir=tmp_path)
+    assert manifest_of(tmp_path)["skipped"] == {"test": {"no_matching_days": 48}}
+    with pytest.warns(UserWarning, match=r"m \(144 of 192, 48 missing, no_matching_days 48\)"):
+        merged = pipeline().report(tmp_path, test=days, horizon=1)
+    assert merged.forecast_counts().iloc[0]["no_matching_days"] == 48
+
+
+def test_skip_counts_say_nothing_about_a_stored_forecast():
+    manifest = {"model_class": "OLSModel", "created_at": "now"}
+    assert manifest_digest({**manifest, "skipped": {"test": {"fit_error": 3}}}) == manifest_digest(manifest)
+
+
+def test_a_stored_record_without_its_matching_days_is_refused(frame, tmp_path):
+    path = tmp_path / "m.jsonl"
+    make = lambda: OLSModel(one_list, training_window=WINDOW)  # noqa: E731
+    make().run(frame, *TEST, horizon=1, information_set=INFO, save_to=str(path))
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    del records[0]["matching_days"]
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    with pytest.raises(ManifestMismatchError, match=r"1 stored forecast\(s\) .* have other matching days"):
+        make().run(frame, *TEST, horizon=1, information_set=INFO, save_to=str(path))

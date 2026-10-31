@@ -204,9 +204,9 @@ Workers write records as their tasks finish, so the order of the lines in a resu
 
 `ModelPipeline.report(save_dir, test_start=..., test_end=..., horizon=..., freq=...)` builds a report from the per-model JSONL files a previous run wrote to `save_dir` and runs the evaluators and exporters. `Workflow.report()` / `epf report` use it to merge the results of a SLURM array (see [Workflow](/epftoolbox2/workflow/overview/#run-only-one-model-slurm-arrays)).
 
-If any model's file has fewer lines than the planned count for `test_start`..`test_end` × `horizon` × `freq` (an array task that failed or never ran), `report()` warns, naming the models and their produced/planned/missing counts, and notes that metrics are then computed on different forecast sets for those models.
+If any model's file has fewer forecasts inside `test_start`..`test_end` than the planned count for that period × `horizon` × `freq` (an array task that failed or never ran, or forecasts skipped), `report()` warns, naming the models and their produced/planned/missing counts, and notes that metrics are then computed on different forecast sets for those models.
 
-What the runs listed in `report.availability()` comes back from their manifests, whichever pipeline builds the report.
+What the runs listed in `report.availability()` comes back from their manifests, whichever pipeline builds the report. So do the skip reasons in `forecast_counts()`, per window: a run that skipped forecasts records how many in its manifest when it finishes, and a resume, or a run naming one window, replaces that window's counts only. So what `missing` holds beyond the reasons is a task that crashed or never ran. The counts can't be split by day, so a report on part of a plain run's days has `missing` and no reasons.
 
 After runs with validation, `report(save_dir, validation=..., test=..., horizon=..., freq=...)` takes what `run` was told and returns what `run` returns, with `report.validation`. Each window must be what the manifests record, and with no window at all the report is on every window they record. Results whose manifests record different windows raise `ValueError`. See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/).
 
