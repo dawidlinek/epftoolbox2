@@ -19,7 +19,15 @@ from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..exporters.base import Exporter
 from ..results.availability import read_listing, warn_about
-from ..results.manifest import FrameHashes, ManifestMismatchError, is_ensemble_manifest, manifest_path, read_windows
+from ..results.manifest import (
+    FrameHashes,
+    ManifestMismatchError,
+    is_ensemble_manifest,
+    manifest_path,
+    read_matching_lists,
+    read_windows,
+)
+from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef, split_by_window
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
@@ -391,6 +399,7 @@ class ModelPipeline:
                 produced=produced,
                 availability_listing=read_listing(manifest_path(path)),
                 windows=windows,
+                matching_lists=read_matching_lists(manifest_path(path)),
             )
         if missing and not allow_missing:
             raise FileNotFoundError(f"No results for model(s): {', '.join(missing)}. Run them first.")
@@ -441,6 +450,7 @@ class ModelPipeline:
         warn_about({name: ref.availability_listing for name, ref in refs.items()}, stacklevel=3)
 
         report = EvaluationReport(refs, [] if forecast_only else self.evaluators, source_data=data, choices=choices)
+        warn_about_thin(rows_of_refs(refs), stacklevel=2)  # on the whole file: a report holds one window
         if not forecast_only:
             for exporter in self.exporters:
                 exporter.export(report)
