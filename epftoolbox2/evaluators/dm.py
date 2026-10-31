@@ -2,10 +2,9 @@ import operator
 import warnings
 from typing import Any, Dict, Mapping, Optional
 
-import numpy as np
 import pandas as pd
 
-from ._compare import adjust, compare_pair, is_grouped, is_per_hour, panel_of, verdict, warn_if_short
+from ._compare import adjust_family, compare_pair, is_grouped, is_per_hour, panel_of, verdict, warn_if_short
 from .base import EvaluatorResult, SetEvaluator
 
 
@@ -13,8 +12,8 @@ class DMEvaluator(SetEvaluator):
     """Each model against `benchmark` on the keys the two share: MAE ratio, its interval and a Diebold-Mariano test.
 
     Columns (`"DM {key}"`): `ratio` (MAE of the model / MAE of the benchmark, so below 1 is better), `ci_low`, `ci_high`,
-    `p`, `p_holm` (Holm over the `m` models compared with the benchmark in that group), `m`, `verdict`, `n_days`,
-    `n_forecasts`. The test runs on the daily mean absolute error, with the daily losses of several horizons averaged per
+    `p`, `p_holm` (Holm over the `m` models compared with the benchmark in that group, with exact clones counted once), `m`,
+    `verdict`, `n_days`, `n_forecasts`. The test runs on the daily mean absolute error, with the daily losses of several horizons averaged per
     run date. In the per-hour tables (`by_hour`, `by_hour_horizon`) `p_holm` and `verdict` stay empty: a per-hour DM is a
     heatmap, never a verdict. `verdict` is also empty below 30 days, and when the test and the ratio point in opposite
     ways. The interval is empty when the days fit in one bootstrap block. `summary()` warns below 182 days.
@@ -91,8 +90,9 @@ class DMEvaluator(SetEvaluator):
         ]
         per_hour = is_per_hour(model_dfs)
         p_values = [pair.p_value for pair in pairs]
-        p_holm = adjust(p_values, None if per_hour else self.correction)
-        m = int(np.isfinite(p_values).sum())
+        p_holm, m, _ = adjust_family(
+            panel, rows, names, self.benchmark, p_values, None if per_hour else self.correction
+        )
         for name, pair, adjusted in zip(names, pairs, p_holm):
             tested_p = float(adjusted) if self.correction == "holm" else pair.p_value
             out[name] = {
@@ -113,6 +113,13 @@ class DMEvaluator(SetEvaluator):
         if pairs and not is_grouped(model_dfs):
             warn_if_short(min(pair.n_days for pair in pairs))
         return out
+
+    def clones(self, model_dfs: Mapping[str, pd.DataFrame]) -> list:
+        if self.benchmark not in model_dfs or not len(model_dfs[self.benchmark]):
+            return []
+        panel = panel_of(model_dfs)
+        names = [name for name in model_dfs if name != self.benchmark]
+        return panel.pair_clone_groups(panel.rows(), names, self.benchmark)
 
 
 def check_test_settings(

@@ -1,10 +1,11 @@
 import math
-from typing import Dict, Tuple
+import warnings
+from typing import Dict, Mapping, Tuple
 
 import numpy as np
 import pandas as pd
 
-from .base import FORECAST_KEYS, Evaluator
+from .base import FORECAST_KEYS, Evaluator, EvaluatorResult
 
 
 class rMAEEvaluator(Evaluator):
@@ -19,6 +20,15 @@ class rMAEEvaluator(Evaluator):
 
     def __init__(self, base_model: str):
         self.base_model = base_model
+
+    def compute_group(self, model_dfs: Mapping[str, pd.DataFrame]) -> Dict[str, EvaluatorResult]:
+        if self.base_model not in model_dfs or not len(model_dfs[self.base_model]):
+            warnings.warn(
+                f"rMAEEvaluator: the base model {self.base_model!r} has no forecasts here (models: {list(model_dfs)}), so "
+                "there is nothing to compare with.",
+                stacklevel=2,
+            )
+        return super().compute_group(model_dfs)
 
     def compute(self, df: pd.DataFrame, **kwargs) -> float:
         model_dfs: Dict[str, pd.DataFrame] = kwargs.get("model_dfs", {})

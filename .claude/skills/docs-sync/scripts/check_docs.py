@@ -40,12 +40,13 @@ LLMS = ROOT / "llms.txt"
 README = ROOT / "README.md"
 EXAMPLES = ROOT / "examples"
 
-# (category, package, base class name, docs sub-directory, registry module, TUI list name)
+# (category, package, base class name, docs sub-directory, registry module, TUI list name or None if the TUI has none)
 CATEGORIES = [
     ("sources", "epftoolbox2.data.sources", "DataSource", "data-sources", "data_pipeline", "_SOURCES"),
     ("transformers", "epftoolbox2.data.transformers", "Transformer", "transformers", "data_pipeline", "_TRANSFORMERS"),
     ("validators", "epftoolbox2.data.validators", "Validator", "validators", "data_pipeline", "_VALIDATORS"),
     ("models", "epftoolbox2.models", "BaseModel", "models", "model_pipeline", "_MODELS"),
+    ("ensembles", "epftoolbox2.ensembles", "Ensemble", "model-pipeline", "model_pipeline", None),
     ("evaluators", "epftoolbox2.evaluators", "Evaluator", "evaluators", "model_pipeline", "_EVALUATORS"),
     ("exporters", "epftoolbox2.exporters", "Exporter", "exporters", "model_pipeline", "_EXPORTERS"),
 ]
@@ -226,6 +227,8 @@ def check_registry(components: list[Component]) -> list[Finding]:
                     where,
                 )
             )
+        if tui_list is None:
+            continue
         if comp.name not in getattr(tui, tui_list, []):
             findings.append(
                 Finding("registry", "warning", comp.name, f"not offered in the TUI ({tui_list})", "epftoolbox2/tui.py")

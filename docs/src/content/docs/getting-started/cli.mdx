@@ -91,14 +91,14 @@ epf run experiment.yaml --dry-run
 
 ## `epf report`: Merge array results
 
-After a SLURM array in which each task ran one model (`--model-index`), merge every model's JSONL from `model_pipeline.save_dir` and run the evaluators and exporters once. Prints planned vs produced forecasts per model.
+After a SLURM array in which each task ran one model (`--model-index`), merge every model's JSONL from `model_pipeline.save_dir`, compute the [ensembles](/epftoolbox2/model-pipeline/ensembles/) from them and run the evaluators and exporters once. Prints planned vs produced forecasts per model, and what the ensembles chose.
 
 ```bash
 epf report experiment.yaml
 epf report experiment.yaml --allow-missing   # report the models that have results
 ```
 
-Without `--allow-missing` it fails if any model has no results file.
+Without `--allow-missing` it fails if any model has no results file. With it, an ensemble with a missing member is left out with a warning.
 
 ---
 

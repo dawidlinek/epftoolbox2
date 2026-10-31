@@ -8,6 +8,7 @@ from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
 from epftoolbox2.data.sources import CalendarSource, CsvSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import CoverageValidator
+from epftoolbox2.ensembles import AverageEnsemble
 from epftoolbox2.models import OLSModel, LassoCVModel
 from epftoolbox2.evaluators import (
     BatteryArbitrage,
@@ -706,6 +707,7 @@ class TestModelPipelineParameterFidelity:
                 OLSModel(["price_d-1", "load_d+{horizon}"], training_window=90, name="O", scaler="asinh"),
                 LassoCVModel(["price_d-1"], training_window=60, cv=3, max_iter=77, name="L"),
             ],
+            "ensembles": [AverageEnsemble(["O", "L"], top=1, by="validation", name="best")],
             "evaluators": [
                 MAEEvaluator(),
                 RMSEEvaluator(),
@@ -737,8 +739,8 @@ class TestModelPipelineParameterFidelity:
         assert covered == {name for names in MODEL_REGISTRY.values() for name in names}  # add a new component here
 
         pipeline = ModelPipeline()
-        pipeline.models, pipeline.evaluators, pipeline.exporters = (
-            originals[kind] for kind in ("models", "evaluators", "exporters")
+        pipeline.models, pipeline.ensembles, pipeline.evaluators, pipeline.exporters = (
+            originals[kind] for kind in ("models", "ensembles", "evaluators", "exporters")
         )
         path = tmp_path / "mp.yaml"
         pipeline.save(path)

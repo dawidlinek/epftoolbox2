@@ -53,6 +53,7 @@ class ModelPipeline:
     ): ...
 
     def add_model(self, model: BaseModel) -> "ModelPipeline": ...
+    def add_ensemble(self, ensemble: Ensemble) -> "ModelPipeline": ...  # Members are resolved when the pipeline runs
     def add_evaluator(self, *evaluators: Evaluator) -> "ModelPipeline": ...  # One or several; chainable
     def add_exporter(self, exporter: Exporter) -> "ModelPipeline": ...
 
@@ -198,6 +199,7 @@ class EvaluationReport:
     def summary(self) -> pd.DataFrame: ...          # model, forecasts, one column per evaluator
     def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
     def availability(self) -> pd.DataFrame: ...     # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
+    def choices(self) -> pd.DataFrame: ...          # ensemble, segment, chosen, k, validation_mae, validation_forecasts, validation_share, validation_start, validation_end, test_start, test_end; attrs: member_mae, k_mae, limited_by
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
     def by_hour_horizon(self) -> pd.DataFrame: ...
@@ -238,7 +240,7 @@ class EvaluationReport:
         seed: int = 0,
         models: Optional[Sequence[str]] = None,  # Default: all; fewer than 3 gives NaN with a warning
         horizon: Union[int, str, None] = None,   # None or "all": daily losses averaged per run date; a number
-    ) -> pd.DataFrame: ...  # model, n_days, n_forecasts, mae, ratio_to_best, p_value, in_90, in_75; attrs: n_days, n_forecasts, limited_by
+    ) -> pd.DataFrame: ...  # model, n_days, n_forecasts, mae, ratio_to_best, p_value, in_90, in_75; attrs: n_days, n_forecasts, limited_by, clones
 
     def ranks(
         self,
@@ -248,7 +250,7 @@ class EvaluationReport:
         level: float = 0.90,               # Coverage of the rank interval
         horizon: Union[int, str, None] = None,
         models: Optional[Sequence[str]] = None,
-    ) -> pd.DataFrame: ...  # model, n_days, n_forecasts, mae, rank, p_best, rank_low, rank_high; attrs: n_days, n_forecasts, limited_by
+    ) -> pd.DataFrame: ...  # model, n_days, n_forecasts, mae, rank, p_best, rank_low, rank_high; attrs: n_days, n_forecasts, limited_by, clones
 
     def compare(
         self, a: str, b: str, horizon: Union[int, str, None] = None
@@ -279,6 +281,25 @@ class Segment:
 
 def read_windows(path: Union[str, Path]) -> Optional[RunWindows]: ...  # From a results JSONL or its manifest; None for a plain run
 ```
+
+---
+
+## Ensembles
+
+```python
+from epftoolbox2.ensembles import AverageEnsemble, Ensemble
+
+class AverageEnsemble(Ensemble):
+    def __init__(
+        self,
+        members: Sequence[str],             # Names of models or ensembles, resolved when the pipeline runs
+        top: Union[int, str, None] = None,  # None: all of them; k: the best k on validation; "validation": chooses k as well
+        by: str = "validation",             # Where top chooses, the only value
+        name: str = "avg",                  # Unique across models and ensembles
+    ): ...
+```
+
+See [Ensembles](/epftoolbox2/model-pipeline/ensembles/).
 
 ---
 
@@ -474,7 +495,7 @@ class Use:                                  # What the function may return inste
 
 `PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, and `ModelResultRef.availability_listing` holds the rows behind `report.availability()`.
 
-`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`.
+`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`. And `frame_hashes`, what one `ModelPipeline.run` call shares between its models so that it hashes each column once.
 
 ### Scalers
 

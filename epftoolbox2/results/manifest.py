@@ -33,6 +33,20 @@ cover another span than the results it resumes, so that validation can come firs
 the data the stored forecasts read, up to the end of the span they cover, and its manifest grows to cover both. Resuming
 also compares each stored key's window and mask to what a fresh run would give it (`check_stored_lists`). A window this run
 doesn't name stays recorded, like the records it holds.
+
+Every run also records `column_hashes`, a hash of each column it reads (its predictors, the target, and what a predictor
+function reads through `ctx`) on its own, with numbers as float64, and `frame_hash`, a hash of the whole frame, both over the
+rows `data_columns_hash` covers. They are never compared on resume, so a change in a column a run doesn't read still resumes.
+They are for what can't be seen from one model's results: two models averaged by an ensemble must have read one thing, whatever
+columns each of them took (`epftoolbox2.ensembles._compute`). Manifests written before them load, and simply don't have them.
+
+All these hashes describe the frame of the last run, so after a resume they speak for the stored forecasts only because resuming
+compared them. Where nothing compared them, on an override that accepted other data or for results with no manifest, the manifest
+records `data_unverified: true`, and keeps it across later resumes. It is written on those paths alone.
+
+An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
+which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
+resume into it.
 """
 
 from __future__ import annotations
@@ -46,6 +60,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple, Union
 
+import numpy as np
 import pandas as pd
 
 from ..logging import get_logger
@@ -58,6 +73,12 @@ SCHEMA_VERSION = 1
 
 # `predictor_layout_hash` of a predictor function of `ctx`: it never equals the hash of fixed lists.
 PREDICTOR_FUNCTION_LAYOUT = "predictor function: lists are compared per record"
+
+# The `kind` of an ensemble's manifest.
+ENSEMBLE_KIND = "ensemble"
+
+# Who wrote a manifest and when, which says nothing about the results it describes.
+_PROVENANCE_FIELDS = ("package_version", "git_sha", "created_at", "updated_at")
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -123,6 +144,11 @@ class Manifest:
     windows: Optional[Dict[str, Any]] = None
     binary_masks: Optional[Dict[str, str]] = None
     actuals: Optional[Dict[str, str]] = None
+    # Through `test_end`: each column this run read on its own, and the whole frame. Recorded, never compared on resume.
+    column_hashes: Optional[Dict[str, str]] = None
+    frame_hash: Optional[str] = None
+    # True if the stored forecasts may come from another frame than the hashes above describe: see the module docstring.
+    data_unverified: Optional[bool] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -144,6 +170,11 @@ class Manifest:
         for name in ("windows", "binary_masks", "actuals"):  # a plain run: nothing to record
             if out[name] is None:
                 del out[name]
+        for name in ("column_hashes", "frame_hash"):  # a manifest older than them, or a frame that can't be hashed
+            if out[name] is None:
+                del out[name]
+        if out["data_unverified"] is None:  # the usual case: resuming compared what the stored forecasts read
+            del out["data_unverified"]
         return out
 
     @classmethod
@@ -165,6 +196,67 @@ def hash_columns(data: pd.DataFrame, columns: Sequence[str]) -> str:
     frame = data[sorted(set(columns))]
     row_hashes = pd.util.hash_pandas_object(frame, index=True).to_numpy()
     return hashlib.sha256(row_hashes.tobytes()).hexdigest()
+
+
+def hash_frame(data: pd.DataFrame) -> Optional[str]:
+    """`hash_columns` over every column of `data`, or None if a column holds values that can't be hashed (lists, say): a
+    hash nothing needs must not stop a run."""
+    try:
+        return hash_columns(data, list(data.columns))
+    except TypeError:
+        return None
+
+
+def hash_column(data: pd.DataFrame, column: str) -> str:
+    """`hash_columns` of one column, with numbers as float64 and one bit pattern for a NaN and for zero: the same values hash
+    alike whatever dtype a frame holds them in. Only `column_hashes`, which compare frames, use it."""
+    series = data[column]
+    if not pd.api.types.is_numeric_dtype(series):
+        return hash_columns(data, [column])
+    values = series.to_numpy(dtype="float64", na_value=np.nan) + 0.0
+    values[np.isnan(values)] = np.nan
+    return hash_columns(pd.DataFrame({column: values}, index=data.index), [column])
+
+
+class FrameHashes:
+    """The hashes of one frame, each computed once, for one `ModelPipeline.run`: thousands of variants on one frame would
+    otherwise hash its columns again for every model.
+
+    It belongs to that call and must not outlive it, or a frame changed in place would get a stale hash. Rows are through a day,
+    as `.loc[:day]` reads them.
+    """
+
+    def __init__(self, data: pd.DataFrame):
+        self._ordered = data.sort_index()
+        self._rows: Dict[str, pd.DataFrame] = {}
+        self._sets: Dict[Tuple[str, Tuple[str, ...]], str] = {}
+        self._columns: Dict[Tuple[str, str], str] = {}
+        self._frames: Dict[str, Optional[str]] = {}
+
+    def rows(self, through: str) -> pd.DataFrame:
+        if through not in self._rows:
+            self._rows[through] = self._ordered.loc[:through]
+        return self._rows[through]
+
+    def of_columns(self, through: str, columns: Sequence[str]) -> str:
+        """`hash_columns` of these columns together."""
+        key = (through, tuple(sorted(set(columns))))
+        if key not in self._sets:
+            self._sets[key] = hash_columns(self.rows(through), key[1])
+        return self._sets[key]
+
+    def of_column(self, through: str, column: str) -> str:
+        """`hash_column` of this column."""
+        key = (through, column)
+        if key not in self._columns:
+            self._columns[key] = hash_column(self.rows(through), column)
+        return self._columns[key]
+
+    def of_frame(self, through: str) -> Optional[str]:
+        """`hash_frame` of every column."""
+        if through not in self._frames:
+            self._frames[through] = hash_frame(self.rows(through))
+        return self._frames[through]
 
 
 def hash_predictor_layout(expanded: Dict[Tuple[int, int], Sequence[str]]) -> str:
@@ -225,6 +317,8 @@ def build_manifest(
     availability: Optional[Dict[str, Any]] = None,
     windows: Optional[RunWindows] = None,
     binary_masks: Optional[Dict[str, str]] = None,
+    read_columns: Sequence[str] = (),
+    frame_hashes: Optional[FrameHashes] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -246,14 +340,16 @@ def build_manifest(
     itself treated as a configuration change.
 
     `windows` is a run with validation, whose `test_start` and `test_end` are its first and last issue day.
+
+    `read_columns` are what a predictor function read through `ctx` besides its lists: `column_hashes` covers them. `frame_hashes`
+    is what a pipeline shares between the models of one run, so that it hashes each thing once.
     """
     now = datetime.now(timezone.utc).isoformat()
-    ordered = data.sort_index()
-    hashed_rows = ordered.loc[:test_end]
+    hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
     actuals = None
     if windows is not None:
         through = (date.fromisoformat(test_end) + timedelta(days=horizon)).isoformat()
-        actuals = {"through": through, "hash": hash_columns(ordered.loc[:through], [target])}
+        actuals = {"through": through, "hash": hashes.of_columns(through, [target])}
     return Manifest(
         model_class=type(model).__name__,
         predictors=sorted(set(used_columns) - {target}),
@@ -263,7 +359,7 @@ def build_manifest(
         freq=freq,
         training_window=model.training_window,
         model_params={"scaler": getattr(model, "scaler", "standard"), **dict(model._model_kwargs)},
-        data_columns_hash=hash_columns(hashed_rows, used_columns),
+        data_columns_hash=hashes.of_columns(test_end, used_columns),
         data_timezone=str(data.index.tz),
         information_set=information_set.to_dict() if information_set is not None else None,
         test_start=test_start,
@@ -278,6 +374,8 @@ def build_manifest(
         windows=None if windows is None else windows.to_dict(),
         binary_masks=binary_masks,
         actuals=actuals,
+        column_hashes={column: hashes.of_column(test_end, column) for column in {*used_columns, *read_columns}},
+        frame_hash=hashes.of_frame(test_end),
     )
 
 
@@ -285,6 +383,28 @@ def manifest_path(results_path: Path) -> Path:
     """The manifest file for a results JSONL: written next to it, e.g. `ols.jsonl` -> `ols.manifest.json`."""
     results_path = Path(results_path)
     return results_path.with_name(results_path.stem + ".manifest.json")
+
+
+def is_ensemble_manifest(path: Union[str, Path]) -> bool:
+    """Whether the manifest at `path` exists and is an ensemble's."""
+    path = Path(path)
+    return path.exists() and json.loads(path.read_text()).get("kind") == ENSEMBLE_KIND
+
+
+def manifest_digest(manifest: Dict[str, Any]) -> str:
+    """A hash of a manifest's content without its provenance: a member re-run to the same results keeps it."""
+    kept = {key: value for key, value in manifest.items() if key not in _PROVENANCE_FIELDS}
+    return hashlib.sha256(json.dumps(kept, sort_keys=True).encode()).hexdigest()
+
+
+def _read_manifest_of_a_model(path: Path, model_name: str) -> Manifest:
+    data = json.loads(path.read_text())
+    if data.get("kind") == ENSEMBLE_KIND:
+        raise ManifestMismatchError(
+            f"{model_name}: {path.name} is an ensemble's, so a model of this name can't resume there. Rename one of them, "
+            "or use a different save_dir."
+        )
+    return Manifest.from_dict(data)
 
 
 def read_windows(path: Union[str, Path]) -> Optional[RunWindows]:
@@ -308,7 +428,7 @@ def check_and_write(
     allow_mismatch: bool = False,
     require_manifest: bool = False,
     model_name: str = "Model",
-    data_hash: Optional[Callable[[str, Sequence[str]], str]] = None,
+    frame_hashes: Optional[FrameHashes] = None,
     check_stored: Optional[Callable[[], None]] = None,
 ) -> None:
     """Compare `manifest` to the one at `path` (if any), then write it.
@@ -317,13 +437,15 @@ def check_and_write(
     `allow_mismatch` is not set, or when results exist with no manifest and `require_manifest` is set.
     A mismatch that is allowed, and a missing manifest, are both logged.
 
-    A run with validation gives `data_hash(last day, columns)`, the hash of its frame up to that day, so that it can be
-    compared on the span the stored forecasts cover, and `check_stored`, which compares those forecasts themselves
-    (`check_stored_lists`) once the configuration is known to agree.
+    `frame_hashes` hashes this run's frame up to a day, so that a run with validation can be compared on the span the stored
+    forecasts cover. It also gives `check_stored`, which compares those forecasts themselves (`check_stored_lists`) once the
+    configuration is known to agree.
+
+    Stored forecasts that this frame can't be told to have made leave `data_unverified` on the manifest (see the module docstring).
     """
     if path.exists():
-        existing = Manifest.from_dict(json.loads(path.read_text()))
-        data_diffs = _compare_data(existing, manifest, data_hash)
+        existing = _read_manifest_of_a_model(path, model_name)
+        data_diffs = _compare_data(existing, manifest, frame_hashes)
         skip = () if data_diffs is None else ("data_columns_hash",)
         diffs = [*(data_diffs or []), *manifest.differences(existing, skip=skip)]
         if diffs and not allow_mismatch:
@@ -340,8 +462,12 @@ def check_and_write(
         if check_stored is not None:
             check_stored()
         manifest.created_at = existing.created_at  # keep the first run's provenance
+        if existing.data_unverified or (
+            has_existing_results and _accepted_other_data(existing, manifest, data_diffs, frame_hashes)
+        ):
+            manifest.data_unverified = True
         if data_diffs == []:
-            _cover_both(existing, manifest, data_hash)
+            _cover_both(existing, manifest, frame_hashes)
         _keep_windows(existing, manifest, allow_mismatch, model_name)
         if manifest.predictor_lists is not None and existing.predictor_lists:
             # Records outside this run's test period stay in the file: their hashes must still resolve to their lists, and
@@ -364,6 +490,7 @@ def check_and_write(
         logger.warning(f"{message} Continuing without checking they match this run's configuration.")
         if check_stored is not None:
             check_stored()
+        manifest.data_unverified = True
     manifest.write(path)
 
 
@@ -371,24 +498,49 @@ def _same_float(a: Optional[float], b: float) -> bool:
     return a == b or (a is not None and math.isnan(a) and math.isnan(b))
 
 
-def _compare_data(existing: Manifest, manifest: Manifest, data_hash: Optional[Callable]) -> Optional[List[str]]:
+def _accepted_other_data(
+    existing: Manifest, manifest: Manifest, data_diffs: Optional[List[str]], frame_hashes: Optional[FrameHashes]
+) -> bool:
+    """Whether a run going on over a mismatch may have other data under the stored forecasts than its hashes will describe.
+
+    A run with windows has compared them (`data_diffs`). A plain one hashes other rows if it ends on another day, so that alone
+    says nothing: what counts is the columns on file, up to the day on file.
+    """
+    if existing.data_timezone != manifest.data_timezone:
+        return True
+    if data_diffs is not None:
+        return bool(data_diffs)
+    if existing.data_columns_hash == manifest.data_columns_hash:
+        return False
+    if frame_hashes is None:
+        return True
+    try:
+        return (
+            frame_hashes.of_columns(existing.test_end, [existing.target, *existing.predictors])
+            != existing.data_columns_hash
+        )
+    except KeyError:
+        return True
+
+
+def _compare_data(existing: Manifest, manifest: Manifest, frame_hashes: Optional[FrameHashes]) -> Optional[List[str]]:
     """What differs in the data the stored forecasts read, for a run with windows; None to compare hashes as a plain run.
 
     Plain results that end on another day are left to that comparison, which refuses them, as one plain run into another.
     """
-    if data_hash is None or manifest.windows is None:
+    if frame_hashes is None or manifest.windows is None:
         return None
     if existing.windows is None and existing.test_end != manifest.test_end:
         return None
     out = []
     try:
-        stored = data_hash(existing.test_end, [existing.target, *existing.predictors])
+        stored = frame_hashes.of_columns(existing.test_end, [existing.target, *existing.predictors])
     except KeyError as exc:
         return [f"data_columns_hash: a column the existing results read is gone: {exc}"]
     if stored != existing.data_columns_hash:
         out.append(f"data_columns_hash: the data up to {existing.test_end} is not what the existing results read")
     if existing.actuals is not None and existing.target == manifest.target:
-        if data_hash(existing.actuals["through"], [existing.target]) != existing.actuals["hash"]:
+        if frame_hashes.of_columns(existing.actuals["through"], [existing.target]) != existing.actuals["hash"]:
             out.append(
                 f"actuals: {existing.target} up to {existing.actuals['through']} is not what the existing results read as "
                 "`actual` (if the data has since grown, its last days had no actual then, and a fresh run would have one)"
@@ -396,15 +548,23 @@ def _compare_data(existing: Manifest, manifest: Manifest, data_hash: Optional[Ca
     return out
 
 
-def _cover_both(existing: Manifest, manifest: Manifest, data_hash: Callable) -> None:
+def _cover_both(existing: Manifest, manifest: Manifest, frame_hashes: FrameHashes) -> None:
     """Make the manifest speak for the file: the stored forecasts stay in it, whatever span this run covers."""
     manifest.test_start = min(existing.test_start, manifest.test_start)
     manifest.test_end = max(existing.test_end, manifest.test_end)
     manifest.predictors = sorted({*existing.predictors, *manifest.predictors})
-    manifest.data_columns_hash = data_hash(manifest.test_end, [manifest.target, *manifest.predictors])
+    manifest.data_columns_hash = frame_hashes.of_columns(manifest.test_end, [manifest.target, *manifest.predictors])
+    read = {manifest.target, *manifest.predictors, *(manifest.column_hashes or ()), *(existing.column_hashes or ())}
+    # What only an earlier function read may be gone from this frame, unlike what the stored forecasts read as inputs.
+    manifest.column_hashes = {
+        column: frame_hashes.of_column(manifest.test_end, column)
+        for column in read
+        if column in frame_hashes.rows(manifest.test_end).columns
+    }
+    manifest.frame_hash = frame_hashes.of_frame(manifest.test_end)
     if manifest.actuals is not None and existing.actuals is not None:
         through = max(existing.actuals["through"], manifest.actuals["through"])
-        manifest.actuals = {"through": through, "hash": data_hash(through, [manifest.target])}
+        manifest.actuals = {"through": through, "hash": frame_hashes.of_columns(through, [manifest.target])}
 
 
 def _keep_windows(existing: Manifest, manifest: Manifest, allow_mismatch: bool, model_name: str) -> None:
@@ -484,7 +644,7 @@ def check_stored_lists(
     A record without a list hash comes from fixed lists, so nothing can be said about its list. `allow_mismatch` logs
     instead. A function that changed without changing anything stored resumes, with a note.
     """
-    existing = Manifest.from_dict(json.loads(path.read_text())) if path.exists() else None
+    existing = _read_manifest_of_a_model(path, model_name) if path.exists() else None
     stored_masks = {
         entry["hash"]: entry.get("binary_masks", {}) for entry in (existing and existing.predictor_lists) or []
     }
@@ -571,6 +731,7 @@ def check_stored_lists(
 
 
 __all__ = [
+    "ENSEMBLE_KIND",
     "Manifest",
     "ManifestMismatchError",
     "PAST_THE_FRAME",
@@ -579,8 +740,13 @@ __all__ = [
     "build_manifest",
     "check_and_write",
     "check_stored_lists",
+    "FrameHashes",
+    "hash_column",
     "hash_columns",
+    "hash_frame",
     "hash_predictor_layout",
+    "is_ensemble_manifest",
+    "manifest_digest",
     "manifest_path",
     "read_windows",
 ]

@@ -191,7 +191,7 @@ Set a model's `scaler` parameter to `"asinh"` or `"npit"` to use a variance-stab
 | `freq` | str | `"1h"` | Forecasting frequency (e.g., `"15min"`) |
 | `save_dir` | str | `None` | Directory for incremental results |
 | `forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted |
-| `validation` | tuple \| str | `None` | Validation period `(start, end)`, or `"previous_year"`. Alone it forecasts only those days. See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/) |
+| `validation` | tuple \| str | `None` | Validation period `(start, end)`, or `"previous_year"`. Alone it forecasts only those days. See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/), and [Ensembles](/epftoolbox2/model-pipeline/ensembles/) for what can choose on it |
 | `test` | tuple | `None` | Test period `(start, end)`, the same as `test_start` and `test_end`; giving both raises |
 
 Model names must be unique: they name the result files in `save_dir`.

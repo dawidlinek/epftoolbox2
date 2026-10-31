@@ -1,0 +1,213 @@
+---
+title: Ensembles
+description: Average stored forecasts on identical keys, choose the members on validation without look-ahead, and report what was chosen for which test period
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+An ensemble is a forecast made of other forecasts. It fits nothing and reads no data: it is computed from what its members
+stored, after they have run, and from then on it is one more model in every table.
+
+```python
+from epftoolbox2.ensembles import AverageEnsemble
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.models import LassoCVModel, OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+predictors = ["load_forecast_d+{horizon}", "price_d-1", "is_saturday_d+{horizon}", "is_sunday_d+{horizon}"]
+
+pipeline = (
+    ModelPipeline()
+    .add_model(OLSModel(predictors=predictors, training_window=364, name="OLS_364"))
+    .add_model(OLSModel(predictors=predictors, training_window=728, name="OLS_728"))
+    .add_model(LassoCVModel(predictors=predictors, training_window=728, name="Lasso_728"))
+    .add_ensemble(AverageEnsemble(members=["OLS_364", "OLS_728", "Lasso_728"], name="average"))
+    .add_ensemble(AverageEnsemble(members=["OLS_364", "OLS_728", "Lasso_728"], top=2, by="validation", name="best_2"))
+    .add_evaluator(MAEEvaluator())
+)
+report = pipeline.run(df, validation=("2023-01-06", "2023-12-29"), test=("2024-01-05", "2025-12-26"), horizon=1)
+print(report.forecast_counts())  # planned, produced and missing, for the ensembles next to the models
+print(report.choices())          # what best_2 chose, on how many forecasts, for which test period
+```
+
+| Parameter | Default | What it does |
+|---|---|---|
+| `members` | required | Names of the models or ensembles to average. They are resolved when the pipeline runs, so the order of `add_model` and `add_ensemble` doesn't matter |
+| `top` | `None` | `None` averages every member. A number k from 1 to `len(members)` keeps the k members with the lowest validation MAE, so `top=1` means "pick the best". `"validation"` chooses k as well |
+| `by` | `"validation"` | Where `top` chooses, and the only value there is: the test period never chooses anything. Anything else raises |
+| `name` | `"avg"` | Names the ensemble in every table and its results file. Names are unique across models and ensembles |
+
+## The average
+
+**The forecast of a key is `np.mean` over the chosen members' predictions, in member order, on the keys where all of them have a
+finite prediction.** A key is `(run_date, target_date, hour, horizon)`.
+
+- **A key a chosen member lacks is missing for the ensemble.** It is never averaged over the members that happen to be there, so
+  every forecast of an ensemble is the same average. A member's NaN or infinite prediction counts as lacking it.
+- **Missing forecasts are counted.** `forecast_counts()` has them under `member_missing`, so `planned` is `produced` plus the reasons
+  for an ensemble as for a model. A key no member has counts too, such as 02:00 on the issue day of a spring switch.
+- **A NaN actual stays a forecast with a NaN actual**, as for a model.
+- **The ranking doesn't reach the average.** Whatever order the members ranked in, the mean is in member order, so `top=k` equals
+  `AverageEnsemble(members=chosen)` on test, bit for bit, and a one-member average equals the member.
+
+## What counts for choosing
+
+A `top` ensemble chooses once per test period it serves, on validation forecasts alone. A forecast counts only if:
+
+1. **it serves that test period**: it was issued in the validation period, for a target day before the first test issue day
+   (`Segment.serves(run_date, target_date)`). With `horizon=3` and no gap between the windows, the last three validation days lose
+   some of their forecasts, as they do in `report.validation`;
+2. **every member holds it**: the keys are the intersection over all the members of the ensemble, not only the chosen ones, so
+   every member is scored on the same forecasts;
+3. **its prediction and actual are finite** for every member. A key with a NaN actual is left out of the scores.
+
+Members are scored by MAE on those keys. `top="validation"` scores the average of the best k members for every k, and takes the k
+with the lowest MAE. MAEs are compared after rounding to 12 significant digits, so the rounding noise of averaging identical members
+is a tie. **Ties go to the earlier member when ranking and to the smaller k when choosing k.** No common key raises `ValueError`:
+nothing is ever chosen on nothing.
+
+Because every member is scored on what all of them hold, **a member's holes decide what the others are compared on**, and can turn
+the choice even if that member isn't chosen: holes on the hard days of validation make whoever is worst on those days look best. The
+rule stays, since scoring members on different forecasts is worse, but it doesn't stay quiet. `report.choices()` has
+`validation_share`, the common keys as a share of what the fullest member holds, and `df.attrs["limited_by"]` names the members whose holes
+cut them. A choice on less than 90 % of the fullest member's forecasts, or on fewer than 28 distinct target days, warns with the counts.
+
+<Aside type="note">
+  Choosing never reads a record's `window` tag. The validation days of a later yearly segment are test days of the one before, and
+  stay tagged `"test"`. They count for that segment's choice because `Segment.serves` says so.
+</Aside>
+
+## Why a `top` ensemble has no validation forecasts
+
+A plain average has forecasts in every window on file, and is in `report.validation` like a model. A `top` ensemble has test forecasts
+only. Its score on the validation period is in sample: it was chosen for being good there, so a line for it next to the models in
+`report.validation` would compare it unfairly with what it was chosen from. Its validation score lives in `report.choices()`, under
+that name. A plain average with a `top` ensemble among its members has test forecasts only, for the same reason.
+
+`run(df, validation=V)` alone knows no test period. A `top` ensemble then gets a row in `choices()` with no test period, on all
+the validation keys since no test is known, and no forecasts. Mind the end of `V` if a test period may follow: the row changes once
+one is on file.
+
+## Choices are frozen, members keep refitting
+
+A choice holds for the whole test period it serves. The chosen members go on refitting on their rolling windows through it, since
+that is what they do in any run, but nothing is chosen again. With `validation="previous_year"` the test period is cut into 12-month
+[segments](/epftoolbox2/model-pipeline/validation-and-test/#a-new-validation-year-for-every-test-year), each chooses on the 12
+months before it, and a test forecast uses the choice of the segment whose test period holds its issue day.
+
+```python
+report = pipeline.run(df, validation="previous_year", test=("2024-01-05", "2025-12-26"), horizon=1)
+print(report.choices())
+```
+
+```text
+ensemble  segment               chosen  k  validation_mae  validation_forecasts  validation_share  validation_start  validation_end  test_start    test_end
+  best_2        0  [OLS_728, Lasso_728]  2            7.41                  8733               1.0        2023-01-05      2024-01-04  2024-01-05  2025-01-04
+  best_2        1  [OLS_364, Lasso_728]  2            8.12                  8757               1.0        2024-01-05      2025-01-04  2025-01-05  2025-12-26
+```
+
+`report.choices()` has one row per ensemble and test period served: `ensemble`, `segment` (its place in `report.windows.segments`),
+`chosen` in member order, `k`, `validation_mae` of the average of `chosen`, `validation_forecasts` (how many it was scored on),
+`validation_share`, `validation_start`, `validation_end`, `test_start` and `test_end`. `df.attrs` holds `member_mae`, each member's MAE
+on those keys, `k_mae`, the MAE of each k with `top="validation"`, and `limited_by`. A plain average chooses nothing and has no row. The
+terminal exporter prints the table when there is one, before what `show` asks for, and `epf report` prints it after the counts.
+
+## An ordinary model everywhere
+
+An ensemble is in `summary()`, the `by_*()` tables, `tests()`, `mcs()`, `ranks()`, `compare()`, `leaderboard()`, `aggregate()`,
+`join()`, `predictions()`, `iter_details()`, the evaluators and the exporters, on the keys each comparison shares, and it can be a
+benchmark. Read `n_forecasts` as for any model: an ensemble with gaps has fewer forecasts than its members. `aggregate()` and `join()`
+keep `choices()`. The issue-time listing is not repeated for ensembles: `report.availability()` lists the members' inputs, and an
+ensemble uses what its members use. `verify()` and `explain()` take models, so point them at the members.
+
+**A `top=1` ensemble is an exact clone of what it chose** (with `validation="previous_year"`, if one member wins every year). That is
+expected and works: see [exact clones](/epftoolbox2/model-pipeline/comparing-models/#exact-clones).
+
+## Ensembles of ensembles
+
+A plain average may have ensembles among its members: it is then the mean of their means, not a flat average of everything below them.
+An ensemble may not be a member of a `top` ensemble, which raises: it would rank forecasts already chosen or averaged on those days.
+
+## Results on disk and SLURM arrays
+
+With `save_dir` an ensemble has its JSONL and its manifest next to its members', as a model has. The records have a model's keys, with
+empty `coefficients`. The manifest (`"kind": "ensemble"`) holds the members, `top`, `by`, the windows, the choice per segment with the
+validation scores, a hash of each member's manifest without its timestamps and provenance, and a hash of the numbers read from each
+member's records.
+
+**The file is recomputed from the members' results every time and written atomically, never resumed.** It costs nothing and can't go
+stale: re-run or extend a member, and the next `run` or `report` shows it. The same member results give the same bytes, apart from
+the manifest's timestamps, whatever order the members wrote their records in.
+
+`ModelPipeline.report()` computes ensembles from stored results, so members may run in separate pipelines or array tasks, and the
+result is what one run gives, bit for bit. In array mode `Workflow` leaves them to `epf report`, and refuses before any fit what that
+report would refuse before reading anything, such as a `top` ensemble with no validation window. `report(forecast_only=True)`
+reads and computes as usual, and writes nothing:
+
+```python
+merged = pipeline.report("results", validation=("2023-01-06", "2023-12-29"), test=("2024-01-05", "2025-12-26"), horizon=1)
+print(merged.choices())
+```
+
+A member without results raises `FileNotFoundError`. `allow_missing=True` leaves out the ensemble with a warning, and any ensemble
+made of it. It never averages over the members that happen to be there.
+
+## What is refused
+
+Before any fit: a `top` ensemble in a run with no validation window (results of an earlier run on file don't count, so name it again: it
+resumes at no cost), `forecast_only` with one, a `top` out of range, an unknown member, members of each other, an ensemble as a member
+of a `top` ensemble, a name that is already taken, and a name whose results file in `save_dir` belongs to a model. `top` itself is checked when
+the ensemble is built, added or loaded.
+
+When the results are read, `ManifestMismatchError`: members that disagree on the `actual` of a key or hold a key twice, or whose
+manifests differ on target, horizon, frequency, time zone or data, or on the information set: a different issue time, issue zone or rules,
+or an information set against none. An average has one issue time, and a member issued later can read what the others can't. The order
+of the assumptions and a rule's `note` don't count, and neither do `unknown` and `availability`, which say what a run does about a column and
+not when it is known. All of this is read from the manifests of the leaf models, so nesting an average changes nothing. `report()` also refuses a model whose results file
+is an ensemble's, which would go stale as a model.
+
+<Aside type="caution">
+  What the manifests can tell about the data, through the last day a model's results cover (`test_end`):
+
+  - **Refused:** a column two leaf models both read holding other values, the target above all, anywhere up to that day, whatever each
+    of them reads otherwise. A column counts as read if it is a predictor or if a predictor function read it through `ctx`. That includes
+    rows no fit reads: a target revised long before the training window, or a frame that starts later. Numbers compare as float64, so a
+    float32 column with equal values is the same column.
+  - **A warning, and the ensemble is computed:** frames that differ when the columns the members share don't (`frame_hash`). A
+    column only one member reads may have been revised for it alone, and nothing can say whether another member's frame held the
+    same values, because no other member read it. A difference only in columns nobody reads warns just the same.
+  - **A warning:** hashes through different days, which can't be compared (a member run over a longer test period, say); manifests
+    written before `column_hashes`; members without a manifest. Only the `actual` of every key they share is then compared.
+  - **A warning naming the member:** `data_unverified` in its manifest. Its hashes describe the frame of its last run, and its stored
+    forecasts may come from another: it was resumed over a data mismatch with `allow_manifest_mismatch=True`, or its manifest was gone.
+    That stays on the manifest across later resumes. Run it again in a new `save_dir` to be rid of it.
+  - **Nothing to see:** a value corrected after the last day a member covers, which no forecast of it read.
+
+  Run the shards of one study from one frame, and read those warnings as saying that you haven't.
+</Aside>
+
+## YAML
+
+Ensembles are saved in an `ensembles:` section, only if there are any, and old files without it load. The section works the same inline
+in a `Workflow` file. See [Serialization](/epftoolbox2/model-pipeline/serialization/).
+
+```yaml
+models:
+- class: OLSModel
+  params:
+    predictors: [load_forecast_d+{horizon}, price_d-1]
+    training_window: 364
+    name: OLS_364
+- class: OLSModel
+  params:
+    predictors: [load_forecast_d+{horizon}, price_d-1]
+    training_window: 728
+    name: OLS_728
+ensembles:
+- class: AverageEnsemble
+  params:
+    members: [OLS_364, OLS_728]
+    top: 1
+    by: validation
+    name: best
+```

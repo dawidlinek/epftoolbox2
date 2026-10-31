@@ -8,6 +8,8 @@ import { Aside } from '@astrojs/starlight/components';
 Every forecast is refitted on its own rolling window, in validation as in test. The split only decides when choices are
 made: a model's own settings (the lambda of `LassoCVModel`) come from each fit's training window, choices between models or
 lists are made once on the validation period, and the test period uses them without choosing anything.
+[`AverageEnsemble`](/epftoolbox2/model-pipeline/ensembles/) makes such a choice for you, per test period, and
+`report.choices()` says what it chose.
 
 ```python
 from epftoolbox2.models import OLSModel

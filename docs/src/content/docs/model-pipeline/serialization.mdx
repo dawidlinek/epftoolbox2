@@ -41,6 +41,8 @@ report = pipeline.run(data=df, test_start="2024-04-01", test_end="2024-06-01")
 
 ## YAML Format
 
+[Ensembles](/epftoolbox2/model-pipeline/ensembles/#yaml) are saved in an `ensembles:` section after `models`, only if there are any.
+
 If the pipeline has an `information_set` (see [Information Set](/epftoolbox2/model-pipeline/information-set/)),
 it is saved as a top-level `information_set` key, and a level you asked for as `availability`. Left out, a load takes the
 default: `warn` with an `information_set`, `none` without one.

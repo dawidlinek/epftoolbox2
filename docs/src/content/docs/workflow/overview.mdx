@@ -295,7 +295,7 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
 
 `model_index` selects a single model by its 0-based position in the model list. When omitted, all models run. This enables submitting one job per model that allows further parallelization.
 
-In this array mode each task writes its model's results to `model_pipeline.save_dir` (one JSONL per model, resumable if the task is restarted) and skips the evaluators and exporters: relative metrics such as rMAE and the exporters need every model. Once all tasks have finished, merge the results and run the evaluators and exporters once with `epf report experiment.yaml` (or `Workflow.load("experiment.yaml").report()`). What the tasks listed about inputs known after the issue time comes from their manifests into the report, once. A negative or out-of-range `model_index` raises, and so does array mode without `save_dir`. With [`validation` and `test`](/epftoolbox2/model-pipeline/validation-and-test/#slurm-arrays-yaml-and-the-cli) each task runs its model over both windows, and a merge raises if the tasks ran on different windows.
+In this array mode each task writes its model's results to `model_pipeline.save_dir` (one JSONL per model, resumable if the task is restarted) and skips the [ensembles](/epftoolbox2/model-pipeline/ensembles/#results-on-disk-and-slurm-arrays), evaluators and exporters: they need every model. Once all tasks have finished, merge the results, compute the ensembles and run the evaluators and exporters once with `epf report experiment.yaml` (or `Workflow.load("experiment.yaml").report()`). What the tasks listed about inputs known after the issue time comes from their manifests into the report, once. A negative or out-of-range `model_index` raises, and so does array mode without `save_dir`. With [`validation` and `test`](/epftoolbox2/model-pipeline/validation-and-test/#slurm-arrays-yaml-and-the-cli) each task runs its model over both windows, and a merge raises if the tasks ran on different windows.
 
 **Workflow YAML for example SLURM cluster:**
 
@@ -318,7 +318,7 @@ sbatch --array=0-3 run_task.sh        # each task: epf run experiment.yaml
 epf report experiment.yaml
 ```
 
-`report()` raises if a model has no results file. `report(allow_missing=True)` (`epf report --allow-missing`) reports the models that have one. Check `report.forecast_counts()` before comparing models.
+`report()` raises if a model has no results file. `report(allow_missing=True)` (`epf report --allow-missing`) reports the models that have one, and leaves out an ensemble with a missing member, with a warning. Check `report.forecast_counts()` before comparing models.
 
 ## Learn More
 

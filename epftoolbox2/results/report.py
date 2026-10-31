@@ -15,11 +15,12 @@ from ..evaluators._compare import (
     ModelFrames,
     PairComparison,
     SetComparison,
-    adjust,
+    adjust_family,
     compare_pair,
     compare_set,
     confidence_set,
     short_test_message,
+    too_few_distinct_models,
     verdict,
 )
 from ..evaluators._days import periods_per_hour
@@ -67,6 +68,21 @@ _PERIODS_PER_HOUR = {"1h": 1, "15min": 4}
 # Two-sided size of the `verdict` of `tests()`.
 _TEST_ALPHA = 0.05
 
+# The columns of `EvaluationReport.choices()`.
+CHOICE_COLUMNS = [
+    "ensemble",
+    "segment",
+    "chosen",
+    "k",
+    "validation_mae",
+    "validation_forecasts",
+    "validation_share",
+    "validation_start",
+    "validation_end",
+    "test_start",
+    "test_end",
+]
+
 
 def metric_columns(table: pd.DataFrame) -> List[str]:
     """The columns of a table of `summary()`, `compute_all()` or `by_*()` that evaluators wrote, in table order."""
@@ -93,12 +109,14 @@ class EvaluationReport:
         evaluators: List[Evaluator],
         source_data: Optional[pd.DataFrame] = None,
         validation: Optional["EvaluationReport"] = None,
+        choices: Optional[Mapping[str, List[Dict[str, Any]]]] = None,
     ):
         self.evaluators = evaluators
         self.source_data = source_data
         self.refs: Dict[str, ModelResultRef] = {}
         self._read_frames: Dict[str, Tuple[tuple, pd.DataFrame]] = {}
         self._validation = validation
+        self._choices = dict(choices or {})
 
         validation_refs: Dict[str, ModelResultRef] = {}
         for name, v in results_or_refs.items():
@@ -125,8 +143,11 @@ class EvaluationReport:
                 f"These results are on different windows ({shown}): one report would compare models on different forecasts "
                 "whose roles differ. Build one report per window, from the runs with the same validation= and test=."
             )
-        if validation is None and self.window == TEST and validation_refs and len(validation_refs) == len(self.refs):
-            self._validation = EvaluationReport(validation_refs, evaluators, source_data=source_data)
+        expected = sum(not ref.test_only for ref in self.refs.values())
+        if validation is None and self.window == TEST and validation_refs and len(validation_refs) == expected:
+            self._validation = EvaluationReport(
+                validation_refs, evaluators, source_data=source_data, choices=self._choices
+            )
 
     @property
     def window(self) -> str:
@@ -308,7 +329,8 @@ class EvaluationReport:
                 "a daily series has one.",
                 stacklevel=2,
             )
-        return EvaluationReport(results, [e for e in self.evaluators if not isinstance(e, EconomicEvaluator)])
+        evaluators = [e for e in self.evaluators if not isinstance(e, EconomicEvaluator)]
+        return EvaluationReport(results, evaluators, choices=self._choices)
 
     def join(self, other: "EvaluationReport") -> "EvaluationReport":
         """A report with the models of both, for results of separate runs that are to be compared.
@@ -327,7 +349,7 @@ class EvaluationReport:
         """
         if not isinstance(other, EvaluationReport):
             raise TypeError(f"join() takes an EvaluationReport, got {type(other).__name__}")
-        clash = [name for name in other.refs if name in self.refs]
+        clash = [name for name in {**other.refs, **other._choices} if name in {**self.refs, **self._choices}]
         if clash:
             raise ValueError(f"Both reports have a model named {clash}: rename one before joining.")
         self._require_same_window(other)
@@ -339,6 +361,7 @@ class EvaluationReport:
             list(self.evaluators),
             source_data=self.source_data if self.source_data is not None else other.source_data,
             validation=validation,
+            choices={**self._choices, **other._choices},
         )
         joined._require_one_frequency("Joining reports")
         left, right = [_describe(e) for e in self.evaluators], [_describe(e) for e in other.evaluators]
@@ -384,9 +407,12 @@ class EvaluationReport:
         ci_high, statistic, p_value, p_holm, m, mde, verdict`. A positive statistic means the model is better. `ratio` is
         `mae / mae_benchmark`, both forecast-weighted on the pair's keys, and `mde` the difference (a share of
         `mae_benchmark`) this test length would likely detect, by the Newey-West variance whatever `variance` is. Holm runs
-        over the `m` models tested at that horizon, and `verdict` reads `p_holm` at 5 %. `verdict` is empty below 30 days and
-        when the test and the ratio point in opposite ways, the interval when the days fit in one block. `df.attrs` holds
-        the settings, and `partial_days`: the days per model with only part of their periods in common, with a warning.
+        over the `m` models tested at that horizon, and `verdict` reads `p_holm` at 5 %. Exact clones, models with the same
+        predictions (an `AverageEnsemble` with `top=1` and what it chose), count once and share a `p_holm`, and a clone of the
+        benchmark doesn't count. Keys count: two models are one test when the keys each shares with the benchmark, and their
+        predictions there, are the same. `verdict` is empty below 30 days and when the test and the ratio point in opposite
+        ways, the interval when the days fit in one block. `df.attrs` holds the settings, `clones`, the groups of clones per
+        horizon of the table, and `partial_days`: the days per model with only part of their periods in common, with a warning.
 
         Args:
             benchmark: The reference model; by default the benchmark of the report's `DMEvaluator`.
@@ -418,8 +444,10 @@ class EvaluationReport:
 
         rows: List[Dict[str, Any]] = []
         partial: Dict[str, int] = {}
+        clones: Dict[Union[int, str], List[List[str]]] = {}
         for label, keys in self._horizon_slices(panel, horizon, each_horizon=True):
             if by == "hour":
+                clones[label] = panel.pair_clone_groups(keys, models, benchmark)
                 hours = panel.hour[keys]
                 for hour in np.unique(hours):
                     for model in models:
@@ -428,8 +456,7 @@ class EvaluationReport:
                 continue
             pairs = [compare_pair(panel, model, benchmark, keys, **settings) for model in models]
             p_values = [pair.p_value for pair in pairs]
-            p_holm = adjust(p_values, correction)
-            m = int(np.isfinite(p_values).sum())
+            p_holm, m, clones[label] = adjust_family(panel, keys, models, benchmark, p_values, correction)
             for model, pair, adjusted in zip(models, pairs, p_holm):
                 row = _pair_row(model, benchmark, label, pair)
                 judged = float(adjusted) if correction == "holm" else pair.p_value
@@ -445,7 +472,13 @@ class EvaluationReport:
         columns += ["mde"] + ([] if by == "hour" else ["verdict"])
         table = pd.DataFrame(rows, columns=columns)
         table.attrs.update(
-            benchmark=benchmark, variance=variance, lag=lag, correction=correction, interval=interval, alpha=_TEST_ALPHA
+            benchmark=benchmark,
+            variance=variance,
+            lag=lag,
+            correction=correction,
+            interval=interval,
+            alpha=_TEST_ALPHA,
+            clones=clones,
         )
         if by == "hour":
             table.attrs["descriptive"] = (
@@ -475,7 +508,9 @@ class EvaluationReport:
         the 90 % set (p-value above 0.10) and `in_75` the 75 % set (above 0.25). An `alpha` other than those adds its own
         column (`alpha=0.05`: `in_95`). Below 30 days the sets stay empty. The comparison here is the whole set of models,
         so everything is on the keys all of them hold: `df.attrs` holds `n_days`, `n_forecasts` and `limited_by`, the models
-        that lack forecasts the others have, with how many. If one model cuts the sample, leave it out with `models`.
+        that lack forecasts the others have, with how many. If one model cuts the sample, leave it out with `models`. Exact
+        clones on those keys (an `AverageEnsemble` with `top=1` and what it chose) are one model to the set, each with its
+        result, and count once among the 3: their groups are in `df.attrs["clones"]`.
 
         Args:
             alpha: Size of the set the result is built for.
@@ -484,7 +519,8 @@ class EvaluationReport:
             block: Mean block length of the stationary bootstrap, in days.
             reps: Bootstrap repetitions (at least 1,000 recommended).
             seed: Bootstrap seed.
-            models: The set of models; by default all of them. Fewer than 3 gives NaN with a warning.
+            models: The set of models; by default all of them. Fewer than 3, counting exact clones once, gives NaN with a
+                warning.
             horizon: A number for one horizon; by default (or `"all"`) the daily losses of all horizons are averaged per
                 run date.
         """
@@ -502,6 +538,8 @@ class EvaluationReport:
                 f"The model confidence set needs at least 3 models, got {len(names)}: its columns are NaN.",
                 stacklevel=2,
             )
+        elif too_few_distinct_models(compared) is not None:
+            warnings.warn(too_few_distinct_models(compared), stacklevel=2)
         elif daily.n_days < 2:
             warnings.warn(_too_few_days(compared), stacklevel=2)
         else:
@@ -538,8 +576,10 @@ class EvaluationReport:
 
         One row per model, by rank: `model, n_days, n_forecasts, mae, rank, p_best, rank_low, rank_high`. Days are resampled
         in weekly blocks and the models ranked in each sample. As in `mcs()`, everything is on the keys all the models hold
-        (`df.attrs` holds `n_days`, `n_forecasts`, `limited_by`), and `rank` is by the mean daily loss. Models with the same
-        losses on every day are ranked by their order in the report, with a warning.
+        (`df.attrs` holds `n_days`, `n_forecasts`, `limited_by`), and `rank` is by the mean daily loss. Exact clones on those
+        keys (an `AverageEnsemble` with `top=1` and what it chose) are ranked as one model and have one rank and one `p_best`,
+        so they share a row's numbers and the next model has the next rank: their groups are in `df.attrs["clones"]`. Other
+        models with the same losses on every day are ranked by their order in the report, with a warning.
 
         Args:
             block: Block length of the bootstrap, in days.
@@ -565,13 +605,14 @@ class EvaluationReport:
                 stacklevel=2,
             )
         else:
-            _warn_on_identical_losses(daily.losses, names)
-            found = stats.rank_bootstrap(daily.losses, block=block, reps=reps, seed=seed, level=level)
+            kept, twin_of = compared.kept, compared.twin_of
+            _warn_on_identical_losses(daily.losses[:, kept], [names[j] for j in kept])
+            found = stats.rank_bootstrap(daily.losses[:, kept], block=block, reps=reps, seed=seed, level=level)
             columns = {
-                "rank": found.rank,
-                "p_best": found.p_best,
-                "rank_low": found.rank_low,
-                "rank_high": found.rank_high,
+                "rank": found.rank[twin_of],
+                "p_best": found.p_best[twin_of],
+                "rank_low": found.rank_low[twin_of],
+                "rank_high": found.rank_high[twin_of],
             }
         table = pd.DataFrame(
             {"model": names, "n_days": daily.n_days, "n_forecasts": daily.n_forecasts, "mae": daily.mae(), **columns}
@@ -651,8 +692,10 @@ class EvaluationReport:
 
         `n_forecasts` and `MAE` are the model's own, so with different forecast sets the MAE column compares different
         samples (a warning says so): read `ratio`, which does not. `n_days` and `n_common` are the days and forecasts of the
-        pair, and `ratio`, `ci_low`, `ci_high`, `p_value` and `p_holm` (Holm over the models compared) are on them, with
-        the defaults of `tests()`. Without a benchmark (none given, no `DMEvaluator`) only `n_days` is added.
+        pair, and `ratio`, `ci_low`, `ci_high`, `p_value` and `p_holm` (Holm over the models compared, with exact clones
+        counted once, as in `tests()`) are on them, with the defaults of `tests()`. Without a benchmark (none given, no
+        `DMEvaluator`) only `n_days` is added. `df.attrs["clones"]` holds the groups of clones: of the tests with a benchmark,
+        and of the models with the same forecasts on the keys of the table without one.
 
         Args:
             benchmark: The reference model; by default the benchmark of the report's `DMEvaluator`.
@@ -662,6 +705,7 @@ class EvaluationReport:
         panel = self._panel()
         benchmark = self._benchmark(benchmark, panel, required=False)
         _, keys = self._pooled_slice(panel, horizon)
+        clones = panel.clone_groups(keys, panel.models)
         rows: List[Dict[str, Any]] = []
         for model in panel.models:
             own = panel.common(keys, (model,))
@@ -678,7 +722,8 @@ class EvaluationReport:
         if benchmark is not None:
             others = [row for row in rows if row["model"] != benchmark]
             pairs = [compare_pair(panel, row["model"], benchmark, keys) for row in others]
-            p_holm = adjust([pair.p_value for pair in pairs], "holm")
+            names = [row["model"] for row in others]
+            p_holm, _, clones = adjust_family(panel, keys, names, benchmark, [pair.p_value for pair in pairs], "holm")
             partial = {row["model"]: pair.partial_days for row, pair in zip(others, pairs)}
             for row, pair, adjusted in zip(others, pairs, p_holm):
                 row.update(
@@ -697,6 +742,7 @@ class EvaluationReport:
             columns += ["n_common", "ratio", "ci_low", "ci_high", "p_value", "p_holm"]
         table = pd.DataFrame(rows, columns=columns).sort_values("MAE", kind="stable").reset_index(drop=True)
         table.attrs["benchmark"] = benchmark
+        table.attrs["clones"] = clones
         if len(table):
             _flag_test_length(table, int(table["n_days"].min()))
         if benchmark is not None:
@@ -779,6 +825,7 @@ class EvaluationReport:
             n_days=compared.daily.n_days,
             n_forecasts=compared.daily.n_forecasts,
             limited_by=compared.limited_by,
+            clones=[list(group) for group in compared.clones],
             horizon=label,
             **settings,
         )
@@ -834,6 +881,47 @@ class EvaluationReport:
         """
         return listing_frame({name: ref.availability_listing for name, ref in self.refs.items()})
 
+    def choices(self) -> pd.DataFrame:
+        """What each ensemble chose on validation, one row per ensemble and test period served. Empty, with the same columns,
+        when nothing chose anything: a plain average chooses nothing.
+
+        Columns: `ensemble`, `segment` (its place in `report.windows.segments`), `chosen` (the members kept, in member order),
+        `k`, `validation_mae` (of the average of `chosen`), `validation_forecasts` (how many it was scored on: the keys every
+        member holds with a finite prediction and actual, issued in the validation period for a day before the first test
+        issue day), `validation_share` (those keys as a share of the ones the fullest member holds), `validation_start`,
+        `validation_end`, and `test_start`, `test_end`, the test period served. With no test period known yet those two are
+        empty, `segment` is 0, and `report.windows.segments` is empty.
+
+        `df.attrs` holds, per ensemble and segment, `member_mae` (each member's MAE on those keys), `k_mae` (with
+        `top="validation"`, the MAE of the average of the best k members) and `limited_by` (the members whose holes cut the keys,
+        with how many forecasts each lacks). A report of either window shows the same table.
+        """
+        rows = []
+        member_mae: Dict[str, Dict[int, Dict[str, float]]] = {}
+        k_mae: Dict[str, Dict[int, Dict[str, float]]] = {}
+        limited_by: Dict[str, Dict[int, Dict[str, int]]] = {}
+        for ensemble, chosen in self._choices.items():
+            for row in chosen:
+                test = row["test"] or (None, None)
+                rows.append(
+                    {
+                        "ensemble": ensemble,
+                        **{key: row[key] for key in ("segment", "chosen", "k")},
+                        **{key: row[key] for key in ("validation_mae", "validation_forecasts", "validation_share")},
+                        "validation_start": row["validation"][0],
+                        "validation_end": row["validation"][1],
+                        "test_start": test[0],
+                        "test_end": test[1],
+                    }
+                )
+                member_mae.setdefault(ensemble, {})[row["segment"]] = row["member_mae"]
+                limited_by.setdefault(ensemble, {})[row["segment"]] = row["limited_by"]
+                if "k_mae" in row:
+                    k_mae.setdefault(ensemble, {})[row["segment"]] = row["k_mae"]
+        table = pd.DataFrame(rows, columns=CHOICE_COLUMNS)
+        table.attrs.update(member_mae=member_mae, k_mae=k_mae, limited_by=limited_by)
+        return table
+
     def _result_freqs(self) -> Dict[str, str]:
         """The frequency each model's results were produced at, for the models that have results.
 
@@ -861,7 +949,7 @@ class EvaluationReport:
         self, model_dfs: Mapping[str, pd.DataFrame], group_keys: Sequence[str] = ()
     ) -> Dict[str, Dict[str, Any]]:
         """`{model: {column: value}}` for one group: each evaluator runs once, on every model's frame of that group."""
-        frames = ModelFrames(model_dfs, group_keys)
+        frames = model_dfs if isinstance(model_dfs, ModelFrames) else ModelFrames(model_dfs, group_keys)
         columns: Dict[str, Dict[str, Any]] = {name: {} for name in model_dfs}
         written_by: Dict[str, Tuple[Evaluator, bool]] = {}
         for evaluator in self.evaluators:
@@ -941,10 +1029,15 @@ class EvaluationReport:
 
     def _summary_table(self, model_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         self._check_set_evaluators()
-        metrics = self._apply_evaluators(model_dfs)
-        return pd.DataFrame(
+        frames = ModelFrames(model_dfs)
+        metrics = self._apply_evaluators(frames)
+        table = pd.DataFrame(
             [{"model": name, "forecasts": len(df), **metrics.get(name, {})} for name, df in model_dfs.items()]
         )
+        by_evaluator = {e.name: e.clones(frames) for e in self.evaluators if isinstance(e, SetEvaluator)}
+        if by_evaluator:  # `DM` and `MCS` read them on other keys, so they needn't agree
+            table.attrs["clones"] = by_evaluator
+        return table
 
     def _grouped_table(
         self,

@@ -26,6 +26,9 @@ class ModelResultRef:
     are read. `target_before` is the first test issue day of a validation ref, whose forecasts for that day or later are
     left out and counted in `skipped` as `target_in_test`. `windows` holds what the run was made of, and `by_window` the
     refs of its windows on the ref of the whole run. All four stay at their defaults in a plain run.
+
+    `test_only` marks an ensemble that has forecasts in the test window alone, which a report of a run with validation doesn't
+    look for in `.validation` (see `epftoolbox2.ensembles`).
     """
 
     name: str
@@ -44,6 +47,7 @@ class ModelResultRef:
     target_before: Optional[str] = None
     windows: Optional[RunWindows] = None
     by_window: Optional[Dict[str, "ModelResultRef"]] = field(default=None, repr=False)
+    test_only: bool = False
 
     def iter_records(self, cols: Optional[List[str]] = None) -> Iterator[Dict]:
         """The records of this ref, wherever they live.

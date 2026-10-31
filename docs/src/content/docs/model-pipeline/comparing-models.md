@@ -25,6 +25,28 @@ The same numbers can go into `summary()` and the `by_*()` tables through [`DMEva
 - **Fixed seeds.** Same data, same numbers. The seed is a parameter of every method that resamples.
 - **One frequency.** Results at different frequencies raise `ValueError`: period 5 of an hourly model and of a 15-minute model are different times of the day.
 
+## Exact clones
+
+Two models with the same predictions on the keys compared, bit for bit, are one model to a test. An `AverageEnsemble` with `top=1`
+is a clone of what it chose as a matter of course, so these tables take clones as they are, and `df.attrs["clones"]` holds their groups: per
+horizon in `tests()`, per evaluator in `summary()` (when it has a `DMEvaluator` or an `MCSEvaluator`), and one list in the others.
+
+- **A Holm family holds distinct tests.** In `tests()`, `leaderboard()` and `DMEvaluator` the keys compared are each model's with the
+  benchmark. Two models are one hypothesis when their slices against the benchmark, the keys they share with it and their predictions
+  there, are the same. They count once in `m` and share a `p_holm`, so adding a `top=1` ensemble can't change a verdict about another
+  model. Models that differ only where the benchmark has no forecast are one test; a gap on a key the benchmark has makes two, on
+  different forecasts.
+- **A model that repeats the benchmark tests nothing.** Whatever else it lacks, if its predictions on the keys it shares with the benchmark
+  are the benchmark's, its row reads `ratio` 1, `p_value` 1, `no difference`, and it doesn't count in `m`: the benchmark less one day
+  says as little as the benchmark.
+- **A confidence set and a ranking are made without the extra copies.** `mcs()`, `MCSEvaluator` and `ranks()` compare on the keys of the
+  whole set, read clones there, and give each twin the result of the model they are, so their numbers for the other models are what they
+  would be without the clone. Twins share a rank, the next model has the next rank, and their chance of being best isn't split between
+  them. A confidence set takes 3 models with clones counted once: fewer gives NaN with a warning, whatever the number of names.
+
+Models with the same losses and other predictions, one always as far above the actual as the other is below, are not clones: `mcs()` raises
+and `ranks()` warns, as they did.
+
 ## Test length
 
 One test year resolves differences of about 5 % of the MAE. Gaps of 1–2 % need about 2,700 days, so with one year most small gaps will read `no difference`, and that is the right answer. The `mde` column gives the minimum detectable effect for each pair: the difference (as a share of the benchmark's MAE) this test length would detect with 80 % power.
@@ -69,7 +91,7 @@ report.mcs()
 # 2     OLS     365         8760  26.02          1.049    0.012  False  False
 ```
 
-The set of models the data cannot tell from the best: `in_90` is the 90 % set and `in_75` the 75 % set. It takes at least 3 models. Use it when there is no natural reference, and read the width of the set: several members means the data does not pick a winner.
+The set of models the data cannot tell from the best: `in_90` is the 90 % set and `in_75` the 75 % set. It takes at least 3 models, counting [exact clones](#exact-clones) once. Use it when there is no natural reference, and read the width of the set: several members means the data does not pick a winner.
 
 Since the whole set is the comparison, one model with few forecasts cuts the sample of all. `df.attrs` holds `n_days`, `n_forecasts` and `limited_by`, the models that lack forecasts the others have, with how many. Leave such a model out with `models=[...]`.
 

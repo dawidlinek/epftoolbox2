@@ -195,12 +195,14 @@ def test_mcs_with_fewer_than_three_models_is_nan_with_a_warning():
     assert table["MCS p"].isna().all() and table["in MCS"].isna().all()
 
 
-def test_mcs_of_identical_models_is_nan_with_a_warning_in_a_table():
+def test_mcs_gives_exact_clones_one_result_in_a_table():
     results = study()
+    without = EvaluationReport(results, [MCSEvaluator(reps=20)]).summary().set_index("model")
     results["copy"] = results["base"]
-    with pytest.warns(UserWarning, match="No model confidence set.*base, better, same, copy"):
-        table = EvaluationReport(results, [MCSEvaluator(reps=20)]).summary()
-    assert table["MCS p"].isna().all() and (table["MCS n_days"] == 70).all()
+    table = EvaluationReport(results, [MCSEvaluator(reps=20)]).summary().set_index("model")
+    assert list(table.loc[list(without.index), "MCS p"]) == list(without["MCS p"])
+    assert table.loc["copy", "MCS p"] == table.loc["base", "MCS p"] and (table["MCS n_days"] == 70).all()
+    assert table.attrs["clones"] == {"MCS": [["base", "copy"]]}
 
 
 def test_mcs_on_the_keys_of_the_group():
