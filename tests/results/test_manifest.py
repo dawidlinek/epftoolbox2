@@ -264,3 +264,48 @@ def test_model_params_includes_the_scaler_so_resume_refuses_on_a_change(tmp_path
     check_and_write(path, a, has_existing_results=False)
     with pytest.raises(ManifestMismatchError, match="model_params"):
         check_and_write(path, b, has_existing_results=True)
+
+
+def test_every_column_read_and_the_whole_frame_are_hashed_through_the_test_end():
+    data = make_data()
+    data["unread"] = 1.0
+    manifest = make_manifest(data, used_columns=["price", "load"], test_end="2024-01-01")
+    rows = data.loc[:"2024-01-01"]
+    assert manifest.column_hashes == {"price": hash_columns(rows, ["price"]), "load": hash_columns(rows, ["load"])}
+    assert manifest.frame_hash == hash_columns(rows, list(rows.columns))
+    written = manifest.to_dict()
+    assert written["column_hashes"] == manifest.column_hashes and written["frame_hash"] == manifest.frame_hash
+
+
+def test_the_column_hashes_and_the_frame_hash_never_refuse_a_resume(tmp_path):
+    data = make_data()
+    data["unread"] = 1.0
+    path = tmp_path / "m.manifest.json"
+    check_and_write(path, make_manifest(data), has_existing_results=True)
+    moved = data.copy()
+    moved["unread"] = 2.0
+    later = make_manifest(moved)
+    assert later.frame_hash != make_manifest(data).frame_hash
+    check_and_write(path, later, has_existing_results=True)
+    assert json.loads(path.read_text())["frame_hash"] == later.frame_hash
+
+
+def test_a_manifest_older_than_the_column_hashes_loads_resumes_and_gains_them(tmp_path):
+    data = make_data()
+    written = make_manifest(data).to_dict()
+    del written["column_hashes"], written["frame_hash"]
+    loaded = Manifest.from_dict(written)
+    assert loaded.column_hashes is None and loaded.frame_hash is None
+    assert "column_hashes" not in loaded.to_dict() and "frame_hash" not in loaded.to_dict()
+    path = tmp_path / "m.manifest.json"
+    path.write_text(json.dumps(written))
+    check_and_write(path, make_manifest(data), has_existing_results=True)
+    assert set(json.loads(path.read_text())["column_hashes"]) == {"price", "load"}
+
+
+def test_a_frame_that_cant_be_hashed_doesnt_stop_a_run():
+    data = make_data()
+    data["notes"] = [[1, 2]] * len(data)
+    manifest = make_manifest(data)
+    assert manifest.frame_hash is None and "frame_hash" not in manifest.to_dict()
+    assert set(manifest.column_hashes) == {"price", "load"}

@@ -30,10 +30,12 @@ an issue day it didn't sample.
 
 ### New
 
+- A manifest gains `column_hashes` (each column a run reads, on its own) and `frame_hash` (the whole frame), through `test_end`,
+  on every run. They never refuse a resume, and manifests without them load. Records and tables don't change.
 - `AverageEnsemble(members, top=None | k | "validation", by="validation", name=...)` and `pipeline.add_ensemble()`, from
   `epftoolbox2.ensembles`: the mean of stored forecasts on identical keys, with the members and their number chosen on validation
   per test period, `member_missing` in `forecast_counts()` and `report.choices()`. `ModelPipeline.report()` and `epf report` compute
-  ensembles from stored results, and YAML has an `ensembles:` section. A pipeline without ensembles and its files don't change. See
+  ensembles from stored results, and YAML has an `ensembles:` section. See
   [Ensembles](/epftoolbox2/model-pipeline/ensembles/).
 - `run(df, validation=(start, end) | "previous_year", test=(start, end))`: one run per model over both windows, into one results
   file and one manifest. Each forecast is bit for bit what a plain run over its window gives. `report.validation`, `report.window`

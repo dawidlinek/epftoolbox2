@@ -28,6 +28,7 @@ from ..results.manifest import (
     check_and_write,
     check_stored_lists,
     hash_columns,
+    hash_frame,
     manifest_path,
     read_windows,
 )
@@ -431,10 +432,16 @@ class BaseModel(ABC):
         return recorded
 
     @staticmethod
-    def _data_hasher(data: pd.DataFrame) -> Callable[[str, Sequence[str]], str]:
-        """The hash of `data` up to a day, in some columns: a manifest's, for any span a run with windows compares."""
+    def _data_hasher(data: pd.DataFrame) -> Callable[[str, Optional[Sequence[str]]], Optional[str]]:
+        """The hash of `data` up to a day, in some columns or (with None) all of them: a manifest's, for any span a run with
+        windows compares."""
         ordered = data.sort_index()
-        return lambda end, columns: hash_columns(ordered.loc[:end], columns)
+
+        def hasher(end: str, columns: Optional[Sequence[str]]) -> Optional[str]:
+            rows = ordered.loc[:end]
+            return hash_frame(rows) if columns is None else hash_columns(rows, columns)
+
+        return hasher
 
     @staticmethod
     def _window_days(windows: RunWindows, first_day: datetime.date) -> Dict[int, Tuple[str, int, int]]:

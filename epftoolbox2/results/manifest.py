@@ -34,6 +34,12 @@ the data the stored forecasts read, up to the end of the span they cover, and it
 also compares each stored key's window and mask to what a fresh run would give it (`check_stored_lists`). A window this run
 doesn't name stays recorded, like the records it holds.
 
+Every run also records `column_hashes`, a hash of each column it reads (its predictors and the target) on its own, and
+`frame_hash`, a hash of the whole frame, both over the rows `data_columns_hash` covers. They are never compared on resume, so
+a change in a column a run doesn't read still resumes. They are for what can't be seen from one model's results: two models
+averaged by an ensemble must have read one thing, whatever columns each of them took (`epftoolbox2.ensembles._compute`). Manifests
+written before them load, and simply don't have them.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -133,6 +139,9 @@ class Manifest:
     windows: Optional[Dict[str, Any]] = None
     binary_masks: Optional[Dict[str, str]] = None
     actuals: Optional[Dict[str, str]] = None
+    # Through `test_end`: each column this run read on its own, and the whole frame. Recorded, never compared on resume.
+    column_hashes: Optional[Dict[str, str]] = None
+    frame_hash: Optional[str] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -152,6 +161,9 @@ class Manifest:
         if self.availability is None:  # level "none": nothing to record
             del out["availability"]
         for name in ("windows", "binary_masks", "actuals"):  # a plain run: nothing to record
+            if out[name] is None:
+                del out[name]
+        for name in ("column_hashes", "frame_hash"):  # a manifest older than them, or a frame that can't be hashed
             if out[name] is None:
                 del out[name]
         return out
@@ -175,6 +187,15 @@ def hash_columns(data: pd.DataFrame, columns: Sequence[str]) -> str:
     frame = data[sorted(set(columns))]
     row_hashes = pd.util.hash_pandas_object(frame, index=True).to_numpy()
     return hashlib.sha256(row_hashes.tobytes()).hexdigest()
+
+
+def hash_frame(data: pd.DataFrame) -> Optional[str]:
+    """`hash_columns` over every column of `data`, or None if a column holds values that can't be hashed (lists, say): a
+    hash nothing needs must not stop a run."""
+    try:
+        return hash_columns(data, list(data.columns))
+    except TypeError:
+        return None
 
 
 def hash_predictor_layout(expanded: Dict[Tuple[int, int], Sequence[str]]) -> str:
@@ -288,6 +309,8 @@ def build_manifest(
         windows=None if windows is None else windows.to_dict(),
         binary_masks=binary_masks,
         actuals=actuals,
+        column_hashes={column: hash_columns(hashed_rows, [column]) for column in dict.fromkeys(used_columns)},
+        frame_hash=hash_frame(hashed_rows),
     )
 
 
@@ -434,6 +457,10 @@ def _cover_both(existing: Manifest, manifest: Manifest, data_hash: Callable) -> 
     manifest.test_end = max(existing.test_end, manifest.test_end)
     manifest.predictors = sorted({*existing.predictors, *manifest.predictors})
     manifest.data_columns_hash = data_hash(manifest.test_end, [manifest.target, *manifest.predictors])
+    manifest.column_hashes = {
+        column: data_hash(manifest.test_end, [column]) for column in (manifest.target, *manifest.predictors)
+    }
+    manifest.frame_hash = data_hash(manifest.test_end, None)
     if manifest.actuals is not None and existing.actuals is not None:
         through = max(existing.actuals["through"], manifest.actuals["through"])
         manifest.actuals = {"through": through, "hash": data_hash(through, [manifest.target])}
@@ -613,6 +640,7 @@ __all__ = [
     "check_and_write",
     "check_stored_lists",
     "hash_columns",
+    "hash_frame",
     "hash_predictor_layout",
     "is_ensemble_manifest",
     "manifest_digest",

@@ -101,6 +101,8 @@ report = pipeline.run(
 
 A [predictor function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/#results) has no fixed list to compare: resuming compares each stored forecast's list and binary columns with what a fresh run would give it, and each record stores its list's hash.
 
+Every run also records `column_hashes`, a hash of each column it reads (its predictors and the target) on its own, and `frame_hash`, a hash of the whole frame, over the same rows up to `test_end`. They never refuse a resume, so a change in a column the run doesn't read still resumes. They are what an [ensemble](/epftoolbox2/model-pipeline/ensembles/#what-is-refused) compares between its members. Manifests written before them load, and an ensemble then warns.
+
 A run with [validation](/epftoolbox2/model-pipeline/validation-and-test/#resuming) adds to the manifest its windows and segments (`windows`), a digest of the binary columns per window (`binary_masks`, under each list for a function, a test mask under the key a plain run gives it) and a hash of the target up to the last day a stored `actual` reads (`actuals`). A plain run's manifest has none of them. Resuming compares each stored forecast's window and mask with what a fresh run would give it, and the data on what the stored forecasts read, so a run with a test period can follow one with only a validation period.
 
 **A `.jsonl` file with no `.manifest.json` next to it** is not
