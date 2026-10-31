@@ -236,6 +236,12 @@ def _check_members_agree(
     problems += _information_set_differences(recorded)
     found, notes = _data_differences(recorded)
     problems += found
+    unverified = sorted(name for name, manifest in recorded.items() if manifest.get("data_unverified"))
+    if unverified:
+        notes.append(
+            f"the stored forecasts of {unverified} may not come from the frame their hashes describe: they were resumed over a "
+            "mismatch or without a manifest, so what they read can't be compared. Run them again in a new save_dir to know"
+        )
     if problems:
         raise ManifestMismatchError(
             f"{ensemble.name}: its members are not forecasts of one thing, so averaging or ranking them would mean nothing: "
@@ -253,10 +259,11 @@ def _check_members_agree(
 def _information_set_differences(manifests: Mapping[str, Dict[str, Any]]) -> List[str]:
     """An average has one issue time: a member issued later, or with no issue time at all, can read what the others can't.
 
-    The information set is compared whole, so a difference in its rules counts as one in its issue time does. The `availability`
-    level is not part of it, and doesn't change a forecast."""
+    What is compared decides when a column is known: the issue time and zone, the rules, the assumptions and whether the defaults
+    apply. A rule's `note` and the order of the assumptions don't, and neither do `unknown` and the `availability` level, which say
+    what a run does about a column, not when it is known."""
     held = {name: manifest.get("information_set") for name, manifest in manifests.items()}
-    if len({json.dumps(information_set, sort_keys=True) for information_set in held.values()}) < 2:
+    if len({json.dumps(_what_decides_availability(info), sort_keys=True) for info in held.values()}) < 2:
         return []
     shown = {
         name: "none" if info is None else f"{info.get('issue_time')} {info.get('issue_timezone')}"
@@ -265,11 +272,26 @@ def _information_set_differences(manifests: Mapping[str, Dict[str, Any]]) -> Lis
     return [f"different information sets, in their issue time or their rules: {shown}"]
 
 
+def _what_decides_availability(information_set: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if information_set is None:
+        return None
+    return {
+        "issue_time": information_set.get("issue_time"),
+        "issue_timezone": information_set.get("issue_timezone"),
+        "rules": {
+            column: {key: value for key, value in rule.items() if key != "note"}
+            for column, rule in information_set.get("rules", {}).items()
+        },
+        "assumptions": sorted(information_set.get("assumptions", [])),
+        "use_defaults": information_set.get("use_defaults", True),
+    }
+
+
 def _data_differences(manifests: Mapping[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
     """What the data hashes of the manifests say: what refuses the ensemble, and what only can't be told.
 
-    Refused: a column two members read, or the target, hashing differently; `data_columns_hash`, of all a model's columns
-    together, differing on the same columns; the target's own hash. `_on_one_grid` compares the `actual` of every key the members
+    Refused: a column two members read, or the target, hashing differently; for manifests older than those hashes,
+    `data_columns_hash`, of all a model's columns together, differing on the same columns; the target's own hash. `_on_one_grid` compares the `actual` of every key the members
     share as well. Hashes through different days can't be compared, and frames that differ only in columns no two members share
     are not a contradiction: both warn. So do manifests that predate `column_hashes`.
     """
@@ -287,7 +309,8 @@ def _data_differences(manifests: Mapping[str, Dict[str, Any]]) -> Tuple[List[str
         if manifest.get("column_hashes"):
             hashed_through.setdefault(manifest.get("test_end"), {})[name] = manifest
     for hashes in same_columns.values():
-        if len(set(hashes.values())) > 1:
+        # With `column_hashes` on every side those speak, and they don't take a float32 for another value.
+        if len(set(hashes.values())) > 1 and not all(manifests[name].get("column_hashes") for name in hashes):
             problems.append(f"data hashes that differ on the same columns in {sorted(hashes)}")
     for through, hashes in actuals.items():
         if len(set(hashes.values())) > 1:

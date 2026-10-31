@@ -3,14 +3,18 @@
 
 import json
 
+import numpy as np
 import pandas as pd
 import pytest
 
+from epftoolbox2.results import manifest
 from epftoolbox2.results.manifest import (
+    FrameHashes,
     Manifest,
     ManifestMismatchError,
     build_manifest,
     check_and_write,
+    hash_column,
     hash_columns,
     manifest_path,
 )
@@ -271,6 +275,7 @@ def test_every_column_read_and_the_whole_frame_are_hashed_through_the_test_end()
     data["unread"] = 1.0
     manifest = make_manifest(data, used_columns=["price", "load"], test_end="2024-01-01")
     rows = data.loc[:"2024-01-01"]
+    # On a float64 column `hash_column` is `hash_columns`, bit for bit.
     assert manifest.column_hashes == {"price": hash_columns(rows, ["price"]), "load": hash_columns(rows, ["load"])}
     assert manifest.frame_hash == hash_columns(rows, list(rows.columns))
     written = manifest.to_dict()
@@ -309,3 +314,131 @@ def test_a_frame_that_cant_be_hashed_doesnt_stop_a_run():
     manifest = make_manifest(data)
     assert manifest.frame_hash is None and "frame_hash" not in manifest.to_dict()
     assert set(manifest.column_hashes) == {"price", "load"}
+
+
+def test_a_columns_hash_doesnt_depend_on_the_dtype_of_equal_values():
+    index = pd.date_range("2024-01-01", periods=6, freq="h", tz="Europe/Warsaw")
+    values = [0.0, 1.0, 1.0, 0.0, 1.0, 0.0]
+    frame = pd.DataFrame({"x": values}, index=index)
+    same = {
+        "float32": pd.Series(values, index=index, dtype="float32"),
+        "int": pd.Series(values, index=index).astype(int),
+        "bool": pd.Series(values, index=index).astype(bool),
+        "Int64": pd.Series(values, index=index).astype("Int64"),
+        "negative zero": pd.Series(values, index=index) * -1.0 * -1.0 + pd.Series([-0.0] * 6, index=index),
+    }
+    expected = hash_column(frame, "x")
+    assert expected == hash_columns(frame, ["x"])
+    for name, series in same.items():
+        assert hash_column(series.to_frame("x"), "x") == expected, name
+    assert hash_column(pd.DataFrame({"x": [v + 1e-9 for v in values]}, index=index), "x") != expected
+    assert hash_columns(same["float32"].to_frame("x"), ["x"]) != expected, "data_columns_hash stays as it is"
+
+
+def test_a_columns_hash_takes_one_nan_and_text():
+    index = pd.date_range("2024-01-01", periods=3, freq="h", tz="Europe/Warsaw")
+    quiet = np.array([1.0, np.nan, 3.0])
+    computed = np.array([1.0, 0.0, 3.0])
+    with np.errstate(invalid="ignore"):
+        computed[1] = np.divide(0.0, 0.0)  # a NaN with its own sign bit on most machines
+    assert hash_column(pd.DataFrame({"x": quiet}, index=index), "x") == hash_column(
+        pd.DataFrame({"x": computed}, index=index), "x"
+    )
+    with_na = pd.Series([1, None, 3], index=index, dtype="Int64").to_frame("x")
+    assert hash_column(with_na, "x") == hash_column(pd.DataFrame({"x": quiet}, index=index), "x")
+    words = pd.DataFrame({"x": ["a", "b", "c"]}, index=index)
+    assert hash_column(words, "x") == hash_columns(words, ["x"])
+
+
+def test_frame_hashes_compute_each_thing_once_and_answer_what_the_functions_do(monkeypatch):
+    data = make_data()
+    data["other"] = 1.0
+    calls = {"column": 0, "frame": 0, "columns": 0}
+    real = {"column": manifest.hash_column, "frame": manifest.hash_frame, "columns": manifest.hash_columns}
+
+    def counted(kind):
+        def call(*args):
+            calls[kind] += 1
+            return real[kind](*args)
+
+        return call
+
+    hashes = FrameHashes(data)
+    assert hashes.of_column("2024-01-01", "load") == hash_column(data.loc[:"2024-01-01"], "load")
+    assert hashes.of_columns("2024-01-01", ["load", "price"]) == hash_columns(
+        data.loc[:"2024-01-01"], ["load", "price"]
+    )
+    assert hashes.of_frame("2024-01-01") == hash_columns(data.loc[:"2024-01-01"], list(data.columns))
+    monkeypatch.setattr(manifest, "hash_column", counted("column"))
+    monkeypatch.setattr(manifest, "hash_frame", counted("frame"))
+    monkeypatch.setattr(manifest, "hash_columns", counted("columns"))
+    fresh = FrameHashes(data)
+    for _ in range(3):
+        fresh.of_column("2024-01-01", "load")
+        fresh.of_frame("2024-01-01")
+        fresh.of_columns("2024-01-01", ["load", "price"])
+        fresh.of_columns("2024-01-01", ["price", "load"])
+    assert calls["column"] == 1 and calls["frame"] == 1
+    fresh.of_column("2024-01-02", "load")
+    assert calls["column"] == 2, "another day is another hash"
+
+
+def _written(path):
+    return json.loads(path.read_text())
+
+
+def test_a_mismatch_accepted_over_stored_forecasts_is_recorded_and_stays(tmp_path):
+    data = make_data()
+    path = tmp_path / "m.manifest.json"
+    check_and_write(path, make_manifest(data), has_existing_results=False)
+    assert "data_unverified" not in _written(path)
+    moved = data.copy()
+    moved["load"] = moved["load"] + 1.0
+    with pytest.raises(ManifestMismatchError):
+        check_and_write(path, make_manifest(moved), has_existing_results=True, frame_hashes=FrameHashes(moved))
+    check_and_write(
+        path, make_manifest(moved), has_existing_results=True, allow_mismatch=True, frame_hashes=FrameHashes(moved)
+    )
+    assert _written(path)["data_unverified"] is True
+    check_and_write(path, make_manifest(moved), has_existing_results=True, frame_hashes=FrameHashes(moved))
+    assert _written(path)["data_unverified"] is True, "it stays across resumes"
+
+
+def test_a_mismatch_accepted_with_nothing_stored_is_no_matter(tmp_path):
+    data = make_data()
+    path = tmp_path / "m.manifest.json"
+    check_and_write(path, make_manifest(data), has_existing_results=False)
+    moved = data.copy()
+    moved["load"] = moved["load"] + 1.0
+    check_and_write(
+        path, make_manifest(moved), has_existing_results=False, allow_mismatch=True, frame_hashes=FrameHashes(moved)
+    )
+    assert "data_unverified" not in _written(path)
+
+
+def test_an_override_that_only_moves_the_test_end_says_nothing_of_the_data(tmp_path):
+    """A plain run hashes other rows if it ends on another day. The rows on file are still what they were."""
+    data = make_data()
+    path = tmp_path / "m.manifest.json"
+    check_and_write(path, make_manifest(data, test_end="2024-01-01"), has_existing_results=False)
+    later = make_manifest(data, test_end="2024-01-02")
+    check_and_write(path, later, has_existing_results=True, allow_mismatch=True, frame_hashes=FrameHashes(data))
+    assert "data_unverified" not in _written(path)
+    moved = data.copy()
+    moved.iloc[0, 1] += 1.0
+    other = make_manifest(moved, test_end="2024-01-02")
+    check_and_write(path, other, has_existing_results=True, allow_mismatch=True, frame_hashes=FrameHashes(moved))
+    assert _written(path)["data_unverified"] is True
+
+
+def test_results_resumed_with_no_manifest_are_recorded_as_unverified(tmp_path):
+    data = make_data()
+    path = tmp_path / "m.manifest.json"
+    check_and_write(path, make_manifest(data), has_existing_results=False)
+    assert "data_unverified" not in _written(path)
+    path.unlink()
+    check_and_write(path, make_manifest(data), has_existing_results=True)
+    assert _written(path)["data_unverified"] is True
+    path.unlink()
+    check_and_write(path, make_manifest(data), has_existing_results=False)
+    assert "data_unverified" not in _written(path)

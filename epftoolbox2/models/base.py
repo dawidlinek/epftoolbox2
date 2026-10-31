@@ -24,11 +24,10 @@ from ..results.manifest import (
     PAST_THE_FRAME,
     ManifestMismatchError,
     PlannedForecast,
+    FrameHashes,
     build_manifest,
     check_and_write,
     check_stored_lists,
-    hash_columns,
-    hash_frame,
     manifest_path,
     read_windows,
 )
@@ -140,6 +139,7 @@ class BaseModel(ABC):
         availability: str = "raise",
         warn_listing: bool = True,
         windows: Optional[RunWindows] = None,
+        frame_hashes: Optional[FrameHashes] = None,
     ) -> ModelResultRef:
         """Forecast every period and horizon for each day in [test_start, test_end].
 
@@ -163,6 +163,9 @@ class BaseModel(ABC):
         each window reads its binary-column masks from its own first day, which leaves every forecast what a plain run over
         that window gives. A plain run into results made with windows is treated as a run of the test window alone, so that
         its records and masks are checked and the windows on file stay recorded.
+
+        `frame_hashes` is what `ModelPipeline.run` shares between its models, for this `data`, so that each column of a frame is
+        hashed once per call.
         """
         self._set_freq(freq)
         check_level(availability)
@@ -258,6 +261,7 @@ class BaseModel(ABC):
 
         store = ResultStore(save_to, test_start=test_start) if save_to else None
         if store:
+            frame_hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
             manifest = build_manifest(
                 model=self,
                 data=data,
@@ -274,6 +278,8 @@ class BaseModel(ABC):
                 availability=self._manifest_availability(information_set, availability, listing, window_listings),
                 windows=windows,
                 binary_masks=None if windows is None or plan is not None else self._mask_digests(masks),
+                read_columns=() if plan is None else sorted(plan.queried),
+                frame_hashes=frame_hashes,
             )
 
             def check_stored():
@@ -296,7 +302,7 @@ class BaseModel(ABC):
                 allow_mismatch=allow_manifest_mismatch,
                 require_manifest=require_manifest,
                 model_name=self.name,
-                data_hash=None if windows is None else self._data_hasher(data),
+                frame_hashes=frame_hashes,
                 check_stored=None if windows is None else check_stored,
             )
             if availability != "none" and manifest.availability is not None:
@@ -430,18 +436,6 @@ class BaseModel(ABC):
         if window_listings:
             recorded["windows"] = window_listings
         return recorded
-
-    @staticmethod
-    def _data_hasher(data: pd.DataFrame) -> Callable[[str, Optional[Sequence[str]]], Optional[str]]:
-        """The hash of `data` up to a day, in some columns or (with None) all of them: a manifest's, for any span a run with
-        windows compares."""
-        ordered = data.sort_index()
-
-        def hasher(end: str, columns: Optional[Sequence[str]]) -> Optional[str]:
-            rows = ordered.loc[:end]
-            return hash_frame(rows) if columns is None else hash_columns(rows, columns)
-
-        return hasher
 
     @staticmethod
     def _window_days(windows: RunWindows, first_day: datetime.date) -> Dict[int, Tuple[str, int, int]]:

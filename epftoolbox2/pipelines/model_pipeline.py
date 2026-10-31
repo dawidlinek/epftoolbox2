@@ -19,7 +19,7 @@ from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..exporters.base import Exporter
 from ..results.availability import read_listing, warn_about
-from ..results.manifest import ManifestMismatchError, is_ensemble_manifest, manifest_path, read_windows
+from ..results.manifest import FrameHashes, ManifestMismatchError, is_ensemble_manifest, manifest_path, read_windows
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef, split_by_window
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
@@ -223,6 +223,8 @@ class ModelPipeline:
         warn_about(listings, stacklevel=3)  # once, for every model, and before the hours a run can take
 
         refs: dict[str, ModelResultRef] = {}
+        # Of this call alone: a frame changed before the next one must be hashed again.
+        frame_hashes = FrameHashes(data) if save_dir else None
         for model in self.models:
             save_to = str(self.results_path(save_dir, model)) if save_dir else None
             planned = {"plan": plans[model.name]} if model.name in plans else {}
@@ -241,6 +243,7 @@ class ModelPipeline:
                 availability=level,
                 warn_listing=False,
                 windows=windows,
+                frame_hashes=frame_hashes,
                 **planned,
             )
             refs[model.name] = ref

@@ -39,6 +39,7 @@ from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline, Workflow
 from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY
 from epftoolbox2.results import EvaluationReport, ManifestMismatchError, RunWindows, read_windows
+from epftoolbox2.results import manifest as result_manifest
 from epftoolbox2.results.manifest import manifest_path
 from tests.synthetic import PREDICTORS, make_market_data
 
@@ -836,6 +837,23 @@ GAPPED = RunWindows.fixed(("2024-01-01", "2024-03-10"), ("2024-03-20", "2024-03-
 ALL_DAYS = days_of(*GAPPED.validation)
 
 
+def test_limited_by_lists_who_lacks_most_first(tmp_path):
+    windows = GAPPED
+    tested = days_of(*windows.test)
+    records = lambda days, error: forecasts([*days, *tested], error, (0, 1, 2), windows=windows)  # noqa: E731
+    write_member(tmp_path, "a", records(ALL_DAYS, 1.0), windows)
+    write_member(tmp_path, "z", records(ALL_DAYS[2:], 2.0), windows)
+    write_member(tmp_path, "b", records(ALL_DAYS[5:], 3.0), windows)
+    write_member(tmp_path, "c", records(ALL_DAYS[:-2], 4.0), windows)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        report = report_of(
+            tmp_path, AverageEnsemble(["a", "z", "b", "c"], top=1, name="e"), members=("a", "z", "b", "c")
+        )
+    limited_by = report.choices().attrs["limited_by"]["e"][0]
+    assert list(limited_by.items()) == [("b", 15), ("c", 6), ("z", 6)]
+
+
 def test_a_full_validation_has_a_share_of_one_and_says_nothing(tmp_path):
     report, caught = thin(tmp_path, ALL_DAYS, ALL_DAYS, GAPPED)
     row = choice_of(report)
@@ -1086,7 +1104,6 @@ RULE = {"kind": "published", "time": "13:00", "days_before": 1, "timezone": None
         ("freq", "15min", "frequencies"),
         ("horizon", 2, "horizon"),
         ("data_timezone", "Etc/GMT-1", "data_timezone"),
-        ("data_columns_hash", "other data", "data hashes"),
         ("actuals", {"through": "2024-05-13", "hash": "other target"}, "a different target"),
         ("column_hashes", {"price": "one target", "load_d+1": "revised load"}, r"columns they share.*load_d\+1"),
         ("column_hashes", {"price": "other target", "wind_d+1": "wind"}, r"columns they share.*price"),
@@ -1104,6 +1121,228 @@ def test_members_of_different_tasks_are_refused(tmp_path, field, value, message)
     with pytest.raises(ManifestMismatchError, match=message):
         report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
     assert not (tmp_path / "e.jsonl").exists()
+
+
+def test_older_manifests_are_not_compared_through_different_days(tmp_path):
+    days = HAND.issue_days()
+    write_member(tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND, column_hashes=None)
+    other = dict(column_hashes=None, data_columns_hash="other data", test_end="2024-05-13")
+    write_member(tmp_path, "b", forecasts(days, 2.0, windows=HAND), HAND, **other)
+    with pytest.warns(UserWarning, match="have no `column_hashes`"):
+        report = report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+    assert counts_of(report).loc["e", "produced"] == 4 * DAY
+
+
+def test_older_manifests_are_compared_on_their_data_hash(tmp_path):
+    days = HAND.issue_days()
+    write_member(tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND, column_hashes=None)
+    write_member(
+        tmp_path, "b", forecasts(days, 2.0, windows=HAND), HAND, column_hashes=None, data_columns_hash="other data"
+    )
+    with pytest.raises(ManifestMismatchError, match="data hashes"):
+        report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+    write_member(tmp_path, "b", forecasts(days, 2.0, windows=HAND), HAND, data_columns_hash="other data")
+    with pytest.raises(ManifestMismatchError, match="data hashes"):
+        report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+
+
+@pytest.mark.parametrize(
+    "a_fields, b_fields",
+    [
+        (dict(assumptions=["one", "two"]), dict(assumptions=["two", "one"])),
+        (dict(rules={"x": {**RULE, "note": "from the docs"}}), dict(rules={"x": {**RULE, "note": "other words"}})),
+        (dict(rules={"x": {**RULE, "note": "words"}}), dict(rules={"x": RULE})),
+        (dict(unknown="raise"), dict(unknown="warn")),
+        (dict(use_defaults=True), dict()),
+        (dict(rules={"x": RULE, "y": RULE}), dict(rules={"y": RULE, "x": RULE})),
+    ],
+    ids=[
+        "assumptions in another order",
+        "note text",
+        "a note against none",
+        "unknown",
+        "defaults spelled out",
+        "rule order",
+    ],
+)
+def test_what_doesnt_decide_availability_doesnt_refuse(tmp_path, a_fields, b_fields):
+    days = HAND.issue_days()
+    write_member(tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND, information_set={**ISSUED, **a_fields})
+    write_member(tmp_path, "b", forecasts(days, 2.0, windows=HAND), HAND, information_set={**ISSUED, **b_fields})
+    report = report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+    assert counts_of(report).loc["e", "produced"] == 4 * DAY
+
+
+@pytest.mark.parametrize(
+    "a_fields, b_fields",
+    [
+        (dict(assumptions=["one"]), dict(assumptions=["one", "two"])),
+        (dict(rules={"x": RULE}), dict(rules={"x": {**RULE, "time": "14:00"}})),
+        (dict(rules={"x": RULE}), dict(rules={"y": RULE})),
+        (dict(), dict(use_defaults=False)),
+    ],
+    ids=["another assumption", "another time in a rule", "a rule on another column", "no defaults"],
+)
+def test_what_decides_availability_refuses(tmp_path, a_fields, b_fields):
+    days = HAND.issue_days()
+    write_member(tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND, information_set={**ISSUED, **a_fields})
+    write_member(tmp_path, "b", forecasts(days, 2.0, windows=HAND), HAND, information_set={**ISSUED, **b_fields})
+    with pytest.raises(ManifestMismatchError, match="information sets"):
+        report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+
+
+def resumed_on_other_data(df, directory, **windows):
+    """`a` on one frame and `b` on another, then `a` resumed on `b`'s with the override: no forecast of `a` is redone."""
+    moved = with_noise(df, "load")
+    shard(df, "a", SMALL, directory, **windows)
+    shard(moved, "b", PREDICTORS, directory, **windows)
+    with pytest.raises(ManifestMismatchError, match="columns they share"):
+        averaged(directory, SMALL, PREDICTORS, **({"test": T} if "validation" not in windows else {}))
+    before = (Path(directory) / "a.jsonl").read_bytes()
+    built(ols("a", SMALL)).run(moved, horizon=1, save_dir=str(directory), allow_manifest_mismatch=True, **windows)
+    assert (Path(directory) / "a.jsonl").read_bytes() == before
+    return moved
+
+
+@pytest.mark.parametrize("windows", [dict(test=T), dict(validation=V, test=T)], ids=["plain", "windows"])
+def test_a_resume_over_other_data_says_so_for_good(df, tmp_path, windows):
+    moved = resumed_on_other_data(df, tmp_path, **windows)
+    manifest = json.loads(manifest_path(tmp_path / "a.jsonl").read_text())
+    assert manifest["data_unverified"] is True
+    assert "data_unverified" not in json.loads(manifest_path(tmp_path / "b.jsonl").read_text())
+    kwargs = {"test": T} if "validation" not in windows else {}
+    with pytest.warns(UserWarning, match=r"stored forecasts of \['a'\] may not come from the frame"):
+        report = averaged(tmp_path, SMALL, PREDICTORS, **kwargs)
+    assert counts_of(report).loc["e", "produced"] == 3 * DAY
+    shard(
+        moved, "a", SMALL, tmp_path, **windows
+    )  # a later resume compares fine, and knows no more about the old forecasts
+    assert json.loads(manifest_path(tmp_path / "a.jsonl").read_text())["data_unverified"] is True
+
+
+def test_results_resumed_without_their_manifest_are_warned_about_by_name(df, tmp_path):
+    moved = with_noise(df, "load")
+    shard(df, "a", SMALL, tmp_path, test=T)
+    shard(moved, "b", PREDICTORS, tmp_path, test=T)
+    manifest_path(tmp_path / "a.jsonl").unlink()
+    shard(moved, "a", SMALL, tmp_path, test=T)
+    assert json.loads(manifest_path(tmp_path / "a.jsonl").read_text())["data_unverified"] is True
+    with pytest.warns(UserWarning, match=r"stored forecasts of \['a'\]"):
+        averaged(tmp_path, SMALL, PREDICTORS, test=T)
+
+
+def test_a_nested_average_warns_about_its_leaf_model_too(df, tmp_path):
+    resumed_on_other_data(df, tmp_path, test=T)
+    pipeline = built(
+        ols("a", SMALL),
+        ols("b", PREDICTORS),
+        AverageEnsemble(["a"], name="inner"),
+        AverageEnsemble(["inner", "b"], name="outer"),
+    )
+    with pytest.warns(UserWarning, match=r"outer: the stored forecasts of \['a'\]"):
+        pipeline.report(tmp_path, test=T, horizon=1)
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        [dict(test=T)],
+        [dict(test=T), dict(test=T)],
+        [dict(validation=V), dict(validation=V, test=T)],
+        [dict(validation=V, test=T), dict(validation=V)],
+    ],
+    ids=["fresh", "resumed", "validation then test", "names less"],
+)
+def test_normal_runs_write_no_such_field(df, tmp_path, steps):
+    for step in steps:
+        shard(df, "a", SMALL, tmp_path, **step)
+    assert "data_unverified" not in json.loads(manifest_path(tmp_path / "a.jsonl").read_text())
+
+
+def test_an_override_on_the_same_frame_says_nothing_of_the_data(df, tmp_path):
+    shard(df, "a", SMALL, tmp_path, test=T)
+    longer = (T[0], "2023-04-07")
+    built(ols("a", SMALL)).run(df, test=longer, horizon=1, save_dir=str(tmp_path), allow_manifest_mismatch=True)
+    assert "data_unverified" not in json.loads(manifest_path(tmp_path / "a.jsonl").read_text())
+
+
+def reads_wind(ctx):
+    base = ["is_weekend_d+{horizon}", "is_weekday_d+{horizon}", "load_d+{horizon}"]
+    return base if ctx.value("wind_d+1") > 100 else base[:2]
+
+
+def test_a_column_two_members_only_read_through_ctx_is_compared(df, tmp_path):
+    moved = df.copy()
+    moved["wind_d+1"] = moved["wind_d+1"] * 0.01
+    built(ols("g1", reads_wind)).run(df, test=T, horizon=1, save_dir=str(tmp_path))
+    built(ols("g2", reads_wind)).run(moved, test=T, horizon=1, save_dir=str(tmp_path))
+    held = json.loads(manifest_path(tmp_path / "g1.jsonl").read_text())
+    assert "wind_d+1" in held["column_hashes"] and "wind_d+1" not in held["predictors"]
+    pipeline = built(ols("g1", reads_wind), ols("g2", reads_wind), AverageEnsemble(["g1", "g2"], name="e"))
+    with pytest.raises(ManifestMismatchError, match=r"columns they share.*wind_d\+1"):
+        pipeline.report(tmp_path, test=T, horizon=1)
+
+
+def test_a_column_only_read_stays_hashed_when_a_manifest_grows(df, tmp_path):
+    built(ols("g", reads_wind)).run(df, validation=V, horizon=1, save_dir=str(tmp_path))
+    built(ols("g", reads_wind)).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
+    assert "wind_d+1" in json.loads(manifest_path(tmp_path / "g.jsonl").read_text())["column_hashes"]
+
+
+@pytest.mark.parametrize("predictors", [PREDICTORS, SMALL], ids=["other columns too", "the same columns"])
+def test_equal_values_in_another_dtype_are_not_another_frame_to_a_column(df, tmp_path, predictors):
+    other = df.copy()
+    other["is_weekend_d+1"] = other["is_weekend_d+1"].astype("float32")
+    shard(df, "a", SMALL, tmp_path, test=T)
+    shard(other, "b", predictors, tmp_path, test=T)
+    held = {name: json.loads(manifest_path(tmp_path / f"{name}.jsonl").read_text()) for name in ("a", "b")}
+    assert held["a"]["column_hashes"]["is_weekend_d+1"] == held["b"]["column_hashes"]["is_weekend_d+1"]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = averaged(tmp_path, SMALL, predictors, test=T)
+    assert counts_of(report).loc["e", "produced"] == 3 * DAY
+    assert warned(caught, "frames differ"), "the frame's own hash still sees the dtype, which is worth a word"
+
+
+def test_each_hash_is_computed_once_per_run_with_the_same_bytes_as_alone(df, tmp_path, monkeypatch):
+    calls = {"column": 0, "frame": 0}
+    real_column, real_frame = result_manifest.hash_column, result_manifest.hash_frame
+
+    def column(*args):
+        calls["column"] += 1
+        return real_column(*args)
+
+    def frame(*args):
+        calls["frame"] += 1
+        return real_frame(*args)
+
+    alone = tmp_path / "alone"
+    for name, predictors in (("a", PREDICTORS), ("b", SMALL), ("c", WIND)):
+        shard(df, name, predictors, alone, validation=V, test=T)
+
+    monkeypatch.setattr(result_manifest, "hash_column", column)
+    monkeypatch.setattr(result_manifest, "hash_frame", frame)
+    together = tmp_path / "together"
+    built(ols("a"), ols("b", SMALL), ols("c", WIND)).run(df, validation=V, test=T, horizon=1, save_dir=str(together))
+    assert calls == {"column": 5, "frame": 1}, "price and the four distinct columns, whatever the number of models"
+    for name in ("a", "b", "c"):
+        left = without_timestamps(manifest_path(alone / f"{name}.jsonl"))
+        right = without_timestamps(manifest_path(together / f"{name}.jsonl"))
+        assert left == right, name
+
+
+def test_a_frame_changed_between_two_runs_is_hashed_again(df, tmp_path):
+    frame = df.copy()
+    pipeline = built(ols("a", SMALL))
+    pipeline.run(frame, test=T, horizon=1, save_dir=str(tmp_path / "first"))
+    frame["load_d+1"] = frame["load_d+1"] + 1.0
+    frame["unread"] = 1.0
+    pipeline.run(frame, test=T, horizon=1, save_dir=str(tmp_path / "second"))
+    first = json.loads(manifest_path(tmp_path / "first" / "a.jsonl").read_text())
+    second = json.loads(manifest_path(tmp_path / "second" / "a.jsonl").read_text())
+    assert first["column_hashes"]["load_d+1"] != second["column_hashes"]["load_d+1"]
+    assert first["frame_hash"] != second["frame_hash"]
+    assert first["column_hashes"]["price"] == second["column_hashes"]["price"]
 
 
 def test_data_hashes_are_only_compared_on_the_same_columns(tmp_path):
@@ -1136,7 +1375,7 @@ def test_members_on_different_data_are_refused_after_real_runs(df, tmp_path):
     built(ols("a"), ols("other", SMALL)).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
     built(ols("b")).run(moved, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
     members = ("a", "b", "other")
-    with pytest.raises(ManifestMismatchError, match="data hashes"):
+    with pytest.raises(ManifestMismatchError, match=r"columns they share.*load_d\+1"):
         report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=members)
     # `other` reads load too, so the column they share says it, though their columns differ.
     with pytest.raises(ManifestMismatchError, match=r"columns they share.*load_d\+1"):
@@ -1289,7 +1528,7 @@ def test_a_shard_with_another_issue_time_is_refused_after_real_runs(df, tmp_path
     "fields, message",
     [
         (
-            dict(data_columns_hash="other data", column_hashes={"price": "revised", "load_d+1": "revised"}),
+            dict(column_hashes={"price": "revised", "load_d+1": "revised"}),
             "columns they share",
         ),
         (dict(information_set=ISSUED), "information sets"),
