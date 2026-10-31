@@ -1,6 +1,6 @@
 ---
 title: Predictor Functions
-description: Choose each forecast's predictors with a function of `ctx`, planned before any fit, compared with the issue time and saved by import path
+description: Choose each forecast's predictors with a function of `ctx`, planned before any fit, compared with the issue time, trained on all days or the matching ones, and saved by import path
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -148,8 +148,74 @@ can't change an earlier forecast. A column with no value there is read on the fi
 A list used on every test day of a (period, horizon) is treated exactly as a fixed list is.
 
 A function may also return `Use(list, train_on="all")`, which is the plain list.
-`Use(list, train_on="matching")`, training only on the past days that got the same list, isn't available yet and raises
-`NotImplementedError`.
+
+## Training only on the days with the same list
+
+`Use(list, train_on="matching")` trains a forecast only on the past days for which the function returned that same list:
+
+```python
+from epftoolbox2.models import OLSModel, Use
+from epftoolbox2.pipelines import ModelPipeline
+
+weekday_x = ["load_forecast_d+{horizon}", "wind_forecast_d+{horizon}", "price_d-1"]
+weekend_x = ["load_forecast_d+{horizon}", "price_d-1"]
+
+
+def weekend_model(ctx):  # one model for weekend targets, another for the other days
+    if ctx.target_weekday >= 5:
+        return Use(weekend_x, train_on="matching")
+    return Use(weekday_x, train_on="matching")
+
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin").add_model(
+    OLSModel(predictors=weekend_model, training_window=364, name="weekend")
+)
+```
+
+What that means, for each (period, horizon):
+
+- **A past day counts as a forecast issued on that day.** A training row on day D' at horizon h has issue day D' and target day
+  D' + h, so the function runs for it exactly as for a forecast issued on D'. **`published()` and `value()` answer as of the issue
+  time of D', never as of the day the forecast is being made.** A value known only later than that doesn't count as published on
+  D', even though it is long known by the time of the forecast, and at `availability="raise"` a `value()` of it raises there too.
+  So the days a forecast trains on are the days it would have been given this list, with what was known then. Nothing it can't
+  know on its own issue day moves them.
+- **The same list means the same names in the same order and the same `train_on`.** A day that got those names with
+  `train_on="all"` doesn't match.
+- **The window isn't extended.** `training_window` and the usual cut come first, so the newest training target stays D-1. The filter
+  then narrows what they leave. **A matching forecast therefore trains on fewer rows than its window**: about 104 for weekend
+  targets with a window of 364. If that is too few, ask for a longer window.
+- **The scaler is fitted on the rows left**, and the binary columns are still the list's, found as for any list on its window, not
+  once per set of days.
+- **A day with a doubled autumn row** counts as one day, whose two rows both follow its date. A day with no row at that period
+  isn't asked about. The cut counts rows as it does for every list, so a set holding a switch day has the
+  [look-ahead after a fall-back](/epftoolbox2/model-pipeline/verification/) of a fixed list, and a set without it doesn't.
+
+### When there are too few days
+
+- **No matching day:** no fit. The forecast is counted as `no_matching_days` in
+  [`report.forecast_counts()`](/epftoolbox2/model-pipeline/results/#forecast-counts). So a list that first appears on an issue day
+  has no forecast until a day that returned it has a finished target: h + 1 issue days at horizon h.
+- **Fewer days than the list has predictors:** the fit goes ahead, since a regularised model can do it, and OLS then has no unique
+  solution. A warning before any fit names the model, how many forecasts and the smallest count. The terminal exporter prints the
+  same whatever `show` asks for, and `ModelPipeline.report()` warns again from the stored results.
+
+```python
+report = pipeline.run(df, test=("2025-10-01", "2026-09-30"), horizon=2)
+report.forecast_counts()  # no_matching_days among the skip reasons
+report.training_days()  # model, list, predictors, forecasts, periods, horizons, smallest_days, median_days, largest_days, thin_forecasts
+```
+
+`training_days()` reads the records of the report's window, and counts days the fit really uses: a matched day whose row has a
+missing value isn't one.
+
+### What it costs
+
+The function is evaluated on training days too, once per (day, period, horizon), before any fit, and a day that is also an issue day
+isn't evaluated twice. That is (window + test) / test times the calls, and only for the (period, horizon) pairs that have a matching
+forecast: a year of hourly forecasts at seven horizons with a window of 364 days is 123,000 calls instead of 61,000. A function
+building a 175-name list took 3.8 s for them instead of 1.9 s on a desktop. A function with no matching list is never called on a
+training day. Workers get the list of each day from the plan; they don't call the function and see no column more than usual.
 
 ## The issue-time check
 
@@ -203,10 +269,25 @@ Here EXAA isn't out on the five Mondays of the month, and at horizon 2 its rule 
 `adds` and `drops` compare a list with the most used list of the same horizon, since `{horizon}` in a name makes the lists of two
 horizons differ anyway. Ties go to the list returned first. A late `value()` doesn't stop the view, at any level.
 
+A function with `train_on="matching"` lists adds three columns, `smallest days`, `median days` and `largest days`: how many days the
+forecasts of each such list would train on, counted as a run counts them and without fitting anything, and a dash for any other list.
+A smallest of 0 says some of them have no fit:
+
+```text
+weekend_model: 2 distinct list(s)
+ horizon  list         hash  forecasts  issue days first issue day last issue day periods  predictors train_on adds             drops  smallest days  median days  largest days
+       1     1 20310bccfffe        240          10      2024-04-01     2024-04-14    0-23           3 matching    -                 -            258        260.0           260
+       1     2 f91ab6385a9f         96           4      2024-04-05     2024-04-13    0-23           2 matching      wind_forecast_d+1            102        104.0           104
+```
+
 ## Results
 
 Each record of a predictor function has one more key, `predictor_list`: a short hash of its ordered list and training rule.
 Fixed lists have no such key.
+
+A record of a `train_on="matching"` list has two more: `matching_days`, a short hash of the days the function matched, and
+`training_days`, how many of them the fit used once rows with a missing value are dropped. A record of any other list doesn't
+have them, and a pipeline with no matching list doesn't change at all.
 
 ```python
 # One entry per distinct list: hash, train_on, n_predictors, predictors, forecasts, horizons, periods, issue_days,
@@ -223,6 +304,10 @@ change, for example if the function reads a list defined next to it, or a new av
 answer. A change that leaves every stored forecast alone (a comment, an unrelated rule) resumes with a note. Pending
 forecasts may change freely, as nothing stored depends on them, except that adding a column to the union of the lists changes
 the hash of the data the manifest compares, and that raises too. `allow_manifest_mismatch=True` resumes anyway.
+
+For a matching list it also compares `matching_days`, the set of days a fresh run would train the stored forecast on. Its list can
+stay what it was while that set moves: a new list on some past day does that, and so does a change in a value the function only
+reads, which the manifest's data hash doesn't cover. Either raises `ManifestMismatchError`, naming how many stored forecasts differ.
 
 ## Saving to YAML
 

@@ -34,6 +34,14 @@ an issue day it didn't sample.
 
 ### New
 
+- `Use(list, train_on="matching")` in a predictor function of `ctx`: a forecast trains only on the past days for which the function
+  returned that list and rule, per (period, horizon), after the usual training cut. The function is evaluated on those days too, once
+  per (day, period, horizon), before any fit and as of each day's own issue time, which doubles the calls for a year of test and a
+  window of 364. The window isn't extended, so such a forecast trains on fewer rows. A forecast with no such day is counted as
+  `no_matching_days`, and fewer days than predictors warns, also in the terminal exporter. Records of such a list gain `training_days`
+  and `matching_days`, and resuming compares the set. `report.training_days()` and the `lists` table of `explain()` show how many days
+  they train on. Anything without such a list doesn't change. See
+  [Predictor Functions](/epftoolbox2/model-pipeline/predictor-functions/#training-only-on-the-days-with-the-same-list).
 - A manifest gains `column_hashes` (each column a run reads, on its own) and `frame_hash` (the whole frame), through `test_end`,
   on every run, and `data_unverified` on a resume that accepted other data or had no manifest. They never refuse a resume, and
   manifests without them load. Records and tables don't change.

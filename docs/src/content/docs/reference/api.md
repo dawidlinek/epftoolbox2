@@ -199,6 +199,7 @@ class EvaluationReport:
     def summary(self) -> pd.DataFrame: ...          # model, forecasts, one column per evaluator
     def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
     def availability(self) -> pd.DataFrame: ...     # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
+    def training_days(self) -> pd.DataFrame: ...    # model, list, predictors, forecasts, periods, horizons, smallest_days, median_days, largest_days, thin_forecasts
     def choices(self) -> pd.DataFrame: ...          # ensemble, segment, chosen, k, validation_mae, validation_forecasts, validation_share, validation_start, validation_end, test_start, test_end; attrs: member_mae, k_mae, limited_by
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
@@ -490,10 +491,10 @@ class PredictorContext:                     # What the function gets for one pla
     def value(self, column: str) -> Any: ...  # The cell of the forecast's row; raises if known only later
 
 class Use:                                  # What the function may return instead of a plain list
-    def __init__(self, predictors: Sequence[str], train_on: str = "all"): ...  # "matching" isn't available yet
+    def __init__(self, predictors: Sequence[str], train_on: str = "all"): ...  # "matching": only the past days given this list
 ```
 
-`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, and `ModelResultRef.availability_listing` holds the rows behind `report.availability()`.
+`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, `ModelResultRef.availability_listing` holds the rows behind `report.availability()`, and `ModelResultRef.matching_lists` the hash and number of predictors of each `train_on="matching"` list, which `report.training_days()` reads the records for.
 
 `BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`. And `frame_hashes`, what one `ModelPipeline.run` call shares between its models so that it hashes each column once.
 

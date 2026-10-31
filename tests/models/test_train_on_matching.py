@@ -8,7 +8,8 @@ import datetime
 import hashlib
 import json
 import os
-from concurrent.futures import Future
+import re
+from concurrent.futures import Future, ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,7 @@ from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.manifest import ManifestMismatchError
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
+DOCS_PAGE = Path(__file__).resolve().parents[2] / "docs/src/content/docs/model-pipeline/predictor-functions.mdx"
 RULES = {
     "load": Availability.published("10:00", 7),
     "wind": Availability.published("10:00", 7),
@@ -145,6 +147,11 @@ class Rows:
         return float(fit.predict((test - means) / deviations)[0] * y.std(ddof=1) + y.mean()), fit.coef_
 
 
+def real_pool(monkeypatch, processes):
+    monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", ProcessPoolExecutor)
+    monkeypatch.setenv("MAX_PROCESSES", str(processes))
+
+
 def key(record):
     return record["run_date"], record["hour"], record["horizon"]
 
@@ -159,10 +166,6 @@ def expanded(names, horizon):
 
 def stored_lines(path):
     return sorted(line for line in Path(path).read_text().splitlines() if line)
-
-
-def within_test(*records, days=TEST):
-    return [r for r in records if days[0] <= r["run_date"] <= days[1]]
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +303,19 @@ def test_the_function_runs_once_per_training_day_period_and_horizon_as_of_that_d
     assert calls == []  # before any fit, and only then
 
 
+def test_a_day_with_no_row_at_a_period_is_not_asked():
+    data = make_market_data(start="2023-02-01", days=60, horizon=1, noise=5.0, seed=3)
+    calls = set()
+
+    def recording(ctx):
+        calls.add((ctx.issue_day, ctx.period))
+        return one_list(ctx)
+
+    OLSModel(recording, training_window=20)._plan_predictors(data, "price", 1, "1h", INFO, "2023-03-28", "2023-03-30")
+    switch = datetime.date(2023, 3, 26)
+    assert (switch, 2) not in calls and (switch, 3) in calls and (switch - datetime.timedelta(days=1), 2) in calls
+
+
 def test_the_function_answers_on_a_training_day_for_that_day(frame):
     seen = {}
 
@@ -323,10 +339,7 @@ def frozen_after_planning(ctx):
 
 
 def test_workers_get_what_they_need_without_calling_the_function(frame, monkeypatch):
-    monkeypatch.setattr(
-        "epftoolbox2.models.base.ProcessPoolExecutor", __import__("concurrent.futures").futures.ProcessPoolExecutor
-    )
-    monkeypatch.setenv("MAX_PROCESSES", "2")
+    real_pool(monkeypatch, 2)
     data = frame.iloc[:2800]
     model = OLSModel(frozen_after_planning, training_window=WINDOW)
     plan = model._plan_predictors(data, "price", 1, "1h", INFO, *TEST)
@@ -403,47 +416,42 @@ def sets_of(records):
     return {k: (r["matching_days"], r["training_days"], r["prediction"]) for k, r in records.items()}
 
 
-@pytest.fixture(scope="module")
-def probe_frame(frame):
-    return frame.drop(columns=[f"mixed_d+{h}" for h in (1, 2, 3)]).assign(**{"early": frame["early"]})
-
-
 @pytest.mark.filterwarnings("ignore:.*was never True")
-def test_the_matching_set_does_not_move_when_values_unknown_on_the_issue_day_are_perturbed(probe_frame):
-    original = issued(probe_frame)
+def test_the_matching_set_does_not_move_when_values_unknown_on_the_issue_day_are_perturbed(frame):
+    original = issued(frame)
     assert len(original) == 72
-    perturbed, counts, unchecked = perturb_unknown(probe_frame, ISSUE_DAY, INFO)
+    perturbed, counts, unchecked = perturb_unknown(frame, ISSUE_DAY, INFO)
     assert counts["early"] and counts["late"] and counts["signal"] and not unchecked
     assert sets_of(issued(perturbed)) == sets_of(original)
 
 
 @pytest.mark.filterwarnings("ignore:.*was never True")
-def test_values_of_a_training_day_known_only_after_its_own_issue_time_do_not_move_the_set(probe_frame):
+def test_values_of_a_training_day_known_only_after_its_own_issue_time_do_not_move_the_set(frame):
     """`late` of an earlier day is known on the issue day, so `perturb_unknown` leaves it. As of that day's own issue time it
     wasn't, which is the time the function answers as of: taking it away or adding noise there can't move anything."""
-    original = issued(probe_frame)
+    original = issued(frame)
     day = pd.Timestamp(ISSUE_DAY).tz_localize("Europe/Warsaw")
-    earlier = probe_frame.index < day
-    gone = probe_frame.copy()
+    earlier = frame.index < day
+    gone = frame.copy()
     gone.loc[earlier, "late"] = np.nan
-    noisy = probe_frame.copy()
+    noisy = frame.copy()
     noisy.loc[earlier, "late"] = 1e6 + np.arange(earlier.sum())
     assert sets_of(issued(gone)) == sets_of(original)
     assert sets_of(issued(noisy)) == sets_of(original)
 
 
 @pytest.mark.filterwarnings("ignore:.*was never True")
-def test_a_known_value_of_a_training_day_does_move_the_set_so_the_tests_above_can_fail(probe_frame):
-    original = sets_of(issued(probe_frame))
+def test_a_known_value_of_a_training_day_does_move_the_set_so_the_tests_above_can_fail(frame):
+    original = sets_of(issued(frame))
     day = "2023-03-20"
-    hours = probe_frame.index.tz_localize(None).normalize() == pd.Timestamp(day)
+    hours = frame.index.tz_localize(None).normalize() == pd.Timestamp(day)
     for column, value in (("early", np.nan), ("signal_d-1", -1e6)):
-        changed = probe_frame.copy()
+        changed = frame.copy()
         changed.loc[hours, column] = value
         moved = sets_of(issued(changed))
         assert {k for k in moved if moved[k][0] != original[k][0]}, column
     # And a cell the function reads on the issue day is the forecast's own.
-    own = probe_frame.copy()
+    own = frame.copy()
     own.loc[own.index.tz_localize(None).normalize() == pd.Timestamp(ISSUE_DAY), "signal_d-1"] = -1e6
     assert sets_of(issued(own)) != original
 
@@ -464,10 +472,10 @@ def test_the_newest_training_target_stays_the_day_before_the_issue_day(frame, ho
     assert with_target_of(day + pd.Timedelta(days=horizon)) == original
 
 
-def test_leakage_probe_and_verify_pass_a_clean_function_and_the_control_reaches_it(probe_frame):
+def test_leakage_probe_and_verify_pass_a_clean_function_and_the_control_reaches_it(frame):
     result = leakage_probe(
         lambda: OLSModel(by_published_cells, training_window=WINDOW),
-        probe_frame,
+        frame,
         ISSUE_DAY,
         INFO,
         horizon=3,
@@ -484,7 +492,7 @@ def test_leakage_probe_and_verify_pass_a_clean_function_and_the_control_reaches_
     report = (
         ModelPipeline(information_set=INFO)
         .add_model(OLSModel(clean, training_window=WINDOW, name="clean"))
-        .verify(probe_frame, *TEST, horizon=3, days=2)
+        .verify(frame, *TEST, horizon=3, days=2)
     )
     report.assert_ok()
     assert report.table().iloc[0]["control moved"] > 0
@@ -630,6 +638,14 @@ def test_a_switch_day_in_the_training_window_and_in_the_test(switch, freq):
             by_hand += 1
     assert by_hand
 
+    # What the warning and explain() say before any fit is what the records say afterwards.
+    model = OLSModel(on_weekends, training_window=window)
+    plan = model._plan_predictors(data, "price", 3, freq, INFO, str(first.date()), str(last.date()))
+    model._load_periods(data, ["price", *sorted({n for names in plan.lists for n in names})], 3, "price")
+    counts = model._matching_day_counts(plan, "price")
+    for (issue_day, period, hz), record in by_key(ref._results).items():
+        assert counts[(period, hz)][plan.position_of(issue_day)] == record["training_days"], (issue_day, period, hz)
+
 
 def test_a_doubled_autumn_row_follows_its_date():
     data = make_market_data(start="2023-09-01", days=80, noise=5.0, seed=3)
@@ -668,7 +684,7 @@ def test_no_matching_days_are_counted_and_too_few_are_warned_about_in_the_termin
     frame, tmp_path, capsys, monkeypatch
 ):
     monkeypatch.setenv("COLUMNS", "200")
-    days = ("2023-04-07", "2023-04-14")
+    days = ("2023-04-07", "2023-04-15")
     pipeline = (
         ModelPipeline(information_set=INFO)
         .add_model(OLSModel(a_list_starts_in_the_test, training_window=WINDOW, name="starts"))
@@ -678,8 +694,8 @@ def test_no_matching_days_are_counted_and_too_few_are_warned_about_in_the_termin
     )
     # The first day of the new list trains on a row at D-1-h: at horizon h it has none on h + 1 issue days.
     skipped = 24 * (2 + 3 + 4)
-    # Then 1, 2 and 3 days, of 4 predictors, as far as the test reaches: 3 issue days at horizon 1, 2 and 1 at the others.
-    thin = 24 * (3 + 2 + 1)
+    # Then 1, 2, 3 days and so on, for 4 predictors, as far as the test reaches: at horizon 1 the fourth day isn't thin.
+    thin = 24 * (3 + 3 + 2)
     with pytest.warns(UserWarning, match=rf"starts: {thin} forecast\(s\).*as few as 1 day\(s\) for 4 predictors"):
         report = pipeline.run(frame, test=days, horizon=3, save_dir=tmp_path)
 
@@ -779,13 +795,6 @@ class CrashesAfterSomeFits(OLSModel):
         if limit and type(self).fits > int(limit):
             raise RuntimeError("the machine went down")
         return super()._fit_predict(train_x, train_y, test_x)
-
-
-def real_pool(monkeypatch, processes):
-    monkeypatch.setattr(
-        "epftoolbox2.models.base.ProcessPoolExecutor", __import__("concurrent.futures").futures.ProcessPoolExecutor
-    )
-    monkeypatch.setenv("MAX_PROCESSES", str(processes))
 
 
 def test_an_interrupted_run_resumed_through_the_real_pool_equals_a_fresh_one_bitwise(frame, tmp_path, monkeypatch):
@@ -949,6 +958,23 @@ def test_previous_year_filters_each_forecast_on_its_own_window():
     assert first["matching_days"] == rows.digest(matched)
 
 
+def test_validation_first_and_test_later_is_what_one_run_gives(frame, tmp_path):
+    validation, test = ("2023-04-01", "2023-04-03"), ("2023-04-10", "2023-04-12")
+    pipeline = ModelPipeline(information_set=INFO).add_model(OLSModel(mixed_lists, training_window=WINDOW, name="m"))
+    pipeline.run(frame, horizon=2, validation=validation, save_dir=tmp_path / "later")
+    pipeline.run(frame, horizon=2, validation=validation, test=test, save_dir=tmp_path / "later")
+    pipeline.run(frame, horizon=2, validation=validation, test=test, save_dir=tmp_path / "once")
+    assert stored_lines(tmp_path / "later" / "m.jsonl") == stored_lines(tmp_path / "once" / "m.jsonl")
+
+
+def test_forecast_only_filters_like_a_backtest(frame):
+    day = "2023-04-14"
+    model = OLSModel(weekend_split, training_window=WINDOW)
+    live = by_key(model.run(frame, day, day, horizon=1, information_set=INFO, forecast_only=True)._results)
+    backtest = by_key(model.run(frame, day, day, horizon=1, information_set=INFO)._results)
+    assert live == backtest and live[(day, 12, 1)]["training_days"]
+
+
 def test_ensembles_over_matching_models(frame):
     validation, test = ("2023-04-01", "2023-04-04"), ("2023-04-10", "2023-04-14")
     pipeline = (
@@ -1041,3 +1067,18 @@ def test_a_saved_function_with_matching_lists_round_trips(frame, tmp_path):
     assert sorted(map(str, pipeline.run(frame, **run).refs["m"]._results)) == sorted(
         map(str, loaded.run(frame, **run).refs["m"]._results)
     )
+
+
+def test_the_docs_example_trains_weekend_targets_on_about_a_hundred_days():
+    blocks = re.findall(r"```python\n(.*?)```", DOCS_PAGE.read_text(), flags=re.DOTALL)
+    namespace = {}
+    exec(next(block for block in blocks if "def weekend_model" in block), namespace)
+    data = make_market_data(start="2023-01-01", days=520, horizon=1, noise=5.0, seed=7)
+    data["load_forecast_d+1"] = data["load_d+1"]
+    data["wind_forecast_d+1"] = data["wind_d+1"]
+    tables = namespace["pipeline"].explain(
+        data, model="weekend", test=("2024-04-01", "2024-04-14"), horizon=1, hour=12, echo=False
+    )
+    weekend = tables["lists"].query("predictors == 2").iloc[0]
+    assert weekend["train_on"] == "matching" and weekend["median days"] == 104
+    assert tables["lists"].query("predictors == 3").iloc[0]["median days"] == 260
