@@ -19,7 +19,9 @@ class ModelResultRef:
     gave no forecast by reason (e.g. `missing_test_predictors`). `produced` is None for refs built from
     raw result lists. `predictor_lists` describes each distinct list a predictor function of `ctx` returned, with how
     many forecasts use it where; it is None for fixed lists. `availability_listing` holds the rows of inputs known after
-    the issue time (`epftoolbox2.results.availability`), which `EvaluationReport.availability()` shows.
+    the issue time (`epftoolbox2.results.availability`), which `EvaluationReport.availability()` shows. `matching_lists` holds,
+    for a function with `train_on="matching"` lists, each such list's hash and number of predictors, which is what
+    `EvaluationReport.training_days()` reads records for; it is None otherwise.
 
     In a run with validation (see `epftoolbox2.results.windows`) a ref of one window has `window`, and all of the above are
     about that window alone: `test_start` and `test_end` are its first and last issue day, and only records of that window
@@ -48,6 +50,7 @@ class ModelResultRef:
     windows: Optional[RunWindows] = None
     by_window: Optional[Dict[str, "ModelResultRef"]] = field(default=None, repr=False)
     test_only: bool = False
+    matching_lists: Optional[Dict[str, int]] = None
 
     def iter_records(self, cols: Optional[List[str]] = None) -> Iterator[Dict]:
         """The records of this ref, wherever they live.

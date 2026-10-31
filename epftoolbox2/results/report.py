@@ -31,6 +31,7 @@ from ..evaluators.mcs import check_mcs_settings
 from ..logging import get_logger
 from .availability import listing_frame
 from .breakdowns import AGGREGATES, daily_aggregate, price_level, spike_threshold
+from .matching import rows_of_refs, training_day_frame
 from .ref import ModelResultRef
 from .windows import TEST, VALIDATION, RunWindows
 
@@ -880,6 +881,17 @@ class EvaluationReport:
         A report built from `save_dir` shows what the manifests hold, for every test period the results were run on.
         """
         return listing_frame({name: ref.availability_listing for name, ref in self.refs.items()})
+
+    def training_days(self) -> pd.DataFrame:
+        """How many days the forecasts of each `train_on="matching"` list train on, from the records of this report's window.
+        Empty, with the same columns, when no list has that rule.
+
+        Columns: `model`, `list` (its hash), `predictors`, `forecasts` (how many of its forecasts exist), `periods` and
+        `horizons` (where), `smallest_days`, `median_days` and `largest_days` (the days they train on: past days the function
+        returned this list for, after the training cut and after dropping rows with a missing value), and `thin_forecasts`
+        (how many train on fewer days than the list has predictors).
+        """
+        return training_day_frame(rows_of_refs(self.refs))
 
     def choices(self) -> pd.DataFrame:
         """What each ensemble chose on validation, one row per ensemble and test period served. Empty, with the same columns,
