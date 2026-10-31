@@ -1,8 +1,9 @@
 """How many days the forecasts of `train_on="matching"` lists train on (`epftoolbox2.models.context.Use`).
 
-Such a forecast trains on fewer rows than its window, which a list with more predictors than days can't afford: an OLS fit
-then has no unique solution, though a regularised model is fine. Nothing is refused, so this says so: a warning naming the
-model, how many forecasts and the smallest count, before any fit in `BaseModel.run` and again in `ModelPipeline.report`, and
+Such a forecast trains on fewer rows than its window, which a list with as many predictors as days, or more, can't afford: an
+OLS fit then passes through every row or has no unique solution. A regularised model may do better, and a fit can also fail,
+since cross-validation needs at least `cv` rows. Nothing is refused, so this says so: a warning naming the model, how many
+forecasts and the smallest count, before any fit in `BaseModel.run` and again in `ModelPipeline.report`, and
 `EvaluationReport.training_days()`, which the terminal exporter shows.
 """
 
@@ -37,8 +38,8 @@ Use = Tuple[str, int, int, int]  # (list hash, period, horizon, days it trains o
 def training_day_rows(model: str, uses: Iterable[Use], predictors: Mapping[str, int]) -> List[Dict]:
     """One row per list, by its first horizon and hash, so that a table doesn't depend on which list a plan met first.
 
-    `thin_forecasts` are those with a day or more, but fewer days than the list has predictors. A forecast with no day has no
-    fit, and is counted in `forecast_counts()` instead."""
+    `thin_forecasts` are those with a day or more, and no more days than the list has predictors. A forecast with no day has
+    no fit, and is counted in `forecast_counts()` instead."""
     by_list: Dict[str, List[Tuple[int, int, int]]] = {}
     for list_hash, period, horizon, days in uses:
         by_list.setdefault(list_hash, []).append((period, horizon, days))
@@ -58,7 +59,7 @@ def training_day_rows(model: str, uses: Iterable[Use], predictors: Mapping[str, 
                 "smallest_days": int(counts.min()),
                 "median_days": float(np.median(counts)),
                 "largest_days": int(counts.max()),
-                "thin_forecasts": 0 if n_predictors is None else int(((counts > 0) & (counts < n_predictors)).sum()),
+                "thin_forecasts": 0 if n_predictors is None else int(((counts > 0) & (counts <= n_predictors)).sum()),
             }
         )
     return rows
@@ -84,7 +85,7 @@ def training_day_frame(rows: Iterable[Mapping]) -> pd.DataFrame:
 
 
 def warn_about_thin(rows: Iterable[Mapping], stacklevel: int = 2) -> None:
-    """One warning per model with forecasts on fewer days than predictors."""
+    """One warning per model with forecasts on no more days than predictors."""
     by_model: Dict[str, List[Mapping]] = {}
     for row in rows:
         if row["thin_forecasts"]:
@@ -92,10 +93,11 @@ def warn_about_thin(rows: Iterable[Mapping], stacklevel: int = 2) -> None:
     for model, thin in by_model.items():
         fewest = min(thin, key=lambda row: (row["smallest_days"], -row["predictors"]))
         warnings.warn(
-            f"{model}: {sum(row['thin_forecasts'] for row in thin)} forecast(s) with train_on='matching' train on fewer days "
+            f"{model}: {sum(row['thin_forecasts'] for row in thin)} forecast(s) with train_on='matching' train on no more days "
             f"than their list has predictors, as few as {fewest['smallest_days']} day(s) for {fewest['predictors']} "
-            f"predictors (list {fewest['list']}). They are fitted all the same: a regularised model can do that, and OLS "
-            "then has no unique solution. report.training_days() has the counts.",
+            f"predictors (list {fewest['list']}). They aren't refused, but an OLS fit then passes through every row or has no "
+            "unique solution, and a fit can fail: cross-validation needs at least `cv` rows, and a smaller set is counted as "
+            "fit_error in forecast_counts(). report.training_days() has the counts.",
             UserWarning,
             stacklevel=stacklevel,
         )

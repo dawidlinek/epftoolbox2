@@ -159,7 +159,8 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     actual = float(arrays["y"][mask][-1, hz - 1])
 
     # train_on="matching" filters after the cut, which counts rows: before it the newest training target would move. The
-    # plan evaluated the function on these days, so nothing about it is computed here.
+    # plan evaluated the function on these days, so nothing about it is computed here. So the look-ahead the cut leaves after a
+    # doubled autumn row (tests/test_known_issues.py) stays for a set holding that date, and weighs more: it is one of few rows.
     matching = cfg.get("matching")
     matching_days = None
     train_days = None

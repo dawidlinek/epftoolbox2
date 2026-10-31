@@ -921,8 +921,8 @@ def build_plan(
                 plan.assignment[(period, hz)][position] = list_id
     plan.calls = len(days) * len(horizons) * len(periods)
     plan.queried = cells.queried
-    if plan.uses_matching:
-        _plan_training_days(plan, returned, distinct, training_window)
+    only_on_training_days = _plan_training_days(plan, returned, distinct, training_window) if plan.uses_matching else []
+    _warn_same_names_in_another_order([*plan.lists, *only_on_training_days], fn)
     if warn_unpublished:
         _warn_never_published(cells, fn)
     plan.seconds = time.perf_counter() - started
@@ -946,8 +946,8 @@ def _plan_training_days(
     returned: Dict[Tuple[Tuple[str, ...], str, int], int],
     distinct: Dict[Tuple[Tuple[str, ...], str], int],
     training_window: Optional[int],
-) -> None:
-    """The list of each day a matching forecast can train on, into `plan.day_lists`.
+) -> List[Tuple[str, ...]]:
+    """The list of each day a matching forecast can train on, into `plan.day_lists`. Returns the lists no forecast uses.
 
     A row on day D' at horizon h has issue day D' and target day D' + h, so the function runs for it exactly as for a
     forecast issued on D': over `_Cells` of those days, whose clock gives each its own issue time. A day that is an issue
@@ -988,6 +988,7 @@ def _plan_training_days(
     periods = range(cells.periods)
     first = plan.first_grid_day.toordinal()
     calls = 0
+    only_here: List[Tuple[str, ...]] = []
     for position, day in enumerate(training_days):
         place = day.toordinal() - first
         for hz in horizons:
@@ -1004,9 +1005,31 @@ def _plan_training_days(
                 if list_id is None:
                     expanded = _expanded_list(names, hz, fn)
                     list_id = returned[key] = distinct.get((expanded, train_on), OTHER_LIST)
+                    if list_id == OTHER_LIST:
+                        only_here.append(expanded)
                 plan.day_lists[pair][place] = list_id
     plan.calls += calls
     plan.queried = plan.queried | cells.queried
+    return only_here
+
+
+def _warn_same_names_in_another_order(lists: Iterable[Tuple[str, ...]], fn: Any) -> None:
+    """The order of a list is part of it (`list_hash`), and `list(set(names))` has one that changes with the hash seed, and the
+    numbers with it. Only a function that returns two orders in one run can be told by this."""
+    orders: Dict[frozenset, Dict[Tuple[str, ...], None]] = {}
+    for names in lists:
+        orders.setdefault(frozenset(names), {})[names] = None
+    reordered = [list(found) for found in orders.values() if len(found) > 1]
+    if reordered:
+        first, second = reordered[0][:2]
+        warnings.warn(
+            f"{function_name(fn)} returned the same names in another order, e.g. {list(first[:3])} ... and {list(second[:3])} "
+            "... The order is part of a list: these are two lists, with their columns in another order and another hash, and "
+            "train_on='matching' doesn't match one with the other. An order taken from a set also changes with the hash seed, "
+            "and the numbers with it. Sort the names.",
+            UserWarning,
+            stacklevel=4,
+        )
 
 
 def _warn_never_published(cells: _Cells, fn: Any) -> None:

@@ -21,7 +21,8 @@ class ModelResultRef:
     many forecasts use it where; it is None for fixed lists. `availability_listing` holds the rows of inputs known after
     the issue time (`epftoolbox2.results.availability`), which `EvaluationReport.availability()` shows. `matching_lists` holds,
     for a function with `train_on="matching"` lists, each such list's hash and number of predictors, which is what
-    `EvaluationReport.training_days()` reads records for; it is None otherwise.
+    `EvaluationReport.training_days()` reads records for; it is None otherwise. A report merged from stored results reads
+    `skipped` back from the manifests.
 
     In a run with validation (see `epftoolbox2.results.windows`) a ref of one window has `window`, and all of the above are
     about that window alone: `test_start` and `test_end` are its first and last issue day, and only records of that window

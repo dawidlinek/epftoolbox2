@@ -47,6 +47,10 @@ All these hashes describe the frame of the last run, so after a resume they spea
 compared them. Where nothing compared them, on an override that accepted other data or for results with no manifest, the manifest
 records `data_unverified: true`, and keeps it across later resumes. It is written on those paths alone.
 
+A run that skipped forecasts records how many per window and reason (`skipped`, `record_skips`), which is how a report merged from
+the files can tell `no_matching_days` or `fit_error` from a task that crashed. A run with no skips has no such key. Each run replaces
+the counts of the windows it names, since a resume tries the skipped tasks again. They are written after the run, and never compared.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -61,7 +65,7 @@ import subprocess
 from dataclasses import dataclass, fields
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -153,6 +157,9 @@ class Manifest:
     frame_hash: Optional[str] = None
     # True if the stored forecasts may come from another frame than the hashes above describe: see the module docstring.
     data_unverified: Optional[bool] = None
+    # Window -> skip reason -> how many forecasts the last run naming that window skipped, a plain run's as "test"; recorded, never
+    # compared, and absent with nothing skipped.
+    skipped: Optional[Dict[str, Dict[str, int]]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -179,6 +186,8 @@ class Manifest:
                 del out[name]
         if out["data_unverified"] is None:  # the usual case: resuming compared what the stored forecasts read
             del out["data_unverified"]
+        if out["skipped"] is None:  # nothing skipped
+            del out["skipped"]
         return out
 
     @classmethod
@@ -396,8 +405,9 @@ def is_ensemble_manifest(path: Union[str, Path]) -> bool:
 
 
 def manifest_digest(manifest: Dict[str, Any]) -> str:
-    """A hash of a manifest's content without its provenance: a member re-run to the same results keeps it."""
-    kept = {key: value for key, value in manifest.items() if key not in _PROVENANCE_FIELDS}
+    """A hash of a manifest's content without its provenance and skip counts, which say nothing about a stored forecast: a member
+    re-run to the same results keeps it."""
+    kept = {key: value for key, value in manifest.items() if key not in (*_PROVENANCE_FIELDS, "skipped")}
     return hashlib.sha256(json.dumps(kept, sort_keys=True).encode()).hexdigest()
 
 
@@ -419,6 +429,38 @@ def read_matching_lists(path: Union[str, Path]) -> Optional[Dict[str, int]]:
         return None
     entries = json.loads(path.read_text()).get("predictor_lists") or []
     return {e["hash"]: e["n_predictors"] for e in entries if e.get("train_on") == "matching"} or None
+
+
+def record_skips(path: Path, manifest: Manifest, skipped: Mapping[str, Mapping[str, int]]) -> None:
+    """Write what a finished run skipped into its manifest: `skipped` has every window it names, and each replaces what is on
+    file for that window alone. Nothing to change writes nothing, so a run with no skips leaves its manifest as it is."""
+    kept = dict(manifest.skipped or {})
+    for window, counts in skipped.items():
+        if counts:
+            kept[window] = {reason: int(counts[reason]) for reason in sorted(counts)}
+        else:
+            kept.pop(window, None)
+    kept = {window: kept[window] for window in sorted(kept)} or None
+    if kept != manifest.skipped:
+        manifest.skipped = kept
+        manifest.write(path)
+
+
+def read_skipped(
+    path: Union[str, Path], window: str = TEST, period: Optional[Tuple[str, str]] = None
+) -> Dict[str, int]:
+    """Skip reason -> how many, of one window as a manifest records it, or nothing if it has none.
+
+    `period` is what a plain report covers. The counts are per window and can't be split by day, so a period other than the one
+    the manifest was run on gets none: such a report still has `missing`, and no reasons it can't vouch for.
+    """
+    path = Path(path)
+    if not path.exists():
+        return {}
+    stored = json.loads(path.read_text())
+    if period is not None and (stored.get("test_start"), stored.get("test_end")) != tuple(period):
+        return {}
+    return dict((stored.get("skipped") or {}).get(window, {}))
 
 
 def read_windows(path: Union[str, Path]) -> Optional[RunWindows]:
@@ -476,6 +518,7 @@ def check_and_write(
         if check_stored is not None:
             check_stored()
         manifest.created_at = existing.created_at  # keep the first run's provenance
+        manifest.skipped = existing.skipped  # until this run finishes and says otherwise: it may not
         if existing.data_unverified or (
             has_existing_results and _accepted_other_data(existing, manifest, data_diffs, frame_hashes)
         ):
@@ -646,9 +689,9 @@ def check_stored_lists(
     `records` are the stored records, and `planned(period, horizon, run_date)` gives the `PlannedForecast` of this run for a
     key, or None for a key outside its windows. A stored forecast differs if it used another list of a predictor function,
     if the same list now gets another binary-column mask (it is read from the first day of the list in its window, which a
-    changed function or start can move), if a matching list now trains on other days (`matching_days`: a data change can do
-    that through a value the function only reads, which `data_columns_hash` doesn't cover), or if its issue day now falls in
-    another window (a record without a `window` is from a plain run, which is the test window). Pending forecasts may change
+    changed function or start can move), if a matching list now has other matching days (`matching_days`: a data change can do
+    that through a value the function only reads, which `data_columns_hash` doesn't cover, and a day whose row a fit would drop
+    anyway counts too), or if its issue day now falls in another window (a record without a `window` is from a plain run, which is the test window). Pending forecasts may change
     freely: nothing stored depends on them.
 
     A run with windows keeps one mask per (window, list, period, horizon) in a file, whichever days its records are on: a
@@ -721,8 +764,8 @@ def check_stored_lists(
         )
     if other_days:
         problems.append(
-            f"{len(other_days)} stored forecast(s) of a train_on='matching' list trained on other days than a fresh run would "
-            "(the function now returns another list on some of the days they trained on, or the data's rows moved), e.g. "
+            f"{len(other_days)} stored forecast(s) of a train_on='matching' list have other matching days than a fresh run "
+            "would give them (the function now returns another list on some of those days, or the data's rows moved), e.g. "
             f"(run date, period, horizon) {sorted(other_days)[:3]}"
         )
     if other_mask:
@@ -773,5 +816,7 @@ __all__ = [
     "manifest_digest",
     "manifest_path",
     "read_matching_lists",
+    "read_skipped",
     "read_windows",
+    "record_skips",
 ]

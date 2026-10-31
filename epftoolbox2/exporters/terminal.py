@@ -49,11 +49,11 @@ class TerminalExporter(Exporter):
         console.print(table)
 
     def _print_thin_training(self, console: Console, training_days) -> None:
-        """Forecasts fitted on fewer days than predictors, whatever `show` asks for, and only if there are any."""
+        """Forecasts on no more days than predictors, whatever `show` asks for, and only if there are any."""
         thin = training_days[training_days["thin_forecasts"] > 0]
         if thin.empty:
             return
-        console.print("\n[bold]train_on='matching': forecasts on fewer training days than predictors[/bold]")
+        console.print("\n[bold]train_on='matching': forecasts on no more training days than predictors[/bold]")
         table = Table()
         for col in thin.columns:
             table.add_column(str(col), overflow="fold")

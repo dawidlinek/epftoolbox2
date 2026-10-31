@@ -889,7 +889,7 @@ class EvaluationReport:
         Columns: `model`, `list` (its hash), `predictors`, `forecasts` (how many of its forecasts exist), `periods` and
         `horizons` (where), `smallest_days`, `median_days` and `largest_days` (the days they train on: past days the function
         returned this list for, after the training cut and after dropping rows with a missing value), and `thin_forecasts`
-        (how many train on fewer days than the list has predictors).
+        (how many train on no more days than the list has predictors).
         """
         return training_day_frame(rows_of_refs(self.refs))
 
