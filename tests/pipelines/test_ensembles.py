@@ -31,6 +31,7 @@ from epftoolbox2.evaluators import (
     RMSEEvaluator,
     rMAEEvaluator,
 )
+from epftoolbox2.evaluators._compare import LossPanel
 from epftoolbox2.exporters import CsvExporter, ExcelExporter, TerminalExporter
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import BaseModel, OLSModel
@@ -1262,9 +1263,13 @@ def test_the_column_hashes_cover_both_windows_after_a_manifest_grows(df, tmp_pat
     shard(df, "a", SMALL, tmp_path / "grown", validation=V)
     shard(df, "a", SMALL, tmp_path / "grown", validation=V, test=T)
     shard(df, "a", SMALL, tmp_path / "once", validation=V, test=T)
-    grown = json.loads(manifest_path(tmp_path / "grown" / "a.jsonl").read_text())
+    shard(df, "a", SMALL, tmp_path / "narrower", validation=V, test=T)
+    shard(df, "a", SMALL, tmp_path / "narrower", validation=V)  # names less than is on file, which stays
     once = json.loads(manifest_path(tmp_path / "once" / "a.jsonl").read_text())
-    assert grown["column_hashes"] == once["column_hashes"] and grown["frame_hash"] == once["frame_hash"]
+    for folder in ("grown", "narrower"):
+        held = json.loads(manifest_path(tmp_path / folder / "a.jsonl").read_text())
+        assert held["test_end"] == T[1], folder
+        assert held["column_hashes"] == once["column_hashes"] and held["frame_hash"] == once["frame_hash"], folder
 
 
 def test_a_shard_with_another_issue_time_is_refused_after_real_runs(df, tmp_path):
@@ -1740,6 +1745,25 @@ def test_models_on_the_same_losses_with_other_predictions_are_no_clones(tmp_path
     assert ranks.attrs["clones"] == []
     assert report.tests(benchmark="c", interval=None).attrs["clones"] == []
     assert sorted(ranks["rank"].tolist()) == [1, 2, 3]
+
+
+def test_the_same_values_on_other_keys_are_no_clones():
+    days = days_of(*HT)
+    frame = lambda on: pd.DataFrame(  # noqa: E731
+        [
+            {
+                "run_date": pd.Timestamp(day),
+                "target_date": pd.Timestamp(plus_days(day, 1)),
+                "hour": 0,
+                "horizon": 1,
+                "prediction": 5.0,
+                "actual": 1.0,
+            }
+            for day in on
+        ]
+    )
+    panel = LossPanel({"a": frame(days[:2]), "b": frame(days[2:]), "c": frame(days[:2])})
+    assert panel.clone_groups(panel.rows(), ["a", "b", "c"]) == [["a", "c"]]
 
 
 def test_clones_are_read_on_the_keys_compared(tmp_path):
