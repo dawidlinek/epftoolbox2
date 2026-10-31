@@ -23,6 +23,9 @@ directly (`check_stored_lists`): the list and binary-column mask a fresh run wou
 a comment or an unrelated availability rule resumes, with a note, and a change the source can't show (a list defined next
 to the function) doesn't.
 
+A list with `train_on="matching"` trains on the past days for which the function returned it, and that set can change with no
+change to the list a forecast uses. So its records also carry `matching_days`, a hash of that set, compared the same way.
+
 A directory with results but no manifest is not a mismatch. By default it is accepted with a warning and
 a manifest is written for it. Pass `require_manifest=True` for the stricter behaviour of refusing those too.
 
@@ -110,6 +113,7 @@ class PlannedForecast(NamedTuple):
     mask_digest: str
     mask_key: str  # where a manifest keeps the digest
     window: Optional[str] = None  # None in a plain run: the record says nothing about it
+    matching_days: Optional[str] = None  # a matching list's: a hash of the days it trains on
 
 
 @dataclass
@@ -407,6 +411,16 @@ def _read_manifest_of_a_model(path: Path, model_name: str) -> Manifest:
     return Manifest.from_dict(data)
 
 
+def read_matching_lists(path: Union[str, Path]) -> Optional[Dict[str, int]]:
+    """The hash of each `train_on="matching"` list a model's manifest records -> how many predictors it has, or None if it
+    has none or there is no manifest."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    entries = json.loads(path.read_text()).get("predictor_lists") or []
+    return {e["hash"]: e["n_predictors"] for e in entries if e.get("train_on") == "matching"} or None
+
+
 def read_windows(path: Union[str, Path]) -> Optional[RunWindows]:
     """The windows and segments a manifest records, or None for a plain run or no manifest.
 
@@ -632,8 +646,10 @@ def check_stored_lists(
     `records` are the stored records, and `planned(period, horizon, run_date)` gives the `PlannedForecast` of this run for a
     key, or None for a key outside its windows. A stored forecast differs if it used another list of a predictor function,
     if the same list now gets another binary-column mask (it is read from the first day of the list in its window, which a
-    changed function or start can move), or if its issue day now falls in another window (a record without a `window` is
-    from a plain run, which is the test window). Pending forecasts may change freely: nothing stored depends on them.
+    changed function or start can move), if a matching list now trains on other days (`matching_days`: a data change can do
+    that through a value the function only reads, which `data_columns_hash` doesn't cover), or if its issue day now falls in
+    another window (a record without a `window` is from a plain run, which is the test window). Pending forecasts may change
+    freely: nothing stored depends on them.
 
     A run with windows keeps one mask per (window, list, period, horizon) in a file, whichever days its records are on: a
     digest says nothing about which records used it, so a run that overwrote one would let older records pass for what they
@@ -661,7 +677,7 @@ def check_stored_lists(
         and manifest.windows[TEST][0] != existing.test_start
     )
     compare_actuals = stored_actual is not None and (existing is None or existing.windows is None)
-    other_list, other_mask, other_window, other_actual, past_frame = [], [], [], [], []
+    other_list, other_mask, other_window, other_actual, past_frame, other_days = [], [], [], [], [], []
     for record in records:
         period, horizon, run_date = record["hour"], record["horizon"], record["run_date"]
         stored = record.get("predictor_list")
@@ -678,6 +694,8 @@ def check_stored_lists(
         if expected is not None and expected.list_hash is not None and stored != expected.list_hash:
             other_list.append((run_date, period, horizon))
             continue
+        if expected is not None and expected.matching_days not in (None, record.get("matching_days")):
+            other_days.append((run_date, period, horizon))
         if windowed:
             key = mask_key(tag, period, horizon)
             kept = (fixed_masks if stored is None else stored_masks.get(stored, {})).get(key)
@@ -700,6 +718,12 @@ def check_stored_lists(
         problems.append(
             f"{len(other_list)} stored forecast(s) used another predictor list than the predictor function returns now, "
             f"e.g. (run date, period, horizon) {sorted(other_list)[:3]}"
+        )
+    if other_days:
+        problems.append(
+            f"{len(other_days)} stored forecast(s) of a train_on='matching' list trained on other days than a fresh run would "
+            "(the function now returns another list on some of the days they trained on, or the data's rows moved), e.g. "
+            f"(run date, period, horizon) {sorted(other_days)[:3]}"
         )
     if other_mask:
         problems.append(
@@ -748,5 +772,6 @@ __all__ = [
     "is_ensemble_manifest",
     "manifest_digest",
     "manifest_path",
+    "read_matching_lists",
     "read_windows",
 ]
