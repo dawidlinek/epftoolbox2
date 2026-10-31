@@ -340,6 +340,9 @@ class ModelPipeline:
         What the runs listed about inputs known after the issue time comes from the manifests, whatever this pipeline's
         `availability` is: `report.availability()`, one warning and the terminal exporter show it.
 
+        Forecasts of a `train_on="matching"` list on fewer days than the list has predictors are warned about again, from the
+        stored records: an array task's warning went to that task's log.
+
         After runs with validation, `validation` and `test` say what `run` was told, and each must be what the manifests
         record. Without any window the report is on every window they record. Results whose manifests record different
         windows raise `ValueError`, as they would be compared on different forecasts. The report is what `run` returns: on
@@ -722,6 +725,9 @@ class ModelPipeline:
         `adds` to and `drops` from the most used list of that horizon. `predictors` then shows the list used most at
         (`horizon`, `hour`), judged on the days it is used. A late `ctx.value()` doesn't stop the view; see
         `report.availability()` for what a function read.
+
+        With `train_on="matching"` lists `lists` also has `smallest days`, `median days` and `largest days`: how many days the
+        forecasts of such a list would train on, as a run counts them, without fitting anything; a dash for any other list.
 
         Args:
             data: The frame the models run on.

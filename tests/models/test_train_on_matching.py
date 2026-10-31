@@ -31,6 +31,7 @@ from epftoolbox2.models import LassoCVModel, OLSModel, Use, _worker
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.manifest import ManifestMismatchError
+from epftoolbox2.results.matching import training_day_rows
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 DOCS_PAGE = Path(__file__).resolve().parents[2] / "docs/src/content/docs/model-pipeline/predictor-functions.mdx"
@@ -330,6 +331,35 @@ def test_the_function_answers_on_a_training_day_for_that_day(frame):
     expected = data.loc["2023-03-20 10:00", "signal_d-1"].item()
     assert seen[(day, 10, 1)] == (expected, False)
     assert seen[(day + datetime.timedelta(days=1), 10, 1)][1] is True
+
+
+def test_a_day_answers_alike_as_an_issue_day_and_as_a_training_day():
+    """In another zone, whose clocks move on other days: 04:20 in New York is 10:20 in Warsaw until 12 March, 09:20 until 26
+    March and 10:20 after, and `early` is out at 10:15. So the answer flips with the day's own issue time, not the forecast's."""
+    data = make_market_data(start="2023-01-15", days=90, noise=5.0, seed=3)
+    data["early"] = 1.0
+    info = InformationSet("04:20", "America/New_York", rules=RULES)
+
+    def answers(first, last):
+        seen = {}
+
+        def recording(ctx):
+            seen[(ctx.issue_day, ctx.period)] = ctx.published("early")
+            return one_list(ctx)
+
+        OLSModel(recording, training_window=20)._plan_predictors(data, "price", 1, "1h", info, first, last)
+        return seen
+
+    as_issue_days = answers("2023-03-05", "2023-04-02")
+    as_training_days = answers("2023-04-03", "2023-04-03")
+    days = [
+        datetime.date(2023, 3, 15) + datetime.timedelta(days=d) for d in range(19)
+    ]  # the window, up to before its end
+    compared = {(day, period) for day in days for period in range(24)} & as_issue_days.keys() & as_training_days.keys()
+    assert len(compared) > 400
+    assert {key: as_training_days[key] for key in compared} == {key: as_issue_days[key] for key in compared}
+    assert as_issue_days[(datetime.date(2023, 3, 10), 12)] and not as_issue_days[(datetime.date(2023, 3, 20), 12)]
+    assert as_training_days[(datetime.date(2023, 3, 27), 12)] and not as_training_days[(datetime.date(2023, 3, 20), 12)]
 
 
 def frozen_after_planning(ctx):
@@ -904,11 +934,13 @@ def without_tags(records):
     )
 
 
-def test_each_window_of_a_run_is_what_a_plain_run_over_it_gives(frame):
+@pytest.mark.filterwarnings("ignore:.*was never True")
+@pytest.mark.parametrize("function", [mixed_lists, by_published_cells], ids=["by the day", "by cells"])
+def test_each_window_of_a_run_is_what_a_plain_run_over_it_gives(frame, function):
     validation, test = ("2023-04-01", "2023-04-03"), ("2023-04-10", "2023-04-12")
     pipeline = (
         ModelPipeline(information_set=INFO)
-        .add_model(OLSModel(mixed_lists, training_window=WINDOW, name="m"))
+        .add_model(OLSModel(function, training_window=WINDOW, name="m"))
         .add_evaluator(MAEEvaluator())
     )
     both = pipeline.run(frame, horizon=2, validation=validation, test=test)
@@ -1056,6 +1088,13 @@ def test_explain_shows_the_smallest_median_and_largest_days_of_a_matching_list(f
     other = ModelPipeline(information_set=INFO).add_model(OLSModel(plain, training_window=WINDOW, name="p"))
     columns = other.explain(frame, model="p", test=days, horizon=1, hour=12, echo=False)["lists"].columns
     assert "smallest days" not in columns
+
+
+def test_a_stored_list_this_run_does_not_have_stays_in_the_table_with_no_verdict():
+    rows = training_day_rows("m", [("gone", 3, 1, 5), ("kept", 3, 2, 5), ("kept", 4, 2, 9)], {"kept": 6})
+    assert [(r["list"], r["predictors"], r["thin_forecasts"]) for r in rows] == [("gone", None, 0), ("kept", 6, 1)]
+    assert (rows[1]["smallest_days"], rows[1]["median_days"], rows[1]["largest_days"]) == (5, 7.0, 9)
+    assert (rows[1]["periods"], rows[1]["horizons"], rows[1]["forecasts"]) == ("3-4", "2", 2)
 
 
 def test_a_saved_function_with_matching_lists_round_trips(frame, tmp_path):

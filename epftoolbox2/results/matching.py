@@ -35,17 +35,18 @@ Use = Tuple[str, int, int, int]  # (list hash, period, horizon, days it trains o
 
 
 def training_day_rows(model: str, uses: Iterable[Use], predictors: Mapping[str, int]) -> List[Dict]:
-    """One row per list, in the order of `predictors`. `thin_forecasts` are those with a day or more, but fewer days than the
-    list has predictors. A forecast with no day has no fit, and is counted in `forecast_counts()` instead."""
+    """One row per list, by its first horizon and hash, so that a table doesn't depend on which list a plan met first.
+
+    `thin_forecasts` are those with a day or more, but fewer days than the list has predictors. A forecast with no day has no
+    fit, and is counted in `forecast_counts()` instead."""
     by_list: Dict[str, List[Tuple[int, int, int]]] = {}
     for list_hash, period, horizon, days in uses:
         by_list.setdefault(list_hash, []).append((period, horizon, days))
     rows = []
-    for list_hash, n_predictors in predictors.items():
-        if list_hash not in by_list:
-            continue
+    for list_hash in sorted(by_list, key=lambda name: (min(use[1] for use in by_list[name]), name)):
         periods, horizons, days = zip(*by_list[list_hash])
         counts = np.array(days)
+        n_predictors = predictors.get(list_hash)  # none for a list a run went on over with allow_manifest_mismatch
         rows.append(
             {
                 "model": model,
@@ -57,7 +58,7 @@ def training_day_rows(model: str, uses: Iterable[Use], predictors: Mapping[str, 
                 "smallest_days": int(counts.min()),
                 "median_days": float(np.median(counts)),
                 "largest_days": int(counts.max()),
-                "thin_forecasts": int(((counts > 0) & (counts < n_predictors)).sum()),
+                "thin_forecasts": 0 if n_predictors is None else int(((counts > 0) & (counts < n_predictors)).sum()),
             }
         )
     return rows

@@ -36,7 +36,7 @@ from ..results.windows import TEST, RunWindows, mask_key
 from ..logging import get_logger
 from . import _contract
 from .context import TRAIN_ON_MATCHING, PredictorPlan, build_plan, mask_digest, takes_ctx, warn_never_published_in
-from ._worker import _cut, _pool_init, _run_day, matching_digest, matching_rows, training_row_days
+from ._worker import NOT_PLANNED, _cut, _pool_init, _run_day, matching_digest, matching_rows, training_row_days
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days
 from ..information_set import check_level
 
@@ -49,9 +49,6 @@ logger = get_logger(__name__)
 SKIP_MISSING_TEST_ROW = "missing_test_row"
 
 _FREQ_TO_PERIODS: Dict[str, int] = {"1h": 24, "15min": 96}
-
-# A row outside the days of a plan, which no training window of its forecasts reaches.
-NOT_ON_GRID = -3
 
 # ProcessPoolExecutor refuses more workers than this on Windows.
 _WINDOWS_MAX_WORKERS = 61
@@ -160,7 +157,9 @@ class BaseModel(ABC):
         raises instead of warning when `save_to` has results but no manifest.
 
         `plan` is what `ModelPipeline` built for a predictor function of `ctx` before any model ran, for this data,
-        test period, horizon and freq; without it the run builds its own. A model with fixed lists has none.
+        test period, horizon and freq; without it the run builds its own. A model with fixed lists has none. If a list has
+        `train_on="matching"` the plan also holds the list of each day its forecasts can train on, and this run warns before
+        any fit about forecasts with fewer such days than predictors.
 
         `windows` (what `ModelPipeline.run(validation=..., test=...)` resolves to, see `epftoolbox2.results.windows`)
         forecasts the days of its windows in place of [test_start, test_end]. The returned ref covers the whole run and its
@@ -857,12 +856,12 @@ class BaseModel(ABC):
             frame = self._hour_data[period]
             days = self._hour_days[period]
             on_grid = (days >= start) & (days < start + len(lists))
-            row_lists = np.full(len(days), NOT_ON_GRID, dtype=np.int32)
+            row_lists = np.full(len(days), NOT_PLANNED, dtype=np.int32)
             row_lists[on_grid] = lists[days[on_grid] - start]
             finite_y = np.isfinite(frame[f"{target}_d+{horizon}"].to_numpy(dtype=np.float64))
             # The window of each issue day, in the rows of this period, then the cut.
             first_row = np.searchsorted(days, issue_days - self.training_window - horizon, side="left")
-            last_row = np.searchsorted(days, issue_days, side="right") - (1 + horizon)
+            last_row = np.maximum(np.searchsorted(days, issue_days, side="right") - (1 + horizon), first_row)
             out = counts[(period, horizon)] = np.full(len(ids), -1, dtype=np.int64)
             for list_id in plan.matching_ids.intersection(np.unique(ids).tolist()):
                 key = (period, list_id)
@@ -881,7 +880,7 @@ class BaseModel(ABC):
                 new_day[1:] &= ~((days[1:] == days[:-1]) & kept[:-1])
                 total = np.concatenate(([0], np.cumsum(new_day)))
                 on = ids == list_id
-                out[on] = np.where(last_row[on] > first_row[on], total[last_row[on]] - total[first_row[on]], 0)
+                out[on] = total[last_row[on]] - total[first_row[on]]
             if absent:
                 out[[(period, day.toordinal()) in absent for day in plan.issue_days]] = -1
         return counts

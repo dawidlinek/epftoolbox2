@@ -177,9 +177,9 @@ What that means, for each (period, horizon):
 - **A past day counts as a forecast issued on that day.** A training row on day D' at horizon h has issue day D' and target day
   D' + h, so the function runs for it exactly as for a forecast issued on D'. **`published()` and `value()` answer as of the issue
   time of D', never as of the day the forecast is being made.** A value known only later than that doesn't count as published on
-  D', even though it is long known by the time of the forecast, and at `availability="raise"` a `value()` of it raises there too.
-  So the days a forecast trains on are the days it would have been given this list, with what was known then. Nothing it can't
-  know on its own issue day moves them.
+  D', even though it is long known by the time of the forecast. So the days a forecast trains on are the days it would have been
+  given this list, with what was known then. A late `value()` on a training day counts like one on an issue day: refused at
+  `availability="raise"`, listed at `"warn"`, and a `leak` in `verify` at either.
 - **The same list means the same names in the same order and the same `train_on`.** A day that got those names with
   `train_on="all"` doesn't match.
 - **The window isn't extended.** `training_window` and the usual cut come first, so the newest training target stays D-1. The filter
@@ -241,6 +241,10 @@ list when large positive noise lands on the side the value was on. A late `value
 `leak` at the other levels. `verify` also plans the whole test period, so what the function uses late on any issue day is a `leak`,
 sampled or not. A column it uses only on issue days outside the sample, known in time by its rule, makes the status
 `inconclusive`, since the probe hasn't seen it; sample more days.
+
+The training days of a [matching list](#training-only-on-the-days-with-the-same-list) are planned on each frame too, and a cell the
+function reads on one counts the same as on an issue day. So a forecast whose set of days depends on something it can't know is a
+`leak`, whether or not its list moved.
 
 ## Seeing the lists
 
