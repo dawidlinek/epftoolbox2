@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple, Union
 import datetime
+import hashlib
 import os
 import traceback
 
@@ -33,6 +34,12 @@ SKIP_TOO_FEW_ROWS = "too_few_rows"
 SKIP_NO_FINITE_TRAINING_ROWS = "no_finite_training_rows"
 SKIP_MISSING_TEST_PREDICTORS = "missing_test_predictors"
 SKIP_FIT_ERROR = "fit_error"
+SKIP_NO_MATCHING_DAYS = "no_matching_days"
+
+# In `PredictorPlan.day_lists`, next to list ids: a day no matching forecast of that (period, horizon) reads, and a day
+# the function returned a list on that no forecast uses, which matches nothing.
+NOT_PLANNED = -1
+OTHER_LIST = -2
 
 
 class TaskFailed(RuntimeError):
@@ -73,6 +80,36 @@ def _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
     _W_FIT_PREDICT = model_cls(predictors=[], **model_kwargs)._fit_predict
 
 
+def _cut(rows: np.ndarray, hz: int) -> np.ndarray:
+    """What a task may train on of its window's rows, which end with the issue day's: all but the last `1 + hz`, so that the
+    newest training target is the price of the day before the issue day. It counts rows, not days: see the known issues
+    in `tests/test_known_issues.py`."""
+    return rows[: -(1 + hz)]
+
+
+def training_row_days(days: np.ndarray, day: int, training_window: int, hz: int) -> np.ndarray:
+    """The day id of each training row of the task (`hz`, `day`) in a period whose rows are on `days`, before any filter."""
+    return _cut(days[(days >= day - training_window - hz) & (days <= day)], hz)
+
+
+def matching_rows(row_days: np.ndarray, lists: np.ndarray, start: int, list_id: int) -> np.ndarray:
+    """Which of these rows got list `list_id`, where `lists` has an entry per calendar day from day id `start` on. A doubled
+    autumn row follows its date. A row the plan didn't evaluate would quietly match nothing, so it raises."""
+    row_lists = lists[row_days - start]
+    if (row_lists == NOT_PLANNED).any():
+        raise RuntimeError(
+            "A training row of a train_on='matching' forecast is on a day its plan has no list for: "
+            f"{(row_days[row_lists == NOT_PLANNED] - start).tolist()[:3]} day(s) from the start of the plan's days"
+        )
+    return row_lists == list_id
+
+
+def matching_digest(row_days: np.ndarray, first_ordinal: int) -> str:
+    """A short hash of a set of days, as dates: day ids depend on where the frame starts, the dates don't."""
+    days = np.unique(row_days).astype("<i8") + first_ordinal
+    return hashlib.sha256(days.tobytes()).hexdigest()[:12]
+
+
 def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     """Fit and forecast one task.
 
@@ -96,7 +133,8 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     mask = (days >= day_min) & (days <= day)
 
     # A fixed list is keyed by (period, horizon). With a predictor function of `ctx` (see epftoolbox2.models.context)
-    # each task has its own list, and each list its own binary-column mask per (period, horizon).
+    # each task has its own list, and each list its own binary-column mask per (period, horizon). The mask of a matching
+    # list is that list's too, not one per set of days, while the scaler below is fitted on what the filter leaves.
     task_lists = cfg.get("task_lists")
     if task_lists is None:
         list_id = None
@@ -115,10 +153,23 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     if x_full.shape[0] <= (1 + hz):
         return SKIP_TOO_FEW_ROWS
 
-    train_x = x_full[: -(1 + hz)]
-    train_y = y_full[: -(1 + hz)]
+    train_x = _cut(x_full, hz)
+    train_y = _cut(y_full, hz)
     test_x = x_full[-1:]
     actual = float(arrays["y"][mask][-1, hz - 1])
+
+    # train_on="matching" filters after the cut, which counts rows: before it the newest training target would move. The
+    # plan evaluated the function on these days, so nothing about it is computed here.
+    matching = cfg.get("matching")
+    matching_days = None
+    train_days = None
+    if matching is not None and list_id in matching["ids"]:
+        train_days = _cut(days[mask], hz)
+        same = matching_rows(train_days, matching["lists"][(hour, hz)], matching["start"], list_id)
+        train_x, train_y, train_days = train_x[same], train_y[same], train_days[same]
+        if train_days.size == 0:
+            return SKIP_NO_MATCHING_DAYS
+        matching_days = matching_digest(train_days, matching["first_ordinal"])
 
     # Drop rows with NaN/inf in either predictors or target to avoid model fit failures.
     finite_rows = np.isfinite(train_y)
@@ -165,6 +216,9 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     }
     if list_id is not None:
         record["predictor_list"] = cfg["list_hashes"][list_id]
+    if matching_days is not None:
+        record["training_days"] = int(np.unique(train_days[finite_rows]).size)
+        record["matching_days"] = matching_days
     if window is not None:
         record["window"] = window
     return record
