@@ -31,7 +31,7 @@ from epftoolbox2.evaluators import (
     RMSEEvaluator,
     rMAEEvaluator,
 )
-from epftoolbox2.evaluators._compare import LossPanel
+from epftoolbox2.evaluators._compare import LossPanel, compare_set, confidence_set
 from epftoolbox2.exporters import CsvExporter, ExcelExporter, TerminalExporter
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import BaseModel, OLSModel
@@ -1879,9 +1879,9 @@ def test_a_clone_counts_once_in_a_holm_family(clone_reports):
     assert (after["m"] == 2).all()
     assert after.loc["best", "p_holm"] == after.loc[twin, "p_holm"]
     assert after.loc["best", "verdict"] == after.loc[twin, "verdict"]
-    assert after.attrs["clones"] == [[twin, "best"]] and before.attrs["clones"] == []
+    assert after.attrs["clones"] == {1: [[twin, "best"]]} and before.attrs["clones"] == {1: []}
     per_hour = clone.tests(benchmark="ben", interval=None, by="hour")
-    assert per_hour.attrs["clones"] == [[twin, "best"]] and "p_holm" not in per_hour
+    assert per_hour.attrs["clones"] == {1: [[twin, "best"]]} and "p_holm" not in per_hour
 
 
 def test_a_clone_counts_once_for_the_dm_evaluator_and_leaderboard_too(clone_reports):
@@ -1896,7 +1896,8 @@ def test_a_clone_counts_once_for_the_dm_evaluator_and_leaderboard_too(clone_repo
     for column in ("DM p", "DM p_holm", "DM m", "DM verdict"):
         assert list(after.loc[["m", "n"], column]) == list(before.loc[["m", "n"], column]), column
     assert after.loc["best", "DM p_holm"] == after.loc[twin, "DM p_holm"]
-    assert after.attrs["clones"] == [[twin, "best"]] and before.attrs["clones"] == []
+    assert after.attrs["clones"] == {"DM": [[twin, "best"]], "MCS": [[twin, "best"]]}
+    assert before.attrs["clones"] == {"DM": [], "MCS": []}
     assert list(boards[1].loc[["m", "n"], "p_holm"]) == list(boards[0].loc[["m", "n"], "p_holm"])
     assert boards[1].attrs["clones"] == [[twin, "best"]]
 
@@ -1916,7 +1917,7 @@ def test_a_clone_of_the_benchmark_is_a_sane_row_outside_the_family(tmp_path):
     assert (row["ratio"], row["statistic"], row["p_value"], row["p_holm"]) == (1.0, 0.0, 1.0, 1.0)
     assert row["verdict"] == "no difference"
     assert (table["m"] == 2).all() and list(table.loc[["m", "n"], "p_holm"]) == list(without.loc[["m", "n"], "p_holm"])
-    assert table.attrs["clones"] == [["ben", "only"]]
+    assert table.attrs["clones"] == {1: [["ben", "only"]]}
     assert list(board.loc[["m", "n"], "p_holm"]) == list(without.loc[["m", "n"], "p_holm"])
     compared = report.compare("only", "ben").iloc[0]
     assert (compared["ratio"], compared["p_hac"]) == (1.0, 1.0)
@@ -1957,17 +1958,42 @@ def test_a_ranking_collapses_clones_and_doesnt_split_their_chance_of_being_best(
     assert after.attrs["clones"] == [[twin, "best"]] and before.attrs["clones"] == []
 
 
-def test_a_set_of_nothing_but_clones_has_one_result(tmp_path):
+def test_a_set_of_nothing_but_clones_is_too_small_for_a_confidence_set_and_ranks_as_one(tmp_path):
     write_members(tmp_path, windows=LONG, a=1.0)
     ensembles = [AverageEnsemble(["a"], name="one"), AverageEnsemble(["a"], top=1, name="two")]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         report = report_of(tmp_path, *ensembles, members=("a",))
-        table = report.mcs(reps=20).set_index("model")
         ranks = report.ranks(reps=20).set_index("model")
-    assert (table["p_value"] == 1.0).all() and table["in_90"].all()
-    assert (ranks["rank"] == 1).all() and (ranks["p_best"] == 1.0).all()
+    with pytest.warns(UserWarning, match="these are 1 once exact clones count once"):
+        table = report.mcs(reps=20).set_index("model")
+    assert table["p_value"].isna().all() and table["in_90"].isna().all()
     assert table.attrs["clones"] == [["a", "one", "two"]]
+    assert (ranks["rank"] == 1).all() and (ranks["p_best"] == 1.0).all()
+
+
+def test_two_models_and_a_twin_give_what_two_models_give(tmp_path):
+    days = LONG.issue_days()
+    error_of = lambda name: lambda day, target, hour, horizon: random.Random(f"{name} {day} {hour}").gauss(0, 3)  # noqa: E731
+    twin = forecasts(days, error_of("a"), windows=LONG)
+    write_member(tmp_path, "a", twin, LONG)
+    write_member(tmp_path, "t", twin, LONG)
+    write_member(tmp_path, "b", forecasts(days, error_of("b"), windows=LONG), LONG)
+    write_member(tmp_path, "c", forecasts(days, error_of("c"), windows=LONG), LONG)
+    report = report_of(tmp_path, members=("a", "b", "c", "t"))
+    with pytest.warns(UserWarning, match="at least 3 models, got 2"):
+        two = report.mcs(reps=20, models=["a", "b"])
+    with pytest.warns(UserWarning, match="these are 2 once exact clones count once.*'a', 't'"):
+        with_twin = report.mcs(reps=20, models=["a", "b", "t"])
+    assert two["p_value"].isna().all() and with_twin["p_value"].isna().all()
+    assert with_twin.attrs["clones"] == [["a", "t"]]
+    assert report.mcs(reps=20, models=["a", "b", "c"])["p_value"].notna().all()
+
+    evaluator = [MCSEvaluator(reps=20)]
+    with pytest.warns(UserWarning, match="these are 2 once exact clones count once"):
+        table = EvaluationReport({n: report.refs[n] for n in ("a", "b", "t")}, evaluator).summary()
+    assert table["MCS p"].isna().all() and (table["MCS n_days"] > 0).all()
+    assert table.attrs["clones"] == {"MCS": [["a", "t"]]}
 
 
 def test_models_on_the_same_losses_with_other_predictions_are_no_clones(tmp_path):
@@ -1982,7 +2008,7 @@ def test_models_on_the_same_losses_with_other_predictions_are_no_clones(tmp_path
     with pytest.warns(UserWarning, match="same losses on every day"):
         ranks = report.ranks(reps=20)
     assert ranks.attrs["clones"] == []
-    assert report.tests(benchmark="c", interval=None).attrs["clones"] == []
+    assert report.tests(benchmark="c", interval=None).attrs["clones"] == {1: []}
     assert sorted(ranks["rank"].tolist()) == [1, 2, 3]
 
 
@@ -2008,19 +2034,180 @@ def test_the_same_values_on_other_keys_are_no_clones():
 def test_clones_are_read_on_the_keys_compared(tmp_path):
     """With other keys their tests differ, so they are two tests. On the keys of a whole set they are one model."""
     days = LONG.issue_days()
-    error = lambda day, target, hour, horizon: random.Random(f"{day} {hour}").random() * 3  # noqa: E731
-    records = forecasts(days, error, windows=LONG)
+    error_of = lambda name: lambda day, target, hour, horizon: random.Random(f"{name} {day} {hour}").gauss(0, 3)  # noqa: E731
+    records = forecasts(days, error_of("a"), windows=LONG)
     write_member(tmp_path, "a", records, LONG)
     write_member(tmp_path, "shorter", [r for r in records if r["run_date"] != "2024-02-01"], LONG)
-    write_member(tmp_path, "c", forecasts(days, 2.0, windows=LONG), LONG)
+    write_member(tmp_path, "c", forecasts(days, error_of("c"), windows=LONG), LONG)
+    write_member(tmp_path, "d", forecasts(days, error_of("d"), windows=LONG), LONG)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        report = report_of(tmp_path, members=("a", "shorter", "c"))
+        report = report_of(tmp_path, members=("a", "shorter", "c", "d"))
         table = report.tests(benchmark="c", interval=None).set_index("model")
-        confidence = report.mcs(reps=20, models=["a", "shorter", "c"])
-    assert table.attrs["clones"] == [] and (table["m"] == 2).all()
+        confidence = report.mcs(reps=20)
+    assert table.attrs["clones"] == {1: []} and (table["m"] == 3).all()
+    assert table.loc["a", "p_value"] != table.loc["shorter", "p_value"]
     assert confidence.attrs["clones"] == [["a", "shorter"]]
     assert confidence.set_index("model").loc["a", "p_value"] == confidence.set_index("model").loc["shorter", "p_value"]
+
+
+def key_frame(values):
+    """The frame a panel takes, of one prediction per day: `values` is {day: prediction}."""
+    rows = [
+        {
+            "run_date": pd.Timestamp(day),
+            "target_date": pd.Timestamp(plus_days(day, 1)),
+            "hour": 0,
+            "horizon": 1,
+            "prediction": prediction,
+            "actual": 1.0,
+        }
+        for day, prediction in values.items()
+    ]
+    return pd.DataFrame(rows, columns=["run_date", "target_date", "hour", "horizon", "prediction", "actual"])
+
+
+def test_one_ulp_on_one_key_is_no_clone():
+    days = days_of(*HT)
+    values = {day: 5.0 + i for i, day in enumerate(days)}
+    nudged = {**values, days[1]: float(np.nextafter(values[days[1]], np.inf))}
+    other = {day: 2.0 for day in days}
+    panel = LossPanel({"a": key_frame(values), "b": key_frame(nudged), "c": key_frame(values), "ben": key_frame(other)})
+    assert panel.clone_groups(panel.rows(), ["a", "b", "c", "ben"]) == [["a", "c"]]
+    assert panel.pair_clone_groups(panel.rows(), ["a", "b", "c"], "ben") == [["a", "c"]]
+
+
+def test_negative_zero_is_the_same_prediction_as_zero():
+    days = days_of(*HT)
+    panel = LossPanel(
+        {
+            "zero": key_frame(dict.fromkeys(days, 0.0)),
+            "negative": key_frame(dict.fromkeys(days, -0.0)),
+            "ben": key_frame(dict.fromkeys(days, 7.0)),
+        }
+    )
+    assert panel.clone_groups(panel.rows(), ["zero", "negative", "ben"]) == [["zero", "negative"]]
+    assert panel.pair_clone_groups(panel.rows(), ["zero", "negative"], "ben") == [["zero", "negative"]]
+    repeating = LossPanel(
+        {"negative": key_frame(dict.fromkeys(days, -0.0)), "ben": key_frame(dict.fromkeys(days, 0.0))}
+    )
+    assert repeating.pair_clone_groups(repeating.rows(), ["negative"], "ben") == [["ben", "negative"]]
+
+
+def test_a_model_with_no_forecasts_is_nobodys_clone():
+    days = days_of(*HT)
+    held = key_frame(dict.fromkeys(days, 5.0))
+    panel = LossPanel(
+        {"a": held, "none": key_frame({}), "nothing": key_frame({}), "ben": key_frame(dict.fromkeys(days, 2.0))}
+    )
+    assert panel.clone_groups(panel.rows(), ["none", "nothing", "a"]) == []
+    assert panel.pair_clone_groups(panel.rows(), ["none", "nothing", "a"], "ben") == []
+
+
+def test_a_slice_is_keys_and_predictions_against_the_benchmark():
+    days = days_of(*HT)
+    values = {day: 5.0 + i for i, day in enumerate(days)}
+    holed = {day: 2.0 for day in days[:-1]}  # the benchmark has no forecast on the last day
+    panel = LossPanel(
+        {
+            "a": key_frame(values),
+            "differs_where_nothing_is_compared": key_frame({**values, days[-1]: 99.0}),
+            "lacks_a_day_that_is_compared": key_frame({day: value for day, value in values.items() if day != days[0]}),
+            "other": key_frame({day: value + 1.0 for day, value in values.items()}),
+            "ben": key_frame(holed),
+        }
+    )
+    models = ["a", "differs_where_nothing_is_compared", "lacks_a_day_that_is_compared", "other"]
+    assert panel.pair_clone_groups(panel.rows(), models, "ben") == [["a", "differs_where_nothing_is_compared"]]
+    assert panel.clone_groups(panel.rows(), models) == []
+
+
+def test_a_model_that_repeats_the_benchmark_on_fewer_keys_tests_nothing(tmp_path):
+    """The benchmark less one day: ratio 1, p 1, and it must not cost `m` and `n` their verdict."""
+    cloned_members(tmp_path)
+    ben = stored(tmp_path / "ben.jsonl")
+    members = ("ben", "m", "n")
+    without = report_of(tmp_path, members=members).tests(benchmark="ben", interval=None).set_index("model")
+    write_member(tmp_path, "bb", [r for r in ben if r["run_date"] != "2023-06-01"], CLONED)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        report = report_of(tmp_path, members=(*members, "bb"))
+        table = report.tests(benchmark="ben", interval=None).set_index("model")
+    assert (table["m"] == 2).all() and table.attrs["clones"] == {1: [["ben", "bb"]]}
+    assert list(table.loc[["m", "n"], "p_holm"]) == list(without.loc[["m", "n"], "p_holm"])
+    assert list(table.loc[["m", "n"], "verdict"]) == list(without.loc[["m", "n"], "verdict"])
+    assert (table.loc["bb", "ratio"], table.loc["bb", "p_value"], table.loc["bb", "p_holm"]) == (1.0, 1.0, 1.0)
+    assert table.loc["bb", "verdict"] == "no difference"
+    assert report.leaderboard(benchmark="ben").attrs["clones"] == [["ben", "bb"]]
+
+
+def test_models_that_differ_only_where_the_benchmark_has_no_forecast_are_one_test(tmp_path):
+    cloned_members(tmp_path)
+    m = stored(tmp_path / "m.jsonl")
+    hole = "2023-06-01"
+    write_member(
+        tmp_path,
+        "t",
+        [{**r, "prediction": r["prediction"] + (5.0 if r["run_date"] == hole else 0.0)} for r in m],
+        CLONED,
+    )
+    write_member(tmp_path, "ben", [r for r in stored(tmp_path / "ben.jsonl") if r["run_date"] != hole], CLONED)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        table = (
+            report_of(tmp_path, members=("ben", "m", "n", "t")).tests(benchmark="ben", interval=None).set_index("model")
+        )
+    assert (table["m"] == 2).all() and table.attrs["clones"] == {1: [["m", "t"]]}
+    assert (
+        table.loc["t", "p_value"] == table.loc["m", "p_value"] and table.loc["t", "p_holm"] == table.loc["m", "p_holm"]
+    )
+
+
+def test_the_clones_of_tests_are_per_horizon_and_of_summary_per_evaluator(tmp_path):
+    days = LONG.issue_days()
+
+    def error_of(name):
+        return lambda day, target, hour, horizon: random.Random(f"{name} {day} {hour} {horizon}").gauss(0, 3)
+
+    write_member(tmp_path, "a", forecasts(days, error_of("a"), horizons=(1, 2), windows=LONG), LONG, horizon=2)
+
+    def twin_at_one(day, target, hour, horizon):
+        return error_of("a" if horizon == 1 else "t")(day, target, hour, horizon)
+
+    write_member(tmp_path, "t", forecasts(days, twin_at_one, horizons=(1, 2), windows=LONG), LONG, horizon=2)
+    write_member(tmp_path, "c", forecasts(days, error_of("c"), horizons=(1, 2), windows=LONG), LONG, horizon=2)
+    write_member(tmp_path, "d", forecasts(days, error_of("d"), horizons=(1, 2), windows=LONG), LONG, horizon=2)
+    pipeline = reporting(members=("a", "t", "c", "d"))
+    pipeline.add_evaluator(DMEvaluator(benchmark="c", interval=None), MCSEvaluator(reps=20))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        report = pipeline.report(tmp_path, horizon=2)
+        table = report.tests(benchmark="c", interval=None)
+        summary = report.summary()
+        at_one = report.mcs(reps=20, horizon=1)
+    assert table.attrs["clones"] == {1: [["a", "t"]], 2: []}
+    assert summary.attrs["clones"] == {"DM": [], "MCS": []}, "over all horizons they aren't twins"
+    assert at_one.attrs["clones"] == [["a", "t"]]
+    assert list(table[table["horizon"] == 1]["m"].unique()) == [2]
+    assert list(table[table["horizon"] == 2]["m"].unique()) == [3]
+
+
+def test_elimination_goes_through_every_twin():
+    days = [(pd.Timestamp("2024-01-01") + pd.Timedelta(days=i)).date().isoformat() for i in range(60)]
+    frames = {}
+    for name in ("a", "b", "c"):
+        rng = random.Random(name)
+        frames[name] = key_frame({day: 1.0 + rng.random() * {"a": 1, "b": 4, "c": 9}[name] for day in days})
+    frames["t"] = frames["b"]
+    panel = LossPanel(frames)
+    names = ["a", "b", "c", "t"]
+    compared = compare_set(panel, names, panel.rows())
+    result = confidence_set(compared, 0.10, "R", 7, 50, 0)
+    assert compared.clones == (("b", "t"),)
+    assert sorted(result.elimination_order) == [0, 1, 2, 3]
+    order = list(result.elimination_order)
+    assert abs(order.index(1) - order.index(3)) == 1, "twins fall together"
+    assert result.p_values[1] == result.p_values[3]
 
 
 def test_rmae_with_a_base_that_has_no_forecasts_here_says_so(tmp_path):

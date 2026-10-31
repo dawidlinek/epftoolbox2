@@ -114,6 +114,13 @@ class DMEvaluator(SetEvaluator):
             warn_if_short(min(pair.n_days for pair in pairs))
         return out
 
+    def clones(self, model_dfs: Mapping[str, pd.DataFrame]) -> list:
+        if self.benchmark not in model_dfs or not len(model_dfs[self.benchmark]):
+            return []
+        panel = panel_of(model_dfs)
+        names = [name for name in model_dfs if name != self.benchmark]
+        return panel.pair_clone_groups(panel.rows(), names, self.benchmark)
+
 
 def check_test_settings(
     variance: str, lag: Optional[int], correction: Optional[str], seed: int, interval: Optional[float] = None

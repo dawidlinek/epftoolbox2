@@ -20,6 +20,7 @@ from ..evaluators._compare import (
     compare_set,
     confidence_set,
     short_test_message,
+    too_few_distinct_models,
     verdict,
 )
 from ..evaluators._days import periods_per_hour
@@ -408,9 +409,10 @@ class EvaluationReport:
         `mae_benchmark`) this test length would likely detect, by the Newey-West variance whatever `variance` is. Holm runs
         over the `m` models tested at that horizon, and `verdict` reads `p_holm` at 5 %. Exact clones, models with the same
         predictions (an `AverageEnsemble` with `top=1` and what it chose), count once and share a `p_holm`, and a clone of the
-        benchmark doesn't count. `verdict` is empty below 30 days and when the test and the ratio point in opposite ways, the
-        interval when the days fit in one block. `df.attrs` holds the settings, `clones`, the groups of clones, and
-        `partial_days`: the days per model with only part of their periods in common, with a warning.
+        benchmark doesn't count. Keys count: two models are one test when the keys each shares with the benchmark, and their
+        predictions there, are the same. `verdict` is empty below 30 days and when the test and the ratio point in opposite
+        ways, the interval when the days fit in one block. `df.attrs` holds the settings, `clones`, the groups of clones per
+        horizon of the table, and `partial_days`: the days per model with only part of their periods in common, with a warning.
 
         Args:
             benchmark: The reference model; by default the benchmark of the report's `DMEvaluator`.
@@ -442,10 +444,10 @@ class EvaluationReport:
 
         rows: List[Dict[str, Any]] = []
         partial: Dict[str, int] = {}
-        clones: List[List[str]] = []
+        clones: Dict[Union[int, str], List[List[str]]] = {}
         for label, keys in self._horizon_slices(panel, horizon, each_horizon=True):
             if by == "hour":
-                clones.extend(g for g in panel.clone_groups(keys, [benchmark, *models]) if g not in clones)
+                clones[label] = panel.pair_clone_groups(keys, models, benchmark)
                 hours = panel.hour[keys]
                 for hour in np.unique(hours):
                     for model in models:
@@ -454,8 +456,7 @@ class EvaluationReport:
                 continue
             pairs = [compare_pair(panel, model, benchmark, keys, **settings) for model in models]
             p_values = [pair.p_value for pair in pairs]
-            p_holm, m, found = adjust_family(panel, keys, models, benchmark, p_values, correction)
-            clones.extend(group for group in found if group not in clones)
+            p_holm, m, clones[label] = adjust_family(panel, keys, models, benchmark, p_values, correction)
             for model, pair, adjusted in zip(models, pairs, p_holm):
                 row = _pair_row(model, benchmark, label, pair)
                 judged = float(adjusted) if correction == "holm" else pair.p_value
@@ -509,7 +510,7 @@ class EvaluationReport:
         so everything is on the keys all of them hold: `df.attrs` holds `n_days`, `n_forecasts` and `limited_by`, the models
         that lack forecasts the others have, with how many. If one model cuts the sample, leave it out with `models`. Exact
         clones on those keys (an `AverageEnsemble` with `top=1` and what it chose) are one model to the set, each with its
-        result: their groups are in `df.attrs["clones"]`.
+        result, and count once among the 3: their groups are in `df.attrs["clones"]`.
 
         Args:
             alpha: Size of the set the result is built for.
@@ -518,7 +519,8 @@ class EvaluationReport:
             block: Mean block length of the stationary bootstrap, in days.
             reps: Bootstrap repetitions (at least 1,000 recommended).
             seed: Bootstrap seed.
-            models: The set of models; by default all of them. Fewer than 3 gives NaN with a warning.
+            models: The set of models; by default all of them. Fewer than 3, counting exact clones once, gives NaN with a
+                warning.
             horizon: A number for one horizon; by default (or `"all"`) the daily losses of all horizons are averaged per
                 run date.
         """
@@ -536,6 +538,8 @@ class EvaluationReport:
                 f"The model confidence set needs at least 3 models, got {len(names)}: its columns are NaN.",
                 stacklevel=2,
             )
+        elif too_few_distinct_models(compared) is not None:
+            warnings.warn(too_few_distinct_models(compared), stacklevel=2)
         elif daily.n_days < 2:
             warnings.warn(_too_few_days(compared), stacklevel=2)
         else:
@@ -690,7 +694,8 @@ class EvaluationReport:
         samples (a warning says so): read `ratio`, which does not. `n_days` and `n_common` are the days and forecasts of the
         pair, and `ratio`, `ci_low`, `ci_high`, `p_value` and `p_holm` (Holm over the models compared, with exact clones
         counted once, as in `tests()`) are on them, with the defaults of `tests()`. Without a benchmark (none given, no
-        `DMEvaluator`) only `n_days` is added. `df.attrs["clones"]` holds the groups of clones.
+        `DMEvaluator`) only `n_days` is added. `df.attrs["clones"]` holds the groups of clones: of the tests with a benchmark,
+        and of the models with the same forecasts on the keys of the table without one.
 
         Args:
             benchmark: The reference model; by default the benchmark of the report's `DMEvaluator`.
@@ -700,6 +705,7 @@ class EvaluationReport:
         panel = self._panel()
         benchmark = self._benchmark(benchmark, panel, required=False)
         _, keys = self._pooled_slice(panel, horizon)
+        clones = panel.clone_groups(keys, panel.models)
         rows: List[Dict[str, Any]] = []
         for model in panel.models:
             own = panel.common(keys, (model,))
@@ -717,7 +723,7 @@ class EvaluationReport:
             others = [row for row in rows if row["model"] != benchmark]
             pairs = [compare_pair(panel, row["model"], benchmark, keys) for row in others]
             names = [row["model"] for row in others]
-            p_holm, _, _ = adjust_family(panel, keys, names, benchmark, [pair.p_value for pair in pairs], "holm")
+            p_holm, _, clones = adjust_family(panel, keys, names, benchmark, [pair.p_value for pair in pairs], "holm")
             partial = {row["model"]: pair.partial_days for row, pair in zip(others, pairs)}
             for row, pair, adjusted in zip(others, pairs, p_holm):
                 row.update(
@@ -736,7 +742,7 @@ class EvaluationReport:
             columns += ["n_common", "ratio", "ci_low", "ci_high", "p_value", "p_holm"]
         table = pd.DataFrame(rows, columns=columns).sort_values("MAE", kind="stable").reset_index(drop=True)
         table.attrs["benchmark"] = benchmark
-        table.attrs["clones"] = panel.clone_groups(keys, panel.models)
+        table.attrs["clones"] = clones
         if len(table):
             _flag_test_length(table, int(table["n_days"].min()))
         if benchmark is not None:
@@ -1028,8 +1034,9 @@ class EvaluationReport:
         table = pd.DataFrame(
             [{"model": name, "forecasts": len(df), **metrics.get(name, {})} for name, df in model_dfs.items()]
         )
-        if any(isinstance(evaluator, SetEvaluator) for evaluator in self.evaluators):
-            table.attrs["clones"] = frames.panel.clone_groups(frames.panel.rows(), list(frames))
+        by_evaluator = {e.name: e.clones(frames) for e in self.evaluators if isinstance(e, SetEvaluator)}
+        if by_evaluator:  # `DM` and `MCS` read them on other keys, so they needn't agree
+            table.attrs["clones"] = by_evaluator
         return table
 
     def _grouped_table(

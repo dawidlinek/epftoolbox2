@@ -202,7 +202,7 @@ def test_mcs_gives_exact_clones_one_result_in_a_table():
     table = EvaluationReport(results, [MCSEvaluator(reps=20)]).summary().set_index("model")
     assert list(table.loc[list(without.index), "MCS p"]) == list(without["MCS p"])
     assert table.loc["copy", "MCS p"] == table.loc["base", "MCS p"] and (table["MCS n_days"] == 70).all()
-    assert table.attrs["clones"] == [["base", "copy"]]
+    assert table.attrs["clones"] == {"MCS": [["base", "copy"]]}
 
 
 def test_mcs_on_the_keys_of_the_group():

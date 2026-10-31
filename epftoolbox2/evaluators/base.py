@@ -41,6 +41,10 @@ class SetEvaluator(Evaluator):
     def compute_group(self, model_dfs: Mapping[str, pd.DataFrame]) -> Dict[str, EvaluatorResult]:
         pass
 
+    def clones(self, model_dfs: Mapping[str, pd.DataFrame]) -> list:
+        """The groups of models this evaluator counts as one on this group (see `epftoolbox2.evaluators._compare`)."""
+        return []
+
     def compute(self, df: pd.DataFrame, **kwargs) -> EvaluatorResult:
         model_dfs = kwargs.get("model_dfs")
         if not model_dfs:

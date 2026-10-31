@@ -8,9 +8,10 @@ Shared by the set-level evaluators and by the comparison methods of `EvaluationR
 and the matching table give the same number.
 
 Exact clones, models with the same predictions on the keys compared, are one model to a test: an `AverageEnsemble` with `top=1`
-is a clone of what it chose as a matter of course. They count once in a Holm family (`adjust_family`), and a confidence set or a
-ranking is made without the extra copies and gives each twin the result of the one kept (`SetComparison.kept`, `.twin_of`).
-Nothing changes for a table without clones.
+is a clone of what it chose as a matter of course. In a Holm family the keys compared are each model's with the benchmark, so models
+are one hypothesis when those slices are the same, and one that repeats the benchmark tests nothing (`pair_clone_groups`,
+`adjust_family`). A confidence set or a ranking is on the keys of the whole set: it is made without the extra copies and gives each
+twin the result of the one kept (`clone_groups`, `SetComparison.kept`, `.twin_of`). Nothing changes for a table without clones.
 """
 
 import functools
@@ -29,6 +30,8 @@ from .base import FORECAST_KEYS
 _ACTUAL_TOLERANCE = 1e-9
 # How many sets of bootstrap indices stay in memory. One set is `reps x n` integers (11.7 MB at 4000 x 365).
 _INDEX_SETS = 4
+# A model confidence set takes this many distinct models: exact clones count once.
+MIN_SET_MODELS = 3
 # Periods of a whole local day; a day with any other number of shared periods is a partial one.
 _WHOLE_DAY_PERIODS = (23, 24, 25, 92, 96, 100)
 # Below this many days nothing here gives a verdict, whatever its p-value: the normal approximation of the DM test
@@ -195,6 +198,25 @@ class LossPanel:
                 groups.setdefault((held + 0.0).tobytes(), []).append(model)  # + 0.0: -0.0 is the same prediction as 0.0
         return [group for group in groups.values() if len(group) > 1]
 
+    def pair_clone_groups(self, rows: np.ndarray, models: Sequence[str], benchmark: str) -> List[List[str]]:
+        """The groups of `models` that are one test against `benchmark` on the keys of `rows`: each model's slice, the keys it
+        shares with the benchmark and its predictions there, is the same, bit for bit. A model whose slice repeats the benchmark
+        tests nothing, and is grouped with it, first. A model sharing no key with the benchmark is nobody's clone."""
+        column = self._column[benchmark]
+        repeats: List[str] = []
+        groups: Dict[Tuple[bytes, bytes], List[str]] = {}
+        for model in models:
+            shared = self.common(rows, (model, benchmark))
+            if not len(shared):
+                continue
+            held = self.predictions[shared, self._column[model]] + 0.0  # -0.0 is the same prediction as 0.0
+            if held.tobytes() == (self.predictions[shared, column] + 0.0).tobytes():
+                repeats.append(model)
+            else:
+                groups.setdefault((shared.tobytes(), held.tobytes()), []).append(model)
+        tested = [group for group in groups.values() if len(group) > 1]
+        return [[benchmark, *repeats], *tested] if repeats else tested
+
     def daily(self, rows: np.ndarray, models: Sequence[str]) -> "DailyLosses":
         """Daily losses of `models` on exactly the keys in `rows`, which all of them must hold.
 
@@ -359,10 +381,10 @@ def adjust_family(
 
     A family holds distinct tests. A clone repeats its twin's test and shares its adjusted p-value, and a clone of the benchmark
     tests nothing, so neither counts in `m`: an ensemble with `top=1` in the table must not change a verdict about another model.
-    Without clones this is `adjust` and the number of finite p-values.
+    Without clones this is `adjust` and the number of finite p-values. Clones are `LossPanel.pair_clone_groups`.
     """
     p = np.asarray(p_values, dtype=float)
-    clones = panel.clone_groups(rows, [benchmark, *models])
+    clones = panel.pair_clone_groups(rows, models, benchmark)
     if not clones:
         return adjust(p, correction), int(np.isfinite(p).sum()), []
     kept = {name: name for name in models}
@@ -403,6 +425,17 @@ def short_test_message(n_days: int) -> Optional[str]:
     return (
         f"The comparison rests on {n_days} days, less than a year: it does not see every season, and even one test year "
         "only resolves differences of about 5 % of the MAE."
+    )
+
+
+def too_few_distinct_models(compared: "SetComparison") -> Optional[str]:
+    """What to say when collapsing exact clones leaves fewer distinct models than a confidence set takes, or None."""
+    distinct = len(compared.kept)
+    if distinct >= MIN_SET_MODELS or len(compared.models) < MIN_SET_MODELS:
+        return None
+    return (
+        f"The model confidence set needs at least {MIN_SET_MODELS} models, and these are {distinct} once exact clones count once "
+        f"(clones: {[list(group) for group in compared.clones]}): its columns are NaN."
     )
 
 
@@ -454,14 +487,11 @@ def confidence_set(
     compared: SetComparison, alpha: float, statistic: str, block: float, reps: int, seed: int
 ) -> stats.MCSResult:
     """The model confidence set of `compared`, in which twins have one result: the set is made without the extra copies, whose
-    difference has no variance, and twins fall together. Raises ValueError on a degenerate set, naming the models."""
+    difference has no variance, and twins fall together. Raises ValueError on a degenerate set, naming the models. It takes two
+    distinct models at least, and its callers ask for `MIN_SET_MODELS`."""
     indices = bootstrap_indices(compared.daily.n_days, block, reps, seed, kind="stationary")
     kept = compared.kept
     names = [compared.models[j] for j in kept]
-    if len(kept) == 1:  # every model is the same model: nothing to tell apart
-        everyone = tuple(range(len(compared.models)))
-        ones = np.ones(len(everyone))
-        return stats.MCSResult(ones, everyone, alpha, statistic, compared.daily.n_days, indices.shape[0])
     try:
         result = stats.model_confidence_set(
             compared.daily.losses[:, kept], alpha=alpha, statistic=statistic, indices=indices
