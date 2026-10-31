@@ -1584,6 +1584,187 @@ def test_every_table_holds_an_ensemble_as_a_model_on_common_keys(long_report):
         assert set(report.validation.summary()["model"]) == {"a", "b", "c", "gappy"}
 
 
+CLONED = RunWindows.fixed(("2023-01-01", "2023-01-31"), ("2023-02-01", "2023-12-31"))
+
+
+def cloned_members(directory, seed=25, extra_n=-0.14):
+    """A year of one period a day: `ben`, `m` and `n` share a daily shock, and `m` and `n` are a little better than `ben`."""
+    rng = np.random.default_rng(seed)
+    days = CLONED.issue_days()
+    shock = {day: rng.normal(0, 1) for day in days}
+
+    def member(name, extra):
+        noise = {day: rng.normal(0, 1) for day in days}
+        records = forecasts(days, lambda day, *_: 10 + shock[day] + noise[day] + extra, (0,), windows=CLONED)
+        write_member(directory, name, records, CLONED)
+
+    member("ben", 0.0)
+    member("m", -0.14)
+    member("n", extra_n)
+
+
+@pytest.fixture
+def clone_reports(tmp_path):
+    """The same three members without and with a `top=1` ensemble, which is a clone of what it chose."""
+    cloned_members(tmp_path)
+    members = ("ben", "m", "n")
+    evaluators = lambda: [DMEvaluator(benchmark="ben", interval=None), MCSEvaluator(reps=50)]  # noqa: E731
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        without = reporting(members=members).add_evaluator(*evaluators()).report(tmp_path, horizon=1)
+        ensemble = AverageEnsemble(list(members), top=1, name="best")
+        clone = reporting(ensemble, members=members).add_evaluator(*evaluators()).report(tmp_path, horizon=1)
+    twin = choice_of(clone, "best")["chosen"][0]
+    return without, clone, twin
+
+
+def test_a_clone_counts_once_in_a_holm_family(clone_reports):
+    without, clone, twin = clone_reports
+    assert twin != "ben", "this is about a clone of a model tested, and the next test about one of the benchmark"
+    before = without.tests(benchmark="ben", interval=None).set_index("model")
+    after = clone.tests(benchmark="ben", interval=None).set_index("model")
+    for column in ("p_value", "p_holm", "m", "verdict"):
+        assert list(after.loc[list(before.index), column]) == list(before[column]), column
+    assert (after["m"] == 2).all()
+    assert after.loc["best", "p_holm"] == after.loc[twin, "p_holm"]
+    assert after.loc["best", "verdict"] == after.loc[twin, "verdict"]
+    assert after.attrs["clones"] == [[twin, "best"]] and before.attrs["clones"] == []
+
+
+def test_a_clone_counts_once_for_the_dm_evaluator_and_leaderboard_too(clone_reports):
+    without, clone, twin = clone_reports
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        before, after = without.summary().set_index("model"), clone.summary().set_index("model")
+        boards = (
+            without.leaderboard(benchmark="ben").set_index("model"),
+            clone.leaderboard(benchmark="ben").set_index("model"),
+        )
+    for column in ("DM p", "DM p_holm", "DM m", "DM verdict"):
+        assert list(after.loc[["m", "n"], column]) == list(before.loc[["m", "n"], column]), column
+    assert after.loc["best", "DM p_holm"] == after.loc[twin, "DM p_holm"]
+    assert after.attrs["clones"] == [[twin, "best"]] and before.attrs["clones"] == []
+    assert list(boards[1].loc[["m", "n"], "p_holm"]) == list(boards[0].loc[["m", "n"], "p_holm"])
+    assert boards[1].attrs["clones"] == [[twin, "best"]]
+
+
+def test_a_clone_of_the_benchmark_is_a_sane_row_outside_the_family(tmp_path):
+    cloned_members(tmp_path)
+    members = ("ben", "m", "n")
+    # `only` chooses from one model, so it is a clone of it whatever the numbers are.
+    ensemble = AverageEnsemble(["ben"], top=1, name="only")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        without = report_of(tmp_path, members=members).tests(benchmark="ben", interval=None).set_index("model")
+        report = report_of(tmp_path, ensemble, members=members)
+        table = report.tests(benchmark="ben", interval=None).set_index("model")
+        board = report.leaderboard(benchmark="ben").set_index("model")
+    row = table.loc["only"]
+    assert (row["ratio"], row["statistic"], row["p_value"], row["p_holm"]) == (1.0, 0.0, 1.0, 1.0)
+    assert row["verdict"] == "no difference"
+    assert (table["m"] == 2).all() and list(table.loc[["m", "n"], "p_holm"]) == list(without.loc[["m", "n"], "p_holm"])
+    assert table.attrs["clones"] == [["ben", "only"]]
+    assert list(board.loc[["m", "n"], "p_holm"]) == list(without.loc[["m", "n"], "p_holm"])
+    compared = report.compare("only", "ben").iloc[0]
+    assert (compared["ratio"], compared["p_hac"]) == (1.0, 1.0)
+
+
+@pytest.mark.parametrize("statistic", ["R", "max"])
+def test_a_confidence_set_collapses_clones_and_gives_each_twin_the_result(clone_reports, statistic):
+    without, clone, twin = clone_reports
+    before = without.mcs(reps=50, statistic=statistic).set_index("model")
+    after = clone.mcs(reps=50, statistic=statistic).set_index("model")
+    for column in ("mae", "p_value", "in_90", "in_75"):
+        assert list(after.loc[list(before.index), column]) == list(before[column]), column
+        assert after.loc["best", column] == after.loc[twin, column], column
+    assert after.attrs["clones"] == [[twin, "best"]] and before.attrs["clones"] == []
+
+
+def test_the_mcs_evaluator_collapses_clones_too(clone_reports):
+    without, clone, twin = clone_reports
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for name, before, after in (
+            ("summary", without.summary().set_index("model"), clone.summary().set_index("model")),
+            ("by_horizon", without.by_horizon().set_index("model"), clone.by_horizon().set_index("model")),
+        ):
+            for column in ("MCS p", "in MCS"):
+                assert list(after.loc[list(before.index), column]) == list(before[column]), (name, column)
+                assert after.loc["best", column] == after.loc[twin, column], (name, column)
+            assert np.isfinite(after["MCS p"]).all(), name
+
+
+def test_a_ranking_collapses_clones_and_doesnt_split_their_chance_of_being_best(clone_reports):
+    without, clone, twin = clone_reports
+    before = without.ranks(reps=200).set_index("model")
+    after = clone.ranks(reps=200).set_index("model")
+    for column in ("rank", "p_best", "rank_low", "rank_high"):
+        assert list(after.loc[list(before.index), column]) == list(before[column]), column
+        assert after.loc["best", column] == after.loc[twin, column], column
+    assert after.attrs["clones"] == [[twin, "best"]] and before.attrs["clones"] == []
+
+
+def test_a_set_of_nothing_but_clones_has_one_result(tmp_path):
+    write_members(tmp_path, windows=LONG, a=1.0)
+    ensembles = [AverageEnsemble(["a"], name="one"), AverageEnsemble(["a"], top=1, name="two")]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        report = report_of(tmp_path, *ensembles, members=("a",))
+        table = report.mcs(reps=20).set_index("model")
+        ranks = report.ranks(reps=20).set_index("model")
+    assert (table["p_value"] == 1.0).all() and table["in_90"].all()
+    assert (ranks["rank"] == 1).all() and (ranks["p_best"] == 1.0).all()
+    assert table.attrs["clones"] == [["a", "one", "two"]]
+
+
+def test_models_on_the_same_losses_with_other_predictions_are_no_clones(tmp_path):
+    """One errs up and the other down by the same amount: the kernels can't tell them apart, and that stays loud."""
+    write_members(tmp_path, windows=LONG, a=1.0, b=-1.0, c=2.0)
+    report = report_of(tmp_path)
+    with pytest.raises(ValueError, match="identical losses.*a, b, c"):
+        report.mcs(reps=20)
+    report.evaluators = [MCSEvaluator(reps=20)]
+    with pytest.warns(UserWarning, match="No model confidence set.*a, b, c"):
+        assert report.summary()["MCS p"].isna().all()
+    with pytest.warns(UserWarning, match="same losses on every day"):
+        ranks = report.ranks(reps=20)
+    assert ranks.attrs["clones"] == []
+    assert report.tests(benchmark="c", interval=None).attrs["clones"] == []
+    assert sorted(ranks["rank"].tolist()) == [1, 2, 3]
+
+
+def test_clones_are_read_on_the_keys_compared(tmp_path):
+    """With other keys their tests differ, so they are two tests. On the keys of a whole set they are one model."""
+    days = LONG.issue_days()
+    error = lambda day, target, hour, horizon: random.Random(f"{day} {hour}").random() * 3  # noqa: E731
+    records = forecasts(days, error, windows=LONG)
+    write_member(tmp_path, "a", records, LONG)
+    write_member(tmp_path, "shorter", [r for r in records if r["run_date"] != "2024-02-01"], LONG)
+    write_member(tmp_path, "c", forecasts(days, 2.0, windows=LONG), LONG)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        report = report_of(tmp_path, members=("a", "shorter", "c"))
+        table = report.tests(benchmark="c", interval=None).set_index("model")
+        confidence = report.mcs(reps=20, models=["a", "shorter", "c"])
+    assert table.attrs["clones"] == [] and (table["m"] == 2).all()
+    assert confidence.attrs["clones"] == [["a", "shorter"]]
+    assert confidence.set_index("model").loc["a", "p_value"] == confidence.set_index("model").loc["shorter", "p_value"]
+
+
+def test_rmae_with_a_base_that_has_no_forecasts_here_says_so(tmp_path):
+    write_members(tmp_path, a=1.0, b=2.0)
+    pipeline = reporting(AverageEnsemble(["a", "b"], top=1, name="t"), members=("a", "b")).add_evaluator(
+        rMAEEvaluator("t")
+    )
+    report = pipeline.report(tmp_path, horizon=1)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert report.summary().set_index("model").loc["t", "rMAE"] == 1.0
+    assert not warned(caught, "rMAEEvaluator")
+    with pytest.warns(UserWarning, match="rMAEEvaluator: the base model 't' has no forecasts here"):
+        assert report.validation.summary()["rMAE"].isna().all()
+
+
 def test_join_keeps_ensembles_and_choices_and_refuses_a_clash(long_report, tmp_path):
     pipeline, directory = long_report
     other = tmp_path / "other"
@@ -1690,6 +1871,7 @@ def test_in_memory_and_on_disk_are_the_same_numbers(df, tmp_path):
 def test_a_missing_member_raises_and_allow_missing_leaves_the_ensemble_out(tmp_path):
     write_members(tmp_path, a=1.0, b=2.0)
     make = lambda: reporting(  # noqa: E731
+        AverageEnsemble(["a", "b"], name="fine"),  # reported first: what comes after it is no more known for that
         AverageEnsemble(["a", "b", "c"], name="uses_c"),
         AverageEnsemble(["a", "b", "c"], top=1, name="chooses_with_c"),
         AverageEnsemble(["uses_c", "a"], name="nested_on_c"),
@@ -1746,6 +1928,80 @@ def test_an_extended_run_changes_the_ensemble_on_the_next_report(df, tmp_path):
     built(ols("a"), ols("b", SMALL)).run(df, validation=V, test=T, horizon=1, save_dir=str(windowed))
     assert {r["window"] for r in stored(windowed / "e.jsonl")} == {"validation"}, "until the next report"
     assert counts_of(make().report(windowed, horizon=1)).loc["e", "produced"] == 3 * DAY
+
+
+def test_records_outside_the_windows_or_with_another_tag_are_read_by_nothing(tmp_path):
+    """A resumed file can hold them. A report of the member leaves them out, so the ensemble must."""
+    outside = forecasts([plus_days(HV[0], -3)], 1.0, windows=None)
+    for r in outside:
+        r["window"] = "validation"
+    for name, off in (("a", 1.0), ("b", 3.0)):
+        records = forecasts(HAND.issue_days(), off, windows=HAND)
+        for r in records:
+            if r["run_date"] == HT[0] and r["hour"] == 0:
+                r["window"] = "validation"  # on a test day
+            if r["run_date"] == HV[0] and r["hour"] == 0:
+                r["window"] = "test"  # on a validation day
+        write_member(tmp_path, name, [*outside, *records], HAND)
+    report = report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+    assert keyed(records_of(report, "e")).keys() == keyed(records_of(report, "a")).keys()
+    assert keyed(records_of(report.validation, "e")).keys() == keyed(records_of(report.validation, "a")).keys()
+    written = stored(tmp_path / "e.jsonl")
+    assert min(r["run_date"] for r in written) == HV[0]
+    assert (HT[0], 0) not in {(r["run_date"], r["hour"]) for r in written}
+    assert (HV[0], 0) not in {(r["run_date"], r["hour"]) for r in written}
+
+
+def test_day_in_test_comes_from_the_first_member_that_holds_the_key(tmp_path):
+    days = days_of(*HT)
+    write_member(tmp_path, "a", forecasts(days, 1.0))
+    later = [{**r, "day_in_test": r["day_in_test"] + 100} for r in forecasts(days, 3.0)]
+    write_member(tmp_path, "b", later)
+    report_of(tmp_path, AverageEnsemble(["a", "b"], name="first_a"), members=("a", "b"), test=HT)
+    report_of(tmp_path, AverageEnsemble(["b", "a"], name="first_b"), members=("a", "b"), test=HT)
+    assert {r["day_in_test"] for r in stored(tmp_path / "first_a.jsonl")} == {0, 1, 2, 3}
+    assert {r["day_in_test"] for r in stored(tmp_path / "first_b.jsonl")} == {100, 101, 102, 103}
+
+
+def failing_on(monkeypatch, call):
+    """`os.replace` as a crash at its `call`-th use from now on."""
+    real = os.replace
+    calls = []
+
+    def replace(source, destination):
+        calls.append(destination)
+        if len(calls) == call:
+            raise OSError("the disk is gone")
+        real(source, destination)
+
+    monkeypatch.setattr("epftoolbox2.ensembles._compute.os.replace", replace)
+    return calls
+
+
+def test_a_crash_while_writing_leaves_the_old_file_whole_and_nothing_else(tmp_path, monkeypatch):
+    write_members(tmp_path, a=1.0, b=3.0)
+    ensemble = lambda: AverageEnsemble(["a", "b"], name="e")  # noqa: E731
+    report_of(tmp_path, ensemble(), members=("a", "b"))
+    before = (tmp_path / "e.jsonl").read_bytes()
+    write_member(tmp_path, "b", forecasts(HAND.issue_days(), 5.0, windows=HAND), HAND)
+    failing_on(monkeypatch, 2)  # the manifest, then the records
+    with pytest.raises(OSError, match="the disk is gone"):
+        report_of(tmp_path, ensemble(), members=("a", "b"))
+    assert (tmp_path / "e.jsonl").read_bytes() == before
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("call", [1, 2], ids=["before the manifest", "between the two writes"])
+def test_a_crash_on_the_first_write_doesnt_refuse_every_later_run(tmp_path, monkeypatch, call):
+    write_members(tmp_path, a=1.0, b=3.0)
+    ensemble = lambda: AverageEnsemble(["a", "b"], name="e")  # noqa: E731
+    with monkeypatch.context() as patched:
+        failing_on(patched, call)
+        with pytest.raises(OSError, match="the disk is gone"):
+            report_of(tmp_path, ensemble(), members=("a", "b"))
+    assert not (tmp_path / "e.jsonl").exists()
+    report = report_of(tmp_path, ensemble(), members=("a", "b"))
+    assert counts_of(report).loc["e", "produced"] == 4 * DAY
 
 
 def test_the_same_member_results_give_the_same_bytes_whatever_the_order_on_file(tmp_path):
@@ -1870,7 +2126,6 @@ def experiment(tmp_path, df):
 
     def ensemble(**params):
         return {"class": "AverageEnsemble", "params": params}
-        AverageEnsemble(["a", "b"], name="fine"),  # reported first: what comes after it is no more known for that
 
     config = {
         "data_pipeline": {
@@ -1930,80 +2185,6 @@ def test_workflow_round_trip_keeps_the_ensembles_and_epf_report_prints_the_choic
     workflow = Workflow.load(path)
     assert [e.name for e in workflow._build_model_pipeline().ensembles] == ["top2", "plain"]
     saved = tmp_path / "saved.yaml"
-def test_records_outside_the_windows_or_with_another_tag_are_read_by_nothing(tmp_path):
-    """A resumed file can hold them. A report of the member leaves them out, so the ensemble must."""
-    outside = forecasts([plus_days(HV[0], -3)], 1.0, windows=None)
-    for r in outside:
-        r["window"] = "validation"
-    for name, off in (("a", 1.0), ("b", 3.0)):
-        records = forecasts(HAND.issue_days(), off, windows=HAND)
-        for r in records:
-            if r["run_date"] == HT[0] and r["hour"] == 0:
-                r["window"] = "validation"  # on a test day
-            if r["run_date"] == HV[0] and r["hour"] == 0:
-                r["window"] = "test"  # on a validation day
-        write_member(tmp_path, name, [*outside, *records], HAND)
-    report = report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
-    assert keyed(records_of(report, "e")).keys() == keyed(records_of(report, "a")).keys()
-    assert keyed(records_of(report.validation, "e")).keys() == keyed(records_of(report.validation, "a")).keys()
-    written = stored(tmp_path / "e.jsonl")
-    assert min(r["run_date"] for r in written) == HV[0]
-    assert (HT[0], 0) not in {(r["run_date"], r["hour"]) for r in written}
-    assert (HV[0], 0) not in {(r["run_date"], r["hour"]) for r in written}
-
-
-def test_day_in_test_comes_from_the_first_member_that_holds_the_key(tmp_path):
-    days = days_of(*HT)
-    write_member(tmp_path, "a", forecasts(days, 1.0))
-    later = [{**r, "day_in_test": r["day_in_test"] + 100} for r in forecasts(days, 3.0)]
-    write_member(tmp_path, "b", later)
-    report_of(tmp_path, AverageEnsemble(["a", "b"], name="first_a"), members=("a", "b"), test=HT)
-    report_of(tmp_path, AverageEnsemble(["b", "a"], name="first_b"), members=("a", "b"), test=HT)
-    assert {r["day_in_test"] for r in stored(tmp_path / "first_a.jsonl")} == {0, 1, 2, 3}
-    assert {r["day_in_test"] for r in stored(tmp_path / "first_b.jsonl")} == {100, 101, 102, 103}
-
-
-def failing_on(monkeypatch, call):
-    """`os.replace` as a crash at its `call`-th use from now on."""
-    real = os.replace
-    calls = []
-
-    def replace(source, destination):
-        calls.append(destination)
-        if len(calls) == call:
-            raise OSError("the disk is gone")
-        real(source, destination)
-
-    monkeypatch.setattr("epftoolbox2.ensembles._compute.os.replace", replace)
-    return calls
-
-
-def test_a_crash_while_writing_leaves_the_old_file_whole_and_nothing_else(tmp_path, monkeypatch):
-    write_members(tmp_path, a=1.0, b=3.0)
-    ensemble = lambda: AverageEnsemble(["a", "b"], name="e")  # noqa: E731
-    report_of(tmp_path, ensemble(), members=("a", "b"))
-    before = (tmp_path / "e.jsonl").read_bytes()
-    write_member(tmp_path, "b", forecasts(HAND.issue_days(), 5.0, windows=HAND), HAND)
-    failing_on(monkeypatch, 2)  # the manifest, then the records
-    with pytest.raises(OSError, match="the disk is gone"):
-        report_of(tmp_path, ensemble(), members=("a", "b"))
-    assert (tmp_path / "e.jsonl").read_bytes() == before
-    assert list(tmp_path.glob("*.tmp")) == []
-
-
-@pytest.mark.parametrize("call", [1, 2], ids=["before the manifest", "between the two writes"])
-def test_a_crash_on_the_first_write_doesnt_refuse_every_later_run(tmp_path, monkeypatch, call):
-    write_members(tmp_path, a=1.0, b=3.0)
-    ensemble = lambda: AverageEnsemble(["a", "b"], name="e")  # noqa: E731
-    with monkeypatch.context() as patched:
-        failing_on(patched, call)
-        with pytest.raises(OSError, match="the disk is gone"):
-            report_of(tmp_path, ensemble(), members=("a", "b"))
-    assert not (tmp_path / "e.jsonl").exists()
-    report = report_of(tmp_path, ensemble(), members=("a", "b"))
-    assert counts_of(report).loc["e", "produced"] == 4 * DAY
-
-
     workflow.save(saved)
     written = yaml.safe_load(saved.read_text())["model_pipeline"]["ensembles"]
     assert [c["params"]["name"] for c in written] == ["top2", "plain"]

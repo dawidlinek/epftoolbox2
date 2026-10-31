@@ -608,11 +608,14 @@ def test_mcs_with_another_alpha_adds_its_set(full_year):
     assert (table["in_95"] == (table["p_value"] > 0.05)).all()
 
 
-def test_mcs_of_identical_models_raises_naming_them():
+def test_mcs_gives_exact_clones_one_result():
     records = forecast_records(1, SHORT)
-    results = {"a": records, "b": forecast_records(2, SHORT), "copy": records}
-    with pytest.raises(ValueError, match="a, b, copy"):
-        EvaluationReport(results, []).mcs(reps=100)
+    results = {"a": records, "b": forecast_records(2, SHORT), "c": forecast_records(3, SHORT)}
+    without = EvaluationReport(results, []).mcs(reps=100).set_index("model")
+    table = EvaluationReport({**results, "copy": records}, []).mcs(reps=100).set_index("model")
+    assert list(table.loc[list(without.index), "p_value"]) == list(without["p_value"])
+    assert table.loc["copy", "p_value"] == table.loc["a", "p_value"]
+    assert table.attrs["clones"] == [["a", "copy"]]
 
 
 def test_mcs_needs_two_common_days():
@@ -665,11 +668,15 @@ def test_ranks_on_the_keys_of_the_set(planted):
     assert list(table["rank"]) == [1, 2, 3]
 
 
-def test_ranks_of_identical_models_warn():
+def test_ranks_give_exact_clones_one_rank_and_one_chance_of_being_best():
     records = forecast_records(1, YEAR)
-    results = {"a": records, "copy": records, "b": forecast_records(2, YEAR)}
-    with pytest.warns(UserWarning, match="'a' and 'copy' have the same losses"):
-        EvaluationReport(results, []).ranks(reps=50)
+    results = {"a": records, "b": forecast_records(2, YEAR)}
+    without = EvaluationReport(results, []).ranks(reps=50).set_index("model")
+    table = EvaluationReport({"a": records, "copy": records, "b": results["b"]}, []).ranks(reps=50).set_index("model")
+    for column in ("rank", "p_best", "rank_low", "rank_high"):
+        assert list(table.loc[["a", "b"], column]) == list(without.loc[["a", "b"], column]), column
+        assert table.loc["copy", column] == table.loc["a", column], column
+    assert table.attrs["clones"] == [["a", "copy"]]
 
 
 def test_ranks_without_the_limiting_model(planted):

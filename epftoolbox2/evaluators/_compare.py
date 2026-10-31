@@ -6,12 +6,17 @@ of a day is the mean absolute error over the periods of that day that those fore
 
 Shared by the set-level evaluators and by the comparison methods of `EvaluationReport`, so that a column of `summary()`
 and the matching table give the same number.
+
+Exact clones, models with the same predictions on the keys compared, are one model to a test: an `AverageEnsemble` with `top=1`
+is a clone of what it chose as a matter of course. They count once in a Holm family (`adjust_family`), and a confidence set or a
+ranking is made without the extra copies and gives each twin the result of the one kept (`SetComparison.kept`, `.twin_of`).
+Nothing changes for a table without clones.
 """
 
 import functools
 import math
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -72,8 +77,8 @@ class LossPanel:
     """The absolute errors of every model on one grid of forecast keys.
 
     `errors[i, j]` is |prediction - actual| of model j on key i, NaN when the model has no forecast there or its
-    prediction or actual is not finite. Keys are sorted by (run_date, target_date, horizon, hour), so days are in
-    calendar order and every sum is the same however the records were written.
+    prediction or actual is not finite, and `predictions[i, j]` its prediction there. Keys are sorted by (run_date,
+    target_date, horizon, hour), so days are in calendar order and every sum is the same however the records were written.
 
     Raises ValueError when a frame lacks a key column, has a missing key, or holds a key twice (that forecast would count
     twice). A frame without rows is a model without forecasts.
@@ -97,6 +102,7 @@ class LossPanel:
 
         if not frames:
             self.errors = np.empty((0, len(self.models)))
+            self.predictions = np.empty((0, len(self.models)))
             self.hour = self.horizon = self._day = self._run_of_day = np.empty(0, dtype=np.int64)
             return
 
@@ -118,6 +124,7 @@ class LossPanel:
         position = position.ravel()
 
         self.errors = np.full((len(keys), len(self.models)), np.nan)
+        self.predictions = np.full((len(keys), len(self.models)), np.nan)
         reference = np.full(len(keys), np.nan)
         disagreeing = np.zeros(len(keys), dtype=bool)
         start = 0
@@ -133,6 +140,7 @@ class LossPanel:
             actual = np.asarray(df["actual"], dtype=float)
             finite = np.isfinite(prediction) & np.isfinite(actual)
             self.errors[rows[finite], self._column[name]] = np.abs(prediction[finite] - actual[finite])
+            self.predictions[rows[finite], self._column[name]] = prediction[finite]
 
             seen = reference[rows[finite]]
             disagreeing[rows[finite]] |= np.abs(seen - actual[finite]) > _ACTUAL_TOLERANCE * np.maximum(
@@ -176,6 +184,16 @@ class LossPanel:
         """The positions in `rows` where every one of `models` has a finite forecast."""
         columns = [self._column[m] for m in models]
         return rows[~np.isnan(self.errors[np.ix_(rows, columns)]).any(axis=1)]
+
+    def clone_groups(self, rows: np.ndarray, models: Sequence[str]) -> List[List[str]]:
+        """The groups of `models`, in their order, with exactly the same forecasts on the keys `rows`: the same keys held and
+        the same prediction on each, bit for bit. A model with no forecast there is nobody's clone."""
+        groups: Dict[bytes, List[str]] = {}
+        for model in models:
+            held = self.predictions[rows, self._column[model]]
+            if not np.isnan(held).all():
+                groups.setdefault((held + 0.0).tobytes(), []).append(model)  # + 0.0: -0.0 is the same prediction as 0.0
+        return [group for group in groups.values() if len(group) > 1]
 
     def daily(self, rows: np.ndarray, models: Sequence[str]) -> "DailyLosses":
         """Daily losses of `models` on exactly the keys in `rows`, which all of them must hold.
@@ -329,6 +347,38 @@ def adjust(p_values: Sequence[float], correction: Optional[str]) -> np.ndarray:
     return stats.holm(p) if correction == "holm" else np.full(p.shape, np.nan)
 
 
+def adjust_family(
+    panel: LossPanel,
+    rows: np.ndarray,
+    models: Sequence[str],
+    benchmark: str,
+    p_values: Sequence[float],
+    correction: Optional[str],
+) -> Tuple[np.ndarray, int, List[List[str]]]:
+    """`(adjusted p-values, m, clones)` of `models` against `benchmark`, each tested on the keys of `rows` it shares with it.
+
+    A family holds distinct tests. A clone repeats its twin's test and shares its adjusted p-value, and a clone of the benchmark
+    tests nothing, so neither counts in `m`: an ensemble with `top=1` in the table must not change a verdict about another model.
+    Without clones this is `adjust` and the number of finite p-values.
+    """
+    p = np.asarray(p_values, dtype=float)
+    clones = panel.clone_groups(rows, [benchmark, *models])
+    if not clones:
+        return adjust(p, correction), int(np.isfinite(p).sum()), []
+    kept = {name: name for name in models}
+    kept.update({name: group[0] for group in clones for name in group})
+    family = [i for i, name in enumerate(models) if kept[name] == name]
+    adjusted = np.full(p.shape, np.nan)
+    adjusted[family] = adjust(p[family], correction)
+    position = {name: i for i, name in enumerate(models)}
+    for i, name in enumerate(models):
+        if kept[name] == benchmark:
+            adjusted[i] = 1.0 if correction == "holm" else np.nan
+        else:
+            adjusted[i] = adjusted[position[kept[name]]]
+    return adjusted, int(np.isfinite(p[family]).sum()), clones
+
+
 def verdict(pair: PairComparison, p_value: float, alpha: float) -> Optional[str]:
     """`better`, `worse` or `no difference` for a model against its benchmark, `p_value` being the one to read at `alpha`.
 
@@ -367,11 +417,25 @@ def warn_if_short(n_days: int, stacklevel: int = 2) -> None:
 
 @dataclass(frozen=True)
 class SetComparison:
-    """Models on the keys all of them hold. `limited_by`: how many forecasts each model lacks against the others."""
+    """Models on the keys all of them hold. `limited_by`: how many forecasts each model lacks against the others. `clones`:
+    the groups of models with the same predictions on those keys. A kernel takes the columns `kept`, the first of each group and
+    every other model, and `twin_of` gives each model's place among them."""
 
     models: List[str]
     daily: DailyLosses
     limited_by: Dict[str, int]
+    clones: Tuple[Tuple[str, ...], ...] = ()
+
+    @property
+    def kept(self) -> List[int]:
+        extra = {name for group in self.clones for name in group[1:]}
+        return [j for j, name in enumerate(self.models) if name not in extra]
+
+    @property
+    def twin_of(self) -> np.ndarray:
+        first = {name: group[0] for group in self.clones for name in group}
+        place = {self.models[j]: i for i, j in enumerate(self.kept)}
+        return np.array([place[first.get(name, name)] for name in self.models], dtype=int)
 
 
 def compare_set(panel: LossPanel, models: Sequence[str], rows: np.ndarray) -> SetComparison:
@@ -381,15 +445,31 @@ def compare_set(panel: LossPanel, models: Sequence[str], rows: np.ndarray) -> Se
     union = held.any(axis=1).sum()
     short = {m: int(union - held[:, j].sum()) for j, m in enumerate(models)}
     limited_by = dict(sorted(((m, k) for m, k in short.items() if k > 0), key=lambda item: (-item[1], item[0])))
-    return SetComparison(list(models), panel.daily(rows[held.all(axis=1)], models), limited_by)
+    common = rows[held.all(axis=1)]
+    clones = tuple(tuple(group) for group in panel.clone_groups(common, models))
+    return SetComparison(list(models), panel.daily(common, models), limited_by, clones)
 
 
 def confidence_set(
     compared: SetComparison, alpha: float, statistic: str, block: float, reps: int, seed: int
 ) -> stats.MCSResult:
-    """The model confidence set of `compared`. Raises ValueError on a degenerate set, naming the models."""
+    """The model confidence set of `compared`, in which twins have one result: the set is made without the extra copies, whose
+    difference has no variance, and twins fall together. Raises ValueError on a degenerate set, naming the models."""
     indices = bootstrap_indices(compared.daily.n_days, block, reps, seed, kind="stationary")
+    kept = compared.kept
+    names = [compared.models[j] for j in kept]
+    if len(kept) == 1:  # every model is the same model: nothing to tell apart
+        everyone = tuple(range(len(compared.models)))
+        ones = np.ones(len(everyone))
+        return stats.MCSResult(ones, everyone, alpha, statistic, compared.daily.n_days, indices.shape[0])
     try:
-        return stats.model_confidence_set(compared.daily.losses, alpha=alpha, statistic=statistic, indices=indices)
+        result = stats.model_confidence_set(
+            compared.daily.losses[:, kept], alpha=alpha, statistic=statistic, indices=indices
+        )
     except ValueError as exc:
-        raise ValueError(f"{exc} (models by column: {', '.join(compared.models)})") from exc
+        raise ValueError(f"{exc} (models by column: {', '.join(names)})") from exc
+    if len(kept) == len(compared.models):
+        return result
+    twin_of = compared.twin_of
+    order = tuple(j for place in result.elimination_order for j in np.flatnonzero(twin_of == place).tolist())
+    return replace(result, p_values=result.p_values[twin_of], elimination_order=order)

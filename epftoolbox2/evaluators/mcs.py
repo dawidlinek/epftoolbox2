@@ -17,7 +17,7 @@ class MCSEvaluator(SetEvaluator):
     The loss is the daily mean absolute error, with the daily losses of several horizons averaged per run date. Here the
     model set is the comparison, so one model with few forecasts shrinks the sample of all: check `n_days`, or use
     `report.mcs()`, which names the models that limited the keys and takes a subset. Needs at least three models; with
-    fewer the columns are NaN, with a warning. `in MCS` is a verdict, so it is empty per hour (the p-values are a heatmap
+    fewer the columns are NaN, with a warning. Exact clones are one model to the set, and each gets its result. `in MCS` is a verdict, so it is empty per hour (the p-values are a heatmap
     there) and below 30 days. `summary()` warns below 182 days.
 
     Args:
