@@ -201,7 +201,7 @@ What that means, for each (period, horizon):
   price raised by 100 on the issue day moved one forecast by 24.6 on a set of 13 days, and by 6.5 for a fixed list.
 
 <Aside type="caution" title="Revised series and the set of days">
-A value the function reads on a past day is the one in the frame, as for a [forecast's own cell](#published-columns), so a revision
+A value the function reads on a past day is the one in the frame, as for a [forecast's own cell](#publishedcolumns), so a revision
 made after the forecast's issue day moves its set of days and the forecast with it: in one synthetic case all 24 forecasts of a day,
 by 4 on average. `leakage_probe` and `verify` can't see that, since the revised value is known by the rule. If the function reads a
 series that gets revised, the backtest's sets are the archive's.
