@@ -325,7 +325,7 @@ def test_a_columns_hash_doesnt_depend_on_the_dtype_of_equal_values():
         "int": pd.Series(values, index=index).astype(int),
         "bool": pd.Series(values, index=index).astype(bool),
         "Int64": pd.Series(values, index=index).astype("Int64"),
-        "negative zero": pd.Series(values, index=index) * -1.0 * -1.0 + pd.Series([-0.0] * 6, index=index),
+        "negative zero": pd.Series([-0.0 if value == 0.0 else value for value in values], index=index),
     }
     expected = hash_column(frame, "x")
     assert expected == hash_columns(frame, ["x"])

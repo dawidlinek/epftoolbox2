@@ -2029,6 +2029,9 @@ def test_the_same_values_on_other_keys_are_no_clones():
     )
     panel = LossPanel({"a": frame(days[:2]), "b": frame(days[2:]), "c": frame(days[:2])})
     assert panel.clone_groups(panel.rows(), ["a", "b", "c"]) == [["a", "c"]]
+    other = key_frame(dict.fromkeys(days, 2.0))
+    against = LossPanel({"a": frame(days[:2]), "b": frame(days[2:]), "c": frame(days[:2]), "ben": other})
+    assert against.pair_clone_groups(against.rows(), ["a", "b", "c"], "ben") == [["a", "c"]]
 
 
 def test_clones_are_read_on_the_keys_compared(tmp_path):
