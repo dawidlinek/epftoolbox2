@@ -840,7 +840,7 @@ def test_a_full_validation_has_a_share_of_one_and_says_nothing(tmp_path):
     row = choice_of(report)
     assert row["validation_share"] == 1.0 and row["validation_forecasts"] == len(ALL_DAYS) * 3
     assert report.choices().attrs["limited_by"]["e"][0] == {}
-    assert not warned(caught, "rests on")
+    assert not warned(caught, "was made on")
 
 
 def test_a_members_holes_show_in_the_share_with_who_made_them(tmp_path):
@@ -851,6 +851,13 @@ def test_a_members_holes_show_in_the_share_with_who_made_them(tmp_path):
     assert report.choices().attrs["limited_by"]["e"][0] == {"b": (len(ALL_DAYS) - len(ALL_DAYS) // 2) * 3}
     shown = warned(caught, "of the")
     assert len(shown) == 1 and f"{row['validation_forecasts']} forecasts" in shown[0] and "'b'" in shown[0]
+
+
+def test_the_share_is_of_the_fullest_member_and_not_of_all_that_any_member_holds(tmp_path):
+    report, _ = thin(tmp_path, ALL_DAYS[:60], ALL_DAYS[10:], GAPPED)
+    assert choice_of(report)["validation_forecasts"] == 50 * 3
+    assert choice_of(report)["validation_share"] == 50 / 60
+    assert report.choices().attrs["limited_by"]["e"][0] == {"a": 10 * 3, "b": 10 * 3}
 
 
 @pytest.mark.parametrize("lost, warns", [(7, False), (8, True)])

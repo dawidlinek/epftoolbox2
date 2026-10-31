@@ -417,13 +417,13 @@ def _warn_if_thin(
     where = f"the choice on {validation} for the test period {test}"
     if share < MIN_VALIDATION_SHARE:
         warnings.warn(
-            f"{ensemble.name}: {where} rests on {forecasts} forecasts, {share:.0%} of the {fullest} the fullest member holds: "
+            f"{ensemble.name}: {where} was made on {forecasts} forecasts, {share:.0%} of the {fullest} the fullest member holds: "
             f"the holes of {limited_by} (forecasts lacking per member) decide what the members are compared on.",
             stacklevel=2,
         )
     if target_days < MIN_VALIDATION_DAYS:
         warnings.warn(
-            f"{ensemble.name}: {where} rests on {target_days} target days ({forecasts} forecasts), fewer than "
+            f"{ensemble.name}: {where} was made on {target_days} target days ({forecasts} forecasts), fewer than "
             f"{MIN_VALIDATION_DAYS}: read it as indicative only.",
             stacklevel=2,
         )
