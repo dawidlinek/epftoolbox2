@@ -75,6 +75,7 @@ CHOICE_COLUMNS = [
     "k",
     "validation_mae",
     "validation_forecasts",
+    "validation_share",
     "validation_start",
     "validation_end",
     "test_start",
@@ -862,8 +863,9 @@ class EvaluationReport:
         Columns: `ensemble`, `segment` (its place in `report.windows.segments`), `chosen` (the members kept, in member order),
         `k`, `validation_mae` (of the average of `chosen`), `validation_forecasts` (how many it was scored on: the keys every
         member holds with a finite prediction and actual, issued in the validation period for a day before the first test
-        issue day), `validation_start`, `validation_end`, and `test_start`, `test_end`, the test period served, which are
-        empty when no test period is known yet.
+        issue day), `validation_share` (those keys as a share of the ones the fullest member holds), `validation_start`,
+        `validation_end`, and `test_start`, `test_end`, the test period served. With no test period known yet those two are
+        empty, `segment` is 0, and `report.windows.segments` is empty.
 
         `df.attrs` holds, per ensemble and segment, `member_mae` (each member's MAE on those keys) and `k_mae` (with
         `top="validation"`, the MAE of the average of the best k members). A report of either window shows the same table.
@@ -878,7 +880,7 @@ class EvaluationReport:
                     {
                         "ensemble": ensemble,
                         **{key: row[key] for key in ("segment", "chosen", "k")},
-                        **{key: row[key] for key in ("validation_mae", "validation_forecasts")},
+                        **{key: row[key] for key in ("validation_mae", "validation_forecasts", "validation_share")},
                         "validation_start": row["validation"][0],
                         "validation_end": row["validation"][1],
                         "test_start": test[0],
@@ -889,7 +891,8 @@ class EvaluationReport:
                 if "k_mae" in row:
                     k_mae.setdefault(ensemble, {})[row["segment"]] = row["k_mae"]
         table = pd.DataFrame(rows, columns=CHOICE_COLUMNS)
-        table.attrs.update(member_mae=member_mae, k_mae=k_mae)
+        table.attrs.update(member_mae=member_mae, k_mae=k_mae, limited_by=limited_by)
+        limited_by: Dict[str, Dict[int, Dict[str, int]]] = {}
         return table
 
     def _result_freqs(self) -> Dict[str, str]:
@@ -905,6 +908,7 @@ class EvaluationReport:
             records.close()
             if first is not None:
                 freqs[name] = first.get("freq", ref.freq)
+                limited_by.setdefault(ensemble, {})[row["segment"]] = row["limited_by"]
         return freqs
 
     def iter_details(self) -> Iterator[Tuple[str, pd.DataFrame]]:

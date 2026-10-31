@@ -8,6 +8,7 @@ OLS on a few days. Numbers are compared bit for bit.
 import argparse
 import datetime
 import json
+import os
 import random
 import warnings
 from concurrent.futures import Future
@@ -20,6 +21,7 @@ import yaml
 
 from epftoolbox2 import cli
 from epftoolbox2.ensembles import AverageEnsemble, Ensemble
+from epftoolbox2.ensembles._compute import MIN_VALIDATION_DAYS, MIN_VALIDATION_SHARE
 from epftoolbox2.evaluators import (
     BiasEvaluator,
     DMEvaluator,
@@ -215,6 +217,8 @@ def member_manifest(windows=None, **fields):
         "data_timezone": "Europe/Warsaw",
         "test_start": windows.first_day if windows else "2024-05-01",
         "test_end": windows.last_day if windows else "2024-05-12",
+        "column_hashes": {"price": "one target", "load_d+1": "one load"},
+        "frame_hash": "one frame",
         "package_version": "2.3.0",
         "git_sha": None,
         "created_at": "then",
@@ -391,6 +395,15 @@ def test_a_difference_within_twelve_significant_digits_is_a_tie_and_beyond_them_
     assert ensemble.choose(np.column_stack([np.full(4, 1.0), np.full(4, 1.0 - 1e-14)]), actual).chosen == ["a"]
     assert ensemble.choose(np.column_stack([np.full(4, 1.0), np.full(4, 1.0 - 1e-11)]), actual).chosen == ["b"]
     assert ensemble.choose(np.column_stack([np.full(4, 1000.0), np.full(4, 1000.0 - 1e-11)]), actual).chosen == ["a"]
+    # The last digit that counts and the first that doesn't.
+    assert ensemble.choose(np.column_stack([np.full(4, 1.0), np.full(4, 1.0 - 1e-12)]), actual).chosen == ["b"]
+    assert ensemble.choose(np.column_stack([np.full(4, 1.0), np.full(4, 1.0 - 1e-13)]), actual).chosen == ["a"]
+
+
+def test_every_k_is_scored_on_its_average_in_member_order():
+    """0.3 + (0.2 + 0.1) and 0.1 + (0.2 + 0.3) differ in the last bit, and the ranking here is the reverse of member order."""
+    choice = AverageEnsemble(["a", "b", "c"], top="validation").choose(np.array([[0.3, 0.2, 0.1]]), np.zeros(1))
+    assert choice.k_mae[3] == float(np.mean([0.3, 0.2, 0.1])) != float(np.mean([0.1, 0.2, 0.3]))
 
 
 def test_validation_only_gives_a_row_with_no_test_period_and_no_forecasts(tmp_path):
@@ -399,8 +412,8 @@ def test_validation_only_gives_a_row_with_no_test_period_and_no_forecasts(tmp_pa
     days = windows.issue_days()
     for name, error in (("a", 2.0), ("b", 1.0)):
         write_member(tmp_path, name, forecasts(days, error, horizons=(1, 2), windows=windows), windows, horizon=2)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         report = report_of(
             tmp_path,
             AverageEnsemble(["a", "b"], top=1, name="e"),
@@ -409,6 +422,7 @@ def test_validation_only_gives_a_row_with_no_test_period_and_no_forecasts(tmp_pa
             members=("a", "b"),
             horizon=2,
         )
+    assert not [w for w in caught if "no forecasts" in str(w.message)]
     row = choice_of(report)
     assert row["chosen"] == ["b"] and row["validation_forecasts"] == 8 * DAY * 2
     assert row["test_start"] is None and row["test_end"] is None
@@ -683,6 +697,35 @@ def test_member_gaps_are_missing_for_the_ensemble_and_counted(tmp_path):
     assert all(r["prediction"] == r["actual"] + 2.0 for r in records_of(report, "e")), "never averaged over the rest"
 
 
+def test_member_gaps_are_counted_in_a_plain_run_too(tmp_path):
+    days = days_of(*HT)
+    write_member(tmp_path, "a", forecasts(days, 1.0))
+    write_member(tmp_path, "b", [r for r in forecasts(days, 3.0) if not (r["run_date"] == HT[0] and r["hour"] == 1)])
+    report = report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"), test=HT)
+    counts = counts_of(report)
+    assert counts.loc["e", "member_missing"] == 1
+    assert list(counts.loc["e", ["planned", "produced", "missing"]]) == [4 * DAY, 4 * DAY - 1, 1]
+
+
+@pytest.mark.parametrize("windows", [HAND, None], ids=["windows", "plain"])
+def test_results_of_a_longer_horizon_than_the_report_is_told_are_planned_from_the_manifests(tmp_path, windows):
+    days = windows.issue_days() if windows else days_of(*HT)
+    write_member(tmp_path, "a", forecasts(days, 1.0, horizons=(1, 2, 3), windows=windows), windows, horizon=3)
+    gap = lambda r: not (r["run_date"] == HT[0] and r["hour"] == 1)  # noqa: E731
+    held = [r for r in forecasts(days, 3.0, horizons=(1, 2, 3), windows=windows) if gap(r)]
+    write_member(tmp_path, "b", held, windows, horizon=3)
+    report = report_of(
+        tmp_path,
+        AverageEnsemble(["a", "b"], name="e"),
+        members=("a", "b"),
+        horizon=1,
+        **({} if windows else {"test": HT}),
+    )
+    counts = counts_of(report)
+    assert counts.loc["e", "member_missing"] == 3
+    assert list(counts.loc["e", ["planned", "produced"]]) == [4 * DAY * 3, 4 * DAY * 3 - 3]
+
+
 def test_a_key_every_member_lacks_is_missing_too(tmp_path):
     """Planned and produced add up with the reason, as for a model: 02:00 on a spring switch day, say."""
     days = HAND.issue_days()
@@ -775,6 +818,92 @@ def test_the_ranking_is_on_the_common_keys_and_not_on_each_members_own(tmp_path)
     assert report.choices().attrs["member_mae"]["e"][0] == {"a": 1.0, "b": 2.0}
 
 
+def thin(tmp_path, a_days, b_days, windows, hours=(0, 1, 2)):
+    """Results of `a` and `b` on those validation days, and on every test day."""
+    tested = windows.periods[-1][1]
+    days = [*a_days, *days_of(*tested)]
+    write_member(tmp_path, "a", forecasts(days, 1.0, hours, windows=windows), windows)
+    days = [*b_days, *days_of(*tested)]
+    write_member(tmp_path, "b", forecasts(days, 2.0, hours, windows=windows), windows)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = report_of(tmp_path, AverageEnsemble(["a", "b"], top=1, name="e"), members=("a", "b"))
+    return report, caught
+
+
+GAPPED = RunWindows.fixed(("2024-01-01", "2024-03-10"), ("2024-03-20", "2024-03-22"))
+ALL_DAYS = days_of(*GAPPED.validation)
+
+
+def test_a_full_validation_has_a_share_of_one_and_says_nothing(tmp_path):
+    report, caught = thin(tmp_path, ALL_DAYS, ALL_DAYS, GAPPED)
+    row = choice_of(report)
+    assert row["validation_share"] == 1.0 and row["validation_forecasts"] == len(ALL_DAYS) * 3
+    assert report.choices().attrs["limited_by"]["e"][0] == {}
+    assert not warned(caught, "rests on")
+
+
+def test_a_members_holes_show_in_the_share_with_who_made_them(tmp_path):
+    report, caught = thin(tmp_path, ALL_DAYS, ALL_DAYS[: len(ALL_DAYS) // 2], GAPPED)
+    row = choice_of(report)
+    assert row["validation_forecasts"] == len(ALL_DAYS) // 2 * 3
+    assert row["validation_share"] == row["validation_forecasts"] / (len(ALL_DAYS) * 3)
+    assert report.choices().attrs["limited_by"]["e"][0] == {"b": (len(ALL_DAYS) - len(ALL_DAYS) // 2) * 3}
+    shown = warned(caught, "of the")
+    assert len(shown) == 1 and f"{row['validation_forecasts']} forecasts" in shown[0] and "'b'" in shown[0]
+
+
+@pytest.mark.parametrize("lost, warns", [(7, False), (8, True)])
+def test_the_share_warns_below_ninety_percent(tmp_path, lost, warns):
+    """70 days: 7 lost leave exactly 0.9."""
+    _, caught = thin(tmp_path, ALL_DAYS, ALL_DAYS[lost:], GAPPED)
+    assert len(ALL_DAYS) == 70 and MIN_VALIDATION_SHARE == 0.9
+    assert bool(warned(caught, "of the")) is warns
+
+
+@pytest.mark.parametrize("count, warns", [(28, False), (27, True)])
+def test_the_target_days_warn_below_twenty_eight(tmp_path, count, warns):
+    first = "2024-01-01"
+    validation = (first, plus_days(first, count - 1))
+    windows = RunWindows.fixed(validation, ("2024-03-20", "2024-03-22"))
+    days = days_of(*validation)
+    report, caught = thin(tmp_path, days, days, windows)
+    assert MIN_VALIDATION_DAYS == 28
+    found = warned(caught, "target days")
+    assert bool(found) is warns
+    if warns:
+        assert f"{count} target days ({count * 3} forecasts)" in found[0]
+    assert choice_of(report)["validation_share"] == 1.0
+
+
+def test_distinct_target_days_are_counted_not_forecasts(tmp_path):
+    """Many horizons and periods on few days are still few days."""
+    windows = RunWindows.fixed(("2024-01-01", "2024-01-10"), ("2024-03-20", "2024-03-22"))
+    write_members(tmp_path, windows=windows, horizons=(1, 2, 3), a=1.0, b=2.0)
+    with pytest.warns(UserWarning, match="12 target days"):
+        report_of(tmp_path, AverageEnsemble(["a", "b"], top=1, name="e"), members=("a", "b"), horizon=3)
+
+
+def test_an_unchosen_members_holes_flip_the_choice_and_now_say_so(tmp_path):
+    """The intersection rule stays, so holes can decide the choice. What changed is that the table and a warning say it."""
+    windows = RunWindows.fixed(("2024-01-01", "2024-03-31"), ("2024-04-01", "2024-04-30"))
+    hard = lambda target_date: datetime.date.fromisoformat(target_date).day % 5 == 0  # noqa: E731
+    days = windows.issue_days()
+    write_member(tmp_path, "a", forecasts(days, 3.0, (0, 12), windows=windows), windows)
+    b_error = lambda run_date, target_date, *_: 30.0 if hard(target_date) else 1.0  # noqa: E731
+    write_member(tmp_path, "b", forecasts(days, b_error, (0, 12), windows=windows), windows)
+    no_holes = forecasts(days, 40.0, (0, 12), windows=windows)
+    write_member(tmp_path, "c", no_holes, windows)
+    ensemble = lambda: AverageEnsemble(["a", "b", "c"], top=1, name="e")  # noqa: E731
+    assert choice_of(report_of(tmp_path, ensemble()))["chosen"] == ["a"]
+    held = [r for r in no_holes if r["window"] == "test" or not hard(r["target_date"])]
+    write_member(tmp_path, "c", held, windows)
+    with pytest.warns(UserWarning, match=r"the holes of \{'c'"):
+        report = report_of(tmp_path, ensemble())
+    assert choice_of(report)["chosen"] == ["b"]
+    assert choice_of(report)["validation_share"] < 0.9
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------------------------------------------------
@@ -797,11 +926,47 @@ def test_top_without_validation_is_refused_before_any_fit(df, no_fit, kwargs, to
     assert no_fit == []
 
 
+def test_a_model_never_reads_an_ensembles_file_as_its_own_in_a_report(tmp_path):
+    """Its row wouldn't move when the members do: an old file is not a forecast of anything."""
+    write_members(tmp_path, a=1.0, b=3.0)
+    report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+    with pytest.raises(ManifestMismatchError, match="an ensemble's results"):
+        report_of(tmp_path, members=("a", "b", "e"))
+
+
+def test_a_top_ensemble_with_no_validation_fails_an_array_task_before_any_fit(tmp_path, experiment, no_fit):
+    path = experiment(model_index=0)
+    config = yaml.safe_load(path.read_text())
+    del config["model_pipeline"]["validation"]
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="no validation window"):
+        Workflow.load(path).run()
+    assert no_fit == []
+    assert not (tmp_path / "results").exists()
+
+
 def test_a_validation_on_file_is_not_a_validation_in_this_run(df, tmp_path, no_fit):
     write_members(tmp_path, a=1.0)
     with pytest.raises(ValueError, match="no validation window"):
         built(ols("a"), AverageEnsemble(["a"], top=1, name="e")).run(df, test=T, horizon=1, save_dir=str(tmp_path))
     assert no_fit == []
+
+
+def test_a_forecast_only_report_leaves_the_file_alone_and_may_read_what_chose(tmp_path):
+    write_members(tmp_path, a=2.0, b=1.0)
+    make = lambda: [AverageEnsemble(["a", "b"], name="e"), AverageEnsemble(["a", "b"], top=1, name="t")]  # noqa: E731
+    report_of(tmp_path, *make(), members=("a", "b"))
+    files = {
+        name: (tmp_path / name).read_bytes() for name in ("e.jsonl", "t.jsonl", "e.manifest.json", "t.manifest.json")
+    }
+    report = reporting(*make(), members=("a", "b")).report(
+        tmp_path, horizon=1, forecast_only=True, test_start=HT[0], test_end=HT[1]
+    )
+    assert {name: (tmp_path / name).read_bytes() for name in files} == files
+    assert choice_of(report, "t")["chosen"] == ["b"]
+    assert {r["run_date"] for r in records_of(report, "t")} == set(days_of(*HT))
+    assert all(r["prediction"] == r["actual"] + 1.0 for r in records_of(report, "t"))
+    assert all(r["prediction"] == r["actual"] + 1.5 for r in records_of(report, "e"))
 
 
 def test_a_report_with_no_validation_on_file_refuses_top(tmp_path):
@@ -902,6 +1067,10 @@ def test_an_ensemble_never_overwrites_a_models_results_and_a_model_never_resumes
         built(ols("e")).run(df, test=T, horizon=1, save_dir=str(other))
 
 
+ISSUED = {"issue_time": "11:45", "issue_timezone": "Europe/Warsaw", "unknown": "raise"}
+RULE = {"kind": "published", "time": "13:00", "days_before": 1, "timezone": None}
+
+
 @pytest.mark.parametrize(
     "field, value, message",
     [
@@ -911,11 +1080,17 @@ def test_an_ensemble_never_overwrites_a_models_results_and_a_model_never_resumes
         ("data_timezone", "Etc/GMT-1", "data_timezone"),
         ("data_columns_hash", "other data", "data hashes"),
         ("actuals", {"through": "2024-05-13", "hash": "other target"}, "a different target"),
+        ("column_hashes", {"price": "one target", "load_d+1": "revised load"}, r"columns they share.*load_d\+1"),
+        ("column_hashes", {"price": "other target", "wind_d+1": "wind"}, r"columns they share.*price"),
+        ("information_set", {**ISSUED, "issue_time": "23:00"}, "information sets.*23:00"),
+        ("information_set", {**ISSUED, "issue_timezone": "UTC"}, "information sets"),
+        ("information_set", {**ISSUED, "rules": {"auction": RULE}}, "information sets"),
+        ("information_set", None, "information sets.*none"),
     ],
 )
 def test_members_of_different_tasks_are_refused(tmp_path, field, value, message):
     days = HAND.issue_days()
-    actuals = {"actuals": {"through": "2024-05-13", "hash": "one target"}}
+    actuals = {"actuals": {"through": "2024-05-13", "hash": "one target"}, "information_set": ISSUED}
     write_member(tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND, **actuals)
     write_member(tmp_path, "b", forecasts(days, 2.0, windows=HAND), HAND, **{**actuals, field: value})
     with pytest.raises(ManifestMismatchError, match=message):
@@ -929,6 +1104,13 @@ def test_data_hashes_are_only_compared_on_the_same_columns(tmp_path):
     write_member(tmp_path, "b", forecasts(days, 2.0, windows=HAND), HAND, predictors=["y"], data_columns_hash="of y")
     report = report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
     assert report.summary().set_index("model").loc["e", "forecasts"] == 4 * DAY
+
+
+def test_two_frequencies_in_one_member_are_refused(tmp_path):
+    days = days_of(*HT)
+    write_member(tmp_path, "a", [*forecasts(days[:2], 1.0), *forecasts(days[2:], 1.0, freq="15min")])
+    with pytest.raises(ManifestMismatchError, match="several frequencies"):
+        report_of(tmp_path, AverageEnsemble(["a"], name="e"), members=("a",), test=HT)
 
 
 def test_members_with_records_of_another_frequency_are_refused_also_without_a_manifest(tmp_path):
@@ -948,8 +1130,9 @@ def test_members_on_different_data_are_refused_after_real_runs(df, tmp_path):
     members = ("a", "b", "other")
     with pytest.raises(ManifestMismatchError, match="data hashes"):
         report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=members)
-    # On other columns the hashes can't say, and the target's own hash and the actuals agree: the docs name this gap.
-    report_of(tmp_path, AverageEnsemble(["other", "b"], name="f"), members=members)
+    # `other` reads load too, so the column they share says it, though their columns differ.
+    with pytest.raises(ManifestMismatchError, match=r"columns they share.*load_d\+1"):
+        report_of(tmp_path, AverageEnsemble(["other", "b"], name="f"), members=members)
 
 
 def test_members_on_a_different_target_are_refused_after_real_runs(df, tmp_path):
@@ -957,7 +1140,7 @@ def test_members_on_a_different_target_are_refused_after_real_runs(df, tmp_path)
     moved["price"] = moved["price"] + 1.0
     built(ols("a")).run(df, test=T, horizon=1, save_dir=str(tmp_path))
     built(ols("b", SMALL)).run(moved, test=T, horizon=1, save_dir=str(tmp_path))
-    with pytest.raises(ManifestMismatchError, match="disagree on the `actual`"):
+    with pytest.raises(ManifestMismatchError, match="columns they share.*price"):
         report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"), test=T)
 
 
@@ -997,6 +1180,182 @@ def test_all_actuals_missing_is_no_common_key_either(tmp_path):
     write_member(tmp_path, "a", records, HAND)
     with pytest.raises(ValueError, match="nothing is ever chosen on nothing"):
         report_of(tmp_path, AverageEnsemble(["a"], top=1, name="e"), members=("a",))
+
+
+def shard(frame, name, predictors, directory, **windows):
+    built(ols(name, predictors)).run(frame, horizon=1, save_dir=str(directory), **windows)
+
+
+def with_noise(frame, column, before=None):
+    """`column` and its lags revised, as another version of the data would hold them, everywhere or before a day."""
+    out = frame.copy()
+    rng = np.random.default_rng(9)
+    for name in out.columns:
+        if name == column or name.startswith(f"{column}_d"):
+            noise = rng.normal(0, 80.0, len(out))
+            out[name] = out[name] + (noise if before is None else np.where(out.index < before, noise, 0.0))
+    return out
+
+
+def averaged(directory, a_predictors, b_predictors, **kwargs):
+    pipeline = built(ols("a", a_predictors), ols("b", b_predictors), AverageEnsemble(["a", "b"], name="e"))
+    return pipeline.report(directory, horizon=1, **kwargs)
+
+
+def warned(caught, text):
+    return [str(w.message) for w in caught if text in str(w.message)]
+
+
+@pytest.mark.parametrize("windows", [dict(test=T), dict(validation=V, test=T)], ids=["plain", "windows"])
+def test_a_column_two_members_read_differently_is_refused_after_real_runs(df, tmp_path, windows):
+    shard(df, "a", PREDICTORS, tmp_path, **windows)
+    shard(with_noise(df, "load"), "b", SMALL, tmp_path, **windows)
+    with pytest.raises(ManifestMismatchError, match=r"columns they share.*load_d\+1"):
+        averaged(tmp_path, PREDICTORS, SMALL, **({"test": T} if "validation" not in windows else {}))
+
+
+def test_a_target_revised_before_anything_read_is_refused_after_real_runs(df, tmp_path):
+    shard(df, "a", SMALL, tmp_path, test=T)
+    shard(with_noise(df, "price", before=pd.Timestamp("2023-02-01", tz=df.index.tz)), "b", WIND, tmp_path, test=T)
+    with pytest.raises(ManifestMismatchError, match="columns they share.*price"):
+        averaged(tmp_path, SMALL, WIND, test=T)
+
+
+@pytest.mark.parametrize("windows", [dict(test=T), dict(validation=V, test=T)], ids=["plain", "windows"])
+def test_a_column_only_one_member_reads_can_only_be_warned_about_after_real_runs(df, tmp_path, windows):
+    shard(df, "a", SMALL, tmp_path, **windows)
+    shard(with_noise(df, "wind"), "b", WIND, tmp_path, **windows)
+    with pytest.warns(UserWarning, match="their frames differ"):
+        report = averaged(tmp_path, SMALL, WIND, **({"test": T} if "validation" not in windows else {}))
+    assert counts_of(report).loc["e", "produced"] == 3 * DAY
+
+
+def test_members_of_one_frame_on_other_columns_say_nothing(df, tmp_path):
+    for name, predictors in (("a", SMALL), ("b", WIND)):
+        shard(df, name, predictors, tmp_path, test=T)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        averaged(tmp_path, SMALL, WIND, test=T)
+    assert (
+        not warned(caught, "frames differ") and not warned(caught, "different days") and not warned(caught, "manifest")
+    )
+
+
+def test_validation_first_then_the_test_next_to_one_run_of_both_says_nothing(df, tmp_path):
+    shard(df, "a", SMALL, tmp_path, validation=V)
+    shard(df, "a", SMALL, tmp_path, validation=V, test=T)
+    shard(df, "b", WIND, tmp_path, validation=V, test=T)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        averaged(tmp_path, SMALL, WIND)
+    assert not warned(caught, "frames differ") and not warned(caught, "different days")
+
+
+def test_the_column_hashes_cover_both_windows_after_a_manifest_grows(df, tmp_path):
+    shard(df, "a", SMALL, tmp_path / "grown", validation=V)
+    shard(df, "a", SMALL, tmp_path / "grown", validation=V, test=T)
+    shard(df, "a", SMALL, tmp_path / "once", validation=V, test=T)
+    grown = json.loads(manifest_path(tmp_path / "grown" / "a.jsonl").read_text())
+    once = json.loads(manifest_path(tmp_path / "once" / "a.jsonl").read_text())
+    assert grown["column_hashes"] == once["column_hashes"] and grown["frame_hash"] == once["frame_hash"]
+
+
+def test_a_shard_with_another_issue_time_is_refused_after_real_runs(df, tmp_path):
+    late = InformationSet("23:00", "Europe/Warsaw", rules=RULES)
+    built(ols("a", SMALL), info=INFO).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
+    built(ols("b", WIND), info=late).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
+    with pytest.raises(ManifestMismatchError, match="information sets.*23:00"):
+        averaged(tmp_path, SMALL, WIND)
+    other = tmp_path / "other"
+    built(ols("a", SMALL), info=INFO).run(df, validation=V, test=T, horizon=1, save_dir=str(other))
+    built(ols("b", WIND)).run(df, validation=V, test=T, horizon=1, save_dir=str(other))
+    with pytest.raises(ManifestMismatchError, match="information sets.*none"):
+        averaged(other, SMALL, WIND)
+
+
+@pytest.mark.parametrize(
+    "fields, message",
+    [
+        (
+            dict(data_columns_hash="other data", column_hashes={"price": "revised", "load_d+1": "revised"}),
+            "columns they share",
+        ),
+        (dict(information_set=ISSUED), "information sets"),
+        (dict(target="load"), "target"),
+    ],
+)
+def test_a_nested_average_is_checked_on_its_leaf_models(tmp_path, fields, message):
+    days = HAND.issue_days()
+    write_member(tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND)
+    write_member(
+        tmp_path,
+        "c",
+        forecasts(days, 3.0, windows=HAND),
+        HAND,
+        predictors=["wind_d+1"],
+        column_hashes={"wind_d+1": "wind"},
+    )
+    write_member(tmp_path, "b", forecasts(days, 2.0, windows=HAND), HAND, **fields)
+    with pytest.raises(ManifestMismatchError, match=message):
+        report_of(tmp_path, AverageEnsemble(["a", "b"], name="direct"))
+    outer = [AverageEnsemble(["a", "c"], name="inner"), AverageEnsemble(["inner", "b"], name="outer")]
+    with pytest.raises(ManifestMismatchError, match=message):
+        report_of(tmp_path, *outer)
+    deeper = [
+        AverageEnsemble(["a"], name="one"),
+        AverageEnsemble(["one", "c"], name="two"),
+        AverageEnsemble(["two"], name="three"),
+        AverageEnsemble(["b", "three"], name="four"),
+    ]
+    with pytest.raises(ManifestMismatchError, match=message):
+        report_of(tmp_path, *deeper)
+
+
+def test_hashes_through_different_days_are_not_compared_and_say_so(tmp_path):
+    days = HAND.issue_days()
+    shifted = dict(
+        test_end="2024-05-13",
+        data_columns_hash="other data",
+        column_hashes={"price": "other target", "load_d+1": "other load"},
+        frame_hash="other frame",
+        actuals={"through": "2024-05-14", "hash": "other target"},
+    )
+    write_member(
+        tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND, actuals={"through": "2024-05-13", "hash": "one"}
+    )
+    write_member(tmp_path, "b", forecasts(days, 2.0, windows=HAND), HAND, **shifted)
+    with pytest.warns(UserWarning, match="through different days"):
+        report = report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+    assert counts_of(report).loc["e", "produced"] == 4 * DAY
+
+
+def test_manifests_older_than_the_column_hashes_are_warned_about(tmp_path):
+    days = HAND.issue_days()
+    for name in ("a", "b"):
+        path = write_member(tmp_path, name, forecasts(days, 1.0, windows=HAND), HAND)
+        held = json.loads(manifest_path(path).read_text())
+        del held["column_hashes"], held["frame_hash"]
+        manifest_path(path).write_text(json.dumps(held))
+    with pytest.warns(UserWarning, match=r"manifests of \['a', 'b'\] have no `column_hashes`"):
+        report = report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+    assert counts_of(report).loc["e", "produced"] == 4 * DAY
+
+
+@pytest.mark.parametrize("without", [("b",), ("a", "b")], ids=["one", "all"])
+def test_members_without_a_manifest_are_warned_about(tmp_path, without):
+    for name in ("a", "b"):
+        write_member(tmp_path, name, forecasts(days_of(*HT), 1.0))
+    for name in without:
+        manifest_path(tmp_path / f"{name}.jsonl").unlink()
+    with pytest.warns(UserWarning, match="no manifest for"):
+        report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"), test=HT)
+
+
+def test_results_held_in_memory_are_not_warned_about(df):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        built(ols("a"), ols("b", SMALL), AverageEnsemble(["a", "b"], name="e")).run(df, test=T, horizon=1)
+    assert not warned(caught, "manifest")
 
 
 def test_a_plain_average_of_ensembles_is_the_mean_of_their_means(df):
@@ -1080,6 +1439,18 @@ def test_a_report_may_name_part_of_what_is_on_file(tmp_path):
     assert validation_only.choices().equals(whole.choices())
     assert (tmp_path / "e.jsonl").read_bytes() == records, "the file holds what is on file, whatever a report names"
     assert without_timestamps(tmp_path / "e.manifest.json") == manifest
+
+
+def test_a_reports_segments_are_what_the_rows_of_choices_count_in_whatever_it_names(tmp_path):
+    windows = yearly_members(tmp_path, ("2024-01-05", "2025-12-26"), a_better_in={0})
+    ensemble = lambda: AverageEnsemble(["a", "b"], top=1, name="e")  # noqa: E731
+    for kwargs in (dict(), dict(test=windows.test)):
+        report = report_of(tmp_path, ensemble(), members=("a", "b"), **kwargs)
+        assert report.windows.segments == windows.segments and report.windows.mode == windows.mode
+        assert list(report.choices()["segment"]) == [0, 1]
+        for _, row in report.choices().iterrows():
+            assert report.windows.segments[row["segment"]].test == (row["test_start"], row["test_end"])
+    assert report.window == "test" and report.windows.validation is None, "it still holds the windows it names"
 
 
 def test_a_run_that_names_fewer_windows_keeps_a_plain_average_on_all_of_them(df, tmp_path):
@@ -1322,7 +1693,6 @@ def test_a_missing_member_raises_and_allow_missing_leaves_the_ensemble_out(tmp_p
         AverageEnsemble(["a", "b", "c"], name="uses_c"),
         AverageEnsemble(["a", "b", "c"], top=1, name="chooses_with_c"),
         AverageEnsemble(["uses_c", "a"], name="nested_on_c"),
-        AverageEnsemble(["a", "b"], name="fine"),
     )
     with pytest.raises(FileNotFoundError, match="c"):
         make().report(tmp_path, horizon=1)
@@ -1500,6 +1870,7 @@ def experiment(tmp_path, df):
 
     def ensemble(**params):
         return {"class": "AverageEnsemble", "params": params}
+        AverageEnsemble(["a", "b"], name="fine"),  # reported first: what comes after it is no more known for that
 
     config = {
         "data_pipeline": {
@@ -1559,6 +1930,80 @@ def test_workflow_round_trip_keeps_the_ensembles_and_epf_report_prints_the_choic
     workflow = Workflow.load(path)
     assert [e.name for e in workflow._build_model_pipeline().ensembles] == ["top2", "plain"]
     saved = tmp_path / "saved.yaml"
+def test_records_outside_the_windows_or_with_another_tag_are_read_by_nothing(tmp_path):
+    """A resumed file can hold them. A report of the member leaves them out, so the ensemble must."""
+    outside = forecasts([plus_days(HV[0], -3)], 1.0, windows=None)
+    for r in outside:
+        r["window"] = "validation"
+    for name, off in (("a", 1.0), ("b", 3.0)):
+        records = forecasts(HAND.issue_days(), off, windows=HAND)
+        for r in records:
+            if r["run_date"] == HT[0] and r["hour"] == 0:
+                r["window"] = "validation"  # on a test day
+            if r["run_date"] == HV[0] and r["hour"] == 0:
+                r["window"] = "test"  # on a validation day
+        write_member(tmp_path, name, [*outside, *records], HAND)
+    report = report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+    assert keyed(records_of(report, "e")).keys() == keyed(records_of(report, "a")).keys()
+    assert keyed(records_of(report.validation, "e")).keys() == keyed(records_of(report.validation, "a")).keys()
+    written = stored(tmp_path / "e.jsonl")
+    assert min(r["run_date"] for r in written) == HV[0]
+    assert (HT[0], 0) not in {(r["run_date"], r["hour"]) for r in written}
+    assert (HV[0], 0) not in {(r["run_date"], r["hour"]) for r in written}
+
+
+def test_day_in_test_comes_from_the_first_member_that_holds_the_key(tmp_path):
+    days = days_of(*HT)
+    write_member(tmp_path, "a", forecasts(days, 1.0))
+    later = [{**r, "day_in_test": r["day_in_test"] + 100} for r in forecasts(days, 3.0)]
+    write_member(tmp_path, "b", later)
+    report_of(tmp_path, AverageEnsemble(["a", "b"], name="first_a"), members=("a", "b"), test=HT)
+    report_of(tmp_path, AverageEnsemble(["b", "a"], name="first_b"), members=("a", "b"), test=HT)
+    assert {r["day_in_test"] for r in stored(tmp_path / "first_a.jsonl")} == {0, 1, 2, 3}
+    assert {r["day_in_test"] for r in stored(tmp_path / "first_b.jsonl")} == {100, 101, 102, 103}
+
+
+def failing_on(monkeypatch, call):
+    """`os.replace` as a crash at its `call`-th use from now on."""
+    real = os.replace
+    calls = []
+
+    def replace(source, destination):
+        calls.append(destination)
+        if len(calls) == call:
+            raise OSError("the disk is gone")
+        real(source, destination)
+
+    monkeypatch.setattr("epftoolbox2.ensembles._compute.os.replace", replace)
+    return calls
+
+
+def test_a_crash_while_writing_leaves_the_old_file_whole_and_nothing_else(tmp_path, monkeypatch):
+    write_members(tmp_path, a=1.0, b=3.0)
+    ensemble = lambda: AverageEnsemble(["a", "b"], name="e")  # noqa: E731
+    report_of(tmp_path, ensemble(), members=("a", "b"))
+    before = (tmp_path / "e.jsonl").read_bytes()
+    write_member(tmp_path, "b", forecasts(HAND.issue_days(), 5.0, windows=HAND), HAND)
+    failing_on(monkeypatch, 2)  # the manifest, then the records
+    with pytest.raises(OSError, match="the disk is gone"):
+        report_of(tmp_path, ensemble(), members=("a", "b"))
+    assert (tmp_path / "e.jsonl").read_bytes() == before
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("call", [1, 2], ids=["before the manifest", "between the two writes"])
+def test_a_crash_on_the_first_write_doesnt_refuse_every_later_run(tmp_path, monkeypatch, call):
+    write_members(tmp_path, a=1.0, b=3.0)
+    ensemble = lambda: AverageEnsemble(["a", "b"], name="e")  # noqa: E731
+    with monkeypatch.context() as patched:
+        failing_on(patched, call)
+        with pytest.raises(OSError, match="the disk is gone"):
+            report_of(tmp_path, ensemble(), members=("a", "b"))
+    assert not (tmp_path / "e.jsonl").exists()
+    report = report_of(tmp_path, ensemble(), members=("a", "b"))
+    assert counts_of(report).loc["e", "produced"] == 4 * DAY
+
+
     workflow.save(saved)
     written = yaml.safe_load(saved.read_text())["model_pipeline"]["ensembles"]
     assert [c["params"]["name"] for c in written] == ["top2", "plain"]

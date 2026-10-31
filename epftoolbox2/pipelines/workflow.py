@@ -186,6 +186,15 @@ class Workflow:
             )
         mp = self._build_model_pipeline()
         if array_task:
+            # Better now than when `epf report` runs, after every task has.
+            self._build_model_pipeline(all_models=True)._check_before_any_fit(
+                save_dir,
+                self.model_validation,
+                self.model_test,
+                self.model_test_start,
+                self.model_test_end,
+                self.model_forecast_only,
+            )
             # Ensembles, evaluators such as rMAE and the exporters need every model; report() runs them after all tasks.
             mp.ensembles, mp.evaluators, mp.exporters = [], [], []
         dp = self._build_data_pipeline()

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date
 from typing import Callable, List, Optional, Sequence, Tuple, Union, Dict, Any
 from pathlib import Path
@@ -340,6 +341,12 @@ class ModelPipeline:
             self._check_benchmarks()
         self._check_ensembles(save_dir)
         paths = {model.name: self.results_path(save_dir, model) for model in self.models}
+        for name, path in paths.items():
+            if is_ensemble_manifest(manifest_path(path)):
+                raise ManifestMismatchError(
+                    f"Model {name!r}: {path} is an ensemble's results, which go stale as soon as their members move unless "
+                    "they are computed again. Add it to this pipeline with add_ensemble, or rename the model."
+                )
         stored = self._stored_windows({name: path for name, path in paths.items() if path.exists()})
         windows, test_start, test_end = self._resolve_windows(
             validation, test, test_start, test_end, forecast_only, required=stored is None or forecast_only
@@ -403,8 +410,9 @@ class ModelPipeline:
         choices: Dict[str, List[Dict]] = {}
         reported = self._ensembles_with_their_members(set(refs))
         if reported:
-            self._refuse_top_without_validation(reported, None if forecast_only else stored)
-            computed, choices = self._compute_ensembles(reported, refs, None if forecast_only else stored, save_dir)
+            self._refuse_top_without_validation(reported, stored)
+            # A forecast-only report covers some days of what is on file: the file on disk holds all of it.
+            computed, choices = self._compute_ensembles(reported, refs, stored, None if forecast_only else save_dir)
             refs.update(computed)
             for name, ref in computed.items():
                 if ref.by_window is None:
@@ -459,6 +467,21 @@ class ModelPipeline:
         for ensemble in self.ensembles:
             visit(ensemble, ())
         return list(ordered.values())
+
+    def _check_before_any_fit(
+        self,
+        save_dir: Union[str, Path, None],
+        validation: Union[Tuple[Any, Any], str, None],
+        test: Optional[Tuple[Any, Any]],
+        test_start: Optional[str],
+        test_end: Optional[str],
+        forecast_only: bool,
+    ) -> None:
+        """What `run` would refuse about the ensembles, for an array task, which runs one model and leaves them to the report."""
+        self._check_model_names()
+        windows, _, _ = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
+        self._check_ensembles(save_dir)
+        self._refuse_top_without_validation(self.ensembles, windows)
 
     def _check_ensembles(self, save_dir: Union[str, Path, None]) -> None:
         """What can be known about the ensembles before any fit, whatever the windows."""
@@ -517,6 +540,7 @@ class ModelPipeline:
         """`({name: ref} of what a report shows, {name: rows of report.choices()})`, in the order they were added."""
         like = next(iter(refs.values()))
         held = dict(refs)
+        leaves: Dict[str, List[str]] = {}
         test_only_names: set = set()
         computed: Dict[str, ModelResultRef] = {}
         choices: Dict[str, List[Dict]] = {}
@@ -525,7 +549,10 @@ class ModelPipeline:
             if test_only:
                 test_only_names.add(ensemble.name)
             path = self.results_path(save_dir, ensemble) if save_dir else None
-            result = compute(ensemble, held, stored, like, path, test_only)
+            leaves[ensemble.name] = list(
+                dict.fromkeys(leaf for member in ensemble.members for leaf in leaves.get(member, [member]))
+            )
+            result = compute(ensemble, held, stored, like, path, test_only, leaves[ensemble.name])
             held[ensemble.name] = result.ref
             # A ref with no window to show, as a `top` ensemble has in a validation report, is not a row of its tables.
             if result.ref.by_window is None or result.ref.by_window:
@@ -533,6 +560,12 @@ class ModelPipeline:
             if result.choices:
                 choices[ensemble.name] = result.choices
         order = [ensemble.name for ensemble in self.ensembles]
+        if choices and stored is not None:
+            # What the rows of `choices()` count in, whichever part of what is on file this run or report names.
+            for ref in [*refs.values(), *computed.values()]:
+                for part in [ref, *(ref.by_window or {}).values()]:
+                    if part.windows is not None:
+                        part.windows = replace(part.windows, mode=stored.mode, segments=stored.segments)
         return {name: computed[name] for name in order if name in computed}, {
             name: choices[name] for name in order if name in choices
         }

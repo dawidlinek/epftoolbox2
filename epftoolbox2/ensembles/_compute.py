@@ -7,6 +7,9 @@ numbers read from its records, and the choice per test period with the validatio
 
 What makes a choice is read from `RunWindows.segments` and `Segment.serves`, never from a record's `window`: the validation
 days of a later segment are test days of the one before it, and stay tagged "test".
+
+What may be averaged is read from the manifests of the leaf models, the models under any nesting (`_check_members_agree`): one
+target, horizon, frequency, time zone and information set, and one value in every column two of them read.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import os
 import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -41,6 +44,11 @@ logger = get_logger(__name__)
 
 # In `forecast_counts()`: a planned forecast that a member the ensemble averages has no finite prediction for.
 SKIP_MEMBER_MISSING = "member_missing"
+
+# A choice below either of these is still made, with a warning: on the keys all members hold, as a share of those the fullest
+# member holds, and on how many distinct target days. A member's holes can decide what is left to compare on.
+MIN_VALIDATION_SHARE = 0.9
+MIN_VALIDATION_DAYS = 28
 
 _COLUMNS = ["run_date", "target_date", "hour", "horizon", "day_in_test", "prediction", "actual", "freq", "window"]
 
@@ -105,6 +113,11 @@ class _Grid:
         flags = [serves(_iso(r), _iso(t)) for r, t in zip(run.tolist(), target.tolist())]
         return np.asarray(flags, dtype=bool)[inverse]
 
+    def target_days(self, keys: np.ndarray) -> int:
+        """How many distinct target days `keys`, positions on the grid, are for."""
+        codes = self.codes[keys]
+        return len(np.unique((codes >> _RUN_SHIFT) + ((codes >> _TARGET_SHIFT) & _LOW_16)))
+
     def issued_in(self, period: Tuple[str, str]) -> np.ndarray:
         run = self.codes >> _RUN_SHIFT
         return (run >= _ordinal(period[0])) & (run <= _ordinal(period[1]))
@@ -117,16 +130,19 @@ def compute(
     like: ModelResultRef,
     path: Optional[Path],
     test_only: bool,
+    leaves: Sequence[str],
 ) -> Computed:
-    """Compute `ensemble` from `refs`, which hold its members, and write it to `path`, if any.
+    """Compute `ensemble` from `refs`, which hold its members and its `leaves`, and write it to `path`, if any.
 
     `stored` is every window on file. `like` is a model's ref of this run or report, which says what that covers (`windows`,
     the part of `stored` it names, `test_start`, `test_end`, `count`, `horizon`, `freq`). `test_only` is for an ensemble that
-    has forecasts in the test window alone.
+    has forecasts in the test window alone. `leaves` are the models under it, however nested.
     """
     members = {name: _read_member(ensemble, name, refs[name], stored) for name in ensemble.members}
     manifests = {name: _read_manifest(refs[name]) for name in ensemble.members}
-    _check_members_agree(ensemble, members, manifests)
+    # Results held in memory have no manifest to read, and they come from one frame.
+    leaf_manifests = {leaf: _read_manifest(refs[leaf]) for leaf in leaves if refs[leaf].path is not None}
+    _check_members_agree(ensemble, members, leaf_manifests)
     grid = _on_one_grid(ensemble, members)
 
     choices: List[Dict[str, Any]] = []
@@ -139,9 +155,12 @@ def compute(
     freq = next((member.freq for member in members.values() if member.freq is not None), like.freq)
     records = _records(grid, picked, prediction, freq, stored)
     if path is not None:
-        _write_atomically(path, (json.dumps(record) + "\n" for record in records))
+        # In this order: results with no manifest of an ensemble are not an ensemble's, and nothing overwrites them.
         _write_manifest(path, ensemble, stored, freq, members, manifests, choices)
-    return Computed(_ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only), choices)
+        _write_atomically(path, (json.dumps(record) + "\n" for record in records))
+    # What was run, not what this report was told: a horizon-3 run reported with horizon=1 has 3 horizons of forecasts to plan.
+    horizon = next((m["horizon"] for m in leaf_manifests.values() if m and m.get("horizon") is not None), like.horizon)
+    return Computed(_ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only, horizon), choices)
 
 
 def _read_member(ensemble: Ensemble, name: str, ref: ModelResultRef, stored: Optional[RunWindows]) -> _Member:
@@ -199,7 +218,11 @@ def _read_manifest(ref: ModelResultRef) -> Optional[Dict[str, Any]]:
 def _check_members_agree(
     ensemble: Ensemble, members: Mapping[str, _Member], manifests: Mapping[str, Optional[Dict[str, Any]]]
 ) -> None:
-    """`ManifestMismatchError` if the members aren't forecasts of one thing, as far as what they recorded can tell."""
+    """`ManifestMismatchError` if the members aren't forecasts of one thing, as far as what they recorded can tell.
+
+    `manifests` are those of the leaf models, the models under any nesting, with None for one that has none. `members` are the
+    direct members, whose records say their frequency.
+    """
     problems = []
     frequencies = {name: member.freq for name, member in members.items() if member.freq is not None}
     recorded = {name: manifest for name, manifest in manifests.items() if manifest is not None}
@@ -210,41 +233,90 @@ def _check_members_agree(
         values = {name: manifest[field] for name, manifest in recorded.items() if manifest.get(field) is not None}
         if len(set(values.values())) > 1:
             problems.append(f"{field} {values}")
-    problems += _data_differences(recorded)
+    problems += _information_set_differences(recorded)
+    found, notes = _data_differences(recorded)
+    problems += found
     if problems:
         raise ManifestMismatchError(
             f"{ensemble.name}: its members are not forecasts of one thing, so averaging or ranking them would mean nothing: "
-            f"{'; '.join(problems)}. Run them on the same data with the same target, horizon and freq."
+            f"{'; '.join(problems)}. Run them on the same data with the same target, horizon, freq and information set."
         )
     unrecorded = sorted(name for name, manifest in manifests.items() if manifest is None)
-    if unrecorded and recorded:
-        logger.warning(f"{ensemble.name}: no manifest for {unrecorded}, so only their `actual` values can be compared.")
+    if unrecorded:
+        notes.append(
+            f"no manifest for {unrecorded}, so what they were run on can't be compared, only their `actual` values"
+        )
+    for note in notes:
+        warnings.warn(f"{ensemble.name}: {note}.", stacklevel=2)
 
 
-def _data_differences(manifests: Mapping[str, Dict[str, Any]]) -> List[str]:
-    """What the data hashes of the manifests can say.
+def _information_set_differences(manifests: Mapping[str, Dict[str, Any]]) -> List[str]:
+    """An average has one issue time: a member issued later, or with no issue time at all, can read what the others can't.
 
-    A manifest hashes the columns its model reads, so two data hashes are comparable only for the same columns up to the same
-    day. The target's own hash holds in a run with validation, whatever the columns. `_on_one_grid` compares the `actual` of
-    every key the members share as well. That leaves one thing this can't see: members on other columns of different frames,
-    with the same target.
+    The information set is compared whole, so a difference in its rules counts as one in its issue time does. The `availability`
+    level is not part of it, and doesn't change a forecast."""
+    held = {name: manifest.get("information_set") for name, manifest in manifests.items()}
+    if len({json.dumps(information_set, sort_keys=True) for information_set in held.values()}) < 2:
+        return []
+    shown = {
+        name: "none" if info is None else f"{info.get('issue_time')} {info.get('issue_timezone')}"
+        for name, info in held.items()
+    }
+    return [f"different information sets, in their issue time or their rules: {shown}"]
+
+
+def _data_differences(manifests: Mapping[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+    """What the data hashes of the manifests say: what refuses the ensemble, and what only can't be told.
+
+    Refused: a column two members read, or the target, hashing differently; `data_columns_hash`, of all a model's columns
+    together, differing on the same columns; the target's own hash. `_on_one_grid` compares the `actual` of every key the members
+    share as well. Hashes through different days can't be compared, and frames that differ only in columns no two members share
+    are not a contradiction: both warn. So do manifests that predate `column_hashes`.
     """
+    problems: List[str] = []
+    notes: List[str] = []
     same_columns: Dict[Tuple, Dict[str, str]] = {}
     actuals: Dict[str, Dict[str, str]] = {}
+    hashed_through: Dict[Any, Dict[str, Dict[str, Any]]] = {}
     for name, manifest in manifests.items():
         if manifest.get("data_columns_hash") is not None:
             columns = (manifest.get("test_end"), manifest.get("target"), tuple(manifest.get("predictors", ())))
             same_columns.setdefault(columns, {})[name] = manifest["data_columns_hash"]
         if manifest.get("actuals"):
             actuals.setdefault(manifest["actuals"]["through"], {})[name] = manifest["actuals"]["hash"]
-    problems = []
+        if manifest.get("column_hashes"):
+            hashed_through.setdefault(manifest.get("test_end"), {})[name] = manifest
     for hashes in same_columns.values():
         if len(set(hashes.values())) > 1:
             problems.append(f"data hashes that differ on the same columns in {sorted(hashes)}")
     for through, hashes in actuals.items():
         if len(set(hashes.values())) > 1:
             problems.append(f"a different target up to {through} in {sorted(hashes)}")
-    return problems
+    for through, group in hashed_through.items():
+        differing = _columns_that_differ(group)
+        if differing:
+            problems.append(f"different values in columns they share, up to {through}: {differing}")
+        elif len({manifest.get("frame_hash") for manifest in group.values()} - {None}) > 1:
+            notes.append(
+                f"their frames differ, in columns no two of {sorted(group)} share: the columns they share and the target are "
+                "the same, and a difference in the others can't be told from here"
+            )
+    if len(hashed_through) > 1 or len(actuals) > 1:
+        ends = {name: m.get("test_end") for group in hashed_through.values() for name, m in group.items()}
+        notes.append(f"their data hashes run through different days, so they can't be compared: {ends}")
+    older = sorted(name for name, manifest in manifests.items() if not manifest.get("column_hashes"))
+    if older:
+        notes.append(f"the manifests of {older} have no `column_hashes`, so the columns they share can't be compared")
+    return problems, notes
+
+
+def _columns_that_differ(manifests: Mapping[str, Dict[str, Any]]) -> Dict[str, List[str]]:
+    """{column: the members reading it} for each column at least two of `manifests` hash differently."""
+    by_column: Dict[str, Dict[str, str]] = {}
+    for name, manifest in manifests.items():
+        for column, value in manifest["column_hashes"].items():
+            by_column.setdefault(column, {})[name] = value
+    return {column: sorted(held) for column, held in sorted(by_column.items()) if len(set(held.values())) > 1}
 
 
 def _on_one_grid(ensemble: Ensemble, members: Mapping[str, _Member]) -> _Grid:
@@ -300,24 +372,61 @@ def _choose(
     test: Optional[Tuple[str, str]],
 ) -> Dict[str, Any]:
     """The row of a choice, made on the keys every member holds with a finite prediction and actual, of those that serve it."""
-    keys = grid.serving(serves) & np.isfinite(grid.predictions).all(axis=1) & np.isfinite(grid.actual)
-    if not keys.any():
+    serving = np.flatnonzero(grid.serving(serves))
+    held = np.isfinite(grid.predictions[serving]) & np.isfinite(grid.actual[serving])[:, None]
+    keys = serving[held.all(axis=1)]
+    if not len(keys):
         raise ValueError(
             f"{ensemble.name}: its members have no validation forecast in common with a finite prediction and actual, "
             f"among those issued in {validation} to serve {test}, and nothing is ever chosen on nothing."
         )
     choice: Choice = ensemble.choose(grid.predictions[keys], grid.actual[keys])
+    per_member = dict(zip(ensemble.members, held.sum(axis=0).tolist()))
+    any_holds = int(held.any(axis=1).sum())
+    short = {name: any_holds - count for name, count in per_member.items() if count < any_holds}
+    limited_by = dict(sorted(short.items(), key=lambda item: (-item[1], item[0])))
+    share = len(keys) / max(per_member.values())
+    _warn_if_thin(
+        ensemble, validation, test, share, len(keys), max(per_member.values()), grid.target_days(keys), limited_by
+    )
     return {
         "segment": index,
         "chosen": choice.chosen,
         "k": len(choice.chosen),
         "validation_mae": choice.mae,
-        "validation_forecasts": int(keys.sum()),
+        "validation_forecasts": len(keys),
+        "validation_share": share,
+        "limited_by": limited_by,
         "validation": list(validation),
         "test": None if test is None else list(test),
         "member_mae": choice.member_mae,
         **({} if choice.k_mae is None else {"k_mae": {str(k): mae for k, mae in choice.k_mae.items()}}),
     }
+
+
+def _warn_if_thin(
+    ensemble: Ensemble,
+    validation: Tuple[str, str],
+    test: Optional[Tuple[str, str]],
+    share: float,
+    forecasts: int,
+    fullest: int,
+    target_days: int,
+    limited_by: Mapping[str, int],
+) -> None:
+    where = f"the choice on {validation} for the test period {test}"
+    if share < MIN_VALIDATION_SHARE:
+        warnings.warn(
+            f"{ensemble.name}: {where} rests on {forecasts} forecasts, {share:.0%} of the {fullest} the fullest member holds: "
+            f"the holes of {limited_by} (forecasts lacking per member) decide what the members are compared on.",
+            stacklevel=2,
+        )
+    if target_days < MIN_VALIDATION_DAYS:
+        warnings.warn(
+            f"{ensemble.name}: {where} rests on {target_days} target days ({forecasts} forecasts), fewer than "
+            f"{MIN_VALIDATION_DAYS}: read it as indicative only.",
+            stacklevel=2,
+        )
 
 
 def _records(
@@ -425,15 +534,17 @@ def _ref(
     path: Optional[Path],
     freq: str,
     test_only: bool,
+    horizon: int,
 ) -> ModelResultRef:
-    """The ref of the whole, with a ref per window of what this run or report names, as a model's has."""
+    """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizon` is the one the
+    members were run with."""
     ref = ModelResultRef(
         name=ensemble.name,
         path=path,
-        count=like.count,
+        count=like.count // like.horizon * horizon if like.horizon else like.count,
         test_start=like.test_start,
         test_end=like.test_end,
-        horizon=like.horizon,
+        horizon=horizon,
         freq=freq,
         _results=None if path is not None else records,
         windows=like.windows,
@@ -476,4 +587,4 @@ def _say_what_is_missing(name: str, parts: Mapping[Optional[str], ModelResultRef
             )
 
 
-__all__ = ["Computed", "SKIP_MEMBER_MISSING", "compute"]
+__all__ = ["Computed", "MIN_VALIDATION_DAYS", "MIN_VALIDATION_SHARE", "SKIP_MEMBER_MISSING", "compute"]
