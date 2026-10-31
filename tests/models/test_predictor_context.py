@@ -561,9 +561,7 @@ def test_use_with_train_on_all_is_the_plain_list(df):
     assert used.predictor_lists[0]["train_on"] == "all"
 
 
-def test_use_with_train_on_matching_is_not_available_yet():
-    with pytest.raises(NotImplementedError, match=r"train_on='matching'\) isn't available yet"):
-        Use(PREDICTORS, train_on="matching")
+def test_use_refuses_another_rule_and_a_string():
     with pytest.raises(ValueError, match="train_on must be"):
         Use(PREDICTORS, train_on="weekends")
     with pytest.raises(TypeError, match="list of column names"):
