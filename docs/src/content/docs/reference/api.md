@@ -199,7 +199,7 @@ class EvaluationReport:
     def summary(self) -> pd.DataFrame: ...          # model, forecasts, one column per evaluator
     def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
     def availability(self) -> pd.DataFrame: ...     # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
-    def choices(self) -> pd.DataFrame: ...          # ensemble, segment, chosen, k, validation_mae, validation_forecasts, validation_start, validation_end, test_start, test_end; attrs: member_mae, k_mae
+    def choices(self) -> pd.DataFrame: ...          # ensemble, segment, chosen, k, validation_mae, validation_forecasts, validation_share, validation_start, validation_end, test_start, test_end; attrs: member_mae, k_mae, limited_by
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
     def by_hour_horizon(self) -> pd.DataFrame: ...
@@ -240,7 +240,7 @@ class EvaluationReport:
         seed: int = 0,
         models: Optional[Sequence[str]] = None,  # Default: all; fewer than 3 gives NaN with a warning
         horizon: Union[int, str, None] = None,   # None or "all": daily losses averaged per run date; a number
-    ) -> pd.DataFrame: ...  # model, n_days, n_forecasts, mae, ratio_to_best, p_value, in_90, in_75; attrs: n_days, n_forecasts, limited_by
+    ) -> pd.DataFrame: ...  # model, n_days, n_forecasts, mae, ratio_to_best, p_value, in_90, in_75; attrs: n_days, n_forecasts, limited_by, clones
 
     def ranks(
         self,
@@ -250,7 +250,7 @@ class EvaluationReport:
         level: float = 0.90,               # Coverage of the rank interval
         horizon: Union[int, str, None] = None,
         models: Optional[Sequence[str]] = None,
-    ) -> pd.DataFrame: ...  # model, n_days, n_forecasts, mae, rank, p_best, rank_low, rank_high; attrs: n_days, n_forecasts, limited_by
+    ) -> pd.DataFrame: ...  # model, n_days, n_forecasts, mae, rank, p_best, rank_low, rank_high; attrs: n_days, n_forecasts, limited_by, clones
 
     def compare(
         self, a: str, b: str, horizon: Union[int, str, None] = None

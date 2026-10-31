@@ -25,6 +25,23 @@ The same numbers can go into `summary()` and the `by_*()` tables through [`DMEva
 - **Fixed seeds.** Same data, same numbers. The seed is a parameter of every method that resamples.
 - **One frequency.** Results at different frequencies raise `ValueError`: period 5 of an hourly model and of a 15-minute model are different times of the day.
 
+## Exact clones
+
+Two models with the same predictions on the keys compared, bit for bit, are one model to a test. An `AverageEnsemble` with `top=1`
+is a clone of what it chose as a matter of course, so these tables take clones as they are, and their groups are in `df.attrs["clones"]`
+(on `summary()` too, when it has a `DMEvaluator` or an `MCSEvaluator`):
+
+- **A Holm family holds distinct tests.** In `tests()`, `leaderboard()` and `DMEvaluator` a clone counts once in `m` and shares its twin's
+  `p_holm`, so adding a `top=1` ensemble can't change a verdict about another model. A clone of the benchmark tests nothing and doesn't
+  count at all: its row reads `ratio` 1, `p_value` 1, `no difference`.
+- **A confidence set and a ranking are made without the extra copies.** `mcs()`, `MCSEvaluator` and `ranks()` give each twin the result of
+  the model they are, so their numbers for the other models are what they would be without the clone. Twins share a rank, the next
+  model has the next rank, and their chance of being best isn't split between them.
+
+Keys count: `tests()` reads clones on the keys held, so with a gap in one of them there are two tests, on different forecasts. `mcs()` and
+`ranks()` read them on the keys of the whole set. Models with the same losses and other predictions, one always as far above the actual as
+the other is below, are not clones: `mcs()` raises and `ranks()` warns, as they did.
+
 ## Test length
 
 One test year resolves differences of about 5 % of the MAE. Gaps of 1–2 % need about 2,700 days, so with one year most small gaps will read `no difference`, and that is the right answer. The `mde` column gives the minimum detectable effect for each pair: the difference (as a share of the benchmark's MAE) this test length would detect with 80 % power.
