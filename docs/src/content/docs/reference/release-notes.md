@@ -35,7 +35,8 @@ an issue day it didn't sample.
 ### New
 
 - A manifest gains `column_hashes` (each column a run reads, on its own) and `frame_hash` (the whole frame), through `test_end`,
-  on every run. They never refuse a resume, and manifests without them load. Records and tables don't change.
+  on every run, and `data_unverified` on a resume that accepted other data or had no manifest. They never refuse a resume, and
+  manifests without them load. Records and tables don't change.
 - `AverageEnsemble(members, top=None | k | "validation", by="validation", name=...)` and `pipeline.add_ensemble()`, from
   `epftoolbox2.ensembles`: the mean of stored forecasts on identical keys, with the members and their number chosen on validation
   per test period, `member_missing` in `forecast_counts()` and `report.choices()`. `ModelPipeline.report()` and `epf report` compute

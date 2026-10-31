@@ -161,20 +161,26 @@ the ensemble is built, added or loaded.
 
 When the results are read, `ManifestMismatchError`: members that disagree on the `actual` of a key or hold a key twice, or whose
 manifests differ on target, horizon, frequency, time zone or data, or on the information set: a different issue time, issue zone or rules,
-or an information set against none. An average has one issue time, and a member issued later can read what the others can't. All of this
-is read from the manifests of the leaf models, so nesting an average changes nothing. `report()` also refuses a model whose results file
+or an information set against none. An average has one issue time, and a member issued later can read what the others can't. The order
+of the assumptions and a rule's `note` don't count, and neither do `unknown` and `availability`, which say what a run does about a column and
+not when it is known. All of this is read from the manifests of the leaf models, so nesting an average changes nothing. `report()` also refuses a model whose results file
 is an ensemble's, which would go stale as a model.
 
 <Aside type="caution">
   What the manifests can tell about the data, through the last day a model's results cover (`test_end`):
 
   - **Refused:** a column two leaf models both read holding other values, the target above all, anywhere up to that day, whatever each
-    of them reads otherwise. That includes rows no fit reads: a target revised long before the training window, or a frame that starts later.
+    of them reads otherwise. A column counts as read if it is a predictor or if a predictor function read it through `ctx`. That includes
+    rows no fit reads: a target revised long before the training window, or a frame that starts later. Numbers compare as float64, so a
+    float32 column with equal values is the same column.
   - **A warning, and the ensemble is computed:** frames that differ when the columns the members share don't (`frame_hash`). A
     column only one member reads may have been revised for it alone, and nothing can say whether another member's frame held the
     same values, because no other member read it. A difference only in columns nobody reads warns just the same.
   - **A warning:** hashes through different days, which can't be compared (a member run over a longer test period, say); manifests
     written before `column_hashes`; members without a manifest. Only the `actual` of every key they share is then compared.
+  - **A warning naming the member:** `data_unverified` in its manifest. Its hashes describe the frame of its last run, and its stored
+    forecasts may come from another: it was resumed over a data mismatch with `allow_manifest_mismatch=True`, or its manifest was gone.
+    That stays on the manifest across later resumes. Run it again in a new `save_dir` to be rid of it.
   - **Nothing to see:** a value corrected after the last day a member covers, which no forecast of it read.
 
   Run the shards of one study from one frame, and read those warnings as saying that you haven't.
