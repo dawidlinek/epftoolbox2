@@ -445,6 +445,7 @@ class EvaluationReport:
         clones: List[List[str]] = []
         for label, keys in self._horizon_slices(panel, horizon, each_horizon=True):
             if by == "hour":
+                clones.extend(g for g in panel.clone_groups(keys, [benchmark, *models]) if g not in clones)
                 hours = panel.hour[keys]
                 for hour in np.unique(hours):
                     for model in models:

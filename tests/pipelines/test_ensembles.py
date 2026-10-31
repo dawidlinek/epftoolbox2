@@ -1636,6 +1636,8 @@ def test_a_clone_counts_once_in_a_holm_family(clone_reports):
     assert after.loc["best", "p_holm"] == after.loc[twin, "p_holm"]
     assert after.loc["best", "verdict"] == after.loc[twin, "verdict"]
     assert after.attrs["clones"] == [[twin, "best"]] and before.attrs["clones"] == []
+    per_hour = clone.tests(benchmark="ben", interval=None, by="hour")
+    assert per_hour.attrs["clones"] == [[twin, "best"]] and "p_holm" not in per_hour
 
 
 def test_a_clone_counts_once_for_the_dm_evaluator_and_leaderboard_too(clone_reports):
