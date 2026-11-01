@@ -62,10 +62,11 @@ an issue day it didn't sample.
   occurrence, shifts apply from the end of the name, and a repeated autumn hour is checked at its second occurrence, also against a
   rule in another zone. **No forecast of a fixed list moves.** Next to a switch `availability="raise"` may now refuse what this error
   let through, `report.availability()`, `pipeline.verify()` and `explain()` may now call it late, and what it wrongly called late can
-  pass. Listings show the real time, with its UTC offset inside the repeated hour, and `minutes_late` counts elapsed minutes, so across
-  a switch another day can be a column's worst. A predictor function that asks `ctx.published()` about such a cell gets the new answer
-  and may take another list there, which moves that forecast, and resuming its stored forecast then raises `ManifestMismatchError`, as
-  for any changed answer. See [Clock Changes](/epftoolbox2/model-pipeline/information-set/#clock-changes).
+  pass. Listings show the real time, with its UTC offset inside the repeated hour, and the manifest's `minutes_late` counts elapsed
+  minutes, so across a switch another day can be a column's worst. A predictor function that asks `ctx.published()` about such a cell
+  gets the new answer and may take another list there, which moves that forecast, and resuming its stored forecast then raises
+  `ManifestMismatchError`, as for any changed answer. See
+  [Clock Changes](/epftoolbox2/model-pipeline/information-set/#clock-changes).
 - `ModelPipeline.report(test=narrower)` counted every line of a results file as produced, so a shorter period looked complete. It now
   counts the forecasts inside the period, and `forecast_counts()` and its warning say what is missing.
 - A workflow file with `model_index: $SLURM_ARRAY_TASK_ID` couldn't be loaded where that variable isn't set, so `epf report` and
