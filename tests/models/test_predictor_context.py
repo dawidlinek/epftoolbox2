@@ -14,12 +14,13 @@ import pytest
 import yaml
 
 from epftoolbox2 import presets
+from epftoolbox2.ensembles import AverageEnsemble
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.information_set import Availability, InformationSet, InformationSetError, leakage_probe
 from epftoolbox2.models import LassoCVModel, OLSModel, PredictorContext, PredictorPlan, Use
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.models.context import build_plan, list_hash
-from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.pipelines import ModelPipeline, Workflow
 from epftoolbox2.results.manifest import ManifestMismatchError
 from epftoolbox2.verification import sample_issue_days
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
@@ -1384,3 +1385,26 @@ def test_the_signature_of_use_and_the_public_names():
     assert list(inspect.signature(Use).parameters) == ["predictors", "train_on"]
     assert inspect.signature(Use).parameters["train_on"].default == "all"
     assert presets.lear_predictors(["load_forecast"])  # what the docs' examples build on
+
+
+# ---------------------------------------------------------------------------
+# An array task runs a block of models. The prototype's test: tests/pipelines/test_models_per_task.py has the rest.
+# ---------------------------------------------------------------------------
+
+
+def test_models_per_task_selects_a_block_of_models(tmp_path):
+    pipeline = ModelPipeline()
+    for i in range(5):
+        pipeline.add_model(OLSModel(PREDICTORS, name=f"m{i}"))
+    pipeline.add_ensemble(AverageEnsemble([f"m{i}" for i in range(5)], name="avg"))
+    pipeline.save(tmp_path / "mp.yaml")
+    workflow = Workflow(
+        "2023-01-01", "2023-02-01", model_pipeline=str(tmp_path / "mp.yaml"), model_index=2, models_per_task=2
+    )
+    # The prototype also asked for no ensembles here. `run()` is what leaves them to the report now, after it has checked them.
+    assert [m.name for m in workflow._build_model_pipeline().models] == ["m4"]
+    assert len(workflow._build_model_pipeline(all_models=True).ensembles) == 1
+    with pytest.raises(ValueError, match="out of range"):
+        Workflow(
+            "2023-01-01", "2023-02-01", model_pipeline=str(tmp_path / "mp.yaml"), model_index=3, models_per_task=2
+        )._build_model_pipeline()
