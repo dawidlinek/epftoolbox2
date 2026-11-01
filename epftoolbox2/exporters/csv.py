@@ -16,6 +16,8 @@ def _clock_time(period: int) -> str:
 
 
 class CsvExporter(Exporter):
+    _KEY_DTYPES = {"hour": "int64", "horizon": "int64", "day_in_test": "int64", "actual": "float64"}
+
     def __init__(self, path: str, extra_columns: Optional[List[str]] = None, summary_path: Optional[str] = None):
         """
         Args:
@@ -48,8 +50,14 @@ class CsvExporter(Exporter):
 
         base_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual"]
         base_df: Optional[pd.DataFrame] = None
+        model_names: List[str] = []
 
         for model_name, model_df in report.iter_details():
+            model_names.append(model_name)
+            if model_df.empty:
+                # No forecast in the report's window (a task that stopped before its test days): nothing to merge,
+                # and its columns are put back below, empty, where its place in the report puts them.
+                continue
             model_df = model_df.rename(
                 columns={
                     "prediction": f"{model_name}_prediction",
@@ -67,8 +75,11 @@ class CsvExporter(Exporter):
                 )
             del model_df
 
-        if base_df is None:
-            return
+        model_cols = [col for name in model_names for col in (f"{name}_prediction", f"{name}_error")]
+        if base_df is None:  # every model is empty: the header, with the dtypes a join on the keys needs
+            base_df = pd.DataFrame({col: pd.Series(dtype=self._KEY_DTYPES.get(col, "object")) for col in base_cols})
+        if list(base_df.columns) != base_cols + model_cols:
+            base_df = base_df.reindex(columns=base_cols + model_cols)
 
         if freq == "15min":
             base_df.insert(base_df.columns.get_loc("hour") + 1, "target_time", base_df["hour"].map(_clock_time))

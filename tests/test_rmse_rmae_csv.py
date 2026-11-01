@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import tempfile
@@ -7,10 +8,11 @@ import pandas as pd
 import pytest
 
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
-from epftoolbox2.exporters import ExcelExporter
+from epftoolbox2.exporters import ExcelExporter, TerminalExporter
 from epftoolbox2.exporters.csv import CsvExporter
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.results.ref import ModelResultRef
 from epftoolbox2.results.report import EvaluationReport
 from tests.synthetic import PREDICTORS, make_market_data
 
@@ -692,3 +694,163 @@ class TestExcelExporterFreq:
         assert (details["prediction_B"] - details["actual"] == -1.0).all()
         # One column per quarter-hour (the sheet keeps the library's name for the period of the day, "hour").
         assert sheets["hour_MAE"].shape == (2, 1 + 96)
+
+
+# ===========================================================================
+# A model with no forecast in the report's window
+# ===========================================================================
+
+# Three models on partly different forecasts, none of them empty: what CsvExporter wrote at be6d62b.
+_THREE_MODEL_CSV = """\
+run_date,target_date,hour,horizon,day_in_test,actual,OLS_prediction,OLS_error,Lasso_prediction,Lasso_error,Ridge_prediction,Ridge_error
+2024-01-01,2024-01-02,0,1,0,50.0,51.5,1.5,49.5,-0.5,,
+2024-01-01,2024-01-02,1,1,0,51.0,52.75,1.75,50.75,-0.25,,
+2024-01-01,2024-01-02,23,1,0,73.0,80.25,7.25,78.25,5.25,,
+2024-01-02,2024-01-03,0,1,1,55.0,56.5,1.5,54.5,-0.5,55.25,0.25
+2024-01-01,2024-01-03,0,2,0,60.0,61.5,1.5,59.5,-0.5,60.25,0.25
+2024-01-02,2024-01-03,1,1,1,56.0,57.75,1.75,55.75,-0.25,56.5,0.5
+2024-01-01,2024-01-03,1,2,0,61.0,62.75,1.75,60.75,-0.25,61.5,0.5
+2024-01-02,2024-01-03,23,1,1,78.0,85.25,7.25,83.25,5.25,84.0,6.0
+2024-01-01,2024-01-03,23,2,0,83.0,90.25,7.25,88.25,5.25,89.0,6.0
+2024-01-02,2024-01-04,0,2,1,65.0,66.5,1.5,,,,
+2024-01-02,2024-01-04,1,2,1,66.0,67.75,1.75,,,,
+2024-01-02,2024-01-04,23,2,1,88.0,95.25,7.25,,,,
+"""
+
+_EMPTY_MODEL_POSITIONS = pytest.mark.parametrize("position", [0, 1, 2], ids=["first", "middle", "last"])
+
+
+def _pinned_inputs():
+    """The two models and the source data behind `_HOURLY_CSV`."""
+    index = pd.date_range("2024-01-01", periods=96, freq="h", tz="Europe/Warsaw")
+    source_data = pd.DataFrame(
+        {"is_holiday": (index.day == 3).astype(int), "temperature": np.arange(96) / 4}, index=index
+    )
+    return {"OLS": _hourly_records(1.5), "Lasso": _hourly_records(-0.5)[:-3]}, source_data
+
+
+def _model_without_forecasts(kind, tmp_path):
+    """Results of a model that has none in the report's window: an empty list, or a file whose records all lie before
+    the window, as a task that stopped during validation leaves it."""
+    if kind == "list":
+        return []
+    path = tmp_path / "stopped.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in _hourly_records(0.0)))
+    return ModelResultRef(name="Empty", path=path, count=12, test_start="2024-02-01", test_end="2024-02-02", horizon=2)
+
+
+def _with_empty_model(text, position, base=6):
+    """The CSV `text` of the other models as it must read with a model "Empty" that has no forecast, placed after
+    `position` models: its two columns, empty, right after the first `base` columns and those of the models before it."""
+    at = base + 2 * position
+    lines = []
+    for number, line in enumerate(text.splitlines()):
+        fields = line.split(",")
+        fields[at:at] = ["Empty_prediction", "Empty_error"] if number == 0 else ["", ""]
+        lines.append(",".join(fields))
+    return "\n".join(lines) + "\n"
+
+
+class TestCsvExporterModelWithoutForecasts:
+    @pytest.mark.parametrize("kind", ["list", "file"])
+    @_EMPTY_MODEL_POSITIONS
+    def test_the_model_keeps_its_columns_and_the_others_their_rows(self, tmp_path, kind, position):
+        results, source_data = _pinned_inputs()
+        models = list(results.items())
+        models.insert(position, ("Empty", _model_without_forecasts(kind, tmp_path)))
+        path = tmp_path / "out.csv"
+        report = EvaluationReport(dict(models), [MAEEvaluator()], source_data=source_data)
+        CsvExporter(path, extra_columns=["is_holiday", "temperature"]).export(report)
+        # The file of the other two models (pinned above), with two empty columns where the model's place puts them.
+        assert path.read_text() == _with_empty_model(_HOURLY_CSV, position)
+
+    @pytest.mark.parametrize("extra", [[], ["is_holiday", "temperature"]], ids=["plain", "extra_columns"])
+    def test_every_model_empty_gives_the_header(self, tmp_path, extra):
+        _, source_data = _pinned_inputs()
+        report = EvaluationReport({"OLS": [], "Lasso": []}, [MAEEvaluator()], source_data=source_data)
+        path = tmp_path / "out.csv"
+        CsvExporter(path, extra_columns=extra).export(report)
+        header = (
+            "run_date,target_date,hour,horizon,day_in_test,actual,OLS_prediction,OLS_error,Lasso_prediction,Lasso_error"
+        )
+        assert path.read_text() == ",".join([header, *extra]) + "\n"
+
+    @_EMPTY_MODEL_POSITIONS
+    def test_15min_results_with_an_empty_model(self, tmp_path, position):
+        results = {
+            "OLS": _quarter_hour_records("2024-01-01", 1, 1.0),
+            "Lasso": _quarter_hour_records("2024-01-01", 1, -1.0),
+        }
+        without = tmp_path / "without.csv"
+        CsvExporter(without).export(EvaluationReport(results, []))
+        models = list(results.items())
+        models.insert(position, ("Empty", []))
+        path = tmp_path / "out.csv"
+        CsvExporter(path).export(EvaluationReport(dict(models), []))
+        # `target_time` is the seventh column here, so the models' columns start after it.
+        assert path.read_text() == _with_empty_model(without.read_text(), position, base=7)
+
+    def test_without_an_empty_model_the_file_is_what_it_was(self, tmp_path):
+        results = {
+            "OLS": _hourly_records(1.5),
+            "Lasso": _hourly_records(-0.5)[:-3],
+            "Ridge": _hourly_records(0.25)[3:9],
+        }
+        path = tmp_path / "out.csv"
+        CsvExporter(path).export(EvaluationReport(results, [MAEEvaluator()]))
+        assert path.read_text() == _THREE_MODEL_CSV
+
+
+class TestOtherExportersModelWithoutForecasts:
+    @_EMPTY_MODEL_POSITIONS
+    def test_excel_details_keep_the_models_column(self, tmp_path, position):
+        results = {"OLS": _hourly_records(1.5), "Lasso": _hourly_records(-0.5)[:-3]}
+        without = tmp_path / "without.xlsx"
+        ExcelExporter(without, sheets=["details"]).export(EvaluationReport(results, [MAEEvaluator()]))
+        expected = pd.read_excel(without, sheet_name="Details")
+
+        models = list(results.items())
+        models.insert(position, ("Empty", []))
+        path = tmp_path / "out.xlsx"
+        ExcelExporter(path).export(EvaluationReport(dict(models), [MAEEvaluator()]))
+        sheets = pd.read_excel(path, sheet_name=None)
+
+        details = sheets["Details"]
+        columns = list(expected.columns)
+        columns.insert(6 + position, "prediction_Empty")
+        assert list(details.columns) == columns
+        assert details["prediction_Empty"].isna().all()
+        pd.testing.assert_frame_equal(details.drop(columns="prediction_Empty"), expected)
+        assert dict(zip(sheets["Summary"]["model"], sheets["Summary"]["forecasts"])) == {
+            "OLS": 12,
+            "Lasso": 9,
+            "Empty": 0,
+        }
+
+    def test_excel_with_every_model_empty_writes_the_summary_and_the_details_header(self, tmp_path):
+        path = tmp_path / "out.xlsx"
+        ExcelExporter(path).export(EvaluationReport({"OLS": [], "Lasso": []}, [MAEEvaluator()]))
+        sheets = pd.read_excel(path, sheet_name=None)
+
+        assert set(sheets) == {"Summary", "Details"}
+        assert sheets["Summary"]["forecasts"].tolist() == [0, 0]
+        assert list(sheets["Details"].columns) == [
+            "run_date",
+            "target_date",
+            "hour",
+            "horizon",
+            "day_in_test",
+            "actual",
+            "prediction_OLS",
+            "prediction_Lasso",
+        ]
+        assert sheets["Details"].empty
+
+    @pytest.mark.parametrize("every_model", [False, True], ids=["one_empty", "every_model_empty"])
+    def test_terminal_lists_the_model(self, capsys, monkeypatch, every_model):
+        monkeypatch.setenv("COLUMNS", "200")
+        results = {"OLS": [] if every_model else _hourly_records(1.5), "Empty": []}
+        TerminalExporter(show=["summary", "hour", "horizon", "hour_horizon", "year", "year_horizon"]).export(
+            EvaluationReport(results, [MAEEvaluator()])
+        )
+        assert "Empty" in capsys.readouterr().out

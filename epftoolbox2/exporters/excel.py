@@ -110,6 +110,8 @@ class ExcelExporter(Exporter):
         row_col: str,
         col_col: str,
     ) -> None:
+        if data.empty:  # no model has a forecast in the window, so the table has no columns to read
+            return
         models = list(data["model"].unique())
 
         for metric in metric_columns(data):
@@ -207,8 +209,12 @@ class ExcelExporter(Exporter):
 
         sort_keys = ["run_date", "target_date", "hour", "horizon"]
         details_df = None
+        model_names = []
 
         for model_name, model_df in report.iter_details():
+            model_names.append(model_name)
+            if model_df.empty:  # no forecast in the report's window: its column is added below, empty
+                continue
             preds = model_df[sort_keys + ["prediction", "actual", "day_in_test"]].copy()
             preds = preds.rename(columns={"prediction": f"prediction_{model_name}"})
 
@@ -221,12 +227,12 @@ class ExcelExporter(Exporter):
                     details_df["day_in_test"] = details_df["day_in_test"].fillna(details_df["day_in_test_drop"])
                     details_df = details_df.drop(columns=["actual_drop", "day_in_test_drop"])
 
-        if details_df is None:
-            return
+        final_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual"] + [
+            f"prediction_{name}" for name in model_names
+        ]
+        if details_df is None:  # every model is empty: the header only
+            details_df = pd.DataFrame(columns=final_cols)
 
-        pred_cols = [f"prediction_{name}" for name, _ in report.iter_details()]
-        final_cols = ["run_date", "target_date", "hour", "horizon", "day_in_test", "actual"] + pred_cols
-
-        details_df = details_df[final_cols]
+        details_df = details_df.reindex(columns=final_cols)
         details_df = details_df.sort_values(by=["target_date", "hour", "horizon"]).reset_index(drop=True)
         details_df.to_excel(writer, sheet_name="Details", index=False)
