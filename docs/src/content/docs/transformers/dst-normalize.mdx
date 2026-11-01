@@ -62,8 +62,8 @@ pipeline = (
 - Columns that describe the slot itself, such as hour-of-day dummies from `CalendarSource(hour="onehot")`, come
   out averaged on the filled spring slot. Build them after normalising if you need them.
 
-With one row per hour and day, the models' DST caveats go away: every hour has exactly one training row per day,
-and the spring switch day gets its own 02:00 forecast.
+With one row per hour and day, [what a clock change does](/epftoolbox2/model-pipeline/time-and-calendars/#what-a-clock-change-does) to a
+model goes away: every hour has exactly one training row per day, and the spring switch day gets its own 02:00 forecast.
 
 ## Synthetic Actuals
 

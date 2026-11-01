@@ -9,6 +9,24 @@ Notes for changes that need something from you. The full list of changes of a re
 
 ### Breaking changes
 
+- **Training rows are chosen by date, and results made before that are refused.** A forecast's training rows were found by counting
+  back from the issue day, which went wrong around a clock change: on the days after an autumn switch the forecast of the switch hour
+  trained on a target dated on the issue day or later, a look-ahead, and on a spring switch day the key of the skipped hour was built
+  from the day before's row and carried another day's `actual`. Now a forecast (period, h, D) trains on the rows dated from D-W-h to
+  D-1-h, forecasts from the last row dated D, and exists only if the clock has its period on D and on D+h.
+  - **What moves.** Per year, for a run of horizons 1 to H at 1 h: H(H+1)/2 forecasts after the autumn switch, H(H-1)/2 after the spring
+    one, and the keys of the skipped hour go, with a slot the clock doesn't have no longer counted in `planned` or as missing. At
+    `freq="15min"` that is 4 times as many. Every other forecast is the same, bit for bit, and so is every forecast of a frame without a
+    switch. A row lost to a gap in the last days before the issue no longer costs a newer row. `test_golden_metrics.py` went from 140
+    forecasts to 139, with one mislabelled key gone.
+  - **Old results are refused on resume.** A manifest without the new field `training_cut` raises `ManifestMismatchError`, because the
+    stale records would stay in the file and be read. Use a new `save_dir`, or pass `allow_manifest_mismatch=True` to resume with them.
+    `report()` over such results warns and plans as those runs did.
+  - **`aggregate()` reads a whole day from the clock.** The day after a spring switch, from a forecast issued on the switch day, is now
+    dropped at every horizon, also in a run of horizon 1 alone, where it was aggregated over 23 of its 24 hours. Reports of plain lists keep
+    the old rule.
+  - **`verify` no longer calls those days a leak**, and a verify over a spring switch day counts 23 forecasts per horizon.
+  See [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/).
 - **A reversed test period now raises.** `ModelPipeline.run(df, test_start=later, test_end=earlier)` used to run nothing and
   return an empty report, and now raises `ValueError`, as a reversed `test=` does. So does `ModelPipeline.report()`.
 - **An issue time now warns instead of raising.** `ModelPipeline(issue_time=...)` and `ModelPipeline(information_set=...)` used
