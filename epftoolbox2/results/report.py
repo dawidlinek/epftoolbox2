@@ -29,6 +29,7 @@ from ..evaluators.dm import DMEvaluator, check_test_settings
 from ..evaluators.economic import EconomicEvaluator
 from ..evaluators.mcs import check_mcs_settings
 from ..logging import get_logger
+from ..models._calendar import periods_on_dates
 from .availability import listing_frame
 from .breakdowns import AGGREGATES, daily_aggregate, price_level, spike_threshold
 from .matching import rows_of_refs, training_day_frame
@@ -253,13 +254,18 @@ class EvaluationReport:
         the day, which turns hourly or 15-minute forecasts into forecasts of the day's maximum, minimum, mean or spread.
         The new report has `hour` 0 and frequency `"1D"`. A day counts only when all its periods are there, with a
         finite prediction and actual: 23, 24 or 25 hours (92, 96 or 100 quarter-hours), judged by the period ids as
-        `EconomicEvaluator` does, and against the other models: the periods of a target date are every period that any
-        model has a record for, at any horizon, and a day with fewer finite periods is dropped. So a model that lacks 02:00
-        on an ordinary Tuesday is not aggregated over 23 hours while another is aggregated over 24, which would score them
-        against different actuals on one key. A period that no model has at any horizon is taken at its word, since that is
-        how a clock change looks in the ids (a 23-hour day lacks the hour it skips); in a run of horizon 1 alone the day
-        after the spring switch lacks its 02:00 in the same way, and its aggregate is over 23 of its 24 hours. Each model
-        is judged on its own days, so a model missing a period loses that day and no other model does. Dropped days are
+        `EconomicEvaluator` does, and against the clock of the data's time zone (`ModelResultRef.zone`): a day with fewer
+        finite periods than `clock_periods` gives it is dropped. So a model that lacks 02:00 on an ordinary Tuesday is not
+        aggregated over 23 hours while another is aggregated over 24, which would score them against different actuals on one
+        key. The spring switch day is whole over its 23 hours. The day after it, from a forecast issued on the switch day, lacks
+        the hour no forecast was issued from and is dropped at every horizon, and the autumn switch day is dropped for its
+        repeated hour, which has no `actual`.
+
+        Without a zone, for plain lists of records, the periods of a target date are every period that any model has a record
+        for, at any horizon. A period that no model has at any horizon is then taken at its word, since that is how a clock
+        change looks in the ids (a 23-hour day lacks the hour it skips).
+
+        Each model is judged on its own days, so a model missing a period loses that day and no other model does. Dropped days are
         counted, never lost silently: `forecast_counts()` of the new report has them as `missing` and under
         `incomplete_day`, and a warning names the models. `planned` there is the days with any forecast, so days without a
         single forecast are in the first report's `forecast_counts()`.
@@ -284,7 +290,7 @@ class EvaluationReport:
         frames = self._model_frames()
         starts = [df["run_date"].min() for df in frames.values() if "run_date" in df and len(df)]
         start = min(starts) if starts else pd.Timestamp(0)
-        # The periods a target date has: every period that any model has a record for, at any horizon.
+        # Without a zone, the periods a target date has: every period that any model has a record for, at any horizon.
         keyed = [
             df[["target_date", "hour"]] for df in frames.values() if len(df) and {"target_date", "hour"} <= set(df)
         ]
@@ -293,10 +299,14 @@ class EvaluationReport:
         dropped: Dict[str, int] = {}
         for name, ref in self.refs.items():
             frame = frames[name]
-            per_hour = _PERIODS_PER_HOUR.get(freqs.get(name, ref.freq))
+            model_freq = freqs.get(name, ref.freq)
+            per_hour = _PERIODS_PER_HOUR.get(model_freq)
             if per_hour is None:
                 per_hour = periods_per_hour(frame["hour"].to_numpy()) if "hour" in frame else 1
-            days, seen, missing = daily_aggregate(frame, agg, per_hour, periods)
+            expected = periods
+            if ref.zone is not None and "target_date" in frame:
+                expected = periods_on_dates(frame["target_date"].unique(), model_freq, ref.zone)
+            days, seen, missing = daily_aggregate(frame, agg, per_hour, expected)
             records = _daily_records(days, start, ref.window)
             results[name] = ModelResultRef(
                 name=name,
@@ -887,8 +897,8 @@ class EvaluationReport:
         Empty, with the same columns, when no list has that rule.
 
         Columns: `model`, `list` (its hash), `predictors`, `forecasts` (how many of its forecasts exist), `periods` and
-        `horizons` (where), `smallest_days`, `median_days` and `largest_days` (the days they train on: past days the function
-        returned this list for, after the training cut and after dropping rows with a missing value), and `thin_forecasts`
+        `horizons` (where), `smallest_days`, `median_days` and `largest_days` (the days they train on: past days of the window
+        the function returned this list for, after dropping rows with a missing value), and `thin_forecasts`
         (how many train on no more days than the list has predictors).
         """
         return training_day_frame(rows_of_refs(self.refs))

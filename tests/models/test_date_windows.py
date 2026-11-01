@@ -23,6 +23,7 @@ from epftoolbox2.models._calendar import IssueCalendar, periods_per_day, trainin
 from epftoolbox2.models._worker import SKIP_MISSING_TEST_ROW, _fit_one_numpy, _worker_init, issue_row, training_rows
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path, read_zone
+from epftoolbox2.results.report import EvaluationReport
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 # Both zones change their clocks on these dates of 2023, Warsaw at 02:00 and London at 01:00.
@@ -612,6 +613,104 @@ def test_a_matching_forecast_the_clock_doesnt_have_isnt_counted_before_any_fit(t
     for record in ref._results:
         count = counts[(record["hour"], record["horizon"])][plan.position_of(record["run_date"])]
         assert count == record["training_days"]
+
+
+# ---------------------------------------------------------------------------
+# aggregate() on switch days, on real runs
+# ---------------------------------------------------------------------------
+
+
+def aggregated(data, first, last, horizon, freq, save_dir=None):
+    pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m"))
+    pipeline.add_evaluator(MAEEvaluator())
+    report = pipeline.run(data, test=(first, last), horizon=horizon, freq=freq, save_dir=save_dir)
+    return report, report.aggregate("1D", "max")
+
+
+def daily_keys(report):
+    return {(str(r["run_date"]), str(r["target_date"]), r["horizon"]) for r in report.refs["m"]._results}
+
+
+@pytest.mark.parametrize("freq", list(FREQS))
+@pytest.mark.parametrize("horizon", [1, 2], ids=["H1", "H2"])
+def test_aggregate_drops_the_day_after_spring_at_every_horizon_set(freq, horizon):
+    data = market("spring", freq=freq, horizon=2)
+    S = SWITCH_DAYS["spring"]
+    hourly, daily = aggregated(data, day_of(S, -1), day_of(S, 2), horizon, freq)
+
+    keys = daily_keys(daily)
+    # The spring day is whole over its 23 hours, or 92 quarter-hours.
+    assert (day_of(S, -1), S, 1) in keys
+    # The day after it, from S: no forecast of 02:00 was issued, so that day lacks one id at each horizon, also at H=1.
+    for h in range(1, horizon + 1):
+        assert (S, day_of(S, h), h) not in keys
+    # Every other day is whole.
+    every = {
+        (day_of(S, offset), day_of(S, offset + h), h)
+        for offset in range(-1, 3)
+        for h in range(1, horizon + 1)
+        if not (horizon == 2 and offset == -2)
+    }
+    dropped = {key for key in every if key[0] == S}
+    assert keys == every - dropped
+    assert daily.refs["m"].skipped == {"incomplete_day": len(dropped)}
+    counts = daily.forecast_counts().set_index("model").loc["m"]
+    assert (counts["planned"], counts["produced"], counts["incomplete_day"]) == (len(every), len(keys), len(dropped))
+
+    # The whole spring day is made of the periods the clock has.
+    spring = [r for r in hourly.refs["m"]._results if r["target_date"] == S and r["horizon"] == 1]
+    assert len(spring) == 23 * FREQS[freq]
+
+
+@pytest.mark.parametrize("freq", list(FREQS))
+@pytest.mark.parametrize("horizon", [1, 2], ids=["H1", "H2"])
+def test_aggregate_drops_the_autumn_day_for_its_repeated_hour_without_an_actual(freq, horizon):
+    data = market("autumn", freq=freq, horizon=2)
+    S = SWITCH_DAYS["autumn"]
+    _, daily = aggregated(data, day_of(S, -2), day_of(S, 1), horizon, freq)
+    keys = daily_keys(daily)
+    every = {(day_of(S, offset), day_of(S, offset + h), h) for offset in range(-2, 2) for h in range(1, horizon + 1)}
+    dropped = {key for key in every if key[1] == S}
+    assert dropped and keys == every - dropped
+    assert daily.refs["m"].skipped == {"incomplete_day": len(dropped)}
+
+
+def test_an_ensemble_aggregates_by_the_clock_too():
+    data = market("spring", horizon=1)
+    S = SWITCH_DAYS["spring"]
+    pipeline = small_pipeline(True)
+    daily = pipeline.run(data, test=(day_of(S, -1), day_of(S, 1)), horizon=1).aggregate("1D", "max")
+    for name in ("a", "avg"):
+        keys = {(str(r["run_date"]), str(r["target_date"])) for r in daily.refs[name]._results}
+        assert (S, day_of(S, 1)) not in keys and (day_of(S, -1), S) in keys
+        assert daily.refs[name].skipped == {"incomplete_day": 1}
+
+
+def test_aggregate_without_a_zone_keeps_the_rule_of_the_records():
+    """Plain lists say nothing of a clock: a day lacking a period no model has is taken at its word."""
+    data = market("spring", horizon=1)
+    S = SWITCH_DAYS["spring"]
+    report, daily = aggregated(data, day_of(S, -1), day_of(S, 1), 1, "1h")
+    records = list(report.refs["m"]._results)
+    assert (S, day_of(S, 1), 1) not in daily_keys(daily)
+
+    plain = EvaluationReport({"m": records}, [MAEEvaluator()]).aggregate("1D", "max")
+    assert (S, day_of(S, 1), 1) in {
+        (str(r["run_date"]), str(r["target_date"]), r["horizon"]) for r in plain.refs["m"]._results
+    }
+
+
+def test_aggregate_from_files_equals_aggregate_of_the_run(tmp_path):
+    data = market("spring", horizon=2)
+    S = SWITCH_DAYS["spring"]
+    report, daily = aggregated(data, day_of(S, -1), day_of(S, 2), 2, "1h", save_dir=tmp_path)
+    pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m"))
+    merged = pipeline.report(tmp_path, day_of(S, -1), day_of(S, 2), horizon=2)
+    assert merged.refs["m"].zone == "Europe/Warsaw"
+    assert merged.refs["m"].count == report.refs["m"].count
+    from_files = merged.aggregate("1D", "max")
+    assert daily_keys(from_files) == daily_keys(daily)
+    assert from_files.refs["m"].skipped == daily.refs["m"].skipped
 
 
 # ---------------------------------------------------------------------------
