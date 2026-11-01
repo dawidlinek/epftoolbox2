@@ -5,7 +5,9 @@ import warnings
 import numpy as np
 import pytest
 
+from epftoolbox2.models import LassoCVModel, OLSModel
 from epftoolbox2.scalers import AsinhScaler, NPITScaler, StandardScaler
+from epftoolbox2.scalers.base import CONSTANT_STD_RTOL
 
 VST_SCALERS = [AsinhScaler, NPITScaler]
 MAD_TO_STD = 1.482602218505602  # 1 / Phi^-1(0.75)
@@ -214,3 +216,224 @@ def test_invalid_apply_to_is_rejected(bad):
 
 def test_apply_to_tuple_is_stored_as_list():
     assert NPITScaler(apply_to=("price", "price_d-*")).apply_to == ["price", "price_d-*"]
+
+
+def near_constant_case(constant=0.3, noise=1e-15, n=30, seed=0):
+    """A load-like column, a column that is `constant` up to rounding noise, a price that depends on the first."""
+    rng = np.random.default_rng(seed)
+    load = rng.normal(50, 10, n)
+    flat = constant + rng.normal(0, noise, n)
+    price = 2 * load + 5 + rng.normal(0, 3, n)
+    return np.column_stack([load, flat]), price, np.array([[52.0, 0.31]])
+
+
+def spread_column(ratio, centre=1000.0, n=40, seed=3):
+    """Values around `centre` whose sample standard deviation is about `ratio` times their largest absolute value."""
+    z = np.random.default_rng(seed).normal(size=n)
+    z = (z - z.mean()) / z.std(ddof=1)
+    return centre * (1 + ratio * z)
+
+
+def ols_forecast(train_x, train_y, test_x):
+    """What OLSModel does with the scaled data."""
+    return OLSModel(predictors=[])._fit_predict(train_x, train_y, test_x)[0]
+
+
+APPLY_TO = ["all", "target", ["load*"]]  # the near-constant column ("flat") is transformed, or only standardised
+
+
+def scaler_for(scaler_cls, apply_to):
+    return scaler_cls(apply_to=apply_to if apply_to != ["load*"] else ["flat*"])
+
+
+@pytest.mark.parametrize("scaler_cls", VST_SCALERS)
+@pytest.mark.parametrize("apply_to", APPLY_TO)
+class TestNearConstantColumns:
+    """A column constant up to rounding noise isn't divided by its standard deviation of about 1e-16."""
+
+    columns = ["load", "flat"]
+
+    def test_scale_is_one_and_the_test_row_is_ordinary(self, scaler_cls, apply_to):
+        train_x, train_y, test_x = near_constant_case()
+        flat = train_x[:, 1]
+        assert 0 < np.std(flat, ddof=1) <= CONSTANT_STD_RTOL * np.abs(flat).max()
+
+        scaler = scaler_for(scaler_cls, apply_to)
+        scaled_train, _, scaled_test = scaler.fit_transform(train_x, train_y, test_x, columns=self.columns)
+
+        assert scaler._column_params[1][2] == 1.0  # the standardising scale
+        np.testing.assert_array_equal(scaled_train[:, 1], 0.0)  # not its centred noise
+        assert abs(scaled_test[0, 1]) < 0.02  # 0.31 is 0.01 above the constant
+        assert scaled_train[:, 0].std(ddof=1) == pytest.approx(1.0)  # the ordinary column is standardised
+
+    @pytest.mark.parametrize("seed", range(3))
+    def test_forecast_is_finite_and_ordinary(self, scaler_cls, apply_to, seed):
+        train_x, train_y, test_x = near_constant_case(seed=seed)
+
+        scaler = scaler_for(scaler_cls, apply_to)
+        forecast = scaler.inverse(ols_forecast(*scaler.fit_transform(train_x, train_y, test_x, columns=self.columns)))
+        alone = scaler_for(scaler_cls, apply_to if apply_to != ["load*"] else "target")
+        reference = alone.inverse(
+            ols_forecast(*alone.fit_transform(train_x[:, :1], train_y, test_x[:, :1], columns=["load"]))
+        )
+
+        assert np.isfinite(forecast)
+        assert abs(forecast - reference) < 1e-9 * abs(reference)  # the column neither helps nor hurts
+        assert abs(forecast - (2 * 52 + 5)) < 15
+
+    def test_training_values_are_exactly_zero_and_nans_stay_nan(self, scaler_cls, apply_to):
+        train_x, train_y, test_x = near_constant_case()
+        train_x[[2, 11], 1] = np.nan
+
+        scaler = scaler_for(scaler_cls, apply_to)
+        scaled_train, _, scaled_test = scaler.fit_transform(train_x, train_y, test_x, columns=self.columns)
+
+        assert np.isnan(scaled_train[[2, 11], 1]).all()
+        present = np.delete(scaled_train[:, 1], [2, 11])
+        assert present.shape == (28,) and (present == 0.0).all() and not np.signbit(present).any()
+        assert np.isfinite(scaled_test).all() and abs(scaled_test[0, 1]) < 0.02  # the test row isn't zeroed
+
+    @pytest.mark.parametrize("seed", range(3))
+    def test_ols_coefficient_is_exactly_zero(self, scaler_cls, apply_to, seed):
+        train_x, train_y, test_x = near_constant_case(seed=seed)
+        scaler = scaler_for(scaler_cls, apply_to)
+
+        _, coefficients = OLSModel(predictors=[])._fit_predict(
+            *scaler.fit_transform(train_x, train_y, test_x, columns=self.columns)
+        )
+
+        assert coefficients[1] == 0.0
+
+    @pytest.mark.parametrize("seed", range(3))
+    def test_lasso_forecast_equals_the_frame_without_the_column(self, scaler_cls, apply_to, seed):
+        train_x, train_y, test_x = near_constant_case(seed=seed)
+        model = LassoCVModel(predictors=[], cv=3)
+
+        scaler = scaler_for(scaler_cls, apply_to)
+        forecast = scaler.inverse(
+            model._fit_predict(*scaler.fit_transform(train_x, train_y, test_x, columns=self.columns))[0]
+        )
+        alone = scaler_for(scaler_cls, apply_to if apply_to != ["load*"] else "target")
+        reference = alone.inverse(
+            model._fit_predict(*alone.fit_transform(train_x[:, :1], train_y, test_x[:, :1], columns=["load"]))[0]
+        )
+
+        assert abs(forecast - reference) < 1e-9
+
+    def test_exactly_constant_column_with_an_inexact_mean(self, scaler_cls, apply_to):
+        train_x, train_y, test_x = near_constant_case(noise=0.0)
+
+        scaler = scaler_for(scaler_cls, apply_to)
+        scaled_train, _, scaled_test = scaler.fit_transform(train_x, train_y, test_x, columns=self.columns)
+
+        assert scaler._column_params[1][2] == 1.0
+        np.testing.assert_array_equal(scaled_train[:, 1], 0.0)
+        assert abs(scaled_test[0, 1]) < 0.02
+
+    def test_ratio_of_1e9_still_scales_normally(self, scaler_cls, apply_to):
+        col = spread_column(1e-9)
+        assert 5e-10 < np.std(col, ddof=1) / np.abs(col).max() < 2e-9
+        train_x = np.column_stack([np.arange(40.0), col])
+        test_x = np.array([[3.0, col.mean() + 2 * np.std(col, ddof=1)]])
+
+        scaler = scaler_for(scaler_cls, apply_to)
+        scaled_train, _, scaled_test = scaler.fit_transform(train_x, np.arange(40.0), test_x, columns=self.columns)
+
+        assert scaler._column_params[1][2] != 1.0
+        assert np.abs(scaled_train[:, 1]).max() > 1.0  # untouched by the rule: a real standardised column
+        assert scaled_train[:, 1].mean() == pytest.approx(0.0, abs=1e-9)
+        assert scaled_train[:, 1].std(ddof=1) == pytest.approx(1.0, rel=1e-5)
+        assert np.isfinite(scaled_test).all()
+
+    def test_all_zero_column(self, scaler_cls, apply_to):
+        train_x = np.column_stack([np.arange(20.0), np.zeros(20)])
+        scaler = scaler_for(scaler_cls, apply_to)
+
+        scaled_train, _, scaled_test = scaler.fit_transform(
+            train_x, np.arange(20.0), np.array([[3.0, 0.5]]), scalable_mask=np.array([True, True]), columns=self.columns
+        )
+
+        assert not scaled_train[:, 1].any()
+        assert scaler._column_params[1][2] == 1.0
+        assert np.isfinite(scaled_test).all()
+
+    def test_one_finite_value(self, scaler_cls, apply_to):
+        col = np.full(10, np.nan)
+        col[4] = 0.3
+        train_x = np.column_stack([np.arange(10.0), col])
+        scaler = scaler_for(scaler_cls, apply_to)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            scaled_train, _, scaled_test = scaler.fit_transform(
+                train_x,
+                np.arange(10.0),
+                np.array([[3.0, 0.31]]),
+                scalable_mask=np.array([True, True]),
+                columns=self.columns,
+            )
+
+        assert scaler._column_params[1][2] == 1.0
+        assert scaled_train[4, 1] == 0.0
+        assert np.isfinite(scaled_test).all() and abs(scaled_test[0, 1]) < 0.02
+
+    def test_nans_in_the_column(self, scaler_cls, apply_to):
+        train_x, train_y, test_x = near_constant_case()
+        train_x[[2, 11], 1] = np.nan
+        train_x[[5, 7], 0] = np.nan
+
+        scaler = scaler_for(scaler_cls, apply_to)
+        scaled_train, _, scaled_test = scaler.fit_transform(train_x, train_y, test_x, columns=self.columns)
+
+        assert scaler._column_params[1][2] == 1.0
+        assert np.isfinite(np.delete(scaled_train[:, 1], [2, 11])).all()
+        assert abs(scaled_test[0, 1]) < 0.02
+        assert np.nanstd(scaled_train[:, 0], ddof=1) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("scaler_cls", VST_SCALERS)
+class TestNearConstantTarget:
+    def test_scale_is_one_and_the_inverse_stays_at_the_constant(self, scaler_cls):
+        rng = np.random.default_rng(0)
+        train_y = 0.3 + rng.normal(0, 1e-15, 30)
+        scaler = scaler_cls()
+
+        _, scaled_y, _ = scaler.fit_transform(rng.normal(size=(30, 1)), train_y, np.zeros((1, 1)))
+
+        assert scaler._target_std == 1.0
+        assert np.abs(scaled_y).max() < 1e-14  # the target keeps its centred noise: only predictors are zeroed
+        for z in (-3.0, 0.0, 3.0):  # a model's prediction in the scaled space: an ordinary number maps back
+            assert np.isfinite(scaler.inverse(z))
+        assert scaler.inverse(0.0) == pytest.approx(0.3, abs=1e-12)
+
+    def test_exactly_constant_target_with_an_inexact_mean(self, scaler_cls):
+        scaler = scaler_cls()
+        scaler.fit_transform(np.arange(30.0).reshape(-1, 1), np.full(30, 0.3), np.zeros((1, 1)))
+        assert scaler._target_std == 1.0 and scaler.inverse(0.0) == pytest.approx(0.3, abs=1e-12)
+
+    def test_target_with_ratio_of_1e9_is_scaled(self, scaler_cls):
+        scaler = scaler_cls()
+        _, scaled_y, _ = scaler.fit_transform(np.arange(40.0).reshape(-1, 1), spread_column(1e-9), np.zeros((1, 1)))
+
+        assert scaler._target_std != 1.0
+        assert scaled_y.std(ddof=1) == pytest.approx(1.0, rel=1e-5)
+
+    def test_all_zero_one_value_and_nans(self, scaler_cls):
+        x = np.arange(10.0).reshape(-1, 1)
+        zeros = scaler_cls()
+        zeros.fit_transform(x, np.zeros(10), np.zeros((1, 1)))
+        assert zeros._target_std == 1.0 and zeros.inverse(0.0) == 0.0
+
+        one = np.full(10, np.nan)
+        one[3] = 7.0
+        single = scaler_cls()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            single.fit_transform(x, one, np.zeros((1, 1)))
+        assert single._target_std == 1.0
+
+        noisy = 0.3 + np.random.default_rng(1).normal(0, 1e-15, 10)
+        noisy[[1, 6]] = np.nan
+        with_nans = scaler_cls()
+        with_nans.fit_transform(x, noisy, np.zeros((1, 1)))
+        assert with_nans._target_std == 1.0 and with_nans.inverse(0.0) == pytest.approx(0.3, abs=1e-12)

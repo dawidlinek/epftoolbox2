@@ -2029,8 +2029,12 @@ def test_source_rebuild_catches_a_transformer_leak_that_the_final_column_probe_m
     """
     tz = "Europe/Warsaw"
     index = pd.date_range("2024-03-15", "2024-04-05", freq="1h", tz=tz, inclusive="left")
-    load_forecast = pd.Series(1000 + 50 * np.sin(2 * np.pi * np.arange(len(index)) / 24), index=index)
     rng = np.random.default_rng(0)
+    # The day-to-day noise matters: a series that repeats exactly every 24 hours is constant at each hour of the day
+    # up to rounding noise, and a model gives such a predictor no weight, so it could not carry a leak into a forecast.
+    load_forecast = pd.Series(
+        1000 + 50 * np.sin(2 * np.pi * np.arange(len(index)) / 24) + rng.normal(0, 20, len(index)), index=index
+    )
     source = pd.DataFrame({"load_forecast": load_forecast})
     source["price"] = 20 + 0.05 * calendar_shift(load_forecast, 1) + rng.normal(0, 0.1, len(index))
 
