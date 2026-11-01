@@ -194,7 +194,9 @@ def test_a_task_runs_its_block_and_no_other_model(tmp_path, frame_csv, k, monkey
 def test_an_index_past_the_last_block_raises_naming_the_valid_range_before_reading_data(
     tmp_path, frame_csv, k, valid, monkeypatch
 ):
-    monkeypatch.setattr(Workflow, "_run_data", lambda self: pytest.fail("the data pipeline ran before the check"))
+    monkeypatch.setattr(
+        Workflow, "_run_data", lambda self, dp=None: pytest.fail("the data pipeline ran before the check")
+    )
     environment = {"models_per_task": k} if k else {}
     past_the_end = int(valid.split("-")[1]) + 1
     for index in (past_the_end, -1):
@@ -423,7 +425,9 @@ def test_the_size_and_a_merge_need_no_index(tmp_path, frame_csv, outside_the_arr
 
 
 def test_run_refuses_an_index_it_does_not_have(outside_the_array, monkeypatch):
-    monkeypatch.setattr(Workflow, "_run_data", lambda self: pytest.fail("the data pipeline ran before the check"))
+    monkeypatch.setattr(
+        Workflow, "_run_data", lambda self, dp=None: pytest.fail("the data pipeline ran before the check")
+    )
     with pytest.raises(ValueError, match=r"model_index is '\$SLURM_ARRAY_TASK_ID'.*isn't set"):
         Workflow.load(outside_the_array).run()
 
@@ -513,7 +517,9 @@ def test_a_top_ensemble_with_no_validation_fails_any_shard_before_any_fit(tmp_pa
     path.write_text(yaml.safe_dump(config))
     fits = []
     monkeypatch.setattr(BaseModel, "run", lambda model, *args, **kwargs: fits.append(model.name))
-    monkeypatch.setattr(Workflow, "_run_data", lambda self: pytest.fail("the data pipeline ran before the check"))
+    monkeypatch.setattr(
+        Workflow, "_run_data", lambda self, dp=None: pytest.fail("the data pipeline ran before the check")
+    )
 
     with pytest.raises(ValueError, match="no validation window"):
         Workflow.load(path).run()
@@ -526,7 +532,9 @@ def test_an_ensemble_with_a_member_nobody_has_fails_any_shard_before_any_fit(tmp
     config = yaml.safe_load(path.read_text())
     config["model_pipeline"]["ensembles"][1]["params"]["members"] = ["m0", "typo"]
     path.write_text(yaml.safe_dump(config))
-    monkeypatch.setattr(Workflow, "_run_data", lambda self: pytest.fail("the data pipeline ran before the check"))
+    monkeypatch.setattr(
+        Workflow, "_run_data", lambda self, dp=None: pytest.fail("the data pipeline ran before the check")
+    )
 
     with pytest.raises(ValueError, match="unknown member 'typo'"):
         Workflow.load(path).run()
