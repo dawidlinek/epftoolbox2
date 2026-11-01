@@ -177,10 +177,26 @@ def switch_data(spec, freq):
     return with_flag(frame, spec["turns"])
 
 
-@pytest.mark.parametrize("switch", list(SWITCHES))
-@pytest.mark.parametrize("freq", ["1h", "15min"])
-@pytest.mark.parametrize("horizon", [1, 3])
-@pytest.mark.parametrize("predictors", [FIXED, by_day_and_value], ids=["fixed list", "ctx function"])
+# Half of the 2 x 2 x 2 x 2 grid of switch, frequency, horizon and kind of list: the cells with an even number of
+# {autumn, 15min, horizon 3, ctx function} in them. Every level of every axis is in four cells and every pair of levels
+# of two axes in two, so no axis is left to one cell. The Lasso test below spreads its cells over the grid as well.
+OLS_CELLS = [
+    ("spring", "1h", 1, FIXED),
+    ("spring", "1h", 3, by_day_and_value),
+    ("spring", "15min", 1, by_day_and_value),
+    ("spring", "15min", 3, FIXED),
+    ("autumn", "1h", 1, by_day_and_value),
+    ("autumn", "1h", 3, FIXED),
+    ("autumn", "15min", 1, FIXED),
+    ("autumn", "15min", 3, by_day_and_value),
+]
+
+
+def cell_id(value):
+    return value if isinstance(value, (str, int)) else ("ctx function" if callable(value) else "fixed list")
+
+
+@pytest.mark.parametrize(("switch", "freq", "horizon", "predictors"), OLS_CELLS, ids=cell_id)
 def test_ols_records_are_the_plain_runs_records(switch, freq, horizon, predictors):
     spec = SWITCHES[switch]
     frame = switch_data(spec, freq)
@@ -196,11 +212,11 @@ def test_ols_records_are_the_plain_runs_records(switch, freq, horizon, predictor
         (FIXED, "spring", "1h", 1),
         (FIXED, "autumn", "1h", 3),
         (FIXED, "autumn", "15min", 1),
-        (FIXED, "spring", "15min", 3),
+        (FIXED, "spring", "1h", 3),
         (by_day_and_value, "autumn", "1h", 3),
         (by_day_and_value, "spring", "15min", 1),
     ],
-    ids=lambda value: value if isinstance(value, (str, int)) else ("ctx function" if callable(value) else "fixed list"),
+    ids=cell_id,
 )
 def test_lasso_records_are_the_plain_runs_records(switch, freq, horizon, predictors):
     frame = switch_data(SWITCHES[switch], freq)
@@ -484,7 +500,13 @@ def reports(df, tmp_path_factory):
     records = {name: stored(base / "plain_validation" / f"{name}.jsonl") for name, _ in MODELS}
     kept = {name: [r for r in rows if r["target_date"] < LONG_T[0]] for name, rows in records.items()}
     filtered = EvaluationReport(kept, EVALUATORS)
-    return dict(combined=combined, plain_test=plain_test, plain_validation=plain_validation, filtered=filtered)
+    return dict(
+        combined=combined,
+        plain_test=plain_test,
+        plain_validation=plain_validation,
+        filtered=filtered,
+        saved=base / "combined",
+    )
 
 
 def details(report):
@@ -1561,11 +1583,12 @@ def test_a_plan_made_for_other_windows_is_refused(df):
 # ---------------------------------------------------------------------------
 
 
-def test_report_from_saved_results_is_what_the_run_returned(df, tmp_path):
-    make = lambda: pipeline(*models(), evaluators=[MAEEvaluator(), rMAEEvaluator("small")])  # noqa: E731
-    returned = make().run(df, validation=LONG_V, test=LONG_T, horizon=2, save_dir=str(tmp_path))
-    merged = make().report(tmp_path, validation=LONG_V, test=LONG_T, horizon=2)
-    from_manifests = make().report(tmp_path, horizon=2)
+def test_report_from_saved_results_is_what_the_run_returned(reports):
+    """The results the shared run saved, read back by a pipeline with the evaluators it ran with."""
+    make = lambda: pipeline(*models(), evaluators=EVALUATORS)  # noqa: E731
+    returned = reports["combined"]
+    merged = make().report(reports["saved"], validation=LONG_V, test=LONG_T, horizon=2)
+    from_manifests = make().report(reports["saved"], horizon=2)
     for report in (merged, from_manifests):
         assert report.window == "test"
         pd.testing.assert_frame_equal(report.summary(), returned.summary())
