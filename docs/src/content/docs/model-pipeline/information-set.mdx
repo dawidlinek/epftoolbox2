@@ -164,7 +164,8 @@ aggregate](#day-aggregates) over the whole day, an hour lag in elapsed time. On 
 calendar days, and a day aggregate still ends at 23:00. An hour lag lands on another hour next to a switch, so across such a
 window the label is the usual one and says how many days differ: `T-2 12:00 (else on 1 of 4 days)`. `status` is `ok`,
 `late`, `late on 3 of 10 days`, `no rule`, `no issue time` or `not in data`, judged on every issue day of `test`, and
-`known` is that of the day it comes latest. A period the issue day doesn't have (02:00 on the day clocks go forward) is
+`known` is that of the day it comes latest, as an instant shown on the data's clock (see [Clock Changes](#clock-changes)). A
+period the issue day doesn't have (02:00 on the day clocks go forward) is
 noted under the table. On hourly data `_sNN` can be a slot of any length, so its time is `?`.
 
 For a predictor function it shows [the distinct lists first](/epftoolbox2/model-pipeline/predictor-functions/#seeing-the-lists).
@@ -360,6 +361,31 @@ rule for the plain column itself lifts.
   such a case, although it uses that zone: its 23:00 is 23:00 on D of the files' wall clock, and its rules
   (`with_source_rules`) say so, so `price_day_max` and `price_h23` pass all year.
 </Aside>
+
+---
+
+## Clock Changes
+
+The check and the probe compare instants, not clock readings, so on a day the clocks change a value known after the
+issue can't read as known before it:
+
+- **Clock times in a rule** (`published("13:00")`, `as_of("09:00", ...)`, `weather_cutoff(run="00", ...)`) are
+  wall-clock times in the rule's own zone, converted at the instant they denote on that day.
+- **Delays and period lengths are elapsed time.** When Warsaw's clocks go forward, the hour starting at 01:00 ends at
+  03:00, so `realised(delay="1h")` makes it known at 04:00.
+- **Shifts match `LagTransformer`.** A `_d` shift keeps the row's wall-clock time; `_h` and `_min` shifts are elapsed
+  time. Several shifts apply from the end of the name: `x_d+1_h-24` is `x_d+1` of the row 24 elapsed hours earlier.
+- **An issue time the clocks skip** is read at its earliest, so the issue is never later than asked: 02:30 Brussels
+  on 2024-03-31 is 00:30Z. An issue time the clocks repeat is its first occurrence.
+- **A row in the repeated autumn hour** is checked at its second occurrence, the row the model forecasts from. Times
+  inside that hour are shown with their UTC offset, in messages, `report.availability()` and `explain`, because the clock
+  alone can't order them: `known D 01:00 (UTC-05:00), issued D 01:30 (UTC-04:00)`.
+- **A naive index** (after `DSTNormalizeTransformer`) is read in `issue_timezone` and shifted on its own wall clock,
+  as `LagTransformer` does; its averaged repeated hour counts as the second occurrence. Normalise the data in that
+  same zone: nothing can check a zone the index doesn't carry.
+- **`ctx.published()` and `ctx.value()`** read the same instants, so a predictor function can answer otherwise on such a
+  day than a clock reading would, and get another list there. A forecast is otherwise untouched: availability never reads
+  a number.
 
 ---
 

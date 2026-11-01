@@ -727,6 +727,105 @@ def test_violations_convert_the_issue_time_at_its_own_instant():
     assert {p for _, p, _ in found} == {21, 22, 23}
 
 
+def test_a_value_known_after_an_issue_in_the_repeated_autumn_hour_is_unknown():
+    """New York repeats 01:00-02:00 on 2024-11-03. Issued at 01:30, read at its earliest (05:30Z, EDT), a
+    weather_cutoff value known at 06:00Z (run "00", delay "6h") isn't known yet. 06:00Z is New York's second 01:00:
+    compared as wall-clock minutes (01:00 < 01:30) it read as known, for the check and the perturbation alike."""
+    index = pd.date_range("2024-11-01", "2024-11-05", freq="1h", tz="America/New_York")
+    info = InformationSet("01:30", "America/New_York", rules={"temp": Availability.weather_cutoff("00", "6h")})
+    found, _ = violations(["temp"], info=info, horizon=1, index=index, start="2024-11-03", end="2024-11-03")
+    assert {p for _, p, _ in found} == set(range(24))
+
+    data = pd.DataFrame({"temp": np.arange(len(index), dtype=float)}, index=index)
+    perturbed, _counts, unchecked = perturb_unknown(data, "2024-11-03", info, freq="1h")
+    assert unchecked == []
+    nov_3 = np.asarray(index.tz_localize(None).normalize() == pd.Timestamp("2024-11-03"))
+    assert (perturbed.loc[nov_3, "temp"].to_numpy() != data.loc[nov_3, "temp"].to_numpy()).all()
+
+
+def test_a_realised_values_period_and_delay_are_elapsed_time_across_the_spring_switch():
+    """Issued 03:30 Warsaw on 2024-03-31 (01:30Z, after the spring switch). load_actual at 01:00 CET (00:00Z) is
+    known 1 h after its period plus a 1 h delay, at 02:00Z: after the issue. Added to the wall clock instead
+    (01:00 + 1 h + 1 h = 03:00 < 03:30), it read as known, for the check and the perturbation alike. Period 0
+    (23:00Z the day before, known 01:00Z) is known in time."""
+    info = InformationSet("03:30", "Europe/Warsaw")  # default rules: load_actual = Availability.realised("1h")
+    found, _ = violations(
+        ["load_actual"], info=info, horizon=1, index=DST_SPRING_WARSAW, start="2024-03-31", end="2024-03-31"
+    )
+    assert {p for _, p, _ in found} == set(range(1, 24))
+
+    index = pd.date_range("2024-03-29", "2024-04-02", freq="1h", tz="Europe/Warsaw")
+    data = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
+    perturbed, _counts, unchecked = perturb_unknown(data, "2024-03-31", info, freq="1h")
+    assert unchecked == []
+    changed = data.index[perturbed["load_actual"] != data["load_actual"]]
+    assert changed[0] == pd.Timestamp("2024-03-31 01:00", tz="Europe/Warsaw")
+
+
+def test_an_hour_lag_is_elapsed_time_across_the_autumn_switch():
+    """Warsaw repeats 02:00-03:00 on 2024-10-27; issued 02:30, read at its earliest (00:30Z, CEST). load_actual_h-5
+    at 05:00 CET (04:00Z) holds the value delivered 5 hours earlier, at 23:00Z, known 1 h after its period plus a
+    1 h delay: 01:00Z, the second 02:00, after the issue. Subtracting the 5 hours from the wall clock (delivered
+    00:00, known 02:00 < 02:30) read it as known, and flagged only periods from 6 on."""
+    info = InformationSet("02:30", "Europe/Warsaw")
+    found, _ = violations(
+        ["load_actual_h-5"], info=info, horizon=1, index=DST_FALL_WARSAW, start="2024-10-27", end="2024-10-27"
+    )
+    assert {p for _, p, _ in found} == set(range(5, 24))
+
+
+def test_a_repeated_autumn_hour_is_checked_at_the_second_occurrence_the_model_forecasts_from():
+    """Period 2 has two rows on 2024-10-27 in Warsaw, and the model forecasts from the second, 02:00 CET (01:00Z).
+    price_h+22 there holds the price of 2024-10-28 00:00, published 13:00 on D: after the 11:45 issue. Checked at
+    the first occurrence (02:00 CEST) it held D's own 23:00 price and passed."""
+    found, _ = violations(["price_h+22"], horizon=1, index=DST_FALL_WARSAW, start="2024-10-27", end="2024-10-27")
+    assert {p for _, p, _ in found} == set(range(2, 24))
+
+
+def test_an_as_of_value_read_through_an_hour_lag_comes_from_its_source_rows_day():
+    """x is known at 12:00 Warsaw on the day it is read from. On 2024-10-27, a 25-hour day, x_h-24 at 23:00 CET
+    (22:00Z) holds x of 22:00Z the day before, 00:00 CEST on D itself: known at 12:00, after the 11:45 issue.
+    Counting the 24 hours on the wall clock read it from D-1."""
+    info = InformationSet("11:45", "Europe/Brussels", rules={"x": Availability.as_of("12:00", "Europe/Warsaw")})
+    found, _ = violations(["x_h-24"], info=info, horizon=1, index=DST_FALL_WARSAW, start="2024-10-27", end="2024-10-27")
+    assert {p for _, p, _ in found} == {23}
+
+
+def test_shifts_apply_outermost_first():
+    """price_d+1_h-24 is price_d+1 read 24 hours earlier. At 23:00 CET on 2024-10-27 (22:00Z) that is price_d+1 at
+    00:00 CEST on D, the price of 2024-10-28 00:00: published 13:00 on D, after the 11:45 issue. Taking the day shift
+    first read D's own 23:00 price there instead, and flagged the day before."""
+    for day, expected in (("2024-10-26", set()), ("2024-10-27", {23})):
+        found, _ = violations(["price_d+1_h-24"], horizon=1, index=DST_FALL_WARSAW, start=day, end=day)
+        assert {p for _, p, _ in found} == expected
+
+
+def test_a_naive_index_is_shifted_on_its_own_wall_clock():
+    """A naive index (DSTNormalizeTransformer's 24 slots a day) is lagged on its own wall clock: price_h+23 at 01:00
+    on 2024-10-27 holds the price of 2024-10-28 00:00 (published 13:00 on D, after the 11:45 issue), and at 00:00 on
+    any day D's own 23:00 price (known). The averaged 02:00 slot of the autumn day needs the second 02:00 hour,
+    realised at 03:00Z: after an issue at 03:30 CET (02:30Z)."""
+    autumn = pd.date_range("2024-10-20", "2024-11-03", freq="h", inclusive="left")
+    perturbed, _, _ = perturb_unknown(pd.DataFrame({"price_h+23": 0.0}, index=autumn), "2024-10-27", InformationSet())
+    assert perturbed.loc["2024-10-27 01:00", "price_h+23"] != 0
+    data = pd.DataFrame({"load_actual": 0.0}, index=autumn)
+    perturbed, _, _ = perturb_unknown(data, "2024-10-27", InformationSet("03:30", "Europe/Brussels"))
+    assert perturbed.loc["2024-10-27 02:00", "load_actual"] != 0
+
+    spring = pd.date_range("2024-03-25", "2024-04-05", freq="h", inclusive="left")
+    found, _ = violations(["price_h+23"], horizon=1, index=spring, start="2024-03-25", end="2024-04-05")
+    assert {p for _, p, _ in found} == set(range(1, 24))
+
+
+def test_a_time_in_the_repeated_autumn_hour_is_shown_with_its_utc_offset():
+    """06:00Z is New York's second 01:00 on 2024-11-03 and the 01:30 issue its first 01:30; without offsets the
+    message would read as known before the issue."""
+    index = pd.date_range("2024-11-01", "2024-11-05", freq="1h", tz="America/New_York")
+    info = InformationSet("01:30", "America/New_York", rules={"temp": Availability.weather_cutoff("00", "6h")})
+    with pytest.raises(InformationSetError, match=r"known D 01:00 \(UTC-05:00\), issued D 01:30 \(UTC-04:00\)"):
+        info.check(expand(["temp"], horizon=1), "price", "1h", index, "2024-11-03", "2024-11-03")
+
+
 @pytest.mark.parametrize("issue_timezone", ["Europe/Brussels", "Europe/Warsaw"])
 @pytest.mark.parametrize("data_zone", ["UTC", "Europe/Warsaw"])
 def test_an_issue_time_skipped_by_the_spring_switch_is_read_at_its_earliest(issue_timezone, data_zone):

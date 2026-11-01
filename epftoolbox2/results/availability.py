@@ -60,8 +60,8 @@ _NOTHING_KNOWN: Dict[str, Any] = {"rule": "", "known": "", "issued": "", "minute
 def _details(use: Violation) -> Dict[str, Any]:
     return {
         "rule": use.column.rule.describe(),
-        "known": _fmt_minute(use.available),
-        "issued": _fmt_minute(use.issue),
+        "known": use.available_label or _fmt_minute(use.available),
+        "issued": use.issue_label or _fmt_minute(use.issue),
         "minutes_late": float(use.available - use.issue),
         "note": use.hint,
     }

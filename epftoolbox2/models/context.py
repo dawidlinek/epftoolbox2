@@ -48,7 +48,6 @@ from ..information_set import (
     InformationSetError,
     ResolvedColumn,
     Violation,
-    _fmt_minute,
 )
 from ..results.availability import listing_rows, sort_rows
 from ..results.windows import mask_key
@@ -290,7 +289,7 @@ class _Cells:
         return col
 
     def available(self, name: str) -> np.ndarray:
-        """When each cell of a column with a rule is known, in minutes after the first issue day's midnight."""
+        """The instant each cell of a column with a rule is known, in minutes since the first issue day's midnight."""
         grid = self._available.get(name)
         if grid is None:
             col = self.column(name)
@@ -317,7 +316,7 @@ class _Cells:
         return grid
 
     def known_at(self, name: str, period: int, position: int) -> str:
-        return _fmt_minute(self._clock.minute_of_day(self.available(name)[period, position], position))
+        return self._clock.label(self.available(name)[period, position], position)
 
     def published(self, columns: Any, horizon: int, period: int, position: int) -> bool:
         entry = self._published.get((columns, horizon))
@@ -381,8 +380,8 @@ class _Cells:
             avail = self.available(name)
             read = self._on(read, horizon, days)
             late = self._info._late_periods(col, self._periods, avail, self._clock, self._step, used=read)
-            for period, known, issue, hint in late:
-                out.append(Violation(name, period, horizon, col, known, issue, ROLE_VALUE, hint))
+            for found in late:
+                out.append(found.use(name, horizon, col, ROLE_VALUE))
         return out
 
     def no_rule_reads(self, days: Any = None) -> List[Violation]:
@@ -861,9 +860,9 @@ class PredictorPlan:
                         continue
                     row = np.array([period])
                     late = info._late_periods(col, row, avail[row], cells._clock, step, used=used[np.newaxis])
-                    for at, known, issue, hint in late:
-                        hint = hint or info._weather_cutoff_hint(col)
-                        out.setdefault(list_id, []).append(Violation(name, at, horizon, col, known, issue, hint=hint))
+                    for found in late:
+                        use = found.use(name, horizon, col, hint=info._weather_cutoff_hint(col))
+                        out.setdefault(list_id, []).append(use)
         return out
 
     def read_cells(self) -> Dict[Tuple[Any, ...], Tuple[np.ndarray, np.ndarray]]:

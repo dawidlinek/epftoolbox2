@@ -87,7 +87,7 @@ def _judge(
     available = clock.available(col, np.array([period]), step)[0][used]
     excess = available - clock.issue[used]
     worst = int(excess.argmax())
-    known = _fmt_minute(clock.minute_of_day(available[worst], int(np.flatnonzero(used)[worst])))
+    known = clock.label(available[worst], int(np.flatnonzero(used)[worst]))
     late = int((excess > 0).sum())
     status = "ok" if not late else "late" if late == len(excess) else f"late on {late} of {len(excess)} days"
     return col.rule.describe(), known, status
