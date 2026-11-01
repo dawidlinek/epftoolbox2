@@ -16,6 +16,22 @@ import sys
 from pathlib import Path
 
 TAIL_LINES = 60
+# The fast suite, spread over one worker per CPU (pytest-xdist); `worksteal` hands a busy worker's queue to idle ones.
+PYTEST_ARGS = [
+    "-m",
+    "not integration",
+    "-q",
+    "-x",
+    "--tb=short",
+    "-o",
+    "addopts=",
+    "-p",
+    "no:cacheprovider",
+    "-n",
+    "auto",
+    "--dist",
+    "worksteal",
+]
 
 
 def fingerprint(project: Path) -> str:
@@ -73,13 +89,15 @@ def main() -> int:
     if fmt.returncode != 0:
         problems.append(f"ruff format --check failed (run `uv run ruff format .`):\n{tail(fmt.stdout)}")
     tests = subprocess.run(
-        [*uv, "pytest", "-m", "not integration", "-q", "-x", "--tb=short", "-o", "addopts=", "-p", "no:cacheprovider"],
+        [*uv, "pytest", *PYTEST_ARGS],
         cwd=project,
         capture_output=True,
         text=True,
     )
     if tests.returncode != 0:
-        problems.append(f"pytest failed:\n{tail(tests.stdout + tests.stderr)}")
+        output = tests.stdout + tests.stderr
+        hint = "\n(pytest-xdist is missing: run `uv sync --extra dev`)" if "unrecognized arguments" in output else ""
+        problems.append(f"pytest failed:\n{tail(output)}{hint}")
 
     if problems:
         print(

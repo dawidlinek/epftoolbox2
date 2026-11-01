@@ -28,6 +28,6 @@ A component is finished only when all of these places agree. Work through them i
 - **Exporter.** `export(report)` consumes `report.compute_all()` or `report.iter_details()` and never computes metrics itself.
 
 ## Finish
-1. `uv run pytest -m "not integration" -q`
+1. `uv run pytest -m "not integration" -n auto --dist worksteal -q`
 2. `uv run python .claude/skills/docs-sync/scripts/check_docs.py`: no errors and no registry warnings for the new class.
 3. For models, transformers and evaluators, have the `forecast-methodology-reviewer` agent review the diff.

@@ -12,7 +12,7 @@ Requested version: `$ARGUMENTS`. If it is empty, ask which bump the user wants a
 ## 1. Preconditions
 - The working tree is clean. Check which branch you are on and confirm it with the user if it isn't `main`.
 - These pass:
-  - `uv run pytest -m "not integration" -q`
+  - `uv run pytest -m "not integration" -n auto --dist worksteal -q`
   - `uv run ruff check .`
   - `uv run ruff format --check .`
   - `uv run python .claude/skills/docs-sync/scripts/check_docs.py` (no errors)
