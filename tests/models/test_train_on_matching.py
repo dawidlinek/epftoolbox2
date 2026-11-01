@@ -1,7 +1,7 @@
 """`Use(list, train_on="matching")`: a forecast trains only on the past days for which the function returned its list.
 
-Everything here is checked against `Rows`, which reads the frame on its own: the rows of a period, the cut counted in rows,
-the targets by wall clock and the days a label function gives. So a test fails if the code and this reading part ways.
+Everything here is checked against `Rows`, which reads the frame on its own: the rows of a period, chosen by date, the targets
+by wall clock and the days a label function gives. So a test fails if the code and this reading part ways.
 """
 
 import datetime
@@ -28,6 +28,7 @@ from epftoolbox2.information_set import (
     perturb_unknown,
 )
 from epftoolbox2.models import LassoCVModel, OLSModel, Use, _worker
+from epftoolbox2.models._calendar import training_span
 from epftoolbox2.models._worker import NOT_PLANNED, _worker_init, matching_rows
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.models import _contract
@@ -120,8 +121,10 @@ class Rows:
         return np.flatnonzero((self.periods == period) & (self.dates >= first) & (self.dates <= day))
 
     def matched(self, day, period, horizon, label, window=WINDOW):
-        """The training rows with the label of `day`: after the cut, which counts rows, before dropping missing values."""
-        rows = self.window(day, period, horizon, window)[: -(1 + horizon)]
+        """The training rows with the label of `day`: those dated up to the target of the day before, before dropping missing
+        values."""
+        rows = self.window(day, period, horizon, window)
+        rows = rows[self.dates[rows] <= pd.Timestamp(day) - pd.Timedelta(days=1 + horizon)]
         same = label(pd.Timestamp(day).date(), period, horizon)
         return rows[[label(self.dates[row].date(), period, horizon) == same for row in rows]]
 
@@ -529,16 +532,16 @@ def test_leakage_probe_and_verify_pass_a_clean_function_and_the_control_reaches_
     assert report.table().iloc[0]["control moved"] > 0
 
 
-def leaks_the_target_of_the_issue_day(rows, hz):
-    """The cut one row short: the newest training target is dated the issue day."""
-    return rows[:-hz]
+def leaks_the_target_of_the_issue_day(anchor, window, hz):
+    """The span one day late: the newest training target is dated the issue day."""
+    return training_span(anchor + 1, window, hz)
 
 
 def test_verify_catches_a_matching_forecast_fitted_on_a_target_dated_on_the_issue_day(frame, monkeypatch):
     pipeline = ModelPipeline(information_set=INFO).add_model(OLSModel(one_list, training_window=WINDOW, name="m"))
     pipeline.verify(frame, *TEST, horizon=1, days=1, positive_control=False).assert_ok()
 
-    monkeypatch.setattr(_worker, "_cut", leaks_the_target_of_the_issue_day)
+    monkeypatch.setattr(_worker, "training_span", leaks_the_target_of_the_issue_day)
     assert pipeline.verify(frame, *TEST, horizon=1, days=1, positive_control=False).status("m") == "leak"
     probe = leakage_probe(
         lambda: OLSModel(one_list, training_window=WINDOW), frame, ISSUE_DAY, INFO, check_target_boundary=True
@@ -546,11 +549,10 @@ def test_verify_catches_a_matching_forecast_fitted_on_a_target_dated_on_the_issu
     assert not probe.ok
 
 
-def test_a_probe_sees_the_doubled_autumn_row_in_a_set_holding_its_date_and_none_without_it():
-    """`test_known_issues.py` pins the look-ahead itself, for fixed lists and sets, and it isn't fixed here. A set keeps what the
-    cut leaves, so a set with the date of the doubled row has it, which the probe shows; a set without it has none."""
+def test_a_probe_finds_nothing_in_a_set_with_or_without_the_date_of_the_doubled_autumn_row():
+    """Rows are chosen by date before the filter, so a set can't reach past the span, whatever it holds."""
     data = make_market_data(start="2023-08-01", days=120, noise=5.0, seed=1)
-    run_day = "2023-10-30"  # hour 2 of the day before has two rows, and the first stays after the cut
+    run_day = "2023-10-30"  # hour 2 of the day before has two rows
 
     def probe(function):
         return leakage_probe(
@@ -565,8 +567,8 @@ def test_a_probe_sees_the_doubled_autumn_row_in_a_set_holding_its_date_and_none_
     def other_list_on_the_switch_day(ctx):
         return Use(TWO if ctx.issue_day == datetime.date(2023, 10, 29) else PREDICTORS, train_on="matching")
 
-    assert (2, 1) in probe(one_list).changed
-    assert (2, 1) not in probe(other_list_on_the_switch_day).changed
+    assert probe(one_list).changed == []
+    assert probe(other_list_on_the_switch_day).changed == []
 
 
 def reads_late_on_training_days_only(ctx):
@@ -652,7 +654,9 @@ def test_a_switch_day_in_the_training_window_and_in_the_test(switch, freq):
     ref = OLSModel(on_weekends, training_window=window).run(
         data, str(first.date()), str(last.date()), horizon=3, freq=freq, information_set=INFO
     )
-    assert ref.produced + sum(ref.skipped.values()) == ref.count == 12 * 24 * per_hour * 3
+    # In spring the clock has no 02:00 to issue from on the switch day (3 horizons) or to score on it (issued 1 and 2 days before).
+    not_on_the_clock = {"spring": 5, "autumn": 0}[switch] * per_hour
+    assert ref.produced + sum(ref.skipped.values()) == ref.count == 12 * 24 * per_hour * 3 - not_on_the_clock
     switch_periods = range(2 * per_hour, 3 * per_hour)
     by_hand = 0
     for (issue_day, period, hz), record in by_key(ref._results).items():

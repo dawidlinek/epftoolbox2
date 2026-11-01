@@ -1222,13 +1222,14 @@ def test_actuals_missing_then_and_now_are_no_revision(df, tmp_path):
 
 
 def test_a_frame_ending_on_the_spring_switch_is_not_past_its_own_end(tmp_path):
-    """The skipped hour has no row on the last day, and its forecast still reads the row before it."""
+    """The skipped hour has no row on the last day and no forecast is planned from it, and that day's others are inside the frame."""
     frame = make_market_data(start="2023-01-01", days=120, horizon=3, noise=5.0, seed=3)
     short = frame[frame.index.tz_localize(None).normalize() <= pd.Timestamp("2023-03-26")]
     test = ("2023-03-25", "2023-03-26")
     make = lambda: pipeline(ols(["price_d-1"]))  # noqa: E731
     make().run(short, test=test, horizon=1, save_dir=str(tmp_path / "a"))
-    assert [r for r in stored(tmp_path / "a" / "m.jsonl") if r["run_date"] == test[1] and r["hour"] == 2]
+    on_the_last_day = {r["hour"] for r in stored(tmp_path / "a" / "m.jsonl") if r["run_date"] == test[1]}
+    assert on_the_last_day == set(range(24)) - {2}
     make().run(short, validation=("2023-03-10", "2023-03-11"), test=test, horizon=1, save_dir=str(tmp_path / "a"))
     make().run(short, validation=("2023-03-10", "2023-03-11"), test=test, horizon=1, save_dir=str(tmp_path / "b"))
     assert lines(stored(tmp_path / "a" / "m.jsonl"), "window") == lines(stored(tmp_path / "b" / "m.jsonl"), "window")

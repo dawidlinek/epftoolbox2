@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Opt
 import numpy as np
 
 from ..logging import get_logger
+from ..models._calendar import IssueCalendar
 from ..results.manifest import (
     ENSEMBLE_KIND,
     SCHEMA_VERSION,
@@ -561,10 +562,11 @@ def _ref(
 ) -> ModelResultRef:
     """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizon` is the one the
     members were run with."""
+    calendar = IssueCalendar(freq, like.zone, range(1, horizon + 1))
     ref = ModelResultRef(
         name=ensemble.name,
         path=path,
-        count=like.count // like.horizon * horizon if like.horizon else like.count,
+        count=calendar.count(like.test_start, like.test_end),
         test_start=like.test_start,
         test_end=like.test_end,
         horizon=horizon,
@@ -572,6 +574,7 @@ def _ref(
         _results=None if path is not None else records,
         windows=like.windows,
         test_only=test_only,
+        zone=like.zone,
     )
     if like.windows is None:
         run = codes >> _RUN_SHIFT
@@ -579,7 +582,7 @@ def _ref(
         ref.skipped = _missing(ref.count - ref.produced)
         _say_what_is_missing(ref.name, {None: ref})
         return ref
-    parts = split_by_window(ref, like.windows, 96 if freq == "15min" else 24, target_before=stored.target_before)
+    parts = split_by_window(ref, like.windows, calendar, target_before=stored.target_before)
     if test_only:
         parts.pop(VALIDATION, None)
     for part in parts.values():

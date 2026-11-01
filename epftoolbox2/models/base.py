@@ -36,8 +36,19 @@ from ..results.manifest import (
 from ..results.windows import TEST, RunWindows, mask_key
 from ..logging import get_logger
 from . import _contract
+from ._calendar import IssueCalendar, training_span
 from .context import TRAIN_ON_MATCHING, PredictorPlan, build_plan, mask_digest, takes_ctx, warn_never_published_in
-from ._worker import NOT_PLANNED, _cut, _pool_init, _run_day, matching_digest, matching_rows, training_row_days
+from ._worker import (
+    NOT_PLANNED,
+    SKIP_MISSING_TEST_ROW,
+    _pool_init,
+    _run_day,
+    issue_row,
+    matching_digest,
+    matching_rows,
+    training_row_days,
+    training_rows,
+)
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days
 from ..information_set import check_level
 
@@ -45,9 +56,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
 
 logger = get_logger(__name__)
-
-# The issue day has no row for this period (a gap in the data); without the row there is nothing to forecast from.
-SKIP_MISSING_TEST_ROW = "missing_test_row"
 
 _FREQ_TO_PERIODS: Dict[str, int] = {"1h": 24, "15min": 96}
 
@@ -144,7 +152,10 @@ class BaseModel(ABC):
         windows: Optional[RunWindows] = None,
         frame_hashes: Optional[FrameHashes] = None,
     ) -> ModelResultRef:
-        """Forecast every period and horizon for each day in [test_start, test_end].
+        """Forecast every period and horizon the clock has on each day in [test_start, test_end] and on its target day.
+
+        A forecast (period, h, D) trains on the rows of its period dated in `training_span` and forecasts from the last row dated
+        D: see `epftoolbox2.models._calendar`.
 
         With `information_set`, `availability` says what happens to a predictor known after the issue time (see
         epftoolbox2.information_set): "raise", the default here, refuses it before any fit; "warn" goes on and lists it in
@@ -242,15 +253,14 @@ class BaseModel(ABC):
             run_days = [(datetime.date.fromisoformat(day) - first_day).days for day in windows.issue_days()]
         n_days = len(run_days)
         test_days = {d: first_day + datetime.timedelta(days=d) for d in run_days}
+        calendar = IssueCalendar(freq, data.index.tz, range(1, horizon + 1))
         absent_slots = {
             (period, (day.date() - first_day).days)
             for period, day in _contract.missing_test_rows(self._data.index, freq, test_days.values())
         }
         self._data = None
 
-        all_tasks = [
-            (hour, h, d) for d in run_days for h in range(1, horizon + 1) for hour in range(self._periods_per_day)
-        ]
+        all_tasks = calendar.tasks(first_day, run_days)
 
         window_days = None if windows is None else self._window_days(windows, first_day)
         if windows is not None:
@@ -378,12 +388,13 @@ class BaseModel(ABC):
             availability_listing=listing,
             windows=windows,
             matching_lists=matching_lists,
+            zone=data.index.tz,
         )
         if windows is not None:
             ref.by_window = split_by_window(
                 ref,
                 windows,
-                self._periods_per_day,
+                calendar,
                 skipped=window_skipped,
                 predictor_lists=None if plan is None else self._window_lists(plan, windows),
                 listings=window_listings,
@@ -413,10 +424,12 @@ class BaseModel(ABC):
         return RunWindows.fixed(None, period)
 
     def _stored_actual_lookup(self, first_day: datetime.date) -> Callable[[int, int, str], Any]:
-        """What a fresh run's `actual` is for a key: the worker's last row up to the issue day, whatever row that is.
+        """What a fresh run's `actual` is for a key: the `y` of the worker's row on the issue day.
 
-        `PAST_THE_FRAME` for an issue day after the frame's last day, which has no such row. The frame's and not the period's:
-        a period's last row can come before the last day, as the hour skipped on a spring switch does."""
+        `PAST_THE_FRAME` for an issue day after the frame's last day. The frame's and not the period's: a period's last row can
+        come before the last day, as the hour skipped on a spring switch does. NaN for a day with no such row, where a fresh run
+        has no forecast to compare: a stored number there is no forecast of this frame, such as an old record of a slot the clock
+        doesn't have, built from the day before. None if nothing can be said."""
         columns: Dict[Tuple[int, int], np.ndarray] = {}
         last_day = max((int(days[-1]) for days in self._hour_days.values() if len(days)), default=None)
 
@@ -428,9 +441,11 @@ class BaseModel(ABC):
                 return None
             if last_day is not None and day > last_day:
                 return PAST_THE_FRAME
-            row = int(np.searchsorted(days, day, side="right")) - 1
-            if row < 0:
+            if len(days) == 0 or day < days[0]:
                 return None
+            row = issue_row(days, day)
+            if row is None:
+                return float("nan")
             key = (period, horizon)
             if key not in columns:
                 columns[key] = self._hour_data[period][name].to_numpy(dtype=np.float64)
@@ -844,8 +859,8 @@ class BaseModel(ABC):
         self, plan: PredictorPlan, target: str, absent: Iterable[Tuple[int, int]] = ()
     ) -> Dict[Tuple[int, int], np.ndarray]:
         """(period, horizon) of a matching forecast -> the days each issue day's forecast would train on, before any fit, -1
-        if it isn't one of a matching list or has no row to forecast from. They are what its record's `training_days` will say,
-        so after dropping rows with a missing value; a list holding a column the frame lacks can't say, and keeps -1.
+        if it isn't one of a matching list, isn't planned or has no row to forecast from. They are what its record's `training_days`
+        will say, so after dropping rows with a missing value; a list holding a column the frame lacks can't say, and keeps -1.
 
         `absent` has (period, date ordinal) of what the run skips for lack of a row.
         """
@@ -862,9 +877,10 @@ class BaseModel(ABC):
             row_lists = np.full(len(days), NOT_PLANNED, dtype=np.int32)
             row_lists[on_grid] = lists[days[on_grid] - start]
             finite_y = np.isfinite(frame[f"{target}_d+{horizon}"].to_numpy(dtype=np.float64))
-            # The window of each issue day, in the rows of this period, then the cut.
-            first_row = np.searchsorted(days, issue_days - self.training_window - horizon, side="left")
-            last_row = np.maximum(np.searchsorted(days, issue_days, side="right") - (1 + horizon), first_row)
+            # The rows of this period dated in the span of each issue day.
+            first_day, last_day = training_span(issue_days, self.training_window, horizon)
+            first_row = np.searchsorted(days, first_day, side="left")
+            last_row = np.searchsorted(days, last_day, side="right")
             out = counts[(period, horizon)] = np.full(len(ids), -1, dtype=np.int64)
             for list_id in plan.matching_ids.intersection(np.unique(ids).tolist()):
                 key = (period, list_id)
@@ -878,7 +894,7 @@ class BaseModel(ABC):
                 if finite[key] is None:
                     continue
                 kept = (row_lists == list_id) & finite_y & finite[key]
-                # A doubled autumn row counts once, wherever the window ends.
+                # A doubled autumn row counts once.
                 new_day = kept.copy()
                 new_day[1:] &= ~((days[1:] == days[:-1]) & kept[:-1])
                 total = np.concatenate(([0], np.cumsum(new_day)))
@@ -886,6 +902,10 @@ class BaseModel(ABC):
                 out[on] = total[last_row[on]] - total[first_row[on]]
             if absent:
                 out[[(period, day.toordinal()) in absent for day in plan.issue_days]] = -1
+        calendar = IssueCalendar(plan.freq, plan.data.index.tz, range(1, plan.horizon + 1))
+        for period, horizon, position in calendar.unplanned(plan.issue_days):
+            if (period, horizon) in counts:
+                counts[(period, horizon)][position] = -1
         return counts
 
     @staticmethod
@@ -951,7 +971,7 @@ class BaseModel(ABC):
         gc.collect()
 
     def _preprocess(self, data: pd.DataFrame, horizon: int, target: str) -> pd.DataFrame:
-        # The worker treats the last row of a period's window as the issue day's row, so rows must be in time order.
+        # The worker finds a period's rows by their date and takes the last of a date, so rows must be in time order.
         # Duplicates and reserved column names were rejected by _check_inputs.
         data = data.sort_index()
         new_cols = {}
@@ -974,9 +994,8 @@ class BaseModel(ABC):
     def _shift_index_by_calendar_days(self, index: pd.DatetimeIndex, days: int) -> pd.DatetimeIndex:
         # Same wall-clock time `days` local calendar days later, NaT on the hour skipped in spring. A target
         # landing on the hour repeated in autumn from a day where that hour occurs once stays NaT (one row
-        # per horizon per year): which of the two prices is "the" target is ambiguous, and with the training
-        # cut counting rows (see .claude/rules/models.md) a value there would put a target dated on the
-        # issue day into training for the hour-2 forecasts on the fall-back day.
+        # per horizon per year): which of the two prices is "the" target is undefined, and a mean of them would
+        # be an actual no market ever cleared. `aggregate()` drops that day for it, and nothing else depends on it.
         if is_utc_index(index):
             warnings.warn(
                 "The model's data has a UTC index, so its days and hours are UTC ones, not local market days, and "
@@ -1020,9 +1039,8 @@ class BaseModel(ABC):
 
     def _training_sample(self, hour: int, day: int, hz: int, predictors: List[str]) -> np.ndarray:
         """The training rows of the task (hour, hz, day) in these columns, before dropping missing values."""
-        days = self._hour_days[hour]
-        mask = (days >= day - self.training_window - hz) & (days <= day)
-        return _cut(self._hour_data[hour][mask][predictors].to_numpy(dtype=np.float64), hz)
+        rows = training_rows(self._hour_days[hour], day, self.training_window, hz)
+        return self._hour_data[hour].iloc[rows][predictors].to_numpy(dtype=np.float64)
 
     def _precompute_expanded_predictors(self, horizon: int) -> Dict[Tuple[int, int], List[str]]:
         return {

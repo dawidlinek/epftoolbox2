@@ -463,6 +463,26 @@ def read_skipped(
     return dict((stored.get("skipped") or {}).get(window, {}))
 
 
+def read_zone(path: Union[str, Path]) -> Optional[str]:
+    """The time zone a manifest's forecasts were planned in, for an `IssueCalendar` with no data at hand, or None if it says none.
+
+    None for no manifest, a naive index and a zone only the frame could spell (`str(tz)` of some objects reads back as nothing).
+    Those keep the rule without a zone.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    stored = json.loads(path.read_text())
+    zone = stored.get("data_timezone")
+    if zone in (None, "None"):
+        return None
+    try:
+        pd.Timestamp("2000-01-01").tz_localize(zone)
+    except Exception:
+        return None
+    return zone
+
+
 def read_windows(path: Union[str, Path]) -> Optional[RunWindows]:
     """The windows and segments a manifest records, or None for a plain run or no manifest.
 
@@ -818,5 +838,6 @@ __all__ = [
     "read_matching_lists",
     "read_skipped",
     "read_windows",
+    "read_zone",
     "record_skips",
 ]

@@ -52,6 +52,7 @@ from ..information_set import (
 )
 from ..results.availability import listing_rows, sort_rows
 from ..results.windows import mask_key
+from ._calendar import IssueCalendar
 from ._contract import period_index, wall_clock
 from ._worker import NOT_PLANNED, OTHER_LIST
 
@@ -603,6 +604,9 @@ class PredictorPlan:
                 use["horizons"].add(horizon)
                 use["periods"].add(period)
                 use["days"] |= on
+        calendar = IssueCalendar(self.freq, self.data.index.tz, range(1, self.horizon + 1))
+        for period, horizon, position in calendar.unplanned(issue_days):
+            uses[self.assignment[(period, horizon)][days[0] : days[1]][position]]["forecasts"] -= 1
         out = []
         for list_id, use in enumerate(uses):
             on_days = np.flatnonzero(use["days"])
@@ -766,8 +770,8 @@ class PredictorPlan:
 
     def _days_read_by(self, ids: np.ndarray, grid: np.ndarray, horizon: int) -> Optional[np.ndarray]:
         """Which days of the grid these forecasts of one (period, horizon) can train on, or None if none of them is matching.
-        Each reads `[D - training_window - horizon, D - 1]`: the worker's window, which holds whatever its cut leaves, a
-        doubled autumn row and a gap in the data included."""
+        Each reads `[D - training_window - horizon, D - 1]`, which holds its `training_span` and more: the calls of a plan don't
+        depend on how far back from the issue day the rows end."""
         matching = np.isin(ids, sorted(self.matching_ids))
         if not matching.any():
             return None

@@ -11,80 +11,6 @@ import pytest
 
 from epftoolbox2.data.transformers import DailyProfileTransformer
 from epftoolbox2.information_set import Availability, InformationSet, perturb_unknown
-from epftoolbox2.models import OLSModel, Use
-from epftoolbox2.pipelines import ModelPipeline
-from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
-
-
-@pytest.fixture(autouse=True)
-def single_process(monkeypatch):
-    monkeypatch.setenv("MAX_PROCESSES", "1")
-    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
-
-
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="duplicated hour after fall-back DST shifts the training cut by one row"
-)
-@pytest.mark.parametrize("run_day", ["2023-10-30", "2023-10-31"])
-def test_no_lookahead_in_days_after_fall_back_dst(run_day):
-    df = make_market_data(start="2023-08-01", days=120, noise=5.0, seed=1)
-    predictors = PREDICTORS + ["price_d-1"]
-    scrambled = df.copy()
-    future = pd.Series(df.index.date >= pd.Timestamp(run_day).date(), index=df.index)
-    scrambled.loc[future, "price"] = 1e4 + np.arange(future.sum())
-    scrambled["price_d-1"] = calendar_shift(scrambled["price"], -1)
-
-    def predictions(data):
-        ref = OLSModel(predictors, training_window=40).run(data, test_start=run_day, test_end=run_day, horizon=2)
-        return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}
-
-    original, perturbed = predictions(df), predictions(scrambled)
-    changed = [key for key in original if abs(original[key] - perturbed[key]) > 1e-9]
-    assert changed == []
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="the doubled hour puts a target dated on the issue day into a train_on='matching' set, where it weighs more",
-)
-def test_no_lookahead_in_a_matching_set_holding_the_fall_back_day():
-    """Monday and Tuesday targets have a list of their own, so a forecast issued on the Monday after the switch trains on the
-    day of the switch. Hour 2 has two rows there, the cut leaves the first, and its target is the price of the issue day."""
-    df = make_market_data(start="2023-08-20", days=90, noise=5.0, seed=3, horizon=1)
-    run_day = "2023-10-30"
-
-    def mondays_and_tuesdays(ctx):
-        return Use(PREDICTORS if ctx.target_day.weekday() in (0, 1) else PREDICTORS[:3], train_on="matching")
-
-    def forecast(data):
-        ref = OLSModel(mondays_and_tuesdays, training_window=45).run(
-            data, test_start=run_day, test_end=run_day, horizon=1
-        )
-        return {r["hour"]: r["prediction"] for r in ref._results}[2]
-
-    raised = df.copy()
-    raised.loc[f"{run_day} 02:00", "price"] += 100.0
-
-    assert abs(forecast(df) - forecast(raised)) <= 1e-9
-
-
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="on the spring DST day the missing hour uses the previous day's row"
-)
-def test_spring_dst_day_forecasts_carry_their_own_target():
-    df = make_market_data(noise=5.0, seed=1)
-    ref = OLSModel(PREDICTORS, training_window=40).run(df, test_start="2023-03-26", test_end="2023-03-26", horizon=2)
-
-    produced = {(r["hour"], r["horizon"]) for r in ref._results}
-    mislabelled = [
-        (r["hour"], r["horizon"])
-        for r in ref._results
-        if r["actual"]
-        != pytest.approx(df.loc[pd.Timestamp(f"{r['target_date']} {r['hour']:02d}:00", tz=df.index.tz), "price"])
-    ]
-    assert mislabelled == []
-    assert len(produced) == ref.count
 
 
 @pytest.mark.xfail(
@@ -149,24 +75,3 @@ def test_a_half_hour_profile_slot_is_judged_at_its_own_time():
     found, _ = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-16")
 
     assert {v.period for v in found} == set(range(24))
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="the look-ahead after fall-back above is real, so verify() reports it when it samples these days",
-)
-@pytest.mark.parametrize("run_day", ["2023-10-30", "2023-10-31"])
-@pytest.mark.parametrize("target_as_input", [[], ["price"]], ids=["plain", "target as an input"])
-def test_verify_passes_in_the_days_after_fall_back_dst(run_day, target_as_input):
-    df = make_market_data(start="2023-08-01", days=120, noise=5.0, seed=1)
-    rules = {
-        "load": Availability.published("10:00", 7),
-        "wind": Availability.published("10:00", 7),
-        "is_weekend": Availability.static(),
-        "is_weekday": Availability.static(),
-    }
-    pipeline = ModelPipeline(information_set=InformationSet(rules=rules))
-    pipeline.add_model(OLSModel(PREDICTORS + ["price_d-1"] + target_as_input, training_window=40))
-
-    pipeline.verify(df, run_day, run_day, horizon=2, days=1).assert_ok()

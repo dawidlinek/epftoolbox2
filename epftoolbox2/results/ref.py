@@ -5,7 +5,7 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Dict, Iterator, List, Mapping, Optional
+from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 from .windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 
@@ -14,8 +14,8 @@ from .windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 class ModelResultRef:
     """Where one model's results live and how many forecasts the run planned and produced.
 
-    `count` is the number of planned forecasts (periods x horizons x test days). `produced` is how many
-    exist after the run (including ones resumed from an earlier run), and `skipped` counts the tasks that
+    `count` is the number of planned forecasts (`IssueCalendar`: periods x horizons x test days, without the slots the clock
+    doesn't have on an issue day or a target day). `produced` is how many exist after the run (including ones resumed from an earlier run), and `skipped` counts the tasks that
     gave no forecast by reason (e.g. `missing_test_predictors`). `produced` is None for refs built from
     raw result lists. `predictor_lists` describes each distinct list a predictor function of `ctx` returned, with how
     many forecasts use it where; it is None for fixed lists. `availability_listing` holds the rows of inputs known after
@@ -32,6 +32,10 @@ class ModelResultRef:
 
     `test_only` marks an ensemble that has forecasts in the test window alone, which a report of a run with validation doesn't
     look for in `.validation` (see `epftoolbox2.ensembles`).
+
+    `zone` is the time zone of the frame the forecasts came from, which says what periods a date has on the clock: the frame's
+    `index.tz`, or a manifest's `data_timezone` in a report made from files. It is None for a naive index and for results that
+    don't say, such as plain lists, a results file with no manifest or one older than `Manifest.training_cut`.
     """
 
     name: str
@@ -52,6 +56,7 @@ class ModelResultRef:
     by_window: Optional[Dict[str, "ModelResultRef"]] = field(default=None, repr=False)
     test_only: bool = False
     matching_lists: Optional[Dict[str, int]] = None
+    zone: Any = None
 
     def iter_records(self, cols: Optional[List[str]] = None) -> Iterator[Dict]:
         """The records of this ref, wherever they live.
@@ -100,14 +105,15 @@ class ModelResultRef:
 def split_by_window(
     ref: ModelResultRef,
     windows: RunWindows,
-    periods_per_day: int,
+    calendar: Any,
     skipped: Optional[Mapping[str, Mapping[str, int]]] = None,
     predictor_lists: Optional[Mapping[str, List[Dict]]] = None,
     listings: Optional[Mapping[str, Optional[List[Dict]]]] = None,
     target_before: Optional[str] = None,
 ) -> Dict[str, ModelResultRef]:
     """One ref per window of `ref`, the ref of a whole run. `produced` is counted from the records and `count` from the
-    window's days, and what is left out of a validation report for its target day is counted in `skipped`."""
+    window's days by `calendar` (an `IssueCalendar`), and what is left out of a validation report for its target day is counted
+    in `skipped`."""
     produced: Counter = Counter()
     excluded = 0
     for r in ref.iter_records(cols=["run_date", "target_date", "window"]):
@@ -121,14 +127,13 @@ def split_by_window(
 
     refs = {}
     for window, (start, end) in windows.periods:
-        days = RunWindows(test=(start, end)).issue_days()
         counts = dict((skipped or {}).get(window, {}))
         is_validation = window == VALIDATION
         if is_validation and excluded:
             counts[SKIP_TARGET_IN_TEST] = excluded
         refs[window] = replace(
             ref,
-            count=len(days) * ref.horizon * periods_per_day,
+            count=calendar.count(start, end),
             test_start=start,
             test_end=end,
             produced=produced[window],
