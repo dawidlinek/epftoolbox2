@@ -51,3 +51,17 @@ an issue day it didn't sample.
 - `report.availability()`: the inputs a run can't vouch for, per model, list, period and horizon.
 - `pipeline.explain()`: what a forecast's predictors hold relative to the target day, and when each is known; for a predictor
   function, the distinct lists with their days and what each adds or drops.
+
+### Fixed
+
+- **A column that is constant up to rounding noise is no longer divided by its standard deviation.** The scalers took a column
+  for constant only when its standard deviation was exactly 0. A column of 0.3 with floating-point error, or 0.3 repeated 30
+  times (numpy gives a standard deviation of 5.6e-17, not 0), was divided by about 1e-16 and became a regressor: on a narrow
+  training window a test row of 0.31 gave a forecast of 3.5e13 with `StandardScaler`, and `AsinhScaler` and `NPITScaler` turned
+  the noise into an input. A standard deviation at or below 1e-12 of the column's largest finite absolute value now counts as
+  constant, for every scaler and for the target, and the scale is 1.0 as for 0 before. **Forecasts change only for a model that had
+  such a column in a training window**; all other columns scale bit for bit as before. On the 247 LEAR inputs of the five
+  epftoolbox benchmark datasets (NP, PJM, FR, BE, DE) no column of any training window of 7 to 728 days was within a factor of
+  about 1e9 of the threshold, so those results don't change. Results stored by an earlier version resume without a warning:
+  re-run a model whose training windows could hold a constant column. See
+  [Constant columns](/epftoolbox2/models/scalers/#constant-columns).

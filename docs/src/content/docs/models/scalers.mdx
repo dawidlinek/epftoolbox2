@@ -32,7 +32,7 @@ A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `
 | `"asinh"` | `AsinhScaler` | `asinh((x - median) / (MAD / 0.6745))`, then standardised |
 | `"npit"` | `NPITScaler` | `Φ⁻¹(F̂(x))` with `F̂` the empirical CDF of the training rows, then standardised |
 
-- **`AsinhScaler`** is the "Invariant" scaler of epftoolbox's LEAR (Lago et al., 2021): median/MAD normalisation (the MAD divided by 0.6745 estimates the standard deviation of normal data), then the inverse hyperbolic sine. Near the median it is almost linear. For spikes it grows like a logarithm, and it is symmetric, so negative prices are fine. If the MAD is 0 (more than half of the training values are equal, e.g. a price floor) the sample standard deviation is used, and 1.0 if that is 0 too. The inverse is `median + scale · sinh(z)`.
+- **`AsinhScaler`** is the "Invariant" scaler of epftoolbox's LEAR (Lago et al., 2021): median/MAD normalisation (the MAD divided by 0.6745 estimates the standard deviation of normal data), then the inverse hyperbolic sine. Near the median it is almost linear. For spikes it grows like a logarithm, and it is symmetric, so negative prices are fine. If the MAD is 0 (more than half of the training values are equal, e.g. a price floor) the sample standard deviation is used, and 1.0 if that is 0 too, or [only rounding noise](#constant-columns). The inverse is `median + scale · sinh(z)`.
 - **`NPITScaler`** is the normal probability integral transform. The i-th smallest of n training values gets `F̂ = i / (n + 1)` (tied values share their mid-rank), so every value maps to a finite normal quantile. Between training values the map is linear. Values outside the training range are clamped to the extreme knots: a transformed predictor can't exceed the training range, and **a forecast can't go below the training window's lowest or above its highest price**.
 
 ## Parameters
@@ -51,7 +51,14 @@ A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `
 - **Predictors** follow `apply_to`. The default `"all"` matches epftoolbox's LEAR, which applies the Invariant scaler to every input except the day-of-week dummies. The VST papers transform the price series. `apply_to=["price", "price_d-*"]` does that and only standardises exogenous inputs such as load or weather. If no pattern matches any predictor, a warning says that only the target is transformed.
 - **Binary 0/1 predictors** (dummies) are never changed, whatever `apply_to` says. The same rule as for `StandardScaler` decides what is binary.
 - Every column gets its own parameters (median/MAD or empirical CDF), estimated from the task's training rows.
+- A column that is constant in the training rows gets scale 1.0 instead of being divided by a standard deviation of about 1e-16. See [Constant columns](#constant-columns).
 - After the VST every transformed column, and the target, is standardised, so models always receive centred data with unit variance. This is why `OLSModel`, which fits without an intercept, stays valid. epftoolbox's LEAR skips this step. An affine rescaling doesn't change a least-squares fit with an intercept, but it does change the relative scale of the inputs that a Lasso penalty sees, so LassoCV results won't match LEAR's exactly.
+
+## Constant columns
+
+A column whose standard deviation is zero can't be divided by it, so its scale is 1.0 (it is only centred). The same goes for a column that is constant apart from rounding noise: one whose standard deviation is at or below 1e-12 of its largest absolute value is treated as constant. Floating-point arithmetic gives a standard deviation of about 1e-16, not 0, for such a column, for example 0.3 with rounding error, or `0.3` repeated 30 times, and dividing by it would turn the noise into a regressor: a test row that differs a little from the constant would reach the model as a value of 1e13 or more.
+
+The rule is the same for every scaler and for the target. For `AsinhScaler` and `NPITScaler` it applies to the column as it is before the transformation, which is then fitted as for an exactly constant column. An all-zero column and a column with fewer than two values keep scale 1.0, as before. Any other column is scaled exactly as before. A column with a real spread, however small next to its level (a standard deviation of 1e-9 of its largest value, say), is scaled normally.
 
 ## No look-ahead
 
