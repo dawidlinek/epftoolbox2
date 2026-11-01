@@ -22,7 +22,7 @@ from epftoolbox2.models import OLSModel, Use, _contract, _worker
 from epftoolbox2.models._calendar import IssueCalendar, periods_per_day, training_span
 from epftoolbox2.models._worker import SKIP_MISSING_TEST_ROW, _fit_one_numpy, _worker_init, issue_row, training_rows
 from epftoolbox2.pipelines import ModelPipeline
-from epftoolbox2.results.manifest import ManifestMismatchError
+from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path, read_zone
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 # Both zones change their clocks on these dates of 2023, Warsaw at 02:00 and London at 01:00.
@@ -661,6 +661,70 @@ def test_a_window_of_few_rows_still_trains():
     data = make_market_data(start="2023-04-01", days=80, noise=5.0, seed=8, horizon=1)
     ref = OLSModel(PREDICTORS[:1], training_window=2).run(data, "2023-06-10", "2023-06-10", horizon=1)
     assert ref.produced == ref.count == 24
+
+
+def write_old_manifest(path):
+    stored = json.loads(path.read_text())
+    assert stored.pop("training_cut") == {"rows": "dates"}
+    path.write_text(json.dumps(stored))
+
+
+def old_results(tmp_path, data, **run):
+    pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m"))
+    pipeline.run(data, save_dir=tmp_path, horizon=1, **run)
+    write_old_manifest(manifest_path(tmp_path / "m.jsonl"))
+    return pipeline
+
+
+def test_a_manifest_without_the_field_is_refused_on_resume_and_the_override_goes_on(tmp_path):
+    data = market("spring", horizon=1)
+    period = (SWITCH_DAYS["spring"], day_of(SWITCH_DAYS["spring"], 1))
+    pipeline = old_results(tmp_path, data, test=period)
+
+    with pytest.raises(ManifestMismatchError, match="training_cut.*before training rows were chosen by date"):
+        pipeline.run(data, test=period, horizon=1, save_dir=tmp_path)
+
+    report = pipeline.run(data, test=period, horizon=1, save_dir=tmp_path, allow_manifest_mismatch=True)
+    assert report.refs["m"].count == 47
+    assert json.loads(manifest_path(tmp_path / "m.jsonl").read_text())["training_cut"] == {"rows": "dates"}
+    pipeline.run(data, test=period, horizon=1, save_dir=tmp_path)  # and it is one of today's now
+
+
+def test_a_manifest_without_the_field_is_refused_in_a_run_with_windows(tmp_path):
+    data = market("spring", horizon=1)
+    S = SWITCH_DAYS["spring"]
+    windows = {"validation": (day_of(S, -3), day_of(S, -1)), "test": (S, day_of(S, 1))}
+    pipeline = old_results(tmp_path, data, **windows)
+    with pytest.raises(ManifestMismatchError, match="training_cut"):
+        pipeline.run(data, horizon=1, save_dir=tmp_path, **windows)
+
+
+def test_a_report_of_old_results_says_so_and_keeps_the_rule_without_a_zone(tmp_path):
+    data = market("spring", horizon=1)
+    S = SWITCH_DAYS["spring"]
+    pipeline = old_results(tmp_path, data, test=(S, S))
+    with pytest.warns(UserWarning, match=r"\['m'\] were made before training rows were chosen by date"):
+        report = pipeline.report(tmp_path, test=(S, S), horizon=1)
+    assert report.refs["m"].zone is None
+    assert report.refs["m"].count == 24
+
+
+@pytest.mark.parametrize(
+    ("stored", "zone"),
+    [
+        ("Europe/Warsaw", "Europe/Warsaw"),
+        ("UTC+02:00", "UTC+02:00"),
+        ("None", None),
+        ("pytz.FixedOffset(60)", None),  # `str` of some time zones doesn't read back
+    ],
+)
+def test_the_zone_of_a_manifest(tmp_path, stored, zone):
+    path = tmp_path / "m.manifest.json"
+    path.write_text(json.dumps({"data_timezone": stored, "training_cut": {"rows": "dates"}}))
+    assert read_zone(path) == zone
+    path.write_text(json.dumps({"data_timezone": stored}))
+    assert read_zone(path) is None
+    assert read_zone(tmp_path / "no.manifest.json") is None
 
 
 def test_a_manifest_of_today_resumes_and_the_second_run_has_nothing_to_do(tmp_path, capsys):

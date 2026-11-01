@@ -51,6 +51,10 @@ A run that skipped forecasts records how many per window and reason (`skipped`, 
 the files can tell `no_matching_days` or `fit_error` from a task that crashed. A run with no skips has no such key. Each run replaces
 the counts of the windows it names, since a resume tries the skipped tasks again. They are written after the run, and never compared.
 
+How a forecast's training rows are chosen is compared too (`training_cut`). Rows were once chosen by counting them, which left a
+mislabelled record on a spring switch day and a look-ahead on the days after an autumn switch, and a resume would keep those
+records in the file and read them. So a manifest without this field, written before rows were chosen by date, is refused.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -99,6 +103,16 @@ _COMPARED_FIELDS = (
     "model_params",
     "data_columns_hash",
     "data_timezone",
+    "training_cut",
+)
+
+# How a run chooses a forecast's training rows: `Manifest.training_cut`.
+TRAINING_CUT_BY_DATE = {"rows": "dates"}
+
+
+_OLD_RESULTS_NOTE = (
+    ". These results were made before training rows were chosen by date, so they may hold a look-ahead on the days after an "
+    "autumn switch and a mislabelled forecast on a spring one, which a resume would keep in the file"
 )
 
 
@@ -160,6 +174,8 @@ class Manifest:
     # Window -> skip reason -> how many forecasts the last run naming that window skipped, a plain run's as "test"; recorded, never
     # compared, and absent with nothing skipped.
     skipped: Optional[Dict[str, Dict[str, int]]] = None
+    # How the training rows were chosen. None in a manifest older than the field: see the module docstring.
+    training_cut: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -169,7 +185,8 @@ class Manifest:
                 continue
             mine, theirs = getattr(self, name), getattr(existing, name)
             if mine != theirs:
-                out.append(f"{name}: {theirs!r} (existing results) vs {mine!r} (this run)")
+                note = _OLD_RESULTS_NOTE if name == "training_cut" and theirs is None else ""
+                out.append(f"{name}: {theirs!r} (existing results) vs {mine!r} (this run){note}")
         return out
 
     def to_dict(self) -> Dict[str, Any]:
@@ -188,6 +205,8 @@ class Manifest:
             del out["data_unverified"]
         if out["skipped"] is None:  # nothing skipped
             del out["skipped"]
+        if out["training_cut"] is None:  # a manifest older than it
+            del out["training_cut"]
         return out
 
     @classmethod
@@ -389,6 +408,7 @@ def build_manifest(
         actuals=actuals,
         column_hashes={column: hashes.of_column(test_end, column) for column in {*used_columns, *read_columns}},
         frame_hash=hashes.of_frame(test_end),
+        training_cut=dict(TRAINING_CUT_BY_DATE),
     )
 
 
@@ -463,18 +483,24 @@ def read_skipped(
     return dict((stored.get("skipped") or {}).get(window, {}))
 
 
+def made_before_date_rows(path: Union[str, Path]) -> bool:
+    """Whether the manifest at `path` was written before training rows were chosen by date (see the module docstring)."""
+    path = Path(path)
+    return path.exists() and json.loads(path.read_text()).get("training_cut") is None
+
+
 def read_zone(path: Union[str, Path]) -> Optional[str]:
     """The time zone a manifest's forecasts were planned in, for an `IssueCalendar` with no data at hand, or None if it says none.
 
-    None for no manifest, a naive index and a zone only the frame could spell (`str(tz)` of some objects reads back as nothing).
-    Those keep the rule without a zone.
+    None for no manifest, a naive index, a zone only the frame could spell (`str(tz)` of some objects reads back as nothing) and
+    a manifest older than `training_cut`, whose run planned every period of every day. Those keep the rule without a zone.
     """
     path = Path(path)
     if not path.exists():
         return None
     stored = json.loads(path.read_text())
     zone = stored.get("data_timezone")
-    if zone in (None, "None"):
+    if stored.get("training_cut") is None or zone in (None, "None"):
         return None
     try:
         pd.Timestamp("2000-01-01").tz_localize(zone)
@@ -834,6 +860,7 @@ __all__ = [
     "hash_predictor_layout",
     "is_ensemble_manifest",
     "manifest_digest",
+    "made_before_date_rows",
     "manifest_path",
     "read_matching_lists",
     "read_skipped",

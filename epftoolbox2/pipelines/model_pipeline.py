@@ -23,6 +23,7 @@ from ..results.manifest import (
     FrameHashes,
     ManifestMismatchError,
     is_ensemble_manifest,
+    made_before_date_rows,
     manifest_path,
     read_matching_lists,
     read_skipped,
@@ -339,6 +340,9 @@ class ModelPipeline:
         next to them. `allow_missing` leaves out an ensemble with a missing member, with a warning: it is never averaged over
         the members that happen to be there.
 
+        Results whose manifest is older than `training_cut` were made with rows found by counting them: a warning names the
+        models, and they are planned as those runs did, every period of every day.
+
         What the runs listed about inputs known after the issue time comes from the manifests, whatever this pipeline's
         `availability` is: `report.availability()`, one warning and the terminal exporter show it.
 
@@ -416,6 +420,14 @@ class ModelPipeline:
             raise FileNotFoundError(f"No results for model(s): {', '.join(missing)}. Run them first.")
         for name in missing:
             logger.warning(f"Report: no results for {name}; it is left out")
+        old = [name for name, ref in refs.items() if made_before_date_rows(manifest_path(ref.path))]
+        if old:
+            warnings.warn(
+                f"Report: the results of {old} were made before training rows were chosen by date, so they may hold a "
+                "look-ahead on the days after an autumn switch and a mislabelled forecast on a spring one. Run them again in a "
+                "new save_dir: a resume refuses them.",
+                stacklevel=2,
+            )
 
         parts = dict(refs)
         if windows is not None:
