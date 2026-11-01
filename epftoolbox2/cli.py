@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -46,6 +47,22 @@ def cmd_report(args: argparse.Namespace) -> None:
     choices = report.choices()
     if not choices.empty:
         console.print(choices.to_string(index=False), markup=False, highlight=False, soft_wrap=True)
+
+
+def cmd_array(args: argparse.Namespace) -> None:
+    from .pipelines.workflow import Workflow
+
+    # `sbatch --array=$(epf array experiment.yaml)` takes all of stdout, so that holds the range alone: logs go to stderr.
+    errors = Console(stderr=True)
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            workflow = Workflow.load(args.yaml)
+            size = workflow.array_size()
+        except ValueError as exc:
+            errors.print(f"[red]{escape(str(exc))}[/red]")
+            sys.exit(1)
+        errors.print(f"{size} array task(s), {workflow.models_per_task or 1} model(s) per task", markup=False)
+    print(f"0-{size - 1}")
 
 
 def cmd_data(args: argparse.Namespace) -> None:
@@ -230,6 +247,7 @@ model_pipeline:
 #   max_processes: 4
 #   threads_per_process: 1
 #   model_index: 0   # SLURM array: one model per task; needs model_pipeline.save_dir, then `epf report`
+#   models_per_task: 50   # with model_index: task i runs the 50 models from i*50 on; `epf array` prints the range
 """
 
 _DATA_PIPELINE_TEMPLATE = """\
@@ -313,6 +331,12 @@ def build_parser() -> argparse.ArgumentParser:
     report_p.add_argument(
         "--allow-missing", action="store_true", help="Report the models that have results instead of failing"
     )
+
+    # -- array --
+    array_p = sub.add_parser(
+        "array", help="Print the task range of a SLURM array over a workflow's models, for sbatch --array="
+    )
+    array_p.add_argument("yaml", metavar="experiment.yaml", help="Path to workflow YAML")
 
     # -- data --
     data_p = sub.add_parser("data", help="Run a data pipeline and save the result to CSV")
@@ -453,6 +477,7 @@ def main() -> None:
     dispatch = {
         "run": cmd_run,
         "report": cmd_report,
+        "array": cmd_array,
         "data": cmd_data,
         "model": cmd_model,
         "verify": cmd_verify,

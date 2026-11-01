@@ -166,16 +166,18 @@ class Workflow:
         max_processes: Optional[int] = None,                  # Worker process count
         threads_per_process: Optional[int] = None,            # Threads per process
         cache_path: Optional[str] = None,                     # Cache directory (overrides data_cache)
-        model_index: Optional[int] = None,                    # Run only models[model_index], all models if None
+        model_index: Optional[Union[int, str]] = None,        # Array task: models[model_index], or its block with models_per_task; all models if None. "$VAR" reads the variable
         model_save_dir: Optional[str] = None,                 # One JSONL per model, required with model_index
         model_allow_manifest_mismatch: bool = False,          # Overwrite a disagreeing manifest and resume
         model_require_manifest: bool = False,                 # Refuse results that have no manifest
         model_validation: Any = None,                         # [start, end] or "previous_year"
         model_test: Optional[Sequence[Any]] = None,           # [start, end], the same as model_test_start and _end
+        models_per_task: Optional[int] = None,                # With model_index: task i runs models [i*k, (i+1)*k)
     ): ...
 
     def run(self) -> EvaluationReport: ...
     def report(self, allow_missing: bool = False) -> EvaluationReport: ...  # Merge save_dir, run evaluators/exporters
+    def array_size(self) -> int: ...                          # How many array tasks cover the models: 0 .. size - 1
 
     def save(self, path: Union[str, Path]) -> None: ...
 

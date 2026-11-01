@@ -329,7 +329,7 @@ class ModelPipeline:
     ) -> EvaluationReport:
         """Build one report from the per-model JSONL files in `save_dir`, then run evaluators and exporters.
 
-        This is the merge step after runs that each wrote one model's results (e.g. a SLURM array with
+        This is the merge step after runs that each wrote some models' results (e.g. a SLURM array with
         `Workflow(model_index=...)`). The test period, horizon and freq must be those of the runs; they give
         each model's planned forecast count. Raises FileNotFoundError if a model has no results file, unless
         `allow_missing` is set. `data` is only needed by exporters that join source columns.
@@ -501,7 +501,7 @@ class ModelPipeline:
         test_end: Optional[str],
         forecast_only: bool,
     ) -> None:
-        """What `run` would refuse about the ensembles, for an array task, which runs one model and leaves them to the report."""
+        """What `run` would refuse about the ensembles, for an array task, which runs some models and leaves them to the report."""
         self._check_model_names()
         windows, _, _ = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
         self._check_ensembles(save_dir)

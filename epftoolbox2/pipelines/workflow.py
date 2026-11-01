@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Any, Optional, Sequence, Union
 from pathlib import Path
 import os
+import warnings
 import yaml
 
 from .data_pipeline import DataPipeline
@@ -28,6 +29,18 @@ def _as_yaml_period(period: Any) -> Any:
     ]
 
 
+def _read_model_index(raw: Any) -> Union[int, str, None]:
+    """`model_index` as a number, or as written while a variable in it isn't set.
+
+    `epf report`, `epf array` and `epf validate` read the array's YAML outside the array, where `$SLURM_ARRAY_TASK_ID` isn't
+    set and nothing they do needs it. `run()` does, and refuses.
+    """
+    if raw is None:
+        return None
+    expanded = os.path.expandvars(str(raw))
+    return str(raw) if "$" in expanded else int(expanded)
+
+
 class Workflow:
     """Orchestrates a full experiment: loads both pipelines from YAML, sets the
     execution environment, runs data fetching, then model training/evaluation.
@@ -37,16 +50,20 @@ class Workflow:
     section loaded from path.
 
     `model_index` selects a single model by index from the model list, enabling
-    SLURM array jobs where each task runs one model:
+    SLURM array jobs where each task runs one model. With `models_per_task: k`, task i runs the block of models
+    `[i*k, (i+1)*k)` in the order of the list, the last block maybe short, and `array_size()` (CLI: `epf array
+    experiment.yaml`) says how many tasks that makes:
         environment:
             model_index: $SLURM_ARRAY_TASK_ID
+            models_per_task: 50
         model_pipeline:
             save_dir: results/
 
-    Array mode requires `save_dir`: each task writes its model's JSONL there (resumable) and skips
+    Array mode requires `save_dir`: each task writes one JSONL per model there (resumable) and skips
     ensembles, evaluators and exporters, which need all models. After the array finishes, `report()` (CLI:
     `epf report experiment.yaml`) merges the files, computes the ensembles from them and runs the evaluators
-    and exporters once.
+    and exporters once. The block size only says which task runs a model: nothing stored records it, so results
+    of an array at one size resume at another and merge to what one run gives, bit for bit.
 
     The windows of a run live in `model_pipeline` as `validation: [start, end]` (or `previous_year`) and
     `test: [start, end]`, next to the older `test_start` and `test_end`, and mean what they mean in
@@ -84,12 +101,13 @@ class Workflow:
         max_processes: Optional[int] = None,
         threads_per_process: Optional[int] = None,
         cache_path: Optional[str] = None,
-        model_index: Optional[int] = None,
+        model_index: Optional[Union[int, str]] = None,
         model_save_dir: Optional[str] = None,
         model_allow_manifest_mismatch: bool = False,
         model_require_manifest: bool = False,
         model_validation: Any = None,
         model_test: Optional[Sequence[Any]] = None,
+        models_per_task: Optional[int] = None,
     ):
         self.data_pipeline = str(data_pipeline) if data_pipeline is not None else None
         self.model_pipeline = str(model_pipeline) if model_pipeline is not None else None
@@ -105,7 +123,8 @@ class Workflow:
         self.max_processes = max_processes
         self.threads_per_process = threads_per_process
         self.cache_path = cache_path
-        self.model_index = model_index
+        self.model_index = _read_model_index(model_index)
+        self.models_per_task = models_per_task
         self.model_save_dir = str(model_save_dir) if model_save_dir is not None else None
         self.model_allow_manifest_mismatch = model_allow_manifest_mismatch
         self.model_require_manifest = model_require_manifest
@@ -114,6 +133,43 @@ class Workflow:
         self._yaml_dir: Optional[Path] = None  # set by load(), used for relative path resolution
         self._dp_inline: dict = {}  # inline sources/transformers/validators overrides
         self._mp_inline: dict = {}  # inline models/evaluators/exporters overrides
+
+    @property
+    def models_per_task(self) -> Optional[int]:
+        """How many models an array task runs: task `model_index` runs the k models from `model_index * k` on. None is one."""
+        return self._models_per_task
+
+    @models_per_task.setter
+    def models_per_task(self, k: Optional[int]) -> None:
+        if k is not None and (isinstance(k, bool) or not isinstance(k, int) or k < 1):
+            raise ValueError(f"models_per_task must be a positive integer, got {k!r}")
+        self._models_per_task = k
+
+    def array_size(self) -> int:
+        """How many array tasks cover every model of the pipeline: indices 0 to `array_size() - 1`, whatever `model_index` is.
+
+        `epf array experiment.yaml` prints that range as `sbatch --array=` takes it.
+        """
+        n = len(self._build_model_pipeline(all_models=True).models)
+        if n == 0:
+            raise ValueError("At least one model is required")
+        return self._tasks_for(n)
+
+    def _tasks_for(self, n_models: int) -> int:
+        k = self.models_per_task or 1
+        return (n_models + k - 1) // k
+
+    def _block_of(self, models: list) -> list:
+        """The models of task `model_index`, in the order of the list; an index past the last block raises."""
+        k = self.models_per_task or 1
+        first = self.model_index * k
+        if not 0 <= first < len(models):
+            per_task = f", {k} per task" if self.models_per_task is not None else ""
+            valid = f"; the valid indices are 0-{self._tasks_for(len(models)) - 1}" if models else ""
+            raise ValueError(
+                f"model_index {self.model_index} is out of range: the pipeline has {len(models)} model(s){per_task}{valid}"
+            )
+        return models[first : first + k]
 
     def _resolve(self, relative_path: str) -> Path:
         """Resolve a path relative to the workflow YAML's directory."""
@@ -159,11 +215,8 @@ class Workflow:
             mp.information_set = InformationSet.from_dict(info) if info else None
         if "availability" in self._mp_inline:
             mp.availability = self._mp_inline["availability"]
-        if self.model_index is not None and not all_models:
-            n = len(mp.models)
-            if not 0 <= self.model_index < n:
-                raise ValueError(f"model_index {self.model_index} is out of range: the pipeline has {n} model(s)")
-            mp.models = [mp.models[self.model_index]]
+        if isinstance(self.model_index, int) and not all_models:
+            mp.models = self._block_of(mp.models)
         return mp
 
     def _save_dir(self) -> Optional[Path]:
@@ -177,11 +230,22 @@ class Workflow:
     def run(self) -> EvaluationReport:
         self._apply_environment()
 
+        if isinstance(self.model_index, str):
+            raise ValueError(
+                f"model_index is {self.model_index!r}, and that variable isn't set, so this is no array task. Run inside "
+                "the array, or give the index: Workflow.model_index, or `epf run --model-index`."
+            )
+        if self.models_per_task is not None and self.model_index is None:
+            warnings.warn(
+                f"models_per_task={self.models_per_task} has no effect without model_index: this runs the whole pipeline.",
+                stacklevel=2,
+            )
+
         save_dir = self._save_dir()
         array_task = self.model_index is not None
         if array_task and save_dir is None:
             raise ValueError(
-                "model_index runs a single model (array mode) and needs model_pipeline.save_dir, where each task "
+                "model_index runs part of the models (array mode) and needs model_pipeline.save_dir, where each task "
                 "writes its results for `epf report` / Workflow.report() to merge."
             )
         mp = self._build_model_pipeline()
@@ -218,7 +282,7 @@ class Workflow:
         )
         if array_task:
             logger.info(
-                f"Workflow: model {self.model_index} ({mp.models[0].name}) written to {save_dir}; "
+                f"Workflow: task {self.model_index} ({', '.join(model.name for model in mp.models)}) written to {save_dir}; "
                 "run `epf report` after all array tasks finish."
             )
         return report
@@ -227,8 +291,8 @@ class Workflow:
         """Merge every model's results from `model_save_dir`, compute the ensembles from them, and run the
         evaluators and exporters.
 
-        Use after an array job in which each task ran one model. Raises FileNotFoundError if a model's
-        results file is missing, unless `allow_missing` is set, which leaves out that model and every ensemble
+        Use after an array job in which each task ran one model or a block of them. Raises FileNotFoundError naming each
+        model whose results file is missing, unless `allow_missing` is set, which leaves out that model and every ensemble
         it is a member of. The data pipeline is only run when an exporter joins source columns (CsvExporter
         `extra_columns`).
         """
@@ -262,6 +326,8 @@ class Workflow:
             env["cache_path"] = self.cache_path
         if self.model_index is not None:
             env["model_index"] = self.model_index
+        if self.models_per_task is not None:
+            env["models_per_task"] = self.models_per_task
         if env:
             config["environment"] = env
 
@@ -314,9 +380,6 @@ class Workflow:
         dp = config["data_pipeline"]
         mp = config["model_pipeline"]
 
-        model_index_raw = env.get("model_index")
-        model_index = int(os.path.expandvars(str(model_index_raw))) if model_index_raw is not None else None
-
         workflow = cls(
             data_pipeline=dp.get("path"),
             model_pipeline=mp.get("path"),
@@ -332,12 +395,13 @@ class Workflow:
             max_processes=env.get("max_processes"),
             threads_per_process=env.get("threads_per_process"),
             cache_path=env.get("cache_path"),
-            model_index=model_index,
+            model_index=env.get("model_index"),
             model_save_dir=mp.get("save_dir"),
             model_allow_manifest_mismatch=mp.get("allow_manifest_mismatch", False),
             model_require_manifest=mp.get("require_manifest", False),
             model_validation=mp.get("validation"),
             model_test=mp.get("test"),
+            models_per_task=env.get("models_per_task"),
         )
         workflow._yaml_dir = path.parent
         workflow._dp_inline = {k: dp[k] for k in _DP_SECTIONS if k in dp}

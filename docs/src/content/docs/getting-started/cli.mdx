@@ -70,7 +70,7 @@ epf run experiment.yaml
 
 | Flag | Description |
 |------|-------------|
-| `--model-index N` | Run only `models[N]` (array mode: needs `model_pipeline.save_dir`, see [`epf report`](#epf-report-merge-array-results)) |
+| `--model-index N` | Run only array task `N`: `models[N]`, or its block with `environment.models_per_task` (array mode: needs `model_pipeline.save_dir`, see [`epf report`](#epf-report-merge-array-results)) |
 | `--processes N` | Override `max_processes` |
 | `--threads N` | Override `threads_per_process` |
 | `--dry-run` | Build both pipelines without executing, validates config |
@@ -91,14 +91,25 @@ epf run experiment.yaml --dry-run
 
 ## `epf report`: Merge array results
 
-After a SLURM array in which each task ran one model (`--model-index`), merge every model's JSONL from `model_pipeline.save_dir`, compute the [ensembles](/epftoolbox2/model-pipeline/ensembles/) from them and run the evaluators and exporters once. Prints planned vs produced forecasts per model, and what the ensembles chose.
+After a SLURM array in which each task ran one model or a [block of them](/epftoolbox2/workflow/overview/#slurm-arrays-one-model-or-a-block-per-task) (`--model-index`), merge every model's JSONL from `model_pipeline.save_dir`, compute the [ensembles](/epftoolbox2/model-pipeline/ensembles/) from them and run the evaluators and exporters once. Prints planned vs produced forecasts per model, and what the ensembles chose.
 
 ```bash
 epf report experiment.yaml
 epf report experiment.yaml --allow-missing   # report the models that have results
 ```
 
-Without `--allow-missing` it fails if any model has no results file. With it, an ensemble with a missing member is left out with a warning.
+Without `--allow-missing` it fails if any model has no results file, naming each of them. With it, an ensemble with a missing member is left out with a warning.
+
+---
+
+## `epf array`: The range of a SLURM array
+
+Print the range of array tasks that cover every model of a workflow, as `sbatch --array=` takes it: `0-` the last index, from the number of models and `environment.models_per_task`. Standard output holds the range and nothing else; logs and a count of the tasks go to standard error. Exits with code 1 if the YAML can't be used. `$SLURM_ARRAY_TASK_ID` need not be set.
+
+```bash
+epf array experiment.yaml             # 5 models, models_per_task: 2 prints 0-2
+sbatch --array=$(epf array experiment.yaml) run_task.sh
+```
 
 ---
 
