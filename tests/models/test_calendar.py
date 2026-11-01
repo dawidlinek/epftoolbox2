@@ -93,6 +93,15 @@ def test_a_hand_count_of_planned_keys_across_a_spring_switch():
     assert IssueCalendar("1h", "Europe/Warsaw", [1, 2]).count("2023-10-27", "2023-10-30") == 4 * 2 * 24
 
 
+def test_a_switch_past_the_last_issue_day_counts_for_the_forecasts_aimed_at_it():
+    calendar = IssueCalendar("1h", "Europe/Warsaw", [1, 2])
+    assert calendar.count("2023-03-24", "2023-03-25") == 2 * 2 * 24 - 2
+    first_day = datetime.date(2023, 3, 24)
+    assert {(2, 2, 0), (2, 1, 1)}.isdisjoint(calendar.tasks(first_day, [0, 1]))
+    assert (2, 1, 0) in calendar.tasks(first_day, [0, 1])
+    assert sorted(calendar.unplanned([first_day, first_day + datetime.timedelta(days=1)])) == [(2, 1, 1), (2, 2, 0)]
+
+
 def test_tasks_of_days_with_gaps_between_them_as_a_run_with_windows_has():
     calendar = IssueCalendar("1h", "Europe/Warsaw", [1])
     first_day = datetime.date(2023, 3, 20)

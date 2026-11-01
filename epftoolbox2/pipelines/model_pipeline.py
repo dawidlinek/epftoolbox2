@@ -333,8 +333,8 @@ class ModelPipeline:
 
         This is the merge step after runs that each wrote some models' results (e.g. a SLURM array with
         `Workflow(model_index=...)`). The test period, horizon and freq must be those of the runs; with the time zone
-        each manifest records they give each model's planned forecast count (`IssueCalendar`). Raises FileNotFoundError if a model has no results file, unless
-        `allow_missing` is set. `data` is only needed by exporters that join source columns.
+        each manifest records they give each model's planned forecast count (`IssueCalendar`). Raises FileNotFoundError if a
+        model has no results file, unless `allow_missing` is set. `data` is only needed by exporters that join source columns.
 
         Ensembles are computed here from the stored results of their members, every time, so they can't go stale, and written
         next to them. `allow_missing` leaves out an ensemble with a missing member, with a warning: it is never averaged over

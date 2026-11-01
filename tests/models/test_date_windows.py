@@ -175,8 +175,8 @@ def old_cut(days, day, window, hz):
 
 
 def table(switch, in_the_switch_hour, S, D, h):
-    """What the spec's table says of a key: (does it exist, the dates the row cut holds besides the rows of the date rule, the
-    dates it lacks of them, does that change what trains)."""
+    """What the rule of dates says of a key: (does it exist, the dates the row cut holds besides the rows of the rule, the dates it
+    lacks of them, does that change what trains)."""
     if not in_the_switch_hour:
         return True, [], [], False
     if switch == "autumn":
@@ -264,8 +264,6 @@ def test_forecasts_equal_the_row_cut_bit_for_bit_except_on_those_keys(monkeypatc
 
     monkeypatch.setattr(_worker, "training_rows", by_old_cut)
     before = forecasts(data, first, horizon=H, freq=freq, last=last)
-    monkeypatch.undo()
-    monkeypatch.setenv("MAX_PROCESSES", "1")
 
     in_hour = set(switch_periods("Europe/Warsaw", freq))
     origin = pd.Timestamp(S)
@@ -545,6 +543,14 @@ def test_count_equals_report_s_planned_in_a_plain_run(tmp_path, two_years, ensem
     # A report told of a smaller horizon than its members were run with: the ensemble plans what they planned.
     if ensemble:
         assert merged.refs["avg"].horizon == 2
+
+
+def test_a_run_ending_before_a_spring_switch_plans_nothing_aimed_at_the_hour_it_skips():
+    data = market("spring", horizon=1)
+    D = day_of(SWITCH_DAYS["spring"], -1)
+    ref = OLSModel(PREDICTORS, training_window=WINDOW).run(data, D, D, horizon=1)
+    assert ref.count == ref.produced == 23 and ref.skipped == {}
+    assert 2 not in {r["hour"] for r in ref._results}
 
 
 def test_a_real_gap_is_still_planned_and_counted_where_the_clock_s_gap_isn_t():

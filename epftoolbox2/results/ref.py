@@ -15,8 +15,8 @@ class ModelResultRef:
     """Where one model's results live and how many forecasts the run planned and produced.
 
     `count` is the number of planned forecasts (`IssueCalendar`: periods x horizons x test days, without the slots the clock
-    doesn't have on an issue day or a target day). `produced` is how many exist after the run (including ones resumed from an earlier run), and `skipped` counts the tasks that
-    gave no forecast by reason (e.g. `missing_test_predictors`). `produced` is None for refs built from
+    doesn't have on an issue day or a target day). `produced` is how many exist after the run (including ones resumed from an
+    earlier run), and `skipped` counts the tasks that gave no forecast by reason (e.g. `missing_test_predictors`). `produced` is None for refs built from
     raw result lists. `predictor_lists` describes each distinct list a predictor function of `ctx` returned, with how
     many forecasts use it where; it is None for fixed lists. `availability_listing` holds the rows of inputs known after
     the issue time (`epftoolbox2.results.availability`), which `EvaluationReport.availability()` shows. `matching_lists` holds,
