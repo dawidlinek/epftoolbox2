@@ -84,8 +84,11 @@ def test_every_table_of_a_joined_report_is_the_one_of_a_single_report(results):
     pd.testing.assert_frame_equal(joined.compare("better", "base"), one.compare("better", "base"), check_exact=True)
     pd.testing.assert_frame_equal(joined.leaderboard("base"), one.leaderboard("base"), check_exact=True)
     pd.testing.assert_frame_equal(joined.forecast_counts(), one.forecast_counts())
-    for table, expected in joined.compute_all().items():
-        pd.testing.assert_frame_equal(expected, one.compute_all()[table], check_exact=True)
+    expected = one.compute_all()  # once: computing every table again for each of them was most of this test's time
+    found = joined.compute_all()
+    assert set(found) == set(expected)
+    for table, frame in found.items():
+        pd.testing.assert_frame_equal(frame, expected[table], check_exact=True)
 
 
 def test_results_read_from_separate_runs_files_join_into_the_same_report(results, tmp_path):
