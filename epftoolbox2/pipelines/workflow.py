@@ -29,6 +29,18 @@ def _as_yaml_period(period: Any) -> Any:
     ]
 
 
+def _read_model_index(raw: Any) -> Union[int, str, None]:
+    """`model_index` as a number, or as written while a variable in it isn't set.
+
+    `epf report`, `epf array` and `epf validate` read the array's YAML outside the array, where `$SLURM_ARRAY_TASK_ID` isn't
+    set and nothing they do needs it. `run()` does, and refuses.
+    """
+    if raw is None:
+        return None
+    expanded = os.path.expandvars(str(raw))
+    return str(raw) if "$" in expanded else int(expanded)
+
+
 class Workflow:
     """Orchestrates a full experiment: loads both pipelines from YAML, sets the
     execution environment, runs data fetching, then model training/evaluation.
@@ -89,7 +101,7 @@ class Workflow:
         max_processes: Optional[int] = None,
         threads_per_process: Optional[int] = None,
         cache_path: Optional[str] = None,
-        model_index: Optional[int] = None,
+        model_index: Optional[Union[int, str]] = None,
         model_save_dir: Optional[str] = None,
         model_allow_manifest_mismatch: bool = False,
         model_require_manifest: bool = False,
@@ -111,7 +123,7 @@ class Workflow:
         self.max_processes = max_processes
         self.threads_per_process = threads_per_process
         self.cache_path = cache_path
-        self.model_index = model_index
+        self.model_index = _read_model_index(model_index)
         self.models_per_task = models_per_task
         self.model_save_dir = str(model_save_dir) if model_save_dir is not None else None
         self.model_allow_manifest_mismatch = model_allow_manifest_mismatch
@@ -203,7 +215,7 @@ class Workflow:
             mp.information_set = InformationSet.from_dict(info) if info else None
         if "availability" in self._mp_inline:
             mp.availability = self._mp_inline["availability"]
-        if self.model_index is not None and not all_models:
+        if isinstance(self.model_index, int) and not all_models:
             mp.models = self._block_of(mp.models)
         return mp
 
@@ -218,6 +230,11 @@ class Workflow:
     def run(self) -> EvaluationReport:
         self._apply_environment()
 
+        if isinstance(self.model_index, str):
+            raise ValueError(
+                f"model_index is {self.model_index!r}, and that variable isn't set, so this is no array task. Run inside "
+                "the array, or give the index: Workflow.model_index, or `epf run --model-index`."
+            )
         if self.models_per_task is not None and self.model_index is None:
             warnings.warn(
                 f"models_per_task={self.models_per_task} has no effect without model_index: this runs the whole pipeline.",
@@ -363,9 +380,6 @@ class Workflow:
         dp = config["data_pipeline"]
         mp = config["model_pipeline"]
 
-        model_index_raw = env.get("model_index")
-        model_index = int(os.path.expandvars(str(model_index_raw))) if model_index_raw is not None else None
-
         workflow = cls(
             data_pipeline=dp.get("path"),
             model_pipeline=mp.get("path"),
@@ -381,7 +395,7 @@ class Workflow:
             max_processes=env.get("max_processes"),
             threads_per_process=env.get("threads_per_process"),
             cache_path=env.get("cache_path"),
-            model_index=model_index,
+            model_index=env.get("model_index"),
             model_save_dir=mp.get("save_dir"),
             model_allow_manifest_mismatch=mp.get("allow_manifest_mismatch", False),
             model_require_manifest=mp.get("require_manifest", False),

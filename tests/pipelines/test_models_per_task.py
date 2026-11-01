@@ -10,6 +10,7 @@ import yaml
 from epftoolbox2 import cli
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.pipelines import Workflow
+from epftoolbox2.pipelines.workflow import _read_model_index
 from tests.synthetic import make_market_data
 
 V = ("2023-03-28", "2023-03-29")
@@ -382,6 +383,82 @@ def test_null_is_no_block_size(tmp_path, frame_csv):
     workflow = workflow_with(tmp_path, frame_csv, models_per_task=None, model_index=2)
     assert workflow.models_per_task is None
     assert names_of(workflow._build_model_pipeline()) == ["m2"]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The array's own YAML outside the array
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def outside_the_array(tmp_path, frame_csv, monkeypatch):
+    """The YAML of the docs' example where `$SLURM_ARRAY_TASK_ID` isn't set: on a login node or in the job that merges."""
+    monkeypatch.delenv("SLURM_ARRAY_TASK_ID", raising=False)
+    return write_experiment(tmp_path, frame_csv, model_index="$SLURM_ARRAY_TASK_ID", models_per_task=2)
+
+
+def test_the_variable_selects_the_block_inside_the_array(tmp_path, outside_the_array, monkeypatch):
+    monkeypatch.setenv("SLURM_ARRAY_TASK_ID", "1")
+    workflow = Workflow.load(outside_the_array)
+    assert workflow.model_index == 1
+    assert names_of(workflow._build_model_pipeline()) == ["m2", "m3"]
+    assert workflow.to_dict()["environment"]["model_index"] == 1, "a task's copy is that task's, as it always was"
+
+
+def test_the_size_and_a_merge_need_no_index(tmp_path, frame_csv, outside_the_array, one_run, capsys, monkeypatch):
+    assert Workflow.load(outside_the_array).array_size() == 3
+    capsys.readouterr()
+    cli.cmd_array(cli.build_parser().parse_args(["array", str(outside_the_array)]))
+    assert capsys.readouterr().out == "0-2\n"
+    cli.cmd_validate(cli.build_parser().parse_args(["validate", str(outside_the_array)]))
+    assert "valid" in capsys.readouterr().out
+
+    for index in range(3):
+        monkeypatch.setenv("SLURM_ARRAY_TASK_ID", str(index))
+        Workflow.load(outside_the_array).run()
+    monkeypatch.delenv("SLURM_ARRAY_TASK_ID")
+
+    cli.cmd_report(cli.build_parser().parse_args(["report", str(outside_the_array)]))
+    assert tables(Workflow.load(outside_the_array).report()) == one_run.tables
+
+
+def test_run_refuses_an_index_it_does_not_have(outside_the_array, monkeypatch):
+    monkeypatch.setattr(Workflow, "_run_data", lambda self: pytest.fail("the data pipeline ran before the check"))
+    with pytest.raises(ValueError, match=r"model_index is '\$SLURM_ARRAY_TASK_ID'.*isn't set"):
+        Workflow.load(outside_the_array).run()
+
+
+def test_the_flag_gives_run_the_index(tmp_path, outside_the_array):
+    args = cli.build_parser().parse_args(["run", str(outside_the_array), "--model-index", "2"])
+    cli.cmd_run(args)
+    assert [p.name for p in (tmp_path / "results").glob("*.jsonl")] == ["m4.jsonl"]
+
+
+def test_saving_outside_the_array_keeps_the_variable(tmp_path, outside_the_array):
+    workflow = Workflow.load(outside_the_array)
+    workflow.save(tmp_path / "copy.yaml")
+    assert yaml.safe_load((tmp_path / "copy.yaml").read_text())["environment"]["model_index"] == "$SLURM_ARRAY_TASK_ID"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, None),
+        (0, 0),
+        (3, 3),
+        ("3", 3),
+        ("$NOT_SET_HERE", "$NOT_SET_HERE"),
+        ("${NOT_SET_HERE}", "${NOT_SET_HERE}"),
+    ],
+)
+def test_reading_the_index(raw, expected, monkeypatch):
+    monkeypatch.delenv("NOT_SET_HERE", raising=False)
+    assert _read_model_index(raw) == expected
+
+
+def test_a_model_index_that_is_no_number_or_variable_still_raises_at_load():
+    with pytest.raises(ValueError, match="invalid literal"):
+        _read_model_index("three")
 
 
 # ---------------------------------------------------------------------------------------------------------------------
