@@ -167,7 +167,7 @@ Models scale each task's data with a scaler fitted on that task's training rows 
 
 <Steps>
 
-1. **Numeric features** are standardized (mean=0, std=1). A column that is constant, also up to rounding noise, is only centred
+1. **Numeric features** are standardized (mean=0, std=1). A predictor that is constant, also up to rounding noise, is set to 0 in the training data
 
 2. **Binary features (0/1)** are auto-detected and skipped
 

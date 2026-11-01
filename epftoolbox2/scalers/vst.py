@@ -15,7 +15,7 @@ from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from .base import BaseScaler, is_constant, mean_std
+from .base import BaseScaler, is_constant, mean_std, scale_training_column
 
 # MAD / _Z75 estimates the standard deviation of normally distributed data.
 _Z75 = NormalDist().inv_cdf(0.75)
@@ -63,6 +63,8 @@ class _VSTScaler(BaseScaler):
     A column that is constant up to rounding noise (standard deviation at or below 1e-12 of its largest absolute
     value, ``scalers.base.CONSTANT_STD_RTOL``) is treated as the exactly constant column it stands for: the VST is
     fitted as for that constant and the standardising scale is 1.0, so its noise isn't stretched into a regressor.
+    A predictor like that has training values of exactly 0.0 (NaNs stay NaN); its test row and the target are
+    transformed and centred as usual.
     """
 
     def __init__(self, apply_to: Union[str, List[str]] = "all"):
@@ -127,18 +129,19 @@ class _VSTScaler(BaseScaler):
             if not scalable_mask[i]:
                 self._column_params.append(None)
                 continue
-            params, mean, std, (train_col, test_col) = self._standardise(train_x[:, i], [test_x[:, i]], vst_mask[i])
-            train_x[:, i] = (train_col - mean) / std
+            raw = train_x[:, i]
+            params, mean, std, constant, (train_col, test_col) = self._standardise(raw, [test_x[:, i]], vst_mask[i])
+            train_x[:, i] = scale_training_column(raw, train_col, mean, std, constant)
             test_x[:, i] = (test_col - mean) / std
             self._column_params.append((params, mean, std))
 
-        self._target_params, self._target_mean, self._target_std, (train_z,) = self._standardise(train_y, [], True)
+        self._target_params, self._target_mean, self._target_std, _, (train_z,) = self._standardise(train_y, [], True)
         return train_x, (train_z - self._target_mean) / self._target_std, test_x
 
     def _standardise(
         self, train: np.ndarray, others: List[np.ndarray], vst: bool
-    ) -> Tuple[Any, float, float, List[np.ndarray]]:
-        """VST parameters (``vst``), mean and scale of one column, and the VST of it and of ``others``.
+    ) -> Tuple[Any, float, float, bool, List[np.ndarray]]:
+        """VST parameters (``vst``), mean, scale and constant flag of one column, and the VST of it and of ``others``.
 
         The mean and scale are those of the transformed training values. If the raw column is constant up to rounding
         noise, the VST is fitted on its median repeated, as for an exactly constant column, and the scale is 1.0. It
@@ -150,8 +153,9 @@ class _VSTScaler(BaseScaler):
         if vst:
             params = self._fit(_as_exactly_constant(train) if constant else train)
             train, others = self._forward(params, train), [self._forward(params, o) for o in others]
-        mean, std = mean_std(train)
-        return params, mean, 1.0 if constant else std, [train, *others]
+        mean, std, flat = mean_std(train)
+        constant = constant or flat
+        return params, mean, 1.0 if constant else std, constant, [train, *others]
 
     def inverse(self, value: float) -> float:
         z = np.asarray(value, dtype=np.float64) * self._target_std + self._target_mean

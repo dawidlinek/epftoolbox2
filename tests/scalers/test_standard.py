@@ -2,7 +2,7 @@ import warnings
 
 import pytest
 import numpy as np
-from epftoolbox2.models import OLSModel
+from epftoolbox2.models import LassoCVModel, OLSModel
 from epftoolbox2.scalers import StandardScaler
 from epftoolbox2.scalers.base import CONSTANT_STD_RTOL, is_constant, mean_std
 
@@ -131,8 +131,8 @@ class TestNearConstantColumns:
 
         scaled_train, _, scaled_test = StandardScaler().fit_transform(train_x, train_y, test_x)
 
-        np.testing.assert_array_equal(scaled_train[:, 1], flat - np.mean(flat))  # centred, divided by 1.0
-        assert scaled_test[0, 1] == pytest.approx(0.31 - np.mean(flat), abs=1e-15)
+        np.testing.assert_array_equal(scaled_train[:, 1], 0.0)  # not its centred noise
+        assert scaled_test[0, 1] == (0.31 - np.mean(flat)) / 1.0  # the test row is centred and divided by 1.0
         assert scaled_train[:, 0].std(ddof=1) == pytest.approx(1.0)  # the ordinary column is standardised as before
 
     @pytest.mark.parametrize("seed", range(5))
@@ -145,7 +145,7 @@ class TestNearConstantColumns:
         reference = alone.inverse(ols_forecast(*alone.fit_transform(train_x[:, :1], train_y, test_x[:, :1])))
 
         assert np.isfinite(forecast)
-        assert forecast == pytest.approx(reference, rel=1e-6)  # the column neither helps nor hurts
+        assert forecast == pytest.approx(reference, rel=1e-9)  # the column neither helps nor hurts
         assert abs(forecast - (2 * 52 + 5)) < 10  # 109 plus the price's own noise (sd 3) in the fit
 
     def test_exactly_constant_column_with_an_inexact_mean(self):
@@ -154,7 +154,7 @@ class TestNearConstantColumns:
 
         scaled_train, _, scaled_test = StandardScaler().fit_transform(train_x, train_y, test_x)
 
-        assert np.abs(scaled_train[:, 1]).max() < 1e-15
+        np.testing.assert_array_equal(scaled_train[:, 1], 0.0)
         assert scaled_test[0, 1] == pytest.approx(0.01, abs=1e-15)
 
     @pytest.mark.parametrize("centre", [1e-3, 0.3, 1000.0, 1e9])
@@ -216,8 +216,8 @@ class TestNearConstantColumns:
         scaled_train, _, scaled_test = StandardScaler().fit_transform(train_x, train_y, test_x)
 
         flat = train_x[:, 1]
-        np.testing.assert_array_equal(scaled_train[:, 1], flat - np.nanmean(flat))  # NaN stays NaN, scale 1.0
-        assert scaled_test[0, 1] == pytest.approx(0.31 - np.nanmean(flat), abs=1e-15)
+        np.testing.assert_array_equal(scaled_train[:, 1], np.where(np.isnan(flat), np.nan, 0.0))  # NaN stays NaN
+        assert scaled_test[0, 1] == (0.31 - np.nanmean(flat)) / 1.0
         assert np.nanstd(scaled_train[:, 0], ddof=1) == pytest.approx(1.0)  # an ordinary column with NaNs
 
     def test_target_constant_up_to_rounding_noise_has_scale_one(self):
@@ -261,16 +261,61 @@ class TestNearConstantColumns:
         assert with_nans._target_std == 1.0 and with_nans._target_mean == np.nanmean(noisy)
 
 
+class TestConstantPredictorTrainsAsZeros:
+    """The centred noise of a constant predictor isn't left to the solver to ignore: it is 0.0, so any solver gives
+    the column the coefficient 0."""
+
+    def test_training_values_are_exactly_zero_and_nans_stay_nan(self):
+        train_x, train_y, test_x = near_constant_case()
+        train_x[[2, 11], 1] = np.nan
+
+        scaled_train, _, scaled_test = StandardScaler().fit_transform(train_x, train_y, test_x)
+
+        assert np.isnan(scaled_train[[2, 11], 1]).all()
+        present = np.delete(scaled_train[:, 1], [2, 11])
+        assert present.shape == (28,) and (present == 0.0).all() and not np.signbit(present).any()
+        assert scaled_test[0, 1] == (0.31 - np.nanmean(train_x[:, 1])) / 1.0  # the test row keeps its deviation
+
+    @pytest.mark.parametrize("seed", range(5))
+    def test_ols_coefficient_is_exactly_zero(self, seed):
+        train_x, train_y, test_x = near_constant_case(seed=seed)
+        _, coefficients = OLSModel(predictors=[])._fit_predict(
+            *StandardScaler().fit_transform(train_x, train_y, test_x)
+        )
+        assert coefficients[1] == 0.0
+
+    @pytest.mark.parametrize("seed", range(3))
+    def test_lasso_forecast_equals_the_frame_without_the_column(self, seed):
+        train_x, train_y, test_x = near_constant_case(seed=seed)
+        model = LassoCVModel(predictors=[], cv=3)
+
+        scaler = StandardScaler()
+        forecast = scaler.inverse(model._fit_predict(*scaler.fit_transform(train_x, train_y, test_x))[0])
+        alone = StandardScaler()
+        reference = alone.inverse(model._fit_predict(*alone.fit_transform(train_x[:, :1], train_y, test_x[:, :1]))[0])
+
+        assert abs(forecast - reference) < 1e-9
+
+    def test_a_column_with_ratio_1e9_is_untouched(self):
+        col = spread_column(1e-9)
+        assert 5e-10 < np.std(col, ddof=1) / np.abs(col).max() < 2e-9
+
+        scaled_train, _, _ = StandardScaler().fit_transform(col.reshape(-1, 1), np.arange(40.0), col[:1].reshape(1, 1))
+
+        np.testing.assert_allclose(scaled_train[:, 0], (col - np.mean(col)) / np.std(col, ddof=1), rtol=1e-12)
+        assert scaled_train.any()
+
+
 class TestSharedRule:
     def test_mean_std_is_the_sample_statistics_unless_constant_or_undefined(self):
         col = np.array([1.0, 2.0, 4.0, np.nan])
-        assert mean_std(col) == (np.nanmean(col), np.nanstd(col, ddof=1))
-        assert mean_std(np.full(5, 0.3))[1] == 1.0
-        assert mean_std(np.zeros(5)) == (0.0, 1.0)
+        assert mean_std(col) == (np.nanmean(col), np.nanstd(col, ddof=1), False)
+        assert mean_std(np.full(5, 0.3))[1:] == (1.0, True)
+        assert mean_std(np.zeros(5)) == (0.0, 1.0, True)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            assert mean_std(np.array([0.3, np.nan])) == (0.3, 1.0)
-            assert mean_std(np.array([0.3, np.inf]))[1] == 1.0  # undefined: infinity minus infinity
+            assert mean_std(np.array([0.3, np.nan])) == (0.3, 1.0, False)  # undefined, not constant
+            assert mean_std(np.array([0.3, np.inf]))[1:] == (1.0, False)  # undefined: infinity minus infinity
 
     def test_is_constant_needs_two_values_and_a_defined_spread(self):
         assert is_constant(np.full(30, 0.3))

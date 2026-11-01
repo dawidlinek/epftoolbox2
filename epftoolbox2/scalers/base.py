@@ -29,18 +29,32 @@ def is_constant(values: np.ndarray) -> bool:
     return not np.isnan(std) and _negligible(std, values)
 
 
-def mean_std(values: np.ndarray) -> Tuple[float, float]:
-    """Mean and sample standard deviation of the non-NaN values: the pair every scaler standardises with.
+def mean_std(values: np.ndarray) -> Tuple[float, float, bool]:
+    """Mean, scale and whether the column is constant: what every scaler standardises with.
 
-    The standard deviation is 1.0 where it is undefined (fewer than two values) or the column is constant up to
-    rounding noise (``CONSTANT_STD_RTOL``), as for an exactly constant or all-zero column, so that such a column is
-    centred and left at its scale instead of being divided by about 1e-15.
+    The mean and the sample standard deviation are those of the non-NaN values. The scale is the standard deviation,
+    or 1.0 where it is undefined (fewer than two values) or the column is constant up to rounding noise
+    (``CONSTANT_STD_RTOL``, the third value), as for an exactly constant or all-zero column, so that such a column
+    isn't divided by about 1e-15.
     """
     mean = np.nanmean(values)
     std = np.nanstd(values, ddof=1)
-    if np.isnan(std) or _negligible(std, values):
-        std = 1.0
-    return mean, std
+    if np.isnan(std):
+        return mean, 1.0, False
+    if _negligible(std, values):
+        return mean, 1.0, True
+    return mean, std, False
+
+
+def scale_training_column(
+    raw: np.ndarray, transformed: np.ndarray, mean: float, std: float, constant: bool
+) -> np.ndarray:
+    """``(transformed - mean) / std`` for a predictor's training values, but exactly 0.0 where ``raw`` is not NaN if
+    the column is constant. Its centred noise (about 1e-15) would otherwise be left to the solver to ignore; a column
+    of zeros gets the coefficient 0 from any solver. NaNs stay NaN."""
+    if constant:
+        return np.where(np.isnan(raw), np.nan, 0.0)
+    return (transformed - mean) / std
 
 
 class BaseScaler(ABC):
