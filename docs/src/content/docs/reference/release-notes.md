@@ -38,6 +38,10 @@ an issue day it didn't sample.
   counts the forecasts inside the period, and `forecast_counts()` and its warning say what is missing.
 - A workflow file with `model_index: $SLURM_ARRAY_TASK_ID` couldn't be loaded where that variable isn't set, so `epf report` and
   `epf validate` failed on it outside the array with `invalid literal for int()`. They now work, and only `run()` raises, saying so.
+- `CsvExporter` and `ExcelExporter` raised `KeyError` when a model had no forecasts in the report's window (an array task that stopped
+  during validation, say), so one unfinished model cost the whole CSV or the `details` sheet. The model now keeps its columns, empty,
+  where its place among the models puts them, and the other models' rows are as they were; a file of a report with no such model doesn't
+  change by a byte. When no model has forecasts, the CSV is the header alone and the workbook holds the `Summary` and `Details` sheets only.
 
 ### New
 

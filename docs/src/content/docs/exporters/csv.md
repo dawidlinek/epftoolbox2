@@ -44,6 +44,8 @@ The CSV contains the following columns:
 - `{model}_prediction`: model's prediction
 - `{model}_error`: residual (prediction - actual)
 
+A model with no forecasts in the report's window (an array task that stopped before its test days, say) keeps its two columns, empty, in its place among the models, and the rows of the other models are unchanged. If no model has forecasts, the file holds the header only.
+
 **Extra columns** (optional):
 - Any columns from the source dataset, joined by `target_date` + `hour` (the period of the day, so a quarter-hour row gets the source value of that quarter-hour)
 
