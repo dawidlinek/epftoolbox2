@@ -1,11 +1,15 @@
 import numpy as np
 from typing import Optional, Sequence, Tuple
 
-from .base import BaseScaler
+from .base import BaseScaler, mean_std
 
 
 class StandardScaler(BaseScaler):
-    """Standardise every non-binary predictor and the target to mean 0, standard deviation 1 (the default)."""
+    """Standardise every non-binary predictor and the target to mean 0, standard deviation 1 (the default).
+
+    A column that is constant up to rounding noise (standard deviation at or below 1e-12 of its largest absolute
+    value, or undefined) is centred and divided by 1.0, not by about 1e-15.
+    """
 
     name = "standard"
 
@@ -38,17 +42,11 @@ class StandardScaler(BaseScaler):
             if not scalable_mask[i]:
                 continue
             col = train_x[:, i]
-            mean = np.nanmean(col)
-            std = np.nanstd(col, ddof=1)
-            if std == 0 or np.isnan(std):
-                std = 1.0
+            mean, std = mean_std(col)
             train_x[:, i] = (col - mean) / std
             test_x[:, i] = (test_x[:, i] - mean) / std
 
-        self._target_mean = np.nanmean(train_y)
-        self._target_std = np.nanstd(train_y, ddof=1)
-        if self._target_std == 0 or np.isnan(self._target_std):
-            self._target_std = 1.0
+        self._target_mean, self._target_std = mean_std(train_y)
         train_y_scaled = (train_y - self._target_mean) / self._target_std
 
         return train_x, train_y_scaled, test_x
