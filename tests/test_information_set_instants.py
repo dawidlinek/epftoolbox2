@@ -9,11 +9,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from epftoolbox2.data.transformers import LagTransformer
 from epftoolbox2.information_set import (
     ROLE_PREDICTOR,
     Availability,
     InformationSet,
     InformationSetError,
+    _available_array,
+    _Context,
     perturb_recent,
     perturb_unknown,
 )
@@ -76,6 +79,7 @@ QUARTER_NAMES = [f"{base}{suffix}" for base in ("pub", "act", "run", "cut") for 
 WARSAW_DAYS = [SPRING + timedelta(days=k) for k in (-2, -1, 0, 1, 2)] + [AUTUMN + timedelta(days=k) for k in (-2, -1, 0, 1, 2)]  # fmt: skip
 NEW_YORK_DAYS = [date(2024, 3, 9), date(2024, 3, 10), date(2024, 3, 11), date(2024, 11, 2), date(2024, 11, 3), date(2024, 11, 4)]  # fmt: skip
 HAVANA_DAYS = [date(2024, 3, 9), date(2024, 3, 10), date(2024, 3, 11), date(2024, 11, 2), date(2024, 11, 3), date(2024, 11, 4)]  # fmt: skip  # at midnight
+ASUNCION_DAYS = [date(2024, 3, 22), date(2024, 3, 23), date(2024, 3, 24)]  # 23:00 repeats on the 23rd
 
 CASES = {
     "warsaw 1h": ("Europe/Warsaw", "1h", "11:45", "Europe/Brussels", WARSAW_DAYS),
@@ -86,6 +90,7 @@ CASES = {
     "new york, issue in the switch": ("America/New_York", "1h", "01:30", "America/New_York", NEW_YORK_DAYS),
     "new york, issue in brussels": ("America/New_York", "1h", "11:45", "Europe/Brussels", NEW_YORK_DAYS),
     "havana, a midnight switch": ("America/Havana", "1h", "00:30", "America/Havana", HAVANA_DAYS),
+    "asuncion, a repeated last hour": ("America/Asuncion", "1h", "23:30", "America/Asuncion", ASUNCION_DAYS),
     "utc 1h": ("UTC", "1h", "11:45", "Europe/Brussels", WARSAW_DAYS),
     "utc 1h, issue in the switch": ("UTC", "1h", "02:30", "Europe/Brussels", WARSAW_DAYS),
     "utc 15min": ("UTC", "15min", "11:45", "Europe/Brussels", WARSAW_DAYS),
@@ -347,6 +352,23 @@ def test_a_repeated_hour_read_in_a_zone_whose_midnight_falls_between_its_occurre
     index = pd.date_range("2024-10-20", "2024-11-02", freq="1h", tz="Europe/Warsaw")
     found, _ = info.violations({(p, 1): ["x"] for p in range(24)}, "x_d-3", "1h", index, "2024-10-27", "2024-10-27")
     assert {use.period for use in found if use.role == ROLE_PREDICTOR} == set(range(2, 24))
+
+
+def test_a_day_shift_between_two_switch_days_keeps_the_occurrence():
+    """2023-10-29 and 2024-10-27 both repeat 02:00, 364 days apart, and LagTransformer maps each occurrence to its own. So
+    the two rows of x_d+364 hold values delivered an hour apart, and are known an hour apart."""
+    index = pd.date_range("2023-10-20", "2024-11-05", freq="1h", tz="Europe/Warsaw")
+    raw = pd.DataFrame({"x": (index - pd.Timestamp("2023-01-01", tz="UTC")) / pd.Timedelta(minutes=1)}, index=index)
+    built = LagTransformer(columns=["x"], lags=[-364], freq="day").transform(raw)
+    held = built.loc[built.index.tz_localize(None) == pd.Timestamp("2023-10-29 02:00"), "x_d+364"].to_numpy()
+    assert held[1] - held[0] == 60.0  # the transformer's own reading
+
+    rule = Availability.realised("0min")
+    col = InformationSet("11:45", "Europe/Warsaw", rules={"x": rule}).resolve("x_d+364")
+    ctx = _Context(pd.Timestamp("2023-10-29"), "Europe/Warsaw")
+    known = _available_array(col, rule, np.zeros(2), np.array([120.0, 120.0]), 60, ctx, np.array([True, False]))
+    midnight = (ctx.origin - pd.Timestamp("2023-01-01", tz="UTC")) / pd.Timedelta(minutes=1)
+    assert (known + midnight).tolist() == (held + 60.0).tolist()
 
 
 def test_an_hour_lag_inside_a_day_aggregate_is_elapsed_time():
