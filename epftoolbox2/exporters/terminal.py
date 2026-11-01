@@ -24,6 +24,7 @@ class TerminalExporter(Exporter):
         if report.window != "test":
             console.print(f"\n[bold]The {report.window} window[/bold]")
         self._print_availability(console, report.availability())
+        self._print_thin_training(console, report.training_days())
         self._print_choices(console, report.choices())
         for key in self.show:
             if key in self._SHOW_MAP:
@@ -45,6 +46,19 @@ class TerminalExporter(Exporter):
             table.add_column(str(col), overflow="fold")  # a predictor's name is no use cut short
         for _, row in shown.iterrows():
             table.add_row(*[str(value) for value in row])
+        console.print(table)
+
+    def _print_thin_training(self, console: Console, training_days) -> None:
+        """Forecasts on no more days than predictors, whatever `show` asks for, and only if there are any."""
+        thin = training_days[training_days["thin_forecasts"] > 0]
+        if thin.empty:
+            return
+        console.print("\n[bold]train_on='matching': forecasts on no more training days than predictors[/bold]")
+        table = Table()
+        for col in thin.columns:
+            table.add_column(str(col), overflow="fold")
+        for _, row in thin.iterrows():
+            table.add_row(*[self._format(value) for value in row])
         console.print(table)
 
     def _print_choices(self, console: Console, choices) -> None:

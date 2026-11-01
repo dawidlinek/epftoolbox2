@@ -134,6 +134,8 @@ class RandomForestModel(BaseModel):
         return prediction, importances
 ```
 
+Under [`train_on="matching"`](/epftoolbox2/model-pipeline/predictor-functions/#training-only-on-the-days-with-the-same-list) a model receives only the rows of the days that matched, so `train_x` and `train_y` aren't consecutive days. A custom model that weights rows by their position must not assume they are.
+
 ---
 
 ## Custom Evaluator

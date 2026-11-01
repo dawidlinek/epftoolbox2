@@ -178,9 +178,13 @@ model is `inconclusive`. If it really is known in advance, for example a column 
   a DST switch on their own: `pipeline.verify(df, "2024-10-26", "2024-10-29", days=4)`.
 - **The look-ahead after a fall-back switch is real.** On the days after the switch, hour 2 of the forecasts trains on a
   target dated on or after the issue day. `verify` reports this as a leak if it samples those days. It is a known issue of
-  the training cut, not a flaw in your pipeline.
+  the training cut, not a flaw in your pipeline. A
+  [`train_on="matching"` set](/epftoolbox2/model-pipeline/predictor-functions/#training-only-on-the-days-with-the-same-list) holding
+  that day has it too, and more strongly, since that row is one of fewer.
 - **A model must be deterministic.** Two runs of a model with no fixed `random_state` differ, which shows up as a leak.
 - **It trusts your rules.** A rule that says a value is known earlier than it really is keeps that value out of the probe.
+- **It can't see revisions.** A value in the frame revised after the issue day is known by its rule, so nothing perturbs it. A
+  predictor function reading it can move its list or its [set of days](/epftoolbox2/model-pipeline/predictor-functions/#training-only-on-the-days-with-the-same-list) without a word.
 - **A day the model can't forecast at all stops it** with the reason, as `run()` does: `no forecasts produced`.
 
 <Aside type="tip">

@@ -77,7 +77,7 @@ Rules to know before using the library:
 - [Forecast-Only Mode](docs/src/content/docs/model-pipeline/forecasting.mdx): operational forecasts for the next days without back-testing
 - [Information Set](docs/src/content/docs/model-pipeline/information-set.mdx): availability rules, the issue-time check at the levels none, warn and raise, `report.availability()`, `pipeline.explain()` and the leakage probe
 - [Verifying a Pipeline](docs/src/content/docs/model-pipeline/verification.mdx): `ModelPipeline.verify()` and `epf verify`, the leakage probe on sampled issue days with a positive control
-- [Predictor Functions](docs/src/content/docs/model-pipeline/predictor-functions.mdx): a function of `ctx` that picks each forecast's list, what `published()` and `value()` mean at each availability level, how each list trains, resuming and YAML
+- [Predictor Functions](docs/src/content/docs/model-pipeline/predictor-functions.mdx): a function of `ctx` that picks each forecast's list, what `published()` and `value()` mean at each availability level, how each list trains, `Use(list, train_on="matching")`, resuming and YAML
 - [Validation and Test](docs/src/content/docs/model-pipeline/validation-and-test.mdx): `run(df, validation=..., test=...)` and `"previous_year"`, records identical to plain runs, `report.validation`, resuming validation before test, SLURM merges
 - [Ensembles](docs/src/content/docs/model-pipeline/ensembles.mdx): `AverageEnsemble` and `add_ensemble()`, the rule of the average, what counts for choosing, why a `top` ensemble has no validation forecasts, `report.choices()`, SLURM merges and YAML
 - [Predictor Presets](docs/src/content/docs/model-pipeline/presets.mdx): LEAR and expert-model inputs in this library's column naming

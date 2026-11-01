@@ -11,7 +11,7 @@ import pytest
 
 from epftoolbox2.data.transformers import DailyProfileTransformer
 from epftoolbox2.information_set import Availability, InformationSet, perturb_unknown
-from epftoolbox2.models import OLSModel
+from epftoolbox2.models import OLSModel, Use
 from epftoolbox2.pipelines import ModelPipeline
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
@@ -41,6 +41,32 @@ def test_no_lookahead_in_days_after_fall_back_dst(run_day):
     original, perturbed = predictions(df), predictions(scrambled)
     changed = [key for key in original if abs(original[key] - perturbed[key]) > 1e-9]
     assert changed == []
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="the doubled hour puts a target dated on the issue day into a train_on='matching' set, where it weighs more",
+)
+def test_no_lookahead_in_a_matching_set_holding_the_fall_back_day():
+    """Monday and Tuesday targets have a list of their own, so a forecast issued on the Monday after the switch trains on the
+    day of the switch. Hour 2 has two rows there, the cut leaves the first, and its target is the price of the issue day."""
+    df = make_market_data(start="2023-08-20", days=90, noise=5.0, seed=3, horizon=1)
+    run_day = "2023-10-30"
+
+    def mondays_and_tuesdays(ctx):
+        return Use(PREDICTORS if ctx.target_day.weekday() in (0, 1) else PREDICTORS[:3], train_on="matching")
+
+    def forecast(data):
+        ref = OLSModel(mondays_and_tuesdays, training_window=45).run(
+            data, test_start=run_day, test_end=run_day, horizon=1
+        )
+        return {r["hour"]: r["prediction"] for r in ref._results}[2]
+
+    raised = df.copy()
+    raised.loc[f"{run_day} 02:00", "price"] += 100.0
+
+    assert abs(forecast(df) - forecast(raised)) <= 1e-9
 
 
 @pytest.mark.xfail(

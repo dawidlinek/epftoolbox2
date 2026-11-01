@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import TYPE_CHECKING, Any, List, Dict, Callable, Sequence, Union, Tuple, Optional
+from typing import TYPE_CHECKING, Any, List, Dict, Callable, Iterable, Sequence, Union, Tuple, Optional
 
 import datetime
 import gc
@@ -20,6 +20,7 @@ from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef, split_by_window
 from ..results.availability import listing_rows, warn_about
+from ..results.matching import training_day_rows, warn_about_thin
 from ..results.manifest import (
     PAST_THE_FRAME,
     ManifestMismatchError,
@@ -30,12 +31,13 @@ from ..results.manifest import (
     check_stored_lists,
     manifest_path,
     read_windows,
+    record_skips,
 )
 from ..results.windows import TEST, RunWindows, mask_key
 from ..logging import get_logger
 from . import _contract
-from .context import PredictorPlan, build_plan, mask_digest, takes_ctx, warn_never_published_in
-from ._worker import _pool_init, _run_day
+from .context import TRAIN_ON_MATCHING, PredictorPlan, build_plan, mask_digest, takes_ctx, warn_never_published_in
+from ._worker import NOT_PLANNED, _cut, _pool_init, _run_day, matching_digest, matching_rows, training_row_days
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days
 from ..information_set import check_level
 
@@ -95,6 +97,7 @@ class BaseModel(ABC):
         self._hour_data: Dict[int, pd.DataFrame] = {}
         self._hour_days: Dict[int, np.ndarray] = {}
         self._offset: int = 0
+        self._first_ordinal: int = 0  # the date of day id 0
         self._target: str = ""
         self._freq: str = "1h"
         self._periods_per_day: int = 24
@@ -155,7 +158,9 @@ class BaseModel(ABC):
         raises instead of warning when `save_to` has results but no manifest.
 
         `plan` is what `ModelPipeline` built for a predictor function of `ctx` before any model ran, for this data,
-        test period, horizon and freq; without it the run builds its own. A model with fixed lists has none.
+        test period, horizon and freq; without it the run builds its own. A model with fixed lists has none. If a list has
+        `train_on="matching"` the plan also holds the list of each day its forecasts can train on, and this run warns before
+        any fit about forecasts with no more such days than predictors.
 
         `windows` (what `ModelPipeline.run(validation=..., test=...)` resolves to, see `epftoolbox2.results.windows`)
         forecasts the days of its windows in place of [test_start, test_end]. The returned ref covers the whole run and its
@@ -222,12 +227,7 @@ class BaseModel(ABC):
             warn_about({self.name: listing}, stacklevel=3)
         used_columns = list(dict.fromkeys([target, *self._used_predictors]))
 
-        self._data = self._preprocess(data[used_columns], horizon, target)
-
-        for hour in range(self._periods_per_day):
-            hour_df = self._data[self._data["hour"] == hour].copy()
-            self._hour_data[hour] = hour_df
-            self._hour_days[hour] = hour_df["day"].values
+        self._load_periods(data, used_columns, horizon, target)
 
         first_day = datetime.date.fromisoformat(test_start)
         if windows is None:
@@ -286,7 +286,9 @@ class BaseModel(ABC):
                 check_stored_lists(
                     manifest_path(store.path),
                     manifest,
-                    store.iter_lines(cols=["hour", "horizon", "run_date", "predictor_list", "window", "actual"]),
+                    store.iter_lines(
+                        cols=["hour", "horizon", "run_date", "predictor_list", "matching_days", "window", "actual"]
+                    ),
                     self._stored_forecast_lookup(plan, masks, windows),
                     allow_mismatch=allow_manifest_mismatch,
                     model_name=self.name,
@@ -309,6 +311,14 @@ class BaseModel(ABC):
                 listing = manifest.availability["listing"]  # with what earlier runs listed for other test periods
                 window_listings = manifest.availability.get("windows", window_listings)
             stored_windows = None if manifest.windows is None else RunWindows.from_dict(manifest.windows)
+        matching_lists = None
+        if plan is not None and plan.uses_matching:
+            matching_lists = self._matching_lists(plan)
+            absent = {(period, first_day.toordinal() + day) for period, day in absent_slots}
+            counts = self._matching_day_counts(plan, target, absent)
+            warn_about_thin(
+                training_day_rows(self.name, self._matching_uses(plan, counts), matching_lists), stacklevel=2
+            )
         pending = store.get_missing(all_tasks) if store else all_tasks
 
         skipped: Counter = Counter()
@@ -345,6 +355,8 @@ class BaseModel(ABC):
             if store:
                 store.flush()
             self._cleanup()
+        if store:  # not after a crash: what it skipped so far is no count of anything
+            record_skips(manifest_path(store.path), manifest, {TEST: skipped} if windows is None else window_skipped)
 
         if not pending:
             print(f"All {len(all_tasks)} tasks completed")
@@ -365,6 +377,7 @@ class BaseModel(ABC):
             predictor_lists=None if plan is None else plan.describe(),
             availability_listing=listing,
             windows=windows,
+            matching_lists=matching_lists,
         )
         if windows is not None:
             ref.by_window = split_by_window(
@@ -523,6 +536,13 @@ class BaseModel(ABC):
         if plan is not None:
             config["task_lists"] = plan.assignment
             config["list_hashes"] = plan.hashes
+            if plan.uses_matching:
+                config["matching"] = {
+                    "lists": plan.day_lists,
+                    "start": self._grid_start(plan),
+                    "first_ordinal": self._first_ordinal,
+                    "ids": plan.matching_ids,
+                }
         if window_days is not None:
             config["run_days"] = window_days
         first_day = datetime.date.fromisoformat(test_start)
@@ -708,7 +728,17 @@ class BaseModel(ABC):
             raise ValueError(f"{self.name}: a predictor function of `ctx` needs the test period to plan its lists")
         else:
             days = _test_days(test_start, test_end)
-        plan = build_plan(self._ctx_fn, data, days, horizon, freq, information_set, warn_unpublished, availability)
+        plan = build_plan(
+            self._ctx_fn,
+            data,
+            days,
+            horizon,
+            freq,
+            information_set,
+            warn_unpublished,
+            availability,
+            training_window=self.training_window,
+        )
         if windows is not None and warn_unpublished and len(windows.periods) > 1:
             for name, (start, end) in windows.periods:
                 warn_never_published_in(plan, name, (plan.position_of(start), plan.position_of(end) + 1))
@@ -738,6 +768,8 @@ class BaseModel(ABC):
             problems.append("information set")
         if information_set is not None and plan.availability != availability:
             problems.append("availability level")
+        if plan.uses_matching and plan.training_window != self.training_window:
+            problems.append("training window")
         if problems:
             raise ValueError(f"{self.name}: this plan was built for another {', '.join(problems)}")
 
@@ -783,9 +815,96 @@ class BaseModel(ABC):
                 mask[found] = StandardScaler.get_scalable_mask(sample)[found]
                 without_values &= ~found
 
+    def _load_periods(self, data: pd.DataFrame, used_columns: Sequence[str], horizon: int, target: str) -> None:
+        """Read `data` into the frames of the periods, whose rows the tasks are cut from."""
+        self._data = self._preprocess(data[list(used_columns)], horizon, target)
+        self._first_ordinal = self._data.index[0].date().toordinal()
+        for hour in range(self._periods_per_day):
+            hour_df = self._data[self._data["hour"] == hour].copy()
+            self._hour_data[hour] = hour_df
+            self._hour_days[hour] = hour_df["day"].values
+
+    def _grid_start(self, plan: PredictorPlan) -> int:
+        """The day id of the first day of `plan.day_lists`, which may be before the frame's."""
+        return plan.first_grid_day.toordinal() - self._first_ordinal
+
     @staticmethod
+    def _matching_lists(plan: PredictorPlan) -> Dict[str, int]:
+        """The hash of each list with `train_on="matching"` -> how many predictors it has."""
+        return {plan.hashes[list_id]: len(plan.lists[list_id]) for list_id in sorted(plan.matching_ids)}
+
+    def _matching_days_of(self, plan: PredictorPlan, period: int, horizon: int, run_date: str, list_id: int) -> str:
+        """The record's `matching_days` of a forecast: the worker's own cut and filter, on the rows the worker has."""
+        day = datetime.date.fromisoformat(run_date).toordinal() - self._first_ordinal
+        rows = training_row_days(self._hour_days[period], day, self.training_window, horizon)
+        lists = plan.day_lists[(period, horizon)]
+        return matching_digest(rows[matching_rows(rows, lists, self._grid_start(plan), list_id)], self._first_ordinal)
+
+    def _matching_day_counts(
+        self, plan: PredictorPlan, target: str, absent: Iterable[Tuple[int, int]] = ()
+    ) -> Dict[Tuple[int, int], np.ndarray]:
+        """(period, horizon) of a matching forecast -> the days each issue day's forecast would train on, before any fit, -1
+        if it isn't one of a matching list or has no row to forecast from. They are what its record's `training_days` will say,
+        so after dropping rows with a missing value; a list holding a column the frame lacks can't say, and keeps -1.
+
+        `absent` has (period, date ordinal) of what the run skips for lack of a row.
+        """
+        absent = set(absent)
+        issue_days = np.array([day.toordinal() - self._first_ordinal for day in plan.issue_days], dtype=np.int64)
+        start = self._grid_start(plan)
+        finite: Dict[Tuple[int, int], Optional[np.ndarray]] = {}
+        counts: Dict[Tuple[int, int], np.ndarray] = {}
+        for (period, horizon), lists in plan.day_lists.items():
+            ids = plan.assignment[(period, horizon)]
+            frame = self._hour_data[period]
+            days = self._hour_days[period]
+            on_grid = (days >= start) & (days < start + len(lists))
+            row_lists = np.full(len(days), NOT_PLANNED, dtype=np.int32)
+            row_lists[on_grid] = lists[days[on_grid] - start]
+            finite_y = np.isfinite(frame[f"{target}_d+{horizon}"].to_numpy(dtype=np.float64))
+            # The window of each issue day, in the rows of this period, then the cut.
+            first_row = np.searchsorted(days, issue_days - self.training_window - horizon, side="left")
+            last_row = np.maximum(np.searchsorted(days, issue_days, side="right") - (1 + horizon), first_row)
+            out = counts[(period, horizon)] = np.full(len(ids), -1, dtype=np.int64)
+            for list_id in plan.matching_ids.intersection(np.unique(ids).tolist()):
+                key = (period, list_id)
+                if key not in finite:
+                    names = list(plan.lists[list_id])
+                    finite[key] = (
+                        np.isfinite(frame[names].to_numpy(dtype=np.float64)).all(axis=1)
+                        if set(names) <= set(frame.columns)
+                        else None
+                    )
+                if finite[key] is None:
+                    continue
+                kept = (row_lists == list_id) & finite_y & finite[key]
+                # A doubled autumn row counts once, wherever the window ends.
+                new_day = kept.copy()
+                new_day[1:] &= ~((days[1:] == days[:-1]) & kept[:-1])
+                total = np.concatenate(([0], np.cumsum(new_day)))
+                on = ids == list_id
+                out[on] = total[last_row[on]] - total[first_row[on]]
+            if absent:
+                out[[(period, day.toordinal()) in absent for day in plan.issue_days]] = -1
+        return counts
+
+    @staticmethod
+    def _matching_uses(
+        plan: PredictorPlan, counts: Dict[Tuple[int, int], np.ndarray]
+    ) -> List[Tuple[str, int, int, int]]:
+        """(list hash, period, horizon, days it trains on) of each forecast of a matching list that will have a fit."""
+        uses = []
+        for (period, horizon), days in counts.items():
+            fitted = days > 0
+            ids = plan.assignment[(period, horizon)][fitted]
+            uses.extend(
+                (plan.hashes[list_id], period, horizon, count)
+                for list_id, count in zip(ids.tolist(), days[fitted].tolist())
+            )
+        return uses
+
     def _stored_forecast_lookup(
-        plan: Optional[PredictorPlan], masks: Dict, windows: Optional[RunWindows] = None
+        self, plan: Optional[PredictorPlan], masks: Dict, windows: Optional[RunWindows] = None
     ) -> Callable[[int, int, str], Optional[PlannedForecast]]:
         """What a fresh run would give a stored forecast's key, or None if it isn't planned. `masks` are per window in a
         run with windows."""
@@ -804,11 +923,13 @@ class BaseModel(ABC):
             digest = digests[window].get(key)
             if digest is None:
                 return None
+            matching = plan is not None and plan.train_on[list_id] == TRAIN_ON_MATCHING
             return PlannedForecast(
                 None if plan is None else plan.hashes[list_id],
                 digest,
                 mask_key(window, period, horizon),
                 None if windows is None else window,
+                self._matching_days_of(plan, period, horizon, run_date, list_id) if matching else None,
             )
 
         return lookup
@@ -901,7 +1022,7 @@ class BaseModel(ABC):
         """The training rows of the task (hour, hz, day) in these columns, before dropping missing values."""
         days = self._hour_days[hour]
         mask = (days >= day - self.training_window - hz) & (days <= day)
-        return self._hour_data[hour][mask][predictors].to_numpy(dtype=np.float64)[: -(1 + hz)]
+        return _cut(self._hour_data[hour][mask][predictors].to_numpy(dtype=np.float64), hz)
 
     def _precompute_expanded_predictors(self, horizon: int) -> Dict[Tuple[int, int], List[str]]:
         return {

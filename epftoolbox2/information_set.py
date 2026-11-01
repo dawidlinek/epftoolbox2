@@ -1084,7 +1084,9 @@ def leakage_probe(
 
     A predictor function of `ctx` is planned on each frame, so a value it reads can move its list. A cell it read that
     differs between the frames counts as a change of the forecasts that read it, in `changed` and `moved_reads`, because
-    the noise may well leave a list where it was.
+    the noise may well leave a list where it was. So does a cell it read on a training day of a `train_on="matching"` list:
+    the function answers there as of that day's own issue time, so no such cell is unknown on `run_day` unless it reads
+    something it can't know.
 
     `availability` is the level the function is planned at. With "raise" a late `ctx.value()` stops the probe with
     `InformationSetError`; with "warn" or "none" it returns the value, and the forecasts that read it are in `changed` and
@@ -1129,7 +1131,7 @@ def _issue_day_forecasts(
     freq: str,
     information_set: InformationSet,
     availability: str = "raise",
-) -> Tuple[Dict[Tuple[int, int], float], Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]], List[Violation]]:
+) -> Tuple[Dict[Tuple[int, int], float], Dict[Tuple[Any, ...], Tuple[np.ndarray, np.ndarray]], List[Violation]]:
     """The model's forecasts issued on `run_day` from `frame`, by (period, horizon), the cells a predictor function of
     `ctx` read (see `PredictorPlan.read_cells`), and its reads of values known only later (`PredictorPlan.late_reads`).
 
@@ -1159,8 +1161,8 @@ def _issue_day_forecasts(
 
 
 def _moved_reads(
-    original: Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]],
-    other: Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]],
+    original: Dict[Tuple[Any, ...], Tuple[np.ndarray, np.ndarray]],
+    other: Dict[Tuple[Any, ...], Tuple[np.ndarray, np.ndarray]],
     atol: float,
 ) -> Tuple[List[Tuple[int, int]], Dict[str, int]]:
     """The forecasts (period, horizon) that read a cell through `ctx` holding another value in the other frame, and how
@@ -1171,10 +1173,11 @@ def _moved_reads(
     days though the choice depends on a value it can't know.
     """
     forecasts, counts = set(), {}
-    for (name, horizon), (cells, values) in original.items():
-        if (name, horizon) not in other:
+    for key, (cells, values) in original.items():
+        if key not in other:
             continue
-        other_cells, other_values = other[(name, horizon)]
+        name, horizon = key[:2]  # a cell read on a training day has one more part: it is on other days than the others
+        other_cells, other_values = other[key]
         moved = cells & other_cells & _cells_differ(values, other_values, atol)
         if moved.any():
             forecasts.update((int(period), horizon) for period in np.nonzero(moved)[0])

@@ -1,6 +1,6 @@
 ---
 title: Predictor Functions
-description: Choose each forecast's predictors with a function of `ctx`, planned before any fit, compared with the issue time and saved by import path
+description: Choose each forecast's predictors with a function of `ctx`, planned before any fit, compared with the issue time, trained on all days or the matching ones, and saved by import path
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -90,10 +90,14 @@ the issue time according to the information set, and that value is not NaN.
   far as can be told. A rule that puts a column after the issue time makes it False on every day, which looks like a
   working run with an input that never switched on.
 
-<Aside type="caution" title="What `published` means in a backtest">
-"Not NaN" is the state of the archive you backtest on, not the state of the server at the issue time. A value that came an
-hour late on the day and was backfilled later reads as published. The availability rule is what stands for the usual
-publication time; `published` can't replay a day's outage, and a live run may see a gap the backtest doesn't.
+<Aside type="caution" title="What `published` and `value` mean in a backtest">
+"Not NaN" and the value itself are the state of the archive you backtest on, not the state of the server at the issue time. A value
+that came an hour late on the day and was backfilled later reads as published, and `value()` reads the frame's value, however
+often it was revised after that day. The availability rule stands for the usual publication time. It can't replay a day's outage
+or a revision, and only data with its vintages could; this library doesn't read those yet.
+
+`leakage_probe` and `verify` can't see any of this: a revised value in the frame looks like any other known value. A live run may also
+see a gap the backtest doesn't, so a function can take a path no backtest took.
 </Aside>
 
 ### `value(column)`
@@ -148,8 +152,91 @@ can't change an earlier forecast. A column with no value there is read on the fi
 A list used on every test day of a (period, horizon) is treated exactly as a fixed list is.
 
 A function may also return `Use(list, train_on="all")`, which is the plain list.
-`Use(list, train_on="matching")`, training only on the past days that got the same list, isn't available yet and raises
-`NotImplementedError`.
+
+## Training only on the days with the same list
+
+`Use(list, train_on="matching")` trains a forecast only on the past days for which the function returned that same list:
+
+```python
+from epftoolbox2.models import OLSModel, Use
+from epftoolbox2.pipelines import ModelPipeline
+
+weekday_x = ["load_forecast_d+{horizon}", "wind_forecast_d+{horizon}", "price_d-1"]
+weekend_x = ["load_forecast_d+{horizon}", "price_d-1"]
+
+
+def weekend_model(ctx):  # one model for weekend targets, another for the other days
+    if ctx.target_weekday >= 5:
+        return Use(weekend_x, train_on="matching")
+    return Use(weekday_x, train_on="matching")
+
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin").add_model(
+    OLSModel(predictors=weekend_model, training_window=364, name="weekend")
+)
+```
+
+What that means, for each (period, horizon):
+
+- **A past day counts as a forecast issued on that day.** A training row on day D' at horizon h has issue day D' and target day
+  D' + h, so the function runs for it exactly as for a forecast issued on D'. **`published()` and `value()` answer as of the issue
+  time of D', never as of the day the forecast is being made.** A value known only later than that doesn't count as published on
+  D', even though it is long known by the time of the forecast. So the days a forecast trains on are the days the function gives
+  this list by the availability rules and **the values the frame holds now**, which is not what was out then for a series that gets
+  revised or backfilled; see below. A late `value()` on a training day counts like one on an issue day: refused at
+  `availability="raise"`, listed at `"warn"`, and a `leak` in `verify` at either.
+- **The same list means the same names in the same order and the same `train_on`.** A day that got those names with
+  `train_on="all"` doesn't match, and neither does a day that got them in another order. Build a list in a fixed order: the order
+  of `list(set(names))` changes with the hash seed, and the numbers with it. Two lists with the same names in another order give a
+  warning, for any `train_on`.
+- **The window isn't extended.** `training_window` and the usual cut come first, so the newest training target stays D-1. The filter
+  then narrows what they leave. **A matching forecast therefore trains on fewer rows than its window**: about 104 for weekend
+  targets with a window of 364. If that is too few, ask for a longer window.
+- **The scaler is fitted on the rows left**, and the binary columns are still the list's, found as for any list on its window, not
+  once per set of days.
+- **A day with a doubled autumn row** counts as one day, whose two rows both follow its date. A day with no row at that period
+  isn't asked about. The cut counts rows as it does for every list, so a set holding that day has the
+  [look-ahead after a fall-back](/epftoolbox2/model-pipeline/verification/) on the days after it, and a set without it doesn't. **It
+  weighs more than for a fixed list**, since the row with a target dated on the issue day is one of fewer. With a window of 45, a
+  price raised by 100 on the issue day moved one forecast by 24.6 on a set of 13 days, and by 6.5 for a fixed list.
+
+<Aside type="caution" title="Revised series and the set of days">
+A value the function reads on a past day is the one in the frame, as for a [forecast's own cell](#publishedcolumns), so a revision
+made after the forecast's issue day moves its set of days and the forecast with it: in one synthetic case all 24 forecasts of a day,
+by 4 on average. `leakage_probe` and `verify` can't see that, since the revised value is known by the rule. If the function reads a
+series that gets revised, the backtest's sets are the archive's.
+
+Backfilling works against a live run too. If `published()` is False today and the archive has backfilled that column on every past
+day, today's list is one no past day got: a fallback list used that way has `no_matching_days`, and no forecast, in the live run
+that needed it.
+</Aside>
+
+### When there are too few days
+
+- **No matching day:** no fit. The forecast is counted as `no_matching_days` in
+  [`report.forecast_counts()`](/epftoolbox2/model-pipeline/results/#forecast-counts). So a list that first appears on an issue day
+  has no forecast until a day that returned it has a finished target: h + 1 issue days at horizon h.
+- **As many days as the list has predictors, or fewer:** nothing refuses the fit. OLS then passes through every row or has no unique
+  solution, and a regularised model may do better. A fit can also fail: below `cv` rows `LassoCVModel` can't cross-validate, and
+  the forecast is counted as `fit_error`. A warning before any fit names the model, how many forecasts and the smallest count. The
+  terminal exporter prints the same whatever `show` asks for, and `ModelPipeline.report()` warns again from the stored results.
+
+```python
+report = pipeline.run(df, test=("2025-10-01", "2026-09-30"), horizon=2)
+report.forecast_counts()  # no_matching_days among the skip reasons
+report.training_days()  # model, list, predictors, forecasts, periods, horizons, smallest_days, median_days, largest_days, thin_forecasts
+```
+
+`training_days()` reads the records of the report's window, and counts days the fit really uses: a matched day whose row has a
+missing value isn't one.
+
+### What it costs
+
+The function is evaluated on training days too, once per (day, period, horizon), before any fit, and a day that is also an issue day
+isn't evaluated twice. That is (window + test) / test times the calls, and only for the (period, horizon) pairs that have a matching
+forecast: a year of hourly forecasts at seven horizons with a window of 364 days is 123,000 calls instead of 61,000. A function
+building a 175-name list took 3.8 s for them instead of 1.9 s on a desktop. A function with no matching list is never called on a
+training day. Workers get the list of each day from the plan; they don't call the function and see no column more than usual.
 
 ## The issue-time check
 
@@ -175,6 +262,10 @@ list when large positive noise lands on the side the value was on. A late `value
 `leak` at the other levels. `verify` also plans the whole test period, so what the function uses late on any issue day is a `leak`,
 sampled or not. A column it uses only on issue days outside the sample, known in time by its rule, makes the status
 `inconclusive`, since the probe hasn't seen it; sample more days.
+
+The training days of a [matching list](#training-only-on-the-days-with-the-same-list) are planned on each frame too, and a cell the
+function reads on one counts the same as on an issue day. So a forecast whose set of days depends on something it can't know is a
+`leak`, whether or not its list moved.
 
 ## Seeing the lists
 
@@ -203,10 +294,25 @@ Here EXAA isn't out on the five Mondays of the month, and at horizon 2 its rule 
 `adds` and `drops` compare a list with the most used list of the same horizon, since `{horizon}` in a name makes the lists of two
 horizons differ anyway. Ties go to the list returned first. A late `value()` doesn't stop the view, at any level.
 
+A function with `train_on="matching"` lists adds three columns, `smallest days`, `median days` and `largest days`: how many days the
+forecasts of each such list would train on, counted as a run counts them and without fitting anything, and a dash for any other list.
+A smallest of 0 says some of them have no fit:
+
+```text
+weekend_model: 2 distinct list(s)
+ horizon  list         hash  forecasts  issue days first issue day last issue day periods  predictors train_on adds             drops  smallest days  median days  largest days
+       1     1 20310bccfffe        240          10      2024-04-01     2024-04-14    0-23           3 matching    -                 -            258        260.0           260
+       1     2 f91ab6385a9f         96           4      2024-04-05     2024-04-13    0-23           2 matching      wind_forecast_d+1            102        104.0           104
+```
+
 ## Results
 
 Each record of a predictor function has one more key, `predictor_list`: a short hash of its ordered list and training rule.
 Fixed lists have no such key.
+
+A record of a `train_on="matching"` list has two more: `matching_days`, a short hash of the days the function matched, and
+`training_days`, how many of them the fit used once rows with a missing value are dropped. A record of any other list doesn't
+have them, and a pipeline with no matching list doesn't change at all.
 
 ```python
 # One entry per distinct list: hash, train_on, n_predictors, predictors, forecasts, horizons, periods, issue_days,
@@ -223,6 +329,11 @@ change, for example if the function reads a list defined next to it, or a new av
 answer. A change that leaves every stored forecast alone (a comment, an unrelated rule) resumes with a note. Pending
 forecasts may change freely, as nothing stored depends on them, except that adding a column to the union of the lists changes
 the hash of the data the manifest compares, and that raises too. `allow_manifest_mismatch=True` resumes anyway.
+
+For a matching list it also compares `matching_days`, the set of past days a fresh run would match for the stored forecast. Its list
+can stay what it was while that set moves: a new list on some past day does that, and so does a change in a value the function only
+reads, which the manifest's data hash doesn't cover. Either raises `ManifestMismatchError`, saying how many stored forecasts have other
+matching days. That holds for a day whose row the fit drops anyway for a missing value, so the fit's rows can be the same.
 
 ## Saving to YAML
 

@@ -27,9 +27,10 @@ from ..information_set import (
     parse_predictor,
 )
 from . import _contract
-from .context import PredictorPlan, function_name
+from .context import TRAIN_ON_MATCHING, PredictorPlan, function_name
 
 COLUMNS = ["predictor", "target-relative", "rule", "known", "status"]
+_TRAINING_DAY_COLUMNS = ("smallest days", "median days", "largest days")
 _DASH = "-"
 # Names a run of slots or a list of added names spells out before it shortens them.
 _NAMES_SHOWN = 3
@@ -157,10 +158,15 @@ def _short(names: List[str]) -> str:
     return f"{names[0]}, {names[1]} … {names[-1]} ({len(names)})"
 
 
-def list_table(plan: PredictorPlan, horizons: range) -> pd.DataFrame:
+def list_table(
+    plan: PredictorPlan, horizons: range, training_days: Optional[Dict[Tuple[int, int], np.ndarray]] = None
+) -> pd.DataFrame:
     """One row per (horizon, list that horizon uses), and what each adds to or drops from that horizon's most used list.
 
     Compared within a horizon only: a `{horizon}` in a name makes the lists of two horizons differ anyway.
+
+    A plan with `train_on="matching"` lists has three more columns, from `training_days` (`BaseModel._matching_day_counts`):
+    the smallest, median and largest number of days the forecasts of such a list train on, and a dash for any other.
     """
     columns = [
         "horizon",
@@ -175,6 +181,7 @@ def list_table(plan: PredictorPlan, horizons: range) -> pd.DataFrame:
         "train_on",
         "adds",
         "drops",
+        *(_TRAINING_DAY_COLUMNS if training_days is not None else ()),
     ]
     rows = []
     for horizon in horizons:
@@ -200,9 +207,47 @@ def list_table(plan: PredictorPlan, horizons: range) -> pd.DataFrame:
                     "train_on": plan.train_on[list_id],
                     "adds": _DASH if names == reference else _short([n for n in names if n not in reference]),
                     "drops": _DASH if names == reference else _short([n for n in reference if n not in names]),
+                    **(_training_day_columns(plan, list_id, horizon, pairs, training_days) if training_days else {}),
                 }
             )
     return pd.DataFrame(rows, columns=columns)
+
+
+def _training_day_columns(
+    plan: PredictorPlan,
+    list_id: int,
+    horizon: int,
+    pairs: Dict[int, np.ndarray],
+    training_days: Dict[Tuple[int, int], np.ndarray],
+) -> Dict[str, Any]:
+    counts = [
+        training_days[(period, horizon)][ids == list_id]
+        for period, ids in pairs.items()
+        if (period, horizon) in training_days
+    ]
+    days = np.concatenate(counts) if counts else np.array([], dtype=np.int64)
+    days = days[days >= 0]
+    if plan.train_on[list_id] != TRAIN_ON_MATCHING or not len(days):
+        return dict.fromkeys(_TRAINING_DAY_COLUMNS, _DASH)
+    return dict(zip(_TRAINING_DAY_COLUMNS, (int(days.min()), float(np.median(days)), int(days.max()))))
+
+
+def _matching_counts(
+    model: Any, plan: PredictorPlan, data: pd.DataFrame, target: str, horizon: int, freq: str
+) -> Optional[Dict[Tuple[int, int], np.ndarray]]:
+    """How many days the forecasts of matching lists train on, before any fit, as a run counts them. A list holding a column
+    `run` would refuse has no count: the predictor table says what is wrong with it."""
+    if not plan.uses_matching or target not in data.columns:
+        return None
+    usable = [
+        name
+        for name in dict.fromkeys(name for names in plan.lists for name in names)
+        if name in data.columns and _contract._is_numeric(data[name])
+    ]
+    model._load_periods(data, list(dict.fromkeys([target, *usable])), horizon, target)
+    model._data = None
+    absent = _contract.missing_test_rows(data.index, freq, plan.issue_days)
+    return model._matching_day_counts(plan, target, {(period, day.toordinal()) for period, day in absent})
 
 
 def explain_model(
@@ -240,7 +285,9 @@ def explain_model(
         plan = model._plan_predictors(
             data, target, horizon, freq, info, start, end, warn_unpublished=False, availability=level
         )
-        out["lists"] = list_table(plan, range(1, horizon + 1))
+        out["lists"] = list_table(
+            plan, range(1, horizon + 1), _matching_counts(model, plan, data, target, horizon, freq)
+        )
         ids = plan.assignment[(hour, horizon)]
         chosen = int(
             pd.Series(ids).value_counts(sort=False).sort_index().idxmax()

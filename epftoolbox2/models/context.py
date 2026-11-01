@@ -6,6 +6,11 @@ forecast (issue day, horizon, period) and returns the full list of column names 
 which forecast uses which. Each forecast is still its own fit, with its own list; forecasts are grouped by list only for
 the information-set check, the manifest and the records.
 
+`Use(list, train_on="matching")` trains a forecast only on the past days for which the function returned that same list and
+rule. So the plan also evaluates the function on those days, once per (day, period, horizon), each exactly as for a forecast
+issued on that day: `ctx` answers as of that day's own issue time, never the time of the forecast being made. A plan with no
+such list does none of this.
+
 `ctx` never hands out the frame. `ctx.published(columns)` and `ctx.value(column)` read single cells of the forecast's own
 row (issue day D, this period), and only cells the information set says are known at the issue time. They answer through
 the same availability path as `InformationSet.check` (`_IssueClock`), so a profile column is judged at its slot, a day
@@ -48,11 +53,16 @@ from ..information_set import (
 from ..results.availability import listing_rows, sort_rows
 from ..results.windows import mask_key
 from ._contract import period_index, wall_clock
+from ._worker import NOT_PLANNED, OTHER_LIST
 
 _HORIZON = "{horizon}"
 # How many lists an InformationSetError spells out; a late column often sits in every list.
 _LISTS_SHOWN = 5
 _STEP_PERIODS = {freq: 1440 // minutes for freq, minutes in _STEP_MINUTES.items()}
+
+TRAIN_ON_ALL = "all"
+TRAIN_ON_MATCHING = "matching"
+TRAINING_DAY = "training day"  # the last part of a key of `PredictorPlan.read_cells` for a cell read on a training day
 
 
 @dataclass(frozen=True)
@@ -61,20 +71,17 @@ class Use:
 
     Args:
         predictors: The full list of column names, as a plain returned list would be.
-        train_on: `"all"` trains on the window's rows where the list's columns exist, as a plain list does.
+        train_on: `"all"` trains on the window's rows where the list's columns exist, as a plain list does. `"matching"`
+            then keeps only the days for which the function returned this same list and `train_on`, per (period, horizon),
+            each evaluated as of its own issue time. The window isn't extended, so that is fewer rows.
     """
 
     predictors: Sequence[str]
-    train_on: str = "all"
+    train_on: str = TRAIN_ON_ALL
 
     def __post_init__(self):
-        if self.train_on == "matching":
-            raise NotImplementedError(
-                "Use(..., train_on='matching') isn't available yet: training only on the past days that got the same "
-                "list needs the function evaluated on every training day too. Use train_on='all' for now."
-            )
-        if self.train_on != "all":
-            raise ValueError(f"train_on must be 'all', got {self.train_on!r}")
+        if self.train_on not in (TRAIN_ON_ALL, TRAIN_ON_MATCHING):
+            raise ValueError(f"train_on must be '{TRAIN_ON_ALL}' or '{TRAIN_ON_MATCHING}', got {self.train_on!r}")
         if isinstance(self.predictors, str):
             raise TypeError(f"Use(predictors=...) takes a list of column names, got the string {self.predictors!r}")
         object.__setattr__(self, "predictors", tuple(self.predictors))
@@ -227,6 +234,12 @@ class _Cells:
     def queried(self) -> Set[str]:
         return set(self._values)
 
+    def has_row(self) -> np.ndarray:
+        """Whether the data has a row at each [period, issue day]."""
+        present = np.zeros((self.periods, self._n_days), dtype=bool)
+        present[self._row_cell] = True
+        return present
+
     def read_cells(self) -> Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]]:
         """(column, horizon) -> the cells whose value the function's answers depended on, and the column's cells.
 
@@ -339,9 +352,9 @@ class _Cells:
         value = values[period, position]
         return float(value) if values.dtype != object else value
 
-    def late_reads(self, days: Optional[np.ndarray] = None) -> List[Violation]:
-        """Each (column, period, horizon) whose `value` was read though its rule puts it after the issue time, on `days`
-        (a mask of the issue days) if given."""
+    def late_reads(self, days: Any = None) -> List[Violation]:
+        """Each (column, period, horizon) whose `value` was read though its rule puts it after the issue time, on `days` if
+        given (a mask of the issue days, or `horizon -> mask of [period, issue day]`)."""
         out = []
         if self._info is None:
             return out
@@ -350,23 +363,29 @@ class _Cells:
             if col.rule is None:
                 continue
             avail = self.available(name)
-            read = read if days is None else read & days
+            read = self._on(read, horizon, days)
             late = self._info._late_periods(col, self._periods, avail, self._clock, self._step, used=read)
             for period, known, issue, hint in late:
                 out.append(Violation(name, period, horizon, col, known, issue, ROLE_VALUE, hint))
         return out
 
-    def no_rule_reads(self, days: Optional[np.ndarray] = None) -> List[Violation]:
-        """Each (column, period, horizon) read through `ctx` that has no rule, on `days` (a mask of the issue days) if given."""
+    def no_rule_reads(self, days: Any = None) -> List[Violation]:
+        """Each (column, period, horizon) read through `ctx` that has no rule, on `days` if given (see `late_reads`)."""
         out = []
         if self._info is None:
             return out
         for (name, horizon), read in self._value_cells.items():
-            out.extend(self._without_rule(name, horizon, read if days is None else read & days, ROLE_VALUE))
+            out.extend(self._without_rule(name, horizon, self._on(read, horizon, days), ROLE_VALUE))
         for (_, horizon), (names, _, asked) in self._published.items():
             for name in names:
-                out.extend(self._without_rule(name, horizon, asked if days is None else asked & days, ROLE_PUBLISHED))
+                out.extend(self._without_rule(name, horizon, self._on(asked, horizon, days), ROLE_PUBLISHED))
         return out
+
+    @staticmethod
+    def _on(read: np.ndarray, horizon: int, days: Any) -> np.ndarray:
+        if days is None:
+            return read
+        return read & (days.get(horizon, False) if isinstance(days, dict) else days)
 
     def _without_rule(self, name: str, horizon: int, cells: np.ndarray, role: str) -> List[Violation]:
         col = self.column(name)
@@ -499,9 +518,14 @@ class PredictorPlan:
         hashes: Each list's `list_hash`, as records store it.
         assignment: `(period, horizon)` -> the list id of each issue day.
         queried: The columns the function read through `ctx`.
-        calls: How many times the function was called.
+        calls: How many times the function was called, on training days too.
         seconds: How long planning took.
         availability: The level it was planned at, which decides what `ctx` does around a value it can't vouch for.
+        training_window: The window the training days of `train_on="matching"` lists were planned for, if any.
+        first_grid_day: The first day of `day_lists`, whose entries are one per calendar day up to the last issue day.
+        day_lists: `(period, horizon)` of a matching forecast -> the list id of each day of the grid, what a matching forecast
+            filters its training rows on: `OTHER_LIST` for a list no forecast uses, which matches nothing, and
+            `NOT_PLANNED` for a day no matching forecast of that pair reads. Empty without a matching forecast.
     """
 
     function: Any
@@ -522,9 +546,22 @@ class PredictorPlan:
     availability: str = "raise"
     _listings: Dict[Tuple[int, Optional[int]], List[Dict[str, Any]]] = field(default_factory=dict, repr=False)
     _positions: Dict[str, int] = field(init=False, repr=False)
+    training_window: Optional[int] = None
+    first_grid_day: Optional[datetime.date] = field(default=None, repr=False)
+    day_lists: Dict[Tuple[int, int], np.ndarray] = field(default_factory=dict, repr=False)
+    _training_cells: Optional[_Cells] = field(default=None, repr=False)
 
     def __post_init__(self):
         self._positions = {day.isoformat(): position for position, day in enumerate(self.issue_days)}
+
+    @property
+    def uses_matching(self) -> bool:
+        return TRAIN_ON_MATCHING in self.train_on
+
+    @property
+    def matching_ids(self) -> Set[int]:
+        """The ids of the lists with `train_on="matching"`."""
+        return {list_id for list_id, rule in enumerate(self.train_on) if rule == TRAIN_ON_MATCHING}
 
     def list_id_of(self, period: int, horizon: int, run_date: str) -> Optional[int]:
         """The list id of the forecast with this key, or None if this plan doesn't cover it."""
@@ -673,9 +710,11 @@ class PredictorPlan:
         pairs = {(period, hz): [] for period, hz in self.assignment}
         cells, target_uses, _, late_names, no_rule = self._scan(target, pairs, days)
         on_days = None
+        read_on, read_on_training = None, None
         if days != (0, None):
             on_days = np.zeros(len(self.issue_days), dtype=bool)
             on_days[days[0] : days[1]] = True
+            read_on, read_on_training = self._read_by_forecasts_of(days, on_days)
         col = cells.column(target)
         if col.rule is None:
             target_uses = [Violation(target, p, h, col, float("nan"), float("nan"), ROLE_TARGET) for p, h in pairs]
@@ -691,10 +730,63 @@ class PredictorPlan:
                     nan = float("nan")
                     uses.extend(Violation(name, p, h, col, nan, nan) for p, h in pairs_of_list[list_id])
             rows += listing_rows(uses, list_hash)
-        rows += listing_rows([*cells.late_reads(on_days), *cells.no_rule_reads(on_days)])
+        reads = [*cells.late_reads(read_on), *cells.no_rule_reads(read_on)]
+        if self._training_cells is not None:
+            training = self._training_cells
+            reads += [*training.late_reads(read_on_training), *training.no_rule_reads(read_on_training)]
+        rows += listing_rows(reads)
         self.information_set._log_assumptions(model_name)
         self._listings[days] = sort_rows(rows)
         return self._listings[days]
+
+    def _read_by_forecasts_of(self, days: Tuple[int, Optional[int]], on_days: np.ndarray) -> Tuple[Any, Any]:
+        """What the forecasts of `days`, a (start, stop) slice of `issue_days`, had the function read: the mask to read
+        `_cells` with and the one to read `_training_cells` with (see `_Cells.late_reads`).
+
+        A window's forecasts read their own days and, through a matching list, the days they train on, also if those are days
+        of another window: a plain run over this window evaluates them as training days and lists what they read.
+        """
+        if not self.day_lists:
+            return on_days, None
+        grid = self._grid_positions()
+        is_training_day = np.ones(self._grid_size(), dtype=bool)
+        is_training_day[grid] = False
+        periods, horizons = _STEP_PERIODS[self.freq], range(1, self.horizon + 1)
+        on_issue_days = {horizon: np.tile(on_days, (periods, 1)) for horizon in horizons}
+        on_training_days = {
+            horizon: np.zeros((periods, int(is_training_day.sum())), dtype=bool) for horizon in horizons
+        }
+        slice_of = slice(days[0], days[1])
+        for (period, horizon), ids in self.assignment.items():
+            read = self._days_read_by(ids[slice_of], grid[slice_of], horizon)
+            if read is not None:
+                on_issue_days[horizon][period] |= read[grid]
+                on_training_days[horizon][period] = read[is_training_day]
+        return on_issue_days, on_training_days
+
+    def _days_read_by(self, ids: np.ndarray, grid: np.ndarray, horizon: int) -> Optional[np.ndarray]:
+        """Which days of the grid these forecasts of one (period, horizon) can train on, or None if none of them is matching.
+        Each reads `[D - training_window - horizon, D - 1]`: the worker's window, which holds whatever its cut leaves, a
+        doubled autumn row and a gap in the data included."""
+        matching = np.isin(ids, sorted(self.matching_ids))
+        if not matching.any():
+            return None
+        marks = np.zeros(self._grid_size() + 1, dtype=np.int64)
+        np.add.at(marks, grid[matching] - self.training_window - horizon, 1)
+        np.add.at(marks, grid[matching], -1)
+        return np.cumsum(marks[:-1]) > 0
+
+    def _grid_positions(self) -> np.ndarray:
+        """Where each issue day is in the grid of `day_lists`."""
+        first = self.first_grid_day.toordinal()
+        return np.array([day.toordinal() - first for day in self.issue_days], dtype=np.int64)
+
+    def _grid_size(self) -> int:
+        return max(self.issue_days).toordinal() - self.first_grid_day.toordinal() + 1
+
+    def grid_days(self) -> List[datetime.date]:
+        """Every calendar day of `day_lists`, the first one first."""
+        return [self.first_grid_day + datetime.timedelta(days=d) for d in range(self._grid_size())]
 
     def _pairs_of_lists(self, days: Optional[np.ndarray] = None) -> Dict[int, List[Tuple[int, int]]]:
         """List id -> the (period, horizon) pairs that use it, on `days` (a mask of the issue days) if given."""
@@ -705,8 +797,11 @@ class PredictorPlan:
         return out
 
     def late_reads(self) -> List[Violation]:
-        """The `value` reads of cells known only after the issue time, for `leakage_probe`, until `release`."""
-        return [] if self._cells is None else self._cells.late_reads()
+        """The `value` reads of cells known only after the issue time of their own day, on a training day too, for
+        `leakage_probe`, until `release`."""
+        if self._cells is None:
+            return []
+        return [*self._cells.late_reads(), *(self._training_cells.late_reads() if self._training_cells else ())]
 
     def _late_uses(
         self, late_names: List[str], cells: _Cells, days: Optional[np.ndarray] = None
@@ -735,14 +830,21 @@ class PredictorPlan:
                         out.setdefault(list_id, []).append(Violation(name, at, horizon, col, known, issue, hint=hint))
         return out
 
-    def read_cells(self) -> Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray]]:
+    def read_cells(self) -> Dict[Tuple[Any, ...], Tuple[np.ndarray, np.ndarray]]:
         """What the function's answers depended on, for `leakage_probe`, until `release`: (column, horizon) -> the cells
-        [period, issue day] it read, and the column's cells."""
-        return {} if self._cells is None else self._cells.read_cells()
+        [period, issue day] it read, and the column's cells. What it read on a training day is under (column, horizon,
+        `TRAINING_DAY`), on those days: a frame on which no forecast is matching has none to compare."""
+        if self._cells is None:
+            return {}
+        read: Dict[Tuple[Any, ...], Tuple[np.ndarray, np.ndarray]] = dict(self._cells.read_cells())
+        if self._training_cells is not None:
+            read.update({(*key, TRAINING_DAY): cells for key, cells in self._training_cells.read_cells().items()})
+        return read
 
     def release(self) -> None:
         """Drop the cells read while planning: a loop over many models would otherwise keep them all."""
         self._cells = None
+        self._training_cells = None
 
 
 def _names(result: Any, fn: Any) -> Tuple[Sequence[str], str]:
@@ -778,10 +880,15 @@ def build_plan(
     information_set: Optional[InformationSet] = None,
     warn_unpublished: bool = True,
     availability: str = "raise",
+    training_window: Optional[int] = None,
 ) -> PredictorPlan:
     """Evaluate `fn` for every planned forecast. `warn_unpublished` warns for each `published()` argument that was never
     True over these days, which is meaningless for a sample of days: a wrong rule would silently disable an input.
-    `availability` is the level `ctx` answers at (see the module docstring)."""
+    `availability` is the level `ctx` answers at (see the module docstring).
+
+    If a forecast gets `Use(list, train_on="matching")`, `fn` is also evaluated on the days it can train on, which needs
+    `training_window`. What `fn` answers on a day is then the same whether that day is issued or only trained on.
+    """
     started = time.perf_counter()
     days = list(issue_days)
     cells = _Cells(data, information_set, freq, days, availability)
@@ -798,14 +905,7 @@ def build_plan(
         for hz in horizons:
             target_day = day + datetime.timedelta(days=hz)
             for period in periods:
-                try:
-                    result = fn(PredictorContext(cells, position, period, hz, day, target_day))
-                except Exception as exc:
-                    exc.add_note(
-                        f"Raised by predictor function {function_name(fn)} for issue day {day}, horizon {hz}, "
-                        f"period {period}."
-                    )
-                    raise
+                result = _call(fn, PredictorContext(cells, position, period, hz, day, target_day))
                 names, train_on = _names(result, fn)
                 key = (tuple(names), train_on, hz)
                 list_id = returned.get(key)
@@ -821,10 +921,115 @@ def build_plan(
                 plan.assignment[(period, hz)][position] = list_id
     plan.calls = len(days) * len(horizons) * len(periods)
     plan.queried = cells.queried
+    only_on_training_days = _plan_training_days(plan, returned, distinct, training_window) if plan.uses_matching else []
+    _warn_same_names_in_another_order([*plan.lists, *only_on_training_days], fn)
     if warn_unpublished:
         _warn_never_published(cells, fn)
     plan.seconds = time.perf_counter() - started
     return plan
+
+
+def _call(fn: Callable, ctx: PredictorContext, training: bool = False) -> Any:
+    try:
+        return fn(ctx)
+    except Exception as exc:
+        as_what = "for training day" if training else "for issue day"
+        exc.add_note(
+            f"Raised by predictor function {function_name(fn)} {as_what} {ctx.issue_day}, horizon {ctx.horizon}, "
+            f"period {ctx.period}."
+        )
+        raise
+
+
+def _plan_training_days(
+    plan: PredictorPlan,
+    returned: Dict[Tuple[Tuple[str, ...], str, int], int],
+    distinct: Dict[Tuple[Tuple[str, ...], str], int],
+    training_window: Optional[int],
+) -> List[Tuple[str, ...]]:
+    """The list of each day a matching forecast can train on, into `plan.day_lists`. Returns the lists no forecast uses.
+
+    A row on day D' at horizon h has issue day D' and target day D' + h, so the function runs for it exactly as for a
+    forecast issued on D': over `_Cells` of those days, whose clock gives each its own issue time. A day that is an issue
+    day already has its answer, and only a (day, period, horizon) with a row and a matching forecast to read it is asked.
+    A list no forecast uses is validated like any other, and gets `OTHER_LIST`: no forecast can match it, and it must not
+    show in the plan's lists, whose ids the manifest, the masks and the check go through.
+    """
+    fn = plan.function
+    if training_window is None:
+        raise ValueError(
+            f"{function_name(fn)} returned Use(..., train_on='matching'), which needs the training_window to plan"
+        )
+    plan.training_window = training_window
+    plan.first_grid_day = min(plan.issue_days) - datetime.timedelta(days=training_window + plan.horizon)
+    grid = plan._grid_positions()
+    is_issue_day = np.zeros(plan._grid_size(), dtype=bool)
+    is_issue_day[grid] = True
+    grid_days = plan.grid_days()
+    training_days = [day for day, issued in zip(grid_days, is_issue_day) if not issued]
+    cells = _Cells(plan.data, plan.information_set, plan.freq, training_days, plan.availability)
+    plan._training_cells = cells
+    has_row = cells.has_row()
+    position_of = np.full(len(grid_days), -1, dtype=np.int64)
+    position_of[~is_issue_day] = np.arange(len(training_days))
+
+    asked: Dict[Tuple[int, int], np.ndarray] = {}  # (period, horizon) -> which training days its forecasts read
+    for (period, hz), ids in plan.assignment.items():
+        read = plan._days_read_by(ids, grid, hz)
+        if read is None:
+            continue
+        plan.day_lists[(period, hz)] = lists = np.full(len(grid_days), NOT_PLANNED, dtype=np.int32)
+        lists[grid] = ids
+        asked_days = np.zeros(len(training_days), dtype=bool)
+        asked_days[position_of[read & ~is_issue_day]] = True
+        asked[(period, hz)] = asked_days & has_row[period]
+
+    horizons = range(1, plan.horizon + 1)
+    periods = range(cells.periods)
+    first = plan.first_grid_day.toordinal()
+    calls = 0
+    only_here: List[Tuple[str, ...]] = []
+    for position, day in enumerate(training_days):
+        place = day.toordinal() - first
+        for hz in horizons:
+            target_day = day + datetime.timedelta(days=hz)
+            for period in periods:
+                pair = (period, hz)
+                if pair not in asked or not asked[pair][position]:
+                    continue
+                result = _call(fn, PredictorContext(cells, position, period, hz, day, target_day), training=True)
+                calls += 1
+                names, train_on = _names(result, fn)
+                key = (tuple(names), train_on, hz)
+                list_id = returned.get(key)
+                if list_id is None:
+                    expanded = _expanded_list(names, hz, fn)
+                    list_id = returned[key] = distinct.get((expanded, train_on), OTHER_LIST)
+                    if list_id == OTHER_LIST:
+                        only_here.append(expanded)
+                plan.day_lists[pair][place] = list_id
+    plan.calls += calls
+    plan.queried = plan.queried | cells.queried
+    return only_here
+
+
+def _warn_same_names_in_another_order(lists: Iterable[Tuple[str, ...]], fn: Any) -> None:
+    """The order of a list is part of it (`list_hash`), and `list(set(names))` has one that changes with the hash seed, and the
+    numbers with it. Only a function that returns two orders in one run can be told by this."""
+    orders: Dict[frozenset, Dict[Tuple[str, ...], None]] = {}
+    for names in lists:
+        orders.setdefault(frozenset(names), {})[names] = None
+    reordered = [list(found) for found in orders.values() if len(found) > 1]
+    if reordered:
+        first, second = reordered[0][:2]
+        warnings.warn(
+            f"{function_name(fn)} returned the same names in another order, e.g. {list(first[:3])} ... and {list(second[:3])} "
+            "... The order is part of a list: these are two lists, with their columns in another order and another hash, and "
+            "train_on='matching' doesn't match one with the other. An order taken from a set also changes with the hash seed, "
+            "and the numbers with it. Sort the names.",
+            UserWarning,
+            stacklevel=4,
+        )
 
 
 def _warn_never_published(cells: _Cells, fn: Any) -> None:

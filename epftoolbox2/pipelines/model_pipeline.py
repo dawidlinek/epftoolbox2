@@ -19,7 +19,16 @@ from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..exporters.base import Exporter
 from ..results.availability import read_listing, warn_about
-from ..results.manifest import FrameHashes, ManifestMismatchError, is_ensemble_manifest, manifest_path, read_windows
+from ..results.manifest import (
+    FrameHashes,
+    ManifestMismatchError,
+    is_ensemble_manifest,
+    manifest_path,
+    read_matching_lists,
+    read_skipped,
+    read_windows,
+)
+from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef, split_by_window
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
@@ -332,6 +341,13 @@ class ModelPipeline:
         What the runs listed about inputs known after the issue time comes from the manifests, whatever this pipeline's
         `availability` is: `report.availability()`, one warning and the terminal exporter show it.
 
+        `forecast_counts()` has the skip reasons the runs recorded in their manifests, of a window as a whole: a report on part of
+        a plain run's days has `missing` and no reasons. A task that crashed recorded none, so what `missing` holds beyond them is
+        that. `produced` counts the records inside the period, whatever else the file holds.
+
+        Forecasts of a `train_on="matching"` list on no more days than the list has predictors are warned about again, from the
+        stored records: an array task's warning went to that task's log.
+
         After runs with validation, `validation` and `test` say what `run` was told, and each must be what the manifests
         record. Without any window the report is on every window they record. Results whose manifests record different
         windows raise `ValueError`, as they would be compared on different forecasts. The report is what `run` returns: on
@@ -378,9 +394,7 @@ class ModelPipeline:
             if not path.exists():
                 missing.append(f"{model.name} ({path})")
                 continue
-            with open(path) as f:
-                produced = sum(1 for line in f if line.strip())
-            refs[model.name] = ModelResultRef(
+            ref = ModelResultRef(
                 name=model.name,
                 path=path,
                 count=planned,
@@ -388,10 +402,14 @@ class ModelPipeline:
                 test_end=test_end,
                 horizon=horizon,
                 freq=freq,
-                produced=produced,
+                skipped={} if windows is not None else read_skipped(manifest_path(path), period=(test_start, test_end)),
                 availability_listing=read_listing(manifest_path(path)),
                 windows=windows,
+                matching_lists=read_matching_lists(manifest_path(path)),
             )
+            # Through the ref: the file can hold more than this period, and a line outside it is no forecast of it.
+            ref.produced = sum(1 for _ in ref.iter_records(cols=["hour"]))
+            refs[model.name] = ref
         if missing and not allow_missing:
             raise FileNotFoundError(f"No results for model(s): {', '.join(missing)}. Run them first.")
         for name in missing:
@@ -405,6 +423,7 @@ class ModelPipeline:
                     ref,
                     windows,
                     96 if freq == "15min" else 24,
+                    skipped={w: read_skipped(manifest_path(ref.path), w) for w, _ in windows.periods},
                     listings={w: read_listing(manifest_path(ref.path), w) for w, _ in windows.periods},
                     target_before=stored.target_before,
                 )
@@ -430,7 +449,8 @@ class ModelPipeline:
         }
         if shortfall:
             details = "; ".join(
-                f"{name} ({ref.produced} of {ref.count}, {ref.count - ref.produced} missing)"
+                f"{name} ({ref.produced} of {ref.count}, {ref.count - ref.produced} missing"
+                f"{''.join(f', {reason} {n}' for reason, n in sorted(ref.skipped.items()))})"
                 for name, ref in shortfall.items()
             )
             warnings.warn(
@@ -441,6 +461,7 @@ class ModelPipeline:
         warn_about({name: ref.availability_listing for name, ref in refs.items()}, stacklevel=3)
 
         report = EvaluationReport(refs, [] if forecast_only else self.evaluators, source_data=data, choices=choices)
+        warn_about_thin(rows_of_refs(refs), stacklevel=2)  # on the whole file: a report holds one window
         if not forecast_only:
             for exporter in self.exporters:
                 exporter.export(report)
@@ -712,6 +733,9 @@ class ModelPipeline:
         `adds` to and `drops` from the most used list of that horizon. `predictors` then shows the list used most at
         (`horizon`, `hour`), judged on the days it is used. A late `ctx.value()` doesn't stop the view; see
         `report.availability()` for what a function read.
+
+        With `train_on="matching"` lists `lists` also has `smallest days`, `median days` and `largest days`: how many days the
+        forecasts of such a list would train on, as a run counts them, without fitting anything; a dash for any other list.
 
         Args:
             data: The frame the models run on.
