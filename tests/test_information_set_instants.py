@@ -17,6 +17,7 @@ from epftoolbox2.information_set import (
     InformationSetError,
     _available_array,
     _Context,
+    leakage_probe,
     perturb_recent,
     perturb_unknown,
 )
@@ -24,7 +25,7 @@ from epftoolbox2.models import OLSModel
 from epftoolbox2.models.context import _Cells
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.availability import listing_rows
-from tests.synthetic import make_market_data
+from tests.synthetic import PREDICTORS, make_market_data
 
 UTC = timezone.utc
 MINUTE = timedelta(minutes=1)
@@ -460,6 +461,21 @@ def test_a_predictor_function_answers_at_the_real_instant():
         for i, day in enumerate(days)
     }
     assert with_load == {"2024-03-30": [0, 1], "2024-03-31": [0], "2024-04-01": [0, 1]}
+
+
+def test_the_probe_sees_a_look_ahead_the_wall_clock_let_through(monkeypatch):
+    """The same cell through a real model: at 01:00 on 2024-03-31 load_actual_h+8 is known after the issue (see above), so
+    noise goes there and the forecast moves. On the wall clock it was known, unperturbed, and the probe said nothing. At
+    00:00 it is known and stays."""
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    data = make_market_data(start="2024-02-20", days=45, noise=2.0, seed=3)
+    data["load_actual_h+8"] = data["load"].shift(-8)
+    rules = {name: Availability.static() for name in ("load", "wind", "is_weekend", "is_weekday")}
+    info = InformationSet("11:45", "Europe/Warsaw", rules=rules)
+    model = OLSModel(predictors=[*PREDICTORS, "load_actual_h+8"], training_window=14)
+    probe = leakage_probe(model, data, "2024-03-31", info, columns=["load_actual_h+8"])
+    assert (1, 1) in probe.changed and (0, 1) not in probe.changed
 
 
 def test_a_repeated_hour_is_shown_with_its_offset_in_explain():
