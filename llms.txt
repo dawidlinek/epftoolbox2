@@ -84,7 +84,7 @@ Rules to know before using the library:
 
 ## Workflow
 
-- [Workflow](docs/src/content/docs/workflow/overview.mdx): YAML experiment orchestration, environment settings, overrides and SLURM array jobs
+- [Workflow](docs/src/content/docs/workflow/overview.mdx): YAML experiment orchestration, environment settings, overrides and SLURM array jobs of one model or a block per task
 
 ## Models
 

@@ -36,9 +36,16 @@ an issue day it didn't sample.
 
 - `ModelPipeline.report(test=narrower)` counted every line of a results file as produced, so a shorter period looked complete. It now
   counts the forecasts inside the period, and `forecast_counts()` and its warning say what is missing.
+- A workflow file with `model_index: $SLURM_ARRAY_TASK_ID` couldn't be loaded where that variable isn't set, so `epf report` and
+  `epf validate` failed on it outside the array with `invalid literal for int()`. They now work, and only `run()` raises, saying so.
 
 ### New
 
+- `environment.models_per_task: k` in `Workflow` YAML (`Workflow(models_per_task=k)`): SLURM array task `i` runs the block of models
+  `[i*k, (i+1)*k)` instead of one model. `epf array experiment.yaml` prints the range for `sbatch --array=`, and
+  `Workflow.array_size()` the number of tasks. `epf report` merges the blocks and computes the ensembles as before. The block size is no
+  part of a result: nothing stored records it, and results resume at another block size and merge to what one run gives, bit for bit.
+  Files without the key don't change. See [Workflow](/epftoolbox2/workflow/overview/#slurm-arrays-one-model-or-a-block-per-task).
 - A merged `report()` has the skip reasons in `forecast_counts()`. A run that skipped forecasts records them per window in its
   manifest (`skipped`), when it finishes; a run with no skips has no such key, and a resume or a run naming one window replaces
   that window's counts only.
