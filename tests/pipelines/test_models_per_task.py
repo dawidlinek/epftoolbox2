@@ -219,6 +219,25 @@ def test_the_array_size_covers_every_model_whatever_the_index_is(tmp_path, frame
     assert workflow_with(tmp_path, frame_csv, model_index=0, **environment).array_size() == size
 
 
+@pytest.mark.parametrize(("k", "printed"), [(None, "0-4"), (2, "0-2"), (7, "0-0")])
+def test_epf_array_prints_the_range_alone_on_stdout(tmp_path, frame_csv, k, printed, capsys):
+    environment = {"models_per_task": k} if k else {}
+    path = write_experiment(tmp_path, frame_csv, **environment)
+    cli.cmd_array(cli.build_parser().parse_args(["array", str(path)]))
+    out, err = capsys.readouterr()
+    assert out == f"{printed}\n", "`sbatch --array=$(epf array ...)` takes all of stdout"
+    assert "Loaded configuration" in err and "per task" in err
+
+
+def test_epf_array_fails_with_nothing_on_stdout(tmp_path, frame_csv, capsys):
+    path = write_experiment(tmp_path, frame_csv, models_per_task=0)
+    with pytest.raises(SystemExit) as stopped:
+        cli.cmd_array(cli.build_parser().parse_args(["array", str(path)]))
+    assert stopped.value.code == 1
+    out, err = capsys.readouterr()
+    assert out == "" and "positive integer" in err
+
+
 def test_a_pipeline_with_no_models_has_no_array(tmp_path):
     path = tmp_path / "experiment.yaml"
     path.write_text(yaml.safe_dump({"data_pipeline": {"start": "a", "end": "b"}, "model_pipeline": {}}))
