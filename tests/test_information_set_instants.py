@@ -487,3 +487,14 @@ def test_a_repeated_hour_is_shown_with_its_offset_in_explain():
     for day, expected in (("2024-10-27", "D 02:00 (UTC+01:00)"), ("2024-03-31", "D 04:00")):
         tables = pipeline.explain(data, model="m", test=(day, day), horizon=1, hour=1, target="price", echo=False)
         assert tables["predictors"]["known"].tolist() == [expected]
+
+
+def test_explain_reads_what_a_name_holds_from_the_second_occurrence():
+    """The row of hour 2 on 2024-10-27 the model forecasts from is the second 02:00 (01:00Z). An hour before it is 00:00Z, the
+    first 02:00: T-1 02:00 at horizon 1, on the wall clock. From the first 02:00 it would read 01:00."""
+    data = make_market_data(start="2024-08-01", days=120, noise=2.0, seed=3).assign(**{"load_actual_h-1": 1.0})
+    pipeline = ModelPipeline(information_set=InformationSet("11:45", "Europe/Warsaw"), availability="warn")
+    pipeline.add_model(OLSModel(predictors=["load_actual_h-1"], training_window=14, name="m"))
+    day = "2024-10-27"
+    tables = pipeline.explain(data, model="m", test=(day, day), horizon=1, hour=2, target="price", echo=False)
+    assert tables["predictors"]["target-relative"].tolist() == ["T-1 02:00"]
