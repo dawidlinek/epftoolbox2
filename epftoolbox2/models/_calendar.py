@@ -12,6 +12,7 @@ the name of a zone, or None for a frame with no clock of its own (a naive index)
 on every date.
 """
 
+import collections.abc
 import datetime
 import functools
 from typing import Any, Dict, FrozenSet, Iterable, List, Sequence, Set, Tuple
@@ -40,6 +41,52 @@ def training_span(anchor: Any, window: int, hz: int, newest: Any = -1) -> Tuple[
     """
     last = np.minimum(anchor + newest - hz, anchor - 1)
     return last - window + 1, last
+
+
+def resolve_horizons(horizon: Any, horizons: Any, default: int) -> Tuple[Any, Tuple[int, ...]]:
+    """(the largest horizon, every horizon planned, in order) of a run told `horizon=H`, which means 1 to H, or `horizons=`.
+
+    `horizons` is any sequence of whole numbers from 1, such as `[1, 3, 7]` or `range(3, 10)`: it is sorted, and an empty one or
+    one with a repeat raises. Giving both raises; giving neither is `horizon=default`. `range(1, H + 1)` is then exactly
+    `horizon=H`. Whatever the list, targets are built for 1 to its largest, so `{target}_d+k` up to it stays refused as an input.
+    """
+    if horizons is None:
+        horizon = default if horizon is None else horizon
+        if isinstance(horizon, (bool, np.bool_)) or not isinstance(horizon, (int, np.integer)) or horizon < 1:
+            raise ValueError(f"horizon must be a whole number of days from 1, got {horizon!r}")
+        return horizon, tuple(range(1, horizon + 1))
+    if horizon is not None:
+        raise ValueError(
+            f"Pass horizon or horizons, not both: horizon={horizon!r} means every horizon from 1 to it, horizons={horizons!r} "
+            "the ones it lists."
+        )
+    if isinstance(horizons, (str, bytes)) or not isinstance(horizons, collections.abc.Iterable):
+        raise ValueError(
+            f"horizons must be a sequence of whole numbers of days, such as [1, 3, 7] or range(3, 10), got {horizons!r}; "
+            "horizon=H is every horizon from 1 to H"
+        )
+    listed = list(horizons)
+    bad = [h for h in listed if isinstance(h, (bool, np.bool_)) or not isinstance(h, (int, np.integer)) or h < 1]
+    if bad:
+        raise ValueError(f"horizons are whole numbers of days from 1, got {bad[:3]} in {listed}")
+    if not listed:
+        raise ValueError("horizons is empty: a run needs at least one horizon")
+    found = [int(h) for h in listed]
+    repeated = sorted({h for h in found if found.count(h) > 1})
+    if repeated:
+        raise ValueError(f"horizons lists {repeated} more than once: {found}")
+    found.sort()
+    return found[-1], tuple(found)
+
+
+def every_horizon(horizon: Any, horizons: Sequence[int]) -> bool:
+    """Whether `horizons` is every horizon from 1 to `horizon`, the run `horizon=H` plans."""
+    return tuple(horizons) == tuple(range(1, horizon + 1))
+
+
+def horizon_arguments(horizon: Any, horizons: Sequence[int]) -> Dict[str, Any]:
+    """What to pass on to a `run(...)`: `horizon=H` for every horizon from 1 to H, as before `horizons` existed, else `horizons`."""
+    return {"horizon": horizon} if every_horizon(horizon, horizons) else {"horizons": tuple(horizons)}
 
 
 NEWEST_TARGETS = ("d-1", "published")

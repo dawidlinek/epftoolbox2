@@ -63,7 +63,7 @@ class ModelPipeline:
         test_start: str = None,           # Test period start
         test_end: str = None,             # Test period end
         target: str = "price",            # Target column
-        horizon: int = 7,                 # Max horizon
+        horizon: Optional[int] = None,    # Every horizon from 1 to it; 7 if neither it nor horizons is given
         freq: str = "1h",                 # "1h" or "15min"; must match the data
         save_dir: Optional[str] = None,   # Result cache directory (one JSONL per model)
         forecast_only: bool = False,      # Skip evaluators/exporters; dates default to today
@@ -71,6 +71,7 @@ class ModelPipeline:
         require_manifest: bool = False,   # Refuse results in save_dir that have no manifest
         validation: Union[Tuple[Any, Any], str, None] = None,  # (start, end) or "previous_year"; alone, only those days
         test: Optional[Tuple[Any, Any]] = None,  # (start, end), the same as test_start and test_end
+        horizons: Optional[Sequence[int]] = None,  # Only these horizons, e.g. [1, 3, 7] or range(3, 10); not with horizon
     ) -> EvaluationReport: ...
 
     def report(                           # Report from the JSONL files a run wrote to save_dir
@@ -78,13 +79,14 @@ class ModelPipeline:
         save_dir: Union[str, Path],
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
-        horizon: int = 7,
+        horizon: Optional[int] = None,         # As in run; neither: what the manifests record (7 without one)
         freq: str = "1h",
         forecast_only: bool = False,
         data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns
         allow_missing: bool = False,           # else FileNotFoundError when a model has no results
         validation: Union[Tuple[Any, Any], str, None] = None,  # What run was told; each must be what the manifests record
         test: Optional[Tuple[Any, Any]] = None,  # None of the windows: every window the manifests record
+        horizons: Optional[Sequence[int]] = None,  # As in run; only records of these horizons are read
     ) -> EvaluationReport: ...
 
     def verify(                           # Leakage probe and positive control on sampled issue days
@@ -93,13 +95,14 @@ class ModelPipeline:
         test_start: str,                  # First issue day to sample from
         test_end: str,                    # Last issue day to sample from
         target: str = "price",            # Target column
-        horizon: int = 1,                 # Max horizon
+        horizon: Optional[int] = None,    # Every horizon from 1 to it; 1 if neither it nor horizons is given
         freq: str = "1h",                 # "1h" or "15min"; must match the data
         days: int = 5,                    # Issue days per model
         seed: int = 0,                    # Picks the days and the noise
         models: Optional[Sequence[str]] = None,  # Names of the models to verify; None verifies all
         positive_control: bool = True,    # False: `ok` only says that no forecast moved
         rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,  # Builds the input from source data
+        horizons: Optional[Sequence[int]] = None,  # The horizons a run lists, in place of horizon
     ) -> VerifyReport: ...
 
     def explain(                          # What one forecast's predictors hold and when each is known; no side effects
@@ -107,11 +110,12 @@ class ModelPipeline:
         data: pd.DataFrame,               # The frame the models run on
         model: str,                       # The model's name
         test: Optional[Tuple[Any, Any]] = None,  # (first, last) issue day; required for a predictor function of ctx
-        horizon: int = 1,                 # Days ahead of the issue day of the forecast shown
+        horizon: Optional[int] = None,    # Days ahead of the issue day of the forecast shown; 1 if not given
         hour: int = 12,                   # Its period of the target day: 0-23, or 0-95 for 15-minute data
         target: str = "price",            # Target column
         freq: str = "1h",                 # "1h" or "15min"; must match the data
         echo: bool = True,                # Print the tables
+        horizons: Optional[Sequence[int]] = None,  # The horizons a run lists, in place of horizon: shown at the largest
     ) -> Dict[str, pd.DataFrame]: ...     # "predictors", "grouped"; "lists" for a predictor function of ctx;
                                           # "newest_target" for newest_target="published"
 
@@ -161,7 +165,7 @@ class Workflow:
         model_pipeline: Optional[Union[str, Path]] = None,   # Path to model_pipeline.yaml
         data_cache: Union[bool, str] = False,                 # Data caching option
         model_target: str = "price",                          # Target column
-        model_horizon: int = 7,                               # Max forecast horizon
+        model_horizon: Optional[int] = None,                  # Every horizon from 1 to it; 7 if neither is given
         model_freq: str = "1h",                               # "1h" or "15min"
         model_forecast_only: bool = False,                    # Skip evaluators/exporters
         max_processes: Optional[int] = None,                  # Worker process count
@@ -174,6 +178,7 @@ class Workflow:
         model_validation: Any = None,                         # [start, end] or "previous_year"
         model_test: Optional[Sequence[Any]] = None,           # [start, end], the same as model_test_start and _end
         models_per_task: Optional[int] = None,                # With model_index: task i runs models [i*k, (i+1)*k)
+        model_horizons: Optional[Sequence[int]] = None,       # Only these horizons, e.g. [1, 3, 7]; not with model_horizon
     ): ...
 
     def run(self) -> EvaluationReport: ...
@@ -498,9 +503,9 @@ class Use:                                  # What the function may return inste
     def __init__(self, predictors: Sequence[str], train_on: str = "all"): ...  # "matching": only the past days given this list
 ```
 
-`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, `ModelResultRef.availability_listing` holds the rows behind `report.availability()`, and `ModelResultRef.matching_lists` the hash and number of predictors of each `train_on="matching"` list, which `report.training_days()` reads the records for. `ModelResultRef.zone` is the data's time zone, which says what periods a date has on the clock (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned)).
+`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, `ModelResultRef.availability_listing` holds the rows behind `report.availability()`, and `ModelResultRef.matching_lists` the hash and number of predictors of each `train_on="matching"` list, which `report.training_days()` reads the records for. `ModelResultRef.zone` is the data's time zone, which says what periods a date has on the clock (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned)). `ModelResultRef.horizon` is the largest horizon of a run and `ModelResultRef.horizons` the ones it lists, None for every one from 1 to `horizon`; only records of those horizons are read (see [Horizons](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)).
 
-`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`. And `frame_hashes`, what one `ModelPipeline.run` call shares between its models so that it hashes each column once. And `cut_rules`, an information set a model with `newest_target="published"` reads its newest targets from when `information_set` isn't given, without checking anything with it: the leakage probe runs models so.
+`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`. And `frame_hashes`, what one `ModelPipeline.run` call shares between its models so that it hashes each column once. And `cut_rules`, an information set a model with `newest_target="published"` reads its newest targets from when `information_set` isn't given, without checking anything with it: the leakage probe runs models so. And `horizons`, as in `ModelPipeline.run`; its `horizon` defaults to 7 too. `leakage_probe` and `positive_control` take `horizon` (default 1) or `horizons` the same way.
 
 ### Scalers
 

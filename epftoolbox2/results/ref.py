@@ -39,6 +39,10 @@ class ModelResultRef:
     don't say, such as plain lists or a results file with no manifest. With a zone, a record of a slot the clock doesn't have
     on its run date or its target date is no forecast, as its target can't exist: `iter_records` leaves it out, and
     `off_the_clock` counts it. Only results written before training rows were chosen by date hold one.
+
+    `horizon` is the largest horizon planned, and `horizons` the ones planned: a run's ref has them when they aren't every one
+    from 1 to `horizon` (`run(horizons=[1, 3, 7])`), and a ref of `ModelPipeline.report()` always. None reads every horizon.
+    Only records of those horizons are read: `count` plans no other, and a record of another would be compared with nothing.
     """
 
     name: str
@@ -60,6 +64,7 @@ class ModelResultRef:
     test_only: bool = False
     matching_lists: Optional[Dict[str, int]] = None
     zone: Any = None
+    horizons: Optional[Tuple[int, ...]] = None
 
     def iter_records(self, cols: Optional[List[str]] = None) -> Iterator[Dict]:
         """The records of this ref, wherever they live.
@@ -69,7 +74,8 @@ class ModelResultRef:
         lists have no window (test_start/test_end are "") and are read as given.
 
         A window's ref gives `day_in_test` from the window's start as it is now: a record resumed after the start moved
-        holds the old count in the file. A record of a slot the clock doesn't have is left out (see the class docstring).
+        holds the old count in the file. A record of a slot the clock doesn't have is left out, and so is one of a horizon
+        `horizons` doesn't list (see the class docstring).
         """
         on_the_clock = self._on_the_clock()
         return (read for read, r in self._records(cols) if on_the_clock is None or on_the_clock(r))
@@ -99,9 +105,12 @@ class ModelResultRef:
         """(the record as read, the whole record) of each record of this ref's dates and window."""
         filter_dates = bool(self.test_start and self.test_end)
         window_start = date.fromisoformat(self.test_start) if self.window is not None and self.test_start else None
+        horizons = None if self.horizons is None else frozenset(self.horizons)
 
         def keep(r: Dict) -> bool:
             if filter_dates and not self.test_start <= r["run_date"] <= self.test_end:
+                return False
+            if horizons is not None and r["horizon"] not in horizons:
                 return False
             if self.window is not None and r.get("window", TEST) != self.window:
                 return False

@@ -178,8 +178,8 @@ model is `inconclusive`. If it really is known in advance, for example a column 
 
 ## Limits
 
-- **It checks the horizons you ask for.** `horizon` defaults to 1 and `run()` to 7, so pass the horizon you run: a leak in
-  another horizon can't be seen.
+- **It checks the horizons you ask for.** `horizon` defaults to 1 and `run()` to 7, so pass the horizon you run, or `horizons=` with
+  the list you run: a leak in another horizon can't be seen. With a list, a horizon it doesn't name is no blind spot.
 - **It samples.** A leak that exists only on some days shows up only if one of them is sampled. Run it on the days around
   a DST switch on their own: `pipeline.verify(df, "2024-10-26", "2024-10-29", days=4)`. See
   [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#checking-it).

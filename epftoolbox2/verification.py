@@ -29,6 +29,7 @@ from .information_set import (
     leakage_probe,
     positive_control,
 )
+from .models._calendar import every_horizon, horizon_arguments, resolve_horizons
 from .models._contract import wall_clock
 from .results.availability import LATE
 
@@ -53,6 +54,12 @@ class IssueDayCheck:
     late_in_period: List[str] = field(
         default_factory=list
     )  # what a predictor function uses late in the whole test period
+    horizons: Optional[Tuple[int, ...]] = None  # the horizons verified; None is every one from 1 to `horizon`
+
+    @property
+    def planned_horizons(self) -> Tuple[int, ...]:
+        """The horizons verified: `horizons`, or every one from 1 to `horizon`."""
+        return tuple(range(1, self.horizon + 1)) if self.horizons is None else tuple(self.horizons)
 
     @property
     def unreached_horizons(self) -> List[int]:
@@ -165,7 +172,7 @@ def _blind_spots(checks: List[IssueDayCheck]) -> List[str]:
     if controls:
         produced = {key for control in controls for key in [*control.moved, *control.unmoved]}
         moved = {key for control in controls for key in control.moved}
-        absent = [h for h in range(1, checks[0].horizon + 1) if h not in {horizon for _, horizon in produced}]
+        absent = [h for h in checks[0].planned_horizons if h not in {horizon for _, horizon in produced}]
         if absent:
             lines.append(f"no forecast of horizon(s) {absent} on any sampled issue day, so nothing checked them.")
         unreached = [check for check in checks if check.unreached_horizons]
@@ -229,13 +236,14 @@ def verify_model(
     run_days: Sequence[str],
     information_set: InformationSet,
     target: str = "price",
-    horizon: int = 1,
+    horizon: Optional[int] = None,
     freq: str = "1h",
     seed: int = 0,
     control: bool = True,
     rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
     test_period: Optional[Tuple[Any, Any]] = None,
     availability: str = "raise",
+    horizons: Optional[Sequence[int]] = None,
 ) -> List[IssueDayCheck]:
     """Probe (and control) one model on each of `run_days`. The model itself is never run, only copies of it.
 
@@ -249,7 +257,10 @@ def verify_model(
     What a model trains on is checked against its own boundary. With `newest_target="d-1"` that is D-1, stricter than any rule,
     so the probe also perturbs the target from the issue day on (`check_target_boundary`). With `"published"` it is the target's
     rule, and the probe perturbs what the rule calls unknown, as for any column.
+
+    `horizon=H` verifies every horizon from 1 to H (1 if neither is given), `horizons` the ones it lists (`run(horizons=...)`).
     """
+    horizon, horizons = resolve_horizons(horizon, horizons, 1)
 
     def make_model():
         return copy.deepcopy(model)
@@ -268,15 +279,25 @@ def verify_model(
         issue_days=run_days,
         warn_unpublished=False,
         availability=availability,
+        horizons=horizons,
     )
-    checked._check_inputs(built, target, horizon, freq, plan=plan, cut_rules=information_set)
+    checked._check_inputs(built, target, horizon, freq, plan=plan, cut_rules=information_set, horizons=horizons)
     used = sorted({*checked._used_predictors, *plan.queried}) if plan is not None else list(checked._used_predictors)
     not_sampled: List[str] = []
     late_in_period: List[str] = []
     if plan is not None and test_period is not None:
         start, end = resolve_date(test_period[0]), resolve_date(test_period[1])
         whole = checked._plan_predictors(
-            built, target, horizon, freq, information_set, start, end, warn_unpublished=False, availability=availability
+            built,
+            target,
+            horizon,
+            freq,
+            information_set,
+            start,
+            end,
+            warn_unpublished=False,
+            availability=availability,
+            horizons=horizons,
         )
         not_sampled = sorted(({name for names in whole.lists for name in names} | whole.queried) - set(used))
         late_in_period = sorted(
@@ -309,7 +330,7 @@ def verify_model(
         return frame if label == target else frame.assign(**{label: frame[target]})
 
     labelled = None if features is None else (lambda frame: with_label(features(frame)))
-    common = dict(horizon=horizon, freq=freq, seed=seed, availability=availability)
+    common = dict(**horizon_arguments(horizon, horizons), freq=freq, seed=seed, availability=availability)
 
     checks = []
     for run_day in run_days:
@@ -349,7 +370,15 @@ def verify_model(
             )
         checks.append(
             IssueDayCheck(
-                model.name, probe.run_day, horizon, probe, result, not_from_frame, not_sampled, late_in_period
+                model.name,
+                probe.run_day,
+                horizon,
+                probe,
+                result,
+                not_from_frame,
+                not_sampled,
+                late_in_period,
+                None if every_horizon(horizon, horizons) else horizons,
             )
         )
     return checks

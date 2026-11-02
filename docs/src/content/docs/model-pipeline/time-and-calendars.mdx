@@ -156,6 +156,46 @@ manifest (`data_timezone`, the zone's name, such as `Europe/Warsaw` also for a d
 that reads back, such as pytz's `FixedOffset`, can't be read, and the run says so when it writes the files. Results with no manifest, or
 such a zone, have no zone in a report, and `report()` plans every period of every day for them.
 
+## Some horizons only
+
+`horizon=H` forecasts every horizon from 1 to H. `horizons=` forecasts the ones it lists and nothing else, such as the days of a week
+ahead without the days between them:
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline().add_model(OLSModel(["load_d+{horizon}"], training_window=365, name="OLS"))
+report = pipeline.run(df, test=("2024-03-01", "2024-03-31"), horizons=[1, 3, 7], save_dir="results")
+report = pipeline.report("results", test=("2024-03-01", "2024-03-31"), horizons=[1, 3, 7])
+```
+
+- **What it takes.** Any sequence of whole numbers from 1: `[1, 3, 7]`, `range(3, 10)`. It is sorted; a repeat, an empty list or
+  anything else raises, and so does giving `horizon` too, so `horizon` defaults to `None`, which is 7 for `run` and `report` and 1 for
+  `verify` and `explain`. `range(1, H + 1)` is `horizon=H` in everything, down to the bytes of the results files.
+- **Each forecast reads its own rows.** The forecast (period, h, D) trains on the rows dated from D-W-h to D-1-h whatever else is
+  listed, so `horizons=[3, 9]` trains horizon 3 on D-W-3 to D-4 and horizon 9 on D-W-9 to D-10, and every record of a model is bit
+  for bit the one `horizon=9` gives that key, and so is a plain average's. A `top=` [ensemble](/epftoolbox2/model-pipeline/ensembles/)
+  chooses its members on validation pooled over the horizons the run made, so a run of `[1, 3, 7]` may choose other members than a run
+  of every horizon to 7, and its records differ where it does. That choice, and `validation_mae` in `report.choices()`, pool the run's
+  horizons even in a report told fewer, such as `horizons=[3]`. `{horizon}` in a name, a `(horizon)` callable and `ctx.horizon` are h, and a predictor function is
+  called for the listed horizons alone.
+- **Targets go up to the largest.** A run builds `{target}_d+1` to `{target}_d+{max}` whatever it lists, so at `horizons=[3]`
+  `price_d+2` is still the future price and is refused as an input. The frame is checked on the days a run of `horizon=max` reads.
+- **Only listed keys are planned.** `planned` in `forecast_counts()` counts them, with the clock's rule above, and a validation
+  forecast aimed at the test period counts as `target_in_test` at each listed horizon.
+- **The results know the list.** The manifest records `horizons` next to `horizon`, its largest, when they aren't every horizon from 1
+  to it, and a resume with another list, or with `horizon=7` over `[1, 3, 7]`, raises `ManifestMismatchError`. `report()` told
+  neither `horizon` nor `horizons` plans what the manifests record (7 without a manifest), and raises if the models ran different
+  lists, asking for `horizons=` or `horizon=`. A report reads only the
+  records of the horizons it plans, so `horizons=[3]` reports horizon 3 of a `[1, 3, 7]` run, with `missing` and without the skip
+  reasons, which the run counted over all three horizons; `horizon=3` reads horizons 1 and 3 and counts 2 as missing, and `horizon=7`
+  plans all seven and warns that four are missing. Members of an
+  [ensemble](/epftoolbox2/model-pipeline/ensembles/) must have run the same list.
+- **Everywhere.** `ModelPipeline.run`, `report`, `verify` and `explain`, `BaseModel.run`, `leakage_probe` and `positive_control` take
+  it; a `Workflow` reads `model_pipeline.horizons: [1, 3, 7]`; `epf model` and `epf verify` take `--horizons 3-9`, `1,3,7` or `1-3,7`.
+  `verify` checks the listed horizons, and says "no forecast of horizon(s)" only of those; `explain` shows the forecast at the largest.
+
 ## Gaps in the data
 
 A gap is a slot the clock has and the frame doesn't. It costs its own row and nothing else.
@@ -208,7 +248,7 @@ Each reading is the one that can't make a value look known earlier than it is.
 ## Checking it
 
 [`pipeline.verify`](/epftoolbox2/model-pipeline/verification/) perturbs what a forecast can't know, and what it trains on from the issue
-day on. Run it across a switch with the horizon you run, as a sample of days may miss them:
+day on. Run it across a switch with the horizon you run (or `horizons=`, the list you run), as a sample of days may miss them:
 
 ```python
 pipeline.verify(df, "2024-10-27", "2024-10-30", horizon=3, days=4).assert_ok()

@@ -9,6 +9,11 @@ Notes for changes that need something from you. The full list of changes of a re
 
 ### Breaking changes
 
+- **`ModelPipeline.report()` reads only the horizons it plans.** `report(save_dir, horizon=3)` of results run with `horizon=7` used to
+  plan horizons 1 to 3 and read every record on file, so its tables held horizons 4 to 7 and `planned` equalled `produced` with no
+  warning. It now reads horizons 1 to 3 alone, and so do the ensembles it computes, which planned what their members ran. A report told
+  the horizon its runs had doesn't change. A report told other horizons than its runs had has no skip reasons in `forecast_counts()`,
+  only `missing`: the runs counted them over all their horizons.
 - **Training rows are chosen by date, and results made before that are refused.** A forecast's training rows were found by counting
   back from the issue day, which went wrong around a clock change: on the days after an autumn switch the forecast of the switch hour
   trained on a target dated on the issue day or later, a look-ahead, and on a spring switch day the key of the skipped hour was built
@@ -87,6 +92,19 @@ an issue day it didn't sample.
 
 ### New
 
+- **`horizons=`: some horizons only.** `pipeline.run(df, test=..., horizons=[1, 3, 7])` (or `range(3, 10)`) forecasts the listed
+  horizons and nothing else, and `report`, `verify`, `explain`, `BaseModel.run`, `leakage_probe` and `positive_control` take it too, as do
+  `Workflow` YAML (`model_pipeline.horizons: [1, 3, 7]`) and `epf model` / `epf verify` (`--horizons 3-9`, `1,3,7` or `1-3,7`). Each
+  forecast reads its own rows, so every record of a model, and of a plain average, is bit for bit the one `horizon=max(horizons)` gives
+  that key. A `top=` ensemble chooses on validation pooled over the horizons the run made, so it may choose other members than a run of
+  every horizon. `horizon=H` keeps meaning
+  every horizon from 1 to H, and **nothing moves without the keyword**: `range(1, H + 1)` is `horizon=H` down to the bytes of the files.
+  Giving both raises, so `horizon` now defaults to `None`, which is 7 for `run` and `report` and 1 for `verify`, `explain` and the probes,
+  and `Workflow(model_horizon=...)` defaults to `None` (7). Targets are still built for 1 to the largest horizon, so `price_d+2` stays
+  refused as an input at `horizons=[3]`. The manifest records `horizons` when they aren't 1 to the largest and a resume with another list
+  refuses. `report()` told neither `horizon` nor `horizons` plans what the manifests record (7 without one, as before) and raises when
+  the models ran different lists; it reads only the records of the horizons it plans. See
+  [Some horizons only](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only).
 - **`newest_target` on every model.** `OLSModel(..., newest_target="published")` (any model) trains each forecast on every target
   that the target's availability rule says is known by the issue time on D, period by period, instead of stopping at D-1: at 11:45
   Brussels that is D's day-ahead prices, and D's realised load up to 10:00. A row dated D or later never trains. It needs an

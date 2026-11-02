@@ -1415,7 +1415,7 @@ def leakage_probe(
     run_day: str,
     information_set: InformationSet,
     target: str = "price",
-    horizon: int = 1,
+    horizon: Optional[int] = None,
     freq: str = "1h",
     columns: Optional[Sequence[str]] = None,
     atol: float = 1e-9,
@@ -1423,6 +1423,7 @@ def leakage_probe(
     rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
     check_target_boundary: bool = False,
     availability: str = "raise",
+    horizons: Optional[Sequence[int]] = None,
 ) -> ProbeResult:
     """Perturb every value not known at issue time on `run_day` and check that the forecasts don't change.
 
@@ -1458,8 +1459,11 @@ def leakage_probe(
     `availability` is the level the function is planned at. With "raise" a late `ctx.value()` stops the probe with
     `InformationSetError`; with "warn" or "none" it returns the value, and the forecasts that read it are in `changed` and
     `late_reads`, whatever the noise did. The boundary tested is the same at every level.
+
+    `horizon=H` runs every horizon from 1 to H, 1 if neither is given, and `horizons` the ones it lists, as `run` does.
     """
     run_day = str(pd.Timestamp(run_day).date())
+    horizon = _horizon_arguments(horizon, horizons, 1)
     if check_target_boundary and _newest_target_of(model) == "published":
         raise ValueError(
             "check_target_boundary=True perturbs the target from the issue day on, which a model with "
@@ -1500,13 +1504,14 @@ def _issue_day_forecasts(
     frame: pd.DataFrame,
     run_day: str,
     target: str,
-    horizon: int,
+    horizon: Dict[str, Any],
     freq: str,
     information_set: InformationSet,
     availability: str = "raise",
 ) -> Tuple[Dict[Tuple[int, int], float], Dict[Tuple[Any, ...], Tuple[np.ndarray, np.ndarray]], List[Violation]]:
     """The model's forecasts issued on `run_day` from `frame`, by (period, horizon), the cells a predictor function of
     `ctx` read (see `PredictorPlan.read_cells`), and its reads of values known only later (`PredictorPlan.late_reads`).
+    `horizon` is what to pass on to the run: `{"horizon": H}` or `{"horizons": (...)}` (`_horizon_arguments`).
 
     Such a function is planned on this very frame, so a value it reads can move its list, and it answers through the
     information set. The run itself gets none, so a late list isn't refused and the forecasts show it. A model with
@@ -1516,23 +1521,25 @@ def _issue_day_forecasts(
     plan_predictors = getattr(m, "_plan_predictors", None)
     plan = None
     if plan_predictors is not None:
+        horizons = horizon.get("horizons")
         plan = plan_predictors(
             frame,
             target,
-            horizon,
+            horizon.get("horizon") or max(horizons),
             freq,
             information_set,
             run_day,
             run_day,
             warn_unpublished=False,
             availability=availability,
+            **({} if horizons is None else {"horizons": horizons}),
         )
     extra = {} if plan is None else {"plan": plan}
     if getattr(m, "newest_target", "d-1") == "published":
         extra["cut_rules"] = information_set
     read = {} if plan is None else plan.read_cells()  # the run lets go of them
     late = [] if plan is None else plan.late_reads()
-    ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, horizon=horizon, freq=freq, **extra)
+    ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, freq=freq, **horizon, **extra)
     return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}, read, late
 
 
@@ -1601,13 +1608,14 @@ def positive_control(
     run_day: str,
     information_set: InformationSet,
     target: str = "price",
-    horizon: int = 1,
+    horizon: Optional[int] = None,
     freq: str = "1h",
     columns: Optional[Sequence[str]] = None,
     atol: float = 1e-9,
     seed: int = 0,
     rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
     availability: str = "raise",
+    horizons: Optional[Sequence[int]] = None,
 ) -> ControlResult:
     """Perturb the freshest values known at issue time on `run_day` and check that the forecasts do change.
 
@@ -1630,9 +1638,10 @@ def positive_control(
     change, so that what row D builds from them (`x_d-1`) does, and every built row before D is put back.
 
     `model` is a model instance or a zero-argument factory, and `availability` the level a predictor function is planned
-    at, as in `leakage_probe`.
+    at, and `horizon` or `horizons` what it runs, as in `leakage_probe`.
     """
     run_day = str(pd.Timestamp(run_day).date())
+    horizon = _horizon_arguments(horizon, horizons, 1)
     first_row_day = 0 if _newest_target_of(model) == "published" else -1
     names = list(data.columns) if columns is None else list(columns)
     if rebuild is None:
@@ -1661,6 +1670,13 @@ def positive_control(
         unchecked=unchecked,
         unmoved=sorted((original.keys() & other.keys()) - set(moved)),
     )
+
+
+def _horizon_arguments(horizon: Optional[int], horizons: Optional[Sequence[int]], default: int) -> Dict[str, Any]:
+    """`{"horizon": H}` for every horizon from 1 to H, else `{"horizons": (...)}`: what a probe passes on to `run`."""
+    from .models._calendar import horizon_arguments, resolve_horizons  # models import this module
+
+    return horizon_arguments(*resolve_horizons(horizon, horizons, default))
 
 
 def _newest_target_of(model: Any) -> str:

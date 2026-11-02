@@ -710,7 +710,9 @@ def test_member_gaps_are_counted_in_a_plain_run_too(tmp_path):
 
 
 @pytest.mark.parametrize("windows", [HAND, None], ids=["windows", "plain"])
-def test_results_of_a_longer_horizon_than_the_report_is_told_are_planned_from_the_manifests(tmp_path, windows):
+def test_a_report_told_a_shorter_horizon_than_the_results_plans_and_reads_that_one(tmp_path, windows):
+    """The members and the ensemble plan what the report is told, and read only that: the members' records of horizons 2 and 3
+    are no forecasts of it."""
     days = windows.issue_days() if windows else days_of(*HT)
     write_member(tmp_path, "a", forecasts(days, 1.0, horizons=(1, 2, 3), windows=windows), windows, horizon=3)
     gap = lambda r: not (r["run_date"] == HT[0] and r["hour"] == 1)  # noqa: E731
@@ -724,8 +726,10 @@ def test_results_of_a_longer_horizon_than_the_report_is_told_are_planned_from_th
         **({} if windows else {"test": HT}),
     )
     counts = counts_of(report)
-    assert counts.loc["e", "member_missing"] == 3
-    assert list(counts.loc["e", ["planned", "produced"]]) == [4 * DAY * 3, 4 * DAY * 3 - 3]
+    assert counts.loc["e", "member_missing"] == 1
+    assert list(counts.loc["e", ["planned", "produced"]]) == [4 * DAY, 4 * DAY - 1]
+    assert list(counts.loc[["a", "b"], "produced"]) == [4 * DAY, 4 * DAY - 1]
+    assert set(report.by_horizon()["horizon"]) == {1}
 
 
 def test_a_key_every_member_lacks_is_missing_too(tmp_path):

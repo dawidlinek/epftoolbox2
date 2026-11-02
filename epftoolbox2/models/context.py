@@ -526,7 +526,8 @@ class PredictorPlan:
     Attributes:
         function: The predictor function.
         issue_days: The planned issue days, in order.
-        horizon: The largest horizon planned.
+        horizon: The largest horizon planned, which says how far back the training days of a matching list reach
+            (`first_grid_day`).
         freq: `"1h"` or `"15min"`.
         lists: Each distinct list, names expanded, in the order first returned. A list id is a position here.
         train_on: Each list's training rule.
@@ -545,6 +546,8 @@ class PredictorPlan:
         day_lists: `(period, horizon)` of a matching forecast -> the list id of each day of the grid, what a matching forecast
             filters its training rows on: `OTHER_LIST` for a list no forecast uses, which matches nothing, and
             `NOT_PLANNED` for a day no matching forecast of that pair reads. Empty without a matching forecast.
+        horizons: The horizons planned, in order: every one from 1 to `horizon` unless a run lists them (`horizons=`). The
+            function is called for these alone, and `assignment` has no other.
     """
 
     function: Any
@@ -572,9 +575,11 @@ class PredictorPlan:
     day_lists: Dict[Tuple[int, int], np.ndarray] = field(default_factory=dict, repr=False)
     _training_cells: Optional[_Cells] = field(default=None, repr=False)
     _planned: Optional[Dict[Tuple[int, int], np.ndarray]] = field(default=None, repr=False)
+    horizons: Tuple[int, ...] = ()
 
     def __post_init__(self):
         self._positions = {day.isoformat(): position for position, day in enumerate(self.issue_days)}
+        self.horizons = tuple(self.horizons) or tuple(range(1, self.horizon + 1))
 
     @property
     def uses_matching(self) -> bool:
@@ -597,7 +602,7 @@ class PredictorPlan:
         depend on the clock, but what it returns or reads there is no forecast's: nothing counts, lists or checks it (`_Cells`
         leaves the reads out)."""
         if self._planned is None:
-            calendar = IssueCalendar(self.freq, self.data.index.tz, range(1, self.horizon + 1))
+            calendar = IssueCalendar(self.freq, self.data.index.tz, self.horizons)
             grids = calendar.planned_cells(self.issue_days)
             self._planned = {(period, horizon): grids[horizon][period] for period, horizon in self.assignment}
         return self._planned
@@ -791,7 +796,7 @@ class PredictorPlan:
         grid = self._grid_positions()
         is_training_day = np.ones(self._grid_size(), dtype=bool)
         is_training_day[grid] = False
-        periods, horizons = _STEP_PERIODS[self.freq], range(1, self.horizon + 1)
+        periods, horizons = _STEP_PERIODS[self.freq], self.horizons
         on_issue_days = {horizon: np.tile(on_days, (periods, 1)) for horizon in horizons}
         on_training_days = {
             horizon: np.zeros((periods, int(is_training_day.sum())), dtype=bool) for horizon in horizons
@@ -929,8 +934,10 @@ def build_plan(
     training_window: Optional[int] = None,
     newest_target: str = "d-1",
     reach: int = 0,
+    horizons: Optional[Sequence[int]] = None,
 ) -> PredictorPlan:
-    """Evaluate `fn` for every planned forecast. `warn_unpublished` warns for each `published()` argument that was never
+    """Evaluate `fn` for every planned forecast, at each of `horizons` (every one from 1 to `horizon`, the largest, if not
+    given). `warn_unpublished` warns for each `published()` argument that was never
     True over these days, which is meaningless for a sample of days: a wrong rule would silently disable an input.
     `availability` is the level `ctx` answers at (see the module docstring).
 
@@ -952,8 +959,9 @@ def build_plan(
         availability=availability,
         newest_target=newest_target,
         reach=reach,
+        horizons=() if horizons is None else tuple(horizons),
     )
-    horizons = range(1, horizon + 1)
+    horizons = plan.horizons
     periods = range(cells.periods)
     for hz in horizons:
         for period in periods:
@@ -1044,7 +1052,7 @@ def _plan_training_days(
         asked_days[position_of[read & ~is_issue_day]] = True
         asked[(period, hz)] = asked_days & has_row[period]
 
-    horizons = range(1, plan.horizon + 1)
+    horizons = plan.horizons
     periods = range(cells.periods)
     first = plan.first_grid_day.toordinal()
     calls = 0

@@ -9,7 +9,7 @@ What makes a choice is read from `RunWindows.segments` and `Segment.serves`, nev
 days of a later segment are test days of the one before it, and stay tagged "test".
 
 What may be averaged is read from the manifests of the leaf models, the models under any nesting (`_check_members_agree`): one
-target, horizon, frequency, time zone and information set, and one value in every column two of them read.
+target, horizon, list of horizons, frequency, time zone and information set, and one value in every column two of them read.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from ..results.manifest import (
     ManifestMismatchError,
     _git_sha,
     _package_version,
+    horizons_of,
     is_ensemble_manifest,
     manifest_digest,
     manifest_path,
@@ -159,9 +160,11 @@ def compute(
         # In this order: results with no manifest of an ensemble are not an ensemble's, and nothing overwrites them.
         _write_manifest(path, ensemble, stored, freq, members, manifests, choices)
         _write_atomically(path, (json.dumps(record) + "\n" for record in records))
-    # What was run, not what this report was told: a horizon-3 run reported with horizon=1 has 3 horizons of forecasts to plan.
-    horizon = next((m["horizon"] for m in leaf_manifests.values() if m and m.get("horizon") is not None), like.horizon)
-    return Computed(_ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only, horizon), choices)
+    # What the members' refs plan, so that one report plans one list for all: a report's refs always name it (`report()` reads it
+    # from the manifests when told nothing), and a run's do unless it is every horizon to the largest. `_check_members_agree` has
+    # compared the members' manifests on it.
+    horizons = like.horizons or tuple(range(1, like.horizon + 1))
+    return Computed(_ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only, horizons), choices)
 
 
 def _read_member(ensemble: Ensemble, name: str, ref: ModelResultRef, stored: Optional[RunWindows]) -> _Member:
@@ -170,7 +173,7 @@ def _read_member(ensemble: Ensemble, name: str, ref: ModelResultRef, stored: Opt
     ordinals: Dict[str, int] = {}
     window_of: Dict[str, Optional[str]] = {}
     freqs = set()
-    whole = replace(ref, test_start="", test_end="", window=None, target_before=None, by_window=None)
+    whole = replace(ref, test_start="", test_end="", window=None, target_before=None, by_window=None, horizons=None)
     for record in whole.iter_records(cols=_COLUMNS):
         run_date, target_date = record["run_date"], record["target_date"]
         if stored is not None:
@@ -234,6 +237,10 @@ def _check_members_agree(
         values = {name: manifest[field] for name, manifest in recorded.items() if manifest.get(field) is not None}
         if len(set(values.values())) > 1:
             problems.append(f"{field} {values}")
+    # One largest horizon can still be several lists of them: [1, 3, 7] and every horizon from 1 to 7 plan different keys.
+    lists = {name: horizons_of(manifest) for name, manifest in recorded.items() if manifest.get("horizon") is not None}
+    if len(set(lists.values())) > 1 and not any(problem.startswith("horizon ") for problem in problems):
+        problems.append(f"horizons {{{', '.join(f'{name!r}: {list(found)}' for name, found in lists.items())}}}")
     problems += _information_set_differences(recorded)
     found, notes = _data_differences(recorded)
     problems += found
@@ -558,27 +565,35 @@ def _ref(
     path: Optional[Path],
     freq: str,
     test_only: bool,
-    horizon: int,
+    horizons: Sequence[int],
 ) -> ModelResultRef:
-    """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizon` is the one the
-    members were run with."""
-    calendar = IssueCalendar(freq, like.zone, range(1, horizon + 1))
+    """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizons` are the ones
+    the members were run with."""
+    horizons = tuple(horizons)
+    calendar = IssueCalendar(freq, like.zone, horizons)
     ref = ModelResultRef(
         name=ensemble.name,
         path=path,
         count=calendar.count(like.test_start, like.test_end),
         test_start=like.test_start,
         test_end=like.test_end,
-        horizon=horizon,
+        horizon=max(horizons, default=0),
         freq=freq,
         _results=None if path is not None else records,
         windows=like.windows,
         test_only=test_only,
         zone=like.zone,
+        # As its members' refs: a report's always name what they plan, a run's only a list that isn't every horizon to the largest.
+        horizons=None
+        if like.horizons is None and horizons == tuple(range(1, max(horizons, default=0) + 1))
+        else horizons,
     )
     if like.windows is None:
         run = codes >> _RUN_SHIFT
-        ref.produced = int(((run >= _ordinal(ref.test_start)) & (run <= _ordinal(ref.test_end))).sum())
+        read = (run >= _ordinal(ref.test_start)) & (run <= _ordinal(ref.test_end))
+        if ref.horizons is not None:  # what `iter_records` reads of the file
+            read &= np.isin((codes >> _HORIZON_SHIFT) & _LOW_16, ref.horizons)
+        ref.produced = int(read.sum())
         ref.skipped = _missing(ref.count - ref.produced)
         _say_what_is_missing(ref.name, {None: ref})
         return ref
