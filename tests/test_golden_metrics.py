@@ -3,7 +3,7 @@
 A change in these numbers means model fitting, feature alignment or evaluation changed. That may be
 intended (a fix) — then regenerate with `UPDATE_GOLDEN=1 uv run pytest tests/test_golden_metrics.py`
 and say in the commit message why the numbers moved. The test window includes the spring DST switch
-(2023-03-26) on purpose, so fixing the DST issues in tests/test_known_issues.py will move them.
+(2023-03-26) on purpose: a change to the dates of a forecast shows here.
 """
 
 import json

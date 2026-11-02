@@ -591,13 +591,13 @@ def test_a_horizon_the_control_cannot_move_is_inconclusive(data):
 
 
 def test_a_clean_model_passes_on_the_spring_switch(data):
-    """A 23-hour issue day: 24 forecasts of D+2 and 23 of D+1, whose hour 2 has no input row (a known issue)."""
+    """A 23-hour issue day: 23 forecasts of each horizon, as no forecast is issued from the hour the clock skips."""
     report = pipeline(ols()).verify(data, "2023-03-26", "2023-03-26", horizon=2, days=1)
 
     assert report.issue_days == ["2023-03-26"]
     assert report.ok
-    assert row(report)["forecasts"] == 47
-    assert row(report)["control moved"] == 47
+    assert row(report)["forecasts"] == 46
+    assert row(report)["control moved"] == 46
 
 
 def test_a_clean_model_passes_on_the_fall_back_switch():

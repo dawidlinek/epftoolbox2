@@ -9,6 +9,7 @@ import numpy as np
 from threadpoolctl import ThreadpoolController
 
 from ..scalers.registry import make_scaler
+from ._calendar import training_span
 
 _W_HOUR_ARRAYS: Dict = {}
 _W_EXPANDED_PREDS: Dict = {}
@@ -35,6 +36,8 @@ SKIP_NO_FINITE_TRAINING_ROWS = "no_finite_training_rows"
 SKIP_MISSING_TEST_PREDICTORS = "missing_test_predictors"
 SKIP_FIT_ERROR = "fit_error"
 SKIP_NO_MATCHING_DAYS = "no_matching_days"
+# The issue day has no row for this period (a gap in the data); without the row there is nothing to forecast from.
+SKIP_MISSING_TEST_ROW = "missing_test_row"
 
 # In `PredictorPlan.day_lists`, next to list ids: a day no matching forecast of that (period, horizon) reads, and a day
 # the function returned a list on that no forecast uses, which matches nothing.
@@ -80,16 +83,24 @@ def _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
     _W_FIT_PREDICT = model_cls(predictors=[], **model_kwargs)._fit_predict
 
 
-def _cut(rows: np.ndarray, hz: int) -> np.ndarray:
-    """What a task may train on of its window's rows, which end with the issue day's: all but the last `1 + hz`, so that the
-    newest training target is the price of the day before the issue day. It counts rows, not days: see the known issues
-    in `tests/test_known_issues.py`."""
-    return rows[: -(1 + hz)]
+def training_rows(days: np.ndarray, day: int, training_window: int, hz: int) -> slice:
+    """The rows the task (`hz`, `day`) may train on, in a period whose rows are on `days`, which are sorted: those whose date is in
+    `training_span`. Rows are chosen by date, since a date can hold two of them or none (see `epftoolbox2.models._calendar`), so a
+    doubled autumn row has both occurrences in or out, each with the same target."""
+    first, last = training_span(day, training_window, hz)
+    return slice(int(np.searchsorted(days, first, side="left")), int(np.searchsorted(days, last, side="right")))
+
+
+def issue_row(days: np.ndarray, day: int) -> Optional[int]:
+    """The row a forecast issued on `day` is made from: the last one of that date, so the second occurrence of a repeated autumn
+    hour. None if the date has no row in this period."""
+    row = int(np.searchsorted(days, day, side="right")) - 1
+    return row if row >= 0 and days[row] == day else None
 
 
 def training_row_days(days: np.ndarray, day: int, training_window: int, hz: int) -> np.ndarray:
     """The day id of each training row of the task (`hz`, `day`) in a period whose rows are on `days`, before any filter."""
-    return _cut(days[(days >= day - training_window - hz) & (days <= day)], hz)
+    return days[training_rows(days, day, training_window, hz)]
 
 
 def matching_rows(row_days: np.ndarray, lists: np.ndarray, start: int, list_id: int) -> np.ndarray:
@@ -129,8 +140,10 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     scalable_masks = cfg["scalable_masks"] if window is None else cfg["scalable_masks"][window]
 
     days = arrays["days"]
-    day_min = day - cfg["training_window"] - hz
-    mask = (days >= day_min) & (days <= day)
+    train = training_rows(days, day, cfg["training_window"], hz)
+    test = issue_row(days, day)
+    if test is None:
+        return SKIP_MISSING_TEST_ROW
 
     # A fixed list is keyed by (period, horizon). With a predictor function of `ctx` (see epftoolbox2.models.context)
     # each task has its own list, and each list its own binary-column mask per (period, horizon). The mask of a matching
@@ -146,26 +159,23 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
         scalable_mask = scalable_masks[(list_id, hour, hz)]
 
     col_idx = [arrays["col_index"][c] for c in predictors]
-    x_full = arrays["x"][mask][:, col_idx]
-    y_full = arrays["y"][mask][:, hz - 1]
+    train_x = arrays["x"][train][:, col_idx]
+    train_y = arrays["y"][train][:, hz - 1]
 
-    # Not enough samples to build train/test slices for this (hour, horizon, day).
-    if x_full.shape[0] <= (1 + hz):
+    # No row dated inside the span, so nothing to train on for this (hour, horizon, day).
+    if train_x.shape[0] == 0:
         return SKIP_TOO_FEW_ROWS
 
-    train_x = _cut(x_full, hz)
-    train_y = _cut(y_full, hz)
-    test_x = x_full[-1:]
-    actual = float(arrays["y"][mask][-1, hz - 1])
+    test_x = arrays["x"][test : test + 1][:, col_idx]
+    actual = float(arrays["y"][test, hz - 1])
 
-    # train_on="matching" filters after the cut, which counts rows: before it the newest training target would move. The
-    # plan evaluated the function on these days, so nothing about it is computed here. So the look-ahead the cut leaves after a
-    # doubled autumn row (tests/test_known_issues.py) stays for a set holding that date, and weighs more: it is one of few rows.
+    # train_on="matching" filters what the span holds, so the set can't reach past it. The plan evaluated the function on these
+    # days, so nothing about it is computed here.
     matching = cfg.get("matching")
     matching_days = None
     train_days = None
     if matching is not None and list_id in matching["ids"]:
-        train_days = _cut(days[mask], hz)
+        train_days = days[train]
         same = matching_rows(train_days, matching["lists"][(hour, hz)], matching["start"], list_id)
         train_x, train_y, train_days = train_x[same], train_y[same], train_days[same]
         if train_days.size == 0:

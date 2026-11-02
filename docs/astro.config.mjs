@@ -67,6 +67,7 @@ export default defineConfig({
                         { label: 'Forecasting', link: '/model-pipeline/forecasting/' },
                         { label: 'Information Set', link: '/model-pipeline/information-set/' },
                         { label: 'Verifying a Pipeline', link: '/model-pipeline/verification/' },
+                        { label: 'Time and Calendars', link: '/model-pipeline/time-and-calendars/' },
                         { label: 'Predictor Functions', link: '/model-pipeline/predictor-functions/' },
                         { label: 'Validation and Test', link: '/model-pipeline/validation-and-test/' },
                         { label: 'Ensembles', link: '/model-pipeline/ensembles/' },

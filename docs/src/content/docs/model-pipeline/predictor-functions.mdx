@@ -139,8 +139,8 @@ the same column: the model trains on the same mix it forecasts with.
 
 ## How each list trains
 
-The training window, the cut and the newest training target stay as they are: for a forecast issued on D the targets end on
-D-1. A forecast's list decides which columns it reads, and it trains on **the window's rows where those columns exist**, so
+The training window and the newest training target stay as they are: for a forecast issued on D the targets end on
+D-1 ([which rows those are](/epftoolbox2/model-pipeline/time-and-calendars/#which-rows-a-forecast-reads)). A forecast's list decides which columns it reads, and it trains on **the window's rows where those columns exist**, so
 a column missing on some past days costs that list those rows and no other list anything.
 
 A column that starts inside the test period therefore starts with few rows: the first forecasts of a list holding it have
@@ -189,16 +189,13 @@ What that means, for each (period, horizon):
   `train_on="all"` doesn't match, and neither does a day that got them in another order. Build a list in a fixed order: the order
   of `list(set(names))` changes with the hash seed, and the numbers with it. Two lists with the same names in another order give a
   warning, for any `train_on`.
-- **The window isn't extended.** `training_window` and the usual cut come first, so the newest training target stays D-1. The filter
-  then narrows what they leave. **A matching forecast therefore trains on fewer rows than its window**: about 104 for weekend
+- **The window isn't extended.** The dates of `training_window` come first, so the newest training target stays D-1. The filter
+  then narrows those rows. **A matching forecast therefore trains on fewer rows than its window**: about 104 for weekend
   targets with a window of 364. If that is too few, ask for a longer window.
 - **The scaler is fitted on the rows left**, and the binary columns are still the list's, found as for any list on its window, not
   once per set of days.
 - **A day with a doubled autumn row** counts as one day, whose two rows both follow its date. A day with no row at that period
-  isn't asked about. The cut counts rows as it does for every list, so a set holding that day has the
-  [look-ahead after a fall-back](/epftoolbox2/model-pipeline/verification/) on the days after it, and a set without it doesn't. **It
-  weighs more than for a fixed list**, since the row with a target dated on the issue day is one of fewer. With a window of 45, a
-  price raised by 100 on the issue day moved one forecast by 24.6 on a set of 13 days, and by 6.5 for a fixed list.
+  isn't asked about. A set can't reach past the dates of the window, so no row of it has a target dated on the issue day.
 
 <Aside type="caution" title="Revised series and the set of days">
 A value the function reads on a past day is the one in the frame, as for a [forecast's own cell](#publishedcolumns), so a revision

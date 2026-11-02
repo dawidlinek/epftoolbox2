@@ -1,0 +1,144 @@
+---
+title: Time and Calendars
+description: How dates choose a forecast's training rows, which forecasts are planned, and what a clock change does to both
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A forecast is a key: a period of the day, a horizon h and an issue day D. Local calendar dates decide everything about it, because
+a period isn't always one row a day. The hour clocks repeat in autumn has two rows on its date, and the hour they skip in spring
+has none.
+
+## Which rows a forecast reads
+
+For the forecast (period, h, D) of a model with `training_window` W:
+
+- **It trains on** the rows of that period dated from D-W-h to D-1-h, both included. That is W dates, and the newest of them has
+  its target on D-1.
+- **It forecasts from** the last row dated D.
+- **Its `actual`** is the target of that row: the value on D+h at the same wall-clock time.
+
+Rows are chosen by their date, never by counting them. So a date with two rows counts as one date, a date with none costs only
+itself, and no row dated D-h or later can reach a fit, whatever the calendar does.
+
+The target of a row comes from a shift by calendar days: the same wall-clock time h local dates later, not 24 hours times h. A
+[day lag](/epftoolbox2/transformers/lag/) works the same way.
+
+## What a clock change does
+
+Europe/Warsaw changes its clocks at 02:00, so period 2 is the one affected (8 to 11 at `freq="15min"`). Europe/London changes at
+01:00, and its period 1 behaves the same way. With S the switch day:
+
+| Switch | Case | What happens |
+|---|---|---|
+| Autumn | A date with two rows inside the span | Both rows train, each with the same target |
+| Autumn | D = S | The forecast is made from the second occurrence of the hour |
+| Autumn | D+h = S | The repeated hour has no target, so the forecast's `actual` is NaN, and as a training row it drops |
+| Spring | D = S | **Not planned:** the clock has no such row to issue from |
+| Spring | D+h = S | **Not planned:** the clock has no such hour to score on |
+| Spring | D-1 = S | The newest row in the span has its target on the skipped hour, so it drops |
+
+Why the repeated hour keeps no target: which of its two prices is "the" 02:00 is undefined, and a mean of them would be an actual
+that no market cleared. The hour stays in the forecasts issued from it, and a daily aggregate leaves out the day it is on (see
+[below](#daily-aggregates-on-a-switch-day)).
+
+A zone that changes at midnight, at 22:00 or by half an hour follows the same rule, through the periods its clock has. A period is on
+the clock when any minute of it is: Lord Howe skips 02:00 to 02:29, so hourly its period 2 stays, with its row at 02:30, and at
+`freq="15min"` periods 8 and 9 go. A naive index and a UTC one have every period on every date.
+[`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/) gives every day 24 slots instead, with synthetic values on the
+slots it fills.
+
+## What is planned
+
+`planned` in `report.forecast_counts()` is every key whose period the clock has on the issue day and on the target day. A slot the
+clock doesn't have is no missing forecast: it isn't in `missing` or under any skip reason. So at horizons 1 and 2, hourly in
+Warsaw, the issue days from S-2 to S+1 plan
+
+```text
+4 days x 2 horizons x 24 periods - 4 = 188
+```
+
+The 4 are S at both horizons, S-1 at horizon 1 and S-2 at horizon 2. A switch day takes 2H keys out of a run of horizons 1 to H, and 2H
+per period of the hour at `freq="15min"`.
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline().add_model(OLSModel(["load_d+{horizon}"], training_window=365, name="OLS"))
+report = pipeline.run(df, test=("2024-03-29", "2024-04-02"), horizon=2)
+print(report.forecast_counts())
+```
+
+A run, a `report()` from its files and an ensemble of it plan the same keys, also per window. `report()` reads the zone from each
+manifest (`data_timezone`, the zone's name, such as `Europe/Warsaw` also for a dateutil zone), so it needs no data. A zone with no name
+that reads back, such as pytz's `FixedOffset`, can't be read, and the run says so when it writes the files. Results with no manifest, or
+such a zone, have no zone in a report, and `report()` plans every period of every day for them.
+
+## Gaps in the data
+
+A gap is a slot the clock has and the frame doesn't. It costs its own row and nothing else.
+
+| Where | What happens |
+|---|---|
+| On the issue day | The forecast is planned and skipped, counted as `missing_test_row` |
+| On the target day | The forecast has a NaN `actual` |
+| Inside the span | The fit has one row fewer. Rows newer than the gap stay |
+| The whole span | The forecast is counted as `too_few_rows` |
+
+A row with a missing predictor or target drops from the fit too, or skips the forecast if it is the row forecast from: see
+[Forecast counts](/epftoolbox2/model-pipeline/results/#forecast-counts).
+
+## Daily aggregates on a switch day
+
+[`report.aggregate()`](/epftoolbox2/model-pipeline/results/#daily-aggregates) needs a whole day, and with a zone it reads what a whole
+day is from the clock: the day's finite periods must be exactly those its clock has, wherever in the day the clock skips. A dropped day
+is counted as `incomplete_day`.
+
+| Target day | Periods the clock has | Result |
+|---|---|---|
+| An ordinary day | 24 (96) | Whole if all of them have a finite prediction and actual |
+| The spring switch day | 23 (92) | Whole over those |
+| S+h, from a forecast issued on the spring switch day S at horizon h | 24 (96) | **Dropped:** no forecast of the skipped hour was issued on S, so a period is missing |
+| Any other day after the switch | 24 (96) | Whole |
+| The autumn switch day | 24 (96) | **Dropped:** the repeated hour has no `actual` |
+
+Plain lists of records have no zone. There the periods of a date are those any model has a record for, as described on
+[Working with Results](/epftoolbox2/model-pipeline/results/#daily-aggregates). `EconomicEvaluator` judges a whole day by the period ids,
+as it did.
+
+## Checking it
+
+[`pipeline.verify`](/epftoolbox2/model-pipeline/verification/) perturbs what a forecast can't know, and what it trains on from the issue
+day on. Run it across a switch with the horizon you run, as a sample of days may miss them:
+
+```python
+pipeline.verify(df, "2024-10-27", "2024-10-30", horizon=3, days=4).assert_ok()
+```
+
+## Results made with counted rows
+
+Before this, a forecast's training rows were found by counting back from the issue day. That went wrong around a switch, and the results
+of those runs hold it:
+
+- **A look-ahead on the days after an autumn switch.** For D from S+1 to S+h the row on D-h stayed in the fit, so the forecast of the
+  switch hour trained on a target dated D.
+- **A mislabelled forecast on a spring switch day.** The key of the skipped hour was built from the day before's row, so it had the
+  dates of S and the `actual` of another day.
+- **A row too few after a spring switch.** For D from S+2 to S+h the forecast of the switch hour lost its newest row.
+
+So a manifest has `training_cut`, compared on resume, and one without it raises `ManifestMismatchError`: a resume would keep those
+records in the file and read them. Use a new `save_dir`.
+
+Results accepted anyway, with `allow_manifest_mismatch=True` or from a folder with no manifest, still hold those records. Their manifest
+says so for good (`training_cut` is `{"rows": "dates", "stored": "unverified"}`, which later resumes keep), and every `report()` of them
+warns, naming the models, as it does for results with no manifest or an older one. A record of a slot the clock doesn't have can't
+have a target, so it is left out of every table and count, with a warning saying how many. The look-ahead after an autumn switch can't
+be told from the records: run such results again into a new folder.
+
+<Aside type="note" title="What moves">
+Of a run of horizons 1 to H at 1 h, per year: H(H+1)/2 forecasts move after the autumn switch, H(H-1)/2 after the spring one, and the
+keys of the skipped hour go. At `freq="15min"` that is 4 times as many. Every other forecast is the same, bit for bit. In a frame
+without a switch every forecast is the same too, unless the frame has a gap: a key whose last days before the issue day, D-h to D-1,
+lack a row moves, since the row cut lost a newer row to the gap.
+</Aside>

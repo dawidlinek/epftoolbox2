@@ -51,6 +51,14 @@ A run that skipped forecasts records how many per window and reason (`skipped`, 
 the files can tell `no_matching_days` or `fit_error` from a task that crashed. A run with no skips has no such key. Each run replaces
 the counts of the windows it names, since a resume tries the skipped tasks again. They are written after the run, and never compared.
 
+How a forecast's training rows are chosen is compared too (`training_cut`). Rows were once chosen by counting them, which left a
+mislabelled record on a spring switch day and a look-ahead on the days after an autumn switch, and a resume would keep those
+records in the file and read them. So a manifest without this field, written before rows were chosen by date, is refused.
+Results that may still hold such records, accepted over that refusal with `allow_manifest_mismatch=True` or resumed with no
+manifest at all, get `{"rows": "dates", "stored": "unverified"}`, which every later resume keeps and which compares equal to the
+plain one: `ModelPipeline.report()` warns about them every time. Records of a slot the clock doesn't have are left out of every
+table and count wherever the zone is known (`ModelResultRef.iter_records`).
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -62,6 +70,7 @@ import hashlib
 import json
 import math
 import subprocess
+import warnings
 from dataclasses import dataclass, fields
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -70,6 +79,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Opt
 import numpy as np
 import pandas as pd
 
+from .._date_utils import zone_name
 from ..logging import get_logger
 from .availability import merge_listings
 from .windows import TEST, RunWindows, mask_key
@@ -99,6 +109,23 @@ _COMPARED_FIELDS = (
     "model_params",
     "data_columns_hash",
     "data_timezone",
+    "training_cut",
+)
+
+# How a run chooses a forecast's training rows: `Manifest.training_cut`.
+TRAINING_CUT_BY_DATE = {"rows": "dates"}
+# The same, for results that may hold records written another way: see the module docstring.
+TRAINING_CUT_UNVERIFIED = {**TRAINING_CUT_BY_DATE, "stored": "unverified"}
+
+
+def _cut_rule(cut: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """How a run chooses rows, without what is known of the records stored: what a resume compares."""
+    return None if cut is None else {key: value for key, value in cut.items() if key != "stored"}
+
+
+_OLD_RESULTS_NOTE = (
+    ". These results were made before training rows were chosen by date, so they may hold a look-ahead on the days after an "
+    "autumn switch and a mislabelled forecast on a spring one, which a resume would keep in the file"
 )
 
 
@@ -160,6 +187,8 @@ class Manifest:
     # Window -> skip reason -> how many forecasts the last run naming that window skipped, a plain run's as "test"; recorded, never
     # compared, and absent with nothing skipped.
     skipped: Optional[Dict[str, Dict[str, int]]] = None
+    # How the training rows were chosen. None in a manifest older than the field: see the module docstring.
+    training_cut: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -168,8 +197,11 @@ class Manifest:
             if name in skip:
                 continue
             mine, theirs = getattr(self, name), getattr(existing, name)
+            if name == "training_cut":
+                mine, theirs = _cut_rule(mine), _cut_rule(theirs)
             if mine != theirs:
-                out.append(f"{name}: {theirs!r} (existing results) vs {mine!r} (this run)")
+                note = _OLD_RESULTS_NOTE if name == "training_cut" and theirs is None else ""
+                out.append(f"{name}: {theirs!r} (existing results) vs {mine!r} (this run){note}")
         return out
 
     def to_dict(self) -> Dict[str, Any]:
@@ -188,6 +220,8 @@ class Manifest:
             del out["data_unverified"]
         if out["skipped"] is None:  # nothing skipped
             del out["skipped"]
+        if out["training_cut"] is None:  # a manifest older than it
+            del out["training_cut"]
         return out
 
     @classmethod
@@ -373,7 +407,7 @@ def build_manifest(
         training_window=model.training_window,
         model_params={"scaler": getattr(model, "scaler", "standard"), **dict(model._model_kwargs)},
         data_columns_hash=hashes.of_columns(test_end, used_columns),
-        data_timezone=str(data.index.tz),
+        data_timezone=zone_name(data.index.tz) or str(data.index.tz),
         information_set=information_set.to_dict() if information_set is not None else None,
         test_start=test_start,
         test_end=test_end,
@@ -389,6 +423,7 @@ def build_manifest(
         actuals=actuals,
         column_hashes={column: hashes.of_column(test_end, column) for column in {*used_columns, *read_columns}},
         frame_hash=hashes.of_frame(test_end),
+        training_cut=dict(TRAINING_CUT_BY_DATE),
     )
 
 
@@ -463,6 +498,32 @@ def read_skipped(
     return dict((stored.get("skipped") or {}).get(window, {}))
 
 
+def rows_unverified(path: Union[str, Path]) -> bool:
+    """Whether the results of the manifest at `path` may hold records written before training rows were chosen by date: no
+    manifest, one older than `training_cut`, or one that says so (see the module docstring)."""
+    path = Path(path)
+    return not path.exists() or json.loads(path.read_text()).get("training_cut") != TRAINING_CUT_BY_DATE
+
+
+def read_zone(path: Union[str, Path]) -> Optional[str]:
+    """The time zone a manifest's forecasts were planned in, for an `IssueCalendar` with no data at hand, or None if it says none.
+
+    None for no manifest, a naive index and a zone that doesn't read back by its name (`BaseModel.run` warns about those). Those
+    keep the rule without a zone.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    zone = json.loads(path.read_text()).get("data_timezone")
+    if zone in (None, "None"):
+        return None
+    try:
+        pd.Timestamp("2000-01-01").tz_localize(zone)
+    except Exception:
+        return None
+    return zone
+
+
 def read_windows(path: Union[str, Path]) -> Optional[RunWindows]:
     """The windows and segments a manifest records, or None for a plain run or no manifest.
 
@@ -523,6 +584,10 @@ def check_and_write(
             has_existing_results and _accepted_other_data(existing, manifest, data_diffs, frame_hashes)
         ):
             manifest.data_unverified = True
+        if has_existing_results and existing.training_cut != TRAINING_CUT_BY_DATE:
+            _mark_rows_unverified(
+                manifest, model_name, path, "its manifest was written before rows were chosen by date"
+            )
         if data_diffs == []:
             _cover_both(existing, manifest, frame_hashes)
         _keep_windows(existing, manifest, allow_mismatch, model_name)
@@ -548,7 +613,21 @@ def check_and_write(
         if check_stored is not None:
             check_stored()
         manifest.data_unverified = True
+        _mark_rows_unverified(manifest, model_name, path, "they have no manifest")
     manifest.write(path)
+
+
+def _mark_rows_unverified(manifest: Manifest, model_name: str, path: Path, why: str) -> None:
+    """Results accepted though they may hold records written before rows were chosen by date keep saying so, for good."""
+    if manifest.training_cut is not None and manifest.training_cut.get("stored") is None:
+        warnings.warn(
+            f"{model_name}: the results in {path.parent} may hold records written before training rows were chosen by date "
+            f"({why}). They stay in the file, and every report() of it will say so. Run again into a new save_dir to be rid "
+            "of them.",
+            UserWarning,
+            stacklevel=4,
+        )
+    manifest.training_cut = {**(manifest.training_cut or TRAINING_CUT_BY_DATE), "stored": "unverified"}
 
 
 def _same_float(a: Optional[float], b: float) -> bool:
@@ -814,9 +893,11 @@ __all__ = [
     "hash_predictor_layout",
     "is_ensemble_manifest",
     "manifest_digest",
+    "rows_unverified",
     "manifest_path",
     "read_matching_lists",
     "read_skipped",
     "read_windows",
+    "read_zone",
     "record_skips",
 ]

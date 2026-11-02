@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from epftoolbox2.models._calendar import IssueCalendar, clock_periods
 from tests.live import (
     DATA_END,
     DATA_START,
@@ -160,7 +161,6 @@ def test_05_forecast_only(live_dir, monkeypatch, information_set_checks):
     example = load_example("05_forecast_only.py", monkeypatch)
     models = ["OLS", "LassoCV"]
     horizon = 5
-    planned = horizon * 24
 
     # The example's dates are relative to today, so the window is too: 60 days of history through today + 5.
     before = dt.date.today()
@@ -179,12 +179,14 @@ def test_05_forecast_only(live_dir, monkeypatch, information_set_checks):
         today - dt.timedelta(days=60),
         today + dt.timedelta(days=5),
     )
-    # A DST switch among the target days costs at most one forecast per model and switch day
+    # The hour a spring switch skips, on today or a target day, is no planned forecast; a lag or lead that lands on it may cost one
+    # forecast per model and switch day
+    planned = IssueCalendar("1h", "Europe/Warsaw", range(1, horizon + 1)).count(today, today)
     switching = switch_days(today + dt.timedelta(days=1), today + dt.timedelta(days=horizon), "Europe/Warsaw")
     assert_forecasts(report, models, planned, max_missing=len(switching))
     assert len(predictions) == report.forecast_counts()["produced"].sum()
     assert set(predictions["horizon"]) == set(range(1, horizon + 1))
-    assert set(predictions["hour"]) == set(range(24))
+    assert set(predictions["hour"]) == set(clock_periods(today, "1h", "Europe/Warsaw"))
     assert_information_set_checked(information_set_checks, models)
     # forecast_only skips the evaluators and the exporters
     assert report.evaluators == []

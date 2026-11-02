@@ -1,7 +1,7 @@
 """The data contract a model run checks before any fit.
 
 Every check here turns a failure mode that would otherwise produce wrong or missing forecasts without an error
-into an error: data at a finer resolution than `freq` (look-ahead through the training cut) or at a coarser one
+into an error: data at a finer resolution than `freq` (a period mixing several times of day) or at a coarser one
 in part of the frame (some periods trained on far fewer days), columns that
 collide with the model's own target or id columns, predictors that don't exist, and non-numeric predictors.
 """
@@ -14,13 +14,14 @@ import numpy as np
 import pandas as pd
 
 from .._date_utils import is_utc_index
+from ._calendar import FREQ_STEPS, clock_periods
 
 DayRange = Tuple[pd.Timestamp, pd.Timestamp]
 
 # Columns the model adds to its working frame; data columns with these names would be shadowed.
 RESERVED_COLUMNS = ("hour", "day")
 
-_FREQ_STEPS = {"1h": pd.Timedelta(hours=1), "15min": pd.Timedelta(minutes=15)}
+_FREQ_STEPS = FREQ_STEPS
 _DAY_LAG_SUFFIX = re.compile(r"_d-\d+$")
 # A coarser stretch: at least this many consecutive rows, none with a neighbour one `freq` step away, evenly
 # spaced at one multiple of the step and covering at least this span (rows x spacing). Anything less is a gap.
@@ -139,9 +140,8 @@ def check_index(data: pd.DataFrame, freq: str, days: Union[DayRange, Sequence[Da
         examples = ", ".join(f"{pd.Timestamp(d).date()} period {p}" for d, p in crowded.index[:3].tolist())
         raise ValueError(
             f"{len(crowded)} (local day, period) slot(s) have more than one row for freq='{freq}' "
-            f"(e.g. {examples}). The data mixes resolutions or is finer than freq; the training cut assumes "
-            "one row per day and period, so extra rows would leak the issue day's targets into training. "
-            f"Resample the data to {freq} first."
+            f"(e.g. {examples}). The data mixes resolutions or is finer than freq, so one period would mix several "
+            f"times of day. Resample the data to {freq} first."
         )
     if len(spacings):
         _check_spacing(ordered, spacings, freq, days)
@@ -308,8 +308,8 @@ def check_predictors(
 def missing_test_rows(index: pd.DatetimeIndex, freq: str, days: Iterable) -> List[Tuple[int, pd.Timestamp]]:
     """(period, local day) slots on the given days that have no row although that wall-clock time exists.
 
-    Slots that don't exist because clocks spring forward are not listed: their handling is a known
-    issue pinned in tests/test_known_issues.py.
+    A slot the clock doesn't have, because clocks spring forward, is not listed: it is no gap in the data, and
+    `IssueCalendar` doesn't plan a forecast from it.
     """
     local = wall_clock(index)
     present = set(zip(local.normalize().asi8.tolist(), period_index(index, freq).tolist()))
@@ -321,9 +321,8 @@ def missing_test_rows(index: pd.DatetimeIndex, freq: str, days: Iterable) -> Lis
         absent.extend((p, day) for p in range(periods) if (day.value, p) not in present)
     if not absent or index.tz is None:
         return absent
-    stamps = pd.DatetimeIndex([day + p * step for p, day in absent])
-    localized = stamps.tz_localize(index.tz, nonexistent="NaT", ambiguous=np.ones(len(stamps), dtype=bool))
-    return [slot for slot, exists in zip(absent, ~localized.isna()) if exists]
+    on_the_clock = {day: clock_periods(day, freq, index.tz) for day in {day for _, day in absent}}
+    return [(period, day) for period, day in absent if period in on_the_clock[day]]
 
 
 def _is_int(value) -> bool:

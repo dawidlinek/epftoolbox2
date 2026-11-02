@@ -45,7 +45,8 @@ finite prediction.** A key is `(run_date, target_date, hour, horizon)`.
 - **A key a chosen member lacks is missing for the ensemble.** It is never averaged over the members that happen to be there, so
   every forecast of an ensemble is the same average. A member's NaN or infinite prediction counts as lacking it.
 - **Missing forecasts are counted.** `forecast_counts()` has them under `member_missing`, so `planned` is `produced` plus the reasons
-  for an ensemble as for a model. A key no member has counts too, such as 02:00 on the issue day of a spring switch.
+  for an ensemble as for a model. A key no member has counts too, and a slot the clock doesn't have
+  [isn't planned](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned), for an ensemble as for a model.
 - **A NaN actual stays a forecast with a NaN actual**, as for a model.
 - **The ranking doesn't reach the average.** Whatever order the members ranked in, the mean is in member order, so `top=k` equals
   `AverageEnsemble(members=chosen)` on test, bit for bit, and a one-member average equals the member.

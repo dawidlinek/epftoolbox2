@@ -5,7 +5,8 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Dict, Iterator, List, Mapping, Optional
+import warnings
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from .windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 
@@ -14,9 +15,9 @@ from .windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 class ModelResultRef:
     """Where one model's results live and how many forecasts the run planned and produced.
 
-    `count` is the number of planned forecasts (periods x horizons x test days). `produced` is how many
-    exist after the run (including ones resumed from an earlier run), and `skipped` counts the tasks that
-    gave no forecast by reason (e.g. `missing_test_predictors`). `produced` is None for refs built from
+    `count` is the number of planned forecasts (`IssueCalendar`: periods x horizons x test days, without the slots the clock
+    doesn't have on an issue day or a target day). `produced` is how many exist after the run (including ones resumed from an
+    earlier run), and `skipped` counts the tasks that gave no forecast by reason (e.g. `missing_test_predictors`). `produced` is None for refs built from
     raw result lists. `predictor_lists` describes each distinct list a predictor function of `ctx` returned, with how
     many forecasts use it where; it is None for fixed lists. `availability_listing` holds the rows of inputs known after
     the issue time (`epftoolbox2.results.availability`), which `EvaluationReport.availability()` shows. `matching_lists` holds,
@@ -32,6 +33,12 @@ class ModelResultRef:
 
     `test_only` marks an ensemble that has forecasts in the test window alone, which a report of a run with validation doesn't
     look for in `.validation` (see `epftoolbox2.ensembles`).
+
+    `zone` is the time zone of the frame the forecasts came from, which says what periods a date has on the clock: the frame's
+    `index.tz`, or a manifest's `data_timezone` in a report made from files. It is None for a naive index and for results that
+    don't say, such as plain lists or a results file with no manifest. With a zone, a record of a slot the clock doesn't have
+    on its run date or its target date is no forecast, as its target can't exist: `iter_records` leaves it out, and
+    `off_the_clock` counts it. Only results written before training rows were chosen by date hold one.
     """
 
     name: str
@@ -52,6 +59,7 @@ class ModelResultRef:
     by_window: Optional[Dict[str, "ModelResultRef"]] = field(default=None, repr=False)
     test_only: bool = False
     matching_lists: Optional[Dict[str, int]] = None
+    zone: Any = None
 
     def iter_records(self, cols: Optional[List[str]] = None) -> Iterator[Dict]:
         """The records of this ref, wherever they live.
@@ -61,8 +69,34 @@ class ModelResultRef:
         lists have no window (test_start/test_end are "") and are read as given.
 
         A window's ref gives `day_in_test` from the window's start as it is now: a record resumed after the start moved
-        holds the old count in the file.
+        holds the old count in the file. A record of a slot the clock doesn't have is left out (see the class docstring).
         """
+        on_the_clock = self._on_the_clock()
+        return (read for read, r in self._records(cols) if on_the_clock is None or on_the_clock(r))
+
+    def off_the_clock(self) -> int:
+        """How many records of this ref are of a slot the clock doesn't have, which `iter_records` leaves out."""
+        on_the_clock = self._on_the_clock()
+        return 0 if on_the_clock is None else sum(1 for r, _ in self._records(None) if not on_the_clock(r))
+
+    def _on_the_clock(self) -> Optional[Callable[[Dict], bool]]:
+        if self.zone is None:
+            return None
+        from ..models._calendar import FREQ_STEPS, skipped_periods  # the models import this module
+
+        def on_the_clock(r: Dict) -> bool:
+            freq = r.get("freq", self.freq)
+            if freq not in FREQ_STEPS:
+                return True
+            return not (
+                r["hour"] in skipped_periods(r["run_date"], freq, self.zone)
+                or r["hour"] in skipped_periods(r["target_date"], freq, self.zone)
+            )
+
+        return on_the_clock
+
+    def _records(self, cols: Optional[List[str]]) -> Iterator[Tuple[Dict, Dict]]:
+        """(the record as read, the whole record) of each record of this ref's dates and window."""
         filter_dates = bool(self.test_start and self.test_end)
         window_start = date.fromisoformat(self.test_start) if self.window is not None and self.test_start else None
 
@@ -82,11 +116,11 @@ class ModelResultRef:
                         if line:
                             r = json.loads(line)
                             if keep(r):
-                                yield self._as_read(r, cols, window_start)
+                                yield self._as_read(r, cols, window_start), r
         else:
             for r in self._results or []:
                 if keep(r):
-                    yield self._as_read(r, cols, window_start)
+                    yield self._as_read(r, cols, window_start), r
 
     @staticmethod
     def _as_read(r: Dict, cols: Optional[List[str]], window_start: Optional[date]) -> Dict:
@@ -100,14 +134,15 @@ class ModelResultRef:
 def split_by_window(
     ref: ModelResultRef,
     windows: RunWindows,
-    periods_per_day: int,
+    calendar: Any,
     skipped: Optional[Mapping[str, Mapping[str, int]]] = None,
     predictor_lists: Optional[Mapping[str, List[Dict]]] = None,
     listings: Optional[Mapping[str, Optional[List[Dict]]]] = None,
     target_before: Optional[str] = None,
 ) -> Dict[str, ModelResultRef]:
     """One ref per window of `ref`, the ref of a whole run. `produced` is counted from the records and `count` from the
-    window's days, and what is left out of a validation report for its target day is counted in `skipped`."""
+    window's days by `calendar` (an `IssueCalendar`), and what is left out of a validation report for its target day is counted
+    in `skipped`."""
     produced: Counter = Counter()
     excluded = 0
     for r in ref.iter_records(cols=["run_date", "target_date", "window"]):
@@ -121,14 +156,13 @@ def split_by_window(
 
     refs = {}
     for window, (start, end) in windows.periods:
-        days = RunWindows(test=(start, end)).issue_days()
         counts = dict((skipped or {}).get(window, {}))
         is_validation = window == VALIDATION
         if is_validation and excluded:
             counts[SKIP_TARGET_IN_TEST] = excluded
         refs[window] = replace(
             ref,
-            count=len(days) * ref.horizon * periods_per_day,
+            count=calendar.count(start, end),
             test_start=start,
             test_end=end,
             produced=produced[window],
@@ -141,3 +175,16 @@ def split_by_window(
             by_window=None,
         )
     return refs
+
+
+def warn_off_the_clock(refs: Mapping[str, ModelResultRef], stacklevel: int = 2) -> None:
+    """One warning naming the refs with records of a slot the clock doesn't have, and how many: they are no forecasts."""
+    found = {name: n for name, ref in refs.items() if (n := ref.off_the_clock())}
+    if found:
+        warnings.warn(
+            f"Records of a slot the clock doesn't have, the hour a spring switch skips, on their issue day or target day "
+            f"(per model: {found}): their target can't exist, so they are left out of every table and count. Only results "
+            "written before training rows were chosen by date hold them.",
+            UserWarning,
+            stacklevel=stacklevel + 1,
+        )

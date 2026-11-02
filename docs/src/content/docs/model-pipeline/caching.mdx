@@ -70,8 +70,9 @@ the ordered layout tells `["price_d-1", "price_d-2"]` apart from `["price_d-{hor
 freq, training window, a content hash of the data columns used up to `test_end` (rows after `test_end`
 don't affect any forecast in this run, so appending them between runs isn't a mismatch), and the data's own
 time zone (converting the same instants to a different zone keeps the same hash, since it's over each
-value's own representation, not the zone label): everything that defines what a forecast in the file
-actually *is*. It also records provenance (package version, git SHA if available, when it was first and
+value's own representation, not the zone label), and how the training rows are chosen (`training_cut`): everything that defines what
+a forecast in the file actually *is*. A manifest without `training_cut` was [made with counted rows](/epftoolbox2/model-pipeline/time-and-calendars/#results-made-with-counted-rows)
+and is refused; results accepted anyway are marked unverified, for good. It also records provenance (package version, git SHA if available, when it was first and
 last written) and the
 [information set](/epftoolbox2/model-pipeline/information-set/) settings, but neither is compared: a
 version bump or a new commit does not by itself invalidate a results directory, and the information set

@@ -2731,8 +2731,10 @@ def test_keys_align_over_a_switch_in_validation_and_in_test(freq, per_hour):
 
     counts = counts_of(report.validation)
     assert counts.loc["plain", "produced"] == counts.loc["a", "produced"] == len(a_validation)
-    assert counts.loc["plain", "member_missing"] == counts.loc["a", "planned"] - len(a_validation) > 0
-    assert counts.loc["a", "missing"] == counts.loc["plain", "missing"]
+    # What the clock doesn't have isn't planned, so it is no forecast a member lacks.
+    assert counts.loc["plain", "planned"] == counts.loc["a", "planned"] == len(a_validation)
+    assert "member_missing" not in counts.columns
+    assert counts.loc["a", "missing"] == counts.loc["plain", "missing"] == 0
 
     for key, record in keyed(records_of(report, "plain")).items():
         assert record["prediction"] == (a_test[key]["prediction"] + b_test[key]["prediction"]) / 2

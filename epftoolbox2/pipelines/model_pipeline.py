@@ -1,5 +1,4 @@
 from dataclasses import replace
-from datetime import date
 from typing import Callable, List, Optional, Sequence, Tuple, Union, Dict, Any
 from pathlib import Path
 import copy
@@ -10,6 +9,7 @@ import yaml
 
 from .._date_utils import resolve_date
 from ..information_set import InformationSet, InformationSetError, check_level
+from ..models._calendar import IssueCalendar
 from ..models.base import BaseModel
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model
@@ -27,10 +27,12 @@ from ..results.manifest import (
     read_matching_lists,
     read_skipped,
     read_windows,
+    read_zone,
+    rows_unverified,
 )
 from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.report import EvaluationReport
-from ..results.ref import ModelResultRef, split_by_window
+from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
 from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
@@ -330,13 +332,17 @@ class ModelPipeline:
         """Build one report from the per-model JSONL files in `save_dir`, then run evaluators and exporters.
 
         This is the merge step after runs that each wrote some models' results (e.g. a SLURM array with
-        `Workflow(model_index=...)`). The test period, horizon and freq must be those of the runs; they give
-        each model's planned forecast count. Raises FileNotFoundError if a model has no results file, unless
-        `allow_missing` is set. `data` is only needed by exporters that join source columns.
+        `Workflow(model_index=...)`). The test period, horizon and freq must be those of the runs; with the time zone
+        each manifest records they give each model's planned forecast count (`IssueCalendar`). Raises FileNotFoundError if a
+        model has no results file, unless `allow_missing` is set. `data` is only needed by exporters that join source columns.
 
         Ensembles are computed here from the stored results of their members, every time, so they can't go stale, and written
         next to them. `allow_missing` leaves out an ensemble with a missing member, with a warning: it is never averaged over
         the members that happen to be there.
+
+        Results that may hold records written before training rows were chosen by date (no manifest, one older than
+        `training_cut`, or one that accepted such results, see `epftoolbox2.results.manifest`) are warned about by name, every
+        time. With the zone their manifest records, a record of a slot the clock doesn't have is left out, with a warning.
 
         What the runs listed about inputs known after the issue time comes from the manifests, whatever this pipeline's
         `availability` is: `report.availability()`, one warning and the terminal exporter show it.
@@ -379,25 +385,25 @@ class ModelPipeline:
             )
         if windows is not None:
             test_start, test_end = windows.first_day, windows.last_day
-            planned = 0
         else:
             if forecast_only:
                 test_start, test_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
             test_start, test_end = resolve_date(test_start), resolve_date(test_end)
-            n_days = (date.fromisoformat(test_end) - date.fromisoformat(test_start)).days + 1
-            planned = n_days * horizon * (96 if freq == "15min" else 24)
 
         refs: Dict[str, ModelResultRef] = {}
+        calendars: Dict[str, IssueCalendar] = {}
         missing = []
         for model in self.models:
             path = self.results_path(save_dir, model)
             if not path.exists():
                 missing.append(f"{model.name} ({path})")
                 continue
+            zone = read_zone(manifest_path(path))
+            calendars[model.name] = IssueCalendar(freq, zone, range(1, horizon + 1))
             ref = ModelResultRef(
                 name=model.name,
                 path=path,
-                count=planned,
+                count=0 if windows is not None else calendars[model.name].count(test_start, test_end),
                 test_start=test_start,
                 test_end=test_end,
                 horizon=horizon,
@@ -406,6 +412,7 @@ class ModelPipeline:
                 availability_listing=read_listing(manifest_path(path)),
                 windows=windows,
                 matching_lists=read_matching_lists(manifest_path(path)),
+                zone=zone,
             )
             # Through the ref: the file can hold more than this period, and a line outside it is no forecast of it.
             ref.produced = sum(1 for _ in ref.iter_records(cols=["hour"]))
@@ -414,6 +421,15 @@ class ModelPipeline:
             raise FileNotFoundError(f"No results for model(s): {', '.join(missing)}. Run them first.")
         for name in missing:
             logger.warning(f"Report: no results for {name}; it is left out")
+        old = [name for name, ref in refs.items() if rows_unverified(manifest_path(ref.path))]
+        if old:
+            warnings.warn(
+                f"Report: the results of {old} may hold records written before training rows were chosen by date (their "
+                "manifest is older, was accepted over that with allow_manifest_mismatch=True, or is missing), so the days after "
+                "an autumn switch may hold a look-ahead. Run them again into a new save_dir.",
+                stacklevel=2,
+            )
+        warn_off_the_clock(refs, stacklevel=2)
 
         parts = dict(refs)
         if windows is not None:
@@ -422,7 +438,7 @@ class ModelPipeline:
                 ref.by_window = split_by_window(
                     ref,
                     windows,
-                    96 if freq == "15min" else 24,
+                    calendars[name],
                     skipped={w: read_skipped(manifest_path(ref.path), w) for w, _ in windows.periods},
                     listings={w: read_listing(manifest_path(ref.path), w) for w, _ in windows.periods},
                     target_before=stored.target_before,
