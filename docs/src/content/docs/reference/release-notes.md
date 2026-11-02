@@ -92,6 +92,18 @@ an issue day it didn't sample.
 
 ### New
 
+- **`freq="1D"`: one model per day.** `pipeline.run(df.at_time("12:00"), ..., freq="1D")` fits one model per day on a frame with one row
+  per local date, every row at one time of day. It is accepted wherever `freq` is: `ModelPipeline.run`, `report`, `verify` and
+  `explain`, `BaseModel.run`, `leakage_probe` and `positive_control`, `Workflow` YAML (`model_pipeline.freq: 1D`), `epf model` and
+  `epf verify` (`--freq 1D`) and the interactive wizard. Records have `hour` 0 and `freq` `"1D"`, the shape `report.aggregate()` gives.
+  The row's time of day is read from the index and is what its names mean (`x_h-1` is one elapsed hour before the stamp), so stamp
+  the rows at the time the forecast is made: a frame stamped at midnight that holds what is true at noon reads `load_actual_h-1` as
+  23:00 on D-1, and neither the check nor `verify` can see the look-ahead. A plain `realised` column such as `actual_daily_max` is the
+  value of its whole local date, known `delay` after that date ends, so it is late on its own date at any issue time. A daily run of
+  `df.at_time("12:00")` is period 12 of the hourly run of `df`, bit for bit. **Nothing else moves**: `"1h"` and `"15min"`
+  runs are what they were. `EconomicEvaluator` with `freq="1D"` raises before any model is planned or run, since a schedule needs the
+  periods of a day. `ModelPipeline.explain(hour=...)` now defaults to `None`, which is 12 at `"1h"` and `"15min"` as before and 0 at
+  `"1D"`. See [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames).
 - **`horizons=`: some horizons only.** `pipeline.run(df, test=..., horizons=[1, 3, 7])` (or `range(3, 10)`) forecasts the listed
   horizons and nothing else, and `report`, `verify`, `explain`, `BaseModel.run`, `leakage_probe` and `positive_control` take it too, as do
   `Workflow` YAML (`model_pipeline.horizons: [1, 3, 7]`) and `epf model` / `epf verify` (`--horizons 3-9`, `1,3,7` or `1-3,7`). Each

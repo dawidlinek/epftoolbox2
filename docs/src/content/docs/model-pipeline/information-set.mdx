@@ -157,8 +157,11 @@ load_actual_h10 … load_actual_h23 (14) T-1 10:00 … 23:00               known
 |---|---|
 | `model` | The model's name |
 | `test` | (first, last) issue day to judge on; `None` takes every day of the data, for fixed lists only |
-| `horizon`, `hour` | The forecast shown: days ahead, and the period of the target day (0-23, or 0-95 for 15-minute data) |
-| `target`, `freq`, `echo` | Target column, `"1h"` or `"15min"`, and whether to print |
+| `horizon`, `hour` | The forecast shown: days ahead, and the period of the target day (0-23, 0-95 for 15-minute data, 0 for a daily frame). `hour=None`, the default, is 12, or 0 at `"1D"` |
+| `target`, `freq`, `echo` | Target column, `"1h"`, `"15min"` or `"1D"`, and whether to print |
+
+At `"1D"` the header gives the time the rows are stamped at, `period 0 (12:00)`, and `target-relative` counts from it: `load_actual_h-1`
+of a noon row is `T-1 11:00` at horizon 1 (see [Daily Rows](#daily-rows)).
 
 `target-relative` reads the name the way the check does: a [profile](#profile-columns) at its slot, a [day
 aggregate](#day-aggregates) over the whole day, an hour lag in elapsed time. On a DST day labels stay wall-clock times and
@@ -394,6 +397,44 @@ issue can't read as known before it:
 - **`ctx.published()` and `ctx.value()`** read the same instants, so a predictor function can answer otherwise on such a
   day than a clock reading would, and get another list there. A forecast is otherwise untouched: availability never reads
   a number.
+
+---
+
+## Daily Rows
+
+A frame run with `freq="1D"` has one row per local date, stamped at the time of day the row stands for (see
+[Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames)). The stamp is read from the index. Each kind of
+rule reads a daily row like this, with the rule's own clock times and delays as everywhere:
+
+| Rule | Read on a daily row |
+|---|---|
+| `static` | Always known |
+| `published`, `weekly` | By the delivery day the column's shifts reach. The stamp matters only through `h` shifts |
+| `realised`, with no `h`, `min` or `s` shift | The value of its whole local date, known `delay` after that date ends |
+| `realised`, with an hour shift | That hour, counted back from the stamp |
+| `weather_run`, `as_of`, `weather_cutoff` | As on an hourly row, from the stamp |
+| A profile or a day aggregate | The column it was built from, at its slot or last slot, as on an hourly row |
+| A `_sNN` slot | Needs a rule of your own, as on hourly data |
+
+With `realised("1h")` and a noon stamp:
+
+| Column | Holds | Known |
+|---|---|---|
+| `actual_daily_max` | The maximum of D | D+1 01:00: late at every issue time on D |
+| `actual_daily_max_d-1` | The maximum of D-1 | D 01:00 |
+| `load_actual_h-1` | The load of 11:00 to 12:00 on D | D 13:00: late at a 12:00 issue |
+| `load_actual_h-2` | The load of 10:00 to 11:00 on D | D 12:00, which counts as known at a 12:00 issue |
+
+A plain `realised` column is the date's value, not an hour's. Read from the stamp like `load_actual_h-1`, a daily maximum would be
+known at 13:00 on its own date, when the date isn't over. That holds for the column named alone: what a profile or an aggregate is
+built from is read at its slot, as on hourly rows. With `newest_target="published"`, `realised("1h")` on a daily target gives k = -1:
+the newest training row at horizon 1 is D-2 (see [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target)).
+
+<Aside type="caution">
+  A frame stamped at midnight that holds what is true at noon hides the hour before noon: `load_actual_h-1` reads as 23:00 on D-1
+  and passes. Restamp it to noon, as [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#stamp-at-noon-not-at-midnight)
+  shows. Neither the check nor `verify` can see this.
+</Aside>
 
 ---
 

@@ -54,6 +54,7 @@ Issued at 11:45 Brussels:
 | `price`, published 13:00 Brussels on D-1 (the built-in rule) | 0 on every period: D's prices are out | D-1 |
 | `load_actual`, `realised("1h")`, hourly | 0 for periods 0 to 9 (known by 11:00), -1 from period 10 (12:00 and later) | D-1, D-2 |
 | the same at `freq="15min"` | 0 for periods 0 to 42 (known at 11:45 exactly, which counts), -1 from 43 | D-1, D-2 |
+| `actual_daily_max`, `realised("1h")`, daily frame stamped at noon | -1 on its one period: D's maximum is known at 01:00 on D+1, D-1's at 01:00 on D | D-2 |
 | `price`, issued at 14:00 | +1, since D+1's prices are out at 13:00 on D; the row of D would be the forecast's own, so at h=1 the newest row stays D-1, and at h=2 it is D-1 instead of D-2 | D-1 |
 
 At horizon h the newest row is D+k-h, so k doesn't depend on the horizon, apart from that cap. How k is found:
@@ -259,6 +260,72 @@ report = pipeline.report("fridays", test=("2023-01-01", "2024-12-31"), horizons=
 - **Everywhere.** `ModelPipeline.run`, `report` and `verify`, and `BaseModel.run` take it; `explain` doesn't. A `Workflow` reads
   `model_pipeline.issue_days: [friday]` (`model_issue_days`) and writes it only when it isn't every day; `epf model` and `epf verify`
   take `--issue-days friday,monday`.
+
+## Daily frames
+
+`freq="1D"` fits one model per day, where `"1h"` and `"15min"` fit one per hour or quarter-hour: a day has one period, 0. The frame has
+one row per local date, every row at the same time of day, and that time is the moment the row stands for. Cut it from the hourly
+frame, after the usual transformers, with `at_time`:
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+df_daily = df.at_time("12:00")  # one row per local date, each holding what is true at noon
+pipeline = ModelPipeline().add_model(OLSModel(["load_d+{horizon}"], training_window=365, name="OLS"))
+report = pipeline.run(df_daily, test=("2024-03-01", "2024-03-31"), horizon=3, freq="1D")
+print(report.forecast_counts())
+```
+
+- **The frame.** At most one row per local date, every row at one wall-clock time of day that the clock has once on every date of the
+  frame. Gaps are allowed, as at any `freq`. A time the clocks skip or repeat on some date, such as 02:30 in Europe/Warsaw, raises,
+  because that date's row would be another instant, or two; a naive or UTC index has every time once. Hourly data, two rows on a date
+  and rows at several times of day raise too, each with a message that suggests `df.at_time("12:00")`. There is no
+  transformer for the cut: a daily statistic or profile needs the hourly rows it is built from, so make them first.
+- **The stamp.** A row's time of day is read from the index, and the names mean it. `x_h-1` is `x` one elapsed hour
+  before the stamp, 11:00 on a noon row. `x_d-k` and `x_d+h` are by local day, `{horizon}` is the horizon, and a
+  [`DailyStatsTransformer`](/epftoolbox2/transformers/daily-stats/) or
+  [`DailyProfileTransformer`](/epftoolbox2/transformers/daily-profile/) column is read as on an hourly frame. Stamp at the time the
+  forecast is made, noon in these examples, where the day-ahead auction closes (12:00 CET). The information set's issue
+  time (11:45 by default) is its own setting: the stamp says what a row's hour-shifted columns hold, and the
+  [information set](/epftoolbox2/model-pipeline/information-set/#daily-rows) says whether that is known by the issue time.
+- **One row a day, whatever the day's length.** The period is on the clock of every date, so a switch day plans its keys like any other
+  and `planned` is the issue days times the horizons. A forecast (h, D) trains on the W rows dated D-W-h to D-1-h and forecasts from
+  the row dated D, as [above](#which-rows-a-forecast-reads), and the target of a row is the value h local dates later at the same
+  wall-clock time, so a 23- or 25-hour date is one row like any other.
+- **It is period 12 of the hourly run.** A daily run of `df.at_time("12:00")` gives, key by key and bit for bit, the records that
+  period 12 of the hourly run of `df` gives, but for `hour` (0 against 12) and `freq`. The tests hold that for fixed lists, predictor
+  functions, `train_on="matching"` and `newest_target="published"`, over both clock changes of a year.
+- **What it works with.** `horizons=`, `issue_days=`, `newest_target=`, `validation=` and `test=`, `train_on="matching"` and ensembles.
+  `ModelPipeline.run`, `report`, `verify` and `explain`, `BaseModel.run`, `leakage_probe` and `positive_control` take `freq="1D"`; a
+  `Workflow` reads `model_pipeline.freq: 1D`; `epf model` and `epf verify` take `--freq 1D`, and so does the interactive wizard.
+- **Its results.** Each record has `hour` 0 and `freq` `"1D"`, the shape that `report.aggregate()` already gives, so `tests(by="hour")`
+  raises, `aggregate()` of it raises (the results are daily already) and `join()` takes a report from `aggregate()`: see
+  [Daily runs](/epftoolbox2/model-pipeline/results/#daily-runs).
+- **`explain`.** `hour=None`, its default, is period 12 at `"1h"` and `"15min"` and period 0 at `"1D"`; any other period raises at `"1D"`.
+  It prints the time of the row, such as `period 0 (12:00)`.
+
+### Stamp at noon, not at midnight
+
+A frame whose rows are stamped at midnight but hold what is true at noon, such as a file of daily snapshots, must be restamped to noon
+before it runs. Left at midnight, `load_actual_h-1` reads as 23:00 on D-1, known by 01:00, so it passes as known. The column holds the
+load of 11:00 on D, known at 13:00, and neither the information-set check nor `verify` can see the look-ahead. Restamp on the wall
+clock: adding twelve hours to a midnight that has a time zone gives 13:00 on the day the clocks go forward, and the frame is refused.
+
+```python
+import pandas as pd
+
+wall = snapshots.index.tz_localize(None).normalize() + pd.Timedelta(hours=12)
+df_daily = snapshots.set_axis(wall.tz_localize("Europe/Warsaw"))
+```
+
+### What a daily run cannot do
+
+`EconomicEvaluator` schedules a battery over the periods of a day, and a daily run has one. A pipeline with one and `freq="1D"` raises
+`ValueError` in `ModelPipeline.run` (also with `forecast_only`) and in `report()`, before any model is planned or run. Remove the
+evaluator, or score an hourly run of the same models. `CsvExporter(extra_columns=...)` joins its columns by target date and period, so
+for daily results it needs a daily source, else every hour of a date would join period 0: see
+[CsvExporter](/epftoolbox2/exporters/csv/#extra-columns).
 
 ## Gaps in the data
 

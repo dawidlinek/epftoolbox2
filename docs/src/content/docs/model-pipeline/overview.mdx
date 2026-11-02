@@ -30,7 +30,7 @@ report = pipeline.run(
     test_end="2024-03-01",
     target="price",
     horizon=7,
-    freq="1h",                   # Optional. Allows sub-hourly testing like "15min"
+    freq="1h",                   # Optional. "15min" for sub-hourly testing, "1D" for one row a day
     save_dir="results",
 )
 ```
@@ -188,7 +188,7 @@ Set a model's `scaler` parameter to `"asinh"` or `"npit"` to use a variance-stab
 | `test_end` | str | `None` | Test period end; or `test` |
 | `target` | str | `"price"` | Target column name |
 | `horizon` | int | `None` | Every horizon from 1 to it (days); 7 if neither it nor `horizons` is given |
-| `freq` | str | `"1h"` | Forecasting frequency (e.g., `"15min"`) |
+| `freq` | str | `"1h"` | Forecasting frequency: `"1h"`, `"15min"`, or `"1D"` for a frame with one row per local date at one time of day. See [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames) |
 | `save_dir` | str | `None` | Directory for incremental results |
 | `forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted |
 | `validation` | tuple \| str | `None` | Validation period `(start, end)`, or `"previous_year"`. Alone it forecasts only those days. See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/), and [Ensembles](/epftoolbox2/model-pipeline/ensembles/) for what can choose on it |
@@ -204,7 +204,7 @@ Model names must be unique: they name the result files in `save_dir`.
 
 Before any model is fitted, `run()` checks every model's input and raises `ValueError` with a description of the problem:
 
-- **Resolution:** rows must be `freq` apart, with one row per local day and period (hour, or quarter-hour for `freq="15min"`). Only the hour repeated when clocks fall back may occur twice. Data finer than `freq` would mix several times of day in one period. Resample it first (`ResampleTransformer`) or pass the matching `freq`. Gaps (missing days, periods or scattered rows) are allowed, but rows off the `freq` grid are not, and neither is more than a day of rows evenly spaced at a multiple of `freq`, e.g. hourly prices before 15-minute ones with `freq="15min"`: that would train the quarter-hour periods on far fewer days than the full hours. The spacing is checked only on the days a run can read, from `test_start` minus `training_window + horizon + 1` days to `test_end` plus `horizon + 1` days, so hourly history before the switch doesn't block a run that stays inside the 15-minute part. If the run does reach it, bring those rows to one grid with `ResampleTransformer(freq="15min")` or shorten the training window. Duplicates and several rows in one slot are refused anywhere in the frame.
+- **Resolution:** rows must be `freq` apart, with one row per local day and period (hour, or quarter-hour for `freq="15min"`). Only the hour repeated when clocks fall back may occur twice. Data finer than `freq` would mix several times of day in one period. Resample it first (`ResampleTransformer`) or pass the matching `freq`. Gaps (missing days, periods or scattered rows) are allowed, but rows off the `freq` grid are not, and neither is more than a day of rows evenly spaced at a multiple of `freq`, e.g. hourly prices before 15-minute ones with `freq="15min"`: that would train the quarter-hour periods on far fewer days than the full hours. The spacing is checked only on the days a run can read, from `test_start` minus `training_window + horizon + 1` days to `test_end` plus `horizon + 1` days, so hourly history before the switch doesn't block a run that stays inside the 15-minute part. If the run does reach it, bring those rows to one grid with `ResampleTransformer(freq="15min")` or shorten the training window. Duplicates and several rows in one slot are refused anywhere in the frame. At `freq="1D"` the rule is at most one row per local date, every row at one time of day, and finer data is refused: see [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames).
 - **Timestamps:** no duplicates. Rows are sorted by time.
 - **Names:** the data must not contain the model's target columns (`{target}_d+1` … `{target}_d+{horizon}`, e.g. from a `LagTransformer` with negative lags on the target) or columns named `hour` or `day`, which the model uses internally (use `CalendarSource(prefix=...)` for its `hour` column).
 - **Predictors:** every expanded predictor (for every hour and horizon) must exist, be numeric, and must not be one of the model's targets.

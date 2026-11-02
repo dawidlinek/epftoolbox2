@@ -59,12 +59,12 @@ They work as [before](/epftoolbox2/model-pipeline/overview/) and can't be saved.
 | | |
 |---|---|
 | `ctx.horizon` | Days ahead of the issue day, from 1 |
-| `ctx.period` | Period of the target day: 0-23, or 0-95 for 15-minute data. `ctx.hour` is the same number |
+| `ctx.period` | Period of the target day: 0-23, 0-95 for 15-minute data, or 0 for a daily frame. `ctx.hour` is the same number |
 | `ctx.issue_day` | The local calendar date D the forecast is issued on |
 | `ctx.target_day` | The local calendar date D + horizon it is for |
 | `ctx.target_weekday` | Weekday of the target day, 0 = Monday |
 | `ctx.zone` | The data's time zone name (None for a naive index) |
-| `ctx.freq` | `"1h"` or `"15min"` |
+| `ctx.freq` | `"1h"`, `"15min"` or `"1D"` |
 | `ctx.published(columns)` | Whether the forecast's own cells are known and present, see below |
 | `ctx.value(column)` | The value of the forecast's own cell, see below |
 
