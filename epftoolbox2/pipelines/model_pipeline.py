@@ -10,6 +10,7 @@ import yaml
 from .._date_utils import resolve_date
 from ..information_set import InformationSet, InformationSetError, check_level
 from ..models._calendar import (
+    DAILY,
     IssueCalendar,
     check_issue_days_in,
     horizon_arguments,
@@ -24,6 +25,7 @@ from ..ensembles._compute import compute
 from ..ensembles.base import Ensemble
 from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
+from ..evaluators.economic import EconomicEvaluator
 from ..exporters.base import Exporter
 from ..results.availability import read_listing, warn_about
 from ..results.manifest import (
@@ -189,6 +191,11 @@ class ModelPipeline:
         `day_in_test` still counts calendar days, and the other days are neither planned nor missing. A window without one of
         these weekdays raises. The results record them.
 
+        `freq` is the resolution of the data and of the forecasts: one model per hour ("1h"), per quarter-hour ("15min"), or
+        one per day ("1D") on a frame with one row per local date, every row at the time of day it stands for, such as
+        `hourly.at_time("12:00")`: the stamp says what `x_h-1` is (11:00 here) and when a value is known, so stamp it at the
+        time a forecast is made, not at midnight (see the docs page Time and Calendars). A daily run's records have `hour` 0 and `freq` "1D". `EconomicEvaluator` can't score it and raises before any fit.
+
         With `save_dir`, each model's results are resumable JSONL with a manifest recording the
         configuration that produced them (epftoolbox2.results.manifest). Resuming into results made with
         a different configuration raises `ManifestMismatchError`; `allow_manifest_mismatch` overwrites the
@@ -217,6 +224,7 @@ class ModelPipeline:
         weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
         self._check_availability()
+        self._check_evaluators_for(freq)
         if not forecast_only:
             self._check_benchmarks()
         windows, test_start, test_end = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
@@ -441,6 +449,7 @@ class ModelPipeline:
             raise ValueError("At least one model is required")
         told_weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
+        self._check_evaluators_for(freq)
         if not forecast_only:
             self._check_benchmarks()
         self._check_ensembles(save_dir)
@@ -788,7 +797,7 @@ class ModelPipeline:
             target: Target column.
             horizon: Max horizon: every horizon from 1 to it, 1 if neither it nor `horizons` is given. Leave no horizon you
                 run out: a leak in another one can't be seen (`run` defaults to 7).
-            freq: "1h" or "15min"; must match the data.
+            freq: "1h", "15min" or "1D"; must match the data.
             days: Issue days per model (all of the period if it has fewer).
             seed: Picks the issue days and the noise.
             models: Names of the models to verify. None verifies them all.
@@ -841,7 +850,7 @@ class ModelPipeline:
         model: str,
         test: Optional[Tuple[Any, Any]] = None,
         horizon: Optional[int] = None,
-        hour: int = 12,
+        hour: Optional[int] = None,
         target: str = "price",
         freq: str = "1h",
         echo: bool = True,
@@ -869,14 +878,17 @@ class ModelPipeline:
             model: The model's name.
             test: (first, last) issue day. None takes every day of `data`, for fixed lists only.
             horizon: Days ahead of the issue day of the forecast shown, 1 if neither it nor `horizons` is given.
-            hour: Its period of the target day: 0-23, or 0-95 for 15-minute data.
+            hour: Its period of the target day: 0-23, 0-95 for 15-minute data, 0 for a daily frame. None is 12 (noon at 1h),
+                or 0 at "1D".
             target: Target column.
-            freq: "1h" or "15min"; must match the data.
+            freq: "1h", "15min" or "1D"; must match the data.
             echo: Print the tables.
             horizons: The horizons a run lists (`run(horizons=...)`), in place of `horizon`: the forecast shown is at the
                 largest, and `lists` has these alone. Passing both raises.
         """
         horizon, horizons = resolve_horizons(horizon, horizons, 1)
+        if hour is None:
+            hour = 0 if freq == DAILY else 12
         chosen = copy.deepcopy(self._select_models([model])[0])  # planning leaves state on a model; this is only a look
         if test is not None:
             test = (resolve_date(test[0]), resolve_date(test[1]))
@@ -908,6 +920,15 @@ class ModelPipeline:
             raise ValueError(
                 f"{what} must be unique (also after lower-casing and replacing spaces, since they name the "
                 f"result files): {names}"
+            )
+
+    def _check_evaluators_for(self, freq: str) -> None:
+        """An evaluator that can't score results at `freq` raises before any fit: `EconomicEvaluator` schedules a strategy over
+        the periods of a day, and a daily run has one."""
+        if freq == DAILY and any(isinstance(evaluator, EconomicEvaluator) for evaluator in self.evaluators):
+            raise ValueError(
+                "EconomicEvaluator schedules a trading strategy over the periods of a day, and with freq='1D' a day has "
+                "one forecast. Remove it from this pipeline, or score an hourly run of the same models."
             )
 
     def _check_benchmarks(self) -> None:

@@ -1092,7 +1092,9 @@ def _load_data_csv(path: Path):  # noqa: ANN202
 
 
 def _ask_freq() -> str:
-    freq = questionary.select("  Data resolution (one model per period)", choices=["1h", "15min"], default="1h").ask()
+    freq = questionary.select(
+        "  Data resolution (one model per period)", choices=["1h", "15min", "1D"], default="1h"
+    ).ask()
     if freq is None:
         _abort()
     return freq
