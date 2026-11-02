@@ -620,25 +620,53 @@ def test_an_hour_the_clock_skips_half_of_is_planned_with_its_row():
     assert ("2024-10-06", 2, 1) in records and np.isnan(records[("2024-10-05", 2, 1)]["actual"])
 
 
-def unplanned_only(ctx):
-    """A list with a late column, and a late read, only where the clock has no 02:00: the spring switch day."""
-    if ctx.issue_day == datetime.date(2023, 3, 26) and ctx.period == 2:
+SPRING = datetime.date(2023, 3, 26)
+
+
+def aimed_at_the_skipped_hour(ctx):
+    """A list with a late column, and a late read, only on keys the clock doesn't have: the 02:00 aimed at the spring switch day,
+    whose row on the day before exists, and the 02:00 issued on it, which has none."""
+    if ctx.period == 2 and SPRING in (ctx.issue_day, ctx.target_day):
         ctx.value("late")
         return PREDICTORS + ["late"]
     return PREDICTORS
 
 
-@pytest.mark.parametrize("level", ["warn", "raise"])
-def test_a_list_only_on_a_slot_the_clock_skips_is_neither_listed_nor_refused(level):
+def also_at_five(ctx):
+    """A list with a column without a rule too, at 02:00 of the day before the switch, aimed at the skipped hour, and at 05:00,
+    where it is planned."""
+    if ctx.period in (2, 5) and ctx.issue_day == SPRING - datetime.timedelta(days=1):
+        return PREDICTORS + ["late", "no_rule"]
+    return aimed_at_the_skipped_hour(ctx)
+
+
+def with_late_columns():
     data = make_market_data(noise=5.0, seed=42)
-    data["late"] = data["load"]
-    info = InformationSet("11:00", "Europe/Warsaw", rules={**RULES, "late": Availability.published("13:00", -1)})
+    data["late"] = data["load"] + np.random.default_rng(0).normal(0, 1, len(data))
+    data["no_rule"] = data["wind"]
+    return data, InformationSet("11:00", "Europe/Warsaw", rules={**RULES, "late": Availability.published("13:00", -1)})
+
+
+@pytest.mark.parametrize("level", ["warn", "raise"])
+def test_a_list_only_on_slots_the_clock_skips_is_neither_listed_nor_refused(level):
+    data, info = with_late_columns()
     pipeline = ModelPipeline(information_set=info, availability=level)
-    pipeline.add_model(OLSModel(unplanned_only, training_window=WINDOW, name="m"))
+    pipeline.add_model(OLSModel(aimed_at_the_skipped_hour, training_window=WINDOW, name="m"))
     report = pipeline.run(data, test=("2023-03-25", "2023-03-27"), horizon=1)
     assert report.availability().empty
     assert sorted(entry["forecasts"] for entry in report.refs["m"].predictor_lists) == [0, report.refs["m"].count]
-    assert pipeline.verify(data, "2023-03-26", "2023-03-26", horizon=1, days=1).status("m") == "ok"
+    verify = pipeline.verify(data, "2023-03-25", "2023-03-25", horizon=1, days=1)
+    assert verify.status("m") == "ok", verify.problems()
+
+
+def test_a_list_also_on_a_planned_key_is_listed_for_that_key_alone():
+    data, info = with_late_columns()
+    pipeline = ModelPipeline(information_set=info, availability="warn")
+    pipeline.add_model(OLSModel(also_at_five, training_window=WINDOW, name="m"))
+    with pytest.warns(UserWarning):
+        report = pipeline.run(data, test=("2023-03-25", "2023-03-27"), horizon=1)
+    rows = {(r["predictor"], r["role"], r["status"]): r["periods"] for r in report.availability().to_dict("records")}
+    assert rows == {("late", "predictor", "late"): "5", ("no_rule", "predictor", "no rule"): "5"}
 
 
 def test_the_lists_of_a_predictor_function_count_the_planned_forecasts(two_years):
