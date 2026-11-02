@@ -122,6 +122,44 @@ def _load_model_pipeline(args: argparse.Namespace):
     return mp
 
 
+def horizon_list(text: str) -> tuple:
+    """`--horizons`: `3-9` (every one from 3 to 9), `1,3,7`, or both kinds joined by commas (`1-3,7`)."""
+    found = []
+    for part in text.split(","):
+        first, dash, last = part.strip().partition("-")
+        try:
+            found.extend(range(int(first), int(last) + 1) if dash else [int(first)])
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"{text!r} is not a list of horizons: write 3-9, 1,3,7 or 1-3,7 (whole numbers of days)"
+            ) from None
+        if dash and int(last) < int(first):
+            raise argparse.ArgumentTypeError(f"{part.strip()!r} runs backwards: write {last}-{first}")
+    from .models._calendar import resolve_horizons
+
+    try:
+        return resolve_horizons(None, found, 1)[1]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _add_horizon_arguments(parser: argparse.ArgumentParser, default: int) -> None:
+    """`--horizon N` (every horizon from 1 to N) or `--horizons 3-9` / `1,3,7`, not both."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--horizon",
+        type=int,
+        metavar="N",
+        help=f"Forecast horizon in days: every horizon from 1 to N (default: {default})",
+    )
+    group.add_argument(
+        "--horizons",
+        type=horizon_list,
+        metavar="LIST",
+        help="Only these horizons, in days: 3-9, 1,3,7 or 1-3,7 (in place of --horizon)",
+    )
+
+
 def cmd_model(args: argparse.Namespace) -> None:
     from .results.windows import RunWindows, to_period
 
@@ -148,6 +186,7 @@ def cmd_model(args: argparse.Namespace) -> None:
         validation=validation,
         target=args.target,
         horizon=args.horizon,
+        horizons=args.horizons,
         freq=args.freq,
         save_dir=args.save_dir,
         forecast_only=args.forecast_only,
@@ -166,6 +205,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
             test_end=args.test_end,
             target=args.target,
             horizon=args.horizon,
+            horizons=args.horizons,
             freq=args.freq,
             days=args.days,
             seed=args.seed,
@@ -369,7 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     model_p.add_argument("--target", default="price", metavar="COL", help="Target column name (default: price)")
-    model_p.add_argument("--horizon", type=int, default=7, metavar="N", help="Forecast horizon in days (default: 7)")
+    _add_horizon_arguments(model_p, 7)
     model_p.add_argument(
         "--freq",
         default="1h",
@@ -421,7 +461,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_p.add_argument("--test-start", required=True, metavar="DATE", help="First issue day to sample from")
     verify_p.add_argument("--test-end", required=True, metavar="DATE", help="Last issue day to sample from")
     verify_p.add_argument("--target", default="price", metavar="COL", help="Target column name (default: price)")
-    verify_p.add_argument("--horizon", type=int, default=1, metavar="N", help="Forecast horizon in days (default: 1)")
+    _add_horizon_arguments(verify_p, 1)
     verify_p.add_argument(
         "--freq",
         default="1h",

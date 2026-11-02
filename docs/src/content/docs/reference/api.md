@@ -165,7 +165,7 @@ class Workflow:
         model_pipeline: Optional[Union[str, Path]] = None,   # Path to model_pipeline.yaml
         data_cache: Union[bool, str] = False,                 # Data caching option
         model_target: str = "price",                          # Target column
-        model_horizon: int = 7,                               # Max forecast horizon
+        model_horizon: Optional[int] = None,                  # Every horizon from 1 to it; 7 if neither is given
         model_freq: str = "1h",                               # "1h" or "15min"
         model_forecast_only: bool = False,                    # Skip evaluators/exporters
         max_processes: Optional[int] = None,                  # Worker process count
@@ -178,6 +178,7 @@ class Workflow:
         model_validation: Any = None,                         # [start, end] or "previous_year"
         model_test: Optional[Sequence[Any]] = None,           # [start, end], the same as model_test_start and _end
         models_per_task: Optional[int] = None,                # With model_index: task i runs models [i*k, (i+1)*k)
+        model_horizons: Optional[Sequence[int]] = None,       # Only these horizons, e.g. [1, 3, 7]; not with model_horizon
     ): ...
 
     def run(self) -> EvaluationReport: ...

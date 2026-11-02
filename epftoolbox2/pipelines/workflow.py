@@ -8,6 +8,7 @@ import yaml
 from .data_pipeline import DataPipeline
 from .model_pipeline import ModelPipeline
 from ..information_set import InformationSet
+from ..models._calendar import every_horizon, resolve_horizons
 from ..results.report import EvaluationReport
 from ..logging import get_logger
 from ._yaml import dump_yaml
@@ -69,6 +70,9 @@ class Workflow:
     `test: [start, end]`, next to the older `test_start` and `test_end`, and mean what they mean in
     `ModelPipeline.run`. A merge raises if the array's tasks ran on different windows.
 
+    `model_pipeline.horizon: H` forecasts every horizon from 1 to H (7 if absent), and `horizons: [1, 3, 7]` (`model_horizons`)
+    only those; giving both raises. `report()` passes the same to `ModelPipeline.report`.
+
     Example:
         >>> workflow = Workflow(
         ...     data_pipeline="data_pipeline.yaml",
@@ -95,7 +99,7 @@ class Workflow:
         model_pipeline: Optional[Union[str, Path]] = None,
         data_cache: Union[bool, str] = False,
         model_target: str = "price",
-        model_horizon: int = 7,
+        model_horizon: Optional[int] = None,
         model_freq: str = "1h",
         model_forecast_only: bool = False,
         max_processes: Optional[int] = None,
@@ -108,7 +112,9 @@ class Workflow:
         model_validation: Any = None,
         model_test: Optional[Sequence[Any]] = None,
         models_per_task: Optional[int] = None,
+        model_horizons: Optional[Sequence[int]] = None,
     ):
+        resolve_horizons(model_horizon, model_horizons, 7)  # both, or a list that isn't one, raise before anything runs
         self.data_pipeline = str(data_pipeline) if data_pipeline is not None else None
         self.model_pipeline = str(model_pipeline) if model_pipeline is not None else None
         self.data_start = data_start
@@ -118,6 +124,7 @@ class Workflow:
         self.model_test_end = model_test_end
         self.model_target = model_target
         self.model_horizon = model_horizon
+        self.model_horizons = model_horizons
         self.model_freq = model_freq
         self.model_forecast_only = model_forecast_only
         self.max_processes = max_processes
@@ -272,6 +279,7 @@ class Workflow:
             test_end=self.model_test_end,
             target=self.model_target,
             horizon=self.model_horizon,
+            horizons=self.model_horizons,
             freq=self.model_freq,
             save_dir=str(save_dir) if save_dir else None,
             forecast_only=self.model_forecast_only,
@@ -306,6 +314,7 @@ class Workflow:
             test_start=self.model_test_start,
             test_end=self.model_test_end,
             horizon=self.model_horizon,
+            horizons=self.model_horizons,
             freq=self.model_freq,
             forecast_only=self.model_forecast_only,
             data=self._run_data() if needs_data else None,
@@ -337,12 +346,13 @@ class Workflow:
         dp.update(self._dp_inline)
         config["data_pipeline"] = dp
 
-        mp: dict = {
-            "target": self.model_target,
-            "horizon": self.model_horizon,
-            "freq": self.model_freq,
-            "forecast_only": self.model_forecast_only,
-        }
+        mp: dict = {"target": self.model_target}
+        horizon, horizons = resolve_horizons(self.model_horizon, self.model_horizons, 7)
+        if every_horizon(horizon, horizons):  # range(1, H + 1) is horizon: H
+            mp["horizon"] = horizon
+        else:
+            mp["horizons"] = list(horizons)
+        mp.update({"freq": self.model_freq, "forecast_only": self.model_forecast_only})
         if self.model_test_start is not None:
             mp["test_start"] = self.model_test_start
         if self.model_test_end is not None:
@@ -389,7 +399,8 @@ class Workflow:
             model_test_start=mp.get("test_start"),
             model_test_end=mp.get("test_end"),
             model_target=mp.get("target", "price"),
-            model_horizon=mp.get("horizon", 7),
+            model_horizon=mp.get("horizon"),
+            model_horizons=mp.get("horizons"),
             model_freq=mp.get("freq", "1h"),
             model_forecast_only=mp.get("forecast_only", False),
             max_processes=env.get("max_processes"),
