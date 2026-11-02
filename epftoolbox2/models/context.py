@@ -52,14 +52,13 @@ from ..information_set import (
 )
 from ..results.availability import listing_rows, sort_rows
 from ..results.windows import mask_key
-from ._calendar import IssueCalendar
+from ._calendar import IssueCalendar, periods_per_day
 from ._contract import period_index, wall_clock
 from ._worker import NOT_PLANNED, OTHER_LIST
 
 _HORIZON = "{horizon}"
 # How many lists an InformationSetError spells out; a late column often sits in every list.
 _LISTS_SHOWN = 5
-_STEP_PERIODS = {freq: 1440 // minutes for freq, minutes in _STEP_MINUTES.items()}
 
 TRAIN_ON_ALL = "all"
 TRAIN_ON_MATCHING = "matching"
@@ -207,7 +206,7 @@ class _Cells:
         self._level = availability
         self._step = _STEP_MINUTES[freq]
         self.freq = freq
-        self.periods = 1440 // self._step
+        self.periods = periods_per_day(freq)
         self.zone = str(index.tz) if getattr(index, "tz", None) is not None else None
         days = pd.DatetimeIndex(issue_days).as_unit("ns")
         self._n_days = len(days)
@@ -221,7 +220,9 @@ class _Cells:
         self._rows = order[planned]
         self._row_cell = (period_index(ordered, freq)[planned], position[planned])
         self._periods = np.arange(self.periods)
-        self._clock = information_set._issue_clock(days, index) if information_set is not None and len(days) else None
+        self._clock = (
+            information_set._issue_clock(days, index, freq) if information_set is not None and len(days) else None
+        )
         self._columns: Dict[str, ResolvedColumn] = {}
         self._values: Dict[str, np.ndarray] = {}
         self._available: Dict[str, np.ndarray] = {}
@@ -452,12 +453,12 @@ class PredictorContext:
 
     Attributes:
         horizon: Days ahead of the issue day, from 1.
-        period: Period of the target day: 0-23, or 0-95 for 15-minute data. `hour` is the same number.
+        period: Period of the target day: 0-23, 0-95 for 15-minute data, or 0 for a daily frame. `hour` is the same number.
         issue_day: The local calendar date D the forecast is issued on.
         target_day: The local calendar date D + horizon it is for.
         target_weekday: Weekday of `target_day`, 0 = Monday.
         zone: The data's time zone name, or None for a naive index.
-        freq: `"1h"` or `"15min"`.
+        freq: `"1h"`, `"15min"` or `"1D"`.
     """
 
     __slots__ = ("horizon", "period", "issue_day", "target_day", "zone", "freq", "_cells", "_position")
@@ -529,7 +530,7 @@ class PredictorPlan:
         issue_days: The planned issue days, in order.
         horizon: The largest horizon planned, which says how far back the training days of a matching list reach
             (`first_grid_day`).
-        freq: `"1h"` or `"15min"`.
+        freq: `"1h"`, `"15min"` or `"1D"`.
         lists: Each distinct list, names expanded, in the order first returned. A list id is a position here.
         train_on: Each list's training rule.
         hashes: Each list's `list_hash`, as records store it.
@@ -727,7 +728,7 @@ class PredictorPlan:
         if self._checked or not self.issue_days:
             return
         info = self.information_set
-        boundary = {(period, 1): [] for period in range(_STEP_PERIODS[self.freq])}
+        boundary = {(period, 1): [] for period in range(periods_per_day(self.freq))}
         cells, target_violations, unknown, late_names, _ = self._scan(target, boundary)
         info._report_unknown(unknown, model_name)
         if target_violations:
@@ -803,7 +804,7 @@ class PredictorPlan:
         grid = self._grid_positions()
         is_training_day = np.ones(self._grid_size(), dtype=bool)
         is_training_day[grid] = False
-        periods, horizons = _STEP_PERIODS[self.freq], self.horizons
+        periods, horizons = periods_per_day(self.freq), self.horizons
         on_issue_days = {horizon: np.tile(on_days, (periods, 1)) for horizon in horizons}
         on_training_days = {
             horizon: np.zeros((periods, int(is_training_day.sum())), dtype=bool) for horizon in horizons

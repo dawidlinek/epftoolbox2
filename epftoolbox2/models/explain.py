@@ -26,6 +26,7 @@ from ..information_set import (
     _ranges,
     parse_predictor,
 )
+from .._date_utils import fmt_minutes
 from . import _contract
 from .context import TRAIN_ON_MATCHING, PredictorPlan, function_name
 
@@ -63,7 +64,8 @@ def target_relative(name: str, period: int, horizon: int, freq: str, clock: _Iss
     if col.built_from is None and _built_from_name(col.base) is not None:
         return "?"  # a `_sNN` slot on hourly data doesn't say how long a slot is
     days = clock.offset[used]
-    start, end = _delivered_span(col, days, np.full(len(days), float(period * step)), step, clock.ctx)
+    minute = clock.row_minutes(np.array([period]), step)[0]  # a daily row's is the time it is stamped at
+    start, end = _delivered_span(col, days, np.full(len(days), minute), step, clock.ctx)
     target = (days + horizon) * 1440.0
     counts = Counter(zip((start - target).tolist(), (end - target).tolist()))
     (first, last), common = counts.most_common(1)[0]
@@ -287,7 +289,7 @@ def explain_model(
     # What `run` refuses it can't explain: the default freq on 15-minute data would read period 10 as 10:00, not 02:30.
     model._check_frame(data, target, horizon, freq, start, end, newest=newest)
     model._newest = newest
-    clock = (info or _NAMES)._issue_clock(days, data.index)
+    clock = (info or _NAMES)._issue_clock(days, data.index, freq)
     out: Dict[str, pd.DataFrame] = {}
     if model._ctx_fn is not None:
         # At "warn", so that a late `ctx.value()` is a thing to show rather than an error.
@@ -314,7 +316,8 @@ def explain_model(
     if newest is not None:
         out["newest_target"] = newest_target_table(newest.k[hour][used], horizon)
     if echo:
-        _print(out, subject, info, days, horizon, hour, freq, used, data.index, model._ctx_fn)
+        minute = clock.row_minutes(np.array([hour]), _STEP_MINUTES[freq])[0]
+        _print(out, subject, info, days, horizon, hour, freq, used, data.index, model._ctx_fn, minute)
     return out
 
 
@@ -334,14 +337,13 @@ def _day_label(offset: int) -> str:
     return "D" if offset == 0 else f"D{offset:+d}"
 
 
-def _print(out, subject, info, days, horizon, hour, freq, used, index, function) -> None:
+def _print(out, subject, info, days, horizon, hour, freq, used, index, function, minute) -> None:
     if function is not None:
         print(f"{function_name(function)}: {out['lists']['list'].nunique()} distinct list(s)")
         print(out["lists"].to_string(index=False))
         print()
-    step = _STEP_MINUTES[freq]
     issued = f"issued {info.issue_time} {info.issue_timezone} on D" if info is not None else "no issue time"
-    time_of_day = f"{hour * step // 60:02d}:{hour * step % 60:02d}"
+    time_of_day = fmt_minutes(minute)
     print(
         f"{subject}: horizon {horizon}, period {hour} ({time_of_day}); T = D + {horizon}; {issued}; "
         f"issue days {days[0].date()} … {days[-1].date()}"

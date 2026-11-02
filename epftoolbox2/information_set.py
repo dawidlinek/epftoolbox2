@@ -30,6 +30,7 @@ from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Se
 import numpy as np
 import pandas as pd
 
+from ._date_utils import daily_anchor
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -42,7 +43,10 @@ _UNKNOWN_POLICIES = ("raise", "warn", "ignore")
 AVAILABILITY_LEVELS = ("none", "warn", "raise")
 _SUFFIX = re.compile(r"^(?P<base>.+)_(?P<unit>d|h|min|s)(?P<sign>[+-])(?P<n>\d+)$")
 _UNIT_MINUTES = {"d": 1440.0, "h": 60.0, "min": 1.0, "s": 1.0 / 60.0}
-_STEP_MINUTES = {"1h": 60, "15min": 15}
+# A period's length in minutes. A daily row ("1D") is no slot: its `h` shifts and its profiles and aggregates are hourly,
+# so its step is an hour, and its periods (one) come from `models._calendar.periods_per_day`, its time from its index.
+_STEP_MINUTES = {"1h": 60, "15min": 15, "1D": 60}
+_DAILY = "1D"
 _EPOCH = pd.Timestamp("1970-01-01")  # days and minutes counted from it, in `_zone_table`
 # DailyProfileTransformer's slot suffixes (`data.transformers._daily.slot_names`): `_h00`..`_h23` for hourly data,
 # `_s00`..`_s95` for 15-minute data. No sign, so they never parse as a shift.
@@ -826,7 +830,7 @@ class InformationSet:
         days = pd.DatetimeIndex(issue_days) if issue_days is not None else self._issue_days(index, test_start, test_end)
         if not len(days):
             return [], unknown
-        clock = self._issue_clock(days, index)
+        clock = self._issue_clock(days, index, freq)
 
         late: Dict[Tuple[str, str, int], _LatePeriod] = {}  # (name, role, period) -> its worst day
         for (name, role), rows in periods.items():
@@ -873,7 +877,7 @@ class InformationSet:
         self._check_source_zone(col, index)
         days = pd.DatetimeIndex(pd.to_datetime([str(pd.Timestamp(day).date()) for day in days]))
         # A pipeline asks for the same table several times per model (planning, the input check, the run), and a sweep of
-        # variants once per variant, so tables are kept by everything they are computed from.
+        # variants once per variant, so tables are kept by everything they are computed from, a daily row's time included.
         key = (
             repr(col),
             self.issue_time,
@@ -881,6 +885,7 @@ class InformationSet:
             self._data_zone(index),
             getattr(index, "tz", None) is None,
             freq,
+            _row_anchor(index, freq) if len(days) else None,
             tuple(days.asi8.tolist()),
             int(horizon),
         )
@@ -899,11 +904,11 @@ class InformationSet:
         self, col: ResolvedColumn, target: str, freq: str, index: pd.DatetimeIndex, days: pd.DatetimeIndex, horizon: int
     ) -> np.ndarray:
         step = _STEP_MINUTES[freq]
-        periods = np.arange(1440 // step)
+        periods = np.arange(_periods_per_day(freq))
         newest = np.full((len(periods), len(days)), max(horizon - 1, NEWEST_TARGET_FROM), dtype=np.int64)
         if not len(days):
             return newest
-        clock = self._issue_clock(days, index)
+        clock = self._issue_clock(days, index, freq)
         open_cells = np.ones(newest.shape, dtype=bool)  # every cell from D-31 up to k is known
         for k in range(NEWEST_TARGET_FROM, horizon):
             known = clock.available(col, periods, step, row_day=k) <= clock.issue
@@ -922,12 +927,17 @@ class InformationSet:
                 break
         return newest
 
-    def _issue_clock(self, days: pd.DatetimeIndex, index: pd.DatetimeIndex) -> "_IssueClock":
-        """The issue times of these issue days (naive midnights, the first one first) on an index like `index`."""
+    def _issue_clock(
+        self, days: pd.DatetimeIndex, index: pd.DatetimeIndex, freq: Optional[str] = None
+    ) -> "_IssueClock":
+        """The issue times of these issue days (naive midnights, the first one first) on an index like `index`, whose rows are
+        at `freq`: a daily frame's row is at the time of day its index says (`_date_utils.daily_anchor`), any other's at its
+        period."""
         ctx = _Context(days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None)
         offset = np.asarray((days - days[0]) // pd.Timedelta(days=1), dtype=np.int64)
         issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), self.issue_timezone, ctx)
-        return _IssueClock(days, ctx, offset, issue, _to_instants(offset * 1440.0, ctx.data_zone, ctx))
+        midnight = _to_instants(offset * 1440.0, ctx.data_zone, ctx)
+        return _IssueClock(days, ctx, offset, issue, midnight, _row_anchor(index, freq))
 
     def _late_periods(
         self,
@@ -1105,7 +1115,17 @@ class _IssueClock:
     offset: np.ndarray  # each issue day as days after the first
     issue: np.ndarray  # its issue instant in minutes since the first's midnight (`ctx.origin`)
     midnight: np.ndarray  # its own midnight in the same minutes: elapsed time, so days of 23 and 25 hours count as such
+    # A daily frame's row time, wall-clock minutes after midnight, the same on every date (`_contract.check_index`); None for
+    # rows at their period's start.
+    anchor: Optional[float] = None
     _skipped: Dict[Tuple[int, int], np.ndarray] = field(default_factory=dict, compare=False, repr=False)
+
+    def row_minutes(self, periods: np.ndarray, step: int) -> np.ndarray:
+        """The wall-clock minute of the row of each period: its start, or on a daily frame the time its rows are stamped at."""
+        periods = np.asarray(periods)
+        if self.anchor is not None:
+            return np.full(len(periods), self.anchor, dtype=float)
+        return (periods * step).astype(float)
 
     def available(self, col: ResolvedColumn, periods: np.ndarray, step: int, row_day: int = 0) -> np.ndarray:
         """The instant the value of `col` at the row (D + row_day, period) is known, in minutes since the first issue
@@ -1122,9 +1142,10 @@ class _IssueClock:
         """`available` with `col` read through `rule` instead of its own."""
         periods = np.asarray(periods)
         issue_day = np.tile(self.offset, len(periods))
-        minute = np.repeat(periods * step, len(self.days)).astype(float)
+        minute = np.repeat(self.row_minutes(periods, step), len(self.days))
         later = np.zeros(len(minute), dtype=bool)
-        avail = _available_array(col, rule, issue_day + row_day, minute, step, self.ctx, later, issue_day)
+        daily = self.anchor is not None
+        avail = _available_array(col, rule, issue_day + row_day, minute, step, self.ctx, later, issue_day, daily)
         avail = avail.reshape(len(periods), len(self.days))
         if not self.ctx.naive:
             skipped = self.skipped(periods, step, row_day)
@@ -1148,11 +1169,16 @@ class _IssueClock:
     def _skipped_slots(self, step: int, row_day: int) -> np.ndarray:
         from .models._calendar import clock_periods_on  # models import this module
 
-        grid = np.zeros((1440 // step, len(self.days)), dtype=bool)
+        # A daily row's period, 0, is on the clock of every date, as for the planning.
+        freq = (
+            _DAILY
+            if self.anchor is not None
+            else next(name for name, minutes in _STEP_MINUTES.items() if minutes == step)
+        )
+        grid = np.zeros((_periods_per_day(freq), len(self.days)), dtype=bool)
         if self.ctx.naive:
             return grid
         days = self.days + pd.Timedelta(days=row_day)
-        freq = next(name for name, minutes in _STEP_MINUTES.items() if minutes == step)
         exists = clock_periods_on(days, freq, self.ctx.data_zone)
         for j, day in enumerate(days):
             grid[:, j] = True
@@ -1198,6 +1224,17 @@ class _LatePeriod(NamedTuple):
             self.known_label,
             self.issue_label,
         )
+
+
+def _periods_per_day(freq: str) -> int:
+    from .models._calendar import periods_per_day  # models import this module
+
+    return periods_per_day(freq)
+
+
+def _row_anchor(index: pd.DatetimeIndex, freq: Optional[str]) -> Optional[float]:
+    """The time of day a daily frame's rows stand for, in minutes after midnight; None at any other `freq`."""
+    return daily_anchor(index) if freq == _DAILY else None
 
 
 def _localize(
@@ -1716,6 +1753,7 @@ def perturb_unknown(
     """
     index = data.index
     step = _STEP_MINUTES[freq]
+    daily = freq == _DAILY
     ctx, day, minute, first = _rows_around_issue(index, run_day, information_set)
     rng = np.random.default_rng(seed)
 
@@ -1730,7 +1768,7 @@ def perturb_unknown(
             unchecked.append(name)
             continue
         information_set._check_source_zone(col, index)
-        available = _available_array(col, col.rule, day, minute, step, ctx, first)
+        available = _available_array(col, col.rule, day, minute, step, ctx, first, daily=daily)
         mask = available > ctx.issue_minute
         if target_from_issue is not None and name == target_from_issue:
             mask = mask | (day >= 0)
@@ -1769,6 +1807,7 @@ def perturb_recent(
     """
     index = data.index
     step = _STEP_MINUTES[freq]
+    daily = freq == _DAILY
     ctx, day, minute, first = _rows_around_issue(index, run_day, information_set)
     # Midnight of D-1 in minutes since midnight of D: -1440, or -1380 and -1500 if D-1 had a clock change.
     yesterday = float(_to_instants(-1440.0, ctx.data_zone, ctx)[0])
@@ -1787,11 +1826,11 @@ def perturb_recent(
         if col.rule.kind == "static":
             continue
         information_set._check_source_zone(col, index)
-        known = _available_array(col, col.rule, day, minute, step, ctx, first) <= ctx.issue_minute
+        known = _available_array(col, col.rule, day, minute, step, ctx, first, daily=daily) <= ctx.issue_minute
         # `issue_day=day` reads an `as_of` or `weather_cutoff` value at its own row's run, not at D's, which is all
         # `perturb_unknown` needs to know whether a run is out yet: here it tells yesterday's run from older ones.
-        published = _available_array(col, col.rule, day, minute, step, ctx, first, issue_day=day)
-        delivered = _available_array(col, _DELIVERED, day, minute, step, ctx, first)
+        published = _available_array(col, col.rule, day, minute, step, ctx, first, issue_day=day, daily=daily)
+        delivered = _available_array(col, _DELIVERED, day, minute, step, ctx, first, daily=daily)
         values = out[name].to_numpy(dtype=float, copy=True)
         fresh = (day >= first_row_day) & ((published > yesterday) | (delivered > yesterday))
         mask = known & fresh & np.isfinite(values)
@@ -1844,6 +1883,7 @@ def _available_array(
     ctx: _Context,
     first: np.ndarray,
     issue_day: Union[int, np.ndarray] = 0,
+    daily: bool = False,
 ) -> np.ndarray:
     """Vectorised `_available` for rows at (ctx.day + day, minute); the value is `col` read through `rule`.
 
@@ -1851,6 +1891,12 @@ def _available_array(
     value is known, in minutes since midnight of `ctx.day` (see `_Context`). `issue_day` is each row's issue day D
     in days after `ctx.day` (`violations` checks many issue days at once; `perturb_unknown` one, `ctx.day` itself).
     `first` marks rows that are not the second occurrence of a repeated autumn wall time.
+
+    `daily` says the rows are a daily frame's (`freq="1D"`), each a whole local date stamped at one time of day. A plain
+    `realised` value of such a row is the date's (a daily maximum, say), known `delay` after the end of the local day the
+    shifts reach, not after an hour from the stamp: else `actual_daily_max` would read as known at 13:00 on its own date. One
+    with an `h`, `min` or `s` shift is an hourly slot, `x_h-1` the hour before the stamp. This holds for the column named
+    alone; what a profile or a day aggregate is built from is read at its slot, as on hourly rows.
     """
     if col.built_from is not None:
         # A profile column holds, on every row of a local day, the column it was built from at its slot of that day:
@@ -1887,6 +1933,10 @@ def _available_array(
         shifts = shifts[1:]
     point, wall = _shift_rows(day, minute, shifts, ctx, first)  # delivery instant of the value (weather: the row time)
     if rule.kind == "realised":
+        if daily and all(shift.unit == "d" for shift in shifts):
+            # The value of a whole local date: known when that date ends, at the next midnight of the data zone.
+            end = (np.floor(wall / 1440.0) + 1.0) * 1440.0
+            return _to_instants(end, ctx.data_zone, ctx, _second(end)) + _parse_delay(rule.delay)
         return point + step + _parse_delay(rule.delay)
     if rule.kind == "weather_run":
         return point + _parse_delay(rule.delay)
