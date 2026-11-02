@@ -16,7 +16,8 @@ on every date.
 import collections.abc
 import datetime
 import functools
-from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
+import re
+from typing import Any, Dict, FrozenSet, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -161,6 +162,63 @@ def check_newest_target(value: Any) -> str:
             "before the issue day, 'published' on every target its rule says is known by the issue time"
         )
     return value
+
+
+# Refit anchors count from here: a Monday, so that "7D" refits on Mondays. Never move it: every anchor would move with it.
+_EPOCH = datetime.date(1970, 1, 5)
+REFIT_EPOCH = _EPOCH.isoformat()
+_REFIT_RULE = re.compile(r"([1-9][0-9]*)(D|MS)")
+
+
+def check_refit(value: Any) -> Optional[str]:
+    """`value` if it is None (a fit per forecast), `"kD"` or `"kMS"` with a whole k from 1, else a ValueError."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or _REFIT_RULE.fullmatch(value) is None:
+        hint = " ('auto' isn't one yet)" if value == "auto" else ""
+        raise ValueError(
+            f"refit must be None, 'kD' or 'kMS' with a whole k from 1, such as '7D' or '1MS', got {value!r}{hint}: None fits "
+            "every forecast on its own, '7D' once every 7 days and '1MS' on the first of every month, counted from Monday "
+            f"{REFIT_EPOCH}"
+        )
+    return value
+
+
+def refit_anchor(day: Any, refit: str) -> datetime.date:
+    """The local date a forecast issued on `day` is fitted on, with `refit` `"kD"` or `"kMS"` (see `check_refit`).
+
+    `"kD"`: the last date on or before `day` a whole number of k days from Monday 1970-01-05, so `"7D"` is the Monday on or before
+    it and `"1D"` the day itself. `"kMS"`: the first of the last month on or before `day` a whole number of k months from January
+    1970, so `"1MS"` is the first of its month, `"3MS"` January, April, July or October and `"12MS"` 1 January. It depends on the
+    issue day alone, never on where a run starts, and a local date has no clock to change.
+    """
+    date = _as_date(day)
+    k, unit = _REFIT_RULE.fullmatch(refit).groups()
+    if unit == "D":
+        return date - datetime.timedelta(days=(date - _EPOCH).days % int(k))
+    months = (date.year - 1970) * 12 + date.month - 1
+    first = months - months % int(k)
+    return datetime.date(1970 + first // 12, first % 12 + 1, 1)
+
+
+def refit_anchors(days: Iterable[Any], refit: str) -> List[datetime.date]:
+    """The anchors of these issue days, each once, in date order."""
+    return sorted({refit_anchor(day, refit) for day in days})
+
+
+class FitUnit(NamedTuple):
+    """One fit of a model with `refit`: every forecast of a period and horizon issued in one block, with one list.
+
+    Its rows are `training_span(anchor, W, horizon, newest)`, with `newest` the newest target known by the issue time on the
+    anchor (-1 with `newest_target="d-1"`), so the cut is relative to the refit day and nothing after it trains. `anchor` is a
+    local date (`refit_anchor`), `list_id` the plan's id of the list (None for fixed lists). Each of its forecasts is predicted on
+    its own from the one fit.
+    """
+
+    period: int
+    horizon: int
+    anchor: datetime.date
+    list_id: Optional[int]
 
 
 class NewestTargets:
