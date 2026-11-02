@@ -79,7 +79,7 @@ class ModelPipeline:
         save_dir: Union[str, Path],
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
-        horizon: Optional[int] = None,         # As in run: 7 if neither it nor horizons is given
+        horizon: Optional[int] = None,         # As in run; neither: what the manifests record (7 without one)
         freq: str = "1h",
         forecast_only: bool = False,
         data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns

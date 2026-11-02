@@ -464,6 +464,12 @@ def horizons_of(manifest: Mapping[str, Any]) -> Optional[Tuple[int, ...]]:
     return tuple(range(1, int(manifest["horizon"]) + 1))
 
 
+def read_horizons(path: Union[str, Path]) -> Optional[Tuple[int, ...]]:
+    """The horizons the run of a manifest file planned (`horizons_of`), or None without a manifest or a horizon in it."""
+    path = Path(path)
+    return horizons_of(json.loads(path.read_text())) if path.exists() else None
+
+
 def manifest_path(results_path: Path) -> Path:
     """The manifest file for a results JSONL: written next to it, e.g. `ols.jsonl` -> `ols.manifest.json`."""
     results_path = Path(results_path)

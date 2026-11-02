@@ -608,3 +608,42 @@ def test_a_report_told_fewer_horizons_than_a_run_of_every_one_reads_those_alone(
     planned = planned_by_hand(*SPRING_TEST, [1, 2, 3])
     assert counts["planned"].tolist() == [planned] * 3
     assert counts["produced"].tolist() == [planned - 3] * 3  # S+1 has no price of D-1 at 02:00, one key per horizon
+
+
+def test_a_report_told_no_horizon_plans_what_the_runs_had(tmp_path, spring_data):
+    small_pipeline().run(spring_data, test=SPRING_TEST, horizons=THREE, save_dir=tmp_path / "a")
+    with pytest.warns(UserWarning, match="missing_test_predictors 3"):
+        found = small_pipeline().report(tmp_path / "a", test=SPRING_TEST)
+    with pytest.warns(UserWarning, match="missing_test_predictors 3"):
+        told = small_pipeline().report(tmp_path / "a", test=SPRING_TEST, horizons=THREE)
+    pd.testing.assert_frame_equal(found.forecast_counts(), told.forecast_counts())
+    counts = found.forecast_counts().set_index("model")
+    assert counts["planned"].tolist() == [planned_by_hand(*SPRING_TEST, THREE)] * 3
+    assert counts["missing"].tolist() == [3, 3, 3]  # every one explained: S+1 has no price of D-1 at 02:00
+    assert sorted(found.by_horizon()["horizon"].unique().tolist()) == THREE
+
+    # Without a manifest there is nothing to read the list from: 1 to 7, as before, and no zone, so every period of every day.
+    (tmp_path / "bare").mkdir()
+    (tmp_path / "bare" / "fixed.jsonl").write_text((tmp_path / "a" / "fixed.jsonl").read_text())
+    bare = ModelPipeline().add_model(OLSModel(PREDICTORS, name="fixed"))
+    with pytest.warns(UserWarning, match="missing forecasts"):
+        counts = bare.report(tmp_path / "bare", test=SPRING_TEST).forecast_counts()
+    assert counts["planned"].tolist() == [12 * 7 * 24]
+
+
+def test_models_run_with_other_horizons_need_the_report_told_which(tmp_path, spring_data):
+    one = ModelPipeline(information_set=InformationSet(rules=RULES))
+    one.add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="a"))
+    one.run(spring_data, test=SPRING_TEST, horizons=THREE, save_dir=tmp_path)
+    other = ModelPipeline(information_set=InformationSet(rules=RULES))
+    other.add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="b"))
+    other.run(spring_data, test=SPRING_TEST, horizon=7, save_dir=tmp_path)
+    both = ModelPipeline(information_set=InformationSet(rules=RULES))
+    both.add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="a"))
+    both.add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="b"))
+    with pytest.raises(
+        ValueError, match=r"different horizons \(a: \[1, 3, 7\], b: \[1, 2, 3, 4, 5, 6, 7\]\).*horizons=\[1, 3, 7\]"
+    ):
+        both.report(tmp_path, test=SPRING_TEST)
+    counts = both.report(tmp_path, test=SPRING_TEST, horizons=THREE).forecast_counts().set_index("model")
+    assert counts["planned"].tolist() == [planned_by_hand(*SPRING_TEST, THREE)] * 2

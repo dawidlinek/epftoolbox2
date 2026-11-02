@@ -100,7 +100,8 @@ an issue day it didn't sample.
   Giving both raises, so `horizon` now defaults to `None`, which is 7 for `run` and `report` and 1 for `verify`, `explain` and the probes,
   and `Workflow(model_horizon=...)` defaults to `None` (7). Targets are still built for 1 to the largest horizon, so `price_d+2` stays
   refused as an input at `horizons=[3]`. The manifest records `horizons` when they aren't 1 to the largest and a resume with another list
-  refuses; `report()` must be told the list and reads only those horizons' records. See
+  refuses. `report()` told neither `horizon` nor `horizons` plans what the manifests record (7 without one, as before) and raises when
+  the models ran different lists; it reads only the records of the horizons it plans. See
   [Some horizons only](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only).
 - **`newest_target` on every model.** `OLSModel(..., newest_target="published")` (any model) trains each forecast on every target
   that the target's availability rule says is known by the issue time on D, period by period, instead of stopping at D-1: at 11:45

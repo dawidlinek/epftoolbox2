@@ -24,6 +24,7 @@ from ..results.manifest import (
     ManifestMismatchError,
     is_ensemble_manifest,
     manifest_path,
+    read_horizons,
     read_matching_lists,
     read_skipped,
     read_windows,
@@ -320,6 +321,22 @@ class ModelPipeline:
         test_start, test_end = to_period(test, TEST)
         return None, test_start, test_end
 
+    @staticmethod
+    def _stored_horizons(save_dir: Union[str, Path], paths: Dict[str, Path]) -> Optional[Tuple[int, ...]]:
+        """The horizons every model's manifest records, or None if none does; models run with different ones raise."""
+        found = {name: read_horizons(manifest_path(path)) for name, path in paths.items()}
+        found = {name: horizons for name, horizons in found.items() if horizons is not None}
+        distinct = set(found.values())
+        if len(distinct) > 1:
+            shared = sorted(set.intersection(*(set(horizons) for horizons in distinct)))
+            shown = ", ".join(f"{name}: {list(horizons)}" for name, horizons in found.items())
+            hint = f" such as horizons={shared}, the ones they share," if shared else ""
+            raise ValueError(
+                f"The models in {save_dir} were run with different horizons ({shown}), so a report that took them from the "
+                f"manifests would plan different forecasts for each. Pass horizons={hint} or horizon= to say which to report."
+            )
+        return next(iter(distinct), None)
+
     def _stored_windows(self, paths: Dict[str, Path]) -> Optional[RunWindows]:
         """The windows every shard's manifest records, or None for plain runs; shards that disagree raise."""
         found = {name: read_windows(path) for name, path in paths.items()}
@@ -350,7 +367,9 @@ class ModelPipeline:
 
         This is the merge step after runs that each wrote some models' results (e.g. a SLURM array with
         `Workflow(model_index=...)`). The test period, horizon (or `horizons`, as in `run`) and freq must be those of the runs;
-        with the time zone each manifest records they give each model's planned forecast count (`IssueCalendar`). Only records
+        with the time zone each manifest records they give each model's planned forecast count (`IssueCalendar`). Given neither
+        `horizon` nor `horizons`, the report plans what the manifests record (7 without one), and models run with different
+        horizons raise. Only records
         of the horizons planned are read, so `horizon=3` of a horizon-7 run is horizons 1 to 3 alone. Raises FileNotFoundError if a
         model has no results file, unless `allow_missing` is set. `data` is only needed by exporters that join source columns.
 
@@ -379,7 +398,6 @@ class ModelPipeline:
         """
         if not self.models:
             raise ValueError("At least one model is required")
-        horizon, horizons = resolve_horizons(horizon, horizons, 7)
         self._check_model_names()
         if not forecast_only:
             self._check_benchmarks()
@@ -391,6 +409,9 @@ class ModelPipeline:
                     f"Model {name!r}: {path} is an ensemble's results, which go stale as soon as their members move unless "
                     "they are computed again. Add it to this pipeline with add_ensemble, or rename the model."
                 )
+        if horizon is None and horizons is None:
+            horizons = self._stored_horizons(save_dir, paths)
+        horizon, horizons = resolve_horizons(horizon, horizons, 7)
         stored = self._stored_windows({name: path for name, path in paths.items() if path.exists()})
         windows, test_start, test_end = self._resolve_windows(
             validation, test, test_start, test_end, forecast_only, required=stored is None or forecast_only
