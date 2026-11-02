@@ -1753,7 +1753,7 @@ def perturb_unknown(
     """
     index = data.index
     step = _STEP_MINUTES[freq]
-    daily = freq == _DAILY
+    daily = _daily_rows(index, freq)
     ctx, day, minute, first = _rows_around_issue(index, run_day, information_set)
     rng = np.random.default_rng(seed)
 
@@ -1807,7 +1807,7 @@ def perturb_recent(
     """
     index = data.index
     step = _STEP_MINUTES[freq]
-    daily = freq == _DAILY
+    daily = _daily_rows(index, freq)
     ctx, day, minute, first = _rows_around_issue(index, run_day, information_set)
     # Midnight of D-1 in minutes since midnight of D: -1440, or -1380 and -1500 if D-1 had a clock change.
     yesterday = float(_to_instants(-1440.0, ctx.data_zone, ctx)[0])
@@ -1840,6 +1840,16 @@ def perturb_recent(
             counts[name] = int(mask.sum())
     _report_unchecked(unchecked, information_set)
     return out, counts, unchecked
+
+
+def _daily_rows(index: pd.DatetimeIndex, freq: str) -> bool:
+    """Whether the rows of a frame perturbed for a `freq` run are a daily frame's, each a whole local date (decision 12 reads
+    their plain `realised` values so). With `rebuild` a daily model's probe perturbs the source it is built from, whose rows
+    are hourly slots, read as such."""
+    if freq != _DAILY or not len(index):
+        return False
+    local = index.tz_localize(None) if index.tz is not None else index
+    return not local.normalize().has_duplicates
 
 
 def _rows_around_issue(

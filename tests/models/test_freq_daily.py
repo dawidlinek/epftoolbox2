@@ -492,6 +492,24 @@ def test_the_positive_control_can_fail_on_a_daily_frame(year):
     assert all(check.probe.ok and check.control.moved == [] and check.control.unmoved for check in report.checks)
 
 
+def from_hours(source):
+    """What `rebuild` makes of hourly source rows: the daily columns from the measured load, and the noon rows."""
+    return with_daily_columns(source).at_time(NOON)
+
+
+def test_verify_with_rebuild_reads_the_hourly_source_of_a_daily_model_by_its_hours(year):
+    """With `rebuild` the probes perturb the source, whose rows are hours: the load of 10:00 is known at 12:00 there, so
+    `load_actual_h-2` built from it is no leak, while the 11:00 one behind `load_actual_h-1` is perturbed and moves the forecast."""
+    hourly, _ = year
+    raw = ["price", "load", "wind", "is_weekend", "is_weekday", "load_actual", "price_d-1"]
+    source = hourly[raw + [f"{c}_d+{h}" for h in (1, 2, 3) for c in ("load", "wind", "is_weekend", "is_weekday")]]
+    report = verified(source, DAILY_INPUTS, horizon=2, days=2, rebuild=from_hours)
+    report.assert_ok()
+    assert all(check.control.moved for check in report.checks)
+    report = verified(source, DAILY_INPUTS + ["load_actual_h-1"], horizon=2, days=2, rebuild=from_hours)
+    assert report.status("m") == "leak"
+
+
 # ---------------------------------------------------------------------------
 # explain
 # ---------------------------------------------------------------------------
