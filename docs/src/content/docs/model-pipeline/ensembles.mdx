@@ -108,7 +108,8 @@ ensemble  segment               chosen  k  validation_mae  validation_forecasts 
 ```
 
 `report.choices()` has one row per ensemble and test period served: `ensemble`, `segment` (its place in `report.windows.segments`),
-`chosen` in member order, `k`, `validation_mae` of the average of `chosen`, `validation_forecasts` (how many it was scored on),
+`chosen` in member order, `k`, `validation_mae` of the average of `chosen` (over every horizon the run made, also in a report told fewer),
+`validation_forecasts` (how many it was scored on),
 `validation_share`, `validation_start`, `validation_end`, `test_start` and `test_end`. `df.attrs` holds `member_mae`, each member's MAE
 on those keys, `k_mae`, the MAE of each k with `top="validation"`, and `limited_by`. A plain average chooses nothing and has no row. The
 terminal exporter prints the table when there is one, before what `show` asks for, and `epf report` prints it after the counts.
@@ -161,7 +162,7 @@ of a `top` ensemble, a name that is already taken, and a name whose results file
 the ensemble is built, added or loaded.
 
 When the results are read, `ManifestMismatchError`: members that disagree on the `actual` of a key or hold a key twice, or whose
-manifests differ on target, horizon, frequency, time zone or data, or on the information set: a different issue time, issue zone or rules,
+manifests differ on target, horizon, the list of horizons (`horizons=`), frequency, time zone or data, or on the information set: a different issue time, issue zone or rules,
 or an information set against none. An average has one issue time, and a member issued later can read what the others can't. The order
 of the assumptions and a rule's `note` don't count, and neither do `unknown` and `availability`, which say what a run does about a column and
 not when it is known. All of this is read from the manifests of the leaf models, so nesting an average changes nothing. `report()` also refuses a model whose results file
