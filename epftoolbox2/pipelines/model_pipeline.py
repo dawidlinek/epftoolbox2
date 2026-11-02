@@ -1017,6 +1017,8 @@ class ModelPipeline:
             params["predictors"] = {"function": importable_path(component._ctx_fn, label)}
         if isinstance(component, BaseModel) and params.get("newest_target") == "d-1":
             del params["newest_target"]  # written only when set, so files saved before it don't move
+        if isinstance(component, BaseModel) and "refit" in params and params["refit"] is None:
+            del params["refit"]  # the same
         return {"class": class_name, "params": params}
 
     def to_dict(self) -> Dict[str, Any]:

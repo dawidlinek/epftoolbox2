@@ -731,6 +731,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "select",
             "choices": ["d-1", "published"],
         },
+        {
+            "name": "refit",
+            "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
     ],
     "LassoCVModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "LassoCV", "kind": "text"},
@@ -771,6 +778,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": "d-1",
             "kind": "select",
             "choices": ["d-1", "published"],
+        },
+        {
+            "name": "refit",
+            "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
+            "required": False,
+            "default": None,
+            "kind": "text",
         },
     ],
     "MAEEvaluator": [],

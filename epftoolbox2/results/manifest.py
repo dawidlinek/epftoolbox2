@@ -161,10 +161,11 @@ class PlannedForecast(NamedTuple):
     """What a fresh run would give a stored forecast's key (`check_stored_lists`)."""
 
     list_hash: Optional[str]  # None for fixed lists
-    mask_digest: str
+    mask_digest: Optional[str]  # None with `refit`: a unit reads its mask from its own rows
     mask_key: str  # where a manifest keeps the digest
     window: Optional[str] = None  # None in a plain run: the record says nothing about it
     matching_days: Optional[str] = None  # a matching list's: a hash of the days it trains on
+    refit_anchor: Optional[str] = None  # with `refit`: the date of the fit the forecast uses
 
 
 @dataclass
@@ -886,6 +887,10 @@ def check_stored_lists(
     anyway counts too), or if its issue day now falls in another window (a record without a `window` is from a plain run, which is the test window). Pending forecasts may change
     freely: nothing stored depends on them.
 
+    A model with `refit` (`training_cut` names it) has no mask digests: a unit reads its mask from its own rows, a function of
+    data the hash covers. Its records carry `refit_anchor` instead, the date of the fit they used, and a stored forecast differs if
+    a fresh run would fit it on another anchor; that is checked for fixed lists too.
+
     A run with windows keeps one mask per (window, list, period, horizon) in a file, whichever days its records are on: a
     digest says nothing about which records used it, so a run that overwrote one would let older records pass for what they
     are not. `stored_actual(period, horizon, run_date)` gives what a fresh run's `actual` would be, or `PAST_THE_FRAME`, for
@@ -912,7 +917,10 @@ def check_stored_lists(
         and manifest.windows[TEST][0] != existing.test_start
     )
     compare_actuals = stored_actual is not None and (existing is None or existing.windows is None)
+    # With `refit` a unit reads its mask from its own rows, which the data hash covers: its records carry their anchors instead.
+    refit = (manifest.training_cut or {}).get("refit") is not None
     other_list, other_mask, other_window, other_actual, past_frame, other_days = [], [], [], [], [], []
+    other_anchor = []
     for record in records:
         period, horizon, run_date = record["hour"], record["horizon"], record["run_date"]
         stored = record.get("predictor_list")
@@ -931,6 +939,14 @@ def check_stored_lists(
             continue
         if expected is not None and expected.matching_days not in (None, record.get("matching_days")):
             other_days.append((run_date, period, horizon))
+        if (
+            expected is not None
+            and expected.refit_anchor is not None
+            and record.get("refit_anchor") != expected.refit_anchor
+        ):
+            other_anchor.append((run_date, period, horizon, record.get("refit_anchor"), expected.refit_anchor))
+        if refit:
+            continue
         if windowed:
             key = mask_key(tag, period, horizon)
             kept = (fixed_masks if stored is None else stored_masks.get(stored, {})).get(key)
@@ -959,6 +975,11 @@ def check_stored_lists(
             f"{len(other_days)} stored forecast(s) of a train_on='matching' list have other matching days than a fresh run "
             "would give them (the function now returns another list on some of those days, or the data's rows moved), e.g. "
             f"(run date, period, horizon) {sorted(other_days)[:3]}"
+        )
+    if other_anchor:
+        problems.append(
+            f"{len(other_anchor)} stored forecast(s) were fitted on another refit anchor than a fresh run would fit them on, "
+            f"e.g. (run date, period, horizon, stored, now) {sorted(other_anchor, key=str)[:3]}"
         )
     if other_mask:
         problems.append(

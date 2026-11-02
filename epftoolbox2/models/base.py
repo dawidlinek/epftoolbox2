@@ -41,11 +41,15 @@ from ._calendar import (
     FREQ_STEPS,
     IssueCalendar,
     NewestTargets,
+    REFIT_EPOCH,
     check_issue_days_in,
     check_newest_target,
+    check_refit,
     every_horizon,
     listed_days,
     periods_per_day,
+    refit_anchor,
+    refit_anchors,
     resolve_horizons,
     resolve_issue_days,
     training_span,
@@ -55,6 +59,7 @@ from ._worker import (
     NOT_PLANNED,
     SKIP_MISSING_TEST_ROW,
     _pool_init,
+    _run_block,
     _run_day,
     issue_row,
     matching_digest,
@@ -99,11 +104,18 @@ class BaseModel(ABC):
         name: str = "Model",
         scaler: ScalerSpec = "standard",
         newest_target: str = "d-1",
+        refit: Optional[str] = None,
     ):
         """`newest_target` is the newest target a forecast issued on D trains on: `"d-1"` the target of D-1, whatever the
         information set says, and `"published"` every target its rule says is known by the issue time on D, per period
         (`InformationSet.newest_targets`), which needs an information set with a rule for the target. A row dated D or later
-        never trains. See the docs page Time and Calendars."""
+        never trains. See the docs page Time and Calendars.
+
+        `refit` is how often a model is fitted: None fits every forecast on its own, `"kD"` once every k days and `"kMS"` on the
+        first of every k-th month, on a calendar counted from Monday 1970-01-05 (`_calendar.refit_anchor`). A forecast issued on
+        D then uses the fit of its anchor a, the refit day on or before D: rows cut as for a forecast issued on a, with the
+        newest target as of a's issue time, so nothing after a trains, and each forecast predicted on its own from that fit. Only
+        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV) can."""
         # A function of `ctx` is planned per forecast (epftoolbox2.models.context); a `(horizon)` or `(horizon, hour)`
         # function gives one list per (period, horizon).
         self._ctx_fn: Optional[Callable] = predictors if callable(predictors) and takes_ctx(predictors) else None
@@ -120,6 +132,7 @@ class BaseModel(ABC):
         self.name = name
         self.scaler = scaler  # validated and normalised in __setattr__
         self.newest_target = newest_target  # validated in __setattr__
+        self.refit = refit  # validated in __setattr__
 
         self._data: Optional[pd.DataFrame] = None
         self._hour_data: Dict[int, pd.DataFrame] = {}
@@ -143,7 +156,20 @@ class BaseModel(ABC):
             value = scaler_spec(value)
         elif key == "newest_target":
             value = check_newest_target(value)
+        elif key == "refit":
+            value = check_refit(value)
+            if value is not None and not self._can_refit():
+                raise ValueError(
+                    f"{type(self).__name__} can't refit on a calendar (refit={value!r}): it fits and forecasts in one step "
+                    "(`_fit_predict`), and refit needs a fit to keep and forecast from (`_fit_model` and `_predict_fitted`). "
+                    "Leave refit=None."
+                )
         super().__setattr__(key, value)
+
+    @classmethod
+    def _can_refit(cls) -> bool:
+        """Whether the model fits once and forecasts from the fit (`_fit_model`, `_predict_fitted`), which `refit` needs."""
+        return cls._fit_model is not BaseModel._fit_model and cls._predict_fitted is not BaseModel._predict_fitted
 
     @property
     def _model_kwargs(self) -> Dict:
@@ -350,7 +376,10 @@ class BaseModel(ABC):
         run_positions = window_days
         if windows is None and weekdays is not None:
             run_positions = {day: (None, day, position) for position, day in enumerate(run_days)}
-        if windows is not None:
+        if self.refit is not None:
+            # A unit reads its mask from its own rows, in the worker (`_worker._fit_unit`): no window or first day decides it.
+            masks = {} if windows is None else {name: {} for name, _ in windows.periods}
+        elif windows is not None:
             masks = self._window_masks(plan, windows, horizons, first_day)
         elif plan is not None:
             masks = self._plan_scalable_masks(plan)
@@ -397,7 +426,16 @@ class BaseModel(ABC):
                     manifest_path(store.path),
                     manifest,
                     store.iter_lines(
-                        cols=["hour", "horizon", "run_date", "predictor_list", "matching_days", "window", "actual"]
+                        cols=[
+                            "hour",
+                            "horizon",
+                            "run_date",
+                            "predictor_list",
+                            "matching_days",
+                            "window",
+                            "actual",
+                            "refit_anchor",
+                        ]
                     ),
                     self._stored_forecast_lookup(plan, masks, windows, weekdays),
                     allow_mismatch=allow_manifest_mismatch,
@@ -415,7 +453,8 @@ class BaseModel(ABC):
                 require_manifest=require_manifest,
                 model_name=self.name,
                 frame_hashes=frame_hashes,
-                check_stored=None if windows is None else check_stored,
+                # A plain run of fixed lists has nothing per record to compare, except a refit's anchors.
+                check_stored=check_stored if windows is not None or (plan is None and self.refit is not None) else None,
             )
             if availability != "none" and manifest.availability is not None:
                 listing = manifest.availability["listing"]  # with what earlier runs listed for other test periods
@@ -542,7 +581,10 @@ class BaseModel(ABC):
     ) -> Optional[NewestTargets]:
         """The newest target of each forecast on these issue days, for `newest_target="published"`; None for `"d-1"`, which
         reads no information set. Raises without one, or without a rule for the target, whatever the level: the rule decides
-        numbers. `issue_days` None only checks that it could be read."""
+        numbers. `issue_days` None only checks that it could be read.
+
+        With `refit` they are read on the anchors of these days instead, as of the issue time on each anchor: a unit's rows are
+        cut there, so a target published between the anchor and the issue day doesn't train (`_newest_of` then takes anchors)."""
         if self.newest_target == "d-1":
             return None
         if rules is None:
@@ -554,13 +596,17 @@ class BaseModel(ABC):
         if issue_days is None:
             rules.newest_targets(target, freq, data.index, [], horizon)
             return None
-        days = list(issue_days)
+        days = list(issue_days) if self.refit is None else refit_anchors(issue_days, self.refit)
         return NewestTargets(days, rules.newest_targets(target, freq, data.index, days, horizon))
 
     def _training_cut(self, rules: Optional["InformationSet"], target: str, freq: str) -> Dict[str, Any]:
-        """What a manifest's `training_cut` says of this run: rows by date and, with `newest_target="published"`, what the newest
-        target is read from. The information set isn't compared on resume, but these decide numbers."""
+        """What a manifest's `training_cut` says of this run: rows by date, with `refit` the rule and its epoch, and with
+        `newest_target="published"` what the newest target is read from. The information set isn't compared on resume, but
+        these decide numbers."""
         cut = dict(TRAINING_CUT_BY_DATE)
+        if self.refit is not None:
+            # Which fit a forecast uses: its anchor depends on the rule and the epoch, and nothing else.
+            cut.update(refit=self.refit, refit_epoch=REFIT_EPOCH)
         if self.newest_target == "d-1":
             return cut
         rule = rules._resolve_for(target, _STEP_MINUTES[freq]).rule
@@ -573,7 +619,8 @@ class BaseModel(ABC):
         }
 
     def _newest_of(self, period: int, day: Any) -> Any:
-        """The newest target, relative to each issue day, of these day ids of a run: -1 with `newest_target="d-1"`."""
+        """The newest target, relative to each issue day, of these day ids of a run: -1 with `newest_target="d-1"`. With
+        `refit` the day ids are anchors, the only days it was read on."""
         if self._newest is None:
             return -1
         return self._newest.at(period, np.asarray(day, dtype=np.int64) + self._first_ordinal)
@@ -674,8 +721,9 @@ class BaseModel(ABC):
         none (they stay with each list). A plain run of fixed lists records its digests, under the test window's key, only where
         a column with no value on the first day was read again on a later day and that changed a mask: results scaled before
         that re-read existed have none, and `check_and_write` refuses to resume them (`unrecorded_masks`). Every other plain
-        manifest is as it was."""
-        if plan is not None:
+        manifest is as it was. A model with `refit` has none: a unit's mask is a function of its rows, which the data hash
+        covers, and its records carry their anchors."""
+        if plan is not None or self.refit is not None:
             return None
         if windows is not None:
             return self._mask_digests(masks)
@@ -722,12 +770,16 @@ class BaseModel(ABC):
             expanded_preds = {list_id: list(names) for list_id, names in enumerate(plan.lists)}
             scalable_masks = masks
 
-        tasks_by_day: Dict[int, list] = {}
+        first_day = datetime.date.fromisoformat(test_start)
+        # A pool job is a day, or with `refit` a block: the issue days of one anchor, whose units it fits once each.
+        tasks_by_day: Dict[Any, list] = {}
         for t in tasks:
-            tasks_by_day.setdefault(t[2], []).append(t)
+            job = t[2] if self.refit is None else refit_anchor(first_day + datetime.timedelta(days=t[2]), self.refit)
+            tasks_by_day.setdefault(job, []).append(t)
+        days_with_tasks = len({t[2] for t in tasks})
 
         threads_per_process, n_processes = self._executor_config()
-        n_processes = min(n_processes, len(tasks_by_day))  # a worker runs whole days; more would sit idle
+        n_processes = min(n_processes, len(tasks_by_day))  # a worker runs whole days (blocks); more would sit idle
         if sys.platform == "win32":
             n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
 
@@ -753,10 +805,12 @@ class BaseModel(ABC):
                 }
         if run_positions is not None:
             config["run_days"] = run_positions
-        if self._newest is not None:
+        if self.refit is not None:
+            # The newest targets were read on the anchors (`_newest_targets`), and a unit looks its own up by date.
+            config["refit"] = {"rule": self.refit, "first_ordinal": self._first_ordinal, "newest": self._newest}
+        elif self._newest is not None:
             # By a task's place among the issue days: with `issue_days`, among the days of the listed weekdays alone.
             config["newest"] = self._newest.by_position(newest_days)
-        first_day = datetime.date.fromisoformat(test_start)
 
         mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
         with ProcessPoolExecutor(
@@ -771,34 +825,40 @@ class BaseModel(ABC):
                 self._model_kwargs,
             ),
         ) as pool:
-            futures = {pool.submit(_run_day, day_tasks): day for day, day_tasks in tasks_by_day.items()}
+            run_job = _run_day if self.refit is None else _run_block
+            futures = {pool.submit(run_job, day_tasks): day for day, day_tasks in tasks_by_day.items()}
             with Progress() as progress:
                 task_id = progress.add_task(
                     f"[cyan]{self.name}",
                     total=n_days,
-                    completed=n_days - len(tasks_by_day),
+                    completed=n_days - days_with_tasks,
                 )
                 for future in as_completed(futures):
-                    run_date = first_day + datetime.timedelta(days=futures[future])
+                    job = futures[future]
                     try:
                         day_results, day_skipped = future.result()
                     except Exception as exc:
                         # Results already saved stay in the store, so a fixed rerun resumes from here.
                         pool.shutdown(wait=True, cancel_futures=True)
-                        raise RuntimeError(f"{self.name}: forecasting failed for run date {run_date}: {exc}") from exc
+                        what = (
+                            f"run date {first_day + datetime.timedelta(days=job)}"
+                            if self.refit is None
+                            else f"the refit block from {job}"
+                        )
+                        raise RuntimeError(f"{self.name}: forecasting failed for {what}: {exc}") from exc
                     for result in day_results:
                         if store:
                             store.save(result)
                         else:
                             in_memory.append(result)
-                    for (hour, hz, _), outcome in day_skipped:
+                    for (hour, hz, day), outcome in day_skipped:
                         reason, _, detail = outcome.partition(": ")
                         skipped[reason] += 1
                         if window_days is not None:
-                            window_skipped[window_days[futures[future]][0]][reason] += 1
-                        where = f"period {hour}, horizon {hz}, run date {run_date}"
+                            window_skipped[window_days[day][0]][reason] += 1
+                        where = f"period {hour}, horizon {hz}, run date {first_day + datetime.timedelta(days=day)}"
                         skip_examples.setdefault(reason, f"{where}: {detail}" if detail else where)
-                    progress.advance(task_id)
+                    progress.advance(task_id, len({t[2] for t in tasks_by_day[job]}))
 
     def _report_counts(self, planned: int, produced: int, skipped: Counter, examples: Dict[str, str]) -> None:
         """Make a shortfall of forecasts loud: a warning with the reasons, an error if nothing was produced."""
@@ -907,6 +967,9 @@ class BaseModel(ABC):
         days = None if windows is None else windows.issue_days(weekdays)
         if days is None and weekdays is not None and test_start is not None and test_end is not None:
             days = [day.isoformat() for day in listed_days(_test_days(test_start, test_end), weekdays)]
+        # With `refit` the newest training target is checked on the anchors, where a unit's rows are cut.
+        on_anchors = check_target and self.refit is not None
+        check_target = check_target and self.refit is None
         if information_set is not None and availability == "raise":
             information_set.check(
                 expanded,
@@ -919,6 +982,10 @@ class BaseModel(ABC):
                 issue_days=days,
                 check_target=check_target,
             )
+            if on_anchors:
+                self._target_on_anchors(
+                    information_set.check, expanded, target, freq, data.index, test_start, test_end, days
+                )
         elif information_set is not None and availability == "warn":
             uses = information_set.late_uses(
                 expanded,
@@ -931,23 +998,51 @@ class BaseModel(ABC):
                 issue_days=days,
                 check_target=check_target,
             )
+            if on_anchors:
+                uses += self._target_on_anchors(
+                    information_set.late_uses, expanded, target, freq, data.index, test_start, test_end, days
+                )
             self._availability_listing = listing_rows(uses)
             for name, (start, end) in windows.periods if windows is not None else ():
                 listed = None if weekdays is None else RunWindows.fixed(None, (start, end)).issue_days(weekdays)
-                self._window_listings[name] = listing_rows(
-                    information_set.late_uses(
-                        expanded,
-                        target,
-                        freq,
-                        data.index,
-                        start,
-                        end,
-                        model_name=self.name,
-                        check_target=check_target,
-                        **({} if listed is None else {"issue_days": listed}),
-                    )
+                uses = information_set.late_uses(
+                    expanded,
+                    target,
+                    freq,
+                    data.index,
+                    start,
+                    end,
+                    model_name=self.name,
+                    check_target=check_target,
+                    **({} if listed is None else {"issue_days": listed}),
                 )
+                if on_anchors:
+                    uses += self._target_on_anchors(
+                        information_set.late_uses, expanded, target, freq, data.index, start, end, listed
+                    )
+                self._window_listings[name] = listing_rows(uses)
         return expanded
+
+    def _target_on_anchors(
+        self,
+        method: Callable,
+        expanded: Dict[Tuple[int, int], List[str]],
+        target: str,
+        freq: str,
+        index: pd.DatetimeIndex,
+        test_start: Optional[str],
+        test_end: Optional[str],
+        issue_days: Optional[Sequence[str]],
+    ) -> Any:
+        """`method` (an information set's `check` or `late_uses`) of the newest training target alone, for a model with `refit`:
+        on the anchors of the issue days (`issue_days`, else every day from `test_start` to `test_end`), since a unit's rows are
+        cut as of the issue time on its anchor. Without days to read anchors from, on every day of the frame, as before."""
+        boundary = {pair: [] for pair in expanded}
+        if issue_days is None and (test_start is None or test_end is None):
+            return method(boundary, target, freq, index, test_start, test_end, model_name=self.name)
+        issued = issue_days if issue_days is not None else [day.isoformat() for day in _test_days(test_start, test_end)]
+        anchors = [day.isoformat() for day in refit_anchors(issued, self.refit)]
+        return method(boundary, target, freq, index, model_name=self.name, issue_days=anchors)
 
     @staticmethod
     def _days_of(
@@ -974,12 +1069,34 @@ class BaseModel(ABC):
     ) -> None:
         reach = 0 if newest is None else newest.reach
         if windows is None:
-            days = _contract.read_days(test_start, test_end, self.training_window, horizon, reach)
+            days = _contract.read_days(self._fit_start(test_start), test_end, self.training_window, horizon, reach)
         else:
-            days = _contract.read_ranges([p for _, p in windows.periods], self.training_window, horizon, reach)
+            periods = [(self._fit_start(start), end) for _, (start, end) in windows.periods]
+            days = _contract.read_ranges(periods, self.training_window, horizon, reach)
         _contract.check_index(data, freq, days)
         _contract.check_timezone_with_day_lags(data)
         _contract.check_names(data, target, horizon)
+
+    def _fit_start(self, start: Optional[str]) -> Optional[str]:
+        """The first day a forecast issued from `start` on is fitted on: `start`, or with `refit` its anchor, from which a
+        unit's rows are cut, so that the rows a run reads (`_contract.read_days`) go back from it."""
+        if self.refit is None or start is None:
+            return start
+        try:
+            return refit_anchor(datetime.date.fromisoformat(start), self.refit).isoformat()
+        except (TypeError, ValueError):  # `read_days` says what it can't read
+            return start
+
+    def _fit_days(self, days: Any) -> Any:
+        """The day id each of these issue day ids is fitted on: itself, or with `refit` its anchor."""
+        if self.refit is None:
+            return days
+        ordinals = np.atleast_1d(np.asarray(days, dtype=np.int64)) + self._first_ordinal
+        anchors = np.array(
+            [refit_anchor(datetime.date.fromordinal(int(o)), self.refit).toordinal() for o in ordinals], dtype=np.int64
+        )
+        anchors -= self._first_ordinal
+        return int(anchors[0]) if np.ndim(days) == 0 else anchors
 
     def _plan_predictors(
         self,
@@ -1036,6 +1153,7 @@ class BaseModel(ABC):
             newest_target=self.newest_target,
             reach=0 if newest is None else newest.reach,
             horizons=horizons,
+            refit=self.refit,
         )
         if windows is not None and warn_unpublished and len(windows.periods) > 1:
             for name, (start, end) in windows.periods:
@@ -1082,6 +1200,8 @@ class BaseModel(ABC):
             plan.uses_matching and plan.reach != (0 if newest is None else newest.reach)
         ):
             problems.append("newest target")
+        if plan.refit != self.refit:
+            problems.append("refit")
         if problems:
             raise ValueError(f"{self.name}: this plan was built for another {', '.join(problems)}")
 
@@ -1173,7 +1293,7 @@ class BaseModel(ABC):
 
     def _matching_days_of(self, plan: PredictorPlan, period: int, horizon: int, run_date: str, list_id: int) -> str:
         """The record's `matching_days` of a forecast: the worker's own cut and filter, on the rows the worker has."""
-        day = datetime.date.fromisoformat(run_date).toordinal() - self._first_ordinal
+        day = self._fit_days(datetime.date.fromisoformat(run_date).toordinal() - self._first_ordinal)
         rows = training_row_days(
             self._hour_days[period], day, self.training_window, horizon, self._newest_of(period, day)
         )
@@ -1190,7 +1310,10 @@ class BaseModel(ABC):
         `absent` has (period, date ordinal) of what the run skips for lack of a row.
         """
         absent = set(absent)
-        issue_days = np.array([day.toordinal() - self._first_ordinal for day in plan.issue_days], dtype=np.int64)
+        # The days the forecasts are fitted on: the issue days, or with `refit` their anchors.
+        issue_days = self._fit_days(
+            np.array([day.toordinal() - self._first_ordinal for day in plan.issue_days], dtype=np.int64)
+        )
         start = self._grid_start(plan)
         finite: Dict[Tuple[int, int], Optional[np.ndarray]] = {}
         counts: Dict[Tuple[int, int], np.ndarray] = {}
@@ -1260,7 +1383,8 @@ class BaseModel(ABC):
         weekdays: Optional[Sequence[int]] = None,
     ) -> Callable[[int, int, str], Optional[PlannedForecast]]:
         """What a fresh run would give a stored forecast's key, or None if it isn't planned, as on a weekday `weekdays` doesn't
-        list. `masks` are per window in a run with windows."""
+        list. `masks` are per window in a run with windows. With `refit` that is its anchor and no mask digest: a unit reads its
+        mask from its own rows."""
         by_window = {TEST: masks} if windows is None else masks
         digests = {
             window: {key: mask_digest(mask) for key, mask in window_masks.items()}
@@ -1274,7 +1398,8 @@ class BaseModel(ABC):
             list_id = None if plan is None else plan.list_id_of(period, horizon, run_date)
             key = (period, horizon) if plan is None else (list_id, period, horizon)
             digest = digests[window].get(key)
-            if digest is None:
+            anchor = None if self.refit is None else refit_anchor(run_date, self.refit).isoformat()
+            if digest is None and (anchor is None or (plan is not None and list_id is None)):
                 return None
             matching = plan is not None and plan.train_on[list_id] == TRAIN_ON_MATCHING
             return PlannedForecast(
@@ -1283,6 +1408,7 @@ class BaseModel(ABC):
                 mask_key(window, period, horizon),
                 None if windows is None else window,
                 self._matching_days_of(plan, period, horizon, run_date, list_id) if matching else None,
+                anchor,
             )
 
         return lookup
@@ -1411,3 +1537,16 @@ class BaseModel(ABC):
     @abstractmethod
     def _fit_predict(self, train_x: np.ndarray, train_y: np.ndarray, test_x: np.ndarray) -> Tuple[float, list]:
         pass
+
+    def _fit_model(self, train_x: np.ndarray, train_y: np.ndarray) -> Any:
+        """Fit on standardised data and return the fit, which `_predict_fitted` forecasts from: the seam of `refit`.
+
+        A model that keeps nothing between fits implements both, and its `_predict_fitted(_fit_model(x, y), test_x)` is
+        `_fit_predict(x, y, test_x)` to the bit. A model with `_fit_predict` alone runs with `refit=None` only."""
+        raise NotImplementedError(f"{type(self).__name__} has no _fit_model: it runs with refit=None only")
+
+    def _predict_fitted(self, fitted: Any, test_x: np.ndarray) -> Tuple[float, list]:
+        """The forecast of the one standardised row `test_x` from `fitted`, and its coefficients, as `_fit_predict` returns
+        them. Called once per forecast, never on several rows at once: a product of a block of rows can differ from that of one
+        row in the last bits, and a forecast must not depend on which others share its fit."""
+        raise NotImplementedError(f"{type(self).__name__} has no _predict_fitted: it runs with refit=None only")
