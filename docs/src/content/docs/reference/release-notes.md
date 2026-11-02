@@ -110,7 +110,8 @@ an issue day it didn't sample.
   (`model_pipeline.issue_days: [friday]`) and `epf model` / `epf verify` (`--issue-days friday,monday`). Names in any case; all seven are
   every day, and an empty list, an unknown or repeated name, a bare string or numbers raise. Training is untouched: every date's row
   trains, a list's mask of binary columns is read on its window's first calendar day whatever its weekday, so for a fixed list a Friday's
-  record is bit for bit the one a run of every day gives it, and `day_in_test` still counts calendar days. The other days are neither
+  record is bit for bit the one a run of every day gives it (a predictor function's can differ where the two runs read a list's mask on
+  different days, neither after the issue day), and `day_in_test` still counts calendar days. The other days are neither
   planned nor missing. **Nothing moves without the keyword.** The manifest records `issue_days` when it isn't every day and a resume
   with other weekdays refuses; `report()` reads the weekdays from the manifests, raises for models run on different ones, and told
   `issue_days` reads only the records issued on them. The information-set check and the `availability="warn"` listing look at the

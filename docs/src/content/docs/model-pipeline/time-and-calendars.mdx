@@ -219,12 +219,24 @@ report = pipeline.report("fridays", test=("2023-01-01", "2024-12-31"), horizons=
 - **Only the issue days change.** Training is untouched: every date's row trains, chosen by date as [above](#which-rows-a-forecast-reads),
   so a Friday's forecast trains on the rows it trains on in a run of every day. `day_in_test` still counts calendar days from the start
   of the window.
-- **A Friday's record is the record of a run of every day.** For a fixed list that holds bit for bit, with the mask of the list's
+- **A Friday's record is the record of a run of every day, for a fixed list.** That holds bit for bit, with the mask of the list's
   binary columns, which a model leaves unscaled: it is read on the window's first calendar day, whatever its weekday. A predictor
-  function's list used on every issue day reads its mask there too, so a function that returns the list on Fridays alone gives in a
-  Friday run what the fixed list gives. A list used on some issue days only reads its mask on the first of them. One case differs from
-  a run of every day: a list that run uses on Fridays alone reads its mask on the first Friday there, and on the window's first day in a
-  Friday run, so where a column turns from 0/1 to other values between those two days, the forecasts of that list differ.
+  function's list reads its mask there too if the window's first issue day uses it, else on the first issue day that does; which day
+  that is never depends on later issue days, their data or the end of the test. A function that returns the list on Fridays alone
+  gives in a Friday run what the fixed list gives.
+- **Where a function's records differ.** A run of every day reads a list's mask on the window's first day if that day uses the list,
+  else on the first day that does, which can be another weekday. So the two runs read it on different days, and a Friday's forecast
+  can differ, for:
+  - a list a run of every day uses on Fridays alone, from a test that doesn't start on a Friday: the first Friday there, the
+    window's first day in a Friday run;
+  - a list used on, say, Wednesdays and Fridays, from a test that starts on a Monday: the first Wednesday there, the Monday in a
+    Friday run;
+  - a list first used on a later Friday that a run of every day uses from the day before: that day there, the Friday in a Friday run;
+  - a column with no value on the day a mask is read, which is read again from the list's next issue day with a value: any day in
+    a run of every day, the listed days in a Friday run.
+
+  They differ only where a column is 0 or 1 in the rows one of those days reads and not in the other's. Both days are the forecast's
+  issue day or earlier, so neither run reads a row dated after D-1-h. Fixed lists and lists used on every day don't differ.
 - **Only listed days are planned.** Another weekday is no issue day: its keys are neither planned, nor missing, nor skipped.
   `planned` in `forecast_counts()` counts the listed days alone, with the clock's rule above.
 - **The information set sees the listed days alone.** The check before any fit, the `availability="warn"` listing and
