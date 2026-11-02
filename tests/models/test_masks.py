@@ -32,6 +32,7 @@ RULES = {
     "is_weekend": Availability.static(),
     "is_weekday": Availability.static(),
     "late": Availability.static(),
+    "turns": Availability.static(),
     "regime": Availability.static(),
     "aux": Availability.static(),
     "price": Availability.published("13:00", 1),  # D's price is known at 11:45 on D: what "published" trains on
@@ -122,7 +123,7 @@ def test_a_later_end_of_the_test_moves_no_forecast_through_a_mask_column_with_no
 
 START, END = "2023-03-20", "2023-04-14"  # a Monday, over the spring switch of 26 March
 LATE_FROM = "2023-03-21"  # `late` starts inside the test: a list holding it has no value of it on the mask day
-MASKED = PREDICTORS + ["late"]
+MASKED = PREDICTORS + ["late", "turns"]
 
 
 def while_aux(ctx):
@@ -154,19 +155,28 @@ CELLS = [
 
 @pytest.fixture(scope="module")
 def late_market():
+    """`late`, continuous, and `turns`: no value before 21 March, then `turns` is 0 to 24 March, 1 to 28 March and continuous from
+    29 March. A list holding them has no value of either on the window's first day. `late` is standardised once it is read, where
+    the old rule kept it raw in a list used on every issue day; `turns` is a 0/1 column for the forecasts of 24 and 31 March, read
+    on the right day, and not if read on a day after D or on rows a change after D reaches."""
     data = make_market_data(start="2023-01-15", days=95, horizon=3, noise=5.0, seed=3)
-    on = local_dates(data) >= np.datetime64(LATE_FROM)
+    dates = local_dates(data)
+    on = dates >= np.datetime64(LATE_FROM)
     late = np.full(len(data), np.nan)
     late[on] = np.random.default_rng(4).normal(size=int(on.sum()))
-    return data.assign(late=late, aux=1.0)
+    turns = np.where(on, 0.0, np.nan)
+    turns[dates >= np.datetime64("2023-03-25")] = 1.0
+    later = dates >= np.datetime64("2023-03-29")
+    turns[later] = np.random.default_rng(5).normal(size=int(later.sum()))
+    return data.assign(late=late, turns=turns, aux=1.0)
 
 
 @pytest.mark.parametrize(("lists", "issue_days", "horizon"), CELLS)
 def test_nothing_after_the_issue_day_moves_its_forecasts(late_market, lists, issue_days, horizon):
     """For D = 24 and 31 March: every finite value dated after D changed (missing values kept), `aux` missing after D (which
     changes a function's list after D), and the test ending on D. D's predictions and coefficients stay bit for bit, and so do
-    its keys. `late` has no value on the window's first day, and its first one on 21 March, so at h=3 the forecasts of 24 March
-    have no row with it and those of 31 March read its mask from a later day than the first."""
+    its keys. `late` and `turns` have no value on the window's first day, and their first on 21 March, so at h=3 the forecasts of
+    24 March have no row with them and those of 31 March read their mask from a later day than the first."""
     fn, newest = LISTS[lists]
     days = {} if issue_days is None else {"issue_days": issue_days}
 
