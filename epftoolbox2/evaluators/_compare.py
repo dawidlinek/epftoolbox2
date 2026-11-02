@@ -37,8 +37,10 @@ _WHOLE_DAY_PERIODS = (23, 24, 25, 92, 96, 100)
 # Below this many days nothing here gives a verdict, whatever its p-value: the normal approximation of the DM test
 # rejects a true null 9 % of the time at 30 days, 21 % at 7 and 35 % at 3.
 MIN_VERDICT_DAYS = 30
-# Test lengths behind the messages of the comparison tables: below the first a comparison says very little, and below
-# the second it lacks a whole year of seasons.
+# Test lengths behind the messages of the comparison tables, in calendar days from the first issue day to the last: below the
+# first a comparison says very little, and below the second it lacks a whole year of seasons. A run issued on Fridays alone has
+# 104 days of forecasts over two years, so its length is that span, while its `n_days` (the observations, which the verdict,
+# the HAC lag and the intervals read) stays 104.
 SHORT_TEST_DAYS = 182
 FULL_TEST_DAYS = 365
 
@@ -106,7 +108,7 @@ class LossPanel:
         if not frames:
             self.errors = np.empty((0, len(self.models)))
             self.predictions = np.empty((0, len(self.models)))
-            self.hour = self.horizon = self._day = self._run_of_day = np.empty(0, dtype=np.int64)
+            self.hour = self.horizon = self._day = self._run_of_day = self._run_days = np.empty(0, dtype=np.int64)
             return
 
         coded, radix = [], []
@@ -159,6 +161,8 @@ class LossPanel:
             )
 
         run_code, _, horizon_code, hour_code = _digits(keys, sizes)
+        # Each run date as a count of days, for the calendar span of a comparison.
+        self._run_days = np.asarray(pd.to_datetime(radix[0]).values.astype("datetime64[D]"), dtype=np.int64)
         self.horizon = np.asarray(radix[2], dtype=np.int64)[horizon_code]
         self.hour = np.asarray(radix[3], dtype=np.int64)[hour_code]
         # A day of a model's forecasts is (run_date, horizon); codes in calendar order, then by horizon.
@@ -237,18 +241,21 @@ class LossPanel:
             losses[:, i] = np.bincount(run_position, weights=day_sum / count[present]) / horizons_per_run
             sums[:, i] = np.bincount(run_position, weights=day_sum)
         partial = int(np.isin(count[present], self.whole_day_periods, invert=True).sum())
-        return DailyLosses(losses=losses, sums=sums, n_forecasts=len(rows), partial_days=partial)
+        span = int(self._run_days[run_ids[-1]] - self._run_days[run_ids[0]] + 1) if len(run_ids) else 0
+        return DailyLosses(losses=losses, sums=sums, n_forecasts=len(rows), partial_days=partial, span_days=span)
 
 
 @dataclass(frozen=True)
 class DailyLosses:
     """`losses` and `sums` are days x models. `n_forecasts` is the number of keys behind them, for each model, and
-    `partial_days` how many (run_date, horizon) among them hold only part of a day."""
+    `partial_days` how many (run_date, horizon) among them hold only part of a day. `span_days` is the calendar span of their
+    run dates, first to last, both counted: `n_days` with a forecast on every day, more with holes or weekly issues."""
 
     losses: np.ndarray
     sums: np.ndarray
     n_forecasts: int
     partial_days: int = 0
+    span_days: int = 0
 
     @property
     def n_days(self) -> int:
@@ -298,6 +305,7 @@ class PairComparison:
     p_value: float
     mde: float
     partial_days: int = 0
+    span_days: int = 0  # calendar days from the first run date to the last: what the test-length messages read
 
 
 def compare_pair(
@@ -360,6 +368,7 @@ def compare_pair(
         p_value=p_value,
         mde=mde,
         partial_days=daily.partial_days,
+        span_days=daily.span_days,
     )
 
 
@@ -418,13 +427,16 @@ def verdict(pair: PairComparison, p_value: float, alpha: float) -> Optional[str]
     return "better" if better else "worse"
 
 
-def short_test_message(n_days: int) -> Optional[str]:
-    """What to say about a comparison of `n_days` days; None for at least a year."""
-    if n_days >= FULL_TEST_DAYS:
+def short_test_message(n_days: int, span_days: Optional[int] = None) -> Optional[str]:
+    """What to say about a comparison of `n_days` days of forecasts over `span_days` calendar days (`n_days` if not given);
+    None for a span of at least a year. The span is what says whether every season is in: 104 Fridays are two years."""
+    span = n_days if span_days is None else span_days
+    if span >= FULL_TEST_DAYS:
         return None
+    over = "" if span == n_days else f" of forecasts over {span} calendar days"
     return (
-        f"The comparison rests on {n_days} days, less than a year: it does not see every season, and even one test year "
-        "only resolves differences of about 5 % of the MAE."
+        f"The comparison rests on {n_days} days{over}, less than a year: it does not see every season, and even one test "
+        "year only resolves differences of about 5 % of the MAE."
     )
 
 
@@ -439,11 +451,12 @@ def too_few_distinct_models(compared: "SetComparison") -> Optional[str]:
     )
 
 
-def warn_if_short(n_days: int, stacklevel: int = 2) -> None:
-    """Warn on a very short comparison, for a table that has no `attrs` to leave a note in."""
-    if n_days < SHORT_TEST_DAYS:
+def warn_if_short(n_days: int, stacklevel: int = 2, span_days: Optional[int] = None) -> None:
+    """Warn on a comparison spanning very few calendar days (`span_days`, `n_days` if not given), for a table that has no
+    `attrs` to leave a note in."""
+    if (n_days if span_days is None else span_days) < SHORT_TEST_DAYS:
         warnings.warn(
-            f"{short_test_message(n_days)} Below {SHORT_TEST_DAYS} days read it as indicative only.",
+            f"{short_test_message(n_days, span_days)} Below {SHORT_TEST_DAYS} days read it as indicative only.",
             stacklevel=stacklevel + 1,
         )
 

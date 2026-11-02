@@ -441,7 +441,8 @@ class EvaluationReport:
             reps: Bootstrap repetitions.
             seed: Bootstrap seed.
 
-        Warns when a comparison has fewer than 182 days; below 365 days `df.attrs["note"]` says so.
+        Warns when a comparison spans fewer than 182 calendar days from its first run date to its last; below 365
+        `df.attrs["note"]` says so. `n_days` counts the days with forecasts: 104 Fridays over two years are 104.
         """
         check_test_settings(variance, lag, correction, seed, interval)
         if by not in (None, "hour"):
@@ -456,6 +457,7 @@ class EvaluationReport:
         settings = dict(variance=variance, lag=lag, interval=interval, block=block, reps=reps, seed=seed)
 
         rows: List[Dict[str, Any]] = []
+        lengths: List[Tuple[int, int]] = []  # (calendar span, days) of each row, for the test-length note
         partial: Dict[str, int] = {}
         clones: Dict[Union[int, str], List[List[str]]] = {}
         for label, keys in self._horizon_slices(panel, horizon, each_horizon=True):
@@ -466,8 +468,10 @@ class EvaluationReport:
                     for model in models:
                         pair = compare_pair(panel, model, benchmark, keys[hours == hour], **settings)
                         rows.append(_pair_row(model, benchmark, label, pair, hour=int(hour)))
+                        lengths.append((pair.span_days, pair.n_days))
                 continue
             pairs = [compare_pair(panel, model, benchmark, keys, **settings) for model in models]
+            lengths += [(pair.span_days, pair.n_days) for pair in pairs]
             p_values = [pair.p_value for pair in pairs]
             p_holm, m, clones[label] = adjust_family(panel, keys, models, benchmark, p_values, correction)
             for model, pair, adjusted in zip(models, pairs, p_holm):
@@ -501,7 +505,8 @@ class EvaluationReport:
             )
         if len(table):
             # Per hour the switch hour has a day less than the others; the length of the test is what counts.
-            _flag_test_length(table, int(table["n_days"].max() if by == "hour" else table["n_days"].min()))
+            span, n_days = max(lengths) if by == "hour" else min(lengths)
+            _flag_test_length(table, n_days, span)
         _flag_partial_days(table, partial)
         return table
 
@@ -696,7 +701,7 @@ class EvaluationReport:
                 "37 % of the time even after Holm. They show where in the day the models differ, not which one is better."
             ),
         )
-        _flag_test_length(table, hac.n_days)
+        _flag_test_length(table, hac.n_days, hac.span_days)
         _flag_partial_days(table, {a: hac.partial_days})
         return table
 
@@ -720,11 +725,13 @@ class EvaluationReport:
         _, keys = self._pooled_slice(panel, horizon)
         clones = panel.clone_groups(keys, panel.models)
         rows: List[Dict[str, Any]] = []
+        lengths: Dict[str, Tuple[int, int]] = {}  # model -> (calendar span, days) of its row, for the test-length note
         for model in panel.models:
             own = panel.common(keys, (model,))
             daily = panel.daily(own, (model,))
             mae = float(daily.mae()[0])
             rows.append({"model": model, "n_forecasts": len(own), "MAE": mae, "n_days": daily.n_days})
+            lengths[model] = (daily.span_days, daily.n_days)
         held = ~np.isnan(panel.errors[keys])
         if (held != held[:, :1]).any():
             warnings.warn(
@@ -739,6 +746,7 @@ class EvaluationReport:
             p_holm, _, clones = adjust_family(panel, keys, names, benchmark, [pair.p_value for pair in pairs], "holm")
             partial = {row["model"]: pair.partial_days for row, pair in zip(others, pairs)}
             for row, pair, adjusted in zip(others, pairs, p_holm):
+                lengths[row["model"]] = (pair.span_days, pair.n_days)
                 row.update(
                     n_days=pair.n_days,
                     n_common=pair.n_forecasts,
@@ -757,7 +765,8 @@ class EvaluationReport:
         table.attrs["benchmark"] = benchmark
         table.attrs["clones"] = clones
         if len(table):
-            _flag_test_length(table, int(table["n_days"].min()))
+            span, n_days = min(lengths.values())
+            _flag_test_length(table, n_days, span)
         if benchmark is not None:
             _flag_partial_days(table, partial)
         return table
@@ -842,7 +851,7 @@ class EvaluationReport:
             horizon=label,
             **settings,
         )
-        _flag_test_length(table, compared.daily.n_days)
+        _flag_test_length(table, compared.daily.n_days, compared.daily.span_days)
         _flag_partial_days(table, {"the set": compared.daily.partial_days})
         return table
 
@@ -1218,13 +1227,14 @@ def _too_few_days(compared: SetComparison) -> str:
     )
 
 
-def _flag_test_length(table: pd.DataFrame, n_days: int) -> None:
-    """Warn on a very short comparison and leave a note in `table.attrs` on one shorter than a year."""
-    note = short_test_message(n_days)
+def _flag_test_length(table: pd.DataFrame, n_days: int, span_days: Optional[int] = None) -> None:
+    """Warn on a very short comparison and leave a note in `table.attrs` on one shorter than a year, by its calendar span
+    (`span_days`, `n_days` if not given): 104 Fridays are two years of seasons, though `n_days` is 104."""
+    note = short_test_message(n_days, span_days)
     if note is None:
         return
     table.attrs["note"] = note
-    if n_days < SHORT_TEST_DAYS:
+    if (n_days if span_days is None else span_days) < SHORT_TEST_DAYS:
         warnings.warn(f"{note} Below {SHORT_TEST_DAYS} days read it as indicative only.", stacklevel=3)
     else:
         logger.info(note)
