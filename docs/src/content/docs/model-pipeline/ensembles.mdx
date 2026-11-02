@@ -162,7 +162,7 @@ of a `top` ensemble, a name that is already taken, and a name whose results file
 the ensemble is built, added or loaded.
 
 When the results are read, `ManifestMismatchError`: members that disagree on the `actual` of a key or hold a key twice, or whose
-manifests differ on target, horizon, the list of horizons (`horizons=`), frequency, time zone or data, or on the information set: a different issue time, issue zone or rules,
+manifests differ on target, horizon, the list of horizons (`horizons=`), the weekdays issued on (`issue_days=`), frequency, time zone or data, or on the information set: a different issue time, issue zone or rules,
 or an information set against none. An average has one issue time, and a member issued later can read what the others can't. The order
 of the assumptions and a rule's `note` don't count, and neither do `unknown` and `availability`, which say what a run does about a column and
 not when it is known. All of this is read from the manifests of the leaf models, so nesting an average changes nothing. `report()` also refuses a model whose results file

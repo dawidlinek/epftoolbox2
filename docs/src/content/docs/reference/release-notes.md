@@ -105,6 +105,23 @@ an issue day it didn't sample.
   refuses. `report()` told neither `horizon` nor `horizons` plans what the manifests record (7 without one, as before) and raises when
   the models ran different lists; it reads only the records of the horizons it plans. See
   [Some horizons only](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only).
+- **`issue_days=`: some weekdays only.** `pipeline.run(df, test=..., horizons=range(3, 10), issue_days=["friday"])` issues forecasts on
+  the listed weekdays and no others, as a week-ahead study does. `report`, `verify` and `BaseModel.run` take it too, as do `Workflow` YAML
+  (`model_pipeline.issue_days: [friday]`) and `epf model` / `epf verify` (`--issue-days friday,monday`). Names in any case; all seven are
+  every day, and an empty list, an unknown or repeated name, a bare string or numbers raise. Training is untouched: every date's row
+  trains, a list's mask of binary columns is read on its window's first calendar day whatever its weekday, so for a fixed list a Friday's
+  record is bit for bit the one a run of every day gives it, and `day_in_test` still counts calendar days. The other days are neither
+  planned nor missing. **Nothing moves without the keyword.** The manifest records `issue_days` when it isn't every day and a resume
+  with other weekdays refuses; `report()` reads the weekdays from the manifests, raises for models run on different ones, and told
+  `issue_days` reads only the records issued on them. The information-set check and the `availability="warn"` listing look at the
+  listed days alone, so a column published weekly (A31, Fridays 10:00) used at horizon 9 passes on a Friday and is late on a Monday. See
+  [Some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only).
+- **The test-length messages read the calendar span.** The note below 365 days and the warning below 182, in `tests()`, `compare()`,
+  `leaderboard()`, the set tables of `mcs()` and `ranks()`, `DMEvaluator` and `MCSEvaluator`, now count the days from the first run date
+  to the last. `n_days` is still the days with forecasts, and the verdict (30 days), the Newey-West lag and the bootstrap intervals read
+  it. With a forecast on every day the two are equal and the message is word for word as before; a run of every day with holes warns a
+  little less, and 104 Fridays span 722 days and don't warn. No number changes. See
+  [Test length](/epftoolbox2/model-pipeline/comparing-models/#test-length).
 - **`newest_target` on every model.** `OLSModel(..., newest_target="published")` (any model) trains each forecast on every target
   that the target's availability rule says is known by the issue time on D, period by period, instead of stopping at D-1: at 11:45
   Brussels that is D's day-ahead prices, and D's realised load up to 10:00. A row dated D or later never trains. It needs an

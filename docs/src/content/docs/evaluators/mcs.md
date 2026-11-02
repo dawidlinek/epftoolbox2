@@ -67,5 +67,5 @@ print(report.summary()[["model", "MAE", "MCS p", "in MCS", "MCS n_days"]])
 - Needs at least 3 models, counting exact clones once. With fewer, or fewer than 2 common days, the columns are NaN, with a warning.
 - [Exact clones](/epftoolbox2/model-pipeline/comparing-models/#exact-clones), models with the same predictions, are one model to the set, and each gets its result. Other models with the same losses on every day have no valid test: in a table the columns are then NaN with a warning that names the models, and `report.mcs()` raises.
 - In the per-hour tables `MCS p` is a heatmap, like the per-hour DM, and `in MCS` stays empty. It stays empty too below 30 days.
-- `summary()` warns below 182 days, and results at different frequencies raise `ValueError`.
+- `summary()` warns below a span of 182 calendar days, from the first run date to the last: `n_days` when every day has a forecast (see [Test length](/epftoolbox2/model-pipeline/comparing-models/#test-length)). Results at different frequencies raise `ValueError`.
 - Serializable to YAML and works with `ModelPipeline.save()`/`load()`.

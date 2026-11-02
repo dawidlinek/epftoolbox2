@@ -57,9 +57,9 @@ A column without a rule can't be perturbed at any level: it follows `unknown` of
 
 ## What it does
 
-For each model, `days` issue days are sampled with `seed` from the test period. Every model gets the same days, so they
-don't depend on which models you verify or in what order, and the same seed gives the same table. On each day two
-experiments run:
+For each model, `days` issue days are sampled with `seed` from the test period (from its days of the weekdays in `issue_days`, if you pass them).
+Every model gets the same days, so they don't depend on which models you verify or in what order, and the same seed gives the same
+table. On each day two experiments run:
 
 | Experiment | What is perturbed | Forecasts must | Otherwise |
 |---|---|---|---|
@@ -180,6 +180,10 @@ model is `inconclusive`. If it really is known in advance, for example a column 
 
 - **It checks the horizons you ask for.** `horizon` defaults to 1 and `run()` to 7, so pass the horizon you run, or `horizons=` with
   the list you run: a leak in another horizon can't be seen. With a list, a horizon it doesn't name is no blind spot.
+- **It checks the weekdays you ask for.** Without `issue_days=` it samples every weekday and plans a predictor function on all of
+  them. Pass the weekdays you run, and only those are sampled and planned: a column published weekly, which is late on a Monday, is
+  no leak of a run on Fridays and is one of a run of every day (see
+  [Some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)).
 - **It samples.** A leak that exists only on some days shows up only if one of them is sampled. Run it on the days around
   a DST switch on their own: `pipeline.verify(df, "2024-10-26", "2024-10-29", days=4)`. See
   [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#checking-it).

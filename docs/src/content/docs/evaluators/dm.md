@@ -83,7 +83,7 @@ print(report.summary()[["model", "MAE", "DM ratio", "DM ci_low", "DM ci_high", "
 - One `DMEvaluator` per pipeline: a second one would write the same columns, which raises `ValueError`. For another benchmark call `report.tests(benchmark=...)`.
 - `ModelPipeline.run()` and `report()` raise before anything else when `benchmark` is not one of the pipeline's models. In a group where the benchmark has no forecasts the columns are NaN, with a warning.
 - A group is tested only with at least 2 days (and more days than `lag`); below that the p-values are NaN, and the ratio is still given.
-- `summary()` warns below 182 days. The breakdowns don't: their groups are short by nature, and `DM n_days` is in the table.
+- `summary()` warns below a span of 182 calendar days, from the first run date to the last: `n_days` when every day has a forecast (see [Test length](/epftoolbox2/model-pipeline/comparing-models/#test-length)). The breakdowns don't: their groups are short by nature, and `DM n_days` is in the table.
 - Results at different frequencies raise `ValueError`: period 5 of an hourly model and of a 15-minute model are different times of the day.
 - In a group with several horizons (`summary()`, `by_hour()`) the test is `report.tests(horizon="all")`; `by_horizon()` holds the per-horizon tests of `report.tests()`.
 - In `compute_all()` (and so the Excel exporter) the test and bootstrap run once per group, which adds up on many models and horizons (with `MCSEvaluator` as well, about 40 seconds for 50 models over a year). Pass `interval=None` or a smaller `reps` if that matters.

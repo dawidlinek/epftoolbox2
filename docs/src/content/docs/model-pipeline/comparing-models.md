@@ -51,12 +51,19 @@ and `ranks()` warns, as they did.
 
 One test year resolves differences of about 5 % of the MAE. Gaps of 1–2 % need about 2,700 days, so with one year most small gaps will read `no difference`, and that is the right answer. The `mde` column gives the minimum detectable effect for each pair: the difference (as a share of the benchmark's MAE) this test length would detect with 80 % power.
 
-| `n_days` | What happens |
-|----------|--------------|
-| below 365 | A note in `df.attrs["note"]` |
-| below 182 | Also a warning |
-| below 30 | Also no `verdict` and no confidence sets (`in_90`, ...): the normal approximation of the test rejects a true null 9 % of the time at 30 days and 35 % at 3 |
-| up to one block (7) | Also no interval and no rank uncertainty: one block covers all the days, so every resample is the same |
+| Length | What happens |
+|--------|--------------|
+| span below 365 | A note in `df.attrs["note"]` |
+| span below 182 | Also a warning |
+| `n_days` below 30 | Also no `verdict` and no confidence sets (`in_90`, ...): the normal approximation of the test rejects a true null 9 % of the time at 30 days and 35 % at 3 |
+| `n_days` up to one block (7) | Also no interval and no rank uncertainty: one block covers all the days, so every resample is the same |
+
+The **span** is the calendar days from the first run date to the last, both counted: it says whether the seasons are in. `n_days` counts
+the days with forecasts, and the verdict, the bootstrap intervals and the Newey-West lag read it. With a forecast on every day the two
+are equal and the messages are as they were. A run that issues on some weekdays only (`issue_days=`, see
+[Some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)) has more span than days: 104 Fridays are
+`n_days` 104 over a span of 722 days, so there is no note and no warning, and the default lag is 4. A run of every day with holes warns a
+little less for the same reason. When the two differ the message gives both: "rests on 30 days of forecasts over 204 calendar days".
 
 ## Testing against a benchmark
 
