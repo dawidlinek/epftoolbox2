@@ -239,7 +239,8 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
         "freq": cfg.get("freq", "1h"),
     }
     if newest_targets is not None:
-        # The date of the newest target the span holds; a row is never dated `day` or later (`training_span`).
+        # The newest target date of the training span, D + min(k, h-1); a row is never dated `day` or later (`training_span`).
+        # Not necessarily a target that trained: it can be a slot the clock skips or a missing value, whose row drops.
         record["newest_target_day"] = (run_date + datetime.timedelta(days=min(newest, hz - 1))).isoformat()
     if list_id is not None:
         record["predictor_list"] = cfg["list_hashes"][list_id]

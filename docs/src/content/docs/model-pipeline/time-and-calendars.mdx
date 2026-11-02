@@ -66,8 +66,9 @@ At horizon h the newest row is D+k-h, so k doesn't depend on the horizon, apart 
 - **The rule decides, not the data.** A missing value at the newest target drops that row from the fit, as any missing value does, and
   no older row takes its place.
 - **A slot the clock skips has no value to be late,** so it doesn't stop the walk. On the day before a spring switch the newest target
-  of the skipped hour is the switch day itself: its row has no target and drops, and the fit has one row fewer, as a `"d-1"` forecast
-  of that hour has on the day after the switch.
+  of the skipped hour is the switch day itself: the window is still W dates, but the row whose target is the skipped slot drops, so
+  the fit has W-1 rows, as a `"d-1"` forecast of that hour has on the day after the switch. That keeps `"published"` equal to `"d-1"`,
+  bit for bit, wherever the rule gives -1.
 - **The rule reads the index's instants.** On a fixed UTC+1 index a Brussels rule reads 23:00 in summer as 00:00 of the next day,
   which the day-ahead auction of D-1 doesn't cover, so the built-in `price` rule gives that period k = -1 all summer. The
   [benchmark files'](/epftoolbox2/data-sources/epftoolbox-benchmark/) index only labels their wall clock, so read them with the
@@ -77,7 +78,9 @@ At horizon h the newest row is D+k-h, so k doesn't depend on the horizon, apart 
   checked on and the training days of a [`train_on="matching"`](/epftoolbox2/model-pipeline/predictor-functions/) list reach as many
   days further back.
 
-Each record of such a model has `newest_target_day`, the date of the newest target its window holds (D + min(k, h-1)), and its
+Each record of such a model has `newest_target_day`, the newest target date of its training span (D + min(k, h-1)). That is not
+necessarily a target that trained: on the day before a spring switch it is the switch day itself for the skipped hour, which has no
+target, and a missing value drops its row as anywhere else. Its
 manifest's `training_cut` says what k was read from: the target's rule and the issue time and zone. A resume compares them, so changing
 the issue time or the target's rule refuses to resume, while changing the level, or a rule of another column, doesn't. A model with
 `"d-1"` writes nothing new: its records, manifest and YAML are what they were, and `newest_target` is saved to YAML only when it is
@@ -89,10 +92,17 @@ perturb the target from D on, which `"d-1"` models get; the positive control lea
 train. See [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/#the-probe).
 
 <Aside type="note" title="What it gains">
-The research behind it measured LEAR 1.0 to 1.1 % better in MAE with `"published"` in each year from 2022 to 2026 in Germany. On the Lago
-DE benchmark in 2017, one `LassoCVModel` with `lear_predictors` and a single 364-day window was 0.12 % better at horizon 1, over 8712
-forecasts on the same keys: within what a year's noise allows, and better in three quarters out of four. Nothing defaults to it:
-`"d-1"` stays the default of every model.
+The research behind the setting measured 1.0 to 1.1 % lower MAE in each year from 2022 to 2026 in Germany, for LEAR with its average
+over several training windows. That figure was not reproduced in the library. The library's own check, one `LassoCVModel` with
+`lear_predictors` and a single 364-day window on the Lago DE benchmark, found no difference beyond noise on that data:
+
+| | Forecasts | MAE | RMSE |
+|---|---|---|---|
+| 2017, horizon 1 | 8712 | 0.12 % lower | 0.53 % higher |
+| 61 days of late 2016, horizons 1 and 2 | 2928 | 0.12 % lower | 0.37 % higher |
+
+Over 2017 the fourth quarter's MAE was 2.13 % higher, about what the first quarter's was lower. Nothing defaults to it: `"d-1"` stays the
+default of every model.
 </Aside>
 
 ## What a clock change does

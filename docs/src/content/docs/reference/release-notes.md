@@ -92,7 +92,7 @@ an issue day it didn't sample.
   Brussels that is D's day-ahead prices, and D's realised load up to 10:00. A row dated D or later never trains. It needs an
   information set with a rule for the target, at every level, and reads nothing else from it. `"d-1"` stays the default and
   **nothing moves without the keyword**: records, manifests and YAML of such a model are byte for byte what they were. A published
-  model's records have `newest_target_day`, its manifest's `training_cut` names the target's rule and the issue time and zone (so
+  model's records have `newest_target_day` (the newest target date of its training span, which needn't have trained), its manifest's `training_cut` names the target's rule and the issue time and zone (so
   changing them refuses a resume, and changing the level doesn't), `explain()` shows the newest target, and `verify()` takes the rule
   as its boundary. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target).
 - `environment.models_per_task: k` in `Workflow` YAML (`Workflow(models_per_task=k)`): SLURM array task `i` runs the block of models

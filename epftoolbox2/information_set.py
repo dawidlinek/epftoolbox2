@@ -1129,6 +1129,11 @@ class _IssueClock:
         if not self.ctx.naive:
             skipped = self.skipped(periods, step, row_day)
             if skipped.any():
+                # A skipped slot has no value to be late. So `newest_targets` walks past it: on the day before a spring
+                # switch the switch hour's newest target is the switch day itself, whose row has no target and drops, and
+                # the window of W dates holds W-1 rows. Deliberate, not stopping the walk one day short: since rows are chosen
+                # by date a window is W dates, and "d-1" gives that slot W-1 rows on the day after the switch in the same
+                # way, so "published" equals "d-1" bit for bit wherever the rule gives -1.
                 avail = np.where(skipped, -np.inf, avail)
         return avail
 

@@ -241,7 +241,7 @@ def test_on_a_fixed_offset_a_brussels_rule_reads_the_summer_s_last_hour_as_tomor
 # ---------------------------------------------------------------------------
 
 
-def hand_forecast(data, freq, period, horizon, day, names, newest):
+def hand_forecast(data, freq, period, horizon, day, names, newest, window=WINDOW):
     """The forecast read from the frame with numpy alone: rows by date up to D + min(k - h, -1), W of them, targets by the wall
     clock (a repeated hour has none), the binary columns as they are and the others standardised on the rows that train."""
     wall = data.index.tz_localize(None)
@@ -249,7 +249,7 @@ def hand_forecast(data, freq, period, horizon, day, names, newest):
     periods = wall.hour * (60 // STEP[freq]) + wall.minute // STEP[freq]
     D = pd.Timestamp(day)
     last = D + pd.Timedelta(days=min(newest - horizon, -1))
-    first = last - pd.Timedelta(days=WINDOW - 1)
+    first = last - pd.Timedelta(days=window - 1)
     here = np.asarray(periods == period)
     rows = np.flatnonzero(here & np.asarray((dates >= first) & (dates <= last)))
     prices = pd.Series(data["price"].to_numpy(), index=wall)
@@ -292,6 +292,37 @@ def test_a_published_forecast_equals_a_hand_fit_on_the_rows_its_rule_allows(case
             assert dates.max() < pd.Timestamp(run_date)  # no row dated on the issue day or later
             checked += 1
     assert checked > 0
+
+
+@pytest.mark.parametrize("h", [2, 3])
+def test_on_the_day_before_a_spring_switch_the_skipped_hour_trains_on_w_1_rows(h):
+    """Warsaw skips 02:00 on 2023-03-26. Issued on 2023-03-25, the switch hour's newest target is the switch day (k = 1): that
+    slot has no value to be late, so the walk goes past it. The window is still W dates, ending on the row whose target is the
+    skipped slot, which drops: W-1 rows, as "d-1" has for that hour on the day after the switch. `newest_target_day` is that
+    date, a target that never trained. An hour the clock has keeps k = 0 and W rows."""
+    W, day = 30, "2023-03-25"
+    data = market("spring", horizon=3)
+    model = OLSModel(PREDICTORS, training_window=W, newest_target="published")
+    found = by_key(model.run(data, day, day, horizon=3, information_set=info_for("price published 13:00 D-1"))._results)
+    names = [name.replace("{horizon}", str(h)) for name in PREDICTORS]
+
+    prediction, dates = hand_forecast(data, "1h", 2, h, day, names, 1, window=W)
+    assert len(dates) == W - 1 and dates.max() == pd.Timestamp(day_of(day, -h))
+    assert found[(day, 2, h)]["prediction"] == pytest.approx(prediction, abs=1e-9)
+    assert found[(day, 2, h)]["newest_target_day"] == "2023-03-26"
+    one_day_short, dates = hand_forecast(data, "1h", 2, h, day, names, 0, window=W)
+    assert len(dates) == W and found[(day, 2, h)]["prediction"] != pytest.approx(one_day_short, abs=1e-9)
+
+    prediction, dates = hand_forecast(data, "1h", 3, h, day, names, 0, window=W)
+    assert len(dates) == W
+    assert found[(day, 3, h)]["prediction"] == pytest.approx(prediction, abs=1e-9)
+    assert found[(day, 3, h)]["newest_target_day"] == day_of(day, min(0, h - 1))
+
+    # "d-1" on the day after the switch: the same W-1 rows for that hour.
+    d_1 = by_key(OLSModel(PREDICTORS, training_window=W).run(data, "2023-03-27", "2023-03-27", horizon=3)._results)
+    prediction, dates = hand_forecast(data, "1h", 2, h, "2023-03-27", names, -1, window=W)
+    assert len(dates) == W - 1
+    assert d_1[("2023-03-27", 2, h)]["prediction"] == pytest.approx(prediction, abs=1e-9)
 
 
 @pytest.mark.parametrize("case", list(CASES))
