@@ -91,3 +91,19 @@ def test_issue_time_prompt_defaults_to_the_information_set_default(monkeypatch, 
         tui.build_model_pipeline_interactive()
 
     assert offered["issue_time"] == InformationSet().issue_time == "11:45"
+
+
+def test_the_resolution_prompt_offers_daily_frames(monkeypatch):
+    offered = {}
+
+    class Answer:
+        def ask(self):
+            return "1D"
+
+    def select(message, choices, default=None):
+        offered["choices"] = choices
+        return Answer()
+
+    monkeypatch.setattr(tui.questionary, "select", select)
+    assert tui._ask_freq() == "1D"
+    assert offered["choices"] == ["1h", "15min", "1D"]
