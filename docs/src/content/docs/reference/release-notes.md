@@ -84,9 +84,12 @@ an issue day it didn't sample.
     `lear_predictors` for Lago's DE data (W=364, 61 days, horizon 2). In a run of Fridays, a function's list first used on the second
     Friday, at a period and horizon whose key on the first Friday the clock skips, now reads its mask on the window's first day, so
     its records there differ from a run of every day's ([where a function's records differ](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)).
-  - **Resuming.** Results of a predictor function, and results with validation windows, whose stored forecasts now get another mask
-    raise `ManifestMismatchError`: run them into a new `save_dir`. Plain results of fixed lists store no mask digest, so their resume
-    isn't refused and would mix the two scalings: if a list holds a column that starts inside the test, run them into a new `save_dir`.
+  - **Resuming.** Results whose stored forecasts now get another mask raise `ManifestMismatchError`: run them into a new `save_dir`.
+    For a predictor function and for a run with validation windows that is the mask digest of each stored forecast. Plain results of
+    fixed lists stored no digest, so a plain run of fixed lists now records its digests (`binary_masks`, under the test window's key)
+    when a column was read on a later day and that changed a mask, and resuming results whose manifest has none then raises, saying the
+    scaling rule changed; `allow_manifest_mismatch=True` resumes anyway. Where nothing was read again the manifest is as it was, byte
+    for byte apart from provenance, and resumes.
 - **Availability compares instants, not clock readings.** `InformationSet` worked in wall-clock minutes of the data's zone, so around
   a clock change a value known after the issue could read as known before it: `realised("1h")` at 01:00 on the Warsaw spring day read
   as known at 03:00, though 01:00 CET plus two hours is 04:00 CEST, and a value known in the second 01:00 read as before an issue in the
