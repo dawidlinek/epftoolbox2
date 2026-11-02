@@ -1377,7 +1377,8 @@ def test_members_with_records_of_another_frequency_are_refused_also_without_a_ma
     write_member(tmp_path, "b", forecasts(days_of(*HT), 2.0, freq="15min"))
     for name in ("a", "b"):
         manifest_path(tmp_path / f"{name}.jsonl").unlink()
-    with pytest.raises(ManifestMismatchError, match="frequencies"):
+    # report() itself reads the freq the records carry without a manifest, and refuses the members first.
+    with pytest.raises(ValueError, match="frequencies"):
         report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"), test=HT)
 
 
