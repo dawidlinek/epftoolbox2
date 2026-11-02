@@ -89,8 +89,10 @@ perturb the target from D on, which `"d-1"` models get; the positive control lea
 train. See [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/#the-probe).
 
 <Aside type="note" title="What it gains">
-On the Lago DE benchmark the plan's research found LEAR 1.0 to 1.1 % better with `"published"` in every year from 2022 to 2026. Nothing
-defaults to it: `"d-1"` stays the default of every model.
+The research behind it measured LEAR 1.0 to 1.1 % better in MAE with `"published"` in each year from 2022 to 2026 in Germany. On the Lago
+DE benchmark in 2017, one `LassoCVModel` with `lear_predictors` and a single 364-day window was 0.12 % better at horizon 1, over 8712
+forecasts on the same keys: within what a year's noise allows, and better in three quarters out of four. Nothing defaults to it:
+`"d-1"` stays the default of every model.
 </Aside>
 
 ## What a clock change does
