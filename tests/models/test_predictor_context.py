@@ -121,9 +121,12 @@ def switch_data(spec, freq):
     return make_market_data(start=spec["start"], days=spec["days"], freq=freq, horizon=3, noise=5.0, seed=3)
 
 
-@pytest.mark.parametrize("switch", list(SWITCHES))
-@pytest.mark.parametrize("freq", ["1h", "15min"])
-@pytest.mark.parametrize("horizon", [1, 3])
+# The OLS test takes the cells of the 2 x 2 x 2 grid (switch, frequency, horizon) that the Lasso test below does not, so
+# each cell has one model and every level of an axis is in four cells.
+@pytest.mark.parametrize(
+    ("switch", "freq", "horizon"),
+    [("spring", "1h", 3), ("spring", "15min", 1), ("autumn", "1h", 1), ("autumn", "15min", 3)],
+)
 def test_ols_on_a_function_returning_the_static_list_is_bitwise_identical(switch, freq, horizon):
     spec = SWITCHES[switch]
     frame = switch_data(spec, freq)

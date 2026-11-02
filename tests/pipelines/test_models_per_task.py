@@ -121,7 +121,10 @@ class Snapshot:
         self.export = (Path(directory) / "table.csv").read_bytes()
 
     def sorted_records(self):
-        """A resume appends what is pending, so the lines of a member's file come in another order: the lines are what count."""
+        """The lines of each file, in a fixed order. The order a file's lines come in is no part of a result: a resume
+        appends what is pending, and a pool hands the days that finished before it started collecting in no set order,
+        so on a busy machine two identical runs write the same lines in another order. The lines are what count, each
+        one compared to the last bit."""
         return {name: sorted(content.splitlines()) for name, content in self.records.items()}
 
 
@@ -269,7 +272,7 @@ def test_a_merged_array_is_bitwise_one_run(tmp_path, frame_csv, one_run, k, via)
 
     merged = merge(tmp_path, frame_csv, via)
 
-    assert merged.records == one_run.records
+    assert merged.sorted_records() == one_run.sorted_records()
     assert merged.manifests == one_run.manifests
     assert merged.tables == one_run.tables
     assert merged.export == one_run.export
@@ -291,7 +294,7 @@ def test_a_merged_array_without_windows_is_bitwise_one_run(tmp_path, frame_csv):
 
     merged = merge(array, frame_csv, windows=False)
 
-    assert merged.records == one_run.records
+    assert merged.sorted_records() == one_run.sorted_records()
     assert merged.manifests == one_run.manifests
     assert merged.tables == one_run.tables
     assert merged.export == one_run.export
@@ -323,7 +326,7 @@ def test_models_per_task_without_an_index_warns_and_runs_the_whole_pipeline(tmp_
     with pytest.warns(UserWarning, match="models_per_task=2 has no effect without model_index"):
         report = workflow.run()
     assert list(report.refs) == [*NAMES, "best", "average"]
-    assert Snapshot(tmp_path, report).records == one_run.records
+    assert Snapshot(tmp_path, report).sorted_records() == one_run.sorted_records()
 
 
 @pytest.mark.parametrize("environment", [{"models_per_task": 3}, {"models_per_task": 3, "model_index": 1}])
@@ -497,7 +500,7 @@ def test_a_late_block_can_complete_a_refused_merge(tmp_path, frame_csv, one_run)
         merge(tmp_path, frame_csv)
     run_array(tmp_path, frame_csv, 2, indices=[1])
     merged = merge(tmp_path, frame_csv)
-    assert merged.records == one_run.records and merged.tables == one_run.tables
+    assert merged.sorted_records() == one_run.sorted_records() and merged.tables == one_run.tables
 
 
 def test_a_task_stopped_inside_a_model_is_warned_about_at_the_merge(tmp_path, frame_csv):

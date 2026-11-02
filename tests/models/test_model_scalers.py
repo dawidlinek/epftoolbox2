@@ -104,8 +104,14 @@ def test_vst_forecasts_ignore_prices_dated_on_or_after_the_issue_day(scaler, sin
         assert runs[1][key] == pytest.approx(prediction, abs=1e-9), key
 
 
-@pytest.mark.parametrize("model_cls", [OLSModel, LassoCVModel])
-def test_every_scaler_runs_on_synthetic_data(model_cls, single_process):
+# LassoCV fits a path of 100 penalties on every fold, so it forecasts the three days around the spring switch (the 26th
+# has 23 hours) where OLS forecasts the week.
+@pytest.mark.parametrize(
+    ("model_cls", "test_end"),
+    [(OLSModel, "2023-03-31"), (LassoCVModel, "2023-03-27")],
+    ids=["OLSModel", "LassoCVModel"],
+)
+def test_every_scaler_runs_on_synthetic_data(model_cls, test_end, single_process):
     df = make_market_data(noise=5.0, seed=42)
     predictors = PREDICTORS + ["price_d-1"]
     kwargs = {"cv": 3} if model_cls is LassoCVModel else {}
@@ -113,7 +119,7 @@ def test_every_scaler_runs_on_synthetic_data(model_cls, single_process):
     results = {}
     for scaler in SCALERS:
         model = model_cls(predictors, training_window=45, scaler=scaler, **kwargs)
-        ref = model.run(df, test_start="2023-03-25", test_end="2023-03-31", target="price", horizon=2)
+        ref = model.run(df, test_start="2023-03-25", test_end=test_end, target="price", horizon=2)
         results[str(scaler)] = {(r["hour"], r["horizon"], r["day_in_test"]): r for r in ref._results}
 
     keys = [set(r) for r in results.values()]

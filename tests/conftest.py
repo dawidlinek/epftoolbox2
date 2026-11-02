@@ -30,6 +30,24 @@ PROCESS_ENV = (
 )
 
 
+@pytest.fixture(autouse=True)
+def restore_process_env():
+    """Give every test the process environment it started with.
+
+    `Workflow.run()` sets these for the whole process, so a test that runs a workflow would otherwise hand its settings
+    to whichever test the same process runs next: with a random order, or with pytest-xdist reusing a worker for the
+    next test, that is a dependence on what ran before.
+    """
+    names = (*PROCESS_ENV, "MAX_PROCESSES", "THREADS_PER_PROCESS")
+    before = {name: os.environ.get(name) for name in names}
+    yield
+    for name, value in before.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
 @pytest.fixture
 def live_dir(tmp_path, monkeypatch, entsoe_api_key):
     """The directory a live test (examples, documentation quick start) runs in. Skips without ENTSOE_API_KEY.

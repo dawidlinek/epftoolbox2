@@ -107,6 +107,13 @@ def reports(kind, tmp_path):
     return [build_report(seed, kind, tmp_path) for seed in (None, 11, 12)]
 
 
+@pytest.fixture
+def file_reports(tmp_path):
+    """The same, always from JSONL files: what the exporters write is what the report holds, whichever way it was
+    given the records, and the tests above compare the report's tables for both."""
+    return [build_report(seed, "jsonl", tmp_path) for seed in (None, 11, 12)]
+
+
 def test_the_test_data_makes_summation_order_matter():
     """Guards the tests below: if shuffling the records changed no sum, they would pass without the fix."""
     for records in STUDY.values():
@@ -173,34 +180,34 @@ def test_details_are_in_forecast_key_order(reports):
             assert details[keys].equals(details[keys].sort_values(keys).reset_index(drop=True)), name
 
 
-def test_csv_does_not_depend_on_record_order(reports, tmp_path):
-    for i, report in enumerate(reports):
+def test_csv_does_not_depend_on_record_order(file_reports, tmp_path):
+    for i, report in enumerate(file_reports):
         CsvExporter(str(tmp_path / f"out{i}.csv")).export(report)
 
     expected = (tmp_path / "out0.csv").read_bytes()
     assert expected
-    for i in range(1, len(reports)):
+    for i in range(1, len(file_reports)):
         assert (tmp_path / f"out{i}.csv").read_bytes() == expected
 
 
-def test_excel_does_not_depend_on_record_order(reports, tmp_path):
-    for i, report in enumerate(reports):
+def test_excel_does_not_depend_on_record_order(file_reports, tmp_path):
+    for i, report in enumerate(file_reports):
         ExcelExporter(str(tmp_path / f"out{i}.xlsx")).export(report)
 
     expected = pd.read_excel(tmp_path / "out0.xlsx", sheet_name=None)
     assert "Summary" in expected and "Details" in expected
-    for i in range(1, len(reports)):
+    for i in range(1, len(file_reports)):
         sheets = pd.read_excel(tmp_path / f"out{i}.xlsx", sheet_name=None)
         assert sheets.keys() == expected.keys()
         for name, sheet in expected.items():
             pd.testing.assert_frame_equal(sheet, sheets[name], check_exact=True, obj=name)
 
 
-def test_terminal_does_not_depend_on_record_order(reports, capsys):
+def test_terminal_does_not_depend_on_record_order(file_reports, capsys):
     shown = []
-    for report in reports:
+    for report in file_reports:
         TerminalExporter(show=["summary", "horizon", "hour_horizon", "year"]).export(report)
         shown.append(capsys.readouterr().out)
 
     assert shown[0]
-    assert shown[1:] == [shown[0]] * (len(reports) - 1)
+    assert shown[1:] == [shown[0]] * (len(file_reports) - 1)
