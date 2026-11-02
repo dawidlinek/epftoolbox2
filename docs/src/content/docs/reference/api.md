@@ -182,6 +182,7 @@ class Workflow:
         model_test: Optional[Sequence[Any]] = None,           # [start, end], the same as model_test_start and _end
         models_per_task: Optional[int] = None,                # With model_index: task i runs models [i*k, (i+1)*k)
         model_horizons: Optional[Sequence[int]] = None,       # Only these horizons, e.g. [1, 3, 7]; not with model_horizon
+        model_issue_days: Optional[Sequence[str]] = None,     # Only these weekdays, e.g. ["friday"]
     ): ...
 
     def run(self) -> EvaluationReport: ...
