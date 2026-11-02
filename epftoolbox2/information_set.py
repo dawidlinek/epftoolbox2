@@ -21,6 +21,7 @@ from __future__ import annotations
 import fnmatch
 import math
 import re
+import threading
 import warnings
 from dataclasses import dataclass, field, replace
 from functools import cached_property, lru_cache
@@ -535,6 +536,13 @@ def _find_rule(name: str, chain: List[Tuple[str, Tuple[Shift, ...]]], rules, lay
 
 ROLE_PREDICTOR = "predictor"
 ROLE_TARGET = "training target"
+# How far back `InformationSet.newest_targets` looks for a known training target, in days relative to the issue day.
+NEWEST_TARGET_FROM = -31
+# Tables `newest_targets` computed, by what they were computed from, the oldest first, and the lock that guards them: models
+# can be planned in threads, and a free-threaded build runs them at once.
+_NEWEST_TABLES: Dict[Tuple[Any, ...], np.ndarray] = {}
+_NEWEST_TABLES_KEPT = 16
+_NEWEST_TABLES_LOCK = threading.Lock()
 ROLE_VALUE = "ctx.value"
 ROLE_PUBLISHED = "ctx.published"
 
@@ -705,12 +713,16 @@ class InformationSet:
         test_end: Optional[str] = None,
         model_name: str = "Model",
         issue_days: Optional[Sequence[str]] = None,
+        check_target: bool = True,
     ) -> None:
         """Raise InformationSetError if a predictor (or the newest training target) is not known at issue time.
 
         `issue_days` checks these days instead of [test_start, test_end]: a run with validation forecasts no day between
-        its windows."""
-        violations, unknown = self.violations(expanded, target, freq, index, test_start, test_end, issue_days)
+        its windows. `check_target=False` leaves the training target out, for a model whose newest target is read from its
+        rule (`newest_target="published"`, see `newest_targets`): what it trains on is known by construction."""
+        violations, unknown = self.violations(
+            expanded, target, freq, index, test_start, test_end, issue_days, check_target=check_target
+        )
         self._report_unknown(unknown, model_name)
         if violations:
             raise InformationSetError(self._format(violations, model_name))
@@ -726,13 +738,17 @@ class InformationSet:
         test_end: Optional[str] = None,
         model_name: str = "Model",
         issue_days: Optional[Sequence[str]] = None,
+        check_target: bool = True,
     ) -> List[Violation]:
         """What `availability="warn"` lists: every use `check` refuses, and every use of a column without a rule, whatever
         `unknown` says, instead of an error. A column of a data source on an index in another zone still raises: neither
-        the check nor the listing could say anything true about it."""
-        found, _ = self.violations(expanded, target, freq, index, test_start, test_end, issue_days)
+        the check nor the listing could say anything true about it. `check_target` is as in `check`."""
+        found, _ = self.violations(
+            expanded, target, freq, index, test_start, test_end, issue_days, check_target=check_target
+        )
         step = _STEP_MINUTES[freq]
         resolved: Dict[str, ResolvedColumn] = {}
+        targets = [(target, ROLE_TARGET)] if check_target else []
 
         def no_rule(name: str) -> Optional[ResolvedColumn]:
             col = resolved.get(name)
@@ -741,7 +757,7 @@ class InformationSet:
             return col if col.rule is None else None
 
         for (period, hz), predictors in sorted(expanded.items()):
-            for name, role in [(p, ROLE_PREDICTOR) for p in predictors] + [(target, ROLE_TARGET)]:
+            for name, role in [(p, ROLE_PREDICTOR) for p in predictors] + targets:
                 col = no_rule(name)
                 if col is not None:
                     found.append(Violation(name, period, hz, col, math.nan, math.nan, role))
@@ -775,6 +791,7 @@ class InformationSet:
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
         issue_days: Optional[Sequence[str]] = None,
+        check_target: bool = True,
     ) -> Tuple[List[Violation], set]:
         """All (predictor, period, horizon) uses of values not known at issue time, and unknown base columns.
 
@@ -782,6 +799,9 @@ class InformationSet:
         it converts: when the data zone and a rule's zone don't switch DST together (a UTC or fixed-offset index
         against Brussels rules), a value delivered or published across a switch from D has other offsets than D.
         A violation reports the issue day on which its value comes latest after the issue time.
+
+        `check_target=False` has no use of the training target, for a model with `newest_target="published"`: its newest
+        target is the newest its rule calls known (`newest_targets`), so it is known by construction.
         """
         step = _STEP_MINUTES[freq]
         resolved: Dict[str, ResolvedColumn] = {}
@@ -792,8 +812,10 @@ class InformationSet:
         for (period, _), predictors in expanded.items():
             for name in predictors:
                 periods.setdefault((name, ROLE_PREDICTOR), set()).add(period)
-            periods.setdefault((target, ROLE_TARGET), set()).add(period)
-        for name in [target] + [name for name, _ in periods]:
+            if check_target:
+                periods.setdefault((target, ROLE_TARGET), set()).add(period)
+        targets = [(target, ROLE_TARGET)] if check_target else []
+        for name in ([target] if check_target else []) + [name for name, _ in periods]:
             if name not in resolved:
                 resolved[name] = self._resolve_for(name, step)
                 if resolved[name].rule is None:
@@ -818,11 +840,87 @@ class InformationSet:
 
         out: List[Violation] = []
         for (period, hz), predictors in sorted(expanded.items()):
-            for name, role in [(p, ROLE_PREDICTOR) for p in predictors] + [(target, ROLE_TARGET)]:
+            for name, role in [(p, ROLE_PREDICTOR) for p in predictors] + targets:
                 if (name, role, period) in late:
                     col = resolved[name]
                     out.append(late[(name, role, period)].use(name, hz, col, role, self._weather_cutoff_hint(col)))
         return out, unknown
+
+    def newest_targets(
+        self, target: str, freq: str, index: pd.DatetimeIndex, days: Sequence[Any], horizon: int
+    ) -> np.ndarray:
+        """The newest training target of each forecast of a model with `newest_target="published"`, as `[period, issue day]`:
+        the largest k such that the target at (D + k, period) and every older one down to (D - 31, period) are known by the
+        issue time on D, by the target's own rule.
+
+        It walks up from k = -31 and stops at the first unknown cell, or at `horizon - 1`, beyond which no row moves (a row
+        is never dated D or later: see `models._calendar.training_span`). "Every older one" matters when a rule makes a newer
+        value known before an older one: rows of such older targets would be a look-ahead. Each cell is read through
+        `_IssueClock.available`, the path `violations` and `ctx.published` read through, and a cell the clock skips counts as
+        known, having no row. Only the rule decides: a missing value at the newest cell drops that row from a fit, as any
+        missing value does, and nothing older takes its place.
+
+        `days` are the issue days, in order. Raises InformationSetError if the target has no rule, whatever `unknown` says
+        (it decides numbers, which no setting may leave to chance), or if its value of D-31 isn't known on some issue day.
+        """
+        step = _STEP_MINUTES[freq]
+        col = self._resolve_for(target, step)
+        if col.rule is None:
+            raise InformationSetError(
+                f"newest_target='published' reads the training target's rule, and '{target}' has none. Declare when it is "
+                f"known, e.g. InformationSet(rules={{'{target}': Availability.published('13:00', 1)}})."
+            )
+        self._check_source_zone(col, index)
+        days = pd.DatetimeIndex(pd.to_datetime([str(pd.Timestamp(day).date()) for day in days]))
+        # A pipeline asks for the same table several times per model (planning, the input check, the run), and a sweep of
+        # variants once per variant, so tables are kept by everything they are computed from.
+        key = (
+            repr(col),
+            self.issue_time,
+            self.issue_timezone,
+            self._data_zone(index),
+            getattr(index, "tz", None) is None,
+            freq,
+            tuple(days.asi8.tolist()),
+            int(horizon),
+        )
+        with _NEWEST_TABLES_LOCK:
+            found = _NEWEST_TABLES.get(key)
+        if found is None:
+            found = self._newest_targets(col, target, freq, index, days, int(horizon))
+            found.setflags(write=False)
+            with _NEWEST_TABLES_LOCK:
+                _NEWEST_TABLES[key] = found
+                while len(_NEWEST_TABLES) > _NEWEST_TABLES_KEPT:
+                    del _NEWEST_TABLES[next(iter(_NEWEST_TABLES))]
+        return found
+
+    def _newest_targets(
+        self, col: ResolvedColumn, target: str, freq: str, index: pd.DatetimeIndex, days: pd.DatetimeIndex, horizon: int
+    ) -> np.ndarray:
+        step = _STEP_MINUTES[freq]
+        periods = np.arange(1440 // step)
+        newest = np.full((len(periods), len(days)), max(horizon - 1, NEWEST_TARGET_FROM), dtype=np.int64)
+        if not len(days):
+            return newest
+        clock = self._issue_clock(days, index)
+        open_cells = np.ones(newest.shape, dtype=bool)  # every cell from D-31 up to k is known
+        for k in range(NEWEST_TARGET_FROM, horizon):
+            known = clock.available(col, periods, step, row_day=k) <= clock.issue
+            if k == NEWEST_TARGET_FROM and not known.all():
+                period, day = (int(i[0]) for i in np.nonzero(~known))
+                raise InformationSetError(
+                    f"newest_target='published' looks back {-NEWEST_TARGET_FROM} days at most, and by its rule "
+                    f"('{col.rule.describe()}') the training target '{target}' of {-NEWEST_TARGET_FROM} days before the issue "
+                    f"day isn't known at the issue time, e.g. period {period} for the issue day {days[day].date()}. Use "
+                    "newest_target='d-1' with a rule this slow, and check the rule."
+                )
+            stopped = open_cells & ~known
+            newest[stopped] = k - 1
+            open_cells &= known
+            if not open_cells.any():
+                break
+        return newest
 
     def _issue_clock(self, days: pd.DatetimeIndex, index: pd.DatetimeIndex) -> "_IssueClock":
         """The issue times of these issue days (naive midnights, the first one first) on an index like `index`."""
@@ -1031,6 +1129,11 @@ class _IssueClock:
         if not self.ctx.naive:
             skipped = self.skipped(periods, step, row_day)
             if skipped.any():
+                # A skipped slot has no value to be late. So `newest_targets` walks past it: on the day before a spring
+                # switch the switch hour's newest target is the switch day itself, whose row has no target and drops, and
+                # the window of W dates holds W-1 rows. Deliberate, not stopping the walk one day short: since rows are chosen
+                # by date a window is W dates, and "d-1" gives that slot W-1 rows on the day after the switch in the same
+                # way, so "published" equals "d-1" bit for bit wherever the rule gives -1.
                 avail = np.where(skipped, -np.inf, avail)
         return avail
 
@@ -1340,8 +1443,11 @@ def leakage_probe(
     own name still looks fine.
 
     `check_target_boundary` additionally perturbs `target` for every row on or after `run_day`, regardless
-    of its own Availability rule: the model's own boundary (training targets end at D-1) is a deliberate,
-    conservative choice that can be stricter than a column's factual publication time.
+    of its own Availability rule: the boundary of a model with `newest_target="d-1"` (training targets end at D-1) is a
+    deliberate, conservative choice that can be stricter than a column's factual publication time. A model with
+    `newest_target="published"` trains on what the target's rule says is known, which may be dated `run_day`, so for it the
+    rule alone is the boundary: `check_target_boundary=True` raises, and its run reads its newest targets from
+    `information_set`, as `run(information_set=...)` would, without anything else of it.
 
     A predictor function of `ctx` is planned on each frame, so a value it reads can move its list. A cell it read that
     differs between the frames counts as a change of the forecasts that read it, in `changed` and `moved_reads`, because
@@ -1354,6 +1460,12 @@ def leakage_probe(
     `late_reads`, whatever the noise did. The boundary tested is the same at every level.
     """
     run_day = str(pd.Timestamp(run_day).date())
+    if check_target_boundary and _newest_target_of(model) == "published":
+        raise ValueError(
+            "check_target_boundary=True perturbs the target from the issue day on, which a model with "
+            "newest_target='published' may train on where its rule says the value is known by the issue time: for such a "
+            "model the target's rule is the boundary, and the probe perturbs what it calls unknown. Leave it False."
+        )
     target_from_issue = target if check_target_boundary else None
     perturbed, counts, unchecked = perturb_unknown(
         data, run_day, information_set, freq, columns, seed, target_from_issue=target_from_issue
@@ -1397,7 +1509,8 @@ def _issue_day_forecasts(
     `ctx` read (see `PredictorPlan.read_cells`), and its reads of values known only later (`PredictorPlan.late_reads`).
 
     Such a function is planned on this very frame, so a value it reads can move its list, and it answers through the
-    information set. The run itself gets none, so a late list isn't refused and the forecasts show it.
+    information set. The run itself gets none, so a late list isn't refused and the forecasts show it. A model with
+    `newest_target="published"` reads its training cut from it (`cut_rules`), and nothing else.
     """
     m = model() if callable(model) and not hasattr(model, "run") else model
     plan_predictors = getattr(m, "_plan_predictors", None)
@@ -1415,6 +1528,8 @@ def _issue_day_forecasts(
             availability=availability,
         )
     extra = {} if plan is None else {"plan": plan}
+    if getattr(m, "newest_target", "d-1") == "published":
+        extra["cut_rules"] = information_set
     read = {} if plan is None else plan.read_cells()  # the run lets go of them
     late = [] if plan is None else plan.late_reads()
     ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, horizon=horizon, freq=freq, **extra)
@@ -1509,23 +1624,31 @@ def positive_control(
 
     With `rebuild`, days are those of the frame it returns, so a source in UTC is read in the market's zone.
 
+    A model with `newest_target="published"` may train on the row of D-1 (at horizon 1 when the target of D is known by the
+    issue time), so for it only rows dated D or later change: an outlier in a training row would move the forecast whatever
+    its inputs, and the control could never fail. With `rebuild` that is a row of the built frame: the raw values of D-1 still
+    change, so that what row D builds from them (`x_d-1`) does, and every built row before D is put back.
+
     `model` is a model instance or a zero-argument factory, and `availability` the level a predictor function is planned
     at, as in `leakage_probe`.
     """
     run_day = str(pd.Timestamp(run_day).date())
+    first_row_day = 0 if _newest_target_of(model) == "published" else -1
     names = list(data.columns) if columns is None else list(columns)
     if rebuild is None:
         names = [name for name in names if name != target]
     if rebuild is None:
         base = data
-        perturbed, counts, unchecked = perturb_recent(data, run_day, information_set, freq, names, seed)
+        perturbed, counts, unchecked = perturb_recent(
+            data, run_day, information_set, freq, names, seed, first_row_day=first_row_day
+        )
     else:
         base = rebuild(data)
         both_aware = data.index.tz is not None and base.index.tz is not None
         in_market_zone = data.tz_convert(base.index.tz) if both_aware else data
         perturbed, counts, unchecked = perturb_recent(in_market_zone, run_day, information_set, freq, names, seed)
         perturbed.index = data.index
-        perturbed = _with_training_data_of(base, rebuild(perturbed), run_day, target)
+        perturbed = _with_training_data_of(base, rebuild(perturbed), run_day, target, first_row_day)
     original, *_ = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set, availability)
     other, *_ = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set, availability)
     moved, max_abs_change, _ = _compare_forecasts(original, other, atol)
@@ -1540,11 +1663,19 @@ def positive_control(
     )
 
 
-def _with_training_data_of(base: pd.DataFrame, perturbed: pd.DataFrame, run_day: str, target: str) -> pd.DataFrame:
-    """A copy of `perturbed` with `target` and every row dated before D-1 taken from `base`."""
+def _newest_target_of(model: Any) -> str:
+    """The `newest_target` of a model instance or of one a zero-argument factory makes; `"d-1"` for one that has none."""
+    m = model() if callable(model) and not hasattr(model, "run") else model
+    return getattr(m, "newest_target", "d-1")
+
+
+def _with_training_data_of(
+    base: pd.DataFrame, perturbed: pd.DataFrame, run_day: str, target: str, first_row_day: int = -1
+) -> pd.DataFrame:
+    """A copy of `perturbed` with `target` and every row dated before D + `first_row_day` (D-1 by default) taken from `base`."""
     out = perturbed.copy()
     local = out.index.tz_localize(None) if out.index.tz is not None else out.index
-    older = np.asarray(local.normalize() < pd.Timestamp(run_day) - pd.Timedelta(days=1))
+    older = np.asarray(local.normalize() < pd.Timestamp(run_day) + pd.Timedelta(days=first_row_day))
     out.loc[older, base.columns] = base.loc[older, base.columns]
     if target in base.columns:
         out[target] = base[target]
@@ -1603,6 +1734,7 @@ def perturb_recent(
     freq: str = "1h",
     columns: Optional[Sequence[str]] = None,
     seed: int = 0,
+    first_row_day: int = -1,
 ) -> Tuple[pd.DataFrame, Dict[str, int], List[str]]:
     """Copy of `data` where the freshest values known at issue time on `run_day` are replaced by noise.
 
@@ -1614,7 +1746,8 @@ def perturb_recent(
     series is not, nor anything older.
 
     Only rows dated D-1 or later change: older rows are what the forecast is trained on, and an outlier there would
-    move a fit whatever the forecast's own inputs are. A column with a `static` rule is left alone: a calendar value
+    move a fit whatever the forecast's own inputs are. `first_row_day=0` changes only rows dated D or later, for a model with
+    `newest_target="published"`, which may train on the row of D-1. A column with a `static` rule is left alone: a calendar value
     can't be known late, so perturbing it says nothing about the boundary. A missing value stays missing. Columns
     without a rule are left alone and listed, as in `perturb_unknown`.
     """
@@ -1644,7 +1777,7 @@ def perturb_recent(
         published = _available_array(col, col.rule, day, minute, step, ctx, first, issue_day=day)
         delivered = _available_array(col, _DELIVERED, day, minute, step, ctx, first)
         values = out[name].to_numpy(dtype=float, copy=True)
-        fresh = (day >= -1) & ((published > yesterday) | (delivered > yesterday))
+        fresh = (day >= first_row_day) & ((published > yesterday) | (delivered > yesterday))
         mask = known & fresh & np.isfinite(values)
         if mask.any():
             values[mask] = 1e6 + rng.normal(0.0, 1e4, int(mask.sum()))

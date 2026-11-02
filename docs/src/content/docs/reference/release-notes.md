@@ -87,6 +87,14 @@ an issue day it didn't sample.
 
 ### New
 
+- **`newest_target` on every model.** `OLSModel(..., newest_target="published")` (any model) trains each forecast on every target
+  that the target's availability rule says is known by the issue time on D, period by period, instead of stopping at D-1: at 11:45
+  Brussels that is D's day-ahead prices, and D's realised load up to 10:00. A row dated D or later never trains. It needs an
+  information set with a rule for the target, at every level, and reads nothing else from it. `"d-1"` stays the default and
+  **nothing moves without the keyword**: records, manifests and YAML of such a model are byte for byte what they were. A published
+  model's records have `newest_target_day` (the newest target date of its training span, which needn't have trained), its manifest's `training_cut` names the target's rule and the issue time and zone (so
+  changing them refuses a resume, and changing the level doesn't), `explain()` shows the newest target, and `verify()` takes the rule
+  as its boundary. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target).
 - `environment.models_per_task: k` in `Workflow` YAML (`Workflow(models_per_task=k)`): SLURM array task `i` runs the block of models
   `[i*k, (i+1)*k)` instead of one model. `epf array experiment.yaml` prints the range for `sbatch --array=`, and
   `Workflow.array_size()` the number of tasks. `epf report` merges the blocks and computes the ensembles as before. The block size is no

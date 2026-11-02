@@ -42,6 +42,54 @@ def training_span(anchor: Any, window: int, hz: int, newest: Any = -1) -> Tuple[
     return last - window + 1, last
 
 
+NEWEST_TARGETS = ("d-1", "published")
+
+
+def check_newest_target(value: Any) -> str:
+    """`value` if it is one of `NEWEST_TARGETS`, else a ValueError."""
+    if not isinstance(value, str) or value not in NEWEST_TARGETS:
+        raise ValueError(
+            f"newest_target must be one of {list(NEWEST_TARGETS)}, got {value!r}: 'd-1' trains on targets up to the day "
+            "before the issue day, 'published' on every target its rule says is known by the issue time"
+        )
+    return value
+
+
+class NewestTargets:
+    """The newest training target of each forecast of a model with `newest_target="published"`.
+
+    `k[period, i]` is the day of that target relative to the issue day `days[i]`, as `InformationSet.newest_targets` reads it
+    from the target's rule, and the forecast (period, h, D) trains on the rows of `training_span(D, W, h, k)`. Days are local
+    dates, looked up by their ordinal: day ids depend on where a frame starts, dates don't.
+    """
+
+    def __init__(self, days: Sequence[Any], k: np.ndarray):
+        self.days = [_as_date(day) for day in days]
+        self.k = np.asarray(k, dtype=np.int64)
+        ordinals = np.array([day.toordinal() for day in self.days], dtype=np.int64)
+        self._order = np.argsort(ordinals, kind="stable")
+        self._ordinals = ordinals[self._order]
+
+    @property
+    def reach(self) -> int:
+        """How many days before the first row of `training_span(D, W, h)` a span may start: more than none only where a target
+        older than D-1 is the newest known."""
+        return max(0, -1 - int(self.k.min())) if self.k.size else 0
+
+    def at(self, period: int, ordinals: Any) -> Any:
+        """k of `period` on these issue days, given by their date ordinals. A day that isn't one of `days` raises KeyError."""
+        wanted = np.asarray(ordinals, dtype=np.int64)
+        place = np.clip(np.searchsorted(self._ordinals, wanted), 0, max(len(self._ordinals) - 1, 0))
+        if not len(self._ordinals) or (self._ordinals[place] != wanted).any():
+            raise KeyError(f"no newest target was read for issue day ordinal(s) {wanted}")
+        found = self.k[period, self._order[place]]
+        return int(found) if np.ndim(found) == 0 else found
+
+    def by_position(self) -> Dict[int, np.ndarray]:
+        """period -> k on each of `days`, in their order: what a worker reads by a task's place among the issue days."""
+        return {period: self.k[period].copy() for period in range(self.k.shape[0])}
+
+
 def _as_date(day: Any) -> datetime.date:
     return pd.Timestamp(day).date()
 

@@ -17,8 +17,9 @@ each list reads.
 **The convention:** a predictor's availability, including a raw, unshifted (lag 0) column such as `price`
 used to forecast a different target, is decided purely by comparing its publication time to `issue_time`,
 never by a fixed lag cutoff. This is independent of the model's own training-target boundary (the newest
-training target is always `day - 1`, see [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/)).
-Changing one is not a side effect of changing the other.
+training target is that of D-1 by default; a model with `newest_target="published"` reads it from the target's rule, see
+[The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target)). Changing one is not a side effect of
+changing the other.
 
 ---
 
@@ -102,7 +103,7 @@ model       predictor      role  status list periods horizons                   
 |---|---|
 | `model` | The model's name |
 | `predictor` | The column |
-| `role` | `predictor`, `training target` (the newest one is the value of D-1), or what a predictor function read it with: `ctx.value`, `ctx.published` |
+| `role` | `predictor`, `training target` (the newest one is the value of D-1; a model with `newest_target="published"` has no such row, since what it trains on is known by construction), or what a predictor function read it with: `ctx.value`, `ctx.published` |
 | `status` | `late` or `no rule` |
 | `list` | The hash of the [predictor function's](/epftoolbox2/model-pipeline/predictor-functions/#results) list, which is listed per list. Empty for fixed lists and for what a function only read |
 | `periods`, `horizons` | Exactly the uses of this row: a predictor used at other periods on other horizons gets one row per set of periods |
@@ -399,7 +400,10 @@ issue can't read as known before it:
 ## Leakage Probe
 
 `InformationSet.check()`, which `availability="raise"` runs, is a static analysis of predictor *names*, and
-`InformationSet.late_uses()`, which `availability="warn"` runs, returns what it refuses. `leakage_probe` checks the same
+`InformationSet.late_uses()`, which `availability="warn"` runs, returns what it refuses. Both take `check_target=False`, which
+leaves out the newest training target, as a model with `newest_target="published"` does: it trains on what
+`InformationSet.newest_targets(target, freq, index, days, horizon)` says the target's rule calls known, period by period (see
+[The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target)). `leakage_probe` checks the same
 boundary empirically, against real data and a real model:
 
 ```python
@@ -417,7 +421,9 @@ regression test for a specific model and information set, alongside (not instead
 **`check_target_boundary=True`** additionally perturbs the target column for every row on or after `run_day`,
 regardless of its own Availability rule: the model's own boundary (training targets end at D-1) is a deliberate,
 conservative choice that can be stricter than a column's factual publication time, a day-ahead price, for
-example, really is published before its own delivery day.
+example, really is published before its own delivery day. A model with `newest_target="published"` trains on what the
+target's rule says is known, D's prices for example, so for it the rule is the boundary: `check_target_boundary=True` raises,
+and the probe perturbs what the rule calls unknown, as for any column.
 
 **`rebuild`** catches a leak a transformer bakes into a derived column, which perturbing the already-built
 column by its parsed name cannot see (a wrong shift moves the *right* raw value into the *wrong* row, and
@@ -443,7 +449,8 @@ stops the probe with `InformationSetError`. With `"warn"` or `"none"` it returns
 
 **`positive_control`** tests the probe. A probe that finds nothing is evidence only if its perturbation reaches the
 model, so this one perturbs the freshest values that *are* known, with `perturb_recent`, and reports which forecasts
-moved. `ModelPipeline.verify()` runs both on sampled issue days and turns them into a verdict: see
+moved. For a model with `newest_target="published"`, whose row of D-1 may train, it changes only rows dated D or later
+(`perturb_recent(first_row_day=0)`). `ModelPipeline.verify()` runs both on sampled issue days and turns them into a verdict: see
 [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/).
 
 ```python

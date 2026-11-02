@@ -2,8 +2,9 @@
 
 For each model and a sample of issue days it runs two experiments on top of `epftoolbox2.information_set`:
 
-- `leakage_probe`: perturb every value not known at the issue time, and what the model trains on from the issue day on.
-  Forecasts must not move. If they do, the model used information from after the issue time.
+- `leakage_probe`: perturb every value not known at the issue time, and what the model trains on from the issue day on
+  (for `newest_target="published"`, what the target's rule calls unknown). Forecasts must not move. If they do, the model
+  used information from after the issue time.
 - `positive_control`: perturb the freshest values that are known. Forecasts must move. If they don't, the probe's
   silence is no evidence: its perturbation isn't reaching the model.
 
@@ -19,6 +20,7 @@ import pandas as pd
 
 from ._date_utils import resolve_date
 from .information_set import (
+    _STEP_MINUTES,
     ROLE_TARGET,
     Availability,
     ControlResult,
@@ -243,6 +245,10 @@ def verify_model(
     `availability` is the level a predictor function is planned at (see `leakage_probe`). The boundary is the same at every
     level: a late input is a leak whether the pipeline would list it or refuse it. The sample is no shelter for it either: a
     predictor function is planned on the whole of `test_period` anyway, which says what it uses late on any issue day.
+
+    What a model trains on is checked against its own boundary. With `newest_target="d-1"` that is D-1, stricter than any rule,
+    so the probe also perturbs the target from the issue day on (`check_target_boundary`). With `"published"` it is the target's
+    rule, and the probe perturbs what the rule calls unknown, as for any column.
     """
 
     def make_model():
@@ -263,7 +269,7 @@ def verify_model(
         warn_unpublished=False,
         availability=availability,
     )
-    checked._check_inputs(built, target, horizon, freq, plan=plan)
+    checked._check_inputs(built, target, horizon, freq, plan=plan, cut_rules=information_set)
     used = sorted({*checked._used_predictors, *plan.queried}) if plan is not None else list(checked._used_predictors)
     not_sampled: List[str] = []
     late_in_period: List[str] = []
@@ -287,13 +293,17 @@ def verify_model(
 
     # A forecast of D+1 may read today's published price, so a model can list its target as an input. What it reads as an
     # input is then up to the target's rule, and only what it trains on is up to the boundary (training targets end at
-    # D-1): these runs train on a copy of the target under another name, leaving the input alone.
+    # D-1): these runs train on a copy of the target under another name, leaving the input alone. Under
+    # newest_target="published" the boundary is the target's rule, so the copy has it: it decides which of its values train.
+    published = getattr(model, "newest_target", "d-1") == "published"
     label = target
     label_rules = information_set
     if target in used:
         label = f"{target}__as_target"
         label_rules = information_set.copy()
-        label_rules.rules[label] = Availability.static()
+        label_rules.rules[label] = (
+            information_set._resolve_for(target, _STEP_MINUTES[freq]).rule if published else Availability.static()
+        )
 
     def with_label(frame):
         return frame if label == target else frame.assign(**{label: frame[target]})
@@ -311,7 +321,7 @@ def verify_model(
                 information_set,
                 target,
                 columns=columns,
-                check_target_boundary=True,
+                check_target_boundary=not published,
                 **common,
             )
         else:
@@ -327,7 +337,7 @@ def verify_model(
                 label_rules,
                 label,
                 columns=[label],
-                check_target_boundary=True,
+                check_target_boundary=not published,
                 **common,
             )
             probe = _merge(probe, boundary)

@@ -14,15 +14,96 @@ has none.
 For the forecast (period, h, D) of a model with `training_window` W:
 
 - **It trains on** the rows of that period dated from D-W-h to D-1-h, both included. That is W dates, and the newest of them has
-  its target on D-1.
+  its target on D-1. With [`newest_target="published"`](#the-newest-target) the W dates end where the target's rule says, and never
+  on D or later.
 - **It forecasts from** the last row dated D.
 - **Its `actual`** is the target of that row: the value on D+h at the same wall-clock time.
 
 Rows are chosen by their date, never by counting them. So a date with two rows counts as one date, a date with none costs only
-itself, and no row dated D-h or later can reach a fit, whatever the calendar does.
+itself, and no row dated D-h or later can reach a fit, whatever the calendar does (D or later with `"published"`).
 
 The target of a row comes from a shift by calendar days: the same wall-clock time h local dates later, not 24 hours times h. A
 [day lag](/epftoolbox2/transformers/lag/) works the same way.
+
+## The newest target
+
+Which targets a forecast issued on D trains on is a setting of each model, `newest_target`:
+
+- **`"d-1"`**, the default: up to the target of D-1, whatever any rule says. It is conservative, reads no information set, and is
+  what every model did before the setting existed.
+- **`"published"`**: every target that the target's [availability rule](/epftoolbox2/model-pipeline/information-set/) says is known
+  by the issue time on D, period by period. With k the day of the newest such target relative to D, the forecast (period, h, D)
+  trains on the W rows dated up to D+k-h, but never on a row dated D or later.
+
+```python
+from epftoolbox2.information_set import InformationSet
+from epftoolbox2.models import LassoCVModel
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.presets import lear_predictors
+
+lear = lear_predictors(exogenous=["load_forecast", "wind_solar_forecast"])
+pipeline = ModelPipeline(information_set=InformationSet("11:45", "Europe/Brussels"))
+pipeline.add_model(LassoCVModel(lear, training_window=364, name="LEAR"))
+pipeline.add_model(LassoCVModel(lear, training_window=364, newest_target="published", name="LEAR published"))
+```
+
+Issued at 11:45 Brussels:
+
+| Target and its rule | k | Newest row at h=1 |
+|---|---|---|
+| `price`, published 13:00 Brussels on D-1 (the built-in rule) | 0 on every period: D's prices are out | D-1 |
+| `load_actual`, `realised("1h")`, hourly | 0 for periods 0 to 9 (known by 11:00), -1 from period 10 (12:00 and later) | D-1, D-2 |
+| the same at `freq="15min"` | 0 for periods 0 to 42 (known at 11:45 exactly, which counts), -1 from 43 | D-1, D-2 |
+| `price`, issued at 14:00 | +1, since D+1's prices are out at 13:00 on D; the row of D would be the forecast's own, so at h=1 the newest row stays D-1, and at h=2 it is D-1 instead of D-2 | D-1 |
+
+At horizon h the newest row is D+k-h, so k doesn't depend on the horizon, apart from that cap. How k is found:
+
+- **Every older target must be known too.** k is the largest day from D-31 up to D+H-1 such that the targets of that day and of
+  every day back to D-31 are known. A rule under which the target of D-31 isn't known raises.
+- **It needs an information set with a rule for the target**, at every [level](/epftoolbox2/model-pipeline/information-set/#three-levels),
+  else `InformationSetError` before any fit, whatever `unknown` says: the rule decides numbers. The level doesn't: `"none"` trains on the
+  same rows as `"raise"`.
+- **The rule decides, not the data.** A missing value at the newest target drops that row from the fit, as any missing value does, and
+  no older row takes its place.
+- **A slot the clock skips has no value to be late,** so it doesn't stop the walk. On the day before a spring switch the newest target
+  of the skipped hour is the switch day itself: the window is still W dates, but the row whose target is the skipped slot drops, so
+  the fit has W-1 rows, as a `"d-1"` forecast of that hour has on the day after the switch. That keeps `"published"` equal to `"d-1"`,
+  bit for bit, wherever the rule gives -1.
+- **The rule reads the index's instants.** On a fixed UTC+1 index a Brussels rule reads 23:00 in summer as 00:00 of the next day,
+  which the day-ahead auction of D-1 doesn't cover, so the built-in `price` rule gives that period k = -1 all summer. The
+  [benchmark files'](/epftoolbox2/data-sources/epftoolbox-benchmark/) index only labels their wall clock, so read them with the
+  source's rules (`InformationSet.with_source_rules`, which a `Workflow` applies), which put the price on that clock and give k = 0
+  on every period.
+- **A slower rule reaches further back.** Prices published three days after delivery give k = -4, and the window, the days the frame is
+  checked on and the training days of a [`train_on="matching"`](/epftoolbox2/model-pipeline/predictor-functions/) list reach as many
+  days further back.
+
+Each record of such a model has `newest_target_day`, the newest target date of its training span (D + min(k, h-1)). That is not
+necessarily a target that trained: on the day before a spring switch it is the switch day itself for the skipped hour, which has no
+target, and a missing value drops its row as anywhere else. Its
+manifest's `training_cut` says what k was read from: the target's rule and the issue time and zone. A resume compares them, so changing
+the issue time or the target's rule refuses to resume, while changing the level, or a rule of another column, doesn't. A model with
+`"d-1"` writes nothing new: its records, manifest and YAML are what they were, and `newest_target` is saved to YAML only when it is
+`"published"`. `pipeline.explain()` of such a model has a `newest_target` table: the newest target and row of the forecast shown, and
+on how many issue days.
+
+`pipeline.verify()` takes the rule as the boundary of such a model: the probe perturbs what the target's rule calls unknown, and doesn't
+perturb the target from D on, which `"d-1"` models get; the positive control leaves every row before D alone, since the row of D-1 may
+train. See [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/#the-probe).
+
+<Aside type="note" title="What it gains">
+The research behind the setting measured 1.0 to 1.1 % lower MAE in each year from 2022 to 2026 in Germany, for LEAR with its average
+over several training windows. That figure was not reproduced in the library. The library's own check, one `LassoCVModel` with
+`lear_predictors` and a single 364-day window on the Lago DE benchmark, found no difference beyond noise on that data:
+
+| | Forecasts | MAE | RMSE |
+|---|---|---|---|
+| 2017, horizon 1 | 8712 | 0.12 % lower | 0.53 % higher |
+| 61 days of late 2016, horizons 1 and 2 | 2928 | 0.12 % lower | 0.37 % higher |
+
+Over 2017 the fourth quarter's MAE was 2.13 % higher, about what the first quarter's was lower. Nothing defaults to it: `"d-1"` stays the
+default of every model.
+</Aside>
 
 ## What a clock change does
 

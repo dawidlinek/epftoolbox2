@@ -537,6 +537,10 @@ class PredictorPlan:
         seconds: How long planning took.
         availability: The level it was planned at, which decides what `ctx` does around a value it can't vouch for.
         training_window: The window the training days of `train_on="matching"` lists were planned for, if any.
+        newest_target: The model's `newest_target`. With `"published"` the training target is known by construction, so the
+            check and the listing have no use of it.
+        reach: How many days before `D - training_window - horizon` a forecast's training rows may start
+            (`NewestTargets.reach`), which the training days of a matching list cover too.
         first_grid_day: The first day of `day_lists`, whose entries are one per calendar day up to the last issue day.
         day_lists: `(period, horizon)` of a matching forecast -> the list id of each day of the grid, what a matching forecast
             filters its training rows on: `OTHER_LIST` for a list no forecast uses, which matches nothing, and
@@ -562,6 +566,8 @@ class PredictorPlan:
     _listings: Dict[Tuple[int, Optional[int]], List[Dict[str, Any]]] = field(default_factory=dict, repr=False)
     _positions: Dict[str, int] = field(init=False, repr=False)
     training_window: Optional[int] = None
+    newest_target: str = "d-1"
+    reach: int = 0
     first_grid_day: Optional[datetime.date] = field(default=None, repr=False)
     day_lists: Dict[Tuple[int, int], np.ndarray] = field(default_factory=dict, repr=False)
     _training_cells: Optional[_Cells] = field(default=None, repr=False)
@@ -679,7 +685,12 @@ class PredictorPlan:
         cells = self._cells or _Cells(self.data, info, self.freq, self.issue_days, self.availability)
         scanned = self.issue_days[days[0] : days[1]]
         target_violations, unknown = info.violations(
-            pairs, target, self.freq, self.data.index, issue_days=[day.isoformat() for day in scanned]
+            pairs,
+            target,
+            self.freq,
+            self.data.index,
+            issue_days=[day.isoformat() for day in scanned],
+            check_target=self.newest_target == "d-1",
         )
         late_names: List[str] = []
         no_rule: List[str] = []
@@ -745,7 +756,7 @@ class PredictorPlan:
             on_days[days[0] : days[1]] = True
             read_on, read_on_training = self._read_by_forecasts_of(days, on_days)
         col = cells.column(target)
-        if col.rule is None:
+        if col.rule is None and self.newest_target == "d-1":
             target_uses = [Violation(target, p, h, col, float("nan"), float("nan"), ROLE_TARGET) for p, h in pairs]
         rows = listing_rows(target_uses)
         by_list = self._late_uses(late_names, cells, on_days)
@@ -795,13 +806,13 @@ class PredictorPlan:
 
     def _days_read_by(self, ids: np.ndarray, grid: np.ndarray, horizon: int) -> Optional[np.ndarray]:
         """Which days of the grid these forecasts of one (period, horizon) can train on, or None if none of them is matching.
-        Each reads `[D - training_window - horizon, D - 1]`, which holds its `training_span` and more: the calls of a plan don't
-        depend on how far back from the issue day the rows end."""
+        Each reads `[D - training_window - horizon - reach, D - 1]`, which holds its `training_span` and more: the calls of a plan
+        don't depend on how far back from the issue day the rows end."""
         matching = np.isin(ids, sorted(self.matching_ids))
         if not matching.any():
             return None
         marks = np.zeros(self._grid_size() + 1, dtype=np.int64)
-        np.add.at(marks, grid[matching] - self.training_window - horizon, 1)
+        np.add.at(marks, grid[matching] - self.training_window - horizon - self.reach, 1)
         np.add.at(marks, grid[matching], -1)
         return np.cumsum(marks[:-1]) > 0
 
@@ -916,6 +927,8 @@ def build_plan(
     warn_unpublished: bool = True,
     availability: str = "raise",
     training_window: Optional[int] = None,
+    newest_target: str = "d-1",
+    reach: int = 0,
 ) -> PredictorPlan:
     """Evaluate `fn` for every planned forecast. `warn_unpublished` warns for each `published()` argument that was never
     True over these days, which is meaningless for a sample of days: a wrong rule would silently disable an input.
@@ -923,11 +936,23 @@ def build_plan(
 
     If a forecast gets `Use(list, train_on="matching")`, `fn` is also evaluated on the days it can train on, which needs
     `training_window`. What `fn` answers on a day is then the same whether that day is issued or only trained on.
+    `newest_target` and `reach` are the model's (see `PredictorPlan`).
     """
     started = time.perf_counter()
     days = list(issue_days)
     cells = _Cells(data, information_set, freq, days, availability)
-    plan = PredictorPlan(fn, data, information_set, days, horizon, freq, _cells=cells, availability=availability)
+    plan = PredictorPlan(
+        fn,
+        data,
+        information_set,
+        days,
+        horizon,
+        freq,
+        _cells=cells,
+        availability=availability,
+        newest_target=newest_target,
+        reach=reach,
+    )
     horizons = range(1, horizon + 1)
     periods = range(cells.periods)
     for hz in horizons:
@@ -996,7 +1021,7 @@ def _plan_training_days(
             f"{function_name(fn)} returned Use(..., train_on='matching'), which needs the training_window to plan"
         )
     plan.training_window = training_window
-    plan.first_grid_day = min(plan.issue_days) - datetime.timedelta(days=training_window + plan.horizon)
+    plan.first_grid_day = min(plan.issue_days) - datetime.timedelta(days=training_window + plan.horizon + plan.reach)
     grid = plan._grid_positions()
     is_issue_day = np.zeros(plan._grid_size(), dtype=bool)
     is_issue_day[grid] = True
