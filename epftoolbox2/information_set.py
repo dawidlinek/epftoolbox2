@@ -1478,7 +1478,9 @@ def leakage_probe(
     model's input from it. This catches a leak a transformer bakes into a derived column (e.g. an
     elapsed-time shift that crosses a DST boundary), which perturbing the already-built column by its
     parsed name cannot see: a wrong shift moves the *right* raw value into the *wrong* row, and that row's
-    own name still looks fine.
+    own name still looks fine. At `freq="1D"` the source's rows are read by their hours, and the daily frame `rebuild` makes
+    of the perturbed source is then perturbed as daily rows too (what `violations` calls unknown on it), or a whole date's
+    value the source repeats on every hour, `actual_daily_max` say, would reach the daily row from an hour known in time.
 
     `check_target_boundary` additionally perturbs `target` for every row on or after `run_day`, regardless
     of its own Availability rule: the boundary of a model with `newest_target="d-1"` (training targets end at D-1) is a
@@ -1514,6 +1516,12 @@ def leakage_probe(
     base = data
     if rebuild is not None:
         base, perturbed = rebuild(data), rebuild(perturbed)
+        if _daily_rows(perturbed.index, freq):
+            # The source was read by its hours, so a value of a whole date it already holds (a daily maximum repeated on every
+            # hour) was perturbed only on the hours known late. The daily rows are read here as `violations` reads them.
+            ruled = [name for name in perturbed.columns if _has_rule(information_set, name, freq)]
+            perturbed, more, _ = perturb_unknown(perturbed, run_day, information_set, freq, ruled, seed)
+            counts = {**counts, **{name: max(counts.get(name, 0), n) for name, n in more.items()}}
 
     common = (run_day, target, horizon, freq, information_set, availability)
     original, read, late = _issue_day_forecasts(model, base, *common)
@@ -1842,10 +1850,14 @@ def perturb_recent(
     return out, counts, unchecked
 
 
+def _has_rule(information_set: InformationSet, name: Any, freq: str) -> bool:
+    return isinstance(name, str) and information_set._resolve_for(name, _STEP_MINUTES[freq]).rule is not None
+
+
 def _daily_rows(index: pd.DatetimeIndex, freq: str) -> bool:
     """Whether the rows of a frame perturbed for a `freq` run are a daily frame's, each a whole local date (decision 12 reads
     their plain `realised` values so). With `rebuild` a daily model's probe perturbs the source it is built from, whose rows
-    are hourly slots, read as such."""
+    are hourly slots, read as such, and then the daily frame `rebuild` makes of it, read as daily rows (`leakage_probe`)."""
     if freq != _DAILY or not len(index):
         return False
     local = index.tz_localize(None) if index.tz is not None else index

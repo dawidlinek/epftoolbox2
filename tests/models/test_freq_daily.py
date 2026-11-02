@@ -566,6 +566,18 @@ def test_verify_with_rebuild_reads_the_hourly_source_of_a_daily_model_by_its_hou
     assert report.status("m") == "leak"
 
 
+@pytest.mark.parametrize(("stamp", "issue"), [("00:00", "11:45"), ("12:00", "14:00")])
+def test_with_rebuild_a_whole_date_s_value_the_source_repeats_on_every_hour_is_a_leak(year, stamp, issue):
+    """The source holds D's maximum on every hour of D, and an hour of it is known by the issue time read as an hour. On the
+    daily row it is D's maximum, known only after D: a leak with `rebuild` as without."""
+    hourly = year[0].drop(columns=["price_daily_max"])  # no rule, so the probe of the source would refuse it
+    names = PREDICTORS + ["price_d-1", "load_actual_h-2", "actual_daily_max"]
+    plain = verified(hourly.at_time(stamp), names, issue=issue, horizon=2, days=2)
+    rebuilt = verified(hourly, names, issue=issue, horizon=2, days=2, rebuild=lambda source: source.at_time(stamp))
+    assert plain.status("m") == rebuilt.status("m") == "leak"
+    assert all(check.probe.perturbed.get("actual_daily_max") for check in rebuilt.checks)
+
+
 # ---------------------------------------------------------------------------
 # explain
 # ---------------------------------------------------------------------------
