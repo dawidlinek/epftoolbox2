@@ -33,6 +33,7 @@ RULES = {
     "is_weekend": Availability.static(),
     "is_weekday": Availability.static(),
     "flag": Availability.static(),
+    "aux": Availability.static(),
     "price": Availability.published("13:00", 1),  # D's price is known at 11:45 on D, D+1's isn't
 }
 INFO = InformationSet("11:45", "Europe/Brussels", rules=RULES)
@@ -435,23 +436,66 @@ def test_results_fitted_on_other_anchors_are_refused(market, tmp_path):
         assert lines(path) == stored
 
 
-def test_nothing_after_the_issue_day_moves_its_forecasts(market):
-    """For D = 29 March and 5 April: every finite value dated after D changed, and the test ending on D. D's forecasts stay bit
-    for bit, as `test_masks.py` holds for refit=None."""
-    predictors = PREDICTORS + ["flag"]
+def flag_while_aux(ctx):
+    return PREDICTORS + ["flag"] if ctx.published("aux") else PREDICTORS
+
+
+def matching_while_aux(ctx):
+    return Use(PREDICTORS + ["flag"], train_on="matching") if ctx.published("aux") else PREDICTORS
+
+
+AFTER_D_LISTS = {
+    "fixed": (PREDICTORS + ["flag"], "d-1"),
+    "function": (flag_while_aux, "d-1"),
+    "matching": (matching_while_aux, "d-1"),
+    "published": (flag_while_aux, "published"),
+}
+# Every level of every axis and every pair of levels (kind of list x issue days x horizon x refit), in half of the cells, as
+# test_masks.py's grid for refit=None.
+AFTER_D_CELLS = [
+    ("fixed", None, 1, "7D"),
+    ("fixed", ["friday"], 3, "1MS"),
+    ("function", None, 3, "7D"),
+    ("function", ["friday"], 1, "1MS"),
+    ("matching", None, 1, "1MS"),
+    ("matching", ["friday"], 3, "7D"),
+    ("published", None, 3, "1MS"),
+    ("published", ["friday"], 1, "7D"),
+]
+
+
+@pytest.mark.parametrize(("lists", "issue_days", "horizon", "refit"), AFTER_D_CELLS)
+def test_nothing_after_the_issue_day_moves_its_forecasts(market, lists, issue_days, horizon, refit):
+    """For D = Friday 31 March and Friday 7 April: every finite value dated after D changed (missing ones kept), `aux` missing
+    after D (which changes a function's list after D), and the test ending on D. D's predictions, coefficients and anchors stay bit
+    for bit, as `test_masks.py` holds for refit=None. `flag` turns from 0/1 to other values on 29 March, so a mask read on another
+    unit's rows, or on the first test day's, would show."""
+    data = market.assign(aux=1.0)
+    fn, newest = AFTER_D_LISTS[lists]
+    days = {} if issue_days is None else {"issue_days": issue_days}
 
     def run(frame, end=FULL[1]):
-        return fits(ols("7D", predictors).run(frame, FULL[0], end, horizon=2)._results)
+        model = ols(refit, fn, newest_target=newest)
+        return fits(model.run(frame, FULL[0], end, horizon=horizon, information_set=INFO, **days)._results)
 
-    base = run(market)
-    columns = [c for c in market.columns if market[c].dtype.kind == "f"]
-    for issue in ("2023-03-29", "2023-04-05"):
+    base = run(data)
+    dates = local_dates(data)
+    columns = [c for c in data.columns if data[c].dtype.kind == "f"]
+    for issue in ("2023-03-31", "2023-04-07"):
         on_d = {key: fit for key, fit in base.items() if key[0] == issue}
-        assert len(on_d) == 48
-        changed = run(move(market, local_dates(market) > np.datetime64(issue), columns))
-        assert {key: fit for key, fit in changed.items() if key[0] == issue} == on_d
-        assert any(changed[key] != fit for key, fit in base.items() if key[0] > issue)
-        assert {key: fit for key, fit in run(market, issue).items() if key[0] == issue} == on_d
+        assert len(on_d) == 24 * horizon
+        after = dates > np.datetime64(issue)
+        blank = data.copy()
+        blank.loc[after, "aux"] = np.nan
+        for what, frame, end in (
+            ("values", move(data, after, columns), FULL[1]),
+            ("aux", blank, FULL[1]),
+            ("end", data, issue),
+        ):
+            other = run(frame, end)
+            assert {key: fit for key, fit in other.items() if key[0] == issue} == on_d, (issue, what)
+            if what == "values":  # the change is seen after D
+                assert any(other.get(key) != fit for key, fit in base.items() if key[0] > issue)
 
 
 # ---------------------------------------------------------------------------
