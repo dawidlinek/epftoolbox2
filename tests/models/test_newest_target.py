@@ -521,6 +521,21 @@ def test_an_explicit_d_1_is_byte_identical_to_leaving_it_out(tmp_path, info):
     assert b"newest_target" not in (tmp_path / "omitted.yaml").read_bytes()
 
 
+def test_with_validation_each_window_is_what_a_plain_run_over_it_gives(tmp_path):
+    """The worker reads k by the task's place among the run's issue days, which skip the days between the windows."""
+    data = market("autumn")
+    info = info_for("load realised 1h")
+    validation, test = ("2023-10-20", "2023-10-23"), ("2023-10-28", "2023-10-31")
+    both = pipeline_of(info).run(data, validation=validation, test=test, horizon=2, save_dir=tmp_path / "both")
+    for window, period in [("validation", validation), ("test", test)]:
+        plain = pipeline_of(info).run(data, test=period, horizon=2, save_dir=tmp_path / window)
+        assert plain.refs["m"].produced == 4 * 2 * 24
+        stored = [json.loads(line) for line in lines(tmp_path / "both" / "m.jsonl")]
+        own = sorted(json.dumps({k: v for k, v in r.items() if k != "window"}) for r in stored if r["window"] == window)
+        assert own == sorted(json.dumps(json.loads(line)) for line in lines(tmp_path / window / "m.jsonl"))
+    assert both.refs["m"].produced == 4 * 2 * 24
+
+
 def test_published_is_saved_to_yaml_and_loads_back(tmp_path):
     pipeline = pipeline_of(info_for("price published 13:00 D-1"))
     pipeline.add_model(LassoCVModel(PREDICTORS, newest_target="published", name="lasso"))
