@@ -14,14 +14,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.information_set import Availability, InformationSet
+from epftoolbox2.information_set import Availability, InformationSet, InformationSetError
 from epftoolbox2.models import OLSModel, Use
 from epftoolbox2.models._calendar import IssueCalendar, clock_periods, periods_per_day
 from epftoolbox2.models._contract import check_index, missing_test_rows, period_index
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.pipelines import ModelPipeline
-from tests.synthetic import PREDICTORS, make_market_data, with_daily_columns
+from tests.synthetic import PREDICTORS, calendar_shift, make_market_data, with_daily_columns
 
 SWITCH_DAYS = {"spring": "2023-03-26", "autumn": "2023-10-29"}
 WINDOW = 40
@@ -404,6 +404,62 @@ def test_a_predictor_function_on_a_daily_frame_sees_one_period_and_what_is_out(y
         )
     assert sorted(plan.assignment) == [(0, 1), (0, 2)]
     assert plan.lists == [tuple(name.replace("{horizon}", str(h)) for name in DAILY_INPUTS) for h in (1, 2)]
+
+
+DATE_RULES = {
+    "price_daily_max": Availability.published("13:00", 1),  # Brussels: a date's prices out at 13:00 the day before
+    "fuel_ttf": Availability.daily_close("18:00"),  # Brussels: a trading day's close at 18:00 on it
+}
+
+
+def market_of_dates(zone, stamp):
+    """Daily rows of a market in `zone` stamped at `stamp`, with the maximum price of each local date and of the next, and a
+    value of each local date that closes on it."""
+    hourly = make_market_data(start="2023-01-01", days=200, tz=zone, horizon=2, noise=5.0, seed=4)
+    local_date = pd.Series(hourly.index.tz_localize(None).normalize(), index=hourly.index)
+    hourly["price_daily_max"] = hourly["price"].groupby(local_date).transform("max")
+    hourly["price_daily_max_d+1"] = calendar_shift(hourly["price_daily_max"], 1)
+    hourly["price_daily_max_d-1"] = calendar_shift(hourly["price_daily_max"], -1)
+    hourly["fuel_ttf"] = hourly["load"].groupby(local_date).transform("mean")
+    return hourly.at_time(stamp)
+
+
+@pytest.mark.parametrize("stamp", ["00:00", "12:00"])
+@pytest.mark.parametrize("name", ["price_daily_max_d+1", "fuel_ttf"])
+def test_a_helsinki_date_is_known_when_the_later_of_its_two_brussels_days_is(stamp, name):
+    """A Helsinki date runs from 23:00 to 23:00 Brussels, so its prices are out when the later Brussels day's are, at 13:00 the
+    day before it, and its close at 18:00 on it. At a midnight stamp the row's own instant is on the earlier Brussels day: read
+    there, both passed as known a day early. By hand, then through a run that refuses late inputs."""
+    daily = market_of_dates("Europe/Helsinki", stamp)
+    information = InformationSet("11:45", "Europe/Brussels", rules={**RULES, **DATE_RULES})
+    days = ["2023-02-14", "2023-06-14"]
+    clock = information._issue_clock(pd.DatetimeIndex(days), daily.index, "1D")
+    origin = pd.Timestamp(days[0], tz="Europe/Helsinki")  # the clock counts from the data zone's midnight
+    by_hand = {
+        "price_daily_max_d+1": lambda D: at(D, 0, "13:00", "Europe/Brussels"),
+        "fuel_ttf": lambda D: at(D, 0, "18:00", "Europe/Brussels"),
+        "price_daily_max_d-1": lambda D: at(D, -2, "13:00", "Europe/Brussels"),
+    }
+    for column, expected in by_hand.items():
+        found = clock.available(information._resolve_for(column, 60), np.array([0]), 60)[0]
+        assert found.tolist() == [(expected(day) - origin) / pd.Timedelta(minutes=1) for day in days], column
+    model = OLSModel(PREDICTORS + [name], training_window=WINDOW, name="m")
+    pipeline = ModelPipeline(information_set=information, availability="raise").add_model(model)
+    with pytest.raises(InformationSetError, match=name.replace("+", r"\+")):
+        pipeline.run(daily, test=("2023-06-01", "2023-06-03"), horizon=2, freq="1D")
+
+
+def test_where_the_date_is_one_brussels_day_the_stamp_changes_nothing():
+    """Warsaw's dates are Brussels' dates, so a date's value is known at the same instant at any stamp."""
+    information = InformationSet("11:45", "Europe/Brussels", rules={**RULES, **DATE_RULES})
+    days = pd.DatetimeIndex(["2023-02-14", "2023-03-26", "2023-10-29"])
+    names = ["price_daily_max_d+1", "price_daily_max_d-1", "fuel_ttf", "price_d-1", "load_d+2"]
+    found = {}
+    for stamp in ("00:00", "12:00", "23:00"):
+        index = market_of_dates("Europe/Warsaw", stamp).index
+        clock = information._issue_clock(days, index, "1D")
+        found[stamp] = [clock.available(information._resolve_for(n, 60), np.array([0]), 60)[0].tolist() for n in names]
+    assert found["00:00"] == found["12:00"] == found["23:00"]
 
 
 @pytest.mark.parametrize("zone", ["America/Havana", "Europe/Warsaw"])

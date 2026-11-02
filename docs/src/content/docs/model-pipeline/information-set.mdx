@@ -409,7 +409,8 @@ rule reads a daily row like this, with the rule's own clock times and delays as 
 | Rule | Read on a daily row |
 |---|---|
 | `static` | Always known |
-| `published`, `weekly` | By the delivery day the column's shifts reach. The stamp matters only through `h` shifts |
+| `published`, `weekly`, with no `h`, `min` or `s` shift | The value of its whole local date, known when the date's last slot is: a date that spans two of the rule's delivery days (a Helsinki date against Brussels rules) is known when the later one is, whatever the stamp |
+| `published`, `weekly`, with an hour shift | That hour, counted from the stamp |
 | `realised`, with no `h`, `min` or `s` shift | The value of its whole local date, known `delay` after that date ends |
 | `realised`, with an hour shift | That hour, counted back from the stamp |
 | `weather_run`, `as_of`, `weather_cutoff` | As on an hourly row, from the stamp |
@@ -427,7 +428,7 @@ With `realised("1h")` and a noon stamp:
 
 A plain `realised` column is the date's value, not an hour's. Read from the stamp like `load_actual_h-1`, a daily maximum would be
 known at 13:00 on its own date, when the date isn't over. That holds for the column named alone: what a profile or an aggregate is
-built from is read at its slot, as on hourly rows. With `newest_target="published"`, `realised("1h")` on a daily target gives k = -1:
+built from is read at its slot, as on hourly rows. A plain `published` or `weekly` column is read the same way, at its date's last slot: a Helsinki date runs from 23:00 to 23:00 Brussels time, so read at a midnight stamp, `price_daily_max_d+1` under `published("13:00", 1)` would pass as known a day before D+1's prices are out. With `newest_target="published"`, `realised("1h")` on a daily target gives k = -1:
 the newest training row at horizon 1 is D-2 (see [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target)).
 
 <Aside type="caution">

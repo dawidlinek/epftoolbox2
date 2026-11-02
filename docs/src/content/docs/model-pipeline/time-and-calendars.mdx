@@ -285,7 +285,9 @@ print(report.forecast_counts())
 - **The stamp.** A row's time of day is read from the index, and the names mean it. `x_h-1` is `x` one elapsed hour
   before the stamp, 11:00 on a noon row. `x_d-k` and `x_d+h` are by local day, `{horizon}` is the horizon, and a
   [`DailyStatsTransformer`](/epftoolbox2/transformers/daily-stats/) or
-  [`DailyProfileTransformer`](/epftoolbox2/transformers/daily-profile/) column is read as on an hourly frame. Stamp at the time the
+  [`DailyProfileTransformer`](/epftoolbox2/transformers/daily-profile/) column is read as on an hourly frame. A column with no hour
+  shift under a `realised`, `published` or `weekly` rule is the value of its whole date, judged at the date's end whatever the
+  stamp. Stamp at the time the
   forecast is made, noon in these examples, where the day-ahead auction closes (12:00 CET). The information set's issue
   time (11:45 by default) is its own setting: the stamp says what a row's hour-shifted columns hold, and the
   [information set](/epftoolbox2/model-pipeline/information-set/#daily-rows) says whether that is known by the issue time.
