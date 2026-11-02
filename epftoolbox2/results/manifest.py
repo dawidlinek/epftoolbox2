@@ -31,7 +31,9 @@ a manifest is written for it. Pass `require_manifest=True` for the stricter beha
 
 A run with validation (`epftoolbox2.results.windows`) adds `windows`, the digests of its fixed lists' binary-column masks
 (`binary_masks`; a predictor function's stay with each list, a test mask under the key a plain run gives it) and `actuals`,
-a hash of the target up to the last day a stored `actual` reads. A plain run's manifest has none of them. Such a run may
+a hash of the target up to the last day a stored `actual` reads. A plain run's manifest has none of them, except the
+`binary_masks` of fixed lists where a column with no value on the first day was read on a later day and that changed a mask:
+results without them were scaled before that rule, and `unrecorded_masks` refuses to resume them. Such a run may
 cover another span than the results it resumes, so that validation can come first and test later: what is compared then is
 the data the stored forecasts read, up to the end of the span they cover, and its manifest grows to cover both. Resuming
 also compares each stored key's window and mask to what a fresh run would give it (`check_stored_lists`). A window this run
@@ -646,7 +648,11 @@ def check_and_write(
         existing = _read_manifest_of_a_model(path, model_name)
         data_diffs = _compare_data(existing, manifest, frame_hashes)
         skip = () if data_diffs is None else ("data_columns_hash",)
-        diffs = [*(data_diffs or []), *manifest.differences(existing, skip=skip)]
+        diffs = [
+            *(data_diffs or []),
+            *manifest.differences(existing, skip=skip),
+            *unrecorded_masks(existing, manifest, has_existing_results),
+        ]
         if diffs and not allow_mismatch:
             raise ManifestMismatchError(
                 f"{model_name}: the results in {path.parent} were produced with a different configuration "
@@ -697,6 +703,28 @@ def check_and_write(
         manifest.data_unverified = True
         _mark_rows_unverified(manifest, model_name, path, "they have no manifest")
     manifest.write(path)
+
+
+def unrecorded_masks(existing: Manifest, manifest: Manifest, has_existing_results: bool) -> List[str]:
+    """Why a plain run of fixed lists can't resume `existing`, if the stored forecasts were scaled by another rule.
+
+    A column with no value on the test's first day used to stay unscaled for good in a fixed list; it is now read on the first
+    later day with one, which changes the masks of such a run (and only of such a run). Its manifest then records the digests
+    (`BaseModel._fixed_mask_digests`), and one written before that has none, so stored forecasts and new ones would be scaled
+    two ways in one file. A manifest of the same configuration made since has them too."""
+    if (
+        not has_existing_results
+        or manifest.windows is not None
+        or manifest.predictor_function is not None
+        or not manifest.binary_masks
+        or existing.binary_masks
+    ):
+        return []
+    return [
+        f"binary_masks: none (existing results) vs {len(manifest.binary_masks)} (this run): the scaling rule changed. A column "
+        "with no value on the test's first day is now read on the first later day with one, which changes how this run scales "
+        "it, and the existing results were scaled the old way; rerun into a new save_dir."
+    ]
 
 
 def _mark_rows_unverified(manifest: Manifest, model_name: str, path: Path, why: str) -> None:

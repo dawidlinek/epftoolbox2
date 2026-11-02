@@ -20,7 +20,8 @@ import pytest
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import OLSModel, Use
 from epftoolbox2.models._worker import _worker_init
-from epftoolbox2.results.manifest import manifest_path
+from epftoolbox2.models.base import BaseModel
+from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path
 from tests.synthetic import PREDICTORS, make_market_data
 
 FRIDAY = 4
@@ -338,6 +339,15 @@ THIRD = ("2023-03-01", "2023-03-12")  # no clock change
 WINDOW = 40
 
 
+def third_day_market():
+    """`late`: its first value on 1 March, the first day of the test, continuous from then on."""
+    data = make_market_data(start="2023-01-01", days=80, horizon=1, noise=5.0, seed=3)
+    on = local_dates(data) >= np.datetime64(THIRD[0])
+    late = np.full(len(data), np.nan)
+    late[on] = np.random.default_rng(4).normal(size=int(on.sum()))
+    return data.assign(late=late)
+
+
 def hand_forecast(data, period, day, names, scaled):
     """OLS on the standardised target without an intercept, from the rows of `period` dated D-W-1 to D-2 (h=1) with every value,
     the columns `scaled` standardised on those rows and the others as they are."""
@@ -364,11 +374,7 @@ def test_a_fixed_list_s_column_that_starts_on_the_third_day_is_scaled_from_there
     """`late` has its first value on 1 March, the first day of the test, so at h=1 the rows of 1 and 2 March (dated up to 27 and
     28 February) have none, and those of 3 March (up to 1 March) have one. Its mask is read there and standardises it, where a
     fixed list used to keep it raw for good. Forecasts of 1 and 2 March have no finite row and are skipped."""
-    data = make_market_data(start="2023-01-01", days=80, horizon=1, noise=5.0, seed=3)
-    on = local_dates(data) >= np.datetime64(THIRD[0])
-    late = np.full(len(data), np.nan)
-    late[on] = np.random.default_rng(4).normal(size=int(on.sum()))
-    data = data.assign(late=late)
+    data = third_day_market()
     names = ["load_d+1", "wind_d+1", "late"]
 
     ref = OLSModel(names, training_window=WINDOW).run(data, *THIRD, horizon=1)
@@ -381,3 +387,69 @@ def test_a_fixed_list_s_column_that_starts_on_the_third_day_is_scaled_from_there
             assert prediction == pytest.approx(hand_forecast(data, period, day, names, [True] * 3), abs=1e-9)
             raw = hand_forecast(data, period, day, names, [True, True, False])
             assert abs(prediction - raw) > 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Results scaled by the old rule aren't resumed silently
+# ---------------------------------------------------------------------------
+
+
+def stored(path):
+    with open(path) as lines:
+        return by_key(json.loads(line) for line in lines if line.strip())
+
+
+def cut_short(path, before="2023-03-08"):
+    """What a run stopped before `before` leaves in the file."""
+    with open(path) as lines:
+        kept = [line for line in lines if line.strip() and json.loads(line)["run_date"] < before]
+    with open(path, "w") as out:
+        out.writelines(kept)
+    return len(kept)
+
+
+@pytest.mark.parametrize(
+    "names", [["load_d+1", "wind_d+1", "late"], ["load_d+1", "wind_d+1"]], ids=["late", "complete"]
+)
+def test_plain_results_of_a_fixed_list_scaled_by_the_old_rule_are_refused_on_resume(tmp_path, monkeypatch, names):
+    """Plain results of fixed lists have no mask digest to compare, so a run made before a column with no value on the first day
+    was read again, cut short and resumed by this code, would have mixed the two scalings without a word. Such a run now records
+    its digests, and results whose manifest has none are refused; with every column there from the first day nothing was read
+    again, the manifest is as it was and the resume gives a fresh run's records."""
+    data = third_day_market()
+    original = BaseModel._precompute_scalable_masks
+
+    def without_reread(self, horizons, offset=None, last=None):
+        offset = self._offset if offset is None else offset
+        return original(self, horizons, offset, offset)
+
+    def run(path, **kwargs):
+        return OLSModel(names, training_window=WINDOW).run(data, *THIRD, horizon=1, save_to=str(path), **kwargs)
+
+    old = tmp_path / "old" / "m.jsonl"
+    with monkeypatch.context() as patch:
+        patch.setattr(BaseModel, "_precompute_scalable_masks", without_reread)
+        run(old)
+    assert "binary_masks" not in json.loads(manifest_path(old).read_text())
+    assert cut_short(old) > 0
+    fresh = by_key(OLSModel(names, training_window=WINDOW).run(data, *THIRD, horizon=1)._results)
+
+    # This code's own run, cut short, resumes whatever the columns.
+    new = tmp_path / "new" / "m.jsonl"
+    run(new)
+    digests = json.loads(manifest_path(new).read_text()).get("binary_masks")
+    cut_short(new)
+    run(new)
+    assert stored(new) == fresh
+
+    if "late" in names:
+        assert sorted(digests) == sorted(f"{period}-1" for period in range(24))
+        with pytest.raises(ManifestMismatchError, match="the scaling rule changed"):
+            run(old)
+        run(old, allow_manifest_mismatch=True)  # an override resumes, and its manifest has the digests from then on
+        assert json.loads(manifest_path(old).read_text())["binary_masks"] == digests
+        run(old)
+    else:
+        assert digests is None
+        run(old)
+        assert stored(old) == fresh

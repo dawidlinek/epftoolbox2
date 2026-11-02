@@ -352,8 +352,10 @@ class BaseModel(ABC):
             run_positions = {day: (None, day, position) for position, day in enumerate(run_days)}
         if windows is not None:
             masks = self._window_masks(plan, windows, horizons, first_day)
+        elif plan is not None:
+            masks = self._plan_scalable_masks(plan)
         else:
-            masks = None if plan is None else self._plan_scalable_masks(plan)
+            masks = self._precompute_scalable_masks(horizons)
         stored_windows = None
 
         store = ResultStore(save_to, test_start=test_start) if save_to else None
@@ -383,7 +385,7 @@ class BaseModel(ABC):
                 predictor_lists=None if plan is None else plan.manifest_lists(masks if windows else {TEST: masks}),
                 availability=self._manifest_availability(information_set, availability, listing, window_listings),
                 windows=windows,
-                binary_masks=None if windows is None or plan is not None else self._mask_digests(masks),
+                binary_masks=self._fixed_mask_digests(plan, windows, masks, horizons),
                 read_columns=() if plan is None else sorted(plan.queried),
                 frame_hashes=frame_hashes,
                 training_cut=self._training_cut(rules, target, freq),
@@ -664,6 +666,23 @@ class BaseModel(ABC):
             else:
                 masks[name] = self._plan_scalable_masks(plan, plan.days_between(start, end), offset, last)
         return masks
+
+    def _fixed_mask_digests(
+        self, plan: Optional[PredictorPlan], windows: Optional[RunWindows], masks: Dict, horizons: Sequence[int]
+    ) -> Optional[Dict[str, str]]:
+        """The `binary_masks` of a manifest: a fixed list's digests per window in a run with windows, a predictor function's
+        none (they stay with each list). A plain run of fixed lists records its digests, under the test window's key, only where
+        a column with no value on the first day was read again on a later day and that changed a mask: results scaled before
+        that re-read existed have none, and `check_and_write` refuses to resume them (`unrecorded_masks`). Every other plain
+        manifest is as it was."""
+        if plan is not None:
+            return None
+        if windows is not None:
+            return self._mask_digests(masks)
+        unread = self._precompute_scalable_masks(horizons, self._offset, self._offset)
+        if all(np.array_equal(mask, unread[key]) for key, mask in masks.items()):
+            return None
+        return self._mask_digests({TEST: masks})
 
     @staticmethod
     def _mask_digests(masks: Dict[str, Dict[Tuple[int, int], np.ndarray]]) -> Dict[str, str]:
