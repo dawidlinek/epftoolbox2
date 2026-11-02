@@ -44,7 +44,8 @@ One run per model covers both windows, into one results file and one manifest. T
   record without one means `"test"`, so old files keep loading.
 - **Binary columns.** A list's mask of columns left unscaled is read from the training window of the first day it is used.
   With one mask for the run, adding validation days would change the masks, and with them the test forecasts, without a word.
-  So each window reads its masks from its own first day, and the manifest holds a digest of each.
+  So each window reads its masks from its own first day, a column with no value there on the first later day of the window with
+  one and never after the window's last, and the manifest holds a digest of each.
 - **Days between the windows** are not forecast. A predictor function isn't asked about them, the issue-time check
   doesn't look at them, and the data contract's spacing check reads only what the windows' training windows reach.
 - **A predictor function doesn't see the window.** `ctx` has no way to ask, so a list can't depend on it.

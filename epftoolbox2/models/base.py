@@ -125,6 +125,7 @@ class BaseModel(ABC):
         self._hour_data: Dict[int, pd.DataFrame] = {}
         self._hour_days: Dict[int, np.ndarray] = {}
         self._offset: int = 0
+        self._last_day: int = 0  # the day id of the run's last calendar day, where a mask's re-read stops
         self._first_ordinal: int = 0  # the date of day id 0
         self._target: str = ""
         self._freq: str = "1h"
@@ -314,7 +315,7 @@ class BaseModel(ABC):
         first_day = datetime.date.fromisoformat(test_start)
         if windows is None:
             self._offset = self._resolve_day(test_start, "test_start")
-            test_end_day = self._resolve_day(test_end, "test_end")
+            test_end_day = self._last_day = self._resolve_day(test_end, "test_end")
             run_days = [
                 day
                 for day in range(test_end_day - self._offset + 1)
@@ -325,6 +326,7 @@ class BaseModel(ABC):
                 self._resolve_day(start, f"{name} start")
                 self._resolve_day(end, f"{name} end")
             self._offset = self._resolve_day(test_start, "first day of the run")
+            self._last_day = self._offset + (datetime.date.fromisoformat(test_end) - first_day).days
             run_days = [(datetime.date.fromisoformat(day) - first_day).days for day in windows.issue_days(weekdays)]
         n_days = len(run_days)
         test_days = {d: first_day + datetime.timedelta(days=d) for d in run_days}
@@ -350,8 +352,10 @@ class BaseModel(ABC):
             run_positions = {day: (None, day, position) for position, day in enumerate(run_days)}
         if windows is not None:
             masks = self._window_masks(plan, windows, horizons, first_day)
+        elif plan is not None:
+            masks = self._plan_scalable_masks(plan)
         else:
-            masks = None if plan is None else self._plan_scalable_masks(plan)
+            masks = self._precompute_scalable_masks(horizons)
         stored_windows = None
 
         store = ResultStore(save_to, test_start=test_start) if save_to else None
@@ -381,7 +385,7 @@ class BaseModel(ABC):
                 predictor_lists=None if plan is None else plan.manifest_lists(masks if windows else {TEST: masks}),
                 availability=self._manifest_availability(information_set, availability, listing, window_listings),
                 windows=windows,
-                binary_masks=None if windows is None or plan is not None else self._mask_digests(masks),
+                binary_masks=self._fixed_mask_digests(plan, windows, masks, horizons),
                 read_columns=() if plan is None else sorted(plan.queried),
                 frame_hashes=frame_hashes,
                 training_cut=self._training_cut(rules, target, freq),
@@ -651,15 +655,34 @@ class BaseModel(ABC):
     def _window_masks(
         self, plan, windows: RunWindows, horizons: Sequence[int], first_day: datetime.date
     ) -> Dict[str, Dict]:
-        """Window -> its binary-column masks, as a plain run over that window alone computes them, from its first day."""
+        """Window -> its binary-column masks, as a plain run over that window alone computes them, from its first day and
+        no day after its last."""
         masks = {}
         for name, (start, end) in windows.periods:
             offset = self._offset + (datetime.date.fromisoformat(start) - first_day).days
+            last = self._offset + (datetime.date.fromisoformat(end) - first_day).days
             if plan is None:
-                masks[name] = self._precompute_scalable_masks(horizons, offset)
+                masks[name] = self._precompute_scalable_masks(horizons, offset, last)
             else:
-                masks[name] = self._plan_scalable_masks(plan, plan.days_between(start, end), offset)
+                masks[name] = self._plan_scalable_masks(plan, plan.days_between(start, end), offset, last)
         return masks
+
+    def _fixed_mask_digests(
+        self, plan: Optional[PredictorPlan], windows: Optional[RunWindows], masks: Dict, horizons: Sequence[int]
+    ) -> Optional[Dict[str, str]]:
+        """The `binary_masks` of a manifest: a fixed list's digests per window in a run with windows, a predictor function's
+        none (they stay with each list). A plain run of fixed lists records its digests, under the test window's key, only where
+        a column with no value on the first day was read again on a later day and that changed a mask: results scaled before
+        that re-read existed have none, and `check_and_write` refuses to resume them (`unrecorded_masks`). Every other plain
+        manifest is as it was."""
+        if plan is not None:
+            return None
+        if windows is not None:
+            return self._mask_digests(masks)
+        unread = self._precompute_scalable_masks(horizons, self._offset, self._offset)
+        if all(np.array_equal(mask, unread[key]) for key, mask in masks.items()):
+            return None
+        return self._mask_digests({TEST: masks})
 
     @staticmethod
     def _mask_digests(masks: Dict[str, Dict[Tuple[int, int], np.ndarray]]) -> Dict[str, str]:
@@ -1063,58 +1086,72 @@ class BaseModel(ABC):
             raise ValueError(f"{self.name}: this plan was built for another {', '.join(problems)}")
 
     def _plan_scalable_masks(
-        self, plan: PredictorPlan, days: Tuple[int, Optional[int]] = (0, None), offset: Optional[int] = None
+        self,
+        plan: PredictorPlan,
+        days: Tuple[int, Optional[int]] = (0, None),
+        offset: Optional[int] = None,
+        last: Optional[int] = None,
     ) -> Dict[Tuple[int, int, int], np.ndarray]:
-        """(list id, period, horizon) -> which of the list's columns are scaled, from all test days of that list.
+        """(list id, period, horizon) -> which of the list's columns are scaled, for each list a planned forecast uses.
 
         All of them, pending or not, so a resumed run computes what a fresh one does. `days` is a (start, stop) slice of the
-        plan's issue days and `offset` the day id of the first calendar day of the window they are in (the run's first day if not
-        given), when masks are kept per window: what happens in another window then can't move them.
+        plan's issue days, `offset` the day id of the first calendar day of the window they are in and `last` that of its last
+        (the run's if not given), when masks are kept per window: what happens in another window then can't move them.
 
-        A list's mask is read on the window's first calendar day if the list is used on the window's first issue day, whatever
-        that day's weekday, as a fixed list's is, else on the first issue day that uses it. Either way it is read on that day or
-        before it, from rows no later than the forecast's own, and which day it is depends on nothing after it: not on later issue
-        days, their answers or the end of the test period. So a function returning one list on every issue day, or on Fridays
-        alone in a run of Fridays, is identical to that fixed list. Test days are the plan's issue days, by date: with
-        `issue_days` they aren't consecutive.
-
-        A column with no value on the day the mask is read can't tell whether it is binary (`get_scalable_mask` would leave it
-        unscaled for good). For a list not used on every issue day it is read on the first of the list's issue days, from the
-        first one used on, that has a value for it: before that day the list's forecasts have no training row, since none has
-        the column. A list used on every issue day keeps a fixed list's mask, such a column unscaled; whether a list is used on
-        every issue day depends on the last of them, a known issue (`tests/test_known_issues.py`).
+        Only planned keys count: what the function returns where the clock doesn't have the period on the issue day or the
+        target day (`PredictorPlan.planned`) is no forecast's, so it decides no mask and a list returned only there gets none.
+        A list's mask day is the window's first calendar day if the list is that of the window's first planned issue day of the
+        (period, horizon), whatever that day's weekday, as a fixed list's is, else the first planned issue day that uses it. It
+        is no later than any of the list's forecasts and depends on nothing after it: not on later issue days, their answers or
+        the end of the test period. So a function returning one list on every issue day, or on Fridays alone in a run of
+        Fridays, is identical to that fixed list. Issue days are the plan's, by date: with `issue_days` they aren't consecutive.
+        A column with no value on the mask day is read again as `_scalable_mask` says.
         """
         offset = self._offset if offset is None else offset
+        last = self._last_day if last is None else last
         day_ids = np.array([day.toordinal() - self._first_ordinal for day in plan.issue_days], dtype=np.int64)
+        planned = plan.planned()
         masks = {}
         for (hour, hz), all_ids in plan.assignment.items():
-            ids = all_ids[days[0] : days[1]]
-            ids_days = day_ids[days[0] : days[1]]
+            on_clock = planned[(hour, hz)][days[0] : days[1]]
+            ids = all_ids[days[0] : days[1]][on_clock]
+            ids_days = day_ids[days[0] : days[1]][on_clock]
             for list_id in np.unique(ids).tolist():
-                predictors = list(plan.lists[list_id])
-                test_days = np.flatnonzero(ids == list_id)
-                first = offset if test_days[0] == 0 else int(ids_days[test_days[0]])
-                sample = self._training_sample(hour, first, hz, predictors)
-                mask = StandardScaler.get_scalable_mask(sample)
-                if len(test_days) < len(ids):
-                    # From the list's first issue day on, that day too when the mask was read before it.
-                    list_days = ids_days[test_days]
-                    later = list_days[1:] if list_days[0] == first else list_days
-                    self._read_columns_without_values(mask, np.isnan(sample).all(axis=0), hour, hz, predictors, later)
-                masks[(list_id, hour, hz)] = mask
+                first = offset if ids[0] == list_id else int(ids_days[np.argmax(ids == list_id)])
+                masks[(list_id, hour, hz)] = self._scalable_mask(hour, hz, list(plan.lists[list_id]), first, last)
         return masks
 
-    def _read_columns_without_values(self, mask, without_values, hour, hz, predictors, list_days) -> None:
-        """Read the columns of a list's mask that had no value where it was read from the first of `list_days` (day ids, in
-        order) that has one."""
-        for day in list_days:
-            if not without_values.any():
-                return
-            sample = self._training_sample(hour, int(day), hz, predictors)
-            found = without_values & ~np.isnan(sample).all(axis=0)
+    def _scalable_mask(self, hour: int, hz: int, predictors: List[str], first: int, last: int) -> np.ndarray:
+        """Which of `predictors` are scaled at (period `hour`, horizon `hz`), read from the training rows of day id `first`,
+        the mask day, by `StandardScaler.get_scalable_mask`.
+
+        A column with no value in those rows can't tell whether it is binary. It is read on the first calendar day d after
+        `first`, up to `last`, whose training rows have a value in it, and the scan stops there: for every list, fixed or a
+        function's, however often it is used, and over calendar days, not issue days, so that a run of Fridays reads it where a
+        run of every day does. No forecast issued on D reads past D through it. The mask day is D or earlier. A forecast of the
+        list with a finite training row has a value of the column in its own rows, so d <= D, and d is decided by the rows of
+        the days up to d, dated d - 1 - h or earlier (d - 1 at the latest with `newest_target="published"`). A forecast issued
+        before d has no value of the column in its rows, so no finite row, and is skipped whatever its mask says.
+        """
+        sample = self._training_sample(hour, first, hz, predictors)
+        mask = StandardScaler.get_scalable_mask(sample)
+        without = np.flatnonzero(np.isnan(sample).all(axis=0))
+        if not len(without) or last <= first:
+            return mask
+        days = self._hour_days[hour]
+        values = self._hour_data[hour][[predictors[i] for i in without]].to_numpy(dtype=np.float64)
+        # The scan stops at the window's last day. That moves no forecast: one with a finite row finds d at its issue day or
+        # before (d <= D <= last), and a column found only after `last` belongs to forecasts with no finite row, which are
+        # skipped. It keeps the mask of a window from reading another window's days, and from the end of the data.
+        for day in range(first + 1, last + 1):
+            rows = values[training_rows(days, day, self.training_window, hz, self._newest_of(hour, day))]
+            found = ~np.isnan(rows).all(axis=0)
             if found.any():
-                mask[found] = StandardScaler.get_scalable_mask(sample)[found]
-                without_values &= ~found
+                mask[without[found]] = StandardScaler.get_scalable_mask(rows[:, found])
+                without, values = without[~found], values[:, ~found]
+                if not len(without):
+                    break
+        return mask
 
     def _load_periods(self, data: pd.DataFrame, used_columns: Sequence[str], horizon: int, target: str) -> None:
         """Read `data` into the frames of the periods, whose rows the tasks are cut from."""
@@ -1323,17 +1360,17 @@ class BaseModel(ABC):
         return hour_arrays
 
     def _precompute_scalable_masks(
-        self, horizons: Sequence[int], offset: Optional[int] = None
+        self, horizons: Sequence[int], offset: Optional[int] = None, last: Optional[int] = None
     ) -> Dict[Tuple[int, int], np.ndarray]:
-        """(period, horizon) -> which of a fixed list's columns are scaled, for each horizon planned."""
+        """(period, horizon) -> which of a fixed list's columns are scaled, for each horizon planned, read on the window's first
+        calendar day `offset` (a column with no value there as `_scalable_mask` says, up to `last`, the window's last)."""
         offset = self._offset if offset is None else offset
-        masks = {}
-        for hour in range(self._periods_per_day):
-            for hz in horizons:
-                preds = self._expand_predictors(hz, hour=hour)
-                sample_x = self._training_sample(hour, offset, hz, preds)
-                masks[(hour, hz)] = StandardScaler.get_scalable_mask(sample_x)
-        return masks
+        last = self._last_day if last is None else last
+        return {
+            (hour, hz): self._scalable_mask(hour, hz, self._expand_predictors(hz, hour=hour), offset, last)
+            for hour in range(self._periods_per_day)
+            for hz in horizons
+        }
 
     def _training_sample(self, hour: int, day: int, hz: int, predictors: List[str]) -> np.ndarray:
         """The training rows of the task (hour, hz, day) in these columns, before dropping missing values."""
