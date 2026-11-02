@@ -1,7 +1,9 @@
 """The information set compares instants. An oracle on UTC datetimes, which shares no arithmetic with the code, says when
 each cell is known, and the check, the `ctx` of a predictor function and the probe must all say the same, cell by cell."""
 
+import json
 import re
+import warnings
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -9,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from epftoolbox2 import information_set
 from epftoolbox2.data.transformers import LagTransformer
 from epftoolbox2.information_set import (
     ROLE_PREDICTOR,
@@ -121,6 +124,11 @@ def _utc(wall, zone, second=False):
         wall = wall + MINUTE  # fold 0 reads a skipped time with the old offset, past the switch, and fold 1 before it
 
 
+def _is_skipped(wall, zone):
+    tz = _zone(zone)
+    return wall.replace(tzinfo=tz, fold=0).astimezone(UTC) > wall.replace(tzinfo=tz, fold=1).astimezone(UTC)
+
+
 def _is_second(wall, zone, instant):
     return instant != _utc(wall, zone) and instant == _utc(wall, zone, second=True)
 
@@ -169,6 +177,8 @@ class Oracle:
         it is known in advance."""
         base, inner, slot, aggregate, outer = _parse(name, self.step)
         wall = datetime.combine(row_day, datetime.min.time()) + timedelta(minutes=minute)
+        if not self.naive and _is_skipped(wall, self.zone):
+            return None  # a row the clock skips holds no value, so nothing is late there
         rule = RULES[base]
         if slot is None:
             return self._cell(rule, inner, wall, True, issue_day, self.step)
@@ -184,7 +194,7 @@ class Oracle:
             rest = shifts[1:] if shifts and shifts[0][0] == "d" and shifts[0][1] > 0 else shifts
             read = issue_day + (self._moved(wall, second, rest)[0].date() - wall.date())
             at = datetime.combine(read, datetime.min.time()) + timedelta(minutes=_clock(rule.time))
-            known = _utc(at, rule.timezone or self.zone)
+            known = _utc(at, rule.timezone or self.zone, second=True)  # a repeated rule time is its later occurrence
             return known + _delay(rule) if rule.kind == "weather_cutoff" else known
         if rule.kind == "weather_run" and shifts and shifts[0][0] == "d" and shifts[0][1] > 0:
             shifts = shifts[1:]
@@ -200,7 +210,9 @@ class Oracle:
             day = delivered - timedelta(days=rule.days_before)
         else:
             day = delivered - timedelta(days=delivered.weekday() + 7) + timedelta(days=4)  # the Friday before that week
-        return _utc(datetime.combine(day, datetime.min.time()) + timedelta(minutes=_clock(rule.time)), zone)
+        return _utc(
+            datetime.combine(day, datetime.min.time()) + timedelta(minutes=_clock(rule.time)), zone, second=True
+        )
 
 
 def _clock(text):
@@ -498,3 +510,176 @@ def test_explain_reads_what_a_name_holds_from_the_second_occurrence():
     day = "2024-10-27"
     tables = pipeline.explain(data, model="m", test=(day, day), horizon=1, hour=2, target="price", echo=False)
     assert tables["predictors"]["target-relative"].tolist() == ["T-1 02:00"]
+
+
+# ---------------------------------------------------------------------------
+# What the review of this change found
+# ---------------------------------------------------------------------------
+
+
+def _spring_frame():
+    data = make_market_data(start="2024-02-20", days=50, noise=2.0, seed=3)
+    return data.assign(load_actual=data["load"] + 1.0)
+
+
+def test_a_listing_made_on_the_wall_clock_is_replaced_on_resume_and_read_with_a_warning(tmp_path, monkeypatch):
+    """Issued 03:30 Warsaw, load_actual (realised 1 h) is late from hour 1 on 2024-03-31 (00:00Z, known 02:00Z after the
+    01:30Z issue), and from hour 2 on the wall clock. Results listed that way carry no "times" stamp: `report()` warns,
+    and a resume at "warn" lists what a fresh run lists instead of keeping the old rows."""
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    data = _spring_frame()
+    rules = {name: Availability.static() for name in ("load", "wind", "is_weekend", "is_weekday")}
+    pipeline = ModelPipeline(information_set=InformationSet("03:30", "Europe/Warsaw", rules=rules), availability="warn")
+    pipeline.add_model(
+        OLSModel(predictors=["load_actual", "is_weekend_d+1", "is_weekday_d+1"], training_window=14, name="m")
+    )
+    test = ("2024-03-31", "2024-03-31")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pipeline.run(data, test=test, horizon=1, save_dir=str(tmp_path / "fresh"))
+        pipeline.run(data, test=test, horizon=1, save_dir=str(tmp_path / "old"))
+    fresh = json.loads((tmp_path / "fresh" / "m.manifest.json").read_text())["availability"]
+    assert fresh["times"] == "instants" and fresh["listing"][0]["periods"] == "1, 3-23"
+
+    path = tmp_path / "old" / "m.manifest.json"
+    manifest = json.loads(path.read_text())
+    del manifest["availability"]["times"]
+    manifest["availability"]["listing"][0]["periods"] = "2-23"  # what the wall clock listed
+    path.write_text(json.dumps(manifest, indent=2))
+    with pytest.warns(UserWarning, match="compared wall-clock times"):
+        pipeline.report(str(tmp_path / "old"), test=test, horizon=1)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pipeline.run(data, test=test, horizon=1, save_dir=str(tmp_path / "old"))
+    assert json.loads(path.read_text())["availability"] == fresh
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pipeline.report(str(tmp_path / "old"), test=test, horizon=1)
+    assert not [w for w in caught if "wall-clock" in str(w.message)]
+
+
+def test_a_row_the_clock_skips_has_no_value_and_no_verdict():
+    """Hour 2 doesn't exist in Warsaw on 2024-03-31. A list that reads x (realised 8 h) only there is no look-ahead: its
+    forecast has no row to read. Read as 03:00 CEST (01:00Z), x was known at 10:00Z, after the 11:45 issue, and refused."""
+    index = pd.date_range("2024-03-01", "2024-04-20", freq="1h", tz="Europe/Warsaw", inclusive="left")
+    info = InformationSet(
+        "11:45", "Europe/Warsaw", rules={"x": Availability.realised("8h"), "z": Availability.static()}
+    )
+    expanded = {(p, 1): ["z"] for p in range(24)}
+    expanded[(2, 1)] = ["x"]
+    info.check(expanded, "z", "1h", index, "2024-03-25", "2024-04-05")
+    assert info.late_uses(expanded, "z", "1h", index, "2024-03-25", "2024-04-05") == []
+
+    frame = pd.DataFrame({"x": 1.0, "z": 1.0}, index=index)
+    cells = _Cells(frame, info, "1h", pd.DatetimeIndex(["2024-03-30", "2024-03-31", "2024-04-01"]))
+    assert cells.known("x")[2].tolist() == [True, True, True]  # 01:00Z and 00:00Z + 9 h the days around, before 09:45Z
+    assert cells.value("x", 1, 2, 1, date(2024, 3, 31)) != cells.value("x", 1, 2, 1, date(2024, 3, 31))  # NaN, no error
+    assert not cells.published("x", 1, 2, 1)
+
+
+def test_a_weather_cutoff_run_is_a_utc_hour():
+    """Run "06" plus 5 h is 11:00Z, 13:00 in Warsaw in summer: after an 11:45 issue, as `describe` says. Read in the data
+    zone, a rule without a zone was known at 11:00 local, two hours early."""
+    for rule in (
+        Availability("weather_cutoff", time="06:00", delay="5h", timezone=None),
+        Availability.from_dict({"kind": "weather_cutoff", "time": "06:00", "delay": "5h"}),
+        Availability.weather_cutoff("06", "5h"),
+    ):
+        assert rule.timezone == "UTC"
+        info = InformationSet("11:45", "Europe/Warsaw", rules={"w": rule, "z": Availability.static()})
+        index = pd.date_range("2024-06-01", periods=240, freq="1h", tz="Europe/Warsaw")
+        found, _ = info.violations({(p, 1): ["w"] for p in range(24)}, "z", "1h", index, "2024-06-05", "2024-06-05")
+        assert {use.period for use in found} == set(range(24))
+        assert found[0].available_label == "D 13:00"
+    with pytest.raises(ValueError, match="run time is a UTC hour"):
+        Availability("weather_cutoff", time="06:00", delay="5h", timezone="Europe/Warsaw")
+    with pytest.raises(ValueError, match="run time is a UTC hour"):
+        Availability("weather_cutoff", time="06:00", delay="5h")  # the class's default zone is no run's
+
+
+@pytest.mark.parametrize(
+    "rule, name",
+    [
+        (Availability.as_of("02:30", "Europe/Warsaw"), "x"),
+        (Availability.published("02:30", 0, "Europe/Warsaw"), "x"),
+        (Availability.weekly("sunday", "02:30", "Europe/Warsaw"), "x_d+1"),
+    ],
+    ids=["as_of", "published", "weekly"],
+)
+def test_a_rule_time_the_clocks_repeat_is_its_later_occurrence(rule, name):
+    """02:30 occurs at 00:30Z and 01:30Z on 2024-10-27 in Warsaw. A value known then is late for an issue at the first 02:45
+    (00:45Z): the later reading, so a rule never reads earlier than it may be. x_d+1 on the 27th is delivered on Monday the
+    28th, and the week from it is published on Sunday the 27th."""
+    index = pd.date_range("2024-10-20", "2024-11-03", freq="1h", tz="Europe/Warsaw", inclusive="left")
+    info = InformationSet("02:45", "Europe/Warsaw", rules={"x": rule, "z": Availability.static()})
+    found, _ = info.violations({(p, 1): [name] for p in range(24)}, "z", "1h", index, "2024-10-27", "2024-10-27")
+    assert {use.period for use in found} == set(range(24))
+    assert found[0].available_label == "D 02:30 (UTC+01:00)"
+
+
+@pytest.mark.parametrize("rule", [Availability.weather_cutoff("00", "6h"), Availability.as_of("06:00", "UTC")])
+def test_the_control_reads_a_run_from_its_own_rows_day(rule):
+    """w_d-1 on the rows of D-1 holds the run of D-2, out at 06:00Z on D-2: no fresher than midnight of D-1, so the control
+    leaves it. On the rows of D it holds D-1's run, out after that midnight, and the control perturbs it. Read at D's run
+    instead, the rows of D-1 would look fresh."""
+    index = pd.date_range("2024-06-01", "2024-06-20", freq="1h", tz="Europe/Warsaw", inclusive="left")
+    frame = pd.DataFrame({"w_d-1": np.arange(1.0, len(index) + 1.0)}, index=index)
+    info = InformationSet("11:45", "Europe/Warsaw", rules={"w": rule})
+    perturbed, _, _ = perturb_recent(frame, "2024-06-10", info)
+    moved = perturbed["w_d-1"] != frame["w_d-1"]
+    day = index.tz_localize(None).normalize()
+    assert moved[day == pd.Timestamp("2024-06-10")].all()
+    assert not moved[day == pd.Timestamp("2024-06-09")].any()
+
+
+def test_the_control_counts_a_value_known_at_the_issue_time_as_known():
+    """Known at exactly 11:45, the issue time: in time, so the control may perturb it, as the check lets it through."""
+    index = pd.date_range("2024-06-01", "2024-06-20", freq="1h", tz="Europe/Warsaw", inclusive="left")
+    frame = pd.DataFrame({"x": np.arange(1.0, len(index) + 1.0)}, index=index)
+    info = InformationSet("11:45", "Europe/Warsaw", rules={"x": Availability.as_of("11:45", "Europe/Warsaw")})
+    perturbed, _, _ = perturb_recent(frame, "2024-06-10", info)
+    day = index.tz_localize(None).normalize() == pd.Timestamp("2024-06-10")
+    assert (perturbed.loc[day, "x"] != frame.loc[day, "x"]).all()
+
+
+def test_a_refusal_and_a_listing_show_the_worst_use_and_its_real_times():
+    """load_actual is late from hour 10 at an 11:45 issue; the refusal names the latest, hour 23, known 01:00 on D+1. On the
+    25-hour 2024-10-27 the issue shows as 11:45 on the clock, not the 12:45 that has elapsed since midnight."""
+    index = pd.date_range("2024-10-20", "2024-11-03", freq="1h", tz="Europe/Warsaw", inclusive="left")
+    info = InformationSet("11:45", "Europe/Warsaw")
+    expanded = {(p, 1): ["load_actual"] for p in range(24)}
+    with pytest.raises(InformationSetError, match=r"load_actual for period 23 is known D\+1 01:00, issued D 11:45"):
+        info.check(expanded, "load_actual_d-3", "1h", index, "2024-10-27", "2024-10-27")
+    found, _ = info.violations(expanded, "load_actual_d-3", "1h", index, "2024-10-27", "2024-10-27")
+    assert {(row["known"], row["issued"]) for row in listing_rows(found)} == {("D+1 01:00", "D 11:45")}
+
+
+def test_explain_shows_the_known_time_of_the_day_it_is_latest():
+    """Hour 1, load_actual: known 03:00 on 2024-03-30 (02:00Z, 8 h 45 before the 10:45Z issue) and 04:00 on the 31st (02:00Z,
+    7 h 45 before 09:45Z). The 31st is the latest, so its time is shown."""
+    data = make_market_data(start="2024-02-01", days=70, noise=2.0, seed=3).assign(load_actual=1.0)
+    pipeline = ModelPipeline(information_set=InformationSet("11:45", "Europe/Warsaw"), availability="warn")
+    pipeline.add_model(OLSModel(predictors=["load_actual"], training_window=14, name="m"))
+    test = ("2024-03-30", "2024-03-31")
+    tables = pipeline.explain(data, model="m", test=test, horizon=1, hour=1, target="price", echo=False)
+    assert tables["predictors"]["known"].tolist() == ["D 04:00"]
+
+
+@pytest.mark.parametrize("case", ["warsaw 1h", "warsaw 15min", "new york, issue in the switch", "havana, a midnight switch", "asuncion, a repeated last hour", "naive 1h, issue in the switch"])  # fmt: skip
+def test_the_arithmetic_on_steady_days_equals_pandas_on_every_cell(case, monkeypatch):
+    """Times are converted by arithmetic on days that keep one UTC offset, and by pandas on the others. With every day sent
+    through pandas, every cell must come out the same, to the bit."""
+    index, info, freq, names, step, *_, days, _, _ = _setup(case)
+    fast = _Cells(pd.DataFrame(index=index), info, freq, pd.DatetimeIndex(days))
+    grids = {name: fast.available(name) for name in names}
+    real = information_set._zone_table
+
+    def unsteady(zone, lo, hi):
+        first, midnight, steady = real(zone, lo, hi)
+        return first, midnight, np.zeros_like(steady)
+
+    monkeypatch.setattr(information_set, "_zone_table", unsteady)
+    slow = _Cells(pd.DataFrame(index=index), info, freq, pd.DatetimeIndex(days))
+    assert [name for name in names if not np.array_equal(slow.available(name), grids[name])] == []

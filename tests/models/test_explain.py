@@ -219,7 +219,8 @@ def test_a_dst_day_on_15_minute_data(day):
 def test_the_hour_a_spring_switch_skips_has_no_row_and_the_view_says_so(capsys):
     table = explain(["price_d-1", "load_actual_d-1"], 1, 2, test=(SPRING, SPRING), echo=True)["predictors"]
     assert table["target-relative"].tolist() == ["T-2 02:00", "T-2 02:00"]
-    assert table["known"].tolist() == ["D-2 13:00", "D-1 04:00"]
+    assert table["known"].tolist() == ["-", "-"]  # no row, so nothing to judge
+    assert table["status"].tolist() == ["no row", "no row"]
     assert f"No row at period 2 on 1 of the issue days ({SPRING})" in capsys.readouterr().out
 
 

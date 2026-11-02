@@ -84,6 +84,9 @@ def _judge(
     if col.rule is None:
         return _DASH, _DASH, "no rule"
     info._check_source_zone(col, data.index)
+    used = used & ~clock.skipped(np.array([period]), step)[0]  # a period the clocks skip has no row to judge
+    if not used.any():
+        return col.rule.describe(), _DASH, "no row"
     available = clock.available(col, np.array([period]), step)[0][used]
     excess = available - clock.issue[used]
     worst = int(excess.argmax())

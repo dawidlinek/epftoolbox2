@@ -747,12 +747,12 @@ def test_a_realised_values_period_and_delay_are_elapsed_time_across_the_spring_s
     """Issued 03:30 Warsaw on 2024-03-31 (01:30Z, after the spring switch). load_actual at 01:00 CET (00:00Z) is
     known 1 h after its period plus a 1 h delay, at 02:00Z: after the issue. Added to the wall clock instead
     (01:00 + 1 h + 1 h = 03:00 < 03:30), it read as known, for the check and the perturbation alike. Period 0
-    (23:00Z the day before, known 01:00Z) is known in time."""
+    (23:00Z the day before, known 01:00Z) is known in time, and period 2, which the clocks skip, has no row to judge."""
     info = InformationSet("03:30", "Europe/Warsaw")  # default rules: load_actual = Availability.realised("1h")
     found, _ = violations(
         ["load_actual"], info=info, horizon=1, index=DST_SPRING_WARSAW, start="2024-03-31", end="2024-03-31"
     )
-    assert {p for _, p, _ in found} == set(range(1, 24))
+    assert {p for _, p, _ in found} == set(range(1, 24)) - {2}
 
     index = pd.date_range("2024-03-29", "2024-04-02", freq="1h", tz="Europe/Warsaw")
     data = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
@@ -836,7 +836,7 @@ def test_an_issue_time_skipped_by_the_spring_switch_is_read_at_its_earliest(issu
     index = pd.date_range("2024-03-25", "2024-04-05", freq="h", tz=data_zone)
     info = InformationSet("02:30", issue_timezone, rules={"x": Availability.as_of("00:45", "UTC")})
     found, _ = violations(["x"], info=info, horizon=1, index=index, start="2024-03-31", end="2024-03-31")
-    assert {p for _, p, _ in found} == set(range(24))
+    assert {p for _, p, _ in found} == _periods_with_a_row(index, "2024-03-31")
 
     perturbed, _, _ = perturb_unknown(pd.DataFrame({"x": 1.0}, index=index), "2024-03-31", info)
     assert (perturbed["x"] != 1.0).all()
@@ -901,6 +901,14 @@ def _refused_periods(found) -> dict:
     for name, period, _ in found:
         out.setdefault(name, set()).add(period)
     return out
+
+
+def _periods_with_a_row(index, day, step=60) -> set:
+    """The periods `index` has a row at on `day`: on the day the clocks go forward, not those of the hour they skip, which
+    hold no value and get no verdict."""
+    wall = index.tz_localize(None) if index.tz is not None else index
+    on_day = wall[wall.normalize() == pd.Timestamp(day)]
+    return set(((on_day.hour * 60 + on_day.minute) // step).tolist())
 
 
 def test_profile_slot_names():
@@ -1048,8 +1056,9 @@ def test_probe_perturbs_a_profile_slot_realised_after_the_issue_on_every_row():
 )
 def test_profile_slots_have_one_verdict_on_every_row_of_a_dst_day(run_day, index, rows):
     """The switch days have 23 and 25 rows, each carrying the day's whole profile. Realised 1 h after its hour, slot 23
-    (known 01:00 the next day) is perturbed on every one of them and refused at every period, including period 2,
-    which has no row or two rows that day; slot 05, and the skipped or repeated slot 02 itself, on none."""
+    (known 01:00 the next day) is perturbed on every one of them and refused at every period it has rows at, period 2
+    with two in autumn, while the spring day's period 2 has no row and so no verdict; slot 05, and the skipped or repeated
+    slot 02 itself, on none."""
     names = ["load_actual_h02", "load_actual_h05", "load_actual_h23"]
     data = pd.DataFrame(1.0, index=index, columns=names)
     info = InformationSet("11:45", "Europe/Brussels", rules=LOAD_ACTUAL_PROFILE)
@@ -1063,7 +1072,7 @@ def test_profile_slots_have_one_verdict_on_every_row_of_a_dst_day(run_day, index
     assert changed["load_actual_h23"].all()
     assert not changed[["load_actual_h02", "load_actual_h05"]].to_numpy().any()
     assert unknown == set()
-    assert _refused_periods(found) == {"load_actual_h23": set(range(24))}
+    assert _refused_periods(found) == {"load_actual_h23": _periods_with_a_row(index, run_day)}
 
 
 @pytest.mark.parametrize("switch", ["2024-03-31", "2024-10-27"])
@@ -1104,7 +1113,8 @@ def _verdicts_against_held_deliveries(
 
     The check judges a (predictor, period): its verdict must be that of the period's last row that day, the one the
     model forecasts from, so the second of a repeated autumn hour. A column known, or unknown, on every row of the day
-    has that verdict at every period, even one with no row. NaN cells hold no delivery and are not compared."""
+    has that verdict at every period with a row; one the clocks skip has none, and no verdict. NaN cells hold no delivery
+    and are not compared."""
     index = data.index
     step = {"1h": 60, "15min": 15}[freq]
     rule = Availability.realised("1h") if realised else Availability.published("13:00", 1, rule_zone)
@@ -1136,12 +1146,13 @@ def _verdicts_against_held_deliveries(
         found, _ = info.violations(expanded, "price", freq, index, day, day)
         refused = _refused_periods({(v.predictor, v.period, v.horizon) for v in found if v.role == "predictor"})
         today = on_day == run_day.to_datetime64()
+        with_row = _periods_with_a_row(index, day, step)
         for name in np.unique(names[today]):
             chosen = today & (names == name)
             by_period = dict(zip(period[chosen].tolist(), unknown[chosen].tolist()))  # a later row overrides
             got = refused.get(name, set())
             if len(set(by_period.values())) == 1:
-                want = every if unknown[chosen][0] else set()
+                want = with_row if unknown[chosen][0] else set()
             else:
                 want, got = {p for p, late in by_period.items() if late}, got & set(by_period)
             if got != want:
@@ -1299,8 +1310,8 @@ def test_probe_perturbs_a_day_aggregate_realised_after_the_issue_on_every_row():
 def test_day_aggregates_have_one_verdict_on_every_row_of_a_dst_day(run_day, hours, freq):
     """The switch days have 23 and 25 hours (92 and 100 quarter-hours), all of them in each row's aggregate. Realised
     1 h after its slot, the aggregate of the switch day is known at 01:00 on the next day: perturbed on every one of its
-    rows and refused at every period, including the switch hour's, which has no row or two rows that day. The
-    aggregate of the day before, `_d-1` on the switch day, on none."""
+    rows and refused at every period with a row, the autumn switch hour's two included; the spring one has none and no
+    verdict. The aggregate of the day before, `_d-1` on the switch day, on none."""
     per_hour = 4 if freq == "15min" else 1
     start = pd.Timestamp(run_day) - pd.Timedelta(days=5)
     index = pd.date_range(start, start + pd.Timedelta(days=10), freq=freq, tz="Europe/Warsaw", inclusive="left")
@@ -1323,7 +1334,7 @@ def test_day_aggregates_have_one_verdict_on_every_row_of_a_dst_day(run_day, hour
     assert not changed[known].to_numpy().any()
     assert unknown == set()
     found = {(v.predictor, v.period, v.horizon) for v in found}
-    assert _refused_periods(found) == {name: set(range(24 * per_hour)) for name in late}
+    assert _refused_periods(found) == {name: _periods_with_a_row(index, run_day, 60 // per_hour) for name in late}
 
 
 @pytest.mark.parametrize("switch", ["2024-03-31", "2024-10-27"])
@@ -1514,10 +1525,10 @@ def test_built_in_rules_judge_derived_columns_through_the_column_they_were_built
 def test_a_derived_column_has_the_verdict_of_its_column_at_the_slot_it_reads(column, shift, zone):
     """Nothing loosens through the built-in rules: on the issue days around a switch, at every period, a profile has the
     verdict of its column at that slot's period and a day aggregate at the day's last period, with the day shift before
-    or after the slot."""
+    or after the slot; a period the clocks skip has no row and no verdict."""
     index = pd.date_range("2024-03-20", "2024-04-10", freq="h", tz=zone, inclusive="left")
-    every = set(range(24))
     for day in pd.date_range("2024-03-29", "2024-04-02", freq="D").strftime("%Y-%m-%d"):
+        every = _periods_with_a_row(index, day)
 
         def refused(name):
             found, unknown = violations([name], horizon=1, start=day, end=day, index=index)

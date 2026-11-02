@@ -30,6 +30,10 @@ Notes for changes that need something from you. The full list of changes of a re
     knows its clock. A zone with no such name warns when a run writes its files.
   - **`verify` no longer calls those days a leak**, and a verify over a spring switch day counts 23 forecasts per horizon.
   See [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/).
+- **A `weather_cutoff` rule is in UTC.** A model run's time is a UTC hour, but a rule built with `timezone=None`, or from a dict or
+  YAML entry without a zone, read it in the data's zone or in `Europe/Brussels`: run `"06"` plus `"5h"` was known at 11:00 Warsaw
+  time in summer, two hours before the 13:00 that `describe()` says, a look-ahead. Both now mean UTC, and any other zone raises.
+  Rules made by `Availability.weather_cutoff(run, delay)` and by the data sources were already in UTC and don't change.
 - **A reversed test period now raises.** `ModelPipeline.run(df, test_start=later, test_end=earlier)` used to run nothing and
   return an empty report, and now raises `ValueError`, as a reversed `test=` does. So does `ModelPipeline.report()`.
 - **An issue time now warns instead of raising.** `ModelPipeline(issue_time=...)` and `ModelPipeline(information_set=...)` used
@@ -65,8 +69,12 @@ an issue day it didn't sample.
   pass. Listings show the real time, with its UTC offset inside the repeated hour, and the manifest's `minutes_late` counts elapsed
   minutes, so across a switch another day can be a column's worst. A predictor function that asks `ctx.published()` about such a cell
   gets the new answer and may take another list there, which moves that forecast, and resuming its stored forecast then raises
-  `ManifestMismatchError`, as for any changed answer. See
+  `ManifestMismatchError`, as for any changed answer. A rule's clock time that the clocks repeat counts at its second occurrence,
+  and a period they skip has no row, so nothing is late there. See
   [Clock Changes](/epftoolbox2/model-pipeline/information-set/#clock-changes).
+- **Listings stored before this change are read with a warning.** They were made on the wall clock, so next to a clock change
+  `report.availability()` of such results can list other periods than a fresh run. A run at `availability="warn"` into the same
+  directory replaces them, refitting nothing; until then `report()` says so.
 - `ModelPipeline.report(test=narrower)` counted every line of a results file as produced, so a shorter period looked complete. It now
   counts the forecasts inside the period, and `forecast_counts()` and its warning say what is missing.
 - A workflow file with `model_index: $SLURM_ARRAY_TASK_ID` couldn't be loaded where that variable isn't set, so `epf report` and
