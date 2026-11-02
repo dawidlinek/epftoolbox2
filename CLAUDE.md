@@ -3,7 +3,7 @@
 Electricity price forecasting library (a rewrite of Lago et al.'s epftoolbox): download market data, build features, run rolling-window forecasts, evaluate. It is used for research, so a methodological error — look-ahead, DST misalignment, models compared on different samples — is worse than a crash: it produces wrong numbers that look fine.
 
 ## Commands
-- Fast tests (~10 s, no network): `uv run pytest -m "not integration" -q`
+- Fast tests (no network): `uv run pytest -m "not integration" -n auto --dist worksteal -q`. They run in parallel with pytest-xdist (in the `dev` extra: `uv sync --extra dev`): about 3 min on this 12-core machine while other test runs kept it at load 20-30, against 16 min serially on a quiet machine and 30 min on that busy one. Each worker takes about 10 s to start, so run a single file or test without `-n`. Tests share nothing between workers (`.claude/rules/tests.md`).
 - Lint / format: `uv run ruff check .` and `uv run ruff format .` (line length 120)
 - Integration tests need `ENTSOE_API_KEY` and hit real APIs; don't run them unless asked.
 - Example tests (~7 min, live APIs): `ENTSOE_API_KEY=... uv run pytest -m examples -q` runs every `examples/*.py` through its `main(...)` and executes the README and docs quick starts, each on a short window. Give the key on the command line only, never in a file. They are `integration` tests too, so the fast suite skips them. Don't run them unless asked.
@@ -13,7 +13,7 @@ Electricity price forecasting library (a rewrite of Lago et al.'s epftoolbox): d
 
 ## Hooks you will see
 - Editing a `.py` file formats it with ruff and reports lint errors back (unused imports are ignored mid-edit).
-- Before finishing a turn in which Python files changed, `ruff check`, `ruff format --check` and the fast tests run; failures come back as feedback. The user can disable this with `EPF_SKIP_STOP_CHECKS=1`.
+- Before finishing a turn in which Python files changed, `ruff check`, `ruff format --check` and the fast tests (in parallel, as above) run; failures come back as feedback. The user can disable this with `EPF_SKIP_STOP_CHECKS=1`.
 - `git commit` is blocked when changes contain a real-looking API key. `DataPipeline.save()` writes `api_key` as a `${ENV_VAR}` reference by default; the hook still matters because `save(path, include_secrets=True)` is an explicit, documented opt-out into plain text, and pipeline YAMLs are tracked.
 
 ## How the pieces fit
