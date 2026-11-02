@@ -436,8 +436,8 @@ class EvaluationReport:
             correction: `"holm"`, or `None` (`p_holm` empty, `verdict` from `p_value`).
             by: `"hour"` for one row per (model, horizon, hour), without `m`, `p_holm` and `verdict`: a per-hour DM is a
                 heatmap, never a verdict (it called two seeds of one model different 37 % of the time).
-            interval: Coverage of the bootstrap interval of the ratio (weekly blocks); `None` skips it.
-            block: Block length of that bootstrap, in days.
+            interval: Coverage of the bootstrap interval of the ratio (blocks of `block` issue days); `None` skips it.
+            block: Block length of that bootstrap, in issue days (observations: seven Fridays are seven weeks).
             reps: Bootstrap repetitions.
             seed: Bootstrap seed.
 
@@ -534,7 +534,7 @@ class EvaluationReport:
             alpha: Size of the set the result is built for.
             statistic: `"R"` (T_R, recommended: seed-stable) or `"max"` (T_max, which keeps models much worse than the
                 best and changes with the seed).
-            block: Mean block length of the stationary bootstrap, in days.
+            block: Mean block length of the stationary bootstrap, in issue days (observations).
             reps: Bootstrap repetitions (at least 1,000 recommended).
             seed: Bootstrap seed.
             models: The set of models; by default all of them. Fewer than 3, counting exact clones once, gives NaN with a
@@ -593,14 +593,14 @@ class EvaluationReport:
         """How decisive the ranking is: every model's chance of being best and the interval of its rank.
 
         One row per model, by rank: `model, n_days, n_forecasts, mae, rank, p_best, rank_low, rank_high`. Days are resampled
-        in weekly blocks and the models ranked in each sample. As in `mcs()`, everything is on the keys all the models hold
+        in blocks of `block` issue days and the models ranked in each sample. As in `mcs()`, everything is on the keys all the models hold
         (`df.attrs` holds `n_days`, `n_forecasts`, `limited_by`), and `rank` is by the mean daily loss. Exact clones on those
         keys (an `AverageEnsemble` with `top=1` and what it chose) are ranked as one model and have one rank and one `p_best`,
         so they share a row's numbers and the next model has the next rank: their groups are in `df.attrs["clones"]`. Other
         models with the same losses on every day are ranked by their order in the report, with a warning.
 
         Args:
-            block: Block length of the bootstrap, in days.
+            block: Block length of the bootstrap, in issue days (observations).
             reps: Bootstrap repetitions.
             seed: Bootstrap seed.
             level: Coverage of the rank interval.

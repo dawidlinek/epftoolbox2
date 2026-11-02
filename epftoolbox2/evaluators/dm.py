@@ -26,7 +26,7 @@ class DMEvaluator(SetEvaluator):
         correction: `"holm"`, or `None` for no correction (`p_holm` empty, `verdict` from `p`).
         alpha: Two-sided size behind `verdict`.
         interval: Coverage of the bootstrap interval of the ratio; `None` skips it.
-        block: Block length of that bootstrap, in days.
+        block: Block length of that bootstrap, in issue days (observations: seven Fridays are seven weeks).
         reps: Bootstrap repetitions.
         seed: Bootstrap seed.
     """

@@ -13,7 +13,7 @@ For the forecasts a model and the benchmark share (same `run_date`, `target_date
 
 - **Daily loss:** the mean absolute error over the periods of one (run date, horizon), whatever their number (23, 24 or 25; 92, 96 or 100). With several horizons in a group, a run date's loss is the mean of its horizons' losses.
 - **DM test:** on the daily losses, with a Newey-West variance (lag ⌊4(n/100)^(2/9)⌋, 5 at 365 days). `variance="plain"` reproduces epftoolbox. Two-sided; a positive statistic means the model is better.
-- **Ratio:** MAE of the model / MAE of the benchmark, both forecast-weighted on the shared forecasts, so below 1 means the model is better. The interval resamples daily error sums in weekly blocks, so it agrees with the ratio on DST days.
+- **Ratio:** MAE of the model / MAE of the benchmark, both forecast-weighted on the shared forecasts, so below 1 means the model is better. The interval resamples daily error sums in blocks of `block` issue days (a week of a run of every day), so it agrees with the ratio on DST days.
 - **Holm:** over the `DM m` models compared with the benchmark in that group, with [exact clones](/epftoolbox2/model-pipeline/comparing-models/#exact-clones) counted once.
 
 ## Output columns
@@ -45,7 +45,7 @@ Some cells stay empty on purpose:
 | `correction` | str | `"holm"` | `"holm"`, or `None` for no correction (`DM p_holm` empty, `DM verdict` from `DM p`) |
 | `alpha` | float | `0.05` | Two-sided size behind `DM verdict` |
 | `interval` | float | `0.95` | Coverage of the interval; `None` skips the bootstrap |
-| `block` | int | `7` | Block length of the bootstrap, in days |
+| `block` | int | `7` | Block length of the bootstrap, in issue days (observations): a week of a run of every day, seven weeks of Fridays |
 | `reps` | int | `4000` | Bootstrap repetitions |
 | `seed` | int | `0` | Bootstrap seed: same data and seed, same numbers |
 

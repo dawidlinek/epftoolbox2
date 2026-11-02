@@ -32,7 +32,7 @@ class MCSEvaluator(SetEvaluator):
     Args:
         alpha: Size of the set (0.10 gives the 90 % set).
         statistic: `"R"` (T_R, recommended: seed-stable) or `"max"` (T_max).
-        block: Mean block length of the stationary bootstrap, in days.
+        block: Mean block length of the stationary bootstrap, in issue days (observations: seven Fridays are seven weeks).
         reps: Bootstrap repetitions (at least 1,000 recommended).
         seed: Bootstrap seed.
     """

@@ -74,7 +74,7 @@ report.tests(benchmark="OLS")
 # 1   Mean       OLS        1     365         8760  25.77          26.02  0.990   0.958    1.024       0.61   0.5440  0.5440  2  0.050  no difference
 ```
 
-- **`ratio`** is `mae / mae_benchmark` on the pair's forecasts, with a 95 % bootstrap interval in weekly blocks. Read this first: how large is the difference, and how well is it known?
+- **`ratio`** is `mae / mae_benchmark` on the pair's forecasts, with a 95 % bootstrap interval in blocks of 7 issue days: a week of a run of every day, seven weeks of a run on Fridays (`block` counts observations, as `n_days` does). Read this first: how large is the difference, and how well is it known?
 - **`p_value`** is the DM test on the daily loss with a Newey-West variance (lag 5 at 365 days). On pairs of seeds of one model it rejected 7.5 % of the time, near the nominal 5 %. `variance="plain"` reproduces the tables of epftoolbox.
 - **`p_holm`** corrects for testing `m` models against one reference, and **`verdict`** reads it at 5 %. In the study the correction turned 12 "better than LEAR" into 8. Holm runs within a horizon; testing several horizons is one more family of tests to keep in mind. `verdict` stays empty when the test and the ratio point in opposite directions, which takes days of very different lengths.
 - **`mde`** is measured with the Newey-West variance whichever `variance` the test uses, so it does not move with that choice.

@@ -11,7 +11,7 @@ Adds the model confidence set (Hansen, Lunde & Nason 2011) to the report's table
 
 - **Keys:** here the set of models is the comparison, so every model is on the forecasts **all** the models of the group hold. One model with few forecasts shrinks the sample for all of them: read `MCS n_days`, or use `report.mcs()`, which names it and takes a subset.
 - **Loss:** the daily mean absolute error, with the daily losses of several horizons averaged per run date.
-- **Test:** the T_R statistic and a stationary bootstrap with mean blocks of 7 days, with the definitions of `arch.bootstrap.MCS`. T_max is available, but in the study behind these defaults it changed with the seed and kept models up to 17 % worse than the best.
+- **Test:** the T_R statistic and a stationary bootstrap with mean blocks of 7 issue days (a week of a run of every day), with the definitions of `arch.bootstrap.MCS`. T_max is available, but in the study behind these defaults it changed with the seed and kept models up to 17 % worse than the best.
 
 ## Output columns
 
@@ -27,7 +27,7 @@ Adds the model confidence set (Hansen, Lunde & Nason 2011) to the report's table
 |-----------|------|---------|-------------|
 | `alpha` | float | `0.10` | Size of the set (0.10 gives the 90 % set) |
 | `statistic` | str | `"R"` | `"R"` (T_R) or `"max"` (T_max) |
-| `block` | int | `7` | Mean block length of the stationary bootstrap, in days |
+| `block` | int | `7` | Mean block length of the stationary bootstrap, in issue days (observations): a week of a run of every day, seven weeks of Fridays |
 | `reps` | int | `1000` | Bootstrap repetitions (at least 1,000 recommended) |
 | `seed` | int | `0` | Bootstrap seed: same data and seed, same numbers |
 

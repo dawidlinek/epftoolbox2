@@ -239,7 +239,7 @@ class EvaluationReport:
         correction: Optional[str] = "holm",  # Over the m models of a horizon; None for none
         by: Optional[str] = None,          # "hour": per-hour rows, descriptive, no p_holm or verdict
         interval: Optional[float] = 0.95,  # Coverage of the bootstrap interval of the ratio; None skips it
-        block: int = 7,                    # Bootstrap block length in days
+        block: int = 7,                    # Bootstrap block length in issue days (observations)
         reps: int = 4000,
         seed: int = 0,
     ) -> pd.DataFrame: ...  # model, benchmark, horizon, n_days, n_forecasts, mae, mae_benchmark, ratio, ci_low, ci_high, statistic, p_value, p_holm, m, mde, verdict
@@ -248,7 +248,7 @@ class EvaluationReport:
         self,
         alpha: float = 0.10,
         statistic: str = "R",              # "R" (T_R) or "max" (T_max)
-        block: int = 7,                    # Mean block length of the stationary bootstrap, in days
+        block: int = 7,                    # Mean block length of the stationary bootstrap, in issue days
         reps: int = 1000,
         seed: int = 0,
         models: Optional[Sequence[str]] = None,  # Default: all; fewer than 3 gives NaN with a warning
@@ -565,7 +565,7 @@ class DMEvaluator(Evaluator):
         correction: Optional[str] = "holm",  # Over the models of a group; None for none
         alpha: float = 0.05,               # Size behind "DM verdict"
         interval: Optional[float] = 0.95,  # Coverage of the bootstrap interval of the ratio; None skips it
-        block: int = 7,                    # Bootstrap block length in days
+        block: int = 7,                    # Bootstrap block length in issue days (observations)
         reps: int = 4000,
         seed: int = 0,
     ): ...
@@ -576,7 +576,7 @@ class MCSEvaluator(Evaluator):
         self,
         alpha: float = 0.10,               # Size of the set
         statistic: str = "R",              # "R" (T_R) or "max" (T_max)
-        block: int = 7,                    # Mean block length of the stationary bootstrap, in days
+        block: int = 7,                    # Mean block length of the stationary bootstrap, in issue days
         reps: int = 1000,
         seed: int = 0,
     ): ...
