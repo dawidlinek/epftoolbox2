@@ -184,6 +184,31 @@ joined = report.join(other_report)
 
 `join()` returns a report with the models of both, for results of separate runs that are to be compared (a SLURM array, a model added later). The references to the results are kept as they are, and the evaluators are the ones of the report you call it on: if the other report has different ones, a warning says so, since the columns of its evaluators are lost and its models are scored by yours (an `rMAEEvaluator` with a base model is computed against the left report's base). It raises `ValueError` when a model name is in both reports, or when the results have different frequencies. Every table is computed on forecast keys, so a joined report gives the tables one report over all the models would, bit for bit.
 
+## Daily runs
+
+`pipeline.run(df_daily, ..., freq="1D")` fits one model per day on a frame with one row per local date at one time of day (see [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames)). Its records have `hour` 0 and `freq` `"1D"`, the shape `aggregate()` gives, so the report behaves like an aggregated one:
+
+- `tests(by="hour")` raises (a day has no hours), and the `hours_*` columns of `compare()` are NaN.
+- `aggregate()` raises, because the results are daily already.
+- `join()` takes a report from `aggregate()`, so a daily model of a daily quantity and an hourly model's forecast of the same quantity are scored on the same keys and actuals, and `tests(benchmark=...)` compares them on their common days.
+- `EconomicEvaluator` can't score a daily run: the pipeline raises before any model is run (see [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#what-a-daily-run-cannot-do)).
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+predictors = ["load_d+{horizon}", "is_weekend_d+{horizon}"]
+test = ("2024-03-01", "2024-03-31")
+hourly = ModelPipeline().add_model(OLSModel(predictors, name="Hourly"))
+daily = ModelPipeline().add_model(OLSModel(predictors, name="Daily"))
+
+hourly_report = hourly.run(df, test=test, horizon=2)
+# price_day_max is the daily maximum of the price, e.g. from DailyStatsTransformer
+daily_report = daily.run(df.at_time("12:00"), test=test, target="price_day_max", horizon=2, freq="1D")
+joined = hourly_report.aggregate(agg="max").join(daily_report)
+print(joined.tests(benchmark="Hourly"))
+```
+
 ## Accessing Raw Predictions
 
 ```python
@@ -203,7 +228,7 @@ Workers write records as their tasks finish, so the order of the lines in a resu
 
 ## Reports from saved results
 
-`ModelPipeline.report(save_dir, test_start=..., test_end=..., horizon=..., freq=...)` builds a report from the per-model JSONL files a previous run wrote to `save_dir` and runs the evaluators and exporters. Given neither `horizon` nor `horizons`, it plans what the manifests record (7 when there is no manifest), and raises if the models were run with different horizons. It reads only the records of the horizons it plans, so `horizon=3` of a horizon-7 run is horizons 1 to 3 alone, and `horizons=[3]` of a `[1, 3, 7]` run is horizon 3 (see [Some horizons only](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)). Given no `issue_days`, it plans the weekdays the manifests record, and raises if the models were run on different ones; told `issue_days=[...]`, it reads only the records issued on those weekdays, so `report(issue_days=["friday"])` of a run of every day is its Fridays (see [Some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)). `Workflow.report()` / `epf report` use it to merge the results of a SLURM array (see [Workflow](/epftoolbox2/workflow/overview/#slurm-arrays-one-model-or-a-block-per-task)).
+`ModelPipeline.report(save_dir, test_start=..., test_end=..., horizon=..., freq=...)` builds a report from the per-model JSONL files a previous run wrote to `save_dir` and runs the evaluators and exporters. Given neither `horizon` nor `horizons`, it plans what the manifests record (7 when there is no manifest), and raises if the models were run with different horizons. It reads only the records of the horizons it plans, so `horizon=3` of a horizon-7 run is horizons 1 to 3 alone, and `horizons=[3]` of a `[1, 3, 7]` run is horizon 3 (see [Some horizons only](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)). Given no `issue_days`, it plans the weekdays the manifests record, and raises if the models were run on different ones; told `issue_days=[...]`, it reads only the records issued on those weekdays, so `report(issue_days=["friday"])` of a run of every day is its Fridays (see [Some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)). Given no `freq`, it reads the one the manifests record (without a manifest, the one the records carry, and records of several raise; `"1h"` if they carry none); models run at different frequencies raise `ValueError`, and so does a `freq` the manifests contradict, which would plan another number of periods a day than the runs did. `Workflow.report()` / `epf report` use it to merge the results of a SLURM array (see [Workflow](/epftoolbox2/workflow/overview/#slurm-arrays-one-model-or-a-block-per-task)).
 
 If any model's file has fewer forecasts inside `test_start`..`test_end` than the [planned count](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned) for that period, `horizon` (or `horizons`), `issue_days` and `freq`, in the zone its manifest records (an array task that failed or never ran, or forecasts skipped), `report()` warns, naming the models and their produced/planned/missing counts, and notes that metrics are then computed on different forecast sets for those models.
 

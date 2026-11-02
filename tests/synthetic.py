@@ -68,3 +68,23 @@ def make_market_data(
             columns[f"{col}_d+{h}"] = calendar_shift(df[col], h)
     columns["price_d-1"] = calendar_shift(df["price"], -1)
     return pd.concat([df, pd.DataFrame(columns, index=index)], axis=1)
+
+
+def with_daily_columns(hourly: pd.DataFrame) -> pd.DataFrame:
+    """`make_market_data` with what a daily frame is made of, built from the hourly rows without the library.
+
+    `load_actual` is the load as measured (a realised series; a copy of `load` unless the frame has one), `load_actual_h-1` and `_h-2` it 1 and 2 elapsed hours earlier (the
+    index is hourly in elapsed time, so a shift of rows is one), `actual_daily_max` its maximum over the row's local date, the
+    same on every row of the date, `actual_daily_max_d-1` that of the date before, and `price_daily_max` the price's. Take a daily
+    frame from it with `.at_time("12:00")`: each row then holds what is true at noon of its date.
+    """
+    df = hourly.copy()
+    if "load_actual" not in df.columns:
+        df["load_actual"] = df["load"]
+    df["load_actual_h-1"] = df["load_actual"].shift(1)
+    df["load_actual_h-2"] = df["load_actual"].shift(2)
+    local_date = pd.Series(df.index.tz_localize(None).normalize(), index=df.index)
+    df["actual_daily_max"] = df["load_actual"].groupby(local_date).transform("max")
+    df["actual_daily_max_d-1"] = calendar_shift(df["actual_daily_max"], -1)
+    df["price_daily_max"] = df["price"].groupby(local_date).transform("max")
+    return df

@@ -23,7 +23,7 @@ The same numbers can go into `summary()` and the `by_*()` tables through [`DMEva
 - **Horizons.** `tests()` has one set of rows per horizon. `horizon="all"` averages the daily losses of all horizons per run date, which is also what the other methods do by default (`horizon=2` picks one).
 - **Two-sided at 5 %.** A positive statistic means the model is better than the benchmark.
 - **Fixed seeds.** Same data, same numbers. The seed is a parameter of every method that resamples.
-- **One frequency.** Results at different frequencies raise `ValueError`: period 5 of an hourly model and of a 15-minute model are different times of the day.
+- **One frequency.** Results at different frequencies raise `ValueError`: period 5 of an hourly model and of a 15-minute model are different times of the day. A daily run (`freq="1D"`) is compared with an hourly model through `report.aggregate()`, see [Daily runs](/epftoolbox2/model-pipeline/results/#daily-runs).
 
 ## Exact clones
 

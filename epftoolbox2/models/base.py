@@ -38,12 +38,14 @@ from ..results.windows import TEST, RunWindows, mask_key
 from ..logging import get_logger
 from . import _contract
 from ._calendar import (
+    FREQ_STEPS,
     IssueCalendar,
     NewestTargets,
     check_issue_days_in,
     check_newest_target,
     every_horizon,
     listed_days,
+    periods_per_day,
     resolve_horizons,
     resolve_issue_days,
     training_span,
@@ -68,7 +70,8 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = get_logger(__name__)
 
-_FREQ_TO_PERIODS: Dict[str, int] = {"1h": 24, "15min": 96}
+# Periods of an ordinary day: one model per period. "1D" has one, a row per local date at one time of day.
+_FREQ_TO_PERIODS: Dict[str, int] = {freq: periods_per_day(freq) for freq in FREQ_STEPS}
 
 # ProcessPoolExecutor refuses more workers than this on Windows.
 _WINDOWS_MAX_WORKERS = 61
@@ -146,13 +149,16 @@ class BaseModel(ABC):
         return {}
 
     def _resolve_day(self, date_str: str, label: str) -> int:
-        if date_str not in self._data.index:
+        """The day id of a local date the data has a row on. By date, not by `.loc[date_str]`: on a daily frame stamped at
+        midnight pandas reads that as the one row's timestamp rather than its date."""
+        day = datetime.date.fromisoformat(date_str).toordinal() - self._first_ordinal
+        if not (self._data["day"].to_numpy() == day).any():
             last = self._data.index[-1].date()
             raise ValueError(
                 f"'{label}' date '{date_str}' is not in the data "
                 f"(data ends at {last}). Fetch data through at least '{date_str}'."
             )
-        return int(self._data.loc[date_str, "day"].iloc[0])
+        return int(day)
 
     def run(
         self,
@@ -858,6 +864,9 @@ class BaseModel(ABC):
                 )
             expanded = plan.names_by_pair()
             self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
+            _contract.warn_about_a_midnight_stamp(
+                data.index, freq, self._used_predictors, self._cut_rules(information_set, cut_rules), self.name
+            )
             if information_set is not None and availability == "raise":
                 plan.check(target, self.name)
             elif information_set is not None and availability == "warn":
@@ -869,6 +878,9 @@ class BaseModel(ABC):
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
         expanded = self._precompute_expanded_predictors(horizons)
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
+        _contract.warn_about_a_midnight_stamp(
+            data.index, freq, self._used_predictors, self._cut_rules(information_set, cut_rules), self.name
+        )
         days = None if windows is None else windows.issue_days(weekdays)
         if days is None and weekdays is not None and test_start is not None and test_end is not None:
             days = [day.isoformat() for day in listed_days(_test_days(test_start, test_end), weekdays)]

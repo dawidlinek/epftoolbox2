@@ -436,8 +436,9 @@ def build_parser() -> argparse.ArgumentParser:
     model_p.add_argument(
         "--freq",
         default="1h",
-        choices=["1h", "15min"],
-        help="Resolution of the data and forecasts: one model per hour or per quarter-hour (default: 1h)",
+        choices=["1h", "15min", "1D"],
+        help="Resolution of the data and forecasts: one model per hour, per quarter-hour, or per day on a frame with one "
+        "row per date at one time of day (default: 1h)",
     )
     model_p.add_argument(
         "--tz",
@@ -489,8 +490,9 @@ def build_parser() -> argparse.ArgumentParser:
     verify_p.add_argument(
         "--freq",
         default="1h",
-        choices=["1h", "15min"],
-        help="Resolution of the data and forecasts: one model per hour or per quarter-hour (default: 1h)",
+        choices=["1h", "15min", "1D"],
+        help="Resolution of the data and forecasts: one model per hour, per quarter-hour, or per day on a frame with one "
+        "row per date at one time of day (default: 1h)",
     )
     verify_p.add_argument(
         "--tz",

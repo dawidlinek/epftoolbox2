@@ -72,3 +72,40 @@ def test_a_later_end_of_the_test_moves_no_forecast_through_a_mask_column_with_no
     shorter = forecasts_of_5_april("2023-04-07")
     assert len(shorter) == 24
     assert forecasts_of_5_april("2023-04-12") == shorter
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="CsvExporter joins extra_columns of 1h results on (date, hour) without checking the source: rows repeat",
+)
+@pytest.mark.parametrize("source_freq", ["15min", "1h"])
+def test_csv_extra_columns_write_each_hourly_forecast_once(tmp_path, monkeypatch, source_freq):
+    """`_join_extra_columns` checks the source's resolution for 15min and 1D results only. For 1h results a 15-minute source has
+    four rows per (date, hour), and even an hourly one two on the hour repeated on 2023-10-29, so the left join writes a forecast
+    once per source row: 96 hourly records become 388 rows, 292 of them repeated keys, from a 15-minute source."""
+    from epftoolbox2.exporters import CsvExporter
+    from epftoolbox2.pipelines import ModelPipeline
+    from epftoolbox2.results.report import EvaluationReport
+    from tests.synthetic import PREDICTORS
+
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    hourly = make_market_data(start="2023-09-01", days=70, horizon=2, noise=5.0, seed=3)
+    report = (
+        ModelPipeline()
+        .add_model(OLSModel(PREDICTORS, training_window=30, name="m"))
+        .run(hourly, test=("2023-10-27", "2023-10-30"), horizon=1)
+    )
+    source = (
+        hourly
+        if source_freq == "1h"
+        else make_market_data(start="2023-09-01", days=70, horizon=2, freq="15min", seed=3)
+    )
+    path = tmp_path / "forecasts.csv"
+    CsvExporter(str(path), extra_columns=["load"]).export(EvaluationReport(report.refs, [], source_data=source))
+
+    table = pd.read_csv(path)
+    records = sum(1 for _ in report.refs["m"].iter_records(cols=["hour"]))
+    assert not table.duplicated(["target_date", "hour", "horizon"]).any()
+    assert len(table) == records

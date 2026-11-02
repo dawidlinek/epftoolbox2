@@ -9,6 +9,11 @@ Notes for changes that need something from you. The full list of changes of a re
 
 ### Breaking changes
 
+- **`ModelPipeline.report()` reads `freq` from the manifests and refuses one they contradict.** Its `freq` defaulted to `"1h"`
+  and was taken at its word: daily results reported at the default planned 24 forecasts a day and called almost all of them missing,
+  and hourly results reported with `freq="1D"`, or 15-minute ones with `"1h"`, showed no missing forecast at all, gaps included.
+  `freq` now defaults to `None`, the one the manifests record (without one, the one the records carry; `"1h"` if none); models run at different frequencies raise
+  `ValueError`, and so does a `freq` the manifests contradict. A report told the freq its runs had doesn't change.
 - **`ModelPipeline.report()` reads only the horizons it plans.** `report(save_dir, horizon=3)` of results run with `horizon=7` used to
   plan horizons 1 to 3 and read every record on file, so its tables held horizons 4 to 7 and `planned` equalled `produced` with no
   warning. It now reads horizons 1 to 3 alone, and so do the ensembles it computes, which planned what their members ran. A report told
@@ -92,6 +97,18 @@ an issue day it didn't sample.
 
 ### New
 
+- **`freq="1D"`: one model per day.** `pipeline.run(df.at_time("12:00"), ..., freq="1D")` fits one model per day on a frame with one row
+  per local date, every row at one time of day. It is accepted wherever `freq` is: `ModelPipeline.run`, `report`, `verify` and
+  `explain`, `BaseModel.run`, `leakage_probe` and `positive_control`, `Workflow` YAML (`model_pipeline.freq: 1D`), `epf model` and
+  `epf verify` (`--freq 1D`) and the interactive wizard. Records have `hour` 0 and `freq` `"1D"`, the shape `report.aggregate()` gives.
+  The row's time of day is read from the index and is what its names mean (`x_h-1` is one elapsed hour before the stamp), so stamp
+  the rows at the time the forecast is made: a frame stamped at midnight that holds what is true at noon reads `load_actual_h-1` as
+  23:00 on D-1, and neither the check nor `verify` can see the look-ahead. A run warns when the rows are stamped at or near midnight and a predictor counts hours from the stamp. A plain `realised` column such as `actual_daily_max` is the
+  value of its whole local date, known `delay` after that date ends, so it is late on its own date at any issue time. A plain `published` or `weekly` column (a `daily_close` too) is read at its date's last slot, so a date that spans two of the rule's days is known when the later one is. A daily run of
+  `df.at_time("12:00")` is period 12 of the hourly run of `df`, bit for bit. **Nothing else moves**: `"1h"` and `"15min"`
+  runs are what they were. `EconomicEvaluator` with `freq="1D"` raises before any model is planned or run, since a schedule needs the
+  periods of a day. `ModelPipeline.explain(hour=...)` now defaults to `None`, which is 12 at `"1h"` and `"15min"` as before and 0 at
+  `"1D"`. See [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames).
 - **`horizons=`: some horizons only.** `pipeline.run(df, test=..., horizons=[1, 3, 7])` (or `range(3, 10)`) forecasts the listed
   horizons and nothing else, and `report`, `verify`, `explain`, `BaseModel.run`, `leakage_probe` and `positive_control` take it too, as do
   `Workflow` YAML (`model_pipeline.horizons: [1, 3, 7]`) and `epf model` / `epf verify` (`--horizons 3-9`, `1,3,7` or `1-3,7`). Each

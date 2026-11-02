@@ -4,6 +4,7 @@ from typing import List, Optional
 import pandas as pd
 
 from .base import Exporter
+from ..models._calendar import DAILY
 from ..models._contract import check_index, period_index
 from ..results.report import EvaluationReport
 
@@ -25,7 +26,7 @@ class CsvExporter(Exporter):
             extra_columns: Column names from the source dataset to include
                            (e.g. ["is_holiday", "load_forecast"]). Joined by
                            target_date + period of the day (`hour`), which is the
-                           hour at 1h and the quarter-hour at 15min.
+                           hour at 1h, the quarter-hour at 15min and 0 at 1D.
             summary_path: Also write `report.summary()`, one row per model with every
                           evaluator's columns, to this CSV file. `path` holds forecasts, not
                           metrics, so this is where metric columns go.
@@ -108,14 +109,15 @@ class CsvExporter(Exporter):
         if not available:
             return base_df
 
-        if freq == "15min":
-            # Quarter-hour results only line up with quarter-hour source rows; any other resolution would fill
-            # most rows with NaN (hourly source) or repeat them (finer source) without saying so.
+        if freq in ("15min", DAILY):
+            # Quarter-hour results only line up with quarter-hour source rows, and daily ones with one row per date; any
+            # other resolution would fill most rows with NaN (a coarser source) or repeat them (a finer one: every hour of a
+            # date is period 0 at 1D) without saying so.
             try:
                 check_index(source_data, freq)
             except ValueError as exc:
                 raise ValueError(
-                    f"extra_columns need source data at the resolution of the 15min results: {exc}"
+                    f"extra_columns need source data at the resolution of the {freq} results: {exc}"
                 ) from exc
 
         src = source_data[available].copy()

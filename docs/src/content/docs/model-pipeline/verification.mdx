@@ -170,6 +170,8 @@ verified = pipeline.verify(source_df, test_start="2024-01-01", test_end="2024-12
 Every numeric column of the source data needs a rule then, since nothing says which of them a model ends up using. The
 source may be in UTC, as sources return it: days are those of the frame `rebuild` returns.
 
+For a daily model (`freq="1D"`) whose `rebuild` cuts hourly source rows to one a date (`at_time("12:00")`), the source is perturbed by its hours, and the daily frame built from it is then perturbed as daily rows too, where a plain `realised`, `published` or `weekly` column is the value of its whole date (see [Daily Rows](/epftoolbox2/model-pipeline/information-set/#daily-rows)): a daily maximum the source repeats on every hour is a leak on its own date, though its early hours are known in time.
+
 An input that stays the same whatever the source data holds isn't built from it, so a leak in it can't be seen, and the
 model is `inconclusive`. If it really is known in advance, for example a column computed from the index, declare it:
 `InformationSet(rules={"peak": Availability.static()})`.

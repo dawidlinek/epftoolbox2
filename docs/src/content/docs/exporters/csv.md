@@ -34,7 +34,7 @@ The CSV contains the following columns:
 **Base columns:**
 - `run_date`: date the forecast was made
 - `target_date`: date being forecasted
-- `hour`: period of the day: the hour (0-23) for hourly results, the quarter-hour (0-95) for `freq="15min"` results
+- `hour`: period of the day: the hour (0-23) for hourly results, the quarter-hour (0-95) for `freq="15min"` results, 0 for `freq="1D"` results (one row a forecast)
 - `target_time`: only for `freq="15min"` results, placed right after `hour`: local start time of that quarter-hour as `HH:MM` (period 5 is `01:15`)
 - `horizon`: forecast horizon (1 to max)
 - `day_in_test`: day index in the test period (in a run with validation, in the window the report is on)
@@ -65,11 +65,11 @@ With `freq="15min"` every quarter-hour is its own row: `hour` runs from 0 to 95 
 |----------|-------------|------|-------------|---------|--------|---------------|-----------|
 | 2024-02-01 | 2024-02-02 | 5 | 01:15 | 1 | 48.50 | 45.23 | -3.27 |
 
-All models in one export must have run at the same frequency; mixing hourly and 15-minute models raises a `ValueError`.
+All models in one export must have run at the same frequency; mixing hourly, 15-minute and daily (`freq="1D"`) models raises a `ValueError`.
 
 ## Extra Columns
 
-Use `extra_columns` to include columns from the source dataset (e.g., calendar features, weather data). Columns are joined by matching `target_date` and `hour` from the results to the source dataset's DatetimeIndex, using the same period of the day: the clock hour for hourly results, the quarter-hour for 15-minute results. The source dataset must have the resolution of the results.
+Use `extra_columns` to include columns from the source dataset (e.g., calendar features, weather data). Columns are joined by matching `target_date` and `hour` from the results to the source dataset's DatetimeIndex, using the same period of the day: the clock hour for hourly results, the quarter-hour for 15-minute results. The source dataset must have the resolution of the results. For `freq="1D"` results that is a daily source, one row per local date at one time of day (`df.at_time("12:00")`; see [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames)), else every hour of a date would join period 0. A source of another resolution raises a `ValueError` (`extra_columns need source data at the resolution of the 1D results`), as one that isn't quarter-hourly does for 15-minute results.
 
 ```python
 exporter = CsvExporter(
