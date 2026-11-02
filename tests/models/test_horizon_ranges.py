@@ -647,3 +647,47 @@ def test_models_run_with_other_horizons_need_the_report_told_which(tmp_path, spr
         both.report(tmp_path, test=SPRING_TEST)
     counts = both.report(tmp_path, test=SPRING_TEST, horizons=THREE).forecast_counts().set_index("model")
     assert counts["planned"].tolist() == [planned_by_hand(*SPRING_TEST, THREE)] * 2
+
+
+def by_horizon_quality(horizon):
+    """Worse at horizons 1, 3 and 7 than at the others: a choice pooled over another set of horizons can come out otherwise."""
+    return PREDICTORS if horizon in (2, 4, 5, 6) else ["load_d+{horizon}", "is_weekday_d+{horizon}"]
+
+
+def test_a_top_choice_pools_the_horizons_the_run_made(tmp_path, spring_data):
+    """Not a look-ahead, and not the run of every horizon: a `top` ensemble chooses on the validation forecasts of the horizons
+    on file, by hand here, also in a report told fewer of them."""
+    windows = {"validation": ("2023-02-10", "2023-03-05"), "test": ("2023-03-06", "2023-03-12")}
+
+    def pipeline():
+        built = ModelPipeline(information_set=InformationSet(rules=RULES))
+        built.add_model(OLSModel(by_horizon_quality, training_window=30, name="m1"))
+        built.add_model(OLSModel(["load_d+{horizon}", *CALENDAR], training_window=30, name="m2"))
+        return built.add_ensemble(AverageEnsemble(["m1", "m2"], top=1, name="top1"))
+
+    listed = pipeline().run(spring_data, horizons=THREE, save_dir=tmp_path / "list", **windows).choices()
+    every = pipeline().run(spring_data, horizon=7, save_dir=tmp_path / "all", **windows).choices()
+
+    def serving(name):
+        records = (json.loads(line) for line in (tmp_path / "list" / f"{name}.jsonl").read_text().splitlines())
+        return {
+            (r["run_date"], r["target_date"], r["hour"], r["horizon"]): (r["prediction"], r["actual"])
+            for r in records
+            if windows["validation"][0] <= r["run_date"] <= windows["validation"][1] and r["target_date"] < "2023-03-06"
+        }
+
+    m1, m2 = serving("m1"), serving("m2")
+    keys = sorted(key for key in m1.keys() & m2.keys() if all(pd.notna(v) for v in (*m1[key], *m2[key])))
+    assert {key[3] for key in keys} == set(THREE)
+    mae = {
+        name: sum(abs(p - a) for p, a in (held[key] for key in keys)) / len(keys)
+        for name, held in (("m1", m1), ("m2", m2))
+    }
+    chosen = min(mae, key=mae.get)
+    row = listed.iloc[0]
+    assert list(row["chosen"]) == [chosen] and int(row["validation_forecasts"]) == len(keys)
+    assert row["validation_mae"] == pytest.approx(mae[chosen], rel=1e-12)
+    assert list(every.iloc[0]["chosen"]) != [chosen]  # pooled over 1 to 7, the other member wins
+
+    again = pipeline().report(tmp_path / "list", horizons=[3], **windows).choices()
+    pd.testing.assert_frame_equal(again, listed)
