@@ -6,7 +6,9 @@ without a word. So each test here that compares numbers compares them bit for bi
 """
 
 import json
+import os
 import re
+import time
 import warnings
 from concurrent.futures import Future
 from pathlib import Path
@@ -990,9 +992,20 @@ def test_interrupted_then_resumed_equals_fresh(df, tmp_path, predictors):
     assert report.refs["m"].produced == 3 * 2 * 24
 
 
-# A model that stops the whole pool in a worker after some fits, the way a killed run does: what was saved stays.
+def wait_for_a_record(path, timeout=60.0):
+    """Wait until the results file at `path` holds a forecast. The pool collects days that finished together in any order,
+    so a worker that stopped without waiting could have its failed day collected first, and the run would end with nothing
+    saved: the resume would then be a fresh run."""
+    deadline = time.monotonic() + timeout
+    while not (os.path.exists(path) and os.path.getsize(path) > 0) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+# A model that stops the whole pool in a worker after some fits, the way a killed run does: what was saved stays. It
+# stops once a forecast is in the file `saved_to` names, so the run always leaves some.
 class StopsAfter(OLSModel):
     stop_after = None
+    saved_to = None
     _fits = 0
 
     def _fit_predict(self, train_x, train_y, test_x):
@@ -1000,6 +1013,7 @@ class StopsAfter(OLSModel):
         if limit is not None:
             type(self)._fits += 1
             if type(self)._fits > limit:
+                wait_for_a_record(StopsAfter.saved_to)
                 raise RuntimeError("stopped on purpose")
         return super()._fit_predict(train_x, train_y, test_x)
 
@@ -1015,11 +1029,12 @@ def test_a_run_stopped_in_the_real_pool_then_resumed_equals_fresh(df, tmp_path, 
     monkeypatch.setenv("MAX_PROCESSES", "1")
     make().run(df, validation=V, test=T, horizon=2, save_dir=str(tmp_path / "fresh"))
 
+    path = tmp_path / "cut" / "m.jsonl"
     monkeypatch.setattr(StopsAfter, "stop_after", 70)  # inherited by the forked workers
+    monkeypatch.setattr(StopsAfter, "saved_to", path)
     monkeypatch.setenv("MAX_PROCESSES", "2")
     with pytest.raises(RuntimeError, match="forecasting failed"):
         make().run(df, validation=V, test=T, horizon=2, save_dir=str(tmp_path / "cut"))
-    path = tmp_path / "cut" / "m.jsonl"
     assert path.exists() and 0 < len(stored(path)) < 6 * 2 * 24
 
     monkeypatch.setattr(StopsAfter, "stop_after", None)
