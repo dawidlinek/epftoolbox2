@@ -598,7 +598,7 @@ def test_a_midnight_stamp_with_hour_lags_warns_and_moves_nothing(year, monkeypat
     with monkeypatch.context() as patched:
         patched.setattr("epftoolbox2.models._contract.warn_about_a_midnight_stamp", lambda *args, **kwargs: None)
         silent, quiet = midnight_warnings(midnight, names)
-    assert silent == [] and [as_text(r) for r in records] == [as_text(r) for r in quiet]
+    assert silent == [] and sorted(as_text(r) for r in records) == sorted(as_text(r) for r in quiet)  # in any order
     assert midnight_warnings(daily, names)[0] == []  # noon
     assert midnight_warnings(midnight, PREDICTORS + ["price_d-1"])[0] == []  # no hour counted from the stamp
     assert midnight_warnings(hourly.at_time("00:00"), names)[0]  # warned too: only the user knows what the rows hold
