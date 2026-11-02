@@ -117,6 +117,9 @@ an issue day it didn't sample.
   `issue_days` reads only the records issued on them. The information-set check and the `availability="warn"` listing look at the
   listed days alone, so a column published weekly (A31, Fridays 10:00) used at horizon 9 passes on a Friday and is late on a Monday. See
   [Some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only).
+- **A choice on few issue days warns.** An ensemble with `top=` warns when its validation forecasts were issued on fewer than 28
+  distinct days, next to the warning on fewer than 28 target days, which four Fridays at horizons 1 to 7 pass. A run of every day
+  that warned before warns once more; nothing is chosen differently. See [Ensembles](/epftoolbox2/model-pipeline/ensembles/).
 - **The test-length messages read the calendar span.** The note below 365 days and the warning below 182, in `tests()`, `compare()`,
   `leaderboard()`, the set tables of `mcs()` and `ranks()`, `DMEvaluator` and `MCSEvaluator`, now count the days from the first run date
   to the last. `n_days` is still the days with forecasts, and the verdict (30 days), the Newey-West lag and the bootstrap intervals read

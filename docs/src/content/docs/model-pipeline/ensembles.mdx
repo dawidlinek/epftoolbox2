@@ -71,7 +71,7 @@ Because every member is scored on what all of them hold, **a member's holes deci
 the choice even if that member isn't chosen: holes on the hard days of validation make whoever is worst on those days look best. The
 rule stays, since scoring members on different forecasts is worse, but it doesn't stay quiet. `report.choices()` has
 `validation_share`, the common keys as a share of what the fullest member holds, and `df.attrs["limited_by"]` names the members whose holes
-cut them. A choice on less than 90 % of the fullest member's forecasts, or on fewer than 28 distinct target days, warns with the counts.
+cut them. A choice on less than 90 % of the fullest member's forecasts, on fewer than 28 distinct target days, or on forecasts issued on fewer than 28 distinct days, warns with the counts. The last is for a run that issues on some weekdays only ([`issue_days=`](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)): four Fridays at horizons 1 to 7 are for 28 target days, and the choice still rests on four issues.
 
 <Aside type="note">
   Choosing never reads a record's `window` tag. The validation days of a later yearly segment are test days of the one before, and

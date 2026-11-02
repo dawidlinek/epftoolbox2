@@ -628,6 +628,24 @@ def test_previous_year_on_fridays(tmp_path):
     assert {r["day_in_test"] for r in stored if r["run_date"] == "2022-03-25"} == {6}
 
 
+def test_a_choice_on_few_fridays_warns_however_many_days_they_are_for(tmp_path):
+    """Four Fridays of March at horizons 1 to 7 are for 28 target days, 4 to 31 March, so the target days don't warn: the issue
+    days do, as the choice rests on four issues."""
+    data = make_market_data(start="2023-01-01", days=110, horizon=7, noise=5.0, seed=5)
+    pipeline = ModelPipeline()
+    pipeline.add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="a"))
+    pipeline.add_model(OLSModel(PREDICTORS + ["price_d-1"], training_window=WINDOW, name="b"))
+    pipeline.add_ensemble(AverageEnsemble(["a", "b"], top=1, name="best"))
+    windows = {"validation": ("2023-03-01", "2023-03-28"), "test": ("2023-04-04", "2023-04-10")}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = pipeline.run(data, horizon=7, issue_days=["friday"], save_dir=tmp_path, **windows)
+    messages = [str(w.message) for w in caught]
+    assert not [m for m in messages if "target days" in m]
+    assert [m for m in messages if "best:" in m and "issued on 4 days (" in m]
+    assert report.choices()["validation_forecasts"].tolist() == [4 * 7 * 24 - 1]  # 02:00 of 26 March, the switch
+
+
 # ---------------------------------------------------------------------------
 # The information set: what is late on a Monday isn't on a Friday
 # ---------------------------------------------------------------------------

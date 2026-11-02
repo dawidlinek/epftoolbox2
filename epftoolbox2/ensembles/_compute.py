@@ -48,10 +48,13 @@ logger = get_logger(__name__)
 # In `forecast_counts()`: a planned forecast that a member the ensemble averages has no finite prediction for.
 SKIP_MEMBER_MISSING = "member_missing"
 
-# A choice below either of these is still made, with a warning: on the keys all members hold, as a share of those the fullest
-# member holds, and on how many distinct target days. A member's holes can decide what is left to compare on.
+# A choice below any of these is still made, with a warning: on the keys all members hold, as a share of those the fullest
+# member holds, on how many distinct target days, and on how many distinct issue days. A member's holes can decide what is left to
+# compare on, and a run that issues on Fridays alone has seven target days per issue at horizons 1 to 7: four Fridays of March
+# reach 28 target days, and the choice rests on four issues.
 MIN_VALIDATION_SHARE = 0.9
 MIN_VALIDATION_DAYS = 28
+MIN_VALIDATION_ISSUES = 28
 
 _COLUMNS = ["run_date", "target_date", "hour", "horizon", "day_in_test", "prediction", "actual", "freq", "window"]
 
@@ -120,6 +123,10 @@ class _Grid:
         """How many distinct target days `keys`, positions on the grid, are for."""
         codes = self.codes[keys]
         return len(np.unique((codes >> _RUN_SHIFT) + ((codes >> _TARGET_SHIFT) & _LOW_16)))
+
+    def issue_days(self, keys: np.ndarray) -> int:
+        """How many distinct issue days `keys`, positions on the grid, were issued on."""
+        return len(np.unique(self.codes[keys] >> _RUN_SHIFT))
 
     def issued_in(self, period: Tuple[str, str]) -> np.ndarray:
         run = self.codes >> _RUN_SHIFT
@@ -430,7 +437,15 @@ def _choose(
     limited_by = dict(sorted(short.items(), key=lambda item: (-item[1], item[0])))
     share = len(keys) / max(per_member.values())
     _warn_if_thin(
-        ensemble, validation, test, share, len(keys), max(per_member.values()), grid.target_days(keys), limited_by
+        ensemble,
+        validation,
+        test,
+        share,
+        len(keys),
+        max(per_member.values()),
+        grid.target_days(keys),
+        limited_by,
+        grid.issue_days(keys),
     )
     return {
         "segment": index,
@@ -456,6 +471,7 @@ def _warn_if_thin(
     fullest: int,
     target_days: int,
     limited_by: Mapping[str, int],
+    issue_days: int,
 ) -> None:
     where = f"the choice on {validation} for the test period {test}"
     if share < MIN_VALIDATION_SHARE:
@@ -468,6 +484,12 @@ def _warn_if_thin(
         warnings.warn(
             f"{ensemble.name}: {where} was made on {target_days} target days ({forecasts} forecasts), fewer than "
             f"{MIN_VALIDATION_DAYS}: read it as indicative only.",
+            stacklevel=2,
+        )
+    if issue_days < MIN_VALIDATION_ISSUES:
+        warnings.warn(
+            f"{ensemble.name}: {where} rests on forecasts issued on {issue_days} days ({forecasts} forecasts), fewer than "
+            f"{MIN_VALIDATION_ISSUES}, however many days they are for: read it as indicative only.",
             stacklevel=2,
         )
 
@@ -645,4 +667,11 @@ def _say_what_is_missing(name: str, parts: Mapping[Optional[str], ModelResultRef
             )
 
 
-__all__ = ["Computed", "MIN_VALIDATION_DAYS", "MIN_VALIDATION_SHARE", "SKIP_MEMBER_MISSING", "compute"]
+__all__ = [
+    "Computed",
+    "MIN_VALIDATION_DAYS",
+    "MIN_VALIDATION_ISSUES",
+    "MIN_VALIDATION_SHARE",
+    "SKIP_MEMBER_MISSING",
+    "compute",
+]
