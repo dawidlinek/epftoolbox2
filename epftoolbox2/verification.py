@@ -29,7 +29,7 @@ from .information_set import (
     leakage_probe,
     positive_control,
 )
-from .models._calendar import every_horizon, horizon_arguments, resolve_horizons
+from .models._calendar import every_horizon, horizon_arguments, resolve_horizons, resolve_issue_days
 from .models._contract import wall_clock
 from .results.availability import LATE
 
@@ -214,9 +214,15 @@ def _blind_spots(checks: List[IssueDayCheck]) -> List[str]:
 
 
 def sample_issue_days(
-    index: pd.DatetimeIndex, test_start: Any, test_end: Any, days: int = 5, seed: int = 0
+    index: pd.DatetimeIndex,
+    test_start: Any,
+    test_end: Any,
+    days: int = 5,
+    seed: int = 0,
+    issue_days: Optional[Sequence[int]] = None,
 ) -> List[str]:
-    """`days` local days of [test_start, test_end] that have rows, sampled with `seed` and sorted (all if fewer)."""
+    """`days` local days of [test_start, test_end] that have rows, sampled with `seed` and sorted (all if fewer). With
+    `issue_days` (weekday numbers, `resolve_issue_days`) only days of those weekdays, the issue days of such a run."""
     if days < 1:
         raise ValueError(f"days must be at least 1, got {days}")
     if not isinstance(index, pd.DatetimeIndex):
@@ -224,6 +230,8 @@ def sample_issue_days(
     start, end = pd.Timestamp(resolve_date(test_start)), pd.Timestamp(resolve_date(test_end))
     dates = wall_clock(index).normalize().unique().sort_values()
     candidates = dates[(dates >= start) & (dates <= end)]
+    if issue_days is not None:
+        candidates = candidates[np.isin(candidates.weekday, list(issue_days))]
     if not len(candidates):
         raise ValueError(f"The data has no rows from {start.date()} to {end.date()}, so there is nothing to verify")
     chosen = np.random.default_rng(seed).choice(len(candidates), size=min(days, len(candidates)), replace=False)
@@ -244,6 +252,7 @@ def verify_model(
     test_period: Optional[Tuple[Any, Any]] = None,
     availability: str = "raise",
     horizons: Optional[Sequence[int]] = None,
+    issue_days: Optional[Sequence[str]] = None,
 ) -> List[IssueDayCheck]:
     """Probe (and control) one model on each of `run_days`. The model itself is never run, only copies of it.
 
@@ -259,8 +268,11 @@ def verify_model(
     rule, and the probe perturbs what the rule calls unknown, as for any column.
 
     `horizon=H` verifies every horizon from 1 to H (1 if neither is given), `horizons` the ones it lists (`run(horizons=...)`).
+    `issue_days` are the weekdays of a run that issues on some only (`run(issue_days=["friday"])`): `test_period` is planned on
+    those days alone, as the run plans it.
     """
     horizon, horizons = resolve_horizons(horizon, horizons, 1)
+    weekdays = resolve_issue_days(issue_days)
 
     def make_model():
         return copy.deepcopy(model)
@@ -298,6 +310,7 @@ def verify_model(
             warn_unpublished=False,
             availability=availability,
             horizons=horizons,
+            weekdays=weekdays,
         )
         not_sampled = sorted(({name for names in whole.lists for name in names} | whole.queried) - set(used))
         late_in_period = sorted(

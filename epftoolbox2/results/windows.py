@@ -180,12 +180,17 @@ class RunWindows:
         """A validation forecast counts only if its target day is before this one, the first test issue day."""
         return None if self.test is None else self.test[0]
 
-    def issue_days(self) -> List[str]:
-        """The days a run forecasts, in order: both windows, once each, and nothing between them."""
+    def issue_days(self, weekdays: Optional[Sequence[int]] = None) -> List[str]:
+        """The days a run forecasts, in order: both windows, once each, and nothing between them. With `weekdays` (a run's
+        `issue_days`, as `date.weekday()` numbers) only the days of those weekdays."""
         days: List[str] = []
+        kept = None if weekdays is None else frozenset(weekdays)
         for _, (start, end) in self.periods:
             first, last = datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)
-            days += [(first + datetime.timedelta(days=d)).isoformat() for d in range((last - first).days + 1)]
+            for d in range((last - first).days + 1):
+                day = first + datetime.timedelta(days=d)
+                if kept is None or day.weekday() in kept:
+                    days.append(day.isoformat())
         return days
 
     def window_of(self, run_date: str) -> Optional[str]:

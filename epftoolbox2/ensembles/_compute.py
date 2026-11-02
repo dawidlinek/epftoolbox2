@@ -9,7 +9,8 @@ What makes a choice is read from `RunWindows.segments` and `Segment.serves`, nev
 days of a later segment are test days of the one before it, and stay tagged "test".
 
 What may be averaged is read from the manifests of the leaf models, the models under any nesting (`_check_members_agree`): one
-target, horizon, list of horizons, frequency, time zone and information set, and one value in every column two of them read.
+target, horizon, list of horizons, weekdays issued on, frequency, time zone and information set, and one value in every column two
+of them read.
 """
 
 from __future__ import annotations
@@ -162,9 +163,12 @@ def compute(
         _write_atomically(path, (json.dumps(record) + "\n" for record in records))
     # What the members' refs plan, so that one report plans one list for all: a report's refs always name it (`report()` reads it
     # from the manifests when told nothing), and a run's do unless it is every horizon to the largest. `_check_members_agree` has
-    # compared the members' manifests on it.
+    # compared the members' manifests on it. The same for the weekdays: a ref's `issue_days` is what it plans, None for every day.
     horizons = like.horizons or tuple(range(1, like.horizon + 1))
-    return Computed(_ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only, horizons), choices)
+    return Computed(
+        _ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only, horizons, like.issue_days),
+        choices,
+    )
 
 
 def _read_member(ensemble: Ensemble, name: str, ref: ModelResultRef, stored: Optional[RunWindows]) -> _Member:
@@ -173,7 +177,9 @@ def _read_member(ensemble: Ensemble, name: str, ref: ModelResultRef, stored: Opt
     ordinals: Dict[str, int] = {}
     window_of: Dict[str, Optional[str]] = {}
     freqs = set()
-    whole = replace(ref, test_start="", test_end="", window=None, target_before=None, by_window=None, horizons=None)
+    whole = replace(
+        ref, test_start="", test_end="", window=None, target_before=None, by_window=None, horizons=None, issue_days=None
+    )
     for record in whole.iter_records(cols=_COLUMNS):
         run_date, target_date = record["run_date"], record["target_date"]
         if stored is not None:
@@ -241,6 +247,11 @@ def _check_members_agree(
     lists = {name: horizons_of(manifest) for name, manifest in recorded.items() if manifest.get("horizon") is not None}
     if len(set(lists.values())) > 1 and not any(problem.startswith("horizon ") for problem in problems):
         problems.append(f"horizons {{{', '.join(f'{name!r}: {list(found)}' for name, found in lists.items())}}}")
+    # Members issued on other weekdays plan other keys: an average of them would be on the days they share.
+    weekdays = {name: manifest.get("issue_days") for name, manifest in recorded.items()}
+    if len({None if days is None else tuple(days) for days in weekdays.values()}) > 1:
+        shown = ", ".join(f"{name!r}: {days or 'every day'}" for name, days in weekdays.items())
+        problems.append(f"issue_days {{{shown}}}")
     problems += _information_set_differences(recorded)
     found, notes = _data_differences(recorded)
     problems += found
@@ -253,7 +264,8 @@ def _check_members_agree(
     if problems:
         raise ManifestMismatchError(
             f"{ensemble.name}: its members are not forecasts of one thing, so averaging or ranking them would mean nothing: "
-            f"{'; '.join(problems)}. Run them on the same data with the same target, horizon, freq and information set."
+            f"{'; '.join(problems)}. Run them on the same data with the same target, horizon, issue days, freq and "
+            "information set."
         )
     unrecorded = sorted(name for name, manifest in manifests.items() if manifest is None)
     if unrecorded:
@@ -566,11 +578,13 @@ def _ref(
     freq: str,
     test_only: bool,
     horizons: Sequence[int],
+    weekdays: Optional[Sequence[int]] = None,
 ) -> ModelResultRef:
     """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizons` are the ones
-    the members were run with."""
+    the members were run with, and `weekdays` the weekdays they issued on (None for every day)."""
     horizons = tuple(horizons)
-    calendar = IssueCalendar(freq, like.zone, horizons)
+    weekdays = None if weekdays is None else tuple(weekdays)
+    calendar = IssueCalendar(freq, like.zone, horizons, weekdays)
     ref = ModelResultRef(
         name=ensemble.name,
         path=path,
@@ -587,12 +601,15 @@ def _ref(
         horizons=None
         if like.horizons is None and horizons == tuple(range(1, max(horizons, default=0) + 1))
         else horizons,
+        issue_days=weekdays,
     )
     if like.windows is None:
         run = codes >> _RUN_SHIFT
         read = (run >= _ordinal(ref.test_start)) & (run <= _ordinal(ref.test_end))
         if ref.horizons is not None:  # what `iter_records` reads of the file
             read &= np.isin((codes >> _HORIZON_SHIFT) & _LOW_16, ref.horizons)
+        if ref.issue_days is not None:  # and of the weekdays: an ordinal's weekday, 1 being a Monday
+            read &= np.isin((run - 1) % 7, ref.issue_days)
         ref.produced = int(read.sum())
         ref.skipped = _missing(ref.count - ref.produced)
         _say_what_is_missing(ref.name, {None: ref})

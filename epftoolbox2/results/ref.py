@@ -43,6 +43,9 @@ class ModelResultRef:
     `horizon` is the largest horizon planned, and `horizons` the ones planned: a run's ref has them when they aren't every one
     from 1 to `horizon` (`run(horizons=[1, 3, 7])`), and a ref of `ModelPipeline.report()` always. None reads every horizon.
     Only records of those horizons are read: `count` plans no other, and a record of another would be compared with nothing.
+
+    `issue_days` are the weekdays a run issued on (`run(issue_days=["friday"])`), as `date.weekday()` numbers, None for every
+    day. Only records issued on them are read (their `run_weekday`), for the same reason.
     """
 
     name: str
@@ -65,6 +68,7 @@ class ModelResultRef:
     matching_lists: Optional[Dict[str, int]] = None
     zone: Any = None
     horizons: Optional[Tuple[int, ...]] = None
+    issue_days: Optional[Tuple[int, ...]] = None
 
     def iter_records(self, cols: Optional[List[str]] = None) -> Iterator[Dict]:
         """The records of this ref, wherever they live.
@@ -75,7 +79,7 @@ class ModelResultRef:
 
         A window's ref gives `day_in_test` from the window's start as it is now: a record resumed after the start moved
         holds the old count in the file. A record of a slot the clock doesn't have is left out, and so is one of a horizon
-        `horizons` doesn't list (see the class docstring).
+        `horizons` doesn't list or issued on a weekday `issue_days` doesn't list (see the class docstring).
         """
         on_the_clock = self._on_the_clock()
         return (read for read, r in self._records(cols) if on_the_clock is None or on_the_clock(r))
@@ -106,11 +110,14 @@ class ModelResultRef:
         filter_dates = bool(self.test_start and self.test_end)
         window_start = date.fromisoformat(self.test_start) if self.window is not None and self.test_start else None
         horizons = None if self.horizons is None else frozenset(self.horizons)
+        weekdays = None if self.issue_days is None else frozenset(self.issue_days)
 
         def keep(r: Dict) -> bool:
             if filter_dates and not self.test_start <= r["run_date"] <= self.test_end:
                 return False
             if horizons is not None and r["horizon"] not in horizons:
+                return False
+            if weekdays is not None and _run_weekday(r) not in weekdays:
                 return False
             if self.window is not None and r.get("window", TEST) != self.window:
                 return False
@@ -138,6 +145,12 @@ class ModelResultRef:
             if r["day_in_test"] != day_in_window:
                 r = {**r, "day_in_test": day_in_window}
         return {k: r[k] for k in cols if k in r} if cols else r
+
+
+def _run_weekday(r: Dict) -> int:
+    """A record's `run_weekday`, which every record the models write carries; from its `run_date` for one without."""
+    weekday = r.get("run_weekday")
+    return date.fromisoformat(r["run_date"]).weekday() if weekday is None else int(weekday)
 
 
 def split_by_window(

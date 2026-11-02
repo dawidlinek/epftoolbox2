@@ -65,6 +65,9 @@ A run of some horizons only (`horizons=[1, 3, 7]`) records them as `horizons`, c
 every horizon from 1 to `horizon` has no such key, so its manifest is what it was before the field existed, and a resume with
 another list refuses: the file would hold forecasts of horizons no run plans, or lack ones it does.
 
+A run that issues on some weekdays only (`issue_days=["friday"]`) records their names as `issue_days`, compared, and only then: a
+run of every day has no such key. A resume with other weekdays refuses for the same reason as other horizons.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -86,6 +89,7 @@ import numpy as np
 import pandas as pd
 
 from .._date_utils import zone_name
+from ..models._calendar import issue_day_names, resolve_issue_days
 from ..logging import get_logger
 from .availability import LISTING_TIMES, merge_listings
 from .windows import TEST, RunWindows, mask_key
@@ -111,6 +115,7 @@ _COMPARED_FIELDS = (
     "target",
     "horizon",
     "horizons",
+    "issue_days",
     "freq",
     "training_window",
     "model_params",
@@ -205,6 +210,8 @@ class Manifest:
     training_cut: Optional[Dict[str, Any]] = None
     # The horizons planned, when they aren't every one from 1 to `horizon`; None (and no key) when they are.
     horizons: Optional[List[int]] = None
+    # The weekdays issued on, by name, when they aren't all seven; None (and no key) for every day.
+    issue_days: Optional[List[str]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -240,6 +247,8 @@ class Manifest:
             del out["training_cut"]
         if out["horizons"] is None:  # every horizon from 1 to `horizon`
             del out["horizons"]
+        if out["issue_days"] is None:  # every day
+            del out["issue_days"]
         return out
 
     @classmethod
@@ -386,6 +395,7 @@ def build_manifest(
     frame_hashes: Optional[FrameHashes] = None,
     training_cut: Optional[Dict[str, Any]] = None,
     horizons: Optional[Sequence[int]] = None,
+    issue_days: Optional[Sequence[int]] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -414,6 +424,7 @@ def build_manifest(
     `training_cut` is how the model chooses its training rows (`BaseModel._training_cut`), rows by date if not given.
 
     `horizon` is the largest horizon and `horizons` the ones planned, recorded only when they aren't every one from 1 to it.
+    `issue_days` are the weekdays issued on (`date.weekday()` numbers), recorded by name, and only when they aren't every day.
     """
     now = datetime.now(timezone.utc).isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
@@ -451,6 +462,7 @@ def build_manifest(
         horizons=None
         if horizons is None or list(horizons) == list(range(1, horizon + 1))
         else [int(h) for h in horizons],
+        issue_days=issue_day_names(issue_days),
     )
 
 
@@ -468,6 +480,17 @@ def read_horizons(path: Union[str, Path]) -> Optional[Tuple[int, ...]]:
     """The horizons the run of a manifest file planned (`horizons_of`), or None without a manifest or a horizon in it."""
     path = Path(path)
     return horizons_of(json.loads(path.read_text())) if path.exists() else None
+
+
+def issue_days_of(manifest: Mapping[str, Any]) -> Optional[Tuple[int, ...]]:
+    """The weekdays a manifest's run issued on, as a dict read from its file, as `date.weekday()` numbers; None for every day."""
+    return resolve_issue_days(manifest.get("issue_days"))
+
+
+def read_issue_days(path: Union[str, Path]) -> Optional[Tuple[int, ...]]:
+    """`issue_days_of` the manifest at `path`; None (every day) without one."""
+    path = Path(path)
+    return issue_days_of(json.loads(path.read_text())) if path.exists() else None
 
 
 def manifest_path(results_path: Path) -> Path:
@@ -529,12 +552,14 @@ def read_skipped(
     window: str = TEST,
     period: Optional[Tuple[str, str]] = None,
     horizons: Optional[Sequence[int]] = None,
+    issue_days: Optional[Sequence[int]] = None,
 ) -> Dict[str, int]:
     """Skip reason -> how many, of one window as a manifest records it, or nothing if it has none.
 
     `period` is what a plain report covers. The counts are per window and can't be split by day, so a period other than the one
     the manifest was run on gets none: such a report still has `missing`, and no reasons it can't vouch for. Nor can they be
-    split by horizon, so a report told a list of `horizons` other than the run's gets none either.
+    split by horizon, so a report told a list of `horizons` other than the run's gets none either, nor by weekday: a report on
+    other `issue_days` (weekday numbers, None for every day) than the run's gets none.
     """
     path = Path(path)
     if not path.exists():
@@ -543,6 +568,8 @@ def read_skipped(
     if period is not None and (stored.get("test_start"), stored.get("test_end")) != tuple(period):
         return {}
     if horizons is not None and horizons_of(stored) != tuple(horizons):
+        return {}
+    if issue_days_of(stored) != (None if issue_days is None else tuple(issue_days)):
         return {}
     return dict((stored.get("skipped") or {}).get(window, {}))
 

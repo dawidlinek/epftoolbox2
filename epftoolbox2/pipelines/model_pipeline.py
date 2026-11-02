@@ -9,7 +9,14 @@ import yaml
 
 from .._date_utils import resolve_date
 from ..information_set import InformationSet, InformationSetError, check_level
-from ..models._calendar import IssueCalendar, horizon_arguments, resolve_horizons
+from ..models._calendar import (
+    IssueCalendar,
+    check_issue_days_in,
+    horizon_arguments,
+    issue_day_names,
+    resolve_horizons,
+    resolve_issue_days,
+)
 from ..models.base import BaseModel
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model
@@ -25,6 +32,7 @@ from ..results.manifest import (
     is_ensemble_manifest,
     manifest_path,
     read_horizons,
+    read_issue_days,
     read_matching_lists,
     read_skipped,
     read_windows,
@@ -167,6 +175,7 @@ class ModelPipeline:
         validation: Union[Tuple[Any, Any], str, None] = None,
         test: Optional[Tuple[Any, Any]] = None,
         horizons: Optional[Sequence[int]] = None,
+        issue_days: Optional[Sequence[str]] = None,
     ) -> EvaluationReport:
         """Run every model, compute the ensembles from what they stored, then (unless `forecast_only`) run the evaluators
         and exporters.
@@ -174,6 +183,11 @@ class ModelPipeline:
         `horizon=H` forecasts every horizon from 1 to H (7 if neither is given), `horizons` only the ones it lists, such as
         `[1, 3, 7]` or `range(3, 10)`; passing both raises. Each forecast is what a run with `horizon=max(horizons)` gives it, and
         the results record the list (see the docs page Time and Calendars).
+
+        `issue_days` issues forecasts on the weekdays it names only, such as `["friday"]` for a week-ahead study (names in any
+        case; all seven are every day). Training is untouched, so each forecast is what a run of every day gives it, its
+        `day_in_test` still counts calendar days, and the other days are neither planned nor missing. A window without one of
+        these weekdays raises. The results record them.
 
         With `save_dir`, each model's results are resumable JSONL with a manifest recording the
         configuration that produced them (epftoolbox2.results.manifest). Resuming into results made with
@@ -200,6 +214,7 @@ class ModelPipeline:
         if not self.models:
             raise ValueError("At least one model is required")
         horizon, horizons = resolve_horizons(horizon, horizons, 7)
+        weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
         self._check_availability()
         if not forecast_only:
@@ -213,6 +228,9 @@ class ModelPipeline:
             check_start, check_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
         else:
             check_start, check_end = test_start, test_end
+        for name, (start, end) in windows.periods if windows is not None else [("test", (check_start, check_end))]:
+            check_issue_days_in(start, end, weekdays, name)
+        days_argument = {} if weekdays is None else {"issue_days": issue_day_names(weekdays)}
         level = self.availability
         # Check every model's inputs before running any, so a bad predictor in the last model fails in seconds. A
         # predictor function is planned here, once, and the run uses that plan.
@@ -231,6 +249,7 @@ class ModelPipeline:
                 availability=level,
                 windows=windows,
                 horizons=horizons,
+                weekdays=weekdays,
             )
             model._check_inputs(
                 data,
@@ -244,6 +263,7 @@ class ModelPipeline:
                 availability=level,
                 windows=windows,
                 horizons=horizons,
+                weekdays=weekdays,
             )
             listings[model.name] = model._availability_listing
             if plan is not None:
@@ -272,6 +292,7 @@ class ModelPipeline:
                 windows=windows,
                 frame_hashes=frame_hashes,
                 **horizon_arguments(horizon, horizons),
+                **days_argument,
                 **planned,
             )
             refs[model.name] = ref
@@ -349,6 +370,21 @@ class ModelPipeline:
             )
         return next(iter(distinct), None)
 
+    @staticmethod
+    def _stored_issue_days(save_dir: Union[str, Path], paths: Dict[str, Path]) -> Optional[Tuple[int, ...]]:
+        """The weekdays every model's manifest records it was run on, None for every day; models run on different ones raise.
+        Results with no manifest say nothing and don't count."""
+        found = {
+            name: read_issue_days(manifest_path(path)) for name, path in paths.items() if manifest_path(path).exists()
+        }
+        if len(set(found.values())) > 1:
+            shown = "; ".join(f"{name}: {issue_day_names(days) or 'every day'}" for name, days in found.items())
+            raise ValueError(
+                f"The models in {save_dir} were run on different weekdays ({shown}), so a report that took them from the "
+                "manifests would plan different forecasts for each. Pass issue_days= to say which to report."
+            )
+        return next(iter(found.values()), None)
+
     def report(
         self,
         save_dir: Union[str, Path],
@@ -362,6 +398,7 @@ class ModelPipeline:
         validation: Union[Tuple[Any, Any], str, None] = None,
         test: Optional[Tuple[Any, Any]] = None,
         horizons: Optional[Sequence[int]] = None,
+        issue_days: Optional[Sequence[str]] = None,
     ) -> EvaluationReport:
         """Build one report from the per-model JSONL files in `save_dir`, then run evaluators and exporters.
 
@@ -372,6 +409,10 @@ class ModelPipeline:
         horizons raise. Only records
         of the horizons planned are read, so `horizon=3` of a horizon-7 run is horizons 1 to 3 alone. Raises FileNotFoundError if a
         model has no results file, unless `allow_missing` is set. `data` is only needed by exporters that join source columns.
+
+        `issue_days` are the weekdays to report, as in `run`; if not given, the manifests say which the models were run on, and
+        models run on different ones raise `ValueError`, as they would be compared on different forecasts. Only records issued on
+        them are read and planned, so a report of the Fridays of a run of every day plans Fridays alone.
 
         Ensembles are computed here from the stored results of their members, every time, so they can't go stale, and written
         next to them. `allow_missing` leaves out an ensemble with a missing member, with a warning: it is never averaged over
@@ -398,6 +439,7 @@ class ModelPipeline:
         """
         if not self.models:
             raise ValueError("At least one model is required")
+        told_weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
         if not forecast_only:
             self._check_benchmarks()
@@ -413,6 +455,7 @@ class ModelPipeline:
             horizons = self._stored_horizons(save_dir, paths)
         horizon, horizons = resolve_horizons(horizon, horizons, 7)
         stored = self._stored_windows({name: path for name, path in paths.items() if path.exists()})
+        weekdays = told_weekdays if issue_days is not None else self._stored_issue_days(save_dir, paths)
         windows, test_start, test_end = self._resolve_windows(
             validation, test, test_start, test_end, forecast_only, required=stored is None or forecast_only
         )
@@ -439,7 +482,9 @@ class ModelPipeline:
                 missing.append(f"{model.name} ({path})")
                 continue
             zone = read_zone(manifest_path(path))
-            calendars[model.name] = IssueCalendar(freq, zone, horizons)
+            for name, (start, end) in windows.periods if windows is not None else [("test", (test_start, test_end))]:
+                check_issue_days_in(start, end, weekdays, name)
+            calendars[model.name] = IssueCalendar(freq, zone, horizons, weekdays)
             ref = ModelResultRef(
                 name=model.name,
                 path=path,
@@ -451,14 +496,18 @@ class ModelPipeline:
                 skipped=(
                     {}
                     if windows is not None
-                    else read_skipped(manifest_path(path), period=(test_start, test_end), horizons=horizons)
+                    else read_skipped(
+                        manifest_path(path), period=(test_start, test_end), horizons=horizons, issue_days=weekdays
+                    )
                 ),
                 availability_listing=read_listing(manifest_path(path)),
                 windows=windows,
                 matching_lists=read_matching_lists(manifest_path(path)),
                 zone=zone,
-                # Only the horizons planned: a record of another is compared with nothing (`horizon=3` of a horizon-7 run).
+                # Only the horizons and weekdays planned: a record of another is compared with nothing (`horizon=3` of a
+                # horizon-7 run, the Fridays of a run of every day).
                 horizons=horizons,
+                issue_days=weekdays,
             )
             # Through the ref: the file can hold more than this period, and a line outside it is no forecast of it.
             ref.produced = sum(1 for _ in ref.iter_records(cols=["hour"]))
@@ -486,7 +535,8 @@ class ModelPipeline:
                     windows,
                     calendars[name],
                     skipped={
-                        w: read_skipped(manifest_path(ref.path), w, horizons=ref.horizons) for w, _ in windows.periods
+                        w: read_skipped(manifest_path(ref.path), w, horizons=ref.horizons, issue_days=ref.issue_days)
+                        for w, _ in windows.periods
                     },
                     listings={w: read_listing(manifest_path(ref.path), w) for w, _ in windows.periods},
                     target_before=stored.target_before,
@@ -694,6 +744,7 @@ class ModelPipeline:
         positive_control: bool = True,
         rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
         horizons: Optional[Sequence[int]] = None,
+        issue_days: Optional[Sequence[str]] = None,
     ) -> VerifyReport:
         """Check on a sample of issue days that no forecast depends on anything unknown when it is issued.
 
@@ -744,12 +795,16 @@ class ModelPipeline:
             positive_control: False skips the control, so `ok` only says that no forecast moved.
             rebuild: Builds the model's input from `data` (see above).
             horizons: The horizons to verify, as `run(horizons=...)` lists them, in place of `horizon`; passing both raises.
+            issue_days: The weekdays a run issues on (`run(issue_days=["friday"])`): only days of these are sampled, and a
+                predictor function is planned on them alone, so what it would read late on another weekday is no leak of
+                this run's. None (or all seven) samples every day.
 
         Raises:
             InformationSetError: The pipeline has no information set, or a checked column has no rule and the
                 information set's `unknown` is "raise".
         """
         horizon, horizons = resolve_horizons(horizon, horizons, 1)
+        weekdays = resolve_issue_days(issue_days)
         if self.information_set is None:
             raise InformationSetError(
                 "verify() needs to know when forecasts are issued: pass issue_time or information_set to ModelPipeline"
@@ -757,7 +812,8 @@ class ModelPipeline:
         if not self.models:
             raise ValueError("At least one model is required")
         self._check_model_names()
-        run_days = sample_issue_days(data.index, test_start, test_end, days, seed)
+        check_issue_days_in(resolve_date(test_start), resolve_date(test_end), weekdays)
+        run_days = sample_issue_days(data.index, test_start, test_end, days, seed, issue_days=weekdays)
         report = VerifyReport(issue_days=run_days)
         for model in self._select_models(models):
             report.checks.extend(
@@ -774,6 +830,7 @@ class ModelPipeline:
                     test_period=(test_start, test_end),
                     availability=self.availability,
                     **horizon_arguments(horizon, horizons),
+                    **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
                 )
             )
         return report

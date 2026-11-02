@@ -317,6 +317,7 @@ class EvaluationReport:
                 test_end=ref.test_end if ref.window is None else "",
                 horizon=ref.horizon,
                 horizons=ref.horizons,
+                issue_days=ref.issue_days,
                 freq=DAILY,
                 _results=records,
                 produced=len(records),

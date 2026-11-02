@@ -72,6 +72,7 @@ class ModelPipeline:
         validation: Union[Tuple[Any, Any], str, None] = None,  # (start, end) or "previous_year"; alone, only those days
         test: Optional[Tuple[Any, Any]] = None,  # (start, end), the same as test_start and test_end
         horizons: Optional[Sequence[int]] = None,  # Only these horizons, e.g. [1, 3, 7] or range(3, 10); not with horizon
+        issue_days: Optional[Sequence[str]] = None,  # Only these weekdays, e.g. ["friday"]; any case, all seven = every day
     ) -> EvaluationReport: ...
 
     def report(                           # Report from the JSONL files a run wrote to save_dir
@@ -87,6 +88,7 @@ class ModelPipeline:
         validation: Union[Tuple[Any, Any], str, None] = None,  # What run was told; each must be what the manifests record
         test: Optional[Tuple[Any, Any]] = None,  # None of the windows: every window the manifests record
         horizons: Optional[Sequence[int]] = None,  # As in run; only records of these horizons are read
+        issue_days: Optional[Sequence[str]] = None,  # As in run; None reads them from the manifests
     ) -> EvaluationReport: ...
 
     def verify(                           # Leakage probe and positive control on sampled issue days
@@ -103,6 +105,7 @@ class ModelPipeline:
         positive_control: bool = True,    # False: `ok` only says that no forecast moved
         rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,  # Builds the input from source data
         horizons: Optional[Sequence[int]] = None,  # The horizons a run lists, in place of horizon
+        issue_days: Optional[Sequence[str]] = None,  # The weekdays a run lists: only those are sampled
     ) -> VerifyReport: ...
 
     def explain(                          # What one forecast's predictors hold and when each is known; no side effects
