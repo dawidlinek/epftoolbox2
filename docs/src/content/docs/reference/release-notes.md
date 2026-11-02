@@ -17,14 +17,17 @@ Notes for changes that need something from you. The full list of changes of a re
   - **What moves.** Per year, for a run of horizons 1 to H at 1 h: H(H+1)/2 forecasts after the autumn switch, H(H-1)/2 after the spring
     one, and the keys of the skipped hour go, with a slot the clock doesn't have no longer counted in `planned` or as missing. At
     `freq="15min"` that is 4 times as many. Every other forecast is the same, bit for bit, and so is every forecast of a frame without a
-    switch. A row lost to a gap in the last days before the issue no longer costs a newer row. `test_golden_metrics.py` went from 140
+    switch or a gap. A row lost to a gap in the last days before the issue no longer costs a newer row, so such a key moves. `test_golden_metrics.py` went from 140
     forecasts to 139, with one mislabelled key gone.
   - **Old results are refused on resume.** A manifest without the new field `training_cut` raises `ManifestMismatchError`, because the
-    stale records would stay in the file and be read. Use a new `save_dir`, or pass `allow_manifest_mismatch=True` to resume with them.
-    `report()` over such results warns and plans as those runs did.
-  - **`aggregate()` reads a whole day from the clock.** The day after a spring switch, from a forecast issued on the switch day, is now
-    dropped at every horizon, also in a run of horizon 1 alone, where it was aggregated over 23 of its 24 hours. Reports of plain lists keep
-    the old rule.
+    stale records would stay in the file and be read. Use a new `save_dir`. Results accepted anyway, with `allow_manifest_mismatch=True`
+    or from a folder with no manifest, are marked `{"rows": "dates", "stored": "unverified"}` for good, and every `report()` of them warns;
+    a record of a slot the clock doesn't have is left out of every table and count, with a warning.
+  - **`aggregate()` reads a whole day from the clock.** Every target day of a forecast issued on a spring switch day is now dropped, also
+    the day after it in a run of horizon 1 alone, where it was aggregated over 23 of its 24 hours. The short day of a zone whose clock
+    skips midnight, 22:00 or half an hour is now whole. Reports of plain lists keep the old rule.
+  - **A manifest names its zone.** `data_timezone` of a dateutil zone is its name (`Europe/Warsaw`), not `tzfile(...)`, so `report()`
+    knows its clock. A zone with no such name warns when a run writes its files.
   - **`verify` no longer calls those days a leak**, and a verify over a spring switch day counts 23 forecasts per horizon.
   See [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/).
 - **A reversed test period now raises.** `ModelPipeline.run(df, test_start=later, test_end=earlier)` used to run nothing and

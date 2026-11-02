@@ -42,9 +42,11 @@ Why the repeated hour keeps no target: which of its two prices is "the" 02:00 is
 that no market cleared. The hour stays in the forecasts issued from it, and a daily aggregate leaves out the day it is on (see
 [below](#daily-aggregates-on-a-switch-day)).
 
-A zone that changes at midnight or by half an hour follows the same rule, through the periods its clock has. A naive index and a UTC
-one have every period on every date. [`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/) gives every day 24 slots
-instead, with synthetic values on the slots it fills.
+A zone that changes at midnight, at 22:00 or by half an hour follows the same rule, through the periods its clock has. A period is on
+the clock when any minute of it is: Lord Howe skips 02:00 to 02:29, so hourly its period 2 stays, with its row at 02:30, and at
+`freq="15min"` periods 8 and 9 go. A naive index and a UTC one have every period on every date.
+[`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/) gives every day 24 slots instead, with synthetic values on the
+slots it fills.
 
 ## What is planned
 
@@ -69,8 +71,9 @@ print(report.forecast_counts())
 ```
 
 A run, a `report()` from its files and an ensemble of it plan the same keys, also per window. `report()` reads the zone from each
-manifest (`data_timezone`), so it needs no data. Results with no manifest have no zone, and `report()` plans every period of every day
-for them.
+manifest (`data_timezone`, the zone's name, such as `Europe/Warsaw` also for a dateutil zone), so it needs no data. A zone with no name
+that reads back, such as pytz's `FixedOffset`, can't be read, and the run says so when it writes the files. Results with no manifest, or
+such a zone, have no zone in a report, and `report()` plans every period of every day for them.
 
 ## Gaps in the data
 
@@ -89,14 +92,15 @@ A row with a missing predictor or target drops from the fit too, or skips the fo
 ## Daily aggregates on a switch day
 
 [`report.aggregate()`](/epftoolbox2/model-pipeline/results/#daily-aggregates) needs a whole day, and with a zone it reads what a whole
-day is from the clock. A dropped day is counted as `incomplete_day`.
+day is from the clock: the day's finite periods must be exactly those its clock has, wherever in the day the clock skips. A dropped day
+is counted as `incomplete_day`.
 
 | Target day | Periods the clock has | Result |
 |---|---|---|
 | An ordinary day | 24 (96) | Whole if all of them have a finite prediction and actual |
 | The spring switch day | 23 (92) | Whole over those |
-| The day after it, from a forecast issued on the switch day | 24 (96) | **Dropped at every horizon:** no forecast of the skipped hour was issued, so a period is missing |
-| The day after it, from a forecast issued earlier | 24 (96) | Whole |
+| S+h, from a forecast issued on the spring switch day S at horizon h | 24 (96) | **Dropped:** no forecast of the skipped hour was issued on S, so a period is missing |
+| Any other day after the switch | 24 (96) | Whole |
 | The autumn switch day | 24 (96) | **Dropped:** the repeated hour has no `actual` |
 
 Plain lists of records have no zone. There the periods of a date are those any model has a record for, as described on
@@ -124,11 +128,17 @@ of those runs hold it:
 - **A row too few after a spring switch.** For D from S+2 to S+h the forecast of the switch hour lost its newest row.
 
 So a manifest has `training_cut`, compared on resume, and one without it raises `ManifestMismatchError`: a resume would keep those
-records in the file and read them. Use a new `save_dir`. `allow_manifest_mismatch=True` resumes anyway, and the records stay.
-`report()` over such results warns, and plans as those runs did.
+records in the file and read them. Use a new `save_dir`.
+
+Results accepted anyway, with `allow_manifest_mismatch=True` or from a folder with no manifest, still hold those records. Their manifest
+says so for good (`training_cut` is `{"rows": "dates", "stored": "unverified"}`, which later resumes keep), and every `report()` of them
+warns, naming the models, as it does for results with no manifest or an older one. A record of a slot the clock doesn't have can't
+have a target, so it is left out of every table and count, with a warning saying how many. The look-ahead after an autumn switch can't
+be told from the records: run such results again into a new folder.
 
 <Aside type="note" title="What moves">
 Of a run of horizons 1 to H at 1 h, per year: H(H+1)/2 forecasts move after the autumn switch, H(H-1)/2 after the spring one, and the
-keys of the skipped hour go. At `freq="15min"` that is 4 times as many. Every other forecast is the same, bit for bit, and so is every
-forecast of a frame without a switch.
+keys of the skipped hour go. At `freq="15min"` that is 4 times as many. Every other forecast is the same, bit for bit. In a frame
+without a switch every forecast is the same too, unless the frame has a gap: a key whose last days before the issue day, D-h to D-1,
+lack a row moves, since the row cut lost a newer row to the gap.
 </Aside>
