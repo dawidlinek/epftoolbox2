@@ -305,3 +305,22 @@ def test_report_refuses_hourly_reading_of_15_minute_results(tmp_path):
     assert pipe.report(tmp_path, test=("2023-03-01", "2023-03-02")).forecast_counts()["planned"].tolist() == [192]
     with pytest.raises(ValueError, match="were run at freq='15min'"):
         pipe.report(tmp_path, test=("2023-03-01", "2023-03-02"), freq="1h")
+
+
+def test_results_with_no_manifest_are_reported_at_the_freq_their_records_carry(frames, tmp_path):
+    """Without a manifest the records say their freq: 14 days of 2 horizons, not 24 periods each. One model's records of two
+    frequencies raise."""
+    _, daily = frames
+    pipe = pipeline(("a", INPUTS)).add_evaluator(MAEEvaluator())
+    pipe.run(daily, test=TEST, horizon=2, freq="1D", save_dir=tmp_path)
+    (tmp_path / "a.manifest.json").unlink()
+    with pytest.warns(UserWarning):  # no manifest: rows not verified
+        counts = pipe.report(tmp_path, test=TEST, horizon=2).forecast_counts().iloc[0]  # no manifest to say 2
+    assert (counts["planned"], counts["missing"]) == (28, 0)
+    with pytest.raises(ValueError, match=r"report\(freq='1h'\), but the results .* were run at freq='1D'"):
+        pipe.report(tmp_path, test=TEST, freq="1h")
+    records = (tmp_path / "a.jsonl").read_text().splitlines()
+    mixed = [json.dumps({**json.loads(records[0]), "freq": "1h"}), *records[1:]]
+    (tmp_path / "a.jsonl").write_text("\n".join(mixed) + "\n")
+    with pytest.raises(ValueError, match=r"records of several frequencies \(\['1D', '1h'\]\)"):
+        pipe.report(tmp_path, test=TEST)

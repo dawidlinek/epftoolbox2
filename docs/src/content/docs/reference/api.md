@@ -81,7 +81,7 @@ class ModelPipeline:
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
         horizon: Optional[int] = None,         # As in run; neither: what the manifests record (7 without one)
-        freq: Optional[str] = None,            # As in run; None: what the manifests record ("1h" without one)
+        freq: Optional[str] = None,            # As in run; None: what the manifests (else the records) record, "1h" if none
         forecast_only: bool = False,
         data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns
         allow_missing: bool = False,           # else FileNotFoundError when a model has no results

@@ -3,6 +3,7 @@ from typing import Callable, List, Optional, Sequence, Tuple, Union, Dict, Any
 from pathlib import Path
 import copy
 import importlib
+import json
 import warnings
 import pandas as pd
 import yaml
@@ -395,11 +396,28 @@ class ModelPipeline:
         return next(iter(found.values()), None)
 
     @staticmethod
+    def _record_freq(name: str, path: Path) -> Optional[str]:
+        """The freq the records of results with no manifest carry, or None if they carry none; records of several raise."""
+        if not path.exists():
+            return None
+        with open(path) as lines:
+            freqs = {json.loads(line).get("freq") for line in lines if line.strip()} - {None}
+        if len(freqs) > 1:
+            raise ValueError(
+                f"The results of {name!r} in {path} hold records of several frequencies ({sorted(freqs)}): their periods are "
+                "different times of day, so they can't be one model's. Write each run into its own save_dir."
+            )
+        return next(iter(freqs), None)
+
+    @staticmethod
     def _stored_freq(save_dir: Union[str, Path], paths: Dict[str, Path], told: Optional[str]) -> Optional[str]:
         """The freq every model's manifest records, or None if none does. Models run at different ones raise, and so does a
         `told` freq the manifests contradict: the report would plan another number of periods a day than the runs did, and count
-        records as missing, or a gap as none. Results with no manifest say nothing and don't count."""
-        found = {name: read_freq(manifest_path(path)) for name, path in paths.items()}
+        records as missing, or a gap as none. Results with no manifest say what freq their records carry."""
+        found = {
+            name: read_freq(manifest_path(path)) or ModelPipeline._record_freq(name, path)
+            for name, path in paths.items()
+        }
         found = {name: freq for name, freq in found.items() if freq is not None}
         shown = ", ".join(f"{name}: {freq!r}" for name, freq in found.items())
         if len(set(found.values())) > 1:
@@ -444,7 +462,8 @@ class ModelPipeline:
         models run on different ones raise `ValueError`, as they would be compared on different forecasts. Only records issued on
         them are read and planned, so a report of the Fridays of a run of every day plans Fridays alone.
 
-        `freq` is read from the manifests when not given ("1h" without one); models run at different frequencies raise
+        `freq` is read from the manifests when not given (without one from the records, which raise if they carry several; "1h"
+        if they carry none); models run at different frequencies raise
         `ValueError`, and so does a `freq` the manifests contradict, which would plan another number of periods a day than the runs
         did. `EconomicEvaluator` raises for daily results, as in `run`.
 

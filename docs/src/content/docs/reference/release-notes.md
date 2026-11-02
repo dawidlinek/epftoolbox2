@@ -12,7 +12,7 @@ Notes for changes that need something from you. The full list of changes of a re
 - **`ModelPipeline.report()` reads `freq` from the manifests and refuses one they contradict.** Its `freq` defaulted to `"1h"`
   and was taken at its word: daily results reported at the default planned 24 forecasts a day and called almost all of them missing,
   and hourly results reported with `freq="1D"`, or 15-minute ones with `"1h"`, showed no missing forecast at all, gaps included.
-  `freq` now defaults to `None`, the one the manifests record (`"1h"` without one); models run at different frequencies raise
+  `freq` now defaults to `None`, the one the manifests record (without one, the one the records carry; `"1h"` if none); models run at different frequencies raise
   `ValueError`, and so does a `freq` the manifests contradict. A report told the freq its runs had doesn't change.
 - **`ModelPipeline.report()` reads only the horizons it plans.** `report(save_dir, horizon=3)` of results run with `horizon=7` used to
   plan horizons 1 to 3 and read every record on file, so its tables held horizons 4 to 7 and `planned` equalled `produced` with no
