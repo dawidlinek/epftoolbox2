@@ -339,8 +339,19 @@ def test_a_mask_is_read_on_the_first_calendar_day_of_its_window(windows):
     assert without_list(run(on_fridays, issue_days=["friday"])) == without_list(on_friday)
 
     # A list from the second Friday on is not used on the first issue day: its mask is read on that Friday, as in a run of every
-    # day.
-    assert run(from_the_second_friday, issue_days=["friday"]) == fridays(run(from_the_second_friday))
+    # day. Except at period 2, horizon 2 of the plain test: on 24 March that key aims at 02:00 on 26 March, which the spring
+    # switch skips, so the Friday run's first planned issue day of the pair is 31 March, whose list reads its mask on the
+    # window's first day, 22 March, where `regime` is binary at h=2 (rows to 19 March); the run of every day has a planned key
+    # on 22 March with the other list and reads it on 31 March (rows to 28 March, continuous). A pinned difference (DIFFERING).
+    friday = run(from_the_second_friday, issue_days=["friday"])
+    every = fridays(run(from_the_second_friday))
+    assert set(friday) == set(every)
+    moved = {
+        key: round(json.loads(friday[key])["prediction"] - json.loads(every[key])["prediction"], 2)
+        for key in friday
+        if friday[key] != every[key]
+    }
+    assert moved == ({("2023-03-31", 2, 2): -0.83, ("2023-04-07", 2, 2): -0.84} if windows == "plain" else {})
 
     # What makes these tests see a mask: read on the first Friday, the same forecasts move at horizon 1.
     if windows == "plain":
@@ -402,8 +413,9 @@ def test_a_later_friday_s_data_moves_no_earlier_forecast():
 
 def test_data_after_a_friday_moves_none_of_its_forecasts_through_a_column_with_no_value():
     """A list used on the first Friday reads its mask on Wednesday 22 March, where `late` has no value yet (its rows go up to 20
-    March at h=1). That column is read again from the first Friday on, the Friday itself included: read from the second, the
-    forecasts of 24 March would take it from rows dated after their issue day."""
+    March at h=1). That column is read again on the first calendar day after it with a value, Thursday 23 March (rows to 21
+    March), whether or not that day is an issue day: read from the second Friday, the forecasts of 24 March would take it from
+    rows dated after their issue day."""
     data = market("spring")
     dates = np.asarray(pd.DatetimeIndex(data.index.tz_localize(None)).normalize())
     late = np.full(len(data), np.nan)
@@ -437,30 +449,61 @@ def from_thursday_30_march(ctx):
 
 
 # Where a Friday run and a run of every day read a list's mask on different days: (function, test start, the day the mask is read in
-# the run of every day, in the Friday run, and the first day `regime` is continuous, so that at h=1 it is binary in the rows of one
-# and not of the other). Each mask day is the forecast's issue day or earlier, so neither reads past D-1-h.
+# the run of every day, in the Friday run, the first day `regime` is continuous, so that at the horizon it is binary in the rows of
+# one and not of the other, the horizon of the run, and the keys that differ: by issue day, or exact keys). Each mask day is the
+# forecast's issue day or earlier, so neither reads past D-1-h.
 DIFFERING = {
-    "fridays alone": (on_fridays, SPRING_WEDNESDAY, "2023-03-24", "2023-03-22", "2023-03-22"),
+    "fridays alone": (
+        on_fridays,
+        SPRING_WEDNESDAY,
+        "2023-03-24",
+        "2023-03-22",
+        "2023-03-22",
+        1,
+        {"2023-03-24", "2023-03-31"},
+    ),
     "wednesdays and fridays from a monday": (
         on_wednesdays_and_fridays,
         "2023-03-20",
         "2023-03-22",
         "2023-03-20",
         "2023-03-20",
+        1,
+        {"2023-03-24", "2023-03-31"},
     ),
-    "from a thursday": (from_thursday_30_march, SPRING_WEDNESDAY, "2023-03-30", "2023-03-31", "2023-03-29"),
+    "from a thursday": (
+        from_thursday_30_march,
+        SPRING_WEDNESDAY,
+        "2023-03-30",
+        "2023-03-31",
+        "2023-03-29",
+        1,
+        {"2023-03-31"},
+    ),
+    # On 24 March the key (period 2, h=2) aims at 02:00 on 26 March, which the spring switch skips: the Friday run's first planned
+    # issue day of that pair is 31 March, whose list reads its mask on the window's first day. The other pairs read it on 31
+    # March in both runs.
+    "from the second friday, the first friday's key skipped by the clock": (
+        from_the_second_friday,
+        SPRING_WEDNESDAY,
+        "2023-03-31",
+        "2023-03-22",
+        "2023-03-22",
+        2,
+        {("2023-03-31", 2, 2)},
+    ),
 }
 
 
 @pytest.mark.parametrize("case", list(DIFFERING))
 def test_where_a_friday_record_and_a_run_of_every_day_s_differ(case):
-    """A list used on the Friday run's first issue day reads its mask on the window's first day, and in a run of every day on the
-    first day that uses it: a Friday-only list on the first Friday, a Wednesday-and-Friday list on the first Wednesday. A list
-    first used on a later Friday reads it there, and in a run of every day on the day before if that one uses it. Where a column is
-    binary on one of those days and not on the other, the forecasts of that list differ; with a column binary throughout they
-    are equal."""
-    fn, start, _, _, turns = DIFFERING[case]
-    test = {"test_start": start, "test_end": "2023-03-31", "horizon": 1}
+    """A list used on the Friday run's first planned issue day reads its mask on the window's first day, and in a run of every
+    day on the first day that uses it: a Friday-only list on the first Friday, a Wednesday-and-Friday list on the first
+    Wednesday, a list from the second Friday on that Friday where the clock skips the first Friday's key. A list first used on a
+    later Friday reads it there, and in a run of every day on the day before if that one uses it. Where a column is binary on one
+    of those days and not on the other, the forecasts of that list differ; with a column binary throughout they are equal."""
+    fn, start, _, _, turns, horizon, expected = DIFFERING[case]
+    test = {"test_start": start, "test_end": "2023-03-31", "horizon": horizon}
     base = market("spring")
 
     def both(data):
@@ -471,8 +514,9 @@ def test_where_a_friday_record_and_a_run_of_every_day_s_differ(case):
 
     assert both(base.assign(regime=base["is_weekend"])) == set()
     differ = both(with_regime(base, turns))
-    # The keys of that list alone: from 31 March for a list from a Thursday, every Friday for the others.
-    assert {key[0] for key in differ} == ({"2023-03-31"} if case == "from a thursday" else {"2023-03-24", "2023-03-31"})
+    # The keys of that list alone: from 31 March for a list from a Thursday, every Friday for the others, and the one key whose
+    # first Friday the clock skips.
+    assert (differ if isinstance(next(iter(expected)), tuple) else {key[0] for key in differ}) == expected
 
 
 # ---------------------------------------------------------------------------
