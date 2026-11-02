@@ -42,7 +42,8 @@ def test_report_warns_when_a_model_has_missing_forecasts(tmp_path):
     with pytest.warns(UserWarning, match="Short") as record:
         report = pipeline.report(tmp_path, test_start="2024-01-10", test_end="2024-01-10", horizon=1, freq="1h")
 
-    message = str(record[0].message)
+    # Files with no manifest are also said to be of unknown rows; this is about the other warning.
+    message = next(str(w.message) for w in record if "missing forecasts" in str(w.message))
     assert "Full" not in message  # the complete model is not named
     assert "10" in message and "24" in message and "14" in message  # produced, planned, missing
     assert "different forecast sets" in message
@@ -55,4 +56,7 @@ def test_report_does_not_warn_when_every_model_is_complete(tmp_path):
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
+        warnings.filterwarnings(
+            "ignore", message=r"Report: the results of .* may hold records written before"
+        )  # no manifest
         pipeline.report(tmp_path, test_start="2024-01-10", test_end="2024-01-10", horizon=1, freq="1h")
