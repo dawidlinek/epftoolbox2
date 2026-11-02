@@ -9,7 +9,8 @@ What makes a choice is read from `RunWindows.segments` and `Segment.serves`, nev
 days of a later segment are test days of the one before it, and stay tagged "test".
 
 What may be averaged is read from the manifests of the leaf models, the models under any nesting (`_check_members_agree`): one
-target, horizon, list of horizons, frequency, time zone and information set, and one value in every column two of them read.
+target, horizon, list of horizons, weekdays issued on, frequency, time zone and information set, and one value in every column two
+of them read.
 """
 
 from __future__ import annotations
@@ -47,10 +48,13 @@ logger = get_logger(__name__)
 # In `forecast_counts()`: a planned forecast that a member the ensemble averages has no finite prediction for.
 SKIP_MEMBER_MISSING = "member_missing"
 
-# A choice below either of these is still made, with a warning: on the keys all members hold, as a share of those the fullest
-# member holds, and on how many distinct target days. A member's holes can decide what is left to compare on.
+# A choice below any of these is still made, with a warning: on the keys all members hold, as a share of those the fullest
+# member holds, on how many distinct target days, and on how many distinct issue days. A member's holes can decide what is left to
+# compare on, and a run that issues on Fridays alone has seven target days per issue at horizons 1 to 7: four Fridays of March
+# reach 28 target days, and the choice rests on four issues.
 MIN_VALIDATION_SHARE = 0.9
 MIN_VALIDATION_DAYS = 28
+MIN_VALIDATION_ISSUES = 28
 
 _COLUMNS = ["run_date", "target_date", "hour", "horizon", "day_in_test", "prediction", "actual", "freq", "window"]
 
@@ -120,6 +124,10 @@ class _Grid:
         codes = self.codes[keys]
         return len(np.unique((codes >> _RUN_SHIFT) + ((codes >> _TARGET_SHIFT) & _LOW_16)))
 
+    def issue_days(self, keys: np.ndarray) -> int:
+        """How many distinct issue days `keys`, positions on the grid, were issued on."""
+        return len(np.unique(self.codes[keys] >> _RUN_SHIFT))
+
     def issued_in(self, period: Tuple[str, str]) -> np.ndarray:
         run = self.codes >> _RUN_SHIFT
         return (run >= _ordinal(period[0])) & (run <= _ordinal(period[1]))
@@ -162,9 +170,12 @@ def compute(
         _write_atomically(path, (json.dumps(record) + "\n" for record in records))
     # What the members' refs plan, so that one report plans one list for all: a report's refs always name it (`report()` reads it
     # from the manifests when told nothing), and a run's do unless it is every horizon to the largest. `_check_members_agree` has
-    # compared the members' manifests on it.
+    # compared the members' manifests on it. The same for the weekdays: a ref's `issue_days` is what it plans, None for every day.
     horizons = like.horizons or tuple(range(1, like.horizon + 1))
-    return Computed(_ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only, horizons), choices)
+    return Computed(
+        _ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only, horizons, like.issue_days),
+        choices,
+    )
 
 
 def _read_member(ensemble: Ensemble, name: str, ref: ModelResultRef, stored: Optional[RunWindows]) -> _Member:
@@ -173,7 +184,9 @@ def _read_member(ensemble: Ensemble, name: str, ref: ModelResultRef, stored: Opt
     ordinals: Dict[str, int] = {}
     window_of: Dict[str, Optional[str]] = {}
     freqs = set()
-    whole = replace(ref, test_start="", test_end="", window=None, target_before=None, by_window=None, horizons=None)
+    whole = replace(
+        ref, test_start="", test_end="", window=None, target_before=None, by_window=None, horizons=None, issue_days=None
+    )
     for record in whole.iter_records(cols=_COLUMNS):
         run_date, target_date = record["run_date"], record["target_date"]
         if stored is not None:
@@ -241,6 +254,11 @@ def _check_members_agree(
     lists = {name: horizons_of(manifest) for name, manifest in recorded.items() if manifest.get("horizon") is not None}
     if len(set(lists.values())) > 1 and not any(problem.startswith("horizon ") for problem in problems):
         problems.append(f"horizons {{{', '.join(f'{name!r}: {list(found)}' for name, found in lists.items())}}}")
+    # Members issued on other weekdays plan other keys: an average of them would be on the days they share.
+    weekdays = {name: manifest.get("issue_days") for name, manifest in recorded.items()}
+    if len({None if days is None else tuple(days) for days in weekdays.values()}) > 1:
+        shown = ", ".join(f"{name!r}: {days or 'every day'}" for name, days in weekdays.items())
+        problems.append(f"issue_days {{{shown}}}")
     problems += _information_set_differences(recorded)
     found, notes = _data_differences(recorded)
     problems += found
@@ -253,7 +271,8 @@ def _check_members_agree(
     if problems:
         raise ManifestMismatchError(
             f"{ensemble.name}: its members are not forecasts of one thing, so averaging or ranking them would mean nothing: "
-            f"{'; '.join(problems)}. Run them on the same data with the same target, horizon, freq and information set."
+            f"{'; '.join(problems)}. Run them on the same data with the same target, horizon, issue days, freq and "
+            "information set."
         )
     unrecorded = sorted(name for name, manifest in manifests.items() if manifest is None)
     if unrecorded:
@@ -418,7 +437,15 @@ def _choose(
     limited_by = dict(sorted(short.items(), key=lambda item: (-item[1], item[0])))
     share = len(keys) / max(per_member.values())
     _warn_if_thin(
-        ensemble, validation, test, share, len(keys), max(per_member.values()), grid.target_days(keys), limited_by
+        ensemble,
+        validation,
+        test,
+        share,
+        len(keys),
+        max(per_member.values()),
+        grid.target_days(keys),
+        limited_by,
+        grid.issue_days(keys),
     )
     return {
         "segment": index,
@@ -444,6 +471,7 @@ def _warn_if_thin(
     fullest: int,
     target_days: int,
     limited_by: Mapping[str, int],
+    issue_days: int,
 ) -> None:
     where = f"the choice on {validation} for the test period {test}"
     if share < MIN_VALIDATION_SHARE:
@@ -456,6 +484,12 @@ def _warn_if_thin(
         warnings.warn(
             f"{ensemble.name}: {where} was made on {target_days} target days ({forecasts} forecasts), fewer than "
             f"{MIN_VALIDATION_DAYS}: read it as indicative only.",
+            stacklevel=2,
+        )
+    if issue_days < MIN_VALIDATION_ISSUES:
+        warnings.warn(
+            f"{ensemble.name}: {where} rests on forecasts issued on {issue_days} days ({forecasts} forecasts), fewer than "
+            f"{MIN_VALIDATION_ISSUES}, however many days they are for: read it as indicative only.",
             stacklevel=2,
         )
 
@@ -566,11 +600,13 @@ def _ref(
     freq: str,
     test_only: bool,
     horizons: Sequence[int],
+    weekdays: Optional[Sequence[int]] = None,
 ) -> ModelResultRef:
     """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizons` are the ones
-    the members were run with."""
+    the members were run with, and `weekdays` the weekdays they issued on (None for every day)."""
     horizons = tuple(horizons)
-    calendar = IssueCalendar(freq, like.zone, horizons)
+    weekdays = None if weekdays is None else tuple(weekdays)
+    calendar = IssueCalendar(freq, like.zone, horizons, weekdays)
     ref = ModelResultRef(
         name=ensemble.name,
         path=path,
@@ -587,12 +623,15 @@ def _ref(
         horizons=None
         if like.horizons is None and horizons == tuple(range(1, max(horizons, default=0) + 1))
         else horizons,
+        issue_days=weekdays,
     )
     if like.windows is None:
         run = codes >> _RUN_SHIFT
         read = (run >= _ordinal(ref.test_start)) & (run <= _ordinal(ref.test_end))
         if ref.horizons is not None:  # what `iter_records` reads of the file
             read &= np.isin((codes >> _HORIZON_SHIFT) & _LOW_16, ref.horizons)
+        if ref.issue_days is not None:  # and of the weekdays: an ordinal's weekday, 1 being a Monday
+            read &= np.isin((run - 1) % 7, ref.issue_days)
         ref.produced = int(read.sum())
         ref.skipped = _missing(ref.count - ref.produced)
         _say_what_is_missing(ref.name, {None: ref})
@@ -628,4 +667,11 @@ def _say_what_is_missing(name: str, parts: Mapping[Optional[str], ModelResultRef
             )
 
 
-__all__ = ["Computed", "MIN_VALIDATION_DAYS", "MIN_VALIDATION_SHARE", "SKIP_MEMBER_MISSING", "compute"]
+__all__ = [
+    "Computed",
+    "MIN_VALIDATION_DAYS",
+    "MIN_VALIDATION_ISSUES",
+    "MIN_VALIDATION_SHARE",
+    "SKIP_MEMBER_MISSING",
+    "compute",
+]

@@ -40,9 +40,12 @@ from . import _contract
 from ._calendar import (
     IssueCalendar,
     NewestTargets,
+    check_issue_days_in,
     check_newest_target,
     every_horizon,
+    listed_days,
     resolve_horizons,
+    resolve_issue_days,
     training_span,
 )
 from .context import TRAIN_ON_MATCHING, PredictorPlan, build_plan, mask_digest, takes_ctx, warn_never_published_in
@@ -171,6 +174,7 @@ class BaseModel(ABC):
         frame_hashes: Optional[FrameHashes] = None,
         cut_rules: Optional["InformationSet"] = None,
         horizons: Optional[Sequence[int]] = None,
+        issue_days: Optional[Sequence[str]] = None,
     ) -> ModelResultRef:
         """Forecast every period and horizon the clock has on each day in [test_start, test_end] and on its target day.
 
@@ -181,6 +185,11 @@ class BaseModel(ABC):
         lists, such as `[1, 3, 7]` or `range(3, 10)`, and nothing else; giving both raises (`resolve_horizons`). Each forecast
         (period, h, D) reads its own rows whatever else is listed, so its record is what a run with `horizon=max(horizons)`
         gives it, and `range(1, H + 1)` is `horizon=H` in everything. Targets are built for 1 to the largest horizon.
+
+        `issue_days` forecasts on the weekdays it names only, such as `["friday"]` (any case; all seven are every day). Training
+        is untouched: every date's row trains, and a list's binary-column mask is read from the window's first calendar day as
+        in a run of every day, so a Friday's record is that of a run of every day. A day of another weekday is no issue day:
+        nothing is planned on it, missing or skipped. A window without one of these weekdays raises.
 
         With `information_set`, `availability` says what happens to a predictor known after the issue time (see
         epftoolbox2.information_set): "raise", the default here, refuses it before any fit; "warn" goes on and lists it in
@@ -215,6 +224,7 @@ class BaseModel(ABC):
         self._set_freq(freq)
         check_level(availability)
         horizon, horizons = resolve_horizons(horizon, horizons, 7)
+        weekdays = resolve_issue_days(issue_days)
         rules = self._cut_rules(information_set, cut_rules)
 
         if windows is not None:
@@ -234,13 +244,13 @@ class BaseModel(ABC):
                     on_file, test_start, test_end, forecast_only, allow_manifest_mismatch
                 )
 
+        self._check_issue_days(test_start, test_end, windows, weekdays)
+
         self._target = target
-        run_issue_days = (
-            _test_days(test_start, test_end)
-            if windows is None
-            else [datetime.date.fromisoformat(day) for day in windows.issue_days()]
-        )
-        newest = self._newest_targets(data, target, horizon, freq, rules, run_issue_days)
+        # The newest targets of every calendar day, as a run of every day reads them: a list's mask is read on the window's first
+        # day, whatever its weekday, and the reach of the training rows mustn't depend on the weekdays.
+        calendar_days = self._days_of(test_start, test_end, windows)
+        newest = self._newest_targets(data, target, horizon, freq, rules, calendar_days)
         if plan is None:
             plan = self._plan_predictors(
                 data,
@@ -254,6 +264,7 @@ class BaseModel(ABC):
                 windows=windows,
                 cut_rules=cut_rules,
                 horizons=horizons,
+                weekdays=weekdays,
             )
         else:
             self._check_plan_is_for(
@@ -268,6 +279,7 @@ class BaseModel(ABC):
                 windows,
                 newest,
                 horizons,
+                weekdays,
             )
         expanded = self._check_inputs(
             data,
@@ -282,6 +294,7 @@ class BaseModel(ABC):
             windows=windows,
             cut_rules=cut_rules,
             horizons=horizons,
+            weekdays=weekdays,
         )
         listing = self._availability_listing
         window_listings = self._window_listings
@@ -296,16 +309,25 @@ class BaseModel(ABC):
         if windows is None:
             self._offset = self._resolve_day(test_start, "test_start")
             test_end_day = self._resolve_day(test_end, "test_end")
-            run_days = list(range(test_end_day - self._offset + 1))
+            run_days = [
+                day
+                for day in range(test_end_day - self._offset + 1)
+                if weekdays is None or (first_day + datetime.timedelta(days=day)).weekday() in weekdays
+            ]
         else:
             for name, (start, end) in windows.periods:
                 self._resolve_day(start, f"{name} start")
                 self._resolve_day(end, f"{name} end")
             self._offset = self._resolve_day(test_start, "first day of the run")
-            run_days = [(datetime.date.fromisoformat(day) - first_day).days for day in windows.issue_days()]
+            run_days = [(datetime.date.fromisoformat(day) - first_day).days for day in windows.issue_days(weekdays)]
         n_days = len(run_days)
         test_days = {d: first_day + datetime.timedelta(days=d) for d in run_days}
-        calendar = IssueCalendar(freq, data.index.tz, horizons)
+        # A run of every day calls it as it did before `issue_days`, so a test that stands in for it still binds.
+        calendar = (
+            IssueCalendar(freq, data.index.tz, horizons)
+            if weekdays is None
+            else IssueCalendar(freq, data.index.tz, horizons, weekdays)
+        )
         absent_slots = {
             (period, (day.date() - first_day).days)
             for period, day in _contract.missing_test_rows(self._data.index, freq, test_days.values())
@@ -314,7 +336,12 @@ class BaseModel(ABC):
 
         all_tasks = calendar.tasks(first_day, run_days)
 
-        window_days = None if windows is None else self._window_days(windows, first_day)
+        window_days = None if windows is None else self._window_days(windows, first_day, weekdays)
+        # What a worker reads a task's day by: its window, days since the window's start, and place among the issue days, which
+        # a plan and the newest targets are indexed by. A plain run of every day has no entry, its place being its day.
+        run_positions = window_days
+        if windows is None and weekdays is not None:
+            run_positions = {day: (None, day, position) for position, day in enumerate(run_days)}
         if windows is not None:
             masks = self._window_masks(plan, windows, horizons, first_day)
         else:
@@ -352,6 +379,7 @@ class BaseModel(ABC):
                 read_columns=() if plan is None else sorted(plan.queried),
                 frame_hashes=frame_hashes,
                 training_cut=self._training_cut(rules, target, freq),
+                issue_days=weekdays,
             )
 
             def check_stored():
@@ -361,7 +389,7 @@ class BaseModel(ABC):
                     store.iter_lines(
                         cols=["hour", "horizon", "run_date", "predictor_list", "matching_days", "window", "actual"]
                     ),
-                    self._stored_forecast_lookup(plan, masks, windows),
+                    self._stored_forecast_lookup(plan, masks, windows, weekdays),
                     allow_mismatch=allow_manifest_mismatch,
                     model_name=self.name,
                     stored_actual=None if windows is None else self._stored_actual_lookup(first_day),
@@ -422,6 +450,8 @@ class BaseModel(ABC):
                     masks,
                     window_days,
                     window_skipped,
+                    run_positions,
+                    None if weekdays is None else [test_days[day] for day in run_days],
                 )
         finally:
             if store:
@@ -452,6 +482,7 @@ class BaseModel(ABC):
             matching_lists=matching_lists,
             zone=data.index.tz,
             horizons=None if every_horizon(horizon, horizons) else horizons,
+            issue_days=weekdays,
         )
         if store:
             warn_off_the_clock({self.name: ref}, stacklevel=2)
@@ -481,6 +512,14 @@ class BaseModel(ABC):
         if information_set is not None and cut_rules is not None and cut_rules is not information_set:
             raise ValueError(f"{self.name}: pass information_set or cut_rules, not both")
         return information_set if information_set is not None else cut_rules
+
+    @staticmethod
+    def _check_issue_days(
+        test_start: str, test_end: str, windows: Optional[RunWindows], weekdays: Optional[Sequence[int]]
+    ) -> None:
+        """A ValueError if a window of the run (or its test period) has none of the listed weekdays."""
+        for name, (start, end) in windows.periods if windows is not None else [("test", (test_start, test_end))]:
+            check_issue_days_in(start, end, weekdays, name)
 
     def _newest_targets(
         self,
@@ -586,15 +625,19 @@ class BaseModel(ABC):
         return recorded
 
     @staticmethod
-    def _window_days(windows: RunWindows, first_day: datetime.date) -> Dict[int, Tuple[str, int, int]]:
-        """Each day of the run, counted from `first_day` -> (its window, days since the window's start, place among the
-        run's issue days)."""
+    def _window_days(
+        windows: RunWindows, first_day: datetime.date, weekdays: Optional[Sequence[int]] = None
+    ) -> Dict[int, Tuple[str, int, int]]:
+        """Each issue day of the run, counted from `first_day` -> (its window, calendar days since the window's start, place
+        among the run's issue days). With `weekdays` only the days of those weekdays are issue days."""
         days = {}
         position = 0
         for name, (start, end) in windows.periods:
             first = (datetime.date.fromisoformat(start) - first_day).days
             last = (datetime.date.fromisoformat(end) - first_day).days
             for day in range(first, last + 1):
+                if weekdays is not None and (first_day + datetime.timedelta(days=day)).weekday() not in weekdays:
+                    continue
                 days[day] = (name, day - first, position)
                 position += 1
         return days
@@ -609,8 +652,7 @@ class BaseModel(ABC):
             if plan is None:
                 masks[name] = self._precompute_scalable_masks(horizons, offset)
             else:
-                days = (plan.position_of(start), plan.position_of(end) + 1)
-                masks[name] = self._plan_scalable_masks(plan, days, offset)
+                masks[name] = self._plan_scalable_masks(plan, plan.days_between(start, end), offset)
         return masks
 
     @staticmethod
@@ -623,10 +665,7 @@ class BaseModel(ABC):
 
     @staticmethod
     def _window_lists(plan: PredictorPlan, windows: RunWindows) -> Dict[str, List[Dict]]:
-        return {
-            name: plan.describe((plan.position_of(start), plan.position_of(end) + 1))
-            for name, (start, end) in windows.periods
-        }
+        return {name: plan.describe(plan.days_between(start, end)) for name, (start, end) in windows.periods}
 
     def _run_tasks(
         self,
@@ -642,6 +681,8 @@ class BaseModel(ABC):
         masks=None,
         window_days=None,
         window_skipped=None,
+        run_positions=None,
+        newest_days=None,
     ) -> None:
         # Targets for every horizon from 1 to the largest, whatever is planned: the worker reads the column of `hz - 1`.
         hour_arrays = self._build_hour_arrays(max(horizons))
@@ -681,10 +722,11 @@ class BaseModel(ABC):
                     "first_ordinal": self._first_ordinal,
                     "ids": plan.matching_ids,
                 }
-        if window_days is not None:
-            config["run_days"] = window_days
+        if run_positions is not None:
+            config["run_days"] = run_positions
         if self._newest is not None:
-            config["newest"] = self._newest.by_position()
+            # By a task's place among the issue days: with `issue_days`, among the days of the listed weekdays alone.
+            config["newest"] = self._newest.by_position(newest_days)
         first_day = datetime.date.fromisoformat(test_start)
 
         mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
@@ -758,6 +800,7 @@ class BaseModel(ABC):
         windows: Optional[RunWindows] = None,
         cut_rules: Optional["InformationSet"] = None,
         horizons: Optional[Sequence[int]] = None,
+        weekdays: Optional[Sequence[int]] = None,
     ) -> Dict[Tuple[int, int], List[str]]:
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
 
@@ -780,6 +823,9 @@ class BaseModel(ABC):
 
         A model with `newest_target="published"` raises without an information set (or `cut_rules`, see `run`) and without a
         rule for the target, at every level. Its training target isn't checked: what it trains on is known by construction.
+
+        `weekdays` (`resolve_issue_days` of a run's `issue_days`) checks and lists the issue days of those weekdays alone: what a
+        forecast of another weekday would read late is no use of this run's.
         """
         self._set_freq(freq)
         horizons = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
@@ -808,6 +854,7 @@ class BaseModel(ABC):
                     windows=windows,
                     cut_rules=cut_rules,
                     horizons=horizons,
+                    weekdays=weekdays,
                 )
             expanded = plan.names_by_pair()
             self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
@@ -822,7 +869,9 @@ class BaseModel(ABC):
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
         expanded = self._precompute_expanded_predictors(horizons)
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
-        days = None if windows is None else windows.issue_days()
+        days = None if windows is None else windows.issue_days(weekdays)
+        if days is None and weekdays is not None and test_start is not None and test_end is not None:
+            days = [day.isoformat() for day in listed_days(_test_days(test_start, test_end), weekdays)]
         if information_set is not None and availability == "raise":
             information_set.check(
                 expanded,
@@ -849,9 +898,18 @@ class BaseModel(ABC):
             )
             self._availability_listing = listing_rows(uses)
             for name, (start, end) in windows.periods if windows is not None else ():
+                listed = None if weekdays is None else RunWindows.fixed(None, (start, end)).issue_days(weekdays)
                 self._window_listings[name] = listing_rows(
                     information_set.late_uses(
-                        expanded, target, freq, data.index, start, end, model_name=self.name, check_target=check_target
+                        expanded,
+                        target,
+                        freq,
+                        data.index,
+                        start,
+                        end,
+                        model_name=self.name,
+                        check_target=check_target,
+                        **({} if listed is None else {"issue_days": listed}),
                     )
                 )
         return expanded
@@ -872,7 +930,7 @@ class BaseModel(ABC):
         if len(windows.periods) == 1:
             return {windows.periods[0][0]: plan.listing(target, self.name)}
         return {
-            name: plan.listing(target, self.name, (plan.position_of(start), plan.position_of(end) + 1))
+            name: plan.listing(target, self.name, plan.days_between(start, end))
             for name, (start, end) in windows.periods
         }
 
@@ -903,26 +961,32 @@ class BaseModel(ABC):
         windows: Optional[RunWindows] = None,
         cut_rules: Optional["InformationSet"] = None,
         horizons: Optional[Sequence[int]] = None,
+        weekdays: Optional[Sequence[int]] = None,
     ) -> Optional[PredictorPlan]:
         """The plan of a predictor function of `ctx` for this data and test period, or None for a model with fixed lists.
 
         `issue_days` plans these days instead of [test_start, test_end]: `verify` samples a few to learn the inputs.
         `windows` plans the days of a run with validation, once each and none between them; the function doesn't see them.
         `availability` is the level `ctx` answers at (see `epftoolbox2.models.context`). `cut_rules` is as in `run`.
-        `horizons` are the horizons planned, every one from 1 to `horizon` (the largest) if not given.
+        `horizons` are the horizons planned, every one from 1 to `horizon` (the largest) if not given. `weekdays` plans the days of
+        those weekdays alone (a run's `issue_days`), not with `issue_days`, which are already the days to plan.
         """
         if self._ctx_fn is None:
             return None
         self._set_freq(freq)
         if windows is not None:
-            days = [datetime.date.fromisoformat(day) for day in windows.issue_days()]
+            calendar_days = [datetime.date.fromisoformat(day) for day in windows.issue_days()]
+            days = listed_days(calendar_days, weekdays)
         elif issue_days is not None:
-            days = [datetime.date.fromisoformat(day) for day in issue_days]
+            days = calendar_days = [datetime.date.fromisoformat(day) for day in issue_days]
         elif test_start is None or test_end is None:
             raise ValueError(f"{self.name}: a predictor function of `ctx` needs the test period to plan its lists")
         else:
-            days = _test_days(test_start, test_end)
-        newest = self._newest_targets(data, target, horizon, freq, self._cut_rules(information_set, cut_rules), days)
+            calendar_days = _test_days(test_start, test_end)
+            days = listed_days(calendar_days, weekdays)
+        # Of every calendar day, as `run` reads them, so that the reach of a matching list's training days is that run's.
+        rules = self._cut_rules(information_set, cut_rules)
+        newest = self._newest_targets(data, target, horizon, freq, rules, calendar_days)
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
         plan = build_plan(
             self._ctx_fn,
@@ -940,7 +1004,7 @@ class BaseModel(ABC):
         )
         if windows is not None and warn_unpublished and len(windows.periods) > 1:
             for name, (start, end) in windows.periods:
-                warn_never_published_in(plan, name, (plan.position_of(start), plan.position_of(end) + 1))
+                warn_never_published_in(plan, name, plan.days_between(start, end))
         return plan
 
     def _check_plan_is_for(
@@ -956,6 +1020,7 @@ class BaseModel(ABC):
         windows=None,
         newest=None,
         horizons=None,
+        weekdays=None,
     ) -> None:
         """A plan answers for one function, frame and test period; on another run it would give wrong lists silently."""
         if plan.function is not self._ctx_fn:
@@ -963,13 +1028,9 @@ class BaseModel(ABC):
         problems = []
         if plan.data is not data:
             problems.append("data")
-        planned_days = (
-            _test_days(test_start, test_end)
-            if windows is None
-            else [datetime.date.fromisoformat(day) for day in windows.issue_days()]
-        )
+        planned_days = listed_days(self._days_of(test_start, test_end, windows), weekdays)
         if plan.issue_days != planned_days:
-            problems.append("test period")
+            problems.append("test period or issue days")
         if plan.horizon != horizon:
             problems.append("horizon")
         elif plan.horizons != (tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)):
@@ -995,37 +1056,49 @@ class BaseModel(ABC):
         """(list id, period, horizon) -> which of the list's columns are scaled, from all test days of that list.
 
         All of them, pending or not, so a resumed run computes what a fresh one does. `days` is a (start, stop) slice of the
-        plan's issue days and `offset` the day id of its first day, when masks are kept per window: what happens in another
-        window then can't move them.
+        plan's issue days and `offset` the day id of the first calendar day of the window they are in (the run's first day if not
+        given), when masks are kept per window: what happens in another window then can't move them.
 
-        A list's mask is read from the window of its first test day, so nothing later than a forecast's own issue day
-        decides how it is scaled. A list in use on every test day of a (period, horizon) is a fixed list there and gets
-        exactly what a fixed list gets, which is what makes a function returning that list identical to it. Any other
-        list may hold a column that only starts with it, and a column with no value can't tell whether it is binary
-        (`get_scalable_mask` would leave it unscaled for good): it is read from the first of the list's test days that has
-        a value for it. Before that day the list's forecasts have no training row, since none has the column.
+        A list's mask is read on the window's first calendar day if the list is used on the window's first issue day, whatever
+        that day's weekday, as a fixed list's is, else on the first issue day that uses it. Either way it is read on that day or
+        before it, from rows no later than the forecast's own, and which day it is depends on nothing after it: not on later issue
+        days, their answers or the end of the test period. So a function returning one list on every issue day, or on Fridays
+        alone in a run of Fridays, is identical to that fixed list. Test days are the plan's issue days, by date: with
+        `issue_days` they aren't consecutive.
+
+        A column with no value on the day the mask is read can't tell whether it is binary (`get_scalable_mask` would leave it
+        unscaled for good). For a list not used on every issue day it is read on the first of the list's issue days, from the
+        first one used on, that has a value for it: before that day the list's forecasts have no training row, since none has
+        the column. A list used on every issue day keeps a fixed list's mask, such a column unscaled; whether a list is used on
+        every issue day depends on the last of them, a known issue (`tests/test_known_issues.py`).
         """
         offset = self._offset if offset is None else offset
+        day_ids = np.array([day.toordinal() - self._first_ordinal for day in plan.issue_days], dtype=np.int64)
         masks = {}
         for (hour, hz), all_ids in plan.assignment.items():
             ids = all_ids[days[0] : days[1]]
+            ids_days = day_ids[days[0] : days[1]]
             for list_id in np.unique(ids).tolist():
                 predictors = list(plan.lists[list_id])
                 test_days = np.flatnonzero(ids == list_id)
-                sample = self._training_sample(hour, offset + test_days[0], hz, predictors)
+                first = offset if test_days[0] == 0 else int(ids_days[test_days[0]])
+                sample = self._training_sample(hour, first, hz, predictors)
                 mask = StandardScaler.get_scalable_mask(sample)
                 if len(test_days) < len(ids):
-                    self._read_columns_without_values(
-                        mask, np.isnan(sample).all(axis=0), hour, hz, predictors, test_days, offset
-                    )
+                    # From the list's first issue day on, that day too when the mask was read before it.
+                    list_days = ids_days[test_days]
+                    later = list_days[1:] if list_days[0] == first else list_days
+                    self._read_columns_without_values(mask, np.isnan(sample).all(axis=0), hour, hz, predictors, later)
                 masks[(list_id, hour, hz)] = mask
         return masks
 
-    def _read_columns_without_values(self, mask, without_values, hour, hz, predictors, test_days, offset) -> None:
-        for day in test_days[1:]:
+    def _read_columns_without_values(self, mask, without_values, hour, hz, predictors, list_days) -> None:
+        """Read the columns of a list's mask that had no value where it was read from the first of `list_days` (day ids, in
+        order) that has one."""
+        for day in list_days:
             if not without_values.any():
                 return
-            sample = self._training_sample(hour, offset + day, hz, predictors)
+            sample = self._training_sample(hour, int(day), hz, predictors)
             found = without_values & ~np.isnan(sample).all(axis=0)
             if found.any():
                 mask[found] = StandardScaler.get_scalable_mask(sample)[found]
@@ -1131,10 +1204,14 @@ class BaseModel(ABC):
         return uses
 
     def _stored_forecast_lookup(
-        self, plan: Optional[PredictorPlan], masks: Dict, windows: Optional[RunWindows] = None
+        self,
+        plan: Optional[PredictorPlan],
+        masks: Dict,
+        windows: Optional[RunWindows] = None,
+        weekdays: Optional[Sequence[int]] = None,
     ) -> Callable[[int, int, str], Optional[PlannedForecast]]:
-        """What a fresh run would give a stored forecast's key, or None if it isn't planned. `masks` are per window in a
-        run with windows."""
+        """What a fresh run would give a stored forecast's key, or None if it isn't planned, as on a weekday `weekdays` doesn't
+        list. `masks` are per window in a run with windows."""
         by_window = {TEST: masks} if windows is None else masks
         digests = {
             window: {key: mask_digest(mask) for key, mask in window_masks.items()}
@@ -1143,7 +1220,7 @@ class BaseModel(ABC):
 
         def lookup(period: int, horizon: int, run_date: str) -> Optional[PlannedForecast]:
             window = TEST if windows is None else windows.window_of(run_date)
-            if window is None:
+            if window is None or (weekdays is not None and not listed_days([run_date], weekdays)):
                 return None
             list_id = None if plan is None else plan.list_id_of(period, horizon, run_date)
             key = (period, horizon) if plan is None else (list_id, period, horizon)

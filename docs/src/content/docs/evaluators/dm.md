@@ -13,7 +13,7 @@ For the forecasts a model and the benchmark share (same `run_date`, `target_date
 
 - **Daily loss:** the mean absolute error over the periods of one (run date, horizon), whatever their number (23, 24 or 25; 92, 96 or 100). With several horizons in a group, a run date's loss is the mean of its horizons' losses.
 - **DM test:** on the daily losses, with a Newey-West variance (lag ⌊4(n/100)^(2/9)⌋, 5 at 365 days). `variance="plain"` reproduces epftoolbox. Two-sided; a positive statistic means the model is better.
-- **Ratio:** MAE of the model / MAE of the benchmark, both forecast-weighted on the shared forecasts, so below 1 means the model is better. The interval resamples daily error sums in weekly blocks, so it agrees with the ratio on DST days.
+- **Ratio:** MAE of the model / MAE of the benchmark, both forecast-weighted on the shared forecasts, so below 1 means the model is better. The interval resamples daily error sums in blocks of `block` issue days (a week of a run of every day), so it agrees with the ratio on DST days.
 - **Holm:** over the `DM m` models compared with the benchmark in that group, with [exact clones](/epftoolbox2/model-pipeline/comparing-models/#exact-clones) counted once.
 
 ## Output columns
@@ -45,7 +45,7 @@ Some cells stay empty on purpose:
 | `correction` | str | `"holm"` | `"holm"`, or `None` for no correction (`DM p_holm` empty, `DM verdict` from `DM p`) |
 | `alpha` | float | `0.05` | Two-sided size behind `DM verdict` |
 | `interval` | float | `0.95` | Coverage of the interval; `None` skips the bootstrap |
-| `block` | int | `7` | Block length of the bootstrap, in days |
+| `block` | int | `7` | Block length of the bootstrap, in issue days (observations): a week of a run of every day, seven weeks of Fridays |
 | `reps` | int | `4000` | Bootstrap repetitions |
 | `seed` | int | `0` | Bootstrap seed: same data and seed, same numbers |
 
@@ -83,7 +83,7 @@ print(report.summary()[["model", "MAE", "DM ratio", "DM ci_low", "DM ci_high", "
 - One `DMEvaluator` per pipeline: a second one would write the same columns, which raises `ValueError`. For another benchmark call `report.tests(benchmark=...)`.
 - `ModelPipeline.run()` and `report()` raise before anything else when `benchmark` is not one of the pipeline's models. In a group where the benchmark has no forecasts the columns are NaN, with a warning.
 - A group is tested only with at least 2 days (and more days than `lag`); below that the p-values are NaN, and the ratio is still given.
-- `summary()` warns below 182 days. The breakdowns don't: their groups are short by nature, and `DM n_days` is in the table.
+- `summary()` warns below a span of 182 calendar days, from the first run date to the last: `n_days` when every day has a forecast (see [Test length](/epftoolbox2/model-pipeline/comparing-models/#test-length)). The breakdowns don't: their groups are short by nature, and `DM n_days` is in the table.
 - Results at different frequencies raise `ValueError`: period 5 of an hourly model and of a 15-minute model are different times of the day.
 - In a group with several horizons (`summary()`, `by_hour()`) the test is `report.tests(horizon="all")`; `by_horizon()` holds the per-horizon tests of `report.tests()`.
 - In `compute_all()` (and so the Excel exporter) the test and bootstrap run once per group, which adds up on many models and horizons (with `MCSEvaluator` as well, about 40 seconds for 50 models over a year). Pass `interval=None` or a smaller `reps` if that matters.

@@ -15,7 +15,7 @@ on every date.
 import collections.abc
 import datetime
 import functools
-from typing import Any, Dict, FrozenSet, Iterable, List, Sequence, Set, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -89,6 +89,64 @@ def horizon_arguments(horizon: Any, horizons: Sequence[int]) -> Dict[str, Any]:
     return {"horizon": horizon} if every_horizon(horizon, horizons) else {"horizons": tuple(horizons)}
 
 
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+def resolve_issue_days(issue_days: Any) -> Optional[Tuple[int, ...]]:
+    """The weekdays a run issues forecasts on, as sorted `date.weekday()` numbers (Monday 0), from `issue_days=`, a list of
+    weekday names in any case such as `["friday"]`; None is every day, and so are all seven, which normalise to it.
+
+    Names only: a number would be read as one of two weekday conventions. A bare string, an empty list, an unknown name or a
+    repeated one raises.
+    """
+    if issue_days is None:
+        return None
+    if isinstance(issue_days, (str, bytes)) or not isinstance(issue_days, collections.abc.Iterable):
+        raise ValueError(
+            f"issue_days must be a list of weekday names, such as ['friday'] or ['monday', 'thursday'], got {issue_days!r}"
+        )
+    listed = list(issue_days)
+    if not listed:
+        raise ValueError("issue_days is empty: a run needs at least one weekday to issue forecasts on")
+    found = []
+    for name in listed:
+        if not isinstance(name, str) or name.strip().lower() not in WEEKDAYS:
+            raise ValueError(f"issue_days are weekday names, one of {list(WEEKDAYS)} in any case, got {name!r}")
+        found.append(WEEKDAYS.index(name.strip().lower()))
+    repeated = sorted({WEEKDAYS[day] for day in found if found.count(day) > 1})
+    if repeated:
+        raise ValueError(f"issue_days lists {repeated} more than once: {listed}")
+    if len(found) == len(WEEKDAYS):
+        return None
+    return tuple(sorted(found))
+
+
+def issue_day_names(weekdays: Optional[Iterable[int]]) -> Optional[List[str]]:
+    """The names of these weekday numbers, in week order, as a manifest and YAML write them; None for every day."""
+    return None if weekdays is None else [WEEKDAYS[day] for day in sorted(weekdays)]
+
+
+def listed_days(days: Iterable[Any], weekdays: Optional[Iterable[int]]) -> List[Any]:
+    """The days among `days` (dates, or ISO date strings) whose weekday is listed, in their order; all of them for None."""
+    days = list(days)
+    if weekdays is None:
+        return days
+    kept = frozenset(weekdays)
+    return [day for day in days if _as_date(day).weekday() in kept]
+
+
+def check_issue_days_in(start: Any, end: Any, weekdays: Optional[Iterable[int]], label: str = "test") -> None:
+    """A ValueError if no day from `start` to `end` is one of `weekdays`: such a window would plan nothing."""
+    if weekdays is None:
+        return
+    first, last = _as_date(start), _as_date(end)
+    if not listed_days((first + datetime.timedelta(days=d) for d in range((last - first).days + 1)), weekdays):
+        raise ValueError(
+            f"The {label} period {first} to {last} has no {' or '.join(issue_day_names(weekdays))}, so with "
+            f"issue_days={issue_day_names(weekdays)} nothing would be forecast in it"
+        )
+
+
 NEWEST_TARGETS = ("d-1", "published")
 
 
@@ -132,9 +190,16 @@ class NewestTargets:
         found = self.k[period, self._order[place]]
         return int(found) if np.ndim(found) == 0 else found
 
-    def by_position(self) -> Dict[int, np.ndarray]:
-        """period -> k on each of `days`, in their order: what a worker reads by a task's place among the issue days."""
-        return {period: self.k[period].copy() for period in range(self.k.shape[0])}
+    def by_position(self, days: Optional[Sequence[Any]] = None) -> Dict[int, np.ndarray]:
+        """period -> k on each of `days`, in their order: what a worker reads by a task's place among the issue days. `days`
+        (dates) are some of the days this was read for, such as the listed weekdays of a run with `issue_days`; all of them if
+        not given."""
+        if days is None:
+            return {period: self.k[period].copy() for period in range(self.k.shape[0])}
+        ordinals = np.array([_as_date(day).toordinal() for day in days], dtype=np.int64)
+        return {
+            period: np.atleast_1d(np.asarray(self.at(period, ordinals))).copy() for period in range(self.k.shape[0])
+        }
 
 
 def _as_date(day: Any) -> datetime.date:
@@ -215,18 +280,24 @@ class IssueCalendar:
 
     This is the one count of planned forecasts, so that `BaseModel.run`, `ModelPipeline.report` and the ensembles agree per window.
     `report` builds it from a manifest's `data_timezone`, with no data at hand. `zone` is as in the module docstring.
+
+    `weekdays` are the weekdays a run issues on (`resolve_issue_days`), every day for None: a day of another weekday is no issue
+    day, so its keys are neither planned nor missing.
     """
 
-    def __init__(self, freq: str, zone: Any, horizons: Iterable[int]):
+    def __init__(self, freq: str, zone: Any, horizons: Iterable[int], weekdays: Optional[Iterable[int]] = None):
         self.freq = freq
         self.zone = zone
         self.horizons = tuple(horizons)
+        self.weekdays = None if weekdays is None else tuple(sorted(weekdays))
         self._periods = periods_per_day(freq)
 
     def issue_days(self, start: Any, end: Any) -> List[datetime.date]:
-        """The issue days from `start` to `end`, both included."""
+        """The issue days from `start` to `end`, both included: those of a listed weekday."""
         first, last = _as_date(start), _as_date(end)
-        return [first + datetime.timedelta(days=day) for day in range((last - first).days + 1)]
+        return listed_days(
+            (first + datetime.timedelta(days=day) for day in range((last - first).days + 1)), self.weekdays
+        )
 
     def _gaps(self, first: datetime.date, last: datetime.date) -> Dict[datetime.date, Tuple[int, ...]]:
         """The clock's gaps on these issue days and the days their forecasts are for."""
@@ -238,7 +309,9 @@ class IssueCalendar:
 
     def tasks(self, first_day: datetime.date, days: Sequence[int]) -> List[Tuple[int, int, int]]:
         """The planned `(period, horizon, day)` of these days, each a count of days from `first_day`, by day, then horizon, then
-        period."""
+        period. A day of a weekday not listed has none."""
+        if self.weekdays is not None:
+            days = [day for day in days if (first_day + datetime.timedelta(days=day)).weekday() in self.weekdays]
         if not len(days):
             return []
         gaps = self._gaps(

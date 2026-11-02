@@ -21,7 +21,7 @@ import yaml
 
 from epftoolbox2 import cli
 from epftoolbox2.ensembles import AverageEnsemble, Ensemble
-from epftoolbox2.ensembles._compute import MIN_VALIDATION_DAYS, MIN_VALIDATION_SHARE
+from epftoolbox2.ensembles._compute import MIN_VALIDATION_DAYS, MIN_VALIDATION_ISSUES, MIN_VALIDATION_SHARE
 from epftoolbox2.evaluators import (
     BiasEvaluator,
     DMEvaluator,
@@ -904,6 +904,12 @@ def test_the_target_days_warn_below_twenty_eight(tmp_path, count, warns):
     if warns:
         assert f"{count} target days ({count * 3} forecasts)" in found[0]
     assert choice_of(report)["validation_share"] == 1.0
+    # One forecast a day: as many issue days as target days, and the same rule.
+    assert MIN_VALIDATION_ISSUES == 28
+    issued = warned(caught, "issued on")
+    assert bool(issued) is warns
+    if warns:
+        assert f"issued on {count} days ({count * 3} forecasts)" in issued[0]
 
 
 def test_distinct_target_days_are_counted_not_forecasts(tmp_path):

@@ -64,6 +64,9 @@ string `"2024-08-01"`, so the whole day is included.
 `horizon: 6` forecasts every horizon from 1 to 6. In its place `horizons: [1, 3, 7]` forecasts those alone, and `report()` / `epf
 report` reads them back with the same list (see [Some horizons only](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)).
 
+`issue_days: [friday]` issues forecasts on those weekdays only, and `report()` / `epf report` read them back with the same list; a file
+without it reports the weekdays the manifests record (see [Some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)).
+
 **Forecast-only variant**: add `forecast_only: true` and use date keywords so the file runs daily without editing:
 
 ```yaml
@@ -101,6 +104,7 @@ model_pipeline:
 | `model_target` | str | `"price"` | Target column name |
 | `model_horizon` | int | `None` | Every horizon from 1 to it (days); 7 if neither it nor `model_horizons` is given (YAML: `model_pipeline.horizon`) |
 | `model_horizons` | list | `None` | Only these horizons, e.g. `[1, 3, 7]`, in place of `model_horizon`; giving both raises (YAML: `model_pipeline.horizons`). Every horizon from 1 to H is saved as `horizon: H`. See [Some horizons only](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only) |
+| `model_issue_days` | list | `None` | Issue forecasts on these weekdays only, e.g. `["friday"]`, names in any case; all seven are every day (YAML: `model_pipeline.issue_days`, written only when it isn't every day). See [Some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only) |
 | `model_freq` | str | `"1h"` | Forecasting frequency (e.g., `"15min"`) |
 | `max_processes` | int | `None` | Worker process count (unset: usable CPUs `// threads_per_process`) |
 | `threads_per_process` | int | `None` | Tasks each worker process runs at once, on threads (unset: 1) |

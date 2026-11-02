@@ -8,7 +8,7 @@ import yaml
 from .data_pipeline import DataPipeline
 from .model_pipeline import ModelPipeline
 from ..information_set import InformationSet
-from ..models._calendar import every_horizon, resolve_horizons
+from ..models._calendar import every_horizon, issue_day_names, resolve_horizons, resolve_issue_days
 from ..results.report import EvaluationReport
 from ..logging import get_logger
 from ._yaml import dump_yaml
@@ -71,7 +71,9 @@ class Workflow:
     `ModelPipeline.run`. A merge raises if the array's tasks ran on different windows.
 
     `model_pipeline.horizon: H` forecasts every horizon from 1 to H (7 if absent), and `horizons: [1, 3, 7]` (`model_horizons`)
-    only those; giving both raises. `report()` passes the same to `ModelPipeline.report`.
+    only those; giving both raises. `report()` passes the same to `ModelPipeline.report`. `issue_days: [friday]`
+    (`model_issue_days`) issues forecasts on those weekdays only, as `ModelPipeline.run(issue_days=...)`, and is written only
+    when it isn't every day.
 
     Example:
         >>> workflow = Workflow(
@@ -113,8 +115,10 @@ class Workflow:
         model_test: Optional[Sequence[Any]] = None,
         models_per_task: Optional[int] = None,
         model_horizons: Optional[Sequence[int]] = None,
+        model_issue_days: Optional[Sequence[str]] = None,
     ):
         resolve_horizons(model_horizon, model_horizons, 7)  # both, or a list that isn't one, raise before anything runs
+        resolve_issue_days(model_issue_days)
         self.data_pipeline = str(data_pipeline) if data_pipeline is not None else None
         self.model_pipeline = str(model_pipeline) if model_pipeline is not None else None
         self.data_start = data_start
@@ -125,6 +129,7 @@ class Workflow:
         self.model_target = model_target
         self.model_horizon = model_horizon
         self.model_horizons = model_horizons
+        self.model_issue_days = model_issue_days
         self.model_freq = model_freq
         self.model_forecast_only = model_forecast_only
         self.max_processes = max_processes
@@ -280,6 +285,7 @@ class Workflow:
             target=self.model_target,
             horizon=self.model_horizon,
             horizons=self.model_horizons,
+            issue_days=self.model_issue_days,
             freq=self.model_freq,
             save_dir=str(save_dir) if save_dir else None,
             forecast_only=self.model_forecast_only,
@@ -315,6 +321,7 @@ class Workflow:
             test_end=self.model_test_end,
             horizon=self.model_horizon,
             horizons=self.model_horizons,
+            issue_days=self.model_issue_days,
             freq=self.model_freq,
             forecast_only=self.model_forecast_only,
             data=self._run_data() if needs_data else None,
@@ -352,6 +359,9 @@ class Workflow:
             mp["horizon"] = horizon
         else:
             mp["horizons"] = list(horizons)
+        weekdays = resolve_issue_days(self.model_issue_days)
+        if weekdays is not None:  # every day writes nothing
+            mp["issue_days"] = issue_day_names(weekdays)
         mp.update({"freq": self.model_freq, "forecast_only": self.model_forecast_only})
         if self.model_test_start is not None:
             mp["test_start"] = self.model_test_start
@@ -401,6 +411,7 @@ class Workflow:
             model_target=mp.get("target", "price"),
             model_horizon=mp.get("horizon"),
             model_horizons=mp.get("horizons"),
+            model_issue_days=mp.get("issue_days"),
             model_freq=mp.get("freq", "1h"),
             model_forecast_only=mp.get("forecast_only", False),
             max_processes=env.get("max_processes"),

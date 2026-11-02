@@ -72,6 +72,7 @@ class ModelPipeline:
         validation: Union[Tuple[Any, Any], str, None] = None,  # (start, end) or "previous_year"; alone, only those days
         test: Optional[Tuple[Any, Any]] = None,  # (start, end), the same as test_start and test_end
         horizons: Optional[Sequence[int]] = None,  # Only these horizons, e.g. [1, 3, 7] or range(3, 10); not with horizon
+        issue_days: Optional[Sequence[str]] = None,  # Only these weekdays, e.g. ["friday"]; any case, all seven = every day
     ) -> EvaluationReport: ...
 
     def report(                           # Report from the JSONL files a run wrote to save_dir
@@ -87,6 +88,7 @@ class ModelPipeline:
         validation: Union[Tuple[Any, Any], str, None] = None,  # What run was told; each must be what the manifests record
         test: Optional[Tuple[Any, Any]] = None,  # None of the windows: every window the manifests record
         horizons: Optional[Sequence[int]] = None,  # As in run; only records of these horizons are read
+        issue_days: Optional[Sequence[str]] = None,  # As in run; None reads them from the manifests
     ) -> EvaluationReport: ...
 
     def verify(                           # Leakage probe and positive control on sampled issue days
@@ -103,6 +105,7 @@ class ModelPipeline:
         positive_control: bool = True,    # False: `ok` only says that no forecast moved
         rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,  # Builds the input from source data
         horizons: Optional[Sequence[int]] = None,  # The horizons a run lists, in place of horizon
+        issue_days: Optional[Sequence[str]] = None,  # The weekdays a run lists: only those are sampled
     ) -> VerifyReport: ...
 
     def explain(                          # What one forecast's predictors hold and when each is known; no side effects
@@ -179,6 +182,7 @@ class Workflow:
         model_test: Optional[Sequence[Any]] = None,           # [start, end], the same as model_test_start and _end
         models_per_task: Optional[int] = None,                # With model_index: task i runs models [i*k, (i+1)*k)
         model_horizons: Optional[Sequence[int]] = None,       # Only these horizons, e.g. [1, 3, 7]; not with model_horizon
+        model_issue_days: Optional[Sequence[str]] = None,     # Only these weekdays, e.g. ["friday"]
     ): ...
 
     def run(self) -> EvaluationReport: ...
@@ -235,7 +239,7 @@ class EvaluationReport:
         correction: Optional[str] = "holm",  # Over the m models of a horizon; None for none
         by: Optional[str] = None,          # "hour": per-hour rows, descriptive, no p_holm or verdict
         interval: Optional[float] = 0.95,  # Coverage of the bootstrap interval of the ratio; None skips it
-        block: int = 7,                    # Bootstrap block length in days
+        block: int = 7,                    # Bootstrap block length in issue days (observations)
         reps: int = 4000,
         seed: int = 0,
     ) -> pd.DataFrame: ...  # model, benchmark, horizon, n_days, n_forecasts, mae, mae_benchmark, ratio, ci_low, ci_high, statistic, p_value, p_holm, m, mde, verdict
@@ -244,7 +248,7 @@ class EvaluationReport:
         self,
         alpha: float = 0.10,
         statistic: str = "R",              # "R" (T_R) or "max" (T_max)
-        block: int = 7,                    # Mean block length of the stationary bootstrap, in days
+        block: int = 7,                    # Mean block length of the stationary bootstrap, in issue days
         reps: int = 1000,
         seed: int = 0,
         models: Optional[Sequence[str]] = None,  # Default: all; fewer than 3 gives NaN with a warning
@@ -503,9 +507,9 @@ class Use:                                  # What the function may return inste
     def __init__(self, predictors: Sequence[str], train_on: str = "all"): ...  # "matching": only the past days given this list
 ```
 
-`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, `ModelResultRef.availability_listing` holds the rows behind `report.availability()`, and `ModelResultRef.matching_lists` the hash and number of predictors of each `train_on="matching"` list, which `report.training_days()` reads the records for. `ModelResultRef.zone` is the data's time zone, which says what periods a date has on the clock (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned)). `ModelResultRef.horizon` is the largest horizon of a run and `ModelResultRef.horizons` the ones it lists, None for every one from 1 to `horizon`; only records of those horizons are read (see [Horizons](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)).
+`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, `ModelResultRef.availability_listing` holds the rows behind `report.availability()`, and `ModelResultRef.matching_lists` the hash and number of predictors of each `train_on="matching"` list, which `report.training_days()` reads the records for. `ModelResultRef.zone` is the data's time zone, which says what periods a date has on the clock (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned)). `ModelResultRef.horizon` is the largest horizon of a run and `ModelResultRef.horizons` the ones it lists, None for every one from 1 to `horizon`; only records of those horizons are read (see [Horizons](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)). `ModelResultRef.issue_days` is the weekdays a run issued on, as `date.weekday()` numbers (Monday is 0), None for every day; only records issued on them (their `run_weekday`) are read (see [Weekdays](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)).
 
-`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`. And `frame_hashes`, what one `ModelPipeline.run` call shares between its models so that it hashes each column once. And `cut_rules`, an information set a model with `newest_target="published"` reads its newest targets from when `information_set` isn't given, without checking anything with it: the leakage probe runs models so. And `horizons`, as in `ModelPipeline.run`; its `horizon` defaults to 7 too. `leakage_probe` and `positive_control` take `horizon` (default 1) or `horizons` the same way.
+`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`. And `frame_hashes`, what one `ModelPipeline.run` call shares between its models so that it hashes each column once. And `cut_rules`, an information set a model with `newest_target="published"` reads its newest targets from when `information_set` isn't given, without checking anything with it: the leakage probe runs models so. And `horizons` and `issue_days`, as in `ModelPipeline.run`; its `horizon` defaults to 7 too. `leakage_probe` and `positive_control` take `horizon` (default 1) or `horizons` the same way.
 
 ### Scalers
 
@@ -561,7 +565,7 @@ class DMEvaluator(Evaluator):
         correction: Optional[str] = "holm",  # Over the models of a group; None for none
         alpha: float = 0.05,               # Size behind "DM verdict"
         interval: Optional[float] = 0.95,  # Coverage of the bootstrap interval of the ratio; None skips it
-        block: int = 7,                    # Bootstrap block length in days
+        block: int = 7,                    # Bootstrap block length in issue days (observations)
         reps: int = 4000,
         seed: int = 0,
     ): ...
@@ -572,7 +576,7 @@ class MCSEvaluator(Evaluator):
         self,
         alpha: float = 0.10,               # Size of the set
         statistic: str = "R",              # "R" (T_R) or "max" (T_max)
-        block: int = 7,                    # Mean block length of the stationary bootstrap, in days
+        block: int = 7,                    # Mean block length of the stationary bootstrap, in issue days
         reps: int = 1000,
         seed: int = 0,
     ): ...

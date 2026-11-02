@@ -27,12 +27,12 @@ class MCSEvaluator(SetEvaluator):
     `report.mcs()`, which names the models that limited the keys and takes a subset. Needs at least three models; with
     fewer the columns are NaN, with a warning. Exact clones are one model to the set, and each gets its result, and they count
     once in those three. `in MCS` is a verdict, so it is empty per hour (the p-values are a heatmap
-    there) and below 30 days. `summary()` warns below 182 days.
+    there) and below 30 days. `summary()` warns below a span of 182 calendar days.
 
     Args:
         alpha: Size of the set (0.10 gives the 90 % set).
         statistic: `"R"` (T_R, recommended: seed-stable) or `"max"` (T_max).
-        block: Mean block length of the stationary bootstrap, in days.
+        block: Mean block length of the stationary bootstrap, in issue days (observations: seven Fridays are seven weeks).
         reps: Bootstrap repetitions (at least 1,000 recommended).
         seed: Bootstrap seed.
     """
@@ -87,7 +87,7 @@ class MCSEvaluator(SetEvaluator):
         for name, p, inside in zip(names, result.p_values, result.included()):
             out[name].update({"p": float(p), "in": bool(inside) if judge else float("nan")})
         if not is_grouped(model_dfs):
-            warn_if_short(compared.daily.n_days)
+            warn_if_short(compared.daily.n_days, span_days=compared.daily.span_days)
         return out
 
     def clones(self, model_dfs: Mapping[str, pd.DataFrame]) -> list:

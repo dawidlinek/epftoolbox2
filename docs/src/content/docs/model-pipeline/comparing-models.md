@@ -51,12 +51,19 @@ and `ranks()` warns, as they did.
 
 One test year resolves differences of about 5 % of the MAE. Gaps of 1–2 % need about 2,700 days, so with one year most small gaps will read `no difference`, and that is the right answer. The `mde` column gives the minimum detectable effect for each pair: the difference (as a share of the benchmark's MAE) this test length would detect with 80 % power.
 
-| `n_days` | What happens |
-|----------|--------------|
-| below 365 | A note in `df.attrs["note"]` |
-| below 182 | Also a warning |
-| below 30 | Also no `verdict` and no confidence sets (`in_90`, ...): the normal approximation of the test rejects a true null 9 % of the time at 30 days and 35 % at 3 |
-| up to one block (7) | Also no interval and no rank uncertainty: one block covers all the days, so every resample is the same |
+| Length | What happens |
+|--------|--------------|
+| span below 365 | A note in `df.attrs["note"]` |
+| span below 182 | Also a warning |
+| `n_days` below 30 | Also no `verdict` and no confidence sets (`in_90`, ...): the normal approximation of the test rejects a true null 9 % of the time at 30 days and 35 % at 3 |
+| `n_days` up to one block (7) | Also no interval and no rank uncertainty: one block covers all the days, so every resample is the same |
+
+The **span** is the calendar days from the first run date to the last, both counted: it says whether the seasons are in. `n_days` counts
+the days with forecasts, and the verdict, the bootstrap intervals and the Newey-West lag read it. With a forecast on every day the two
+are equal and the messages are as they were. A run that issues on some weekdays only (`issue_days=`, see
+[Some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)) has more span than days: 104 Fridays are
+`n_days` 104 over a span of 722 days, so there is no note and no warning, and the default lag is 4. A run of every day with holes warns a
+little less for the same reason. When the two differ the message gives both: "rests on 30 days of forecasts over 204 calendar days".
 
 ## Testing against a benchmark
 
@@ -67,7 +74,7 @@ report.tests(benchmark="OLS")
 # 1   Mean       OLS        1     365         8760  25.77          26.02  0.990   0.958    1.024       0.61   0.5440  0.5440  2  0.050  no difference
 ```
 
-- **`ratio`** is `mae / mae_benchmark` on the pair's forecasts, with a 95 % bootstrap interval in weekly blocks. Read this first: how large is the difference, and how well is it known?
+- **`ratio`** is `mae / mae_benchmark` on the pair's forecasts, with a 95 % bootstrap interval in blocks of 7 issue days: a week of a run of every day, seven weeks of a run on Fridays (`block` counts observations, as `n_days` does). Read this first: how large is the difference, and how well is it known?
 - **`p_value`** is the DM test on the daily loss with a Newey-West variance (lag 5 at 365 days). On pairs of seeds of one model it rejected 7.5 % of the time, near the nominal 5 %. `variance="plain"` reproduces the tables of epftoolbox.
 - **`p_holm`** corrects for testing `m` models against one reference, and **`verdict`** reads it at 5 %. In the study the correction turned 12 "better than LEAR" into 8. Holm runs within a horizon; testing several horizons is one more family of tests to keep in mind. `verdict` stays empty when the test and the ratio point in opposite directions, which takes days of very different lengths.
 - **`mde`** is measured with the Newey-West variance whichever `variance` the test uses, so it does not move with that choice.

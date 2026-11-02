@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import sys
 from pathlib import Path
+from typing import List, Optional
 
 from rich.console import Console
 from rich.markup import escape
@@ -160,6 +161,25 @@ def _add_horizon_arguments(parser: argparse.ArgumentParser, default: int) -> Non
     )
 
 
+def issue_day_list(text: str) -> Optional[List[str]]:
+    """`--issue-days`: weekday names joined by commas, in any case (`friday` or `Monday,Thursday`); all seven are every day."""
+    from .models._calendar import issue_day_names, resolve_issue_days
+
+    try:
+        return issue_day_names(resolve_issue_days([part.strip() for part in text.split(",")]))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _add_issue_days_argument(parser: argparse.ArgumentParser, what: str) -> None:
+    parser.add_argument(
+        "--issue-days",
+        type=issue_day_list,
+        metavar="DAYS",
+        help=f"{what} on these weekdays only, e.g. friday or monday,thursday (default: every day)",
+    )
+
+
 def cmd_model(args: argparse.Namespace) -> None:
     from .results.windows import RunWindows, to_period
 
@@ -187,6 +207,7 @@ def cmd_model(args: argparse.Namespace) -> None:
         target=args.target,
         horizon=args.horizon,
         horizons=args.horizons,
+        issue_days=args.issue_days,
         freq=args.freq,
         save_dir=args.save_dir,
         forecast_only=args.forecast_only,
@@ -206,6 +227,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
             target=args.target,
             horizon=args.horizon,
             horizons=args.horizons,
+            issue_days=args.issue_days,
             freq=args.freq,
             days=args.days,
             seed=args.seed,
@@ -410,6 +432,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_p.add_argument("--target", default="price", metavar="COL", help="Target column name (default: price)")
     _add_horizon_arguments(model_p, 7)
+    _add_issue_days_argument(model_p, "Issue forecasts")
     model_p.add_argument(
         "--freq",
         default="1h",
@@ -462,6 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_p.add_argument("--test-end", required=True, metavar="DATE", help="Last issue day to sample from")
     verify_p.add_argument("--target", default="price", metavar="COL", help="Target column name (default: price)")
     _add_horizon_arguments(verify_p, 1)
+    _add_issue_days_argument(verify_p, "Sample issue days")
     verify_p.add_argument(
         "--freq",
         default="1h",

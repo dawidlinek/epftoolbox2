@@ -25,6 +25,7 @@ is listed.
 
 from __future__ import annotations
 
+import bisect
 import datetime
 import hashlib
 import importlib
@@ -620,6 +621,12 @@ class PredictorPlan:
     def position_of(self, day: str) -> int:
         """Where an issue day is in `issue_days`."""
         return self._positions[day]
+
+    def days_between(self, start: str, end: str) -> Tuple[int, int]:
+        """The (start, stop) slice of `issue_days` from `start` to `end`, both included, which needn't be issue days: a window of
+        a run with `issue_days=["friday"]` may start on a Thursday."""
+        first, last = datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)
+        return bisect.bisect_left(self.issue_days, first), bisect.bisect_right(self.issue_days, last)
 
     def describe(self, days: Tuple[int, Optional[int]] = (0, None)) -> List[Dict[str, Any]]:
         """One entry per distinct list: its hash, rule, names, and how many forecasts use it where.

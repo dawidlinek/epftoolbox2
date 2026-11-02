@@ -16,7 +16,7 @@ class DMEvaluator(SetEvaluator):
     `verdict`, `n_days`, `n_forecasts`. The test runs on the daily mean absolute error, with the daily losses of several horizons averaged per
     run date. In the per-hour tables (`by_hour`, `by_hour_horizon`) `p_holm` and `verdict` stay empty: a per-hour DM is a
     heatmap, never a verdict. `verdict` is also empty below 30 days, and when the test and the ratio point in opposite
-    ways. The interval is empty when the days fit in one bootstrap block. `summary()` warns below 182 days.
+    ways. The interval is empty when the days fit in one bootstrap block. `summary()` warns below a span of 182 calendar days.
     `report.tests()` gives the same comparison as a table of its own.
 
     Args:
@@ -26,7 +26,7 @@ class DMEvaluator(SetEvaluator):
         correction: `"holm"`, or `None` for no correction (`p_holm` empty, `verdict` from `p`).
         alpha: Two-sided size behind `verdict`.
         interval: Coverage of the bootstrap interval of the ratio; `None` skips it.
-        block: Block length of that bootstrap, in days.
+        block: Block length of that bootstrap, in issue days (observations: seven Fridays are seven weeks).
         reps: Bootstrap repetitions.
         seed: Bootstrap seed.
     """
@@ -111,7 +111,8 @@ class DMEvaluator(SetEvaluator):
             ratio=1.0, m=m, n_days=panel.daily(own, (self.benchmark,)).n_days, n_forecasts=len(own)
         )
         if pairs and not is_grouped(model_dfs):
-            warn_if_short(min(pair.n_days for pair in pairs))
+            shortest = min(pairs, key=lambda pair: (pair.span_days, pair.n_days))
+            warn_if_short(shortest.n_days, span_days=shortest.span_days)
         return out
 
     def clones(self, model_dfs: Mapping[str, pd.DataFrame]) -> list:
