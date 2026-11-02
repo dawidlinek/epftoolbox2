@@ -62,7 +62,7 @@ The rule is the same for every scaler and for the target, which is centred and d
 
 ## No look-ahead
 
-A fresh scaler is fitted for every (hour, horizon, run day) task on that task's training rows only. The newest training target is the price of the day before the forecast is issued. The test row is transformed with the training parameters and never changes them. Don't apply a VST to the whole data set in a `DataPipeline`: that would put information from the test period into the training data.
+A fresh scaler is fitted for every (hour, horizon, run day) task on that task's training rows only. The newest training target is the price of the day before the forecast is issued, or, with `newest_target="published"`, the newest its rule says is known by the issue time, never on a row dated on the issue day. The test row is transformed with the training parameters and never changes them. Don't apply a VST to the whole data set in a `DataPipeline`: that would put information from the test period into the training data.
 
 ## Back-transformed forecasts are median-type
 

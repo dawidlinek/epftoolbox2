@@ -41,7 +41,8 @@ day D the forecast is issued on, and horizon h targets D+h. For h = 1 (d = D+1):
 <Aside type="caution">
   **What the presets assume is known when the forecast is issued on D:**
   - D's day-ahead prices (`price`, `price_h05`), published on D-1 around 13:00. The model's training targets still
-    end at D-1, as always.
+    end at D-1 by default; with `newest_target="published"` it trains on D's prices too (see
+    [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target)).
   - The exogenous series for D+1. Use day-ahead forecasts, never realised values. ENTSO-E's load forecast for
     D+1 is published around 10:00 on D and the wind and solar forecast possibly as late as 18:00, so it depends on
     your issue time.

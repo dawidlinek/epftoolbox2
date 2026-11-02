@@ -41,6 +41,7 @@ model = LassoCVModel(
 | `max_iter` | int | `10000` | Max optimization iterations |
 | `name` | str | `"Model"` | Display name for reports |
 | `scaler` | str, dict or scaler | `"standard"` | `"standard"`, `"asinh"` or `"npit"`, or `{"name": ..., "params": {...}}`. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
+| `newest_target` | str | `"d-1"` | The newest target a forecast issued on D trains on: `"d-1"`, or `"published"`, every target its rule says is known by the issue time, which needs an information set. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target) |
 
 Callable predictors accept `(horizon)` or `(horizon, hour)`. See [OLSModel](/epftoolbox2/models/ols/#parameters) for details.
 

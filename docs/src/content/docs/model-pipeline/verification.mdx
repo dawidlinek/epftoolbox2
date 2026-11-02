@@ -93,6 +93,10 @@ it is known, but training targets end at D-1, so a model that reads or trains on
 today's published price to forecast tomorrow is legal when a model declares it, among its predictors or as a feature built
 from it such as `price_day_max`. Those inputs are judged by their rule, and what the model trains on still ends at D-1.
 
+A model with [`newest_target="published"`](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target) trains on every
+target its rule says is known, so for it the rule alone is the boundary: the target is replaced where its rule says it isn't
+known yet, like any column, and not from D on. A model that trains one day further than its rule allows moves, and is a `leak`.
+
 ### The positive control
 
 A probe that finds nothing is evidence only if its perturbation reaches the model. The control perturbs the other side of
@@ -118,7 +122,9 @@ Moving the issue time back a day would not do: the price of D-1 was published on
 already, and the commonest input of all would never change.
 
 The target is never perturbed in what a model fits on, nor any row older than D-1. Every model trains on the target, so a
-control that changed it would move every model and could never fail. That is what makes it useful:
+control that changed it would move every model and could never fail. For the same reason, with `newest_target="published"`, whose
+row of D-1 may train, only rows dated D or later change (with `rebuild`, every built row before D is put back, while the source values
+of D-1 still change, so `x_d-1` on D does). That is what makes it useful:
 
 | Model | Control | Status |
 |---|---|---|

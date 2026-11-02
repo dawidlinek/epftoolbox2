@@ -24,7 +24,7 @@ Column suffixes are relative to the row's local date D: `x_d-k` is x on D-k, `x_
 Path-scoped rules in `.claude/rules/` load automatically for models, data, evaluation, docs and tests; they hold the invariants and known issues for each area.
 
 ## Research invariants
-- A forecast issued on day D may use only information available at issue time. Training targets currently end at D-1; don't move that boundary unless asked.
+- A forecast issued on day D may use only information available at issue time. Training targets end at D-1 for a model with the default `newest_target="d-1"`; one with `newest_target="published"` trains on every target its rule says is known by the issue time, never on a row dated D or later. Don't move either boundary, or the default, unless asked.
 - Local calendar days, not 24-hour offsets, define "same hour yesterday" (DST days have 23 or 25 hours).
 - Compare models only on identical forecast keys, and report how many forecasts each model produced.
 - Same data and config must give the same numbers. `tests/test_golden_metrics.py` pins them; update the golden file only for an intended change and explain it.

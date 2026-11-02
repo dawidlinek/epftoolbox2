@@ -140,7 +140,7 @@ the same column: the model trains on the same mix it forecasts with.
 ## How each list trains
 
 The training window and the newest training target stay as they are: for a forecast issued on D the targets end on
-D-1 ([which rows those are](/epftoolbox2/model-pipeline/time-and-calendars/#which-rows-a-forecast-reads)). A forecast's list decides which columns it reads, and it trains on **the window's rows where those columns exist**, so
+D-1, or where the target's rule says with `newest_target="published"` ([which rows those are](/epftoolbox2/model-pipeline/time-and-calendars/#which-rows-a-forecast-reads)). A forecast's list decides which columns it reads, and it trains on **the window's rows where those columns exist**, so
 a column missing on some past days costs that list those rows and no other list anything.
 
 A column that starts inside the test period therefore starts with few rows: the first forecasts of a list holding it have
@@ -189,7 +189,8 @@ What that means, for each (period, horizon):
   `train_on="all"` doesn't match, and neither does a day that got them in another order. Build a list in a fixed order: the order
   of `list(set(names))` changes with the hash seed, and the numbers with it. Two lists with the same names in another order give a
   warning, for any `train_on`.
-- **The window isn't extended.** The dates of `training_window` come first, so the newest training target stays D-1. The filter
+- **The window isn't extended.** The dates of `training_window` come first, so the newest training target stays where
+  `newest_target` puts it (D-1 by default; with `"published"`, the row of D-1 has its list as of D-1's issue time). The filter
   then narrows those rows. **A matching forecast therefore trains on fewer rows than its window**: about 104 for weekend
   targets with a window of 364. If that is too few, ask for a longer window.
 - **The scaler is fitted on the rows left**, and the binary columns are still the list's, found as for any list on its window, not
