@@ -147,9 +147,12 @@ A column that starts inside the test period therefore starts with few rows: the 
 no training row at all and are counted as `no_finite_training_rows`, and the next ones fit on very few. Guard such a column
 with a condition of your own if that matters.
 
-Binary columns are found once per (list, period, horizon), on the window of the list's first test day, so a later value
-can't change an earlier forecast. A column with no value there is read on the first of the list's test days that has one.
-A list used on every test day of a (period, horizon) is treated exactly as a fixed list is.
+Binary columns are found once per (list, period, horizon), on the training rows of one day: the test's first day if the list is
+that of the first planned forecast of the (period, horizon), else the first day a planned forecast uses the list. What the
+function returns for a slot the clock skips has no say. A column with no value there is read on the first later calendar day
+whose rows have one, as for a fixed list; forecasts before that day have no training row with it and are skipped. So no value
+after a forecast's issue day, and no later answer of the function, changes how it is scaled, and a list used on every test day
+of a (period, horizon) is treated exactly as a fixed list is.
 
 A function may also return `Use(list, train_on="all")`, which is the plain list.
 

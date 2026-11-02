@@ -49,10 +49,19 @@ A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `
 
 - **The target** always gets the VST.
 - **Predictors** follow `apply_to`. The default `"all"` matches epftoolbox's LEAR, which applies the Invariant scaler to every input except the day-of-week dummies. The VST papers transform the price series. `apply_to=["price", "price_d-*"]` does that and only standardises exogenous inputs such as load or weather. If no pattern matches any predictor, a warning says that only the target is transformed.
-- **Binary 0/1 predictors** (dummies) are never changed, whatever `apply_to` says. The same rule as for `StandardScaler` decides what is binary.
+- **Binary 0/1 predictors** (dummies) are never changed, whatever `apply_to` says. The same rule as for `StandardScaler` decides what is binary: see [Binary columns](#binary-columns).
 - Every column gets its own parameters (median/MAD or empirical CDF), estimated from the task's training rows.
 - A predictor that is constant in the training rows is set to 0 instead of being divided by a standard deviation of about 1e-16. See [Constant columns](#constant-columns).
 - After the VST every transformed column, and the target, is standardised, so models always receive centred data with unit variance. This is why `OLSModel`, which fits without an intercept, stays valid. epftoolbox's LEAR skips this step. An affine rescaling doesn't change a least-squares fit with an intercept, but it does change the relative scale of the inputs that a Lasso penalty sees, so LassoCV results won't match LEAR's exactly.
+
+## Binary columns
+
+A predictor whose values are all 0 or 1 is left as it is by every scaler. Which predictors those are is decided once per list,
+period and horizon, and per window in a run with [validation](/epftoolbox2/model-pipeline/validation-and-test/), not per forecast:
+from the training rows of the window's first day or, for a [predictor function](/epftoolbox2/model-pipeline/predictor-functions/)'s
+list first used later, of the first day it is used. A column with no value in those rows, such as one that starts inside the test,
+can't tell, so it is decided on the first later day whose rows have a value of it; a forecast of the list before that day has no
+training row with that column and is skipped. Nothing after a forecast's issue day decides how it is scaled.
 
 ## Constant columns
 

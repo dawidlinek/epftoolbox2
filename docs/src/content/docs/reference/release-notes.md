@@ -69,6 +69,24 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **Nothing after the issue day decides how a column is scaled.** A model leaves a 0/1 column unscaled and decides which columns
+  those are once per list, period and horizon (and window), from the training rows of one day. A column with no value in those rows,
+  such as one that starts inside the test, can't tell. It stayed unscaled for good in a fixed list and in a function's list used on
+  every issue day, and was decided on a later issue day of the list otherwise; whether a list was used on every day depended on the
+  last issue day and on what a predictor function returned for a slot the clock skips. So a later `test_end`, or a value a function
+  read after D, moved earlier forecasts: in a run of every day the forecasts of 5 April moved when the test went on from 7 to 12
+  April, 22 of 24 by up to 0.14 with `LassoCVModel` and 24 of 24 by up to 0.25 with `OLSModel` on two drivers. Now such a column is
+  decided on the first calendar day after that day whose rows have a value of it, for every list, never after the window's last day,
+  and a slot the clock skips has no say in which day a function's list starts from. See [Binary columns](/epftoolbox2/models/scalers/#binary-columns).
+  - **What moves.** Only forecasts of a list holding a column with no value on the day its mask is read and values later in the
+    window: from the day it has one, that column may now be standardised where it stayed raw, or decided on another day. Every other
+    forecast is bit for bit as before: `test_golden_metrics.py` doesn't move, nor do the 2,928 forecasts of `LassoCVModel` on
+    `lear_predictors` for Lago's DE data (W=364, 61 days, horizon 2). In a run of Fridays, a function's list first used on the second
+    Friday, at a period and horizon whose key on the first Friday the clock skips, now reads its mask on the window's first day, so
+    its records there differ from a run of every day's ([where a function's records differ](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)).
+  - **Resuming.** Results of a predictor function, and results with validation windows, whose stored forecasts now get another mask
+    raise `ManifestMismatchError`: run them into a new `save_dir`. Plain results of fixed lists store no mask digest, so their resume
+    isn't refused and would mix the two scalings: if a list holds a column that starts inside the test, run them into a new `save_dir`.
 - **Availability compares instants, not clock readings.** `InformationSet` worked in wall-clock minutes of the data's zone, so around
   a clock change a value known after the issue could read as known before it: `realised("1h")` at 01:00 on the Warsaw spring day read
   as known at 03:00, though 01:00 CET plus two hours is 04:00 CEST, and a value known in the second 01:00 read as before an issue in the
