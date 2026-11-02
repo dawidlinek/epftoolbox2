@@ -103,7 +103,7 @@ an issue day it didn't sample.
   `epf verify` (`--freq 1D`) and the interactive wizard. Records have `hour` 0 and `freq` `"1D"`, the shape `report.aggregate()` gives.
   The row's time of day is read from the index and is what its names mean (`x_h-1` is one elapsed hour before the stamp), so stamp
   the rows at the time the forecast is made: a frame stamped at midnight that holds what is true at noon reads `load_actual_h-1` as
-  23:00 on D-1, and neither the check nor `verify` can see the look-ahead. A plain `realised` column such as `actual_daily_max` is the
+  23:00 on D-1, and neither the check nor `verify` can see the look-ahead. A run warns when the rows are stamped at or near midnight and a predictor counts hours from the stamp. A plain `realised` column such as `actual_daily_max` is the
   value of its whole local date, known `delay` after that date ends, so it is late on its own date at any issue time. A plain `published` or `weekly` column (a `daily_close` too) is read at its date's last slot, so a date that spans two of the rule's days is known when the later one is. A daily run of
   `df.at_time("12:00")` is period 12 of the hourly run of `df`, bit for bit. **Nothing else moves**: `"1h"` and `"15min"`
   runs are what they were. `EconomicEvaluator` with `freq="1D"` raises before any model is planned or run, since a schedule needs the

@@ -434,7 +434,7 @@ the newest training row at horizon 1 is D-2 (see [The newest target](/epftoolbox
 <Aside type="caution">
   A frame stamped at midnight that holds what is true at noon hides the hour before noon: `load_actual_h-1` reads as 23:00 on D-1
   and passes. Restamp it to noon, as [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#stamp-at-noon-not-at-midnight)
-  shows. Neither the check nor `verify` can see this.
+  shows. Neither the check nor `verify` can see this; a run warns when the stamp is at or near midnight and a predictor counts hours from it.
 </Aside>
 
 ---

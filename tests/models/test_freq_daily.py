@@ -8,6 +8,7 @@ late input, and against a control that can't reach a model.
 
 import datetime
 import json
+import warnings
 from concurrent.futures import Future
 
 import numpy as np
@@ -531,13 +532,56 @@ def test_a_frame_stamped_at_midnight_hides_the_hour_before_noon(year):
     assert np.array_equal(
         midnight["load_actual_h-1"].to_numpy(), eleven.reindex(daily.index - pd.Timedelta(hours=1)).to_numpy()
     )
-    verified(daily.set_axis(daily.index.normalize()), names, horizon=2).assert_ok()  # what can't be seen
+    with pytest.warns(UserWarning, match="stamped at 00:00.*restamp"):  # what can't be seen, only warned about
+        verified(daily.set_axis(daily.index.normalize()), names, horizon=2).assert_ok()
     assert verified(daily, names, horizon=2).status("m") == "leak"
     expanded = {(0, 1): names}
     assert not info().violations(expanded, "price", "1D", midnight.index, "2023-10-27", "2023-10-31")[0]
     assert [
         v.predictor for v in info().violations(expanded, "price", "1D", daily.index, "2023-10-27", "2023-10-31")[0]
     ] == ["load_actual_h-1"]
+
+
+def midnight_warnings(daily, names, information_set=None, period=("2023-10-27", "2023-10-28")):
+    """The warnings about a midnight stamp a run of `names` on `daily` gives, and its records."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = OLSModel(names, training_window=WINDOW, name="m")
+        records = model.run(daily, *period, horizon=1, freq="1D", cut_rules=information_set)._results
+    return [str(w.message) for w in caught if "restamp" in str(w.message)], records
+
+
+def test_a_midnight_stamp_with_hour_lags_warns_and_moves_nothing(year, monkeypatch):
+    """Decision 11: neither the check nor a probe can see a midnight stamp on rows that hold noon's values, so a run says what
+    to look at when the rows are stamped at 00:00 and a predictor counts hours from the stamp. Nothing is refused, nothing moves."""
+    hourly, daily = year
+    names = PREDICTORS + ["load_actual_h-1"]
+    midnight = daily.set_axis(daily.index.normalize())
+    found, records = midnight_warnings(midnight, names)
+    assert (
+        len(found) == 1
+        and "m: the daily rows are stamped at 00:00, midnight" in found[0]
+        and "load_actual_h-1" in found[0]
+    )
+    with monkeypatch.context() as patched:
+        patched.setattr("epftoolbox2.models._contract.warn_about_a_midnight_stamp", lambda *args, **kwargs: None)
+        silent, quiet = midnight_warnings(midnight, names)
+    assert silent == [] and [as_text(r) for r in records] == [as_text(r) for r in quiet]
+    assert midnight_warnings(daily, names)[0] == []  # noon
+    assert midnight_warnings(midnight, PREDICTORS + ["price_d-1"])[0] == []  # no hour counted from the stamp
+    assert midnight_warnings(hourly.at_time("00:00"), names)[0]  # warned too: only the user knows what the rows hold
+
+
+@pytest.mark.parametrize(("stamp", "warns"), [("01:00", True), ("23:00", True), ("02:00", False), ("12:00", False)])
+def test_a_stamp_within_a_rule_zone_s_offset_of_midnight_warns(stamp, warns):
+    """Helsinki's 01:00 is Brussels' midnight, so with a Brussels rule on an hour-shifted predictor it warns, and 02:00 doesn't."""
+    daily = market_of_dates("Europe/Helsinki", stamp)
+    daily = daily.assign(**{"price_h-1": daily["price"]})
+    information = InformationSet("11:45", "Europe/Brussels", rules={**RULES, **DATE_RULES})
+    found, _ = midnight_warnings(daily, PREDICTORS + ["price_h-1"], information, ("2023-06-01", "2023-06-02"))
+    assert bool(found) == warns
+    if warns:
+        assert f"stamped at {stamp}, within 01:00 of midnight in the zone of a rule" in found[0]
 
 
 def test_the_positive_control_can_fail_on_a_daily_frame(year):

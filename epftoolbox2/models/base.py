@@ -864,6 +864,9 @@ class BaseModel(ABC):
                 )
             expanded = plan.names_by_pair()
             self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
+            _contract.warn_about_a_midnight_stamp(
+                data.index, freq, self._used_predictors, self._cut_rules(information_set, cut_rules), self.name
+            )
             if information_set is not None and availability == "raise":
                 plan.check(target, self.name)
             elif information_set is not None and availability == "warn":
@@ -875,6 +878,9 @@ class BaseModel(ABC):
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
         expanded = self._precompute_expanded_predictors(horizons)
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
+        _contract.warn_about_a_midnight_stamp(
+            data.index, freq, self._used_predictors, self._cut_rules(information_set, cut_rules), self.name
+        )
         days = None if windows is None else windows.issue_days(weekdays)
         if days is None and weekdays is not None and test_start is not None and test_end is not None:
             days = [day.isoformat() for day in listed_days(_test_days(test_start, test_end), weekdays)]

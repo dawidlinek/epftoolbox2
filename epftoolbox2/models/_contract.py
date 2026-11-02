@@ -8,12 +8,14 @@ collide with the model's own target or id columns, predictors that don't exist, 
 
 import datetime
 import re
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+import warnings
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 
 from .._date_utils import daily_anchor, fmt_minutes, is_utc_index
+from ..information_set import parse_predictor
 from ._calendar import DAILY, FREQ_STEPS, clock_periods
 
 DayRange = Tuple[pd.Timestamp, pd.Timestamp]
@@ -205,6 +207,56 @@ def _check_daily(index: pd.DatetimeIndex) -> None:
             f"from {first.date()} to {last.date()} ({shown}), so a daily row there would be another instant, or two. Stamp "
             "the rows at a time of day that exists once on every date, e.g. df.at_time('12:00')."
         )
+
+
+def warn_about_a_midnight_stamp(
+    index: pd.DatetimeIndex,
+    freq: str,
+    predictors: Iterable[str],
+    information_set: Any = None,
+    model_name: str = "Model",
+) -> None:
+    """A `UserWarning` when the rows of a daily frame are stamped at midnight, or within the offset of a rule's zone from it, and
+    a predictor counts hours from the stamp (an `h`, `min` or `s` shift). Such a frame may hold what is true at another time of
+    day, such as noon, under a midnight stamp: then `load_actual_h-1` holds 11:00 of D, read as 23:00 of D-1, known, and neither
+    the check nor a probe can tell (decision 11 of the step 3 spec). A frame cut with `at_time("00:00")` is right as it is, so
+    this warns and refuses nothing. The rule zones are those of the hour-shifted predictors' rules in `information_set`."""
+    if freq != DAILY or not len(index):
+        return
+    shifted = sorted({name for name in predictors if _counts_hours(name)})
+    if not shifted:
+        return
+    anchor = daily_anchor(index)
+    zones = set()
+    if information_set is not None:
+        for name in shifted:
+            rule = information_set._resolve_for(name, 60).rule
+            if rule is not None and rule.timezone is not None:
+                zones.add(rule.timezone)
+    slack = 0.0
+    if index.tz is not None:
+        for zone in sorted(zones):
+            gap = (wall_clock(index.tz_convert(zone)) - wall_clock(index)) / pd.Timedelta(minutes=1)
+            slack = max(slack, float(np.abs(np.asarray(gap)).max()))
+    if min(anchor, 1440.0 - anchor) > slack:
+        return
+    shown = ", ".join(shifted[:3]) + (f" and {len(shifted) - 3} more" if len(shifted) > 3 else "")
+    where = "midnight" if anchor == 0 else f"within {fmt_minutes(slack)} of midnight in the zone of a rule"
+    warnings.warn(
+        f"{model_name}: the daily rows are stamped at {fmt_minutes(anchor)}, {where}, and {len(shifted)} predictor(s) count "
+        f"hours from the stamp ({shown}): `x_h-1` is the hour before {fmt_minutes(anchor)} on the row's date. If the rows hold "
+        "what is true at another time of day, such as noon, restamp them there on the wall clock first: wall = "
+        "df.index.tz_localize(None).normalize() + pd.Timedelta(hours=12); df = df.set_axis(wall.tz_localize(zone)). Else an "
+        "hour known after the issue time reads as known, and no check can see it. A frame cut with at_time() at this time is "
+        "right as it is. See the docs page Time and Calendars.",
+        UserWarning,
+        stacklevel=4,
+    )
+
+
+def _counts_hours(name: Any) -> bool:
+    """Whether a column name shifts its row by hours, minutes or seconds (`x_h-1`), counted from a daily row's stamp."""
+    return isinstance(name, str) and any(shift.unit != "d" for shift in parse_predictor(name)[-1][1])
 
 
 def _checked_days(days: Optional[Sequence[DayRange]]) -> str:
