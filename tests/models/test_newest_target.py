@@ -526,19 +526,37 @@ def test_an_explicit_d_1_is_byte_identical_to_leaving_it_out(tmp_path, info):
     assert b"newest_target" not in (tmp_path / "omitted.yaml").read_bytes()
 
 
-def test_with_validation_each_window_is_what_a_plain_run_over_it_gives(tmp_path):
-    """The worker reads k by the task's place among the run's issue days, which skip the days between the windows."""
-    data = market("autumn")
-    info = info_for("load realised 1h")
-    validation, test = ("2023-10-20", "2023-10-23"), ("2023-10-28", "2023-10-31")
-    both = pipeline_of(info).run(data, validation=validation, test=test, horizon=2, save_dir=tmp_path / "both")
+@pytest.mark.parametrize(
+    ("case", "switch", "validation", "test", "H"),
+    [
+        ("load realised 1h", "autumn", ("2023-10-20", "2023-10-23"), ("2023-10-28", "2023-10-31"), 2),
+        ("price published 13:00 D-1", "spring", ("2023-03-18", "2023-03-21"), ("2023-03-24", "2023-03-27"), 3),
+    ],
+    ids=["k the same every day", "k one more on the day before the spring switch"],
+)
+def test_with_validation_each_window_is_what_a_plain_run_over_it_gives(tmp_path, case, switch, validation, test, H):
+    """The worker reads k by the task's place among the run's issue days, which skip the days between the windows. Only a k that
+    differs between days can tell a place from a calendar day: in spring the switch hour's k is 1 on 2023-03-25 and 0 on every
+    other day, so a table read over every calendar day from the first issue day would give 2023-03-27 the k of 2023-03-25, and at
+    h=2 train on the prices of 2023-03-28, published at 13:00 on 2023-03-27, after the issue."""
+    data = market(switch, horizon=H)
+    info = info_for(case)
+    issue_days = [d.date() for p in (validation, test) for d in pd.date_range(*p)]
+    k = info.newest_targets("price", "1h", data.index, issue_days, H)
+    if switch == "spring":
+        assert k[2].tolist() == [0, 0, 0, 0, 0, 1, 0, 0] and (k[3] == 0).all()
+    both = pipeline_of(info).run(data, validation=validation, test=test, horizon=H, save_dir=tmp_path / "both")
+    stored = [json.loads(line) for line in lines(tmp_path / "both" / "m.jsonl")]
     for window, period in [("validation", validation), ("test", test)]:
-        plain = pipeline_of(info).run(data, test=period, horizon=2, save_dir=tmp_path / window)
-        assert plain.refs["m"].produced == 4 * 2 * 24
-        stored = [json.loads(line) for line in lines(tmp_path / "both" / "m.jsonl")]
+        plain = pipeline_of(info).run(data, test=period, horizon=H, save_dir=tmp_path / window)
+        assert plain.refs["m"].produced == plain.refs["m"].count
         own = sorted(json.dumps({k: v for k, v in r.items() if k != "window"}) for r in stored if r["window"] == window)
         assert own == sorted(json.dumps(json.loads(line)) for line in lines(tmp_path / window / "m.jsonl"))
-    assert both.refs["m"].produced == 4 * 2 * 24
+    assert both.refs["m"].produced == both.refs["m"].count
+    if switch == "spring":
+        newest = {(r["run_date"], r["hour"], r["horizon"]): r["newest_target_day"] for r in stored}
+        assert newest[("2023-03-27", 2, 2)] == "2023-03-27"
+        assert newest[("2023-03-25", 2, 2)] == "2023-03-26"
 
 
 def test_published_is_saved_to_yaml_and_loads_back(tmp_path):
