@@ -174,7 +174,8 @@ epf model model_pipeline.yaml \
 |------|-------------|
 | `--validation START END` | Validation period, or `--validation previous_year` for each 12 months of the test period served by the 12 months before them. Without a test period only these days are forecast. See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/) |
 | `--target COL` | Target column name (default: `price`) |
-| `--horizon N` | Forecast horizon in days (default: `7`) |
+| `--horizon N` | Forecast horizon in days: every horizon from 1 to N (default: `7`) |
+| `--horizons LIST` | Only these horizons, in place of `--horizon`: `3-9`, `1,3,7` or `1-3,7`. See [Some horizons only](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only) |
 | `--freq {1h,15min}` | Data resolution: one model per hour or per quarter-hour (default: `1h`). Must match the data |
 | `--tz ZONE` | Local time zone of the data (e.g. `Europe/Warsaw`). Overrides the zone named in the file |
 | `--issue-time HH:MM` | Compare every predictor with this issue time before fitting ([information set](/epftoolbox2/model-pipeline/information-set/)). Overrides the YAML's `information_set`, or adds one if it has none |
@@ -213,7 +214,8 @@ Exits with code 0 only if every model is `ok`, and with code 1 on a `leak`, an `
 | Flag | Description |
 |------|-------------|
 | `--target COL` | Target column name (default: `price`) |
-| `--horizon N` | Forecast horizon in days (default: `1`, while `epf model` defaults to `7`: pass the horizon you run) |
+| `--horizon N` | Forecast horizon in days: every horizon from 1 to N (default: `1`, while `epf model` defaults to `7`: pass the horizon you run) |
+| `--horizons LIST` | Only these horizons, in place of `--horizon`: `3-9`, `1,3,7` or `1-3,7`, the list you run |
 | `--freq {1h,15min}` | Data resolution: one model per hour or per quarter-hour (default: `1h`). Must match the data |
 | `--tz ZONE` | Local time zone of the data (e.g. `Europe/Warsaw`). Overrides the zone named in the file |
 | `--issue-time HH:MM` | Issue time to verify against. Overrides the YAML's `information_set`, or adds one if it has none |
