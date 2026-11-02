@@ -33,6 +33,7 @@ from ..results.manifest import (
     ManifestMismatchError,
     is_ensemble_manifest,
     manifest_path,
+    read_freq,
     read_horizons,
     read_issue_days,
     read_matching_lists,
@@ -393,13 +394,34 @@ class ModelPipeline:
             )
         return next(iter(found.values()), None)
 
+    @staticmethod
+    def _stored_freq(save_dir: Union[str, Path], paths: Dict[str, Path], told: Optional[str]) -> Optional[str]:
+        """The freq every model's manifest records, or None if none does. Models run at different ones raise, and so does a
+        `told` freq the manifests contradict: the report would plan another number of periods a day than the runs did, and count
+        records as missing, or a gap as none. Results with no manifest say nothing and don't count."""
+        found = {name: read_freq(manifest_path(path)) for name, path in paths.items()}
+        found = {name: freq for name, freq in found.items() if freq is not None}
+        shown = ", ".join(f"{name}: {freq!r}" for name, freq in found.items())
+        if len(set(found.values())) > 1:
+            raise ValueError(
+                f"The models in {save_dir} were run at different frequencies ({shown}): their periods are different times of "
+                "day, so one report can't plan them. Report each frequency from its own pipeline."
+            )
+        stored = next(iter(found.values()), None)
+        if told is not None and stored is not None and told != stored:
+            raise ValueError(
+                f"report(freq={told!r}), but the results in {save_dir} were run at freq={stored!r} ({shown}). Leave freq out "
+                "to report what the manifests record."
+            )
+        return stored
+
     def report(
         self,
         save_dir: Union[str, Path],
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
         horizon: Optional[int] = None,
-        freq: str = "1h",
+        freq: Optional[str] = None,
         forecast_only: bool = False,
         data: Optional[pd.DataFrame] = None,
         allow_missing: bool = False,
@@ -411,7 +433,7 @@ class ModelPipeline:
         """Build one report from the per-model JSONL files in `save_dir`, then run evaluators and exporters.
 
         This is the merge step after runs that each wrote some models' results (e.g. a SLURM array with
-        `Workflow(model_index=...)`). The test period, horizon (or `horizons`, as in `run`) and freq must be those of the runs;
+        `Workflow(model_index=...)`). The test period and horizon (or `horizons`, as in `run`) must be those of the runs;
         with the time zone each manifest records they give each model's planned forecast count (`IssueCalendar`). Given neither
         `horizon` nor `horizons`, the report plans what the manifests record (7 without one), and models run with different
         horizons raise. Only records
@@ -421,6 +443,10 @@ class ModelPipeline:
         `issue_days` are the weekdays to report, as in `run`; if not given, the manifests say which the models were run on, and
         models run on different ones raise `ValueError`, as they would be compared on different forecasts. Only records issued on
         them are read and planned, so a report of the Fridays of a run of every day plans Fridays alone.
+
+        `freq` is read from the manifests when not given ("1h" without one); models run at different frequencies raise
+        `ValueError`, and so does a `freq` the manifests contradict, which would plan another number of periods a day than the runs
+        did. `EconomicEvaluator` raises for daily results, as in `run`.
 
         Ensembles are computed here from the stored results of their members, every time, so they can't go stale, and written
         next to them. `allow_missing` leaves out an ensemble with a missing member, with a warning: it is never averaged over
@@ -449,7 +475,6 @@ class ModelPipeline:
             raise ValueError("At least one model is required")
         told_weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
-        self._check_evaluators_for(freq)
         if not forecast_only:
             self._check_benchmarks()
         self._check_ensembles(save_dir)
@@ -460,6 +485,8 @@ class ModelPipeline:
                     f"Model {name!r}: {path} is an ensemble's results, which go stale as soon as their members move unless "
                     "they are computed again. Add it to this pipeline with add_ensemble, or rename the model."
                 )
+        freq = self._stored_freq(save_dir, paths, freq) or freq or "1h"
+        self._check_evaluators_for(freq)
         if horizon is None and horizons is None:
             horizons = self._stored_horizons(save_dir, paths)
         horizon, horizons = resolve_horizons(horizon, horizons, 7)

@@ -1128,7 +1128,9 @@ def test_members_of_different_tasks_are_refused(tmp_path, field, value, message)
     actuals = {"actuals": {"through": "2024-05-13", "hash": "one target"}, "information_set": ISSUED}
     write_member(tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND, **actuals)
     write_member(tmp_path, "b", forecasts(days, 2.0, windows=HAND), HAND, **{**actuals, field: value})
-    with pytest.raises(ManifestMismatchError, match=message):
+    # Members at different frequencies are refused by report() itself, which reads the freq from the manifests.
+    error = ValueError if field == "freq" else ManifestMismatchError
+    with pytest.raises(error, match=message):
         report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
     assert not (tmp_path / "e.jsonl").exists()
 

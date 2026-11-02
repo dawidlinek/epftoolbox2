@@ -267,3 +267,41 @@ def test_epf_model_and_verify_take_freq_1d(frames, tmp_path, monkeypatch, capsys
     argv += ["--test-end", TEST[1], "--days", "2", "--freq", "1D"]
     assert run_cli(monkeypatch, argv) == 0
     assert "ok" in capsys.readouterr().out
+
+
+def test_report_reads_the_freq_its_runs_had_and_refuses_another(frames, tmp_path):
+    """Told no freq, `report()` plans what the manifests record: 14 days of 2 horizons of daily results, not 24 periods each. A
+    freq the manifests contradict raises, both ways, and so do models run at different frequencies."""
+    hourly, daily = frames
+    pipe = pipeline(("a", INPUTS), ("b", PREDICTORS)).add_evaluator(MAEEvaluator())
+    pipe.run(daily, test=TEST, horizon=2, freq="1D", save_dir=tmp_path / "daily")
+    counts = pipe.report(tmp_path / "daily", test=TEST).forecast_counts().set_index("model")
+    assert counts["planned"].tolist() == [28, 28] and counts["missing"].tolist() == [0, 0]
+    with pytest.raises(ValueError, match=r"report\(freq='1h'\), but the results .* were run at freq='1D'"):
+        pipe.report(tmp_path / "daily", test=TEST, freq="1h")
+    with pytest.raises(ValueError, match="EconomicEvaluator"):
+        pipeline(("a", INPUTS), ("b", PREDICTORS)).add_evaluator(EconomicEvaluator()).report(
+            tmp_path / "daily", test=TEST
+        )
+
+    plain = ["load_d+{horizon}", "wind_d+{horizon}", "is_weekend_d+{horizon}", "is_weekday_d+{horizon}"]
+    hourly_pipe = pipeline(("a", plain))
+    hourly_pipe.run(hourly, test=("2023-03-20", "2023-03-22"), horizon=1, save_dir=tmp_path / "hourly")
+    assert hourly_pipe.report(tmp_path / "hourly", test=("2023-03-20", "2023-03-22")).forecast_counts()[
+        "planned"
+    ].tolist() == [72]
+    with pytest.raises(ValueError, match=r"report\(freq='1D'\), but the results .* were run at freq='1h'"):
+        hourly_pipe.report(tmp_path / "hourly", test=("2023-03-20", "2023-03-22"), freq="1D")
+
+    pipeline(("b", plain)).run(daily, test=TEST, horizon=1, freq="1D", save_dir=tmp_path / "hourly")
+    with pytest.raises(ValueError, match="run at different frequencies"):
+        pipeline(("a", plain), ("b", plain)).report(tmp_path / "hourly", test=("2023-03-20", "2023-03-22"))
+
+
+def test_report_refuses_hourly_reading_of_15_minute_results(tmp_path):
+    quarter = make_market_data(start="2023-02-01", days=40, freq="15min", horizon=1, noise=5.0, seed=3)
+    pipe = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=20, name="q"))
+    pipe.run(quarter, test=("2023-03-01", "2023-03-02"), horizon=1, freq="15min", save_dir=tmp_path)
+    assert pipe.report(tmp_path, test=("2023-03-01", "2023-03-02")).forecast_counts()["planned"].tolist() == [192]
+    with pytest.raises(ValueError, match="were run at freq='15min'"):
+        pipe.report(tmp_path, test=("2023-03-01", "2023-03-02"), freq="1h")

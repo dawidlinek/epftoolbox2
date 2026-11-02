@@ -493,6 +493,12 @@ def read_issue_days(path: Union[str, Path]) -> Optional[Tuple[int, ...]]:
     return issue_days_of(json.loads(path.read_text())) if path.exists() else None
 
 
+def read_freq(path: Union[str, Path]) -> Optional[str]:
+    """The `freq` a manifest's run forecast at, or None without a manifest or a freq in it."""
+    path = Path(path)
+    return json.loads(path.read_text()).get("freq") if path.exists() else None
+
+
 def manifest_path(results_path: Path) -> Path:
     """The manifest file for a results JSONL: written next to it, e.g. `ols.jsonl` -> `ols.manifest.json`."""
     results_path = Path(results_path)
