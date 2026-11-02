@@ -13,8 +13,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 
-from .._date_utils import is_utc_index
-from ._calendar import FREQ_STEPS, clock_periods
+from .._date_utils import daily_anchor, fmt_minutes, is_utc_index
+from ._calendar import DAILY, FREQ_STEPS, clock_periods
 
 DayRange = Tuple[pd.Timestamp, pd.Timestamp]
 
@@ -30,11 +30,13 @@ _MIN_COARSE_SPAN = pd.Timedelta(days=1)
 
 
 def period_index(index: pd.DatetimeIndex, freq: str) -> np.ndarray:
-    """Period of the (local) day each row belongs to: the hour for "1h", the quarter-hour for "15min"."""
+    """Period of the (local) day each row belongs to: the hour for "1h", the quarter-hour for "15min", 0 for "1D"."""
     if freq == "1h":
         return index.hour.to_numpy()
     if freq == "15min":
         return (index.hour * 4 + index.minute // 15).to_numpy()
+    if freq == DAILY:
+        return np.zeros(len(index), dtype=index.hour.to_numpy().dtype)
     raise ValueError(f"Unsupported freq '{freq}'. Supported: {list(_FREQ_STEPS)}")
 
 
@@ -101,6 +103,9 @@ def check_index(data: pd.DataFrame, freq: str, days: Union[DayRange, Sequence[Da
     `days` (see `read_days`, or several ranges of `read_ranges`) limits the spacing checks to those local days, both
     included, because rows no run can read can't harm it: hourly history before a switch to 15-minute data doesn't block
     a run inside the 15-minute part. Duplicates and slots with several rows are looked for in the whole frame.
+
+    At `"1D"` the frame has at most one row per local date, every row at one wall-clock time that the clock has once on every
+    date, gaps allowed (`_check_daily`, on the whole frame); finer data raises and says to take one time of day.
     """
     if days is not None and isinstance(days[0], pd.Timestamp):
         days = [days]
@@ -116,6 +121,9 @@ def check_index(data: pd.DataFrame, freq: str, days: Union[DayRange, Sequence[Da
             f"Data index has {len(duplicated)} duplicate timestamp(s), first {duplicated[0]}. "
             "Each timestamp must appear once; drop or aggregate the duplicates before running the model."
         )
+    if freq == DAILY:
+        _check_daily(index)
+        return
     if len(index) < 2:
         return
 
@@ -152,6 +160,51 @@ def check_index(data: pd.DataFrame, freq: str, days: Union[DayRange, Sequence[Da
         )
     if len(spacings):
         _check_spacing(ordered, spacings, freq, days)
+
+
+def _check_daily(index: pd.DatetimeIndex) -> None:
+    """Raise unless `index` has at most one row per local date, every row at one wall-clock time, which the clock has once on
+    every date from the first to the last. Gaps are allowed.
+
+    The elapsed spacing checks can't serve a daily frame: its rows are 23, 24 or 25 hours apart around a switch. What a daily row
+    stands for is its time of day (`_date_utils.daily_anchor`), so a time the clocks skip or repeat on some date would make that
+    date's row another instant than the others', or two of them. The whole frame is checked, as slots with several rows are at
+    finer frequencies.
+    """
+    if not len(index):
+        return
+    local = wall_clock(index)
+    dates = local.normalize()
+    if dates.has_duplicates:
+        spacings = np.diff(index.sort_values().as_unit("ns").asi8)
+        values, counts = np.unique(spacings, return_counts=True)
+        common = pd.Timedelta(int(values[np.argmax(counts)]), unit="ns")
+        if common < pd.Timedelta(hours=23):
+            raise ValueError(
+                f"Data rows are most commonly {_fmt_step(common)} apart, but freq='1D' takes one row per local date. Take "
+                "one time of day from finer data, e.g. df.at_time('12:00') after the transformers, so that each row stands "
+                f"for the issue time on its date, or run with the data's own freq ({_suggest_freq(common)})."
+            )
+        crowded = dates[dates.duplicated(keep=False)].unique()
+        examples = ", ".join(str(day.date()) for day in crowded[:3])
+        raise ValueError(
+            f"{len(crowded)} local date(s) have more than one row (e.g. {examples}), but freq='1D' takes one row per local "
+            "date. Keep one row per date, at one time of day, e.g. df.at_time('12:00')."
+        )
+    anchor = daily_anchor(index)
+    if index.tz is None or is_utc_index(index):
+        return
+    first, last = dates.min(), dates.max()
+    walls = pd.date_range(first, last, freq="D", unit="ns") + pd.Timedelta(minutes=anchor)
+    once = walls.tz_localize(index.tz, ambiguous="NaT", nonexistent="NaT")
+    odd = walls[once.isna()]
+    if len(odd):
+        shown = ", ".join(str(day.date()) for day in odd[:3]) + (" ..." if len(odd) > 3 else "")
+        raise ValueError(
+            f"The rows are at {fmt_minutes(anchor)}, which the clock of {index.tz} skips or repeats on {len(odd)} date(s) "
+            f"from {first.date()} to {last.date()} ({shown}), so a daily row there would be another instant, or two. Stamp "
+            "the rows at a time of day that exists once on every date, e.g. df.at_time('12:00')."
+        )
 
 
 def _checked_days(days: Optional[Sequence[DayRange]]) -> str:

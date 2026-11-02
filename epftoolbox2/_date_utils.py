@@ -71,6 +71,41 @@ def zone_name(tz: Any) -> Optional[str]:
     return None
 
 
+def wall_minutes(index: pd.DatetimeIndex) -> np.ndarray:
+    """Each row's local wall-clock time of day, in minutes after its midnight (seconds as fractions of a minute)."""
+    local = index.tz_localize(None) if index.tz is not None else index
+    return np.asarray(local.hour * 60 + local.minute + local.second / 60.0, dtype=float)
+
+
+def fmt_minutes(minutes: float) -> str:
+    """Minutes after midnight as `HH:MM`, or `HH:MM:SS` when there are seconds."""
+    seconds = int(round(float(minutes) * 60))
+    hours, rest = divmod(seconds, 3600)
+    text = f"{hours:02d}:{rest // 60:02d}"
+    return text + (f":{rest % 60:02d}" if rest % 60 else "")
+
+
+def daily_anchor(index: pd.DatetimeIndex) -> float:
+    """The wall-clock time of day every row of a daily frame (`freq="1D"`) is stamped at, in minutes after local midnight.
+
+    A daily row stands for its issue instant on its date: noon in every example, so that `load_actual_h-1` is 11:00 of that
+    date. Its time is read from the index, and a `ValueError` says so if the rows are at several times or there is none.
+    """
+    if not len(index):
+        raise ValueError(
+            "freq='1D' reads the time of day a daily row stands for from its index, and the index is empty"
+        )
+    times = np.unique(wall_minutes(index))
+    if len(times) > 1:
+        shown = ", ".join(fmt_minutes(t) for t in times[:3]) + (", ..." if len(times) > 3 else "")
+        raise ValueError(
+            f"freq='1D' needs every row at one wall-clock time of day, the time its row stands for, but the rows are at "
+            f"{len(times)} times ({shown}). Take one time of day from data at a finer resolution, e.g. "
+            "df.at_time('12:00') after the transformers, or stamp every row at the same time."
+        )
+    return float(times[0])
+
+
 def _reads_back(name: str) -> bool:
     try:
         pd.Timestamp("2000-01-01").tz_localize(name)

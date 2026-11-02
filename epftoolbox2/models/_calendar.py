@@ -5,7 +5,8 @@ isn't always one row: the hour clocks repeat in autumn has two rows on its date,
 rows are chosen by their date, never by counting them, and a key is planned only if the clock has its period on D and on D + h.
 
 A period is on the clock of a date when any minute of it is: Lord Howe skips 02:00 to 02:29 in spring, so at 1 h its period 2 stays,
-with its row at 02:30, and at 15 min periods 8 and 9 go.
+with its row at 02:30, and at 15 min periods 8 and 9 go. At `"1D"` a date has one period, 0, whose row is at one wall-clock time that
+the clock has once on every date (`_contract.check_index`), so it is on the clock of every date, whatever the day's length.
 
 Day ids are integers, one per local date, as `BaseModel._preprocess` numbers them. `zone` is what a frame's `index.tz` holds, or
 the name of a zone, or None for a frame with no clock of its own (a naive index): such a frame, like a UTC one, has every period
@@ -22,11 +23,13 @@ import pandas as pd
 
 from .._date_utils import zone_name
 
-FREQ_STEPS = {"1h": pd.Timedelta(hours=1), "15min": pd.Timedelta(minutes=15)}
+# One row per local date, at one wall-clock time of day (`_contract.check_index`).
+DAILY = "1D"
+FREQ_STEPS = {"1h": pd.Timedelta(hours=1), "15min": pd.Timedelta(minutes=15), DAILY: pd.Timedelta(days=1)}
 
 
 def periods_per_day(freq: str) -> int:
-    """How many periods an ordinary day has at `freq`."""
+    """How many periods an ordinary day has at `freq`: 24, 96, or 1 at `"1D"`."""
     if freq not in FREQ_STEPS:
         raise ValueError(f"Unsupported freq '{freq}'. Supported: {list(FREQ_STEPS)}")
     return int(pd.Timedelta(days=1) / FREQ_STEPS[freq])
