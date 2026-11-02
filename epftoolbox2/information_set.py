@@ -1917,8 +1917,8 @@ def _available_array(
     `daily` says the rows are a daily frame's (`freq="1D"`), each a whole local date stamped at one time of day. A plain
     `realised` value of such a row is the date's (a daily maximum, say), known `delay` after the end of the local day the
     shifts reach, not after an hour from the stamp: else `actual_daily_max` would read as known at 13:00 on its own date. A
-    plain `published` or `weekly` one is read at that date's last slot, so a date spanning two of the rule's delivery days
-    isn't read on the earlier. One with an `h`, `min` or `s` shift is an hourly slot, `x_h-1` the hour before the stamp. This
+    plain `published` or `weekly` one is read at that date's last slot, or at the stamp if it is later, so a date spanning two
+    of the rule's delivery days isn't read on the earlier. One with an `h`, `min` or `s` shift is an hourly slot, `x_h-1` the hour before the stamp. This
     holds for the column named alone; what a profile or a day aggregate is built from is read at its slot, as on hourly rows.
     """
     if col.built_from is not None:
@@ -1966,9 +1966,13 @@ def _available_array(
     if daily and all(shift.unit == "d" for shift in shifts):
         # The value of a whole local date is delivered in every slot of it, so it is known when its last slot is: no earlier
         # slot is published later. A date that spans two of the rule's delivery days (Helsinki's against Brussels') is known
-        # when the later is, wherever the row is stamped.
-        wall = np.floor(wall / 1440.0) * 1440.0 + 1440.0 - step
-        point = _to_instants(wall, ctx.data_zone, ctx, _second(wall))
+        # when the later is, wherever the row is stamped. A stamp after the last slot's start (23:45) is later still: the rule
+        # zone's midnight can fall between them (Kathmandu's against Kolkata's), so the later of the two is read.
+        last = np.floor(wall / 1440.0) * 1440.0 + 1440.0 - step
+        last_point = _to_instants(last, ctx.data_zone, ctx, _second(last))
+        later = last_point > point
+        point = np.where(later, last_point, point)
+        wall = np.where(later, last, wall)
     # The delivery day is a calendar day in the rule's own (market) zone, not in the data's: a value at
     # 23:00 UTC in winter (CET, UTC+1) delivers at 00:00 CET the next day, even though the data zone's own
     # wall clock hasn't crossed midnight yet.

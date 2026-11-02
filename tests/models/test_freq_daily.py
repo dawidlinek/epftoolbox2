@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import epftoolbox2.information_set as information_module
 from epftoolbox2.information_set import Availability, InformationSet, InformationSetError
 from epftoolbox2.models import OLSModel, Use
 from epftoolbox2.models._calendar import IssueCalendar, clock_periods, periods_per_day
@@ -448,6 +449,37 @@ def test_a_helsinki_date_is_known_when_the_later_of_its_two_brussels_days_is(sta
     pipeline = ModelPipeline(information_set=information, availability="raise").add_model(model)
     with pytest.raises(InformationSetError, match=name.replace("+", r"\+")):
         pipeline.run(daily, test=("2023-06-01", "2023-06-03"), horizon=2, freq="1D")
+
+
+@pytest.mark.parametrize(
+    ("data_zone", "rule_zone", "stamp"),
+    [
+        ("Asia/Kolkata", "Asia/Kathmandu", "23:45"),
+        ("Asia/Kolkata", "Asia/Kathmandu", "23:59"),
+        ("Australia/Adelaide", "Australia/Sydney", "23:30"),
+    ],
+)
+def test_a_date_s_value_is_never_known_before_its_stamp_reads_it(data_zone, rule_zone, stamp):
+    """Read at its date's last slot, 23:00, a value stamped later could fall on the rule zone's earlier day: Kathmandu's midnight
+    is 23:45 in Kolkata. So a date's value is read at the later of the two, and is never known before the row's own stamp says."""
+    rules = {
+        "p": Availability.published("13:00", 1, rule_zone),
+        "w": Availability.weekly("friday", "10:00", rule_zone),
+        "c": Availability.daily_close("18:00", rule_zone),
+    }
+    information = InformationSet("11:45", rule_zone, rules=rules)
+    wall = pd.date_range("2023-01-01", "2023-12-31", freq="D") + pd.Timedelta(stamp + ":00")
+    index = wall.tz_localize(data_zone)
+    later = 0
+    for run_day in ["2023-04-02", "2023-06-15", "2023-10-01"]:
+        ctx, day, minute, first = information_module._rows_around_issue(index, run_day, information)
+        for name in ["p", "p_d+1", "p_d-1", "w_d+3", "w_d+9", "c", "c_d-1"]:
+            col = information._resolve_for(name, 60)
+            as_dates = information_module._available_array(col, col.rule, day, minute, 60, ctx, first, daily=True)
+            at_stamp = information_module._available_array(col, col.rule, day, minute, 60, ctx, first, daily=False)
+            assert (as_dates >= at_stamp).all(), (name, run_day)
+            later += int((as_dates > at_stamp).sum())
+    assert later == 0  # a stamp after 23:00 is the date's latest instant: read there, nothing moves
 
 
 def test_where_the_date_is_one_brussels_day_the_stamp_changes_nothing():
