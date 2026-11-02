@@ -1196,9 +1196,10 @@ def _to_instants(
     if not len(wall):
         return wall.copy()
     absolute = wall + ctx.epoch_day * 1440.0
-    day = np.floor(absolute / 1440.0).astype(np.int64)
-    start, _, before, after, change, exact, odd = _zone_table(zone, int(day.min()), int(day.max()))
-    k = day - start
+    lo, hi = int(absolute.min() // 1440.0), int(absolute.max() // 1440.0)
+    start, _, before, after, change, exact, odd = _zone_table(zone, lo, hi)
+    k = np.floor(absolute / 1440.0).astype(np.int64)
+    k -= start
     out = absolute - before[k]
     rows = np.flatnonzero(odd[k])  # on a day of a change: which side of it, or both, or neither
     if len(rows):
@@ -1220,17 +1221,34 @@ def _to_instants(
     return out - ctx.origin_minutes
 
 
-def _to_wall(instants: np.ndarray, zone: str, ctx: _Context) -> np.ndarray:
-    """Instants in minutes since `ctx.origin` -> their wall-clock minutes in `zone` after the naive midnight `ctx.day`."""
+def _to_wall(instants: np.ndarray, zone: str, ctx: _Context, wall: Optional[np.ndarray] = None) -> np.ndarray:
+    """Instants in minutes since `ctx.origin` -> their wall-clock minutes in `zone` after the naive midnight `ctx.day`.
+
+    `wall`, the wall times in `zone` these instants were made from, is the answer on every day of one offset, and only the
+    others are converted: a skipped time was moved, and a day of a change needs its side of it."""
     instants = np.atleast_1d(np.asarray(instants, dtype=float))
     if not len(instants):
         return instants.copy()
+    if wall is not None:
+        wall = np.asarray(wall, dtype=float)
+        absolute = wall + ctx.epoch_day * 1440.0
+        start, *_, odd = _zone_table(zone, int(absolute.min() // 1440.0), int(absolute.max() // 1440.0))
+        k = np.floor(absolute / 1440.0).astype(np.int64)
+        k -= start
+        rows = np.flatnonzero(odd[k])
+        out = wall.copy()
+        if len(rows):
+            out[rows] = _to_wall(instants[rows], zone, ctx)
+        return out
     absolute = instants + ctx.origin_minutes
-    day = np.floor(absolute / 1440.0)
-    start, midnight, before, after, change, exact, odd = _zone_table(zone, int(day.min()) - 2, int(day.max()) + 2)
+    lo, hi = int(absolute.min() // 1440.0), int(absolute.max() // 1440.0)
+    start, midnight, before, after, change, exact, odd = _zone_table(zone, lo - 2, hi + 2)
     # The local day: that of the UTC day's offset, or the one before or after it next to a change. The table reaches a year
     # past either end, so k and k + 1 are in it.
-    k = np.floor((absolute + before[day.astype(np.int64) - start]) / 1440.0).astype(np.int64) - start
+    k = np.floor(absolute / 1440.0).astype(np.int64)
+    k -= start
+    k = np.floor((absolute + before[k]) / 1440.0).astype(np.int64)
+    k -= start
     k -= absolute < midnight[k]
     k += absolute >= midnight[k + 1]
     out = absolute + before[k]
@@ -1718,7 +1736,7 @@ def _available_array(
     shifts = list(col.shifts)
     if rule.kind == "weather_run" and shifts and shifts[0].unit == "d" and shifts[0].offset > 0:
         shifts = shifts[1:]
-    point, _ = _shift_rows(day, minute, shifts, ctx, first)  # delivery instant of the value (weather: the row time)
+    point, wall = _shift_rows(day, minute, shifts, ctx, first)  # delivery instant of the value (weather: the row time)
     if rule.kind == "realised":
         return point + step + _parse_delay(rule.delay)
     if rule.kind == "weather_run":
@@ -1727,7 +1745,7 @@ def _available_array(
     # 23:00 UTC in winter (CET, UTC+1) delivers at 00:00 CET the next day, even though the data zone's own
     # wall clock hasn't crossed midnight yet.
     zone = rule.timezone or ctx.data_zone
-    delivery_day = np.floor(_to_wall(point, zone, ctx) / 1440.0)
+    delivery_day = np.floor(_to_wall(point, zone, ctx, wall if zone == ctx.data_zone else None) / 1440.0)
     if rule.kind == "published":
         publication_day = delivery_day - rule.days_before
     else:  # weekly: published on `weekday` of the week before the delivery week
