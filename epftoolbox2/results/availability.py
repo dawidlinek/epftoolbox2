@@ -21,6 +21,10 @@ from ..information_set import ROLE_PREDICTOR, ROLE_PUBLISHED, ROLE_TARGET, ROLE_
 
 LATE = "late"
 NO_RULE = "no rule"
+# How a manifest's listing compared times. Listings without it were written on the wall clock, which next to a clock change
+# lists other periods than a fresh run would: such a listing is replaced on resume (`manifest._keep_listing`) and read with
+# a warning (`read_listing`).
+LISTING_TIMES = "instants"
 
 # The columns of `EvaluationReport.availability()`.
 COLUMNS = ["model", "predictor", "role", "status", "list", "periods", "horizons", "rule", "known", "issued", "note"]
@@ -60,8 +64,8 @@ _NOTHING_KNOWN: Dict[str, Any] = {"rule": "", "known": "", "issued": "", "minute
 def _details(use: Violation) -> Dict[str, Any]:
     return {
         "rule": use.column.rule.describe(),
-        "known": _fmt_minute(use.available),
-        "issued": _fmt_minute(use.issue),
+        "known": use.available_label or _fmt_minute(use.available),
+        "issued": use.issue_label or _fmt_minute(use.issue),
         "minutes_late": float(use.available - use.issue),
         "note": use.hint,
     }
@@ -160,6 +164,14 @@ def read_listing(path: Path, window: Optional[str] = None) -> Optional[List[Dict
     availability = json.loads(path.read_text()).get("availability")
     if availability is None:
         return None
+    if availability.get("times") != LISTING_TIMES:
+        warnings.warn(
+            f"{path.name}: this availability listing was written when the check compared wall-clock times, so next to a "
+            "clock change it may list other periods than a fresh run. A run at availability='warn' lists it anew: into "
+            "this directory where its manifest lets it resume, refitting nothing, else into a new one.",
+            UserWarning,
+            stacklevel=3,
+        )
     if window is not None:
         return list(availability.get("windows", {}).get(window, []))
     return list(availability.get("listing", []))
@@ -168,6 +180,7 @@ def read_listing(path: Path, window: Optional[str] = None) -> Optional[List[Dict
 __all__ = [
     "COLUMNS",
     "LATE",
+    "LISTING_TIMES",
     "NO_RULE",
     "listing_frame",
     "listing_rows",

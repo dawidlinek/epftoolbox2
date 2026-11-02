@@ -727,6 +727,105 @@ def test_violations_convert_the_issue_time_at_its_own_instant():
     assert {p for _, p, _ in found} == {21, 22, 23}
 
 
+def test_a_value_known_after_an_issue_in_the_repeated_autumn_hour_is_unknown():
+    """New York repeats 01:00-02:00 on 2024-11-03. Issued at 01:30, read at its earliest (05:30Z, EDT), a
+    weather_cutoff value known at 06:00Z (run "00", delay "6h") isn't known yet. 06:00Z is New York's second 01:00:
+    compared as wall-clock minutes (01:00 < 01:30) it read as known, for the check and the perturbation alike."""
+    index = pd.date_range("2024-11-01", "2024-11-05", freq="1h", tz="America/New_York")
+    info = InformationSet("01:30", "America/New_York", rules={"temp": Availability.weather_cutoff("00", "6h")})
+    found, _ = violations(["temp"], info=info, horizon=1, index=index, start="2024-11-03", end="2024-11-03")
+    assert {p for _, p, _ in found} == set(range(24))
+
+    data = pd.DataFrame({"temp": np.arange(len(index), dtype=float)}, index=index)
+    perturbed, _counts, unchecked = perturb_unknown(data, "2024-11-03", info, freq="1h")
+    assert unchecked == []
+    nov_3 = np.asarray(index.tz_localize(None).normalize() == pd.Timestamp("2024-11-03"))
+    assert (perturbed.loc[nov_3, "temp"].to_numpy() != data.loc[nov_3, "temp"].to_numpy()).all()
+
+
+def test_a_realised_values_period_and_delay_are_elapsed_time_across_the_spring_switch():
+    """Issued 03:30 Warsaw on 2024-03-31 (01:30Z, after the spring switch). load_actual at 01:00 CET (00:00Z) is
+    known 1 h after its period plus a 1 h delay, at 02:00Z: after the issue. Added to the wall clock instead
+    (01:00 + 1 h + 1 h = 03:00 < 03:30), it read as known, for the check and the perturbation alike. Period 0
+    (23:00Z the day before, known 01:00Z) is known in time, and period 2, which the clocks skip, has no row to judge."""
+    info = InformationSet("03:30", "Europe/Warsaw")  # default rules: load_actual = Availability.realised("1h")
+    found, _ = violations(
+        ["load_actual"], info=info, horizon=1, index=DST_SPRING_WARSAW, start="2024-03-31", end="2024-03-31"
+    )
+    assert {p for _, p, _ in found} == set(range(1, 24)) - {2}
+
+    index = pd.date_range("2024-03-29", "2024-04-02", freq="1h", tz="Europe/Warsaw")
+    data = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
+    perturbed, _counts, unchecked = perturb_unknown(data, "2024-03-31", info, freq="1h")
+    assert unchecked == []
+    changed = data.index[perturbed["load_actual"] != data["load_actual"]]
+    assert changed[0] == pd.Timestamp("2024-03-31 01:00", tz="Europe/Warsaw")
+
+
+def test_an_hour_lag_is_elapsed_time_across_the_autumn_switch():
+    """Warsaw repeats 02:00-03:00 on 2024-10-27; issued 02:30, read at its earliest (00:30Z, CEST). load_actual_h-5
+    at 05:00 CET (04:00Z) holds the value delivered 5 hours earlier, at 23:00Z, known 1 h after its period plus a
+    1 h delay: 01:00Z, the second 02:00, after the issue. Subtracting the 5 hours from the wall clock (delivered
+    00:00, known 02:00 < 02:30) read it as known, and flagged only periods from 6 on."""
+    info = InformationSet("02:30", "Europe/Warsaw")
+    found, _ = violations(
+        ["load_actual_h-5"], info=info, horizon=1, index=DST_FALL_WARSAW, start="2024-10-27", end="2024-10-27"
+    )
+    assert {p for _, p, _ in found} == set(range(5, 24))
+
+
+def test_a_repeated_autumn_hour_is_checked_at_the_second_occurrence_the_model_forecasts_from():
+    """Period 2 has two rows on 2024-10-27 in Warsaw, and the model forecasts from the second, 02:00 CET (01:00Z).
+    price_h+22 there holds the price of 2024-10-28 00:00, published 13:00 on D: after the 11:45 issue. Checked at
+    the first occurrence (02:00 CEST) it held D's own 23:00 price and passed."""
+    found, _ = violations(["price_h+22"], horizon=1, index=DST_FALL_WARSAW, start="2024-10-27", end="2024-10-27")
+    assert {p for _, p, _ in found} == set(range(2, 24))
+
+
+def test_an_as_of_value_read_through_an_hour_lag_comes_from_its_source_rows_day():
+    """x is known at 12:00 Warsaw on the day it is read from. On 2024-10-27, a 25-hour day, x_h-24 at 23:00 CET
+    (22:00Z) holds x of 22:00Z the day before, 00:00 CEST on D itself: known at 12:00, after the 11:45 issue.
+    Counting the 24 hours on the wall clock read it from D-1."""
+    info = InformationSet("11:45", "Europe/Brussels", rules={"x": Availability.as_of("12:00", "Europe/Warsaw")})
+    found, _ = violations(["x_h-24"], info=info, horizon=1, index=DST_FALL_WARSAW, start="2024-10-27", end="2024-10-27")
+    assert {p for _, p, _ in found} == {23}
+
+
+def test_shifts_apply_outermost_first():
+    """price_d+1_h-24 is price_d+1 read 24 hours earlier. At 23:00 CET on 2024-10-27 (22:00Z) that is price_d+1 at
+    00:00 CEST on D, the price of 2024-10-28 00:00: published 13:00 on D, after the 11:45 issue. Taking the day shift
+    first read D's own 23:00 price there instead, and flagged the day before."""
+    for day, expected in (("2024-10-26", set()), ("2024-10-27", {23})):
+        found, _ = violations(["price_d+1_h-24"], horizon=1, index=DST_FALL_WARSAW, start=day, end=day)
+        assert {p for _, p, _ in found} == expected
+
+
+def test_a_naive_index_is_shifted_on_its_own_wall_clock():
+    """A naive index (DSTNormalizeTransformer's 24 slots a day) is lagged on its own wall clock: price_h+23 at 01:00
+    on 2024-10-27 holds the price of 2024-10-28 00:00 (published 13:00 on D, after the 11:45 issue), and at 00:00 on
+    any day D's own 23:00 price (known). The averaged 02:00 slot of the autumn day needs the second 02:00 hour,
+    realised at 03:00Z: after an issue at 03:30 CET (02:30Z)."""
+    autumn = pd.date_range("2024-10-20", "2024-11-03", freq="h", inclusive="left")
+    perturbed, _, _ = perturb_unknown(pd.DataFrame({"price_h+23": 0.0}, index=autumn), "2024-10-27", InformationSet())
+    assert perturbed.loc["2024-10-27 01:00", "price_h+23"] != 0
+    data = pd.DataFrame({"load_actual": 0.0}, index=autumn)
+    perturbed, _, _ = perturb_unknown(data, "2024-10-27", InformationSet("03:30", "Europe/Brussels"))
+    assert perturbed.loc["2024-10-27 02:00", "load_actual"] != 0
+
+    spring = pd.date_range("2024-03-25", "2024-04-05", freq="h", inclusive="left")
+    found, _ = violations(["price_h+23"], horizon=1, index=spring, start="2024-03-25", end="2024-04-05")
+    assert {p for _, p, _ in found} == set(range(1, 24))
+
+
+def test_a_time_in_the_repeated_autumn_hour_is_shown_with_its_utc_offset():
+    """06:00Z is New York's second 01:00 on 2024-11-03 and the 01:30 issue its first 01:30; without offsets the
+    message would read as known before the issue."""
+    index = pd.date_range("2024-11-01", "2024-11-05", freq="1h", tz="America/New_York")
+    info = InformationSet("01:30", "America/New_York", rules={"temp": Availability.weather_cutoff("00", "6h")})
+    with pytest.raises(InformationSetError, match=r"known D 01:00 \(UTC-05:00\), issued D 01:30 \(UTC-04:00\)"):
+        info.check(expand(["temp"], horizon=1), "price", "1h", index, "2024-11-03", "2024-11-03")
+
+
 @pytest.mark.parametrize("issue_timezone", ["Europe/Brussels", "Europe/Warsaw"])
 @pytest.mark.parametrize("data_zone", ["UTC", "Europe/Warsaw"])
 def test_an_issue_time_skipped_by_the_spring_switch_is_read_at_its_earliest(issue_timezone, data_zone):
@@ -737,7 +836,7 @@ def test_an_issue_time_skipped_by_the_spring_switch_is_read_at_its_earliest(issu
     index = pd.date_range("2024-03-25", "2024-04-05", freq="h", tz=data_zone)
     info = InformationSet("02:30", issue_timezone, rules={"x": Availability.as_of("00:45", "UTC")})
     found, _ = violations(["x"], info=info, horizon=1, index=index, start="2024-03-31", end="2024-03-31")
-    assert {p for _, p, _ in found} == set(range(24))
+    assert {p for _, p, _ in found} == _periods_with_a_row(index, "2024-03-31")
 
     perturbed, _, _ = perturb_unknown(pd.DataFrame({"x": 1.0}, index=index), "2024-03-31", info)
     assert (perturbed["x"] != 1.0).all()
@@ -802,6 +901,14 @@ def _refused_periods(found) -> dict:
     for name, period, _ in found:
         out.setdefault(name, set()).add(period)
     return out
+
+
+def _periods_with_a_row(index, day, step=60) -> set:
+    """The periods `index` has a row at on `day`: on the day the clocks go forward, not those of the hour they skip, which
+    hold no value and get no verdict."""
+    wall = index.tz_localize(None) if index.tz is not None else index
+    on_day = wall[wall.normalize() == pd.Timestamp(day)]
+    return set(((on_day.hour * 60 + on_day.minute) // step).tolist())
 
 
 def test_profile_slot_names():
@@ -949,8 +1056,9 @@ def test_probe_perturbs_a_profile_slot_realised_after_the_issue_on_every_row():
 )
 def test_profile_slots_have_one_verdict_on_every_row_of_a_dst_day(run_day, index, rows):
     """The switch days have 23 and 25 rows, each carrying the day's whole profile. Realised 1 h after its hour, slot 23
-    (known 01:00 the next day) is perturbed on every one of them and refused at every period, including period 2,
-    which has no row or two rows that day; slot 05, and the skipped or repeated slot 02 itself, on none."""
+    (known 01:00 the next day) is perturbed on every one of them and refused at every period it has rows at, period 2
+    with two in autumn, while the spring day's period 2 has no row and so no verdict; slot 05, and the skipped or repeated
+    slot 02 itself, on none."""
     names = ["load_actual_h02", "load_actual_h05", "load_actual_h23"]
     data = pd.DataFrame(1.0, index=index, columns=names)
     info = InformationSet("11:45", "Europe/Brussels", rules=LOAD_ACTUAL_PROFILE)
@@ -964,7 +1072,7 @@ def test_profile_slots_have_one_verdict_on_every_row_of_a_dst_day(run_day, index
     assert changed["load_actual_h23"].all()
     assert not changed[["load_actual_h02", "load_actual_h05"]].to_numpy().any()
     assert unknown == set()
-    assert _refused_periods(found) == {"load_actual_h23": set(range(24))}
+    assert _refused_periods(found) == {"load_actual_h23": _periods_with_a_row(index, run_day)}
 
 
 @pytest.mark.parametrize("switch", ["2024-03-31", "2024-10-27"])
@@ -1005,7 +1113,8 @@ def _verdicts_against_held_deliveries(
 
     The check judges a (predictor, period): its verdict must be that of the period's last row that day, the one the
     model forecasts from, so the second of a repeated autumn hour. A column known, or unknown, on every row of the day
-    has that verdict at every period, even one with no row. NaN cells hold no delivery and are not compared."""
+    has that verdict at every period with a row; one the clocks skip has none, and no verdict. NaN cells hold no delivery
+    and are not compared."""
     index = data.index
     step = {"1h": 60, "15min": 15}[freq]
     rule = Availability.realised("1h") if realised else Availability.published("13:00", 1, rule_zone)
@@ -1037,12 +1146,13 @@ def _verdicts_against_held_deliveries(
         found, _ = info.violations(expanded, "price", freq, index, day, day)
         refused = _refused_periods({(v.predictor, v.period, v.horizon) for v in found if v.role == "predictor"})
         today = on_day == run_day.to_datetime64()
+        with_row = _periods_with_a_row(index, day, step)
         for name in np.unique(names[today]):
             chosen = today & (names == name)
             by_period = dict(zip(period[chosen].tolist(), unknown[chosen].tolist()))  # a later row overrides
             got = refused.get(name, set())
             if len(set(by_period.values())) == 1:
-                want = every if unknown[chosen][0] else set()
+                want = with_row if unknown[chosen][0] else set()
             else:
                 want, got = {p for p, late in by_period.items() if late}, got & set(by_period)
             if got != want:
@@ -1200,8 +1310,8 @@ def test_probe_perturbs_a_day_aggregate_realised_after_the_issue_on_every_row():
 def test_day_aggregates_have_one_verdict_on_every_row_of_a_dst_day(run_day, hours, freq):
     """The switch days have 23 and 25 hours (92 and 100 quarter-hours), all of them in each row's aggregate. Realised
     1 h after its slot, the aggregate of the switch day is known at 01:00 on the next day: perturbed on every one of its
-    rows and refused at every period, including the switch hour's, which has no row or two rows that day. The
-    aggregate of the day before, `_d-1` on the switch day, on none."""
+    rows and refused at every period with a row, the autumn switch hour's two included; the spring one has none and no
+    verdict. The aggregate of the day before, `_d-1` on the switch day, on none."""
     per_hour = 4 if freq == "15min" else 1
     start = pd.Timestamp(run_day) - pd.Timedelta(days=5)
     index = pd.date_range(start, start + pd.Timedelta(days=10), freq=freq, tz="Europe/Warsaw", inclusive="left")
@@ -1224,7 +1334,7 @@ def test_day_aggregates_have_one_verdict_on_every_row_of_a_dst_day(run_day, hour
     assert not changed[known].to_numpy().any()
     assert unknown == set()
     found = {(v.predictor, v.period, v.horizon) for v in found}
-    assert _refused_periods(found) == {name: set(range(24 * per_hour)) for name in late}
+    assert _refused_periods(found) == {name: _periods_with_a_row(index, run_day, 60 // per_hour) for name in late}
 
 
 @pytest.mark.parametrize("switch", ["2024-03-31", "2024-10-27"])
@@ -1415,10 +1525,10 @@ def test_built_in_rules_judge_derived_columns_through_the_column_they_were_built
 def test_a_derived_column_has_the_verdict_of_its_column_at_the_slot_it_reads(column, shift, zone):
     """Nothing loosens through the built-in rules: on the issue days around a switch, at every period, a profile has the
     verdict of its column at that slot's period and a day aggregate at the day's last period, with the day shift before
-    or after the slot."""
+    or after the slot; a period the clocks skip has no row and no verdict."""
     index = pd.date_range("2024-03-20", "2024-04-10", freq="h", tz=zone, inclusive="left")
-    every = set(range(24))
     for day in pd.date_range("2024-03-29", "2024-04-02", freq="D").strftime("%Y-%m-%d"):
+        every = _periods_with_a_row(index, day)
 
         def refused(name):
             found, unknown = violations([name], horizon=1, start=day, end=day, index=index)
