@@ -160,13 +160,10 @@ def compute(
         # In this order: results with no manifest of an ensemble are not an ensemble's, and nothing overwrites them.
         _write_manifest(path, ensemble, stored, freq, members, manifests, choices)
         _write_atomically(path, (json.dumps(record) + "\n" for record in records))
-    # What was run, not what this report was told: a horizon-3 run reported with horizon=1 has 3 horizons of forecasts to plan,
-    # and a run of horizons [1, 3, 7] three. A report told a list reads only the records of those horizons, the members' too, so
-    # the ensemble keeps to them as well.
-    horizons = like.horizons or next(
-        (horizons_of(m) for m in leaf_manifests.values() if m and m.get("horizon") is not None),
-        tuple(range(1, like.horizon + 1)),
-    )
+    # What the members' refs plan, so that one report plans one list for all: a report's refs always name it (`report()` reads it
+    # from the manifests when told nothing), and a run's do unless it is every horizon to the largest. `_check_members_agree` has
+    # compared the members' manifests on it.
+    horizons = like.horizons or tuple(range(1, like.horizon + 1))
     return Computed(_ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only, horizons), choices)
 
 
