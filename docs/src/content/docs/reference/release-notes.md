@@ -9,6 +9,11 @@ Notes for changes that need something from you. The full list of changes of a re
 
 ### Breaking changes
 
+- **`ModelPipeline.report()` reads only the horizons it plans.** `report(save_dir, horizon=3)` of results run with `horizon=7` used to
+  plan horizons 1 to 3 and read every record on file, so its tables held horizons 4 to 7 and `planned` equalled `produced` with no
+  warning. It now reads horizons 1 to 3 alone, and so do the ensembles it computes, which planned what their members ran. A report told
+  the horizon its runs had doesn't change. A report told other horizons than its runs had has no skip reasons in `forecast_counts()`,
+  only `missing`: the runs counted them over all their horizons.
 - **Training rows are chosen by date, and results made before that are refused.** A forecast's training rows were found by counting
   back from the issue day, which went wrong around a clock change: on the days after an autumn switch the forecast of the switch hour
   trained on a target dated on the issue day or later, a look-ahead, and on a spring switch day the key of the skipped hour was built

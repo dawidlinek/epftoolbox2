@@ -40,9 +40,9 @@ class ModelResultRef:
     on its run date or its target date is no forecast, as its target can't exist: `iter_records` leaves it out, and
     `off_the_clock` counts it. Only results written before training rows were chosen by date hold one.
 
-    `horizon` is the largest horizon of the run, and `horizons` the ones it planned when that isn't every one from 1 to
-    `horizon` (`run(horizons=[1, 3, 7])`); None means every one. Only records of those horizons are read: `count` plans no
-    other, and a record of another would be compared with nothing.
+    `horizon` is the largest horizon planned, and `horizons` the ones planned: a run's ref has them when they aren't every one
+    from 1 to `horizon` (`run(horizons=[1, 3, 7])`), and a ref of `ModelPipeline.report()` always. None reads every horizon.
+    Only records of those horizons are read: `count` plans no other, and a record of another would be compared with nothing.
     """
 
     name: str

@@ -9,7 +9,7 @@ import yaml
 
 from .._date_utils import resolve_date
 from ..information_set import InformationSet, InformationSetError, check_level
-from ..models._calendar import IssueCalendar, every_horizon, horizon_arguments, resolve_horizons
+from ..models._calendar import IssueCalendar, horizon_arguments, resolve_horizons
 from ..models.base import BaseModel
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model
@@ -351,7 +351,7 @@ class ModelPipeline:
         This is the merge step after runs that each wrote some models' results (e.g. a SLURM array with
         `Workflow(model_index=...)`). The test period, horizon (or `horizons`, as in `run`) and freq must be those of the runs;
         with the time zone each manifest records they give each model's planned forecast count (`IssueCalendar`). Only records
-        of the horizons named are read. Raises FileNotFoundError if a
+        of the horizons planned are read, so `horizon=3` of a horizon-7 run is horizons 1 to 3 alone. Raises FileNotFoundError if a
         model has no results file, unless `allow_missing` is set. `data` is only needed by exporters that join source columns.
 
         Ensembles are computed here from the stored results of their members, every time, so they can't go stale, and written
@@ -419,7 +419,6 @@ class ModelPipeline:
                 continue
             zone = read_zone(manifest_path(path))
             calendars[model.name] = IssueCalendar(freq, zone, horizons)
-            listed = None if every_horizon(horizon, horizons) else horizons
             ref = ModelResultRef(
                 name=model.name,
                 path=path,
@@ -431,13 +430,14 @@ class ModelPipeline:
                 skipped=(
                     {}
                     if windows is not None
-                    else read_skipped(manifest_path(path), period=(test_start, test_end), horizons=listed)
+                    else read_skipped(manifest_path(path), period=(test_start, test_end), horizons=horizons)
                 ),
                 availability_listing=read_listing(manifest_path(path)),
                 windows=windows,
                 matching_lists=read_matching_lists(manifest_path(path)),
                 zone=zone,
-                horizons=listed,
+                # Only the horizons planned: a record of another is compared with nothing (`horizon=3` of a horizon-7 run).
+                horizons=horizons,
             )
             # Through the ref: the file can hold more than this period, and a line outside it is no forecast of it.
             ref.produced = sum(1 for _ in ref.iter_records(cols=["hour"]))

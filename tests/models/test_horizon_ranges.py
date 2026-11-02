@@ -366,15 +366,22 @@ def test_a_list_of_horizons_runs_resumes_and_reports(tmp_path, spring_data):
     assert "missing_test_predictors" not in counts.columns
     assert counts["missing"].tolist() == [1, 1, 1]
 
-    # Told every horizon to 7, the models plan seven and lack four; the ensemble plans what its members ran.
+    # Told every horizon to 7, the models and the ensemble plan seven and lack four.
     with pytest.warns(UserWarning, match="missing forecasts"):
         told_seven = small_pipeline().report(tmp_path / "a", test=SPRING_TEST, horizon=7)
-    planned = told_seven.forecast_counts().set_index("model")["planned"]
-    assert planned.to_dict() == {
-        "fixed": planned_by_hand(*SPRING_TEST, range(1, 8)),
-        "function": planned_by_hand(*SPRING_TEST, range(1, 8)),
-        "average": planned_by_hand(*SPRING_TEST, THREE),
-    }
+    counts = told_seven.forecast_counts().set_index("model")
+    assert counts["planned"].tolist() == [planned_by_hand(*SPRING_TEST, range(1, 8))] * 3
+    assert counts["produced"].tolist() == [planned_by_hand(*SPRING_TEST, THREE) - 3] * 3
+
+    # Told horizon 3, only horizons 1 and 3 are read: 7 is no forecast of it, and 2 is missing.
+    with pytest.warns(UserWarning, match="missing forecasts"):
+        told_three = small_pipeline().report(tmp_path / "a", test=SPRING_TEST, horizon=3)
+    assert sorted(told_three.by_horizon()["horizon"].unique().tolist()) == [1, 3]
+    counts = told_three.forecast_counts().set_index("model")
+    assert counts["planned"].tolist() == [planned_by_hand(*SPRING_TEST, [1, 2, 3])] * 3
+    assert counts["produced"].tolist() == [planned_by_hand(*SPRING_TEST, [1, 3]) - 2] * 3
+    assert counts["missing"].tolist() == [planned_by_hand(*SPRING_TEST, [2]) + 2] * 3
+    assert "missing_test_predictors" not in counts.columns
 
 
 @pytest.mark.parametrize("other", [{"horizons": [1, 3]}, {"horizon": 7}, {"horizons": [1, 3, 6]}])
@@ -590,3 +597,14 @@ def test_epf_model_with_horizons_gives_the_in_process_forecasts(tmp_path, spring
         key: json.loads(r)["prediction"] for key, r in in_process.items()
     }
     assert {key[2] for key in stored} == {1, 3}
+
+
+def test_a_report_told_fewer_horizons_than_a_run_of_every_one_reads_those_alone(tmp_path, spring_data):
+    """`report(horizon=3)` of a horizon-7 run: horizons 4 to 7 are no forecasts of it, whatever the file holds."""
+    small_pipeline().run(spring_data, test=SPRING_TEST, horizon=7, save_dir=tmp_path)
+    report = small_pipeline().report(tmp_path, test=SPRING_TEST, horizon=3)
+    assert sorted(report.by_horizon()["horizon"].unique().tolist()) == [1, 2, 3]
+    counts = report.forecast_counts().set_index("model")
+    planned = planned_by_hand(*SPRING_TEST, [1, 2, 3])
+    assert counts["planned"].tolist() == [planned] * 3
+    assert counts["produced"].tolist() == [planned - 3] * 3  # S+1 has no price of D-1 at 02:00, one key per horizon

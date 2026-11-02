@@ -586,7 +586,10 @@ def _ref(
         windows=like.windows,
         test_only=test_only,
         zone=like.zone,
-        horizons=None if horizons == tuple(range(1, max(horizons, default=0) + 1)) else horizons,
+        # As its members' refs: a report's always name what they plan, a run's only a list that isn't every horizon to the largest.
+        horizons=None
+        if like.horizons is None and horizons == tuple(range(1, max(horizons, default=0) + 1))
+        else horizons,
     )
     if like.windows is None:
         run = codes >> _RUN_SHIFT
