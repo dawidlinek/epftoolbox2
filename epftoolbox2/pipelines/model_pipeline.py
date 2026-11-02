@@ -23,16 +23,16 @@ from ..results.manifest import (
     FrameHashes,
     ManifestMismatchError,
     is_ensemble_manifest,
-    made_before_date_rows,
     manifest_path,
     read_matching_lists,
     read_skipped,
     read_windows,
     read_zone,
+    rows_unverified,
 )
 from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.report import EvaluationReport
-from ..results.ref import ModelResultRef, split_by_window
+from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
 from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
@@ -340,8 +340,9 @@ class ModelPipeline:
         next to them. `allow_missing` leaves out an ensemble with a missing member, with a warning: it is never averaged over
         the members that happen to be there.
 
-        Results whose manifest is older than `training_cut` were made with rows found by counting them: a warning names the
-        models, and they are planned as those runs did, every period of every day.
+        Results that may hold records written before training rows were chosen by date (no manifest, one older than
+        `training_cut`, or one that accepted such results, see `epftoolbox2.results.manifest`) are warned about by name, every
+        time. With the zone their manifest records, a record of a slot the clock doesn't have is left out, with a warning.
 
         What the runs listed about inputs known after the issue time comes from the manifests, whatever this pipeline's
         `availability` is: `report.availability()`, one warning and the terminal exporter show it.
@@ -420,14 +421,15 @@ class ModelPipeline:
             raise FileNotFoundError(f"No results for model(s): {', '.join(missing)}. Run them first.")
         for name in missing:
             logger.warning(f"Report: no results for {name}; it is left out")
-        old = [name for name, ref in refs.items() if made_before_date_rows(manifest_path(ref.path))]
+        old = [name for name, ref in refs.items() if rows_unverified(manifest_path(ref.path))]
         if old:
             warnings.warn(
-                f"Report: the results of {old} were made before training rows were chosen by date, so they may hold a "
-                "look-ahead on the days after an autumn switch and a mislabelled forecast on a spring one. Run them again in a "
-                "new save_dir: a resume refuses them.",
+                f"Report: the results of {old} may hold records written before training rows were chosen by date (their "
+                "manifest is older, was accepted over that with allow_manifest_mismatch=True, or is missing), so the days after "
+                "an autumn switch may hold a look-ahead. Run them again into a new save_dir.",
                 stacklevel=2,
             )
+        warn_off_the_clock(refs, stacklevel=2)
 
         parts = dict(refs)
         if windows is not None:

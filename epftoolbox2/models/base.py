@@ -18,7 +18,7 @@ from rich.progress import Progress
 from ..scalers.standard import StandardScaler
 from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore
-from ..results.ref import ModelResultRef, split_by_window
+from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
 from ..results.availability import listing_rows, warn_about
 from ..results.matching import training_day_rows, warn_about_thin
 from ..results.manifest import (
@@ -49,7 +49,7 @@ from ._worker import (
     training_row_days,
     training_rows,
 )
-from .._date_utils import is_utc_index, resolve_date, shift_calendar_days
+from .._date_utils import is_utc_index, resolve_date, shift_calendar_days, zone_name
 from ..information_set import check_level
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -270,6 +270,14 @@ class BaseModel(ABC):
         stored_windows = None
 
         store = ResultStore(save_to, test_start=test_start) if save_to else None
+        if store and data.index.tz is not None and zone_name(data.index.tz) is None:
+            warnings.warn(
+                f"{self.name}: the data's time zone {data.index.tz!r} has no name that reads back, so a report() from the files in "
+                f"{store.path.parent} won't know which periods a date has on the clock: it plans every period of every day and "
+                "judges a whole day by its records. Give the index a named zone, such as tz_convert('Europe/Warsaw').",
+                UserWarning,
+                stacklevel=2,
+            )
         if store:
             frame_hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
             manifest = build_manifest(
@@ -390,6 +398,8 @@ class BaseModel(ABC):
             matching_lists=matching_lists,
             zone=data.index.tz,
         )
+        if store:
+            warn_off_the_clock({self.name: ref}, stacklevel=2)
         if windows is not None:
             ref.by_window = split_by_window(
                 ref,

@@ -5,7 +5,8 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional
+import warnings
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from .windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 
@@ -35,7 +36,9 @@ class ModelResultRef:
 
     `zone` is the time zone of the frame the forecasts came from, which says what periods a date has on the clock: the frame's
     `index.tz`, or a manifest's `data_timezone` in a report made from files. It is None for a naive index and for results that
-    don't say, such as plain lists, a results file with no manifest or one older than `Manifest.training_cut`.
+    don't say, such as plain lists or a results file with no manifest. With a zone, a record of a slot the clock doesn't have
+    on its run date or its target date is no forecast, as its target can't exist: `iter_records` leaves it out, and
+    `off_the_clock` counts it. Only results written before training rows were chosen by date hold one.
     """
 
     name: str
@@ -66,8 +69,34 @@ class ModelResultRef:
         lists have no window (test_start/test_end are "") and are read as given.
 
         A window's ref gives `day_in_test` from the window's start as it is now: a record resumed after the start moved
-        holds the old count in the file.
+        holds the old count in the file. A record of a slot the clock doesn't have is left out (see the class docstring).
         """
+        on_the_clock = self._on_the_clock()
+        return (read for read, r in self._records(cols) if on_the_clock is None or on_the_clock(r))
+
+    def off_the_clock(self) -> int:
+        """How many records of this ref are of a slot the clock doesn't have, which `iter_records` leaves out."""
+        on_the_clock = self._on_the_clock()
+        return 0 if on_the_clock is None else sum(1 for r, _ in self._records(None) if not on_the_clock(r))
+
+    def _on_the_clock(self) -> Optional[Callable[[Dict], bool]]:
+        if self.zone is None:
+            return None
+        from ..models._calendar import FREQ_STEPS, skipped_periods  # the models import this module
+
+        def on_the_clock(r: Dict) -> bool:
+            freq = r.get("freq", self.freq)
+            if freq not in FREQ_STEPS:
+                return True
+            return not (
+                r["hour"] in skipped_periods(r["run_date"], freq, self.zone)
+                or r["hour"] in skipped_periods(r["target_date"], freq, self.zone)
+            )
+
+        return on_the_clock
+
+    def _records(self, cols: Optional[List[str]]) -> Iterator[Tuple[Dict, Dict]]:
+        """(the record as read, the whole record) of each record of this ref's dates and window."""
         filter_dates = bool(self.test_start and self.test_end)
         window_start = date.fromisoformat(self.test_start) if self.window is not None and self.test_start else None
 
@@ -87,11 +116,11 @@ class ModelResultRef:
                         if line:
                             r = json.loads(line)
                             if keep(r):
-                                yield self._as_read(r, cols, window_start)
+                                yield self._as_read(r, cols, window_start), r
         else:
             for r in self._results or []:
                 if keep(r):
-                    yield self._as_read(r, cols, window_start)
+                    yield self._as_read(r, cols, window_start), r
 
     @staticmethod
     def _as_read(r: Dict, cols: Optional[List[str]], window_start: Optional[date]) -> Dict:
@@ -146,3 +175,16 @@ def split_by_window(
             by_window=None,
         )
     return refs
+
+
+def warn_off_the_clock(refs: Mapping[str, ModelResultRef], stacklevel: int = 2) -> None:
+    """One warning naming the refs with records of a slot the clock doesn't have, and how many: they are no forecasts."""
+    found = {name: n for name, ref in refs.items() if (n := ref.off_the_clock())}
+    if found:
+        warnings.warn(
+            f"Records of a slot the clock doesn't have, the hour a spring switch skips, on their issue day or target day "
+            f"(per model: {found}): their target can't exist, so they are left out of every table and count. Only results "
+            "written before training rows were chosen by date hold them.",
+            UserWarning,
+            stacklevel=stacklevel + 1,
+        )

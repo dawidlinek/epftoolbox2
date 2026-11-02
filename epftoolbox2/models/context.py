@@ -211,6 +211,8 @@ class _Cells:
         self.zone = str(index.tz) if getattr(index, "tz", None) is not None else None
         days = pd.DatetimeIndex(issue_days).as_unit("ns")
         self._n_days = len(days)
+        self._dates = [day.date() for day in days]
+        self._planned: Dict[int, np.ndarray] = {}
         # In time order, so the later occurrence of a repeated hour is written last.
         order = np.argsort(index.asi8, kind="stable")
         ordered = index[order]
@@ -235,6 +237,15 @@ class _Cells:
     def queried(self) -> Set[str]:
         return set(self._values)
 
+    def planned(self, horizon: int) -> np.ndarray:
+        """Whether the key of each [period, issue day] at this horizon is planned (`IssueCalendar`). The function is asked about
+        the others too, but nothing it reads there is a forecast's, so it is neither listed, refused nor compared by a probe."""
+        grid = self._planned.get(horizon)
+        if grid is None:
+            calendar = IssueCalendar(self.freq, self._data.index.tz, [horizon])
+            grid = self._planned[horizon] = calendar.planned_cells(self._dates)[horizon]
+        return grid
+
     def has_row(self) -> np.ndarray:
         """Whether the data has a row at each [period, issue day]."""
         present = np.zeros((self.periods, self._n_days), dtype=bool)
@@ -251,7 +262,7 @@ class _Cells:
             for name in names:
                 known = cells & self.known(name)
                 read[(name, horizon)] = read[(name, horizon)] | known if (name, horizon) in read else known
-        return {key: (cells, self._values[key[0]]) for key, cells in read.items()}
+        return {key: (cells & self.planned(key[1]), self._values[key[0]]) for key, cells in read.items()}
 
     def values(self, name: str) -> np.ndarray:
         grid = self._values.get(name)
@@ -340,7 +351,11 @@ class _Cells:
     def value(self, column: str, horizon: int, period: int, position: int, issue_day: datetime.date) -> Any:
         name = _expand(column, horizon)
         values = self.values(name)
-        if self._level == "raise" and not self.known(name)[period, position]:
+        if (
+            self._level == "raise"
+            and not self.known(name)[period, position]
+            and self.planned(horizon)[period, position]
+        ):
             raise InformationSetError(
                 f"ctx.value('{name}') on issue day {issue_day}, period {period}: by its availability rule it is known "
                 f"{self.known_at(name, period, position)}, after the issue time ({self._info.issue_time} "
@@ -382,8 +397,8 @@ class _Cells:
                 out.extend(self._without_rule(name, horizon, self._on(asked, horizon, days), ROLE_PUBLISHED))
         return out
 
-    @staticmethod
-    def _on(read: np.ndarray, horizon: int, days: Any) -> np.ndarray:
+    def _on(self, read: np.ndarray, horizon: int, days: Any) -> np.ndarray:
+        read = read & self.planned(horizon)
         if days is None:
             return read
         return read & (days.get(horizon, False) if isinstance(days, dict) else days)
@@ -551,6 +566,7 @@ class PredictorPlan:
     first_grid_day: Optional[datetime.date] = field(default=None, repr=False)
     day_lists: Dict[Tuple[int, int], np.ndarray] = field(default_factory=dict, repr=False)
     _training_cells: Optional[_Cells] = field(default=None, repr=False)
+    _planned: Optional[Dict[Tuple[int, int], np.ndarray]] = field(default=None, repr=False)
 
     def __post_init__(self):
         self._positions = {day.isoformat(): position for position, day in enumerate(self.issue_days)}
@@ -569,6 +585,17 @@ class PredictorPlan:
         position = self._positions.get(run_date)
         ids = self.assignment.get((period, horizon))
         return None if position is None or ids is None else int(ids[position])
+
+    def planned(self) -> Dict[Tuple[int, int], np.ndarray]:
+        """(period, horizon) -> whether the forecast of each issue day is planned: not where the clock doesn't have the period on
+        the issue day or the target day (`IssueCalendar`). The function is called there too, so that the plan's calls don't
+        depend on the clock, but what it returns or reads there is no forecast's: nothing counts, lists or checks it (`_Cells`
+        leaves the reads out)."""
+        if self._planned is None:
+            calendar = IssueCalendar(self.freq, self.data.index.tz, range(1, self.horizon + 1))
+            grids = calendar.planned_cells(self.issue_days)
+            self._planned = {(period, horizon): grids[horizon][period] for period, horizon in self.assignment}
+        return self._planned
 
     def names_by_pair(self) -> Dict[Tuple[int, int], List[str]]:
         """(period, horizon) -> every name any of its forecasts uses."""
@@ -597,16 +624,14 @@ class PredictorPlan:
         ]
         for (period, horizon), all_ids in self.assignment.items():
             ids = all_ids[days[0] : days[1]]
+            planned = self.planned()[(period, horizon)][days[0] : days[1]]
             for list_id in np.unique(ids).tolist():
                 on = ids == list_id
                 use = uses[list_id]
-                use["forecasts"] += int(on.sum())
+                use["forecasts"] += int((on & planned).sum())
                 use["horizons"].add(horizon)
                 use["periods"].add(period)
                 use["days"] |= on
-        calendar = IssueCalendar(self.freq, self.data.index.tz, range(1, self.horizon + 1))
-        for period, horizon, position in calendar.unplanned(issue_days):
-            uses[self.assignment[(period, horizon)][days[0] : days[1]][position]]["forecasts"] -= 1
         out = []
         for list_id, use in enumerate(uses):
             on_days = np.flatnonzero(use["days"])
@@ -659,7 +684,8 @@ class PredictorPlan:
         )
         late_names: List[str] = []
         no_rule: List[str] = []
-        for name in dict.fromkeys(name for names in self.lists for name in names):
+        in_use = self._lists_in_use()
+        for name in dict.fromkeys(name for list_id in in_use for name in self.lists[list_id]):
             col = cells.column(name)
             if col.rule is None:
                 no_rule.append(name)
@@ -793,12 +819,18 @@ class PredictorPlan:
         return [self.first_grid_day + datetime.timedelta(days=d) for d in range(self._grid_size())]
 
     def _pairs_of_lists(self, days: Optional[np.ndarray] = None) -> Dict[int, List[Tuple[int, int]]]:
-        """List id -> the (period, horizon) pairs that use it, on `days` (a mask of the issue days) if given."""
+        """List id -> the (period, horizon) pairs whose planned forecasts use it, on `days` (a mask of the issue days) if
+        given."""
         out: Dict[int, List[Tuple[int, int]]] = {list_id: [] for list_id in range(len(self.lists))}
         for pair, ids in self.assignment.items():
-            for list_id in np.unique(ids if days is None else ids[days]).tolist():
+            on = self.planned()[pair] if days is None else self.planned()[pair] & days
+            for list_id in np.unique(ids[on]).tolist():
                 out[list_id].append(pair)
         return out
+
+    def _lists_in_use(self) -> List[int]:
+        """The ids of the lists some planned forecast uses."""
+        return sorted(list_id for list_id, pairs in self._pairs_of_lists().items() if pairs)
 
     def late_reads(self) -> List[Violation]:
         """The `value` reads of cells known only after the issue time of their own day, on a training day too, for
@@ -822,7 +854,7 @@ class PredictorPlan:
             col, avail = cells.column(name), cells.available(name)
             for list_id in (list_id for list_id, names in enumerate(lists) if name in names):
                 for (period, horizon), ids in self.assignment.items():
-                    used = ids == list_id
+                    used = (ids == list_id) & self.planned()[(period, horizon)]
                     if days is not None:
                         used = used & days
                     if not used.any():

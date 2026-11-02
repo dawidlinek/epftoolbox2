@@ -8,9 +8,11 @@ and doesn't.
 
 import datetime
 import json
+import warnings
 from collections import Counter
 from concurrent.futures import Future
 
+import dateutil.tz
 import numpy as np
 import pandas as pd
 import pytest
@@ -19,10 +21,11 @@ from epftoolbox2.ensembles import AverageEnsemble
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import OLSModel, Use, _contract, _worker
+from epftoolbox2.models import base as base_module
 from epftoolbox2.models._calendar import IssueCalendar, periods_per_day, training_span
 from epftoolbox2.models._worker import SKIP_MISSING_TEST_ROW, _fit_one_numpy, _worker_init, issue_row, training_rows
 from epftoolbox2.pipelines import ModelPipeline
-from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path, read_zone
+from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path, read_zone, rows_unverified
 from epftoolbox2.results.report import EvaluationReport
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
@@ -174,6 +177,12 @@ def old_cut(days, day, window, hz):
     return np.flatnonzero((days >= day - window - hz) & (days <= day))[: -(1 + hz)]
 
 
+def by_old_cut(days, day, window, hz):
+    """The row cut as the slice `training_rows` gives."""
+    rows = old_cut(days, day, window, hz)
+    return slice(int(rows[0]), int(rows[-1]) + 1) if len(rows) else slice(0, 0)
+
+
 def table(switch, in_the_switch_hour, S, D, h):
     """What the rule of dates says of a key: (does it exist, the dates the row cut holds besides the rows of the rule, the dates it
     lacks of them, does that change what trains)."""
@@ -258,10 +267,6 @@ def test_forecasts_equal_the_row_cut_bit_for_bit_except_on_those_keys(monkeypatc
     first, last = day_of(S, 1), day_of(S, 3)
     after = forecasts(data, first, horizon=H, freq=freq, last=last)
 
-    def by_old_cut(days, day, window, hz):
-        rows = old_cut(days, day, window, hz)
-        return slice(int(rows[0]), int(rows[-1]) + 1) if len(rows) else slice(0, 0)
-
     monkeypatch.setattr(_worker, "training_rows", by_old_cut)
     before = forecasts(data, first, horizon=H, freq=freq, last=last)
 
@@ -340,14 +345,19 @@ def test_a_switch_hour_forecast_equals_a_hand_fit_on_rows_chosen_by_date(zone, f
     assert doubled == (sum(3 - h for h in range(1, H + 1)) * FREQS[freq] if switch == "autumn" else 0)
 
 
-def test_the_binary_columns_are_read_from_the_rows_of_the_span():
-    """A column of 0s and 1s up to the last date of the span and a number on the next date: binary for this forecast, so left as it
-    is, and read one day late it would be scaled."""
+@pytest.mark.parametrize(
+    ("offset", "binary"),
+    [(-1, True), (-2, False)],
+    ids=["a number the day after the span: binary", "a number on its last date: scaled"],
+)
+def test_the_binary_columns_are_read_from_the_rows_of_the_span(offset, binary):
+    """A column of 0s and 1s with a number on one date: binary for this forecast if that date is after the span (D-1 at h=1), so
+    left as it is, and scaled if it is the span's last date (D-1-h). A span one day off either way gets one of them wrong."""
     data = make_market_data(start="2023-04-01", days=80, noise=5.0, seed=8, horizon=1)
     D = "2023-06-10"
     rng = np.random.default_rng(1)
     data["flag"] = rng.integers(0, 2, len(data)).astype(float)
-    data.loc[data.index.strftime("%Y-%m-%d") == day_of(D, -1), "flag"] = 7.0
+    data.loc[data.index.strftime("%Y-%m-%d") == day_of(D, offset), "flag"] = 7.0
     names = ["load_d+1", "flag"]
     found = forecasts(data, D, horizon=1, predictors=names)[(D, 5, 1)]
 
@@ -357,11 +367,11 @@ def test_the_binary_columns_are_read_from_the_rows_of_the_span():
     x = data[names].to_numpy(dtype=float)[data.index.hour == 5][rows]
     y = model._hour_data[5]["price_d+1"].to_numpy()[rows]
     test = data.loc[f"{D} 05:00", names].to_numpy(dtype=float)
-    assert set(x[:, 1]) == {0.0, 1.0}
-    load_mean, load_std = x[:, 0].mean(), x[:, 0].std(ddof=1)
-    design = np.column_stack(((x[:, 0] - load_mean) / load_std, x[:, 1]))
-    coefficients, *_ = np.linalg.lstsq(design, (y - y.mean()) / y.std(ddof=1), rcond=None)
-    by_hand = np.array([(test[0] - load_mean) / load_std, test[1]]) @ coefficients * y.std(ddof=1) + y.mean()
+    assert (set(x[:, 1]) == {0.0, 1.0}) == binary
+    means = np.array([x[:, 0].mean(), 0.0 if binary else x[:, 1].mean()])
+    deviations = np.array([x[:, 0].std(ddof=1), 1.0 if binary else x[:, 1].std(ddof=1)])
+    coefficients, *_ = np.linalg.lstsq((x - means) / deviations, (y - y.mean()) / y.std(ddof=1), rcond=None)
+    by_hand = ((test - means) / deviations) @ coefficients * y.std(ddof=1) + y.mean()
     assert found["prediction"] == pytest.approx(by_hand, abs=1e-9)
 
 
@@ -594,6 +604,43 @@ def test_the_clock_s_gap_is_no_missing_row_and_a_worker_asked_for_it_says_so():
     assert _fit_one_numpy(2, 1, 1)["run_date"] == day_of(S, 1)
 
 
+def test_an_hour_the_clock_skips_half_of_is_planned_with_its_row():
+    """Lord Howe skips 02:00 to 02:29 on 2024-10-06, so an hourly frame has its period 2 at 02:30 that day: the forecast issued
+    from it is planned and made, and so is the one aimed at it, whose 02:00 target doesn't exist."""
+    zone = "Australia/Lord_Howe"
+    index = pd.date_range(
+        pd.Timestamp("2024-09-01", tz=zone), pd.Timestamp("2024-10-20", tz=zone), freq="1h", inclusive="left"
+    )
+    rng = np.random.default_rng(0)
+    data = pd.DataFrame({"x": rng.normal(size=len(index)), "price": rng.normal(50, 10, len(index))}, index=index)
+    assert [t.strftime("%H:%M") for t in data.loc["2024-10-06"].index if t.hour == 2] == ["02:30"]
+    ref = OLSModel(["x"], training_window=10).run(data, "2024-10-05", "2024-10-07", horizon=1)
+    records = by_key(ref._results)
+    assert ref.count == ref.produced == 3 * 24 and ref.skipped == {}
+    assert ("2024-10-06", 2, 1) in records and np.isnan(records[("2024-10-05", 2, 1)]["actual"])
+
+
+def unplanned_only(ctx):
+    """A list with a late column, and a late read, only where the clock has no 02:00: the spring switch day."""
+    if ctx.issue_day == datetime.date(2023, 3, 26) and ctx.period == 2:
+        ctx.value("late")
+        return PREDICTORS + ["late"]
+    return PREDICTORS
+
+
+@pytest.mark.parametrize("level", ["warn", "raise"])
+def test_a_list_only_on_a_slot_the_clock_skips_is_neither_listed_nor_refused(level):
+    data = make_market_data(noise=5.0, seed=42)
+    data["late"] = data["load"]
+    info = InformationSet("11:00", "Europe/Warsaw", rules={**RULES, "late": Availability.published("13:00", -1)})
+    pipeline = ModelPipeline(information_set=info, availability=level)
+    pipeline.add_model(OLSModel(unplanned_only, training_window=WINDOW, name="m"))
+    report = pipeline.run(data, test=("2023-03-25", "2023-03-27"), horizon=1)
+    assert report.availability().empty
+    assert sorted(entry["forecasts"] for entry in report.refs["m"].predictor_lists) == [0, report.refs["m"].count]
+    assert pipeline.verify(data, "2023-03-26", "2023-03-26", horizon=1, days=1).status("m") == "ok"
+
+
 def test_the_lists_of_a_predictor_function_count_the_planned_forecasts(two_years):
     def all_the_same(ctx):
         return PREDICTORS
@@ -719,6 +766,47 @@ def test_aggregate_from_files_equals_aggregate_of_the_run(tmp_path):
     assert from_files.refs["m"].skipped == daily.refs["m"].skipped
 
 
+@pytest.mark.parametrize(
+    ("zone", "freq", "switch"),
+    [
+        ("America/Havana", "1h", "2024-03-10"),  # skips its midnight
+        ("America/Nuuk", "1h", "2023-03-25"),  # skips 22:00
+        ("Australia/Lord_Howe", "15min", "2024-10-06"),  # skips half an hour
+    ],
+)
+def test_aggregate_keeps_the_short_day_of_any_clock_and_drops_the_day_after_from_the_switch_day(zone, freq, switch):
+    first = day_of(switch, -50)
+    data = make_market_data(start=first, days=60, tz=zone, freq=freq, horizon=1, noise=5.0, seed=2)
+    _, daily = aggregated(data, day_of(switch, -1), day_of(switch, 1), 1, freq)
+    keys = daily_keys(daily)
+    assert (day_of(switch, -1), switch, 1) in keys
+    assert (switch, day_of(switch, 1), 1) not in keys and (day_of(switch, 1), day_of(switch, 2), 1) in keys
+    assert daily.refs["m"].skipped == {"incomplete_day": 1}
+
+
+def test_a_report_from_the_files_of_a_dateutil_zone_knows_the_clock(tmp_path):
+    data = market("spring", horizon=1)
+    data.index = data.index.tz_convert(dateutil.tz.gettz("Europe/Warsaw"))
+    S = SWITCH_DAYS["spring"]
+    report, daily = aggregated(data, day_of(S, -1), day_of(S, 1), 1, "1h", save_dir=tmp_path)
+    assert json.loads(manifest_path(tmp_path / "m.jsonl").read_text())["data_timezone"] == "Europe/Warsaw"
+    pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m"))
+    merged = pipeline.report(tmp_path, day_of(S, -1), day_of(S, 1), horizon=1)
+    assert merged.refs["m"].count == report.refs["m"].count == 3 * 24 - 2
+    assert daily_keys(merged.aggregate("1D", "max")) == daily_keys(daily)
+
+
+def test_a_zone_without_a_name_is_said_at_run_time(tmp_path):
+    data = make_market_data(start="2023-04-01", days=60, tz="UTC", horizon=1, noise=5.0, seed=1).drop(
+        columns="price_d-1"
+    )
+    data.index = data.index.tz_convert(dateutil.tz.tzoffset(None, 3600))
+    with pytest.warns(UserWarning, match="has no name that reads back"):
+        OLSModel(PREDICTORS, training_window=20).run(
+            data, "2023-05-20", "2023-05-20", horizon=1, save_to=tmp_path / "m.jsonl"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Gaps, old manifests, frames without a switch
 # ---------------------------------------------------------------------------
@@ -789,10 +877,13 @@ def test_a_manifest_without_the_field_is_refused_on_resume_and_the_override_goes
     with pytest.raises(ManifestMismatchError, match="training_cut.*before training rows were chosen by date"):
         pipeline.run(data, test=period, horizon=1, save_dir=tmp_path)
 
-    report = pipeline.run(data, test=period, horizon=1, save_dir=tmp_path, allow_manifest_mismatch=True)
+    with pytest.warns(UserWarning, match="may hold records written before training rows were chosen by date"):
+        report = pipeline.run(data, test=period, horizon=1, save_dir=tmp_path, allow_manifest_mismatch=True)
     assert report.refs["m"].count == 47
-    assert json.loads(manifest_path(tmp_path / "m.jsonl").read_text())["training_cut"] == {"rows": "dates"}
-    pipeline.run(data, test=period, horizon=1, save_dir=tmp_path)  # and it is one of today's now
+    unverified = {"rows": "dates", "stored": "unverified"}
+    assert json.loads(manifest_path(tmp_path / "m.jsonl").read_text())["training_cut"] == unverified
+    pipeline.run(data, test=period, horizon=1, save_dir=tmp_path)  # resumes without the override, and keeps saying so
+    assert json.loads(manifest_path(tmp_path / "m.jsonl").read_text())["training_cut"] == unverified
 
 
 def test_a_manifest_without_the_field_is_refused_in_a_run_with_windows(tmp_path):
@@ -804,14 +895,25 @@ def test_a_manifest_without_the_field_is_refused_in_a_run_with_windows(tmp_path)
         pipeline.run(data, horizon=1, save_dir=tmp_path, **windows)
 
 
-def test_a_report_of_old_results_says_so_and_keeps_the_rule_without_a_zone(tmp_path):
+def test_a_report_of_old_results_says_so_and_plans_by_the_clock(tmp_path):
     data = market("spring", horizon=1)
     S = SWITCH_DAYS["spring"]
     pipeline = old_results(tmp_path, data, test=(S, S))
-    with pytest.warns(UserWarning, match=r"\['m'\] were made before training rows were chosen by date"):
+    with pytest.warns(UserWarning, match=r"\['m'\] may hold records written before training rows were chosen by date"):
         report = pipeline.report(tmp_path, test=(S, S), horizon=1)
-    assert report.refs["m"].zone is None
-    assert report.refs["m"].count == 24
+    assert report.refs["m"].zone == "Europe/Warsaw"
+    assert report.refs["m"].count == 23
+
+
+def test_a_report_of_today_s_results_says_nothing_of_old_records(tmp_path):
+    data = market("spring", horizon=1)
+    S = SWITCH_DAYS["spring"]
+    pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m"))
+    pipeline.run(data, test=(S, S), horizon=1, save_dir=tmp_path)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pipeline.report(tmp_path, test=(S, S), horizon=1)
+    assert not [w for w in caught if "training rows" in str(w.message) or "clock doesn't have" in str(w.message)]
 
 
 @pytest.mark.parametrize(
@@ -825,11 +927,82 @@ def test_a_report_of_old_results_says_so_and_keeps_the_rule_without_a_zone(tmp_p
 )
 def test_the_zone_of_a_manifest(tmp_path, stored, zone):
     path = tmp_path / "m.manifest.json"
-    path.write_text(json.dumps({"data_timezone": stored, "training_cut": {"rows": "dates"}}))
-    assert read_zone(path) == zone
-    path.write_text(json.dumps({"data_timezone": stored}))
-    assert read_zone(path) is None
+    for cut in ({"rows": "dates"}, {"rows": "dates", "stored": "unverified"}, None):
+        path.write_text(json.dumps({"data_timezone": stored, **({} if cut is None else {"training_cut": cut})}))
+        assert read_zone(path) == zone
+        assert rows_unverified(path) == (cut != {"rows": "dates"})
     assert read_zone(tmp_path / "no.manifest.json") is None
+    assert rows_unverified(tmp_path / "no.manifest.json")
+
+
+def last_row_up_to(days, day):
+    """The row the row cut forecast from: the last one up to the issue day, whatever its date."""
+    row = int(np.searchsorted(days, day, side="right")) - 1
+    return row if row >= 0 else None
+
+
+def stage_with_the_row_cut(monkeypatch, pipeline, data, save_dir, **run):
+    """Results as the row cut wrote them: every slot planned, rows counted, and the test row the last one up to the issue day."""
+    with monkeypatch.context() as patch:
+        patch.setattr(_worker, "training_rows", by_old_cut)
+        patch.setattr(_worker, "issue_row", last_row_up_to)
+        patch.setattr(base_module, "IssueCalendar", lambda freq, zone, horizons: IssueCalendar(freq, None, horizons))
+        pipeline.run(data, save_dir=save_dir, **run)
+
+
+@pytest.mark.parametrize("how", ["override", "no manifest"])
+def test_results_staged_by_the_row_cut_and_accepted_are_warned_about_every_time_and_lose_the_slot_the_clock_skips(
+    tmp_path, monkeypatch, how
+):
+    data = market("spring", horizon=2)
+    S = SWITCH_DAYS["spring"]
+    run = dict(test=(day_of(S, -1), day_of(S, 1)), horizon=2)
+    pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m"))
+    pipeline.add_evaluator(MAEEvaluator())
+    stage_with_the_row_cut(monkeypatch, pipeline, data, tmp_path, **run)
+    stale = (S, 2, 2)  # built from the row of S-1, with the price of S+1 as its actual
+    assert stale in by_key(json.loads(line) for line in (tmp_path / "m.jsonl").read_text().splitlines())
+    manifest = manifest_path(tmp_path / "m.jsonl")
+    if how == "override":
+        write_old_manifest(manifest)
+        with pytest.raises(ManifestMismatchError, match="training_cut"):
+            pipeline.run(data, save_dir=tmp_path, **run)
+        with pytest.warns(UserWarning, match="its manifest was written before rows were chosen by date"):
+            pipeline.run(data, save_dir=tmp_path, allow_manifest_mismatch=True, **run)
+    else:
+        manifest.unlink()
+        with pytest.warns(UserWarning, match="they have no manifest"):
+            pipeline.run(data, save_dir=tmp_path, **run)
+    assert json.loads(manifest.read_text())["training_cut"] == {"rows": "dates", "stored": "unverified"}
+    pipeline.run(data, save_dir=tmp_path, **run)  # later resumes go on, and keep saying so
+
+    fresh = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m")).run(data, **run)
+    for _ in range(2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            report = pipeline.report(tmp_path, test=run["test"], horizon=2)
+        said = [str(w.message) for w in caught]
+        assert any("['m'] may hold records written before training rows were chosen by date" in m for m in said), said
+        assert any("clock doesn't have" in m and "{'m': 1}" in m for m in said), said
+        keys = set(by_key(report.refs["m"].iter_records()))
+        assert stale not in keys and keys == set(by_key(fresh.refs["m"].iter_records()))
+        counts = report.forecast_counts().set_index("model").loc["m"]
+        assert counts["planned"] == fresh.refs["m"].count and counts["produced"] == len(keys)
+        assert report.summary().set_index("model").loc["m", "forecasts"] == len(keys)
+    report.refs["m"].zone = None  # without a zone nothing tells the slot apart, and a table read before isn't reused
+    assert report.summary().set_index("model").loc["m", "forecasts"] == len(keys) + 1
+
+
+def test_a_ref_with_a_zone_leaves_out_a_record_of_a_slot_the_clock_skips():
+    data = market("spring", horizon=1)
+    S = SWITCH_DAYS["spring"]
+    ref = OLSModel(PREDICTORS, training_window=WINDOW).run(data, S, S, horizon=1)
+    stale = {**ref._results[0], "hour": 2, "run_date": S, "target_date": day_of(S, 1)}
+    ref._results.append(stale)
+    assert ref.off_the_clock() == 1 and len(list(ref.iter_records())) == 23
+    assert EvaluationReport({"m": ref}, [MAEEvaluator()]).summary().set_index("model").loc["m", "forecasts"] == 23
+    ref.zone = None
+    assert ref.off_the_clock() == 0 and len(list(ref.iter_records())) == 24
 
 
 def test_a_manifest_of_today_resumes_and_the_second_run_has_nothing_to_do(tmp_path, capsys):
@@ -854,19 +1027,21 @@ def test_a_plain_result_grown_into_windows_compares_its_actuals_by_the_issue_day
 
 
 def test_a_stale_record_of_a_slot_the_clock_doesnt_have_is_refused_when_a_plain_result_is_grown(tmp_path):
-    data = market("spring", horizon=1)
+    data = market("spring", horizon=2)
     S = SWITCH_DAYS["spring"]
     period = (S, day_of(S, 1))
     pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m"))
-    pipeline.run(data, test=period, horizon=1, save_dir=tmp_path)
+    pipeline.run(data, test=period, horizon=2, save_dir=tmp_path)
     path = tmp_path / "m.jsonl"
     first = json.loads(path.read_text().splitlines()[0])
-    stale = {**first, "run_date": S, "target_date": day_of(S, 1), "hour": 2, "actual": 50.0}
+    # What the row cut wrote for (S, period 2, h=2): the row of S-1, whose target at h=2 is the price of S+1 at 02:00.
+    old_actual = float(data.loc[f"{day_of(S, 1)} 02:00", "price"])
+    stale = {**first, "run_date": S, "target_date": day_of(S, 2), "hour": 2, "horizon": 2, "actual": old_actual}
     with open(path, "a") as f:
         f.write(json.dumps(stale) + "\n")
 
     with pytest.raises(ManifestMismatchError, match="another `actual`"):
-        pipeline.run(data, validation=(day_of(S, -3), day_of(S, -1)), test=period, horizon=1, save_dir=tmp_path)
+        pipeline.run(data, validation=(day_of(S, -4), day_of(S, -2)), test=period, horizon=2, save_dir=tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -888,10 +1063,6 @@ def test_a_frame_without_switches_is_bitwise_the_row_cut_and_today_s_count(monke
 
     ref, today = run()
     assert ref.count == ref.produced == 3 * 2 * 24 * FREQS[freq]
-
-    def by_old_cut(days, day, window, hz):
-        rows = old_cut(days, day, window, hz)
-        return slice(int(rows[0]), int(rows[-1]) + 1)
 
     monkeypatch.setattr(_worker, "training_rows", by_old_cut)
     _, cut = run()

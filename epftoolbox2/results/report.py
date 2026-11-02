@@ -29,7 +29,7 @@ from ..evaluators.dm import DMEvaluator, check_test_settings
 from ..evaluators.economic import EconomicEvaluator
 from ..evaluators.mcs import check_mcs_settings
 from ..logging import get_logger
-from ..models._calendar import periods_on_dates
+from ..models._calendar import clock_periods_on
 from .availability import listing_frame
 from .breakdowns import AGGREGATES, daily_aggregate, price_level, spike_threshold
 from .matching import rows_of_refs, training_day_frame
@@ -303,10 +303,10 @@ class EvaluationReport:
             per_hour = _PERIODS_PER_HOUR.get(model_freq)
             if per_hour is None:
                 per_hour = periods_per_hour(frame["hour"].to_numpy()) if "hour" in frame else 1
-            expected = periods
+            clock = None
             if ref.zone is not None and "target_date" in frame:
-                expected = periods_on_dates(frame["target_date"].unique(), model_freq, ref.zone)
-            days, seen, missing = daily_aggregate(frame, agg, per_hour, expected)
+                clock = clock_periods_on(frame["target_date"].unique(), model_freq, ref.zone)
+            days, seen, missing = daily_aggregate(frame, agg, per_hour, periods, clock)
             records = _daily_records(days, start, ref.window)
             results[name] = ModelResultRef(
                 name=name,
@@ -1023,6 +1023,7 @@ class EvaluationReport:
             ref.test_end,
             ref.window,
             ref.target_before,
+            str(ref.zone),
         )
         cached = self._read_frames.get(name)
         if cached is None or cached[0] != fingerprint:

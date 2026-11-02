@@ -4,12 +4,27 @@ What a run does with them is in `test_date_windows.py`.
 """
 
 import datetime
+from zoneinfo import ZoneInfo
 
+import dateutil.tz
 import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.models._calendar import IssueCalendar, clock_periods, periods_on_dates, periods_per_day, training_span
+try:  # pandas 3 doesn't need it
+    import pytz
+except ImportError:  # pragma: no cover
+    pytz = None
+
+from epftoolbox2._date_utils import zone_name
+from epftoolbox2.models._calendar import (
+    IssueCalendar,
+    clock_periods,
+    clock_periods_on,
+    periods_per_day,
+    skipped_periods,
+    training_span,
+)
 
 FREQS = {"1h": 1, "15min": 4}
 
@@ -38,6 +53,11 @@ def test_no_row_is_dated_on_the_anchor_or_later_with_any_newest_target(newest):
         ("2023-10-29", "15min", "Europe/Warsaw", []),
         ("2023-03-12", "1h", "America/Havana", [0]),  # a switch at midnight
         ("2023-10-01", "15min", "Australia/Lord_Howe", [8, 9]),  # half an hour
+        ("2023-10-01", "1h", "Australia/Lord_Howe", []),  # its 02:30 to 02:59 exist, so the hour does
+        ("2023-04-02", "1h", "Australia/Lord_Howe", []),  # and half an hour back
+        ("2024-09-08", "1h", "America/Santiago", [0]),
+        ("2023-03-25", "1h", "America/Nuuk", [22]),  # a switch at 22:00
+        ("2011-12-30", "1h", "Pacific/Apia", list(range(24))),  # a day the clock skipped
         ("2023-03-26", "1h", "UTC", []),
         ("2023-03-26", "1h", datetime.timezone(datetime.timedelta(hours=1)), []),
         ("2023-03-26", "1h", None, []),
@@ -112,14 +132,53 @@ def test_tasks_of_days_with_gaps_between_them_as_a_run_with_windows_has():
 
 
 def test_the_periods_on_several_dates_at_once():
-    found = periods_on_dates(
+    found = clock_periods_on(
         pd.to_datetime(["2023-03-27", "2023-03-26", "2023-10-29", "2023-03-26"]), "1h", "Europe/Warsaw"
     )
-    assert found.to_dict() == {
-        pd.Timestamp("2023-03-26"): 23,
-        pd.Timestamp("2023-03-27"): 24,
-        pd.Timestamp("2023-10-29"): 24,
+    every = tuple(range(24))
+    assert found == {
+        pd.Timestamp("2023-03-26"): tuple(p for p in every if p != 2),
+        pd.Timestamp("2023-03-27"): every,
+        pd.Timestamp("2023-10-29"): every,
     }
-    assert periods_on_dates(pd.to_datetime(["2023-03-26"]), "15min", "Europe/Warsaw").iloc[0] == 92
-    assert periods_on_dates(pd.to_datetime(["2023-03-26"]), "1h", None).iloc[0] == 24
-    assert periods_on_dates([], "1h", "Europe/Warsaw").empty
+    assert (
+        len(clock_periods_on(pd.to_datetime(["2023-03-26"]), "15min", "Europe/Warsaw")[pd.Timestamp("2023-03-26")])
+        == 92
+    )
+    assert clock_periods_on(pd.to_datetime(["2023-03-26"]), "1h", None)[pd.Timestamp("2023-03-26")] == every
+    assert clock_periods_on([], "1h", "Europe/Warsaw") == {}
+
+
+@pytest.mark.parametrize(
+    "zone",
+    ["Europe/Warsaw", dateutil.tz.gettz("Europe/Warsaw"), pytz.timezone("Europe/Warsaw"), ZoneInfo("Europe/Warsaw")],
+)
+def test_the_periods_a_record_s_dates_skip(zone):
+    assert skipped_periods("2023-03-26", "1h", zone) == {2}
+    assert skipped_periods(datetime.date(2023, 3, 27), "15min", zone) == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("zone", "name"),
+    [
+        (ZoneInfo("Europe/Warsaw"), "Europe/Warsaw"),
+        (dateutil.tz.gettz("Europe/Warsaw"), "Europe/Warsaw"),  # its str is tzfile('/usr/share/zoneinfo/Europe/Warsaw')
+        (datetime.timezone.utc, "UTC"),
+        (dateutil.tz.UTC, "UTC"),
+        (datetime.timezone(datetime.timedelta(hours=2)), "UTC+02:00"),
+        (dateutil.tz.tzoffset(None, 3600), None),
+        (None, None),
+    ]
+    + (
+        [(pytz.timezone("Europe/Warsaw"), "Europe/Warsaw"), (pytz.UTC, "UTC"), (pytz.FixedOffset(60), None)]
+        if pytz
+        else []
+    ),
+)
+def test_the_name_a_manifest_writes_for_a_zone(zone, name):
+    assert zone_name(zone) == name
+    if name is not None:
+        assert (
+            pd.Timestamp("2023-03-26 12:00").tz_localize(name).utcoffset()
+            == pd.Timestamp("2023-03-26 12:00").tz_localize(zone).utcoffset()
+        )

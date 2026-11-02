@@ -4,16 +4,22 @@ A forecast is a key (period, horizon h, issue day D). Everything here is about l
 isn't always one row: the hour clocks repeat in autumn has two rows on its date, and the hour they skip in spring has none. So
 rows are chosen by their date, never by counting them, and a key is planned only if the clock has its period on D and on D + h.
 
+A period is on the clock of a date when any minute of it is: Lord Howe skips 02:00 to 02:29 in spring, so at 1 h its period 2 stays,
+with its row at 02:30, and at 15 min periods 8 and 9 go.
+
 Day ids are integers, one per local date, as `BaseModel._preprocess` numbers them. `zone` is what a frame's `index.tz` holds, or
 the name of a zone, or None for a frame with no clock of its own (a naive index): such a frame, like a UTC one, has every period
 on every date.
 """
 
 import datetime
-from typing import Any, Dict, Iterable, List, Sequence, Set, Tuple
+import functools
+from typing import Any, Dict, FrozenSet, Iterable, List, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
+
+from .._date_utils import zone_name
 
 FREQ_STEPS = {"1h": pd.Timedelta(hours=1), "15min": pd.Timedelta(minutes=15)}
 
@@ -40,22 +46,34 @@ def _as_date(day: Any) -> datetime.date:
     return pd.Timestamp(day).date()
 
 
+_DAY = pd.Timedelta(days=1).value
+_MINUTE = pd.Timedelta(minutes=1).value
+
+
 def _clock_gaps(
     first: datetime.date, last: datetime.date, freq: str, zone: Any
 ) -> Dict[datetime.date, Tuple[int, ...]]:
-    """The periods the clock skips on each date from `first` to `last`, for the dates that skip any."""
+    """The periods the clock doesn't have on each date from `first` to `last`, for the dates that lack any: those with no minute
+    on the clock."""
     if zone is None or last < first:
         return {}
     days = (last - first).days + 1
     periods = periods_per_day(freq)
-    midnights = pd.date_range(first, periods=days, freq="D", unit="ns").asi8
-    offsets = np.arange(periods, dtype=np.int64) * FREQ_STEPS[freq].value
-    wall = pd.DatetimeIndex((midnights[:, np.newaxis] + offsets).ravel().astype("datetime64[ns]"))
-    exists = ~wall.tz_localize(zone, nonexistent="NaT", ambiguous=np.ones(len(wall), dtype=bool)).isna()
-    gaps: Dict[datetime.date, List[int]] = {}
-    for slot in np.flatnonzero(~exists).tolist():
-        gaps.setdefault(first + datetime.timedelta(days=slot // periods), []).append(slot % periods)
-    return {day: tuple(skipped) for day, skipped in gaps.items()}
+    minutes_per_period = 1440 // periods
+    midnights = pd.date_range(first, periods=days + 1, freq="D", unit="ns")
+    # Only a date whose clock changes lasts other than 24 hours from its midnight to the next, so only those are read minute by
+    # minute. A midnight the clock skips is read as the first minute after it, a repeated one as its first occurrence.
+    starts = midnights.tz_localize(zone, nonexistent="shift_forward", ambiguous=np.ones(days + 1, dtype=bool))
+    changing = np.flatnonzero(np.diff(starts.as_unit("ns").asi8) != _DAY)
+    gaps: Dict[datetime.date, Tuple[int, ...]] = {}
+    for day in changing.tolist():
+        minutes = midnights.asi8[day] + np.arange(1440, dtype=np.int64) * _MINUTE
+        wall = pd.DatetimeIndex(minutes.astype("datetime64[ns]"))
+        exists = ~wall.tz_localize(zone, nonexistent="NaT", ambiguous=np.ones(1440, dtype=bool)).isna()
+        skipped = np.flatnonzero(~exists.reshape(periods, minutes_per_period).any(axis=1))
+        if len(skipped):
+            gaps[first + datetime.timedelta(days=day)] = tuple(skipped.tolist())
+    return gaps
 
 
 def clock_periods(day: Any, freq: str, zone: Any) -> Tuple[int, ...]:
@@ -65,14 +83,33 @@ def clock_periods(day: Any, freq: str, zone: Any) -> Tuple[int, ...]:
     return tuple(period for period in range(periods_per_day(freq)) if period not in skipped)
 
 
-def periods_on_dates(days: Iterable[Any], freq: str, zone: Any) -> pd.Series:
-    """How many period ids exist on each of these local dates (`clock_periods`), indexed by the date as a timestamp."""
+def skipped_periods(day: Any, freq: str, zone: Any) -> FrozenSet[int]:
+    """The period ids a local date doesn't have on the clock: what `clock_periods` leaves out, for a look-up per record."""
+    try:
+        hash(zone)
+    except TypeError:  # dateutil's zones, which are read by their name
+        zone = zone_name(zone) or zone
+        try:
+            hash(zone)
+        except TypeError:
+            return _skipped_periods.__wrapped__(day, freq, zone)
+    return _skipped_periods(day, freq, zone)
+
+
+@functools.lru_cache(maxsize=4096)
+def _skipped_periods(day: Any, freq: str, zone: Any) -> FrozenSet[int]:
+    date = _as_date(day)
+    return frozenset(_clock_gaps(date, date, freq, zone).get(date, ()))
+
+
+def clock_periods_on(days: Iterable[Any], freq: str, zone: Any) -> Dict[pd.Timestamp, Tuple[int, ...]]:
+    """`clock_periods` of each of these local dates, keyed by the date as a timestamp."""
     dates = pd.DatetimeIndex(pd.to_datetime(list(days))).unique().sort_values()
     if not len(dates):
-        return pd.Series(dtype=np.int64, index=dates)
+        return {}
     gaps = _clock_gaps(dates[0].date(), dates[-1].date(), freq, zone)
-    whole = periods_per_day(freq)
-    return pd.Series([whole - len(gaps.get(date.date(), ())) for date in dates], index=dates, dtype=np.int64)
+    every = range(periods_per_day(freq))
+    return {date: tuple(p for p in every if p not in gaps.get(date.date(), ())) for date in dates}
 
 
 class IssueCalendar:
@@ -130,6 +167,13 @@ class IssueCalendar:
         if not gaps:
             return whole
         return whole - sum(len(self._gone(gaps, day, horizon)) for day in days for horizon in self.horizons)
+
+    def planned_cells(self, days: Sequence[datetime.date]) -> Dict[int, np.ndarray]:
+        """horizon -> whether the key of each period and issue day is planned, as [period, position in days]."""
+        grids = {horizon: np.ones((self._periods, len(days)), dtype=bool) for horizon in self.horizons}
+        for period, horizon, position in self.unplanned(days):
+            grids[horizon][period, position] = False
+        return grids
 
     def unplanned(self, days: Sequence[datetime.date]) -> List[Tuple[int, int, int]]:
         """`(period, horizon, position in days)` of the keys on these issue days that the clock doesn't have."""

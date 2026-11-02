@@ -1,6 +1,6 @@
 import re
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -48,6 +48,35 @@ _UTC_NAMES = {"UTC", "UCT", "GMT", "UNIVERSAL", "ZULU", "GREENWICH", "TZUTC()"}
 def is_utc_index(index: pd.DatetimeIndex) -> bool:
     """True for a UTC (or GMT) index, where days are UTC days rather than local market days."""
     return index.tz is not None and str(index.tz).upper().removeprefix("ETC/") in _UTC_NAMES
+
+
+def zone_name(tz: Any) -> Optional[str]:
+    """A name that reads back as this time zone, as a manifest's `data_timezone` is read, or None if it has none.
+
+    The IANA key of a zoneinfo, pytz or dateutil zone (dateutil's from the path of its file after `zoneinfo/`), "UTC" for any UTC,
+    and `str(tz)` when that reads back, such as a fixed offset's "UTC+02:00". `str` of a dateutil zone is
+    "tzfile('/usr/share/zoneinfo/Europe/Warsaw')", which doesn't.
+    """
+    if tz is None:
+        return None
+    candidates = [getattr(tz, "key", None), getattr(tz, "zone", None)]  # zoneinfo, pytz
+    filename = getattr(tz, "_filename", None)  # dateutil
+    if isinstance(filename, str):
+        candidates += [filename.split("zoneinfo/", 1)[1] if "zoneinfo/" in filename else None, filename]
+    text = str(tz)
+    candidates.append("UTC" if text.upper().removeprefix("ETC/") in _UTC_NAMES else text)
+    for name in candidates:
+        if isinstance(name, str) and name and _reads_back(name):
+            return name
+    return None
+
+
+def _reads_back(name: str) -> bool:
+    try:
+        pd.Timestamp("2000-01-01").tz_localize(name)
+    except Exception:
+        return False
+    return True
 
 
 def _occurrences(wall: pd.DatetimeIndex, tz: Any) -> tuple:

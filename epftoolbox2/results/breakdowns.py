@@ -4,7 +4,7 @@ Price levels are read from the actual price alone. Daily aggregates are made onl
 judged by `evaluators._days`, the same rule that decides which days `EconomicEvaluator` can schedule.
 """
 
-from typing import Callable, Dict, Mapping, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -76,8 +76,29 @@ def price_level(actual: pd.Series, threshold: float) -> pd.Series:
     return pd.Series(level, index=actual.index)
 
 
+def _days_on_the_clock(
+    day: np.ndarray, hour: np.ndarray, dates: np.ndarray, clock: Mapping[pd.Timestamp, Tuple[int, ...]]
+) -> List[Tuple[int, np.ndarray]]:
+    """`whole_days` by the clock: the day codes whose period ids are those its target date has, by number of periods. `dates` has
+    the target date of each day code."""
+    length = np.bincount(day) if len(day) else np.empty(0, dtype=np.int64)
+    stamps = pd.DatetimeIndex(dates)
+    found = []
+    for periods in np.unique(length).tolist():
+        days = np.flatnonzero(length == periods)
+        ids = hour[np.isin(day, days)].reshape(-1, periods)
+        whole = np.array([clock.get(stamps[d], ()) == tuple(row) for d, row in zip(days.tolist(), ids.tolist())])
+        if whole.any():
+            found.append((periods, days[whole]))
+    return found
+
+
 def daily_aggregate(
-    frame: pd.DataFrame, agg: str, per_hour: int, periods_in_target: Optional[pd.Series] = None
+    frame: pd.DataFrame,
+    agg: str,
+    per_hour: int,
+    periods_in_target: Optional[pd.Series] = None,
+    clock: Optional[Mapping[pd.Timestamp, Tuple[int, ...]]] = None,
 ) -> Tuple[pd.DataFrame, int, int]:
     """One model's forecasts as one forecast per (run_date, target_date, horizon): `(days, n_seen, n_dropped)`.
 
@@ -90,6 +111,10 @@ def daily_aggregate(
     horizon. A day whose finite periods are fewer is dropped even when its ids look like a clock change: a model that lacks
     the hour 02:00 on an ordinary Tuesday must not be aggregated over 23 hours while another is aggregated over 24, since
     the two would be scored against different actuals on the same key.
+
+    `clock` maps each target date to the period ids its clock has (`models._calendar.clock_periods`), when the data's time zone
+    is known. A day is then whole when its finite periods are exactly those, in place of both rules above: so a zone whose clock
+    skips midnight, 22:00 or half an hour has its short day too.
     """
     if agg not in _REDUCE:
         raise ValueError(f"agg must be one of {list(AGGREGATES)}, got {agg!r}")
@@ -127,12 +152,17 @@ def daily_aggregate(
     reduce = _REDUCE[agg]
     n = len(codes)
     reduced_prediction, reduced_actual = np.full(n, np.nan), np.full(n, np.nan)
-    for periods, days in whole_days(day, hour, sunday, per_hour):
+    found = (
+        whole_days(day, hour, sunday, per_hour)
+        if clock is None
+        else _days_on_the_clock(day, hour, targets[target[first]], clock)
+    )
+    for periods, days in found:
         rows = np.isin(day, days)
         reduced_prediction[days] = reduce(prediction[rows].reshape(-1, periods))
         reduced_actual[days] = reduce(actual[rows].reshape(-1, periods))
     whole = np.isfinite(reduced_prediction) & np.isfinite(reduced_actual)
-    if periods_in_target is not None:
+    if periods_in_target is not None and clock is None:
         expected = periods_in_target.reindex(pd.DatetimeIndex(targets[target[first]])).to_numpy()
         whole &= np.bincount(day, minlength=n) == expected
 
