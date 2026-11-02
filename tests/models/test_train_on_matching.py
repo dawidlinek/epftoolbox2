@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from pathlib import Path
 
@@ -822,15 +823,27 @@ def test_each_forecast_of_a_mixed_function_trains_on_its_own_set(frame):
 # ---------------------------------------------------------------------------
 
 
+def wait_for_a_record(path, timeout=60.0):
+    """Wait until the results file at `path` holds a forecast. The pool collects days that finished together in any order,
+    so a worker that stopped without waiting could have its failed day collected first, and the run would end with nothing
+    saved: the resume would then be a fresh run."""
+    deadline = time.monotonic() + timeout
+    while not (os.path.exists(path) and os.path.getsize(path) > 0) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
 class CrashesAfterSomeFits(OLSModel):
-    """Stops a real pool halfway, as a machine might: a worker's fits count in that worker."""
+    """Stops a real pool halfway, as a machine might: a worker's fits count in that worker. It stops once a forecast is
+    in the file `saved_to` names, so the run always leaves some."""
 
     fits = 0
+    saved_to = None
 
     def _fit_predict(self, train_x, train_y, test_x):
         type(self).fits += 1
         limit = os.environ.get("CRASH_AFTER")
         if limit and type(self).fits > int(limit):
+            wait_for_a_record(type(self).saved_to)
             raise RuntimeError("the machine went down")
         return super()._fit_predict(train_x, train_y, test_x)
 
@@ -847,6 +860,7 @@ def test_an_interrupted_run_resumed_through_the_real_pool_equals_a_fresh_one_bit
 
     real_pool(monkeypatch, 2)
     monkeypatch.setenv("CRASH_AFTER", "100")
+    monkeypatch.setattr(CrashesAfterSomeFits, "saved_to", path)  # inherited by the forked workers
     with pytest.raises(RuntimeError, match="the machine went down"):
         make().run(data, *TEST, horizon=2, information_set=INFO, save_to=str(path))
     monkeypatch.delenv("CRASH_AFTER")
@@ -1403,6 +1417,7 @@ def test_a_crash_records_no_skips_so_what_is_missing_is_not_explained_away(frame
         )
 
     monkeypatch.setenv("CRASH_AFTER", "100")
+    monkeypatch.setattr(CrashesAfterSomeFits, "saved_to", tmp_path / "m.jsonl")
     with pytest.raises(RuntimeError, match="the machine went down"):
         pipeline().run(data, test=days, horizon=1, save_dir=tmp_path)
     monkeypatch.delenv("CRASH_AFTER")
