@@ -221,14 +221,19 @@ def test_the_newest_targets_are_the_table_of_the_spec_across_both_switches(case,
     )
 
 
-def test_on_a_fixed_offset_the_summer_s_last_hour_is_tomorrow_s_auction():
-    """The benchmark files' index is UTC+1 all year. In summer their 23:00 is 00:00 of the next day in Brussels, which the price
-    of D-1's auction doesn't cover: that target is known only at 13:00 on D, after the issue time."""
+def test_on_a_fixed_offset_a_brussels_rule_reads_the_summer_s_last_hour_as_tomorrow():
+    """On a UTC+1 index, 23:00 in summer is 00:00 of the next day in Brussels, which the price of D-1's auction doesn't cover: by
+    a Brussels rule that target is known only at 13:00 on D, after the issue time. The benchmark files' index only labels their
+    wall clock, and their source's rule, on that clock, gives k = 0 all year."""
+    from epftoolbox2.data.sources import EpftoolboxBenchmarkSource
+
     index = pd.date_range("2016-01-01", "2016-12-31 23:00", freq="1h", tz="Etc/GMT-1")
     days = ["2016-01-15", "2016-07-15", "2016-12-15"]
     k = info_for("price published 13:00 D-1").newest_targets("price", "1h", index, days, 2)
     assert (k[:23] == 0).all()
     assert k[23].tolist() == [0, -1, 0]
+    on_its_clock = InformationSet("11:45").with_source_rules([EpftoolboxBenchmarkSource("DE")])
+    assert (on_its_clock.newest_targets("price", "1h", index, days, 2) == 0).all()
 
 
 # ---------------------------------------------------------------------------

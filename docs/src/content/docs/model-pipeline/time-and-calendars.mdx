@@ -68,8 +68,11 @@ At horizon h the newest row is D+k-h, so k doesn't depend on the horizon, apart 
 - **A slot the clock skips has no value to be late,** so it doesn't stop the walk. On the day before a spring switch the newest target
   of the skipped hour is the switch day itself: its row has no target and drops, and the fit has one row fewer, as a `"d-1"` forecast
   of that hour has on the day after the switch.
-- **The rule reads the data's own instants.** On the benchmark files' fixed UTC+1 index, 23:00 in summer is 00:00 of the next day in
-  Brussels, which the day-ahead auction of D-1 doesn't cover: under the built-in `price` rule that period has k = -1 all summer.
+- **The rule reads the index's instants.** On a fixed UTC+1 index a Brussels rule reads 23:00 in summer as 00:00 of the next day,
+  which the day-ahead auction of D-1 doesn't cover, so the built-in `price` rule gives that period k = -1 all summer. The
+  [benchmark files'](/epftoolbox2/data-sources/epftoolbox-benchmark/) index only labels their wall clock, so read them with the
+  source's rules (`InformationSet.with_source_rules`, which a `Workflow` applies), which put the price on that clock and give k = 0
+  on every period.
 - **A slower rule reaches further back.** Prices published three days after delivery give k = -4, and the window, the days the frame is
   checked on and the training days of a [`train_on="matching"`](/epftoolbox2/model-pipeline/predictor-functions/) list reach as many
   days further back.
