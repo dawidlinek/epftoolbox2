@@ -73,8 +73,9 @@ an issue day it didn't sample.
   and a period they skip has no row, so nothing is late there. See
   [Clock Changes](/epftoolbox2/model-pipeline/information-set/#clock-changes).
 - **Listings stored before this change are read with a warning.** They were made on the wall clock, so next to a clock change
-  `report.availability()` of such results can list other periods than a fresh run. A run at `availability="warn"` into the same
-  directory replaces them, refitting nothing; until then `report()` says so.
+  `report.availability()` of such results can list other periods than a fresh run. A run at `availability="warn"` lists them anew,
+  in place where the results resume (results made before rows were chosen by date don't, see above), else into a new `save_dir`;
+  until then `report()` says so.
 - `ModelPipeline.report(test=narrower)` counted every line of a results file as produced, so a shorter period looked complete. It now
   counts the forecasts inside the period, and `forecast_counts()` and its warning say what is missing.
 - A workflow file with `model_index: $SLURM_ARRAY_TASK_ID` couldn't be loaded where that variable isn't set, so `epf report` and

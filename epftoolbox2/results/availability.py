@@ -167,8 +167,8 @@ def read_listing(path: Path, window: Optional[str] = None) -> Optional[List[Dict
     if availability.get("times") != LISTING_TIMES:
         warnings.warn(
             f"{path.name}: this availability listing was written when the check compared wall-clock times, so next to a "
-            "clock change it may list other periods than a fresh run. Run the model again at availability='warn' to "
-            "replace it: its forecasts resume and nothing is refitted.",
+            "clock change it may list other periods than a fresh run. A run at availability='warn' lists it anew: into "
+            "this directory where its manifest lets it resume, refitting nothing, else into a new one.",
             UserWarning,
             stacklevel=3,
         )

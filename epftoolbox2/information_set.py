@@ -264,7 +264,15 @@ def default_rules() -> Dict[str, Availability]:
     Weather columns have no rule here: a `*_temperature_2m`-style suffix alone doesn't say whether a column
     is a forecast or an observed value. `source_rules()` assigns one to exactly the columns an
     `OpenMeteoSource` emits.
+
+    The dict is a copy, yours to change.
     """
+    return dict(_built_in_rules())
+
+
+@lru_cache(maxsize=1)
+def _built_in_rules() -> Dict[str, Availability]:
+    """What `default_rules` copies, built once: every resolution of a name reads it."""
     rules: Dict[str, Availability] = {
         # ENTSO-E
         "price": Availability.published(
@@ -639,7 +647,7 @@ class InformationSet:
         if self._source_rules:
             layers.append(("sources", self._source_rules))
         if self.use_defaults:
-            layers.append(("defaults", default_rules()))
+            layers.append(("defaults", _built_in_rules()))
         return layers
 
     def resolve(self, name: str) -> ResolvedColumn:
@@ -841,12 +849,12 @@ class InformationSet:
         if used is not None:
             excess = np.where(used, excess, -np.inf)
         worst = excess.argmax(axis=1)
+        late = [(r, period, i) for r, (period, i) in enumerate(zip(rows.tolist(), worst)) if excess[r, i] > 0]
+        hints = self._assumption_hints(col, rows, clock, step, row_day) if late else []
         out = []
-        for r, (period, i) in enumerate(zip(rows.tolist(), worst)):
-            if excess[r, i] <= 0:
-                continue
+        for r, period, i in late:
             day_ctx = clock.context_of(i)
-            hint = self._assumption_hint(col, row_day, period * step, step, day_ctx)
+            hint = next((text for known_by, text in hints if known_by[r, i]), "")
             known = clock.minute_of_day(avail[r, i], i)
             issue = day_ctx.issue_minute
             out.append(
@@ -880,13 +888,18 @@ class InformationSet:
             f"a TimezoneTransformer to the DataPipeline (it takes its zone from DataPipeline(timezone='{zone}'))."
         )
 
-    def _assumption_hint(self, col, day, row_minute, step, ctx) -> str:
+    def _assumption_hints(
+        self, col: ResolvedColumn, rows: np.ndarray, clock: "_IssueClock", step: int, row_day: int
+    ) -> List[Tuple[np.ndarray, str]]:
+        """For each assumption not accepted whose rule would replace `col`'s: the cells [row, issue day] it would make known
+        in time, and the hint that says so."""
+        out = []
         for name, (pattern, rule, description) in ASSUMPTIONS.items():
             if name in self.assumptions or col.key != pattern:
                 continue
-            if _available(col, rule, day, row_minute, step, ctx) <= ctx.issue_minute:
-                return f"known in time if you accept assumption '{name}': {description}"
-        return ""
+            known = clock.available_under(col, rule, rows, step, row_day) <= clock.issue
+            out.append((known, f"known in time if you accept assumption '{name}': {description}"))
+        return out
 
     @staticmethod
     def _weather_cutoff_hint(col: ResolvedColumn) -> str:
@@ -994,6 +1007,7 @@ class _IssueClock:
     offset: np.ndarray  # each issue day as days after the first
     issue: np.ndarray  # its issue instant in minutes since the first's midnight (`ctx.origin`)
     midnight: np.ndarray  # its own midnight in the same minutes: elapsed time, so days of 23 and 25 hours count as such
+    _skipped: Dict[Tuple[int, int], np.ndarray] = field(default_factory=dict, compare=False, repr=False)
 
     def available(self, col: ResolvedColumn, periods: np.ndarray, step: int, row_day: int = 0) -> np.ndarray:
         """The instant the value of `col` at the row (D + row_day, period) is known, in minutes since the first issue
@@ -1002,24 +1016,45 @@ class _IssueClock:
 
         A row the data zone's clock skips (02:00 on the day it goes forward) has no value, so it gets no verdict: -inf, as if
         known in advance, which `published` still answers False for, since the cell is empty."""
+        return self.available_under(col, col.rule, periods, step, row_day)
+
+    def available_under(
+        self, col: ResolvedColumn, rule: Availability, periods: np.ndarray, step: int, row_day: int = 0
+    ) -> np.ndarray:
+        """`available` with `col` read through `rule` instead of its own."""
         periods = np.asarray(periods)
         issue_day = np.tile(self.offset, len(periods))
         minute = np.repeat(periods * step, len(self.days)).astype(float)
         later = np.zeros(len(minute), dtype=bool)
-        avail = _available_array(col, col.rule, issue_day + row_day, minute, step, self.ctx, later, issue_day)
-        skipped = self.skipped(periods, step, row_day).ravel()
-        if skipped.any():
-            avail = np.where(skipped, -np.inf, avail)
-        return avail.reshape(len(periods), len(self.days))
+        avail = _available_array(col, rule, issue_day + row_day, minute, step, self.ctx, later, issue_day)
+        avail = avail.reshape(len(periods), len(self.days))
+        if not self.ctx.naive:
+            skipped = self.skipped(periods, step, row_day)
+            if skipped.any():
+                avail = np.where(skipped, -np.inf, avail)
+        return avail
 
     def skipped(self, periods: np.ndarray, step: int, row_day: int = 0) -> np.ndarray:
-        """Whether the clock skips the row (D + row_day, period), for every [period, issue day D]. A naive index has every
-        slot, so none."""
-        periods = np.asarray(periods)
+        """Whether the clock skips the row (D + row_day, period), for every [period, issue day D]: the slots
+        `models._calendar` doesn't plan. A naive index has every slot, so none."""
+        grid = self._skipped.get((step, row_day))
+        if grid is None:
+            grid = self._skipped[(step, row_day)] = self._skipped_slots(step, row_day)
+        return grid[np.asarray(periods)]
+
+    def _skipped_slots(self, step: int, row_day: int) -> np.ndarray:
+        from .models._calendar import clock_periods_on  # models import this module
+
+        grid = np.zeros((1440 // step, len(self.days)), dtype=bool)
         if self.ctx.naive:
-            return np.zeros((len(periods), len(self.days)), dtype=bool)
-        wall = np.tile(self.offset + row_day, len(periods)) * 1440.0 + np.repeat(periods * step, len(self.days))
-        return _skipped(wall, self.ctx.data_zone, self.ctx).reshape(len(periods), len(self.days))
+            return grid
+        days = self.days + pd.Timedelta(days=row_day)
+        freq = next(name for name, minutes in _STEP_MINUTES.items() if minutes == step)
+        exists = clock_periods_on(days, freq, self.ctx.data_zone)
+        for j, day in enumerate(days):
+            grid[:, j] = True
+            grid[list(exists[day]), j] = False
+        return grid
 
     def minute_of_day(self, minutes: float, i: int) -> float:
         """Minutes since the first issue day's midnight -> since the midnight of issue day `i`."""
@@ -1060,13 +1095,6 @@ class _LatePeriod(NamedTuple):
             self.known_label,
             self.issue_label,
         )
-
-
-def _available(col: ResolvedColumn, rule: Availability, day: int, row_minute: float, step: int, ctx: _Context) -> float:
-    """Minutes since midnight of D (data zone) when the value of `col` at the row (D + day, row_minute) is known; a
-    repeated autumn hour is read at its second occurrence, as `violations` checks it."""
-    rows, minutes, later = np.array([day]), np.array([row_minute], dtype=float), np.zeros(1, dtype=bool)
-    return float(_available_array(col, rule, rows, minutes, step, ctx, later)[0])
 
 
 def _localize(
@@ -1110,32 +1138,49 @@ def _issue_minutes(minutes: np.ndarray, zone: str, ctx: _Context) -> np.ndarray:
     return _minutes_since(earliest, ctx)
 
 
-# A wall time and its instant are a whole day's minutes apart from that day's midnight on every day the zone keeps one UTC
-# offset from midnight to midnight, which is all days but those of a clock change. So times are converted by arithmetic on a
-# table of each zone's midnights, and only those on a day of a change go through pandas, which is what conversion costs.
+# Times convert by arithmetic: a wall time is its instant plus the zone's UTC offset, which is one number on most days, and on
+# a day the clocks change, one before the change and one after. The offsets come from a table per zone, built with pandas once,
+# and the arithmetic follows pandas' own rules for a time the clocks repeat or skip, so the result is the same to the bit.
+# A day the table can't describe (two changes in a day, an offset in seconds) goes through pandas.
 
-_ZONE_TABLES: Dict[str, Tuple[int, np.ndarray, np.ndarray]] = {}  # zone -> what `_zone_table` returns
+_ZONE_TABLES: Dict[str, Tuple[Any, ...]] = {}  # zone -> what `_zone_table` returns
 
 
-def _zone_table(zone: str, lo: int, hi: int) -> Tuple[int, np.ndarray, np.ndarray]:
-    """(first, midnights, steady) for consecutive days counted since 1970-01-01, `first` the first of them, covering at least
-    `lo` ... `hi + 1`: each day's local midnight in `zone` in minutes since the epoch (UTC), and whether the day keeps one
-    UTC offset to the next midnight: it is 1440 minutes long, and both its midnights exist and occur once."""
+def _zone_table(zone: str, lo: int, hi: int) -> Tuple[Any, ...]:
+    """(first, midnight, before, after, change, exact, odd) for consecutive days counted since 1970-01-01, `first` the first
+    of them, covering at least `lo` ... `hi + 1`. Per day: its local midnight in `zone` in minutes since the epoch (UTC), the
+    zone's UTC offset in minutes before and after the one change of offset that reaches the day's wall times, the change's
+    instant (inf without one), whether the day is described exactly so, and whether it needs more than `before`."""
     held = _ZONE_TABLES.get(zone)
     if held is not None and held[0] <= lo and hi + 1 < held[0] + len(held[1]):
         return held
     first, last = lo - 366, hi + 367
     if held is not None:
         first, last = min(first, held[0]), max(last, held[0] + len(held[1]) - 1)
-    naive = pd.DatetimeIndex(_EPOCH + pd.to_timedelta(np.arange(first, last + 1), unit="D"))
+    days = np.arange(first, last + 1)
+    naive = pd.DatetimeIndex(_EPOCH + pd.to_timedelta(days, unit="D"))
     local = naive.tz_localize(zone, ambiguous=np.ones(len(naive), dtype=bool), nonexistent="shift_forward")
     midnight = np.asarray((local.tz_convert("UTC").tz_localize(None) - _EPOCH) / pd.Timedelta(minutes=1), dtype=float)
     wall = local.tz_localize(None)
     whole = np.asarray(wall == naive) & np.asarray(wall.tz_localize(zone, ambiguous="NaT", nonexistent="NaT").notna())
     steady = np.append((np.diff(midnight) == 1440.0) & whole[:-1] & whole[1:], False)
-    midnight.setflags(write=False)
-    steady.setflags(write=False)
-    _ZONE_TABLES[zone] = table = (first, midnight, steady)
+    before = days * 1440.0 - midnight  # exact on a steady day; the others are read minute by minute below
+    after, change, exact = before.copy(), np.full(len(days), np.inf), steady.copy()
+    for k in np.flatnonzero(~steady):
+        # Every UTC minute whose wall time can fall on this day, whatever the offset (at most 14 h either way).
+        utc = np.arange(days[k] * 1440 - 900, (days[k] + 1) * 1440 + 900)
+        clock = pd.DatetimeIndex(_EPOCH + pd.to_timedelta(utc, unit="min")).tz_localize("UTC").tz_convert(zone)
+        offset = np.asarray((clock.tz_localize(None) - _EPOCH) / pd.Timedelta(minutes=1)) - utc
+        moves = np.flatnonzero(np.diff(offset))
+        if len(moves) > 1 or not np.array_equal(offset, np.round(offset)):
+            continue  # `exact` stays False: pandas reads this day
+        before[k], after[k] = offset[0], offset[-1]
+        change[k] = utc[moves[0] + 1] if len(moves) else np.inf
+        exact[k] = True
+    odd = ~exact | np.isfinite(change)  # the days one offset doesn't describe
+    for array in (midnight, before, after, change, exact, odd):
+        array.setflags(write=False)
+    _ZONE_TABLES[zone] = table = (first, midnight, before, after, change, exact, odd)
     return table
 
 
@@ -1144,22 +1189,35 @@ def _to_instants(
 ) -> np.ndarray:
     """Wall-clock minutes after the naive midnight `ctx.day` in `zone` -> their instants, in minutes since `ctx.origin`.
 
-    As `_localize` reads them: a wall time skipped by a spring switch moves forward to the switch, and a repeated autumn one
-    is its first occurrence, or its second where `first` is False.
+    As `_localize` reads them: a wall time skipped by a spring switch moves forward to the next whole hour after it (the
+    switch, for a whole-hour switch), and a repeated autumn one is its first occurrence, or its second where `first` is False.
     """
     wall = np.atleast_1d(np.asarray(wall, dtype=float))
     if not len(wall):
         return wall.copy()
     absolute = wall + ctx.epoch_day * 1440.0
     day = np.floor(absolute / 1440.0).astype(np.int64)
-    start, midnight, steady = _zone_table(zone, int(day.min()), int(day.max()))
+    start, _, before, after, change, exact, odd = _zone_table(zone, int(day.min()), int(day.max()))
     k = day - start
-    out = midnight[k] + (absolute - day * 1440.0) - ctx.origin_minutes
-    slow = ~steady[k]
-    if slow.any():
-        which = None if first is None else np.broadcast_to(np.asarray(first, dtype=bool), wall.shape)[slow]
-        out[slow] = _minutes_since(_localize(0, wall[slow], zone, ctx, which), ctx)
-    return out
+    out = absolute - before[k]
+    rows = np.flatnonzero(odd[k])  # on a day of a change: which side of it, or both, or neither
+    if len(rows):
+        a, kk = absolute[rows], k[rows]
+        early, late, at = a - before[kk], a - after[kk], change[kk]
+        in_early, in_late = early < at, late >= at  # both: the clocks repeat it; neither: they skip it
+        twice = in_early & in_late
+        if first is not None:
+            twice &= np.broadcast_to(np.asarray(first, dtype=bool), wall.shape)[rows]
+        fixed = np.where((in_early & ~in_late) | twice, early, late)
+        gap = ~in_early & ~in_late
+        # As pandas' shift_forward: the next whole hour of the wall clock, read with the offset after the change.
+        fixed[gap] = a[gap] - np.mod(a[gap], 60.0) + 60.0 - after[kk][gap]
+        out[rows] = fixed
+        slow = rows[~exact[kk] | (gap & (fixed < at))]
+        if len(slow):
+            which = None if first is None else np.broadcast_to(np.asarray(first, dtype=bool), wall.shape)[slow]
+            out[slow] = _minutes_since(_localize(0, wall[slow], zone, ctx, which), ctx) + ctx.origin_minutes
+    return out - ctx.origin_minutes
 
 
 def _to_wall(instants: np.ndarray, zone: str, ctx: _Context) -> np.ndarray:
@@ -1169,29 +1227,22 @@ def _to_wall(instants: np.ndarray, zone: str, ctx: _Context) -> np.ndarray:
         return instants.copy()
     absolute = instants + ctx.origin_minutes
     day = np.floor(absolute / 1440.0)
-    start, midnight, steady = _zone_table(zone, int(day.min()) - 2, int(day.max()) + 2)  # no zone is 2 days off UTC
-    k = np.clip(np.searchsorted(midnight, absolute, side="right") - 1, 0, len(midnight) - 2)
-    out = (start + k) * 1440.0 + (absolute - midnight[k]) - ctx.epoch_day * 1440.0
-    slow = ~steady[k] | (absolute < midnight[k]) | (absolute >= midnight[k + 1])
-    if slow.any():
-        out[slow] = _wall(_instants(instants[slow], ctx), zone, ctx)
-    return out
-
-
-def _skipped(wall: np.ndarray, zone: str, ctx: _Context) -> np.ndarray:
-    """Whether each wall-clock time (minutes after the naive midnight `ctx.day`) is one the clocks of `zone` skip."""
-    wall = np.asarray(wall, dtype=float)
-    out = np.zeros(len(wall), dtype=bool)
-    if not len(wall):
-        return out
-    day = np.floor((wall + ctx.epoch_day * 1440.0) / 1440.0).astype(np.int64)
-    start, _, steady = _zone_table(zone, int(day.min()), int(day.max()))
-    slow = ~steady[day - start]
-    if slow.any():
-        naive = pd.DatetimeIndex(ctx.day + pd.to_timedelta(wall[slow], unit="min"))
-        late = np.ones(int(slow.sum()), dtype=bool)
-        out[slow] = np.asarray(naive.tz_localize(zone, ambiguous=late, nonexistent="NaT").isna())
-    return out
+    start, midnight, before, after, change, exact, odd = _zone_table(zone, int(day.min()) - 2, int(day.max()) + 2)
+    # The local day: that of the UTC day's offset, or the one before or after it next to a change. The table reaches a year
+    # past either end, so k and k + 1 are in it.
+    k = np.floor((absolute + before[day.astype(np.int64) - start]) / 1440.0).astype(np.int64) - start
+    k -= absolute < midnight[k]
+    k += absolute >= midnight[k + 1]
+    out = absolute + before[k]
+    rows = np.flatnonzero(odd[k])
+    if len(rows):
+        kk = k[rows]
+        a = absolute[rows]
+        out[rows] = a + np.where(a < change[kk], before[kk], after[kk])
+        slow = rows[~exact[kk]]
+        if len(slow):
+            out[slow] = _wall(_instants(instants[slow], ctx), zone, ctx) + ctx.epoch_day * 1440.0
+    return out - ctx.epoch_day * 1440.0
 
 
 # ---------------------------------------------------------------------------

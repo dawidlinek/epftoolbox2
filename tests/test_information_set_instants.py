@@ -20,6 +20,7 @@ from epftoolbox2.information_set import (
     InformationSetError,
     _available_array,
     _Context,
+    default_rules,
     leakage_probe,
     perturb_recent,
     perturb_unknown,
@@ -668,18 +669,26 @@ def test_explain_shows_the_known_time_of_the_day_it_is_latest():
 
 
 @pytest.mark.parametrize("case", ["warsaw 1h", "warsaw 15min", "new york, issue in the switch", "havana, a midnight switch", "asuncion, a repeated last hour", "naive 1h, issue in the switch"])  # fmt: skip
-def test_the_arithmetic_on_steady_days_equals_pandas_on_every_cell(case, monkeypatch):
-    """Times are converted by arithmetic on days that keep one UTC offset, and by pandas on the others. With every day sent
-    through pandas, every cell must come out the same, to the bit."""
+def test_the_arithmetic_equals_pandas_on_every_cell(case, monkeypatch):
+    """Times are converted by arithmetic from a table of each zone's UTC offsets, also on the days the clocks change. With every
+    day sent through pandas instead, every cell must come out the same, to the bit."""
     index, info, freq, names, step, *_, days, _, _ = _setup(case)
     fast = _Cells(pd.DataFrame(index=index), info, freq, pd.DatetimeIndex(days))
     grids = {name: fast.available(name) for name in names}
     real = information_set._zone_table
+    information_set._ZONE_TABLES.clear()
 
     def unsteady(zone, lo, hi):
-        first, midnight, steady = real(zone, lo, hi)
-        return first, midnight, np.zeros_like(steady)
+        first, midnight, before, after, change, exact, odd = real(zone, lo, hi)
+        return first, midnight, before, after, change, np.zeros_like(exact), np.ones_like(odd)
 
     monkeypatch.setattr(information_set, "_zone_table", unsteady)
     slow = _Cells(pd.DataFrame(index=index), info, freq, pd.DatetimeIndex(days))
     assert [name for name in names if not np.array_equal(slow.available(name), grids[name])] == []
+
+
+def test_the_built_in_rules_are_built_once_and_handed_out_as_copies():
+    rules = default_rules()
+    rules["price"] = Availability.static()
+    assert default_rules()["price"].kind == "published"
+    assert InformationSet().resolve("price").rule.kind == "published"
