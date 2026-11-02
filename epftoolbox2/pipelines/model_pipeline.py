@@ -419,6 +419,7 @@ class ModelPipeline:
                 continue
             zone = read_zone(manifest_path(path))
             calendars[model.name] = IssueCalendar(freq, zone, horizons)
+            listed = None if every_horizon(horizon, horizons) else horizons
             ref = ModelResultRef(
                 name=model.name,
                 path=path,
@@ -427,12 +428,16 @@ class ModelPipeline:
                 test_end=test_end,
                 horizon=horizon,
                 freq=freq,
-                skipped={} if windows is not None else read_skipped(manifest_path(path), period=(test_start, test_end)),
+                skipped=(
+                    {}
+                    if windows is not None
+                    else read_skipped(manifest_path(path), period=(test_start, test_end), horizons=listed)
+                ),
                 availability_listing=read_listing(manifest_path(path)),
                 windows=windows,
                 matching_lists=read_matching_lists(manifest_path(path)),
                 zone=zone,
-                horizons=None if every_horizon(horizon, horizons) else horizons,
+                horizons=listed,
             )
             # Through the ref: the file can hold more than this period, and a line outside it is no forecast of it.
             ref.produced = sum(1 for _ in ref.iter_records(cols=["hour"]))
@@ -459,7 +464,9 @@ class ModelPipeline:
                     ref,
                     windows,
                     calendars[name],
-                    skipped={w: read_skipped(manifest_path(ref.path), w) for w, _ in windows.periods},
+                    skipped={
+                        w: read_skipped(manifest_path(ref.path), w, horizons=ref.horizons) for w, _ in windows.periods
+                    },
                     listings={w: read_listing(manifest_path(ref.path), w) for w, _ in windows.periods},
                     target_before=stored.target_before,
                 )

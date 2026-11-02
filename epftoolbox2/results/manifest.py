@@ -519,18 +519,24 @@ def record_skips(path: Path, manifest: Manifest, skipped: Mapping[str, Mapping[s
 
 
 def read_skipped(
-    path: Union[str, Path], window: str = TEST, period: Optional[Tuple[str, str]] = None
+    path: Union[str, Path],
+    window: str = TEST,
+    period: Optional[Tuple[str, str]] = None,
+    horizons: Optional[Sequence[int]] = None,
 ) -> Dict[str, int]:
     """Skip reason -> how many, of one window as a manifest records it, or nothing if it has none.
 
     `period` is what a plain report covers. The counts are per window and can't be split by day, so a period other than the one
-    the manifest was run on gets none: such a report still has `missing`, and no reasons it can't vouch for.
+    the manifest was run on gets none: such a report still has `missing`, and no reasons it can't vouch for. Nor can they be
+    split by horizon, so a report told a list of `horizons` other than the run's gets none either.
     """
     path = Path(path)
     if not path.exists():
         return {}
     stored = json.loads(path.read_text())
     if period is not None and (stored.get("test_start"), stored.get("test_end")) != tuple(period):
+        return {}
+    if horizons is not None and horizons_of(stored) != tuple(horizons):
         return {}
     return dict((stored.get("skipped") or {}).get(window, {}))
 
