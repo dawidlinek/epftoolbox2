@@ -115,7 +115,8 @@ Results resume as usual, and interrupted then resumed equals fresh. On top of th
   another window now (results of `run(df, test=V)` can't become validation records), or when moving a window's first day gives
   a stored forecast other binary columns than a fresh run would. One results file keeps one mask per window, list, period and
   horizon, also for records outside this run's days, so test chunks run into one directory are refused when their masks differ:
-  give each chunk its own directory, or run the whole period. Pending forecasts may change freely.
+  give each chunk its own directory, or run the whole period. Pending forecasts may change freely. A model with
+  [`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) keeps no mask: each fit finds its own on its rows.
 - **A plain run and a run with windows meet.** `run(df, test=T)` followed by `run(df, validation=V, test=T)` keeps the stored test
   records, which have no tag and so mean test. Their `actual` is compared with the data, since a plain manifest holds no hash of it,
   and a stored forecast issued past the end of the frame is refused, since no later run would compare it.

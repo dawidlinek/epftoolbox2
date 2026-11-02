@@ -103,7 +103,7 @@ model       predictor      role  status list periods horizons                   
 |---|---|
 | `model` | The model's name |
 | `predictor` | The column |
-| `role` | `predictor`, `training target` (the newest one is the value of D-1; a model with `newest_target="published"` has no such row, since what it trains on is known by construction), or what a predictor function read it with: `ctx.value`, `ctx.published` |
+| `role` | `predictor`, `training target` (the newest one is the value of D-1; with `refit` it is the value of the day before the refit day, checked at the issue time on the refit day, where the fit's rows are cut; a model with `newest_target="published"` has no such row, since what it trains on is known by construction), or what a predictor function read it with: `ctx.value`, `ctx.published` |
 | `status` | `late` or `no rule` |
 | `list` | The hash of the [predictor function's](/epftoolbox2/model-pipeline/predictor-functions/#results) list, which is listed per list. Empty for fixed lists and for what a function only read |
 | `periods`, `horizons` | Exactly the uses of this row: a predictor used at other periods on other horizons gets one row per set of periods |

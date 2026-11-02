@@ -42,6 +42,7 @@ model = LassoCVModel(
 | `name` | str | `"Model"` | Display name for reports |
 | `scaler` | str, dict or scaler | `"standard"` | `"standard"`, `"asinh"` or `"npit"`, or `{"name": ..., "params": {...}}`. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
 | `newest_target` | str | `"d-1"` | The newest target a forecast issued on D trains on: `"d-1"`, or `"published"`, every target its rule says is known by the issue time, which needs an information set. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target) |
+| `refit` | str or None | `None` | How often the model is fitted: `None` fits every forecast on its own, `"kD"` once every k days and `"kMS"` on the first of every k-th month (k a whole number from 1), on a fixed calendar, such as `"7D"` (Mondays) or `"1MS"`. See [Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) |
 
 Callable predictors accept `(horizon)` or `(horizon, hour)`. See [OLSModel](/epftoolbox2/models/ols/#parameters) for details.
 
