@@ -525,6 +525,8 @@ def test_verify_is_ok_for_a_refit_model(market):
     pipeline.add_model(ols("7D", name="weekly"))
     pipeline.add_model(ols("1MS", PREDICTORS + ["flag"], name="monthly"))
     pipeline.verify(market, "2023-03-20", "2023-04-16", horizon=2, days=3).assert_ok()
+    # The last day of a "7D" block: a fit anchored on the target day's Monday would train on the target of D, which the probe moves.
+    pipeline.verify(market, "2023-04-09", "2023-04-09", horizon=2, days=1).assert_ok()
 
 
 def same_list(ctx):
