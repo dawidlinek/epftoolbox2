@@ -118,6 +118,21 @@ an issue day it didn't sample.
 
 ### New
 
+- **`refit=`: fitting on a fixed calendar.** `OLSModel(..., refit="7D")` and `LassoCVModel(..., refit="1MS")` fit once per unit (a
+  period, a horizon, a refit day and a predictor list) instead of once per forecast: `"kD"` every k days, `"kMS"` on the first of every
+  k-th month, counted from Monday 1970-01-05, so a forecast's refit day depends on its issue day alone, never on where a run starts. A
+  forecast issued on D trains on the rows of the forecast issued on its refit day a (dated a-W-h to a-1-h; with
+  `newest_target="published"` the newest target known at a's issue time), finds its binary columns on those rows, and is predicted from
+  its own row on its own, so it is bit for bit the same whichever run, process count or resume made it. Records gain `refit_anchor`,
+  the manifest's `training_cut` gains `refit` and `refit_epoch` (changing `refit` refuses a resume), resume compares each stored
+  anchor, and YAML writes `refit` only when set. The frame must hold W+h days before the refit day of the first test day, and a run uses
+  at most one process per refit day. Other values raise, `"auto"` included, and so does `refit` on a custom model with only
+  `_fit_predict`. **Nothing moves without the keyword**: `refit=None` is every record, manifest and table as before. With it the
+  numbers move, since fits are older: on Lago DE in 2017 at horizon 1 (LassoCV on the LEAR inputs, W = 364, the same 8712
+  forecasts), MAE was 4.6665 refitting daily, 4.6560 (-0.23 %) with `"7D"` from 1248 fits and 4.7134 (+1.00 %) with `"1MS"` from 288,
+  with naive standard errors of the daily difference of 0.6 % and 1.4 % of the MAE; forecasts issued on a refit day equal the daily
+  refit's bit for bit. See
+  [Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar).
 - **`freq="1D"`: one model per day.** `pipeline.run(df.at_time("12:00"), ..., freq="1D")` fits one model per day on a frame with one row
   per local date, every row at one time of day. It is accepted wherever `freq` is: `ModelPipeline.run`, `report`, `verify` and
   `explain`, `BaseModel.run`, `leakage_probe` and `positive_control`, `Workflow` YAML (`model_pipeline.freq: 1D`), `epf model` and
