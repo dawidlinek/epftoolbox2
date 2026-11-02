@@ -21,6 +21,7 @@ from __future__ import annotations
 import fnmatch
 import math
 import re
+import threading
 import warnings
 from dataclasses import dataclass, field, replace
 from functools import cached_property, lru_cache
@@ -537,9 +538,11 @@ ROLE_PREDICTOR = "predictor"
 ROLE_TARGET = "training target"
 # How far back `InformationSet.newest_targets` looks for a known training target, in days relative to the issue day.
 NEWEST_TARGET_FROM = -31
-# Tables `newest_targets` computed, by what they were computed from, the oldest first.
+# Tables `newest_targets` computed, by what they were computed from, the oldest first, and the lock that guards them: models
+# can be planned in threads, and a free-threaded build runs them at once.
 _NEWEST_TABLES: Dict[Tuple[Any, ...], np.ndarray] = {}
 _NEWEST_TABLES_KEPT = 16
+_NEWEST_TABLES_LOCK = threading.Lock()
 ROLE_VALUE = "ctx.value"
 ROLE_PUBLISHED = "ctx.published"
 
@@ -881,13 +884,15 @@ class InformationSet:
             tuple(days.asi8.tolist()),
             int(horizon),
         )
-        found = _NEWEST_TABLES.get(key)
+        with _NEWEST_TABLES_LOCK:
+            found = _NEWEST_TABLES.get(key)
         if found is None:
             found = self._newest_targets(col, target, freq, index, days, int(horizon))
             found.setflags(write=False)
-            _NEWEST_TABLES[key] = found
-            while len(_NEWEST_TABLES) > _NEWEST_TABLES_KEPT:
-                _NEWEST_TABLES.pop(next(iter(_NEWEST_TABLES)))
+            with _NEWEST_TABLES_LOCK:
+                _NEWEST_TABLES[key] = found
+                while len(_NEWEST_TABLES) > _NEWEST_TABLES_KEPT:
+                    del _NEWEST_TABLES[next(iter(_NEWEST_TABLES))]
         return found
 
     def _newest_targets(

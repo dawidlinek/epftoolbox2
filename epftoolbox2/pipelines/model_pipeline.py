@@ -652,7 +652,8 @@ class ModelPipeline:
         model, whichever ones and in whatever order). On each of them:
 
         - the leakage probe perturbs every value not known at the issue time, and what the model trains on from the
-          issue day on. Forecasts must not move; if they do, the status is `leak`.
+          issue day on (for a model with `newest_target="published"`, whose boundary is its target's rule, what that rule
+          calls unknown). Forecasts must not move; if they do, the status is `leak`.
         - the positive control perturbs the freshest known values: those delivered or first known on the day before the
           issue day or later (see `epftoolbox2.information_set.perturb_recent`). Every forecast must move on some
           sampled day, and on every day some forecast of each horizon; if not, the probe isn't reaching the model and

@@ -2,8 +2,9 @@
 
 For each model and a sample of issue days it runs two experiments on top of `epftoolbox2.information_set`:
 
-- `leakage_probe`: perturb every value not known at the issue time, and what the model trains on from the issue day on.
-  Forecasts must not move. If they do, the model used information from after the issue time.
+- `leakage_probe`: perturb every value not known at the issue time, and what the model trains on from the issue day on
+  (for `newest_target="published"`, what the target's rule calls unknown). Forecasts must not move. If they do, the model
+  used information from after the issue time.
 - `positive_control`: perturb the freshest values that are known. Forecasts must move. If they don't, the probe's
   silence is no evidence: its perturbation isn't reaching the model.
 
