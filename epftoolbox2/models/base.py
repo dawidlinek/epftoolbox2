@@ -23,6 +23,7 @@ from ..results.availability import LISTING_TIMES, listing_rows, warn_about
 from ..results.matching import training_day_rows, warn_about_thin
 from ..results.manifest import (
     PAST_THE_FRAME,
+    TRAINING_CUT_BY_DATE,
     ManifestMismatchError,
     PlannedForecast,
     FrameHashes,
@@ -36,7 +37,7 @@ from ..results.manifest import (
 from ..results.windows import TEST, RunWindows, mask_key
 from ..logging import get_logger
 from . import _contract
-from ._calendar import IssueCalendar, training_span
+from ._calendar import IssueCalendar, NewestTargets, check_newest_target, training_span
 from .context import TRAIN_ON_MATCHING, PredictorPlan, build_plan, mask_digest, takes_ctx, warn_never_published_in
 from ._worker import (
     NOT_PLANNED,
@@ -50,7 +51,7 @@ from ._worker import (
     training_rows,
 )
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days, zone_name
-from ..information_set import check_level
+from ..information_set import _STEP_MINUTES, InformationSetError, check_level
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -84,7 +85,12 @@ class BaseModel(ABC):
         training_window: int = 365,
         name: str = "Model",
         scaler: ScalerSpec = "standard",
+        newest_target: str = "d-1",
     ):
+        """`newest_target` is the newest target a forecast issued on D trains on: `"d-1"` the target of D-1, whatever the
+        information set says, and `"published"` every target its rule says is known by the issue time on D, per period
+        (`InformationSet.newest_targets`), which needs an information set with a rule for the target. A row dated D or later
+        never trains. See the docs page Time and Calendars."""
         # A function of `ctx` is planned per forecast (epftoolbox2.models.context); a `(horizon)` or `(horizon, hour)`
         # function gives one list per (period, horizon).
         self._ctx_fn: Optional[Callable] = predictors if callable(predictors) and takes_ctx(predictors) else None
@@ -100,6 +106,7 @@ class BaseModel(ABC):
         self.training_window = training_window
         self.name = name
         self.scaler = scaler  # validated and normalised in __setattr__
+        self.newest_target = newest_target  # validated in __setattr__
 
         self._data: Optional[pd.DataFrame] = None
         self._hour_data: Dict[int, pd.DataFrame] = {}
@@ -112,12 +119,16 @@ class BaseModel(ABC):
         self._used_predictors: List[str] = []
         self._availability_listing: List[Dict] = []
         self._window_listings: Dict[str, List[Dict]] = {}
+        # A run's newest targets with newest_target="published", by issue day and period; None otherwise.
+        self._newest: Optional[NewestTargets] = None
 
     def __setattr__(self, key, value):
         # The scaler is kept as a name or {"name", "params"} dict, also when assigned after construction, so a
         # typo fails here rather than in every worker and a scaler instance can't be dropped by save().
         if key == "scaler":
             value = scaler_spec(value)
+        elif key == "newest_target":
+            value = check_newest_target(value)
         super().__setattr__(key, value)
 
     @property
@@ -151,6 +162,7 @@ class BaseModel(ABC):
         warn_listing: bool = True,
         windows: Optional[RunWindows] = None,
         frame_hashes: Optional[FrameHashes] = None,
+        cut_rules: Optional["InformationSet"] = None,
     ) -> ModelResultRef:
         """Forecast every period and horizon the clock has on each day in [test_start, test_end] and on its target day.
 
@@ -182,9 +194,14 @@ class BaseModel(ABC):
 
         `frame_hashes` is what `ModelPipeline.run` shares between its models, for this `data`, so that each column of a frame is
         hashed once per call.
+
+        A model with `newest_target="published"` reads its newest training target from the target's rule in `information_set`.
+        `cut_rules` is an information set read for that alone, when `information_set` isn't given: nothing is checked or listed
+        with it, and a predictor function doesn't answer through it. `leakage_probe` runs models so.
         """
         self._set_freq(freq)
         check_level(availability)
+        rules = self._cut_rules(information_set, cut_rules)
 
         if windows is not None:
             test_start, test_end = windows.first_day, windows.last_day
@@ -204,6 +221,12 @@ class BaseModel(ABC):
                 )
 
         self._target = target
+        run_issue_days = (
+            _test_days(test_start, test_end)
+            if windows is None
+            else [datetime.date.fromisoformat(day) for day in windows.issue_days()]
+        )
+        newest = self._newest_targets(data, target, horizon, freq, rules, run_issue_days)
         if plan is None:
             plan = self._plan_predictors(
                 data,
@@ -215,10 +238,11 @@ class BaseModel(ABC):
                 test_end,
                 availability=availability,
                 windows=windows,
+                cut_rules=cut_rules,
             )
         else:
             self._check_plan_is_for(
-                plan, data, horizon, freq, information_set, test_start, test_end, availability, windows
+                plan, data, horizon, freq, information_set, test_start, test_end, availability, windows, newest
             )
         expanded = self._check_inputs(
             data,
@@ -231,6 +255,7 @@ class BaseModel(ABC):
             plan=plan,
             availability=availability,
             windows=windows,
+            cut_rules=cut_rules,
         )
         listing = self._availability_listing
         window_listings = self._window_listings
@@ -239,6 +264,7 @@ class BaseModel(ABC):
         used_columns = list(dict.fromkeys([target, *self._used_predictors]))
 
         self._load_periods(data, used_columns, horizon, target)
+        self._newest = newest
 
         first_day = datetime.date.fromisoformat(test_start)
         if windows is None:
@@ -298,6 +324,7 @@ class BaseModel(ABC):
                 binary_masks=None if windows is None or plan is not None else self._mask_digests(masks),
                 read_columns=() if plan is None else sorted(plan.queried),
                 frame_hashes=frame_hashes,
+                training_cut=self._training_cut(rules, target, freq),
             )
 
             def check_stored():
@@ -418,6 +445,61 @@ class BaseModel(ABC):
                     stacklevel=2,
                 )
         return ref
+
+    def _cut_rules(
+        self, information_set: Optional["InformationSet"], cut_rules: Optional["InformationSet"]
+    ) -> Optional["InformationSet"]:
+        """The information set the training cut is read from: `information_set`, or `cut_rules` without one."""
+        if information_set is not None and cut_rules is not None and cut_rules is not information_set:
+            raise ValueError(f"{self.name}: pass information_set or cut_rules, not both")
+        return information_set if information_set is not None else cut_rules
+
+    def _newest_targets(
+        self,
+        data: pd.DataFrame,
+        target: str,
+        horizon: int,
+        freq: str,
+        rules: Optional["InformationSet"],
+        issue_days: Optional[Sequence[datetime.date]],
+    ) -> Optional[NewestTargets]:
+        """The newest target of each forecast on these issue days, for `newest_target="published"`; None for `"d-1"`, which
+        reads no information set. Raises without one, or without a rule for the target, whatever the level: the rule decides
+        numbers. `issue_days` None only checks that it could be read."""
+        if self.newest_target == "d-1":
+            return None
+        if rules is None:
+            raise InformationSetError(
+                f"{self.name}: newest_target='published' trains on every target its rule says is known by the issue time, "
+                "so it needs an information set: pass information_set (or issue_time) to the ModelPipeline, or "
+                "information_set to run()."
+            )
+        if issue_days is None:
+            rules.newest_targets(target, freq, data.index, [], horizon)
+            return None
+        days = list(issue_days)
+        return NewestTargets(days, rules.newest_targets(target, freq, data.index, days, horizon))
+
+    def _training_cut(self, rules: Optional["InformationSet"], target: str, freq: str) -> Dict[str, Any]:
+        """What a manifest's `training_cut` says of this run: rows by date and, with `newest_target="published"`, what the newest
+        target is read from. The information set isn't compared on resume, but these decide numbers."""
+        cut = dict(TRAINING_CUT_BY_DATE)
+        if self.newest_target == "d-1":
+            return cut
+        rule = rules._resolve_for(target, _STEP_MINUTES[freq]).rule
+        return {
+            **cut,
+            "newest_target": self.newest_target,
+            "target_rule": {key: value for key, value in rule.to_dict().items() if key != "note"},
+            "issue_time": rules.issue_time,
+            "issue_timezone": rules.issue_timezone,
+        }
+
+    def _newest_of(self, period: int, day: Any) -> Any:
+        """The newest target, relative to each issue day, of these day ids of a run: -1 with `newest_target="d-1"`."""
+        if self._newest is None:
+            return -1
+        return self._newest.at(period, np.asarray(day, dtype=np.int64) + self._first_ordinal)
 
     def _as_run_of_test_window(
         self, on_file: RunWindows, test_start: str, test_end: str, forecast_only: bool, allow_mismatch: bool
@@ -570,6 +652,8 @@ class BaseModel(ABC):
                 }
         if window_days is not None:
             config["run_days"] = window_days
+        if self._newest is not None:
+            config["newest"] = self._newest.by_position()
         first_day = datetime.date.fromisoformat(test_start)
 
         mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
@@ -641,6 +725,7 @@ class BaseModel(ABC):
         plan: Optional[PredictorPlan] = None,
         availability: str = "raise",
         windows: Optional[RunWindows] = None,
+        cut_rules: Optional["InformationSet"] = None,
     ) -> Dict[Tuple[int, int], List[str]]:
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
 
@@ -657,10 +742,22 @@ class BaseModel(ABC):
 
         `windows` checks the days of its windows, once, in place of [test_start, test_end], and keeps what `availability`
         "warn" lists for each of them in `_window_listings`.
+
+        A model with `newest_target="published"` raises without an information set (or `cut_rules`, see `run`) and without a
+        rule for the target, at every level. Its training target isn't checked: what it trains on is known by construction.
         """
         self._set_freq(freq)
         self._availability_listing = []
         self._window_listings = {}
+        newest = self._newest_targets(
+            data,
+            target,
+            horizon,
+            freq,
+            self._cut_rules(information_set, cut_rules),
+            self._days_of(test_start, test_end, windows),
+        )
+        check_target = self.newest_target == "d-1"
         if self._ctx_fn is not None:
             if plan is None:
                 plan = self._plan_predictors(
@@ -673,6 +770,7 @@ class BaseModel(ABC):
                     test_end,
                     availability=availability,
                     windows=windows,
+                    cut_rules=cut_rules,
                 )
             expanded = plan.names_by_pair()
             self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
@@ -684,24 +782,53 @@ class BaseModel(ABC):
                     self._window_listings = self._plan_window_listings(plan, target, windows)
             plan.release()
             return expanded
-        self._check_frame(data, target, horizon, freq, test_start, test_end, windows)
+        self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
         expanded = self._precompute_expanded_predictors(horizon)
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
         days = None if windows is None else windows.issue_days()
         if information_set is not None and availability == "raise":
             information_set.check(
-                expanded, target, freq, data.index, test_start, test_end, model_name=self.name, issue_days=days
+                expanded,
+                target,
+                freq,
+                data.index,
+                test_start,
+                test_end,
+                model_name=self.name,
+                issue_days=days,
+                check_target=check_target,
             )
         elif information_set is not None and availability == "warn":
             uses = information_set.late_uses(
-                expanded, target, freq, data.index, test_start, test_end, model_name=self.name, issue_days=days
+                expanded,
+                target,
+                freq,
+                data.index,
+                test_start,
+                test_end,
+                model_name=self.name,
+                issue_days=days,
+                check_target=check_target,
             )
             self._availability_listing = listing_rows(uses)
             for name, (start, end) in windows.periods if windows is not None else ():
                 self._window_listings[name] = listing_rows(
-                    information_set.late_uses(expanded, target, freq, data.index, start, end, model_name=self.name)
+                    information_set.late_uses(
+                        expanded, target, freq, data.index, start, end, model_name=self.name, check_target=check_target
+                    )
                 )
         return expanded
+
+    @staticmethod
+    def _days_of(
+        test_start: Optional[str], test_end: Optional[str], windows: Optional[RunWindows]
+    ) -> Optional[List[datetime.date]]:
+        """The issue days of a run, or None if it doesn't say."""
+        if windows is not None:
+            return [datetime.date.fromisoformat(day) for day in windows.issue_days()]
+        if test_start is None or test_end is None:
+            return None
+        return _test_days(test_start, test_end)
 
     def _plan_window_listings(self, plan: PredictorPlan, target: str, windows: RunWindows) -> Dict[str, List[Dict]]:
         """What each window uses. A run of one window uses what the whole plan does, whether or not its cells are gone."""
@@ -712,11 +839,14 @@ class BaseModel(ABC):
             for name, (start, end) in windows.periods
         }
 
-    def _check_frame(self, data, target, horizon, freq, test_start=None, test_end=None, windows=None) -> None:
+    def _check_frame(
+        self, data, target, horizon, freq, test_start=None, test_end=None, windows=None, newest=None
+    ) -> None:
+        reach = 0 if newest is None else newest.reach
         if windows is None:
-            days = _contract.read_days(test_start, test_end, self.training_window, horizon)
+            days = _contract.read_days(test_start, test_end, self.training_window, horizon, reach)
         else:
-            days = _contract.read_ranges([p for _, p in windows.periods], self.training_window, horizon)
+            days = _contract.read_ranges([p for _, p in windows.periods], self.training_window, horizon, reach)
         _contract.check_index(data, freq, days)
         _contract.check_timezone_with_day_lags(data)
         _contract.check_names(data, target, horizon)
@@ -734,17 +864,17 @@ class BaseModel(ABC):
         warn_unpublished: bool = True,
         availability: str = "raise",
         windows: Optional[RunWindows] = None,
+        cut_rules: Optional["InformationSet"] = None,
     ) -> Optional[PredictorPlan]:
         """The plan of a predictor function of `ctx` for this data and test period, or None for a model with fixed lists.
 
         `issue_days` plans these days instead of [test_start, test_end]: `verify` samples a few to learn the inputs.
         `windows` plans the days of a run with validation, once each and none between them; the function doesn't see them.
-        `availability` is the level `ctx` answers at (see `epftoolbox2.models.context`).
+        `availability` is the level `ctx` answers at (see `epftoolbox2.models.context`). `cut_rules` is as in `run`.
         """
         if self._ctx_fn is None:
             return None
         self._set_freq(freq)
-        self._check_frame(data, target, horizon, freq, test_start, test_end, windows)
         if windows is not None:
             days = [datetime.date.fromisoformat(day) for day in windows.issue_days()]
         elif issue_days is not None:
@@ -753,6 +883,8 @@ class BaseModel(ABC):
             raise ValueError(f"{self.name}: a predictor function of `ctx` needs the test period to plan its lists")
         else:
             days = _test_days(test_start, test_end)
+        newest = self._newest_targets(data, target, horizon, freq, self._cut_rules(information_set, cut_rules), days)
+        self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
         plan = build_plan(
             self._ctx_fn,
             data,
@@ -763,6 +895,8 @@ class BaseModel(ABC):
             warn_unpublished,
             availability,
             training_window=self.training_window,
+            newest_target=self.newest_target,
+            reach=0 if newest is None else newest.reach,
         )
         if windows is not None and warn_unpublished and len(windows.periods) > 1:
             for name, (start, end) in windows.periods:
@@ -770,7 +904,17 @@ class BaseModel(ABC):
         return plan
 
     def _check_plan_is_for(
-        self, plan, data, horizon, freq, information_set, test_start, test_end, availability="raise", windows=None
+        self,
+        plan,
+        data,
+        horizon,
+        freq,
+        information_set,
+        test_start,
+        test_end,
+        availability="raise",
+        windows=None,
+        newest=None,
     ) -> None:
         """A plan answers for one function, frame and test period; on another run it would give wrong lists silently."""
         if plan.function is not self._ctx_fn:
@@ -795,6 +939,10 @@ class BaseModel(ABC):
             problems.append("availability level")
         if plan.uses_matching and plan.training_window != self.training_window:
             problems.append("training window")
+        if plan.newest_target != self.newest_target or (
+            plan.uses_matching and plan.reach != (0 if newest is None else newest.reach)
+        ):
+            problems.append("newest target")
         if problems:
             raise ValueError(f"{self.name}: this plan was built for another {', '.join(problems)}")
 
@@ -861,7 +1009,9 @@ class BaseModel(ABC):
     def _matching_days_of(self, plan: PredictorPlan, period: int, horizon: int, run_date: str, list_id: int) -> str:
         """The record's `matching_days` of a forecast: the worker's own cut and filter, on the rows the worker has."""
         day = datetime.date.fromisoformat(run_date).toordinal() - self._first_ordinal
-        rows = training_row_days(self._hour_days[period], day, self.training_window, horizon)
+        rows = training_row_days(
+            self._hour_days[period], day, self.training_window, horizon, self._newest_of(period, day)
+        )
         lists = plan.day_lists[(period, horizon)]
         return matching_digest(rows[matching_rows(rows, lists, self._grid_start(plan), list_id)], self._first_ordinal)
 
@@ -888,7 +1038,11 @@ class BaseModel(ABC):
             row_lists[on_grid] = lists[days[on_grid] - start]
             finite_y = np.isfinite(frame[f"{target}_d+{horizon}"].to_numpy(dtype=np.float64))
             # The rows of this period dated in the span of each issue day.
-            first_day, last_day = training_span(issue_days, self.training_window, horizon)
+            if self._newest is None:
+                first_day, last_day = training_span(issue_days, self.training_window, horizon)
+            else:
+                newest = self._newest_of(period, issue_days)
+                first_day, last_day = training_span(issue_days, self.training_window, horizon, newest)
             first_row = np.searchsorted(days, first_day, side="left")
             last_row = np.searchsorted(days, last_day, side="right")
             out = counts[(period, horizon)] = np.full(len(ids), -1, dtype=np.int64)
@@ -976,6 +1130,7 @@ class BaseModel(ABC):
 
     def _cleanup(self) -> None:
         self._data = None
+        self._newest = None
         self._hour_data.clear()
         self._hour_days.clear()
         gc.collect()
@@ -1049,7 +1204,7 @@ class BaseModel(ABC):
 
     def _training_sample(self, hour: int, day: int, hz: int, predictors: List[str]) -> np.ndarray:
         """The training rows of the task (hour, hz, day) in these columns, before dropping missing values."""
-        rows = training_rows(self._hour_days[hour], day, self.training_window, hz)
+        rows = training_rows(self._hour_days[hour], day, self.training_window, hz, self._newest_of(hour, day))
         return self._hour_data[hour].iloc[rows][predictors].to_numpy(dtype=np.float64)
 
     def _precompute_expanded_predictors(self, horizon: int) -> Dict[Tuple[int, int], List[str]]:

@@ -83,11 +83,15 @@ def _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
     _W_FIT_PREDICT = model_cls(predictors=[], **model_kwargs)._fit_predict
 
 
-def training_rows(days: np.ndarray, day: int, training_window: int, hz: int) -> slice:
+def training_rows(days: np.ndarray, day: int, training_window: int, hz: int, newest: int = -1) -> slice:
     """The rows the task (`hz`, `day`) may train on, in a period whose rows are on `days`, which are sorted: those whose date is in
-    `training_span`. Rows are chosen by date, since a date can hold two of them or none (see `epftoolbox2.models._calendar`), so a
-    doubled autumn row has both occurrences in or out, each with the same target."""
-    first, last = training_span(day, training_window, hz)
+    `training_span`, `newest` being the day of the newest target relative to `day`. Rows are chosen by date, since a date can hold
+    two of them or none (see `epftoolbox2.models._calendar`), so a doubled autumn row has both occurrences in or out, each with the
+    same target."""
+    # newest_target="d-1" takes today's path, call for call.
+    first, last = (
+        training_span(day, training_window, hz) if newest == -1 else training_span(day, training_window, hz, newest)
+    )
     return slice(int(np.searchsorted(days, first, side="left")), int(np.searchsorted(days, last, side="right")))
 
 
@@ -98,9 +102,11 @@ def issue_row(days: np.ndarray, day: int) -> Optional[int]:
     return row if row >= 0 and days[row] == day else None
 
 
-def training_row_days(days: np.ndarray, day: int, training_window: int, hz: int) -> np.ndarray:
+def training_row_days(days: np.ndarray, day: int, training_window: int, hz: int, newest: int = -1) -> np.ndarray:
     """The day id of each training row of the task (`hz`, `day`) in a period whose rows are on `days`, before any filter."""
-    return days[training_rows(days, day, training_window, hz)]
+    if newest == -1:
+        return days[training_rows(days, day, training_window, hz)]
+    return days[training_rows(days, day, training_window, hz, newest)]
 
 
 def matching_rows(row_days: np.ndarray, lists: np.ndarray, start: int, list_id: int) -> np.ndarray:
@@ -140,7 +146,14 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     scalable_masks = cfg["scalable_masks"] if window is None else cfg["scalable_masks"][window]
 
     days = arrays["days"]
-    train = training_rows(days, day, cfg["training_window"], hz)
+    # A model with newest_target="published" has the day of its newest target per issue day, read from the target's rule.
+    newest_targets = cfg.get("newest")
+    if newest_targets is None:
+        newest = -1
+        train = training_rows(days, day, cfg["training_window"], hz)
+    else:
+        newest = int(newest_targets[hour][position])
+        train = training_rows(days, day, cfg["training_window"], hz, newest)
     test = issue_row(days, day)
     if test is None:
         return SKIP_MISSING_TEST_ROW
@@ -225,6 +238,9 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
         "coefficients": coefs,
         "freq": cfg.get("freq", "1h"),
     }
+    if newest_targets is not None:
+        # The date of the newest target the span holds; a row is never dated `day` or later (`training_span`).
+        record["newest_target_day"] = (run_date + datetime.timedelta(days=min(newest, hz - 1))).isoformat()
     if list_id is not None:
         record["predictor_list"] = cfg["list_hashes"][list_id]
     if matching_days is not None:

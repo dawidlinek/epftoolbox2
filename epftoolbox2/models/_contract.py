@@ -47,13 +47,18 @@ def target_columns(target: str, horizon: int) -> List[str]:
     return [f"{target}_d+{h}" for h in range(1, horizon + 1)]
 
 
-def read_days(test_start, test_end, training_window, horizon) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
+def read_days(
+    test_start, test_end, training_window, horizon, reach: int = 0
+) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
     """The first and last local day to check for a run, or None when they can't be told: check the whole frame.
 
     For a test day D and horizon hz the worker reads the rows of days [D - training_window - hz, D], and a row on
     day D holds its target from day D + hz, so nothing outside [test_start - training_window - horizon,
     test_end + horizon] reaches a fit or an `actual`. The result is one day wider on each side, so an error in
     that reasoning ends in a refusal rather than in unchecked rows being read.
+
+    `reach` is how many days earlier a span may start (`NewestTargets.reach`: a model with `newest_target="published"` whose
+    newest known target is older than D-1).
     """
     if not (_is_int(training_window) and _is_int(horizon)):
         return None
@@ -63,18 +68,20 @@ def read_days(test_start, test_end, training_window, horizon) -> Optional[Tuple[
         if last < first:
             return None
         return (
-            first - pd.Timedelta(days=int(training_window) + int(horizon) + 1),
+            first - pd.Timedelta(days=int(training_window) + int(horizon) + int(reach) + 1),
             last + pd.Timedelta(days=int(horizon) + 1),
         )
     except (TypeError, ValueError, OverflowError):  # the run reports dates it can't read
         return None
 
 
-def read_ranges(periods: Iterable[Tuple[str, str]], training_window, horizon) -> Optional[List[DayRange]]:
+def read_ranges(
+    periods: Iterable[Tuple[str, str]], training_window, horizon, reach: int = 0
+) -> Optional[List[DayRange]]:
     """`read_days` of several periods of one run, merged where they touch; None if any of them can't be told."""
     ranges = []
     for start, end in sorted(periods):
-        days = read_days(start, end, training_window, horizon)
+        days = read_days(start, end, training_window, horizon, reach)
         if days is None:
             return None
         if ranges and days[0] <= ranges[-1][1] + pd.Timedelta(days=1):

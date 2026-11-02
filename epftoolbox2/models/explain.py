@@ -277,9 +277,11 @@ def explain_model(
         raise ValueError(f"{model.name}: explain() of a predictor function of `ctx` needs test=(start, end) to plan it")
 
     start, end = test if test is not None else (None, None)
-    # What `run` refuses it can't explain: the default freq on 15-minute data would read period 10 as 10:00, not 02:30.
-    model._check_frame(data, target, horizon, freq, start, end)
     days = InformationSet._issue_days(data.index, start, end)
+    newest = model._newest_targets(data, target, horizon, freq, info, [day.date() for day in days])
+    # What `run` refuses it can't explain: the default freq on 15-minute data would read period 10 as 10:00, not 02:30.
+    model._check_frame(data, target, horizon, freq, start, end, newest=newest)
+    model._newest = newest
     clock = (info or _NAMES)._issue_clock(days, data.index)
     out: Dict[str, pd.DataFrame] = {}
     if model._ctx_fn is not None:
@@ -306,9 +308,27 @@ def explain_model(
         subject = model.name
     out["predictors"] = predictor_table(names, data, info, horizon, hour, freq, clock, used)
     out["grouped"] = grouped_table(out["predictors"])
+    if newest is not None:
+        out["newest_target"] = newest_target_table(newest.k[hour][used], horizon)
     if echo:
         _print(out, subject, info, days, horizon, hour, freq, used, data.index, model._ctx_fn)
     return out
+
+
+def newest_target_table(newest: np.ndarray, horizon: int) -> pd.DataFrame:
+    """For a model with `newest_target="published"`: the newest target of the forecast shown and the newest row it trains on,
+    relative to the issue day D, and on how many issue days; `newest` has the day of that target per issue day. A row is never
+    dated D or later, so beyond D-1 + horizon a target known earlier doesn't train."""
+    days = Counter(min(int(k), horizon - 1) for k in newest)
+    rows = [
+        {"newest target": _day_label(k), "newest row": _day_label(k - horizon), "issue days": count}
+        for k, count in sorted(days.items(), reverse=True)
+    ]
+    return pd.DataFrame(rows, columns=["newest target", "newest row", "issue days"])
+
+
+def _day_label(offset: int) -> str:
+    return "D" if offset == 0 else f"D{offset:+d}"
 
 
 def _print(out, subject, info, days, horizon, hour, freq, used, index, function) -> None:
@@ -324,6 +344,9 @@ def _print(out, subject, info, days, horizon, hour, freq, used, index, function)
         f"issue days {days[0].date()} … {days[-1].date()}"
     )
     print(out["grouped"].to_string(index=False))
+    if "newest_target" in out:
+        print("newest_target='published': the newest target it trains on, by its rule")
+        print(out["newest_target"].to_string(index=False))
     note = _no_row_note(index, freq, hour, days[used])
     if note:
         print(note)

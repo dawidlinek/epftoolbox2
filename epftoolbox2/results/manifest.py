@@ -53,7 +53,9 @@ the counts of the windows it names, since a resume tries the skipped tasks again
 
 How a forecast's training rows are chosen is compared too (`training_cut`). Rows were once chosen by counting them, which left a
 mislabelled record on a spring switch day and a look-ahead on the days after an autumn switch, and a resume would keep those
-records in the file and read them. So a manifest without this field, written before rows were chosen by date, is refused.
+records in the file and read them. So a manifest without this field, written before rows were chosen by date, is refused. A model
+with `newest_target="published"` adds that, the target's rule (without its note) and the issue time and zone: the information set
+is not compared, but these decide which targets train, so changing one refuses a resume, and changing only the level doesn't.
 Results that may still hold such records, accepted over that refusal with `allow_manifest_mismatch=True` or resumed with no
 manifest at all, get `{"rows": "dates", "stored": "unverified"}`, which every later resume keeps and which compares equal to the
 plain one: `ModelPipeline.report()` warns about them every time. Records of a slot the clock doesn't have are left out of every
@@ -121,6 +123,12 @@ TRAINING_CUT_UNVERIFIED = {**TRAINING_CUT_BY_DATE, "stored": "unverified"}
 def _cut_rule(cut: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """How a run chooses rows, without what is known of the records stored: what a resume compares."""
     return None if cut is None else {key: value for key, value in cut.items() if key != "stored"}
+
+
+def _rows_by_date(cut: Optional[Dict[str, Any]]) -> bool:
+    """Whether a manifest's `training_cut` vouches for every record in its file: rows chosen by date, and nothing stored that
+    was accepted without it. A model with `newest_target="published"` adds what its newest target is read from."""
+    return cut is not None and cut.get("rows") == TRAINING_CUT_BY_DATE["rows"] and "stored" not in cut
 
 
 _OLD_RESULTS_NOTE = (
@@ -367,6 +375,7 @@ def build_manifest(
     binary_masks: Optional[Dict[str, str]] = None,
     read_columns: Sequence[str] = (),
     frame_hashes: Optional[FrameHashes] = None,
+    training_cut: Optional[Dict[str, Any]] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -391,6 +400,8 @@ def build_manifest(
 
     `read_columns` are what a predictor function read through `ctx` besides its lists: `column_hashes` covers them. `frame_hashes`
     is what a pipeline shares between the models of one run, so that it hashes each thing once.
+
+    `training_cut` is how the model chooses its training rows (`BaseModel._training_cut`), rows by date if not given.
     """
     now = datetime.now(timezone.utc).isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
@@ -424,7 +435,7 @@ def build_manifest(
         actuals=actuals,
         column_hashes={column: hashes.of_column(test_end, column) for column in {*used_columns, *read_columns}},
         frame_hash=hashes.of_frame(test_end),
-        training_cut=dict(TRAINING_CUT_BY_DATE),
+        training_cut=dict(TRAINING_CUT_BY_DATE if training_cut is None else training_cut),
     )
 
 
@@ -503,7 +514,7 @@ def rows_unverified(path: Union[str, Path]) -> bool:
     """Whether the results of the manifest at `path` may hold records written before training rows were chosen by date: no
     manifest, one older than `training_cut`, or one that says so (see the module docstring)."""
     path = Path(path)
-    return not path.exists() or json.loads(path.read_text()).get("training_cut") != TRAINING_CUT_BY_DATE
+    return not path.exists() or not _rows_by_date(json.loads(path.read_text()).get("training_cut"))
 
 
 def read_zone(path: Union[str, Path]) -> Optional[str]:
@@ -585,7 +596,7 @@ def check_and_write(
             has_existing_results and _accepted_other_data(existing, manifest, data_diffs, frame_hashes)
         ):
             manifest.data_unverified = True
-        if has_existing_results and existing.training_cut != TRAINING_CUT_BY_DATE:
+        if has_existing_results and not _rows_by_date(existing.training_cut):
             _mark_rows_unverified(
                 manifest, model_name, path, "its manifest was written before rows were chosen by date"
             )

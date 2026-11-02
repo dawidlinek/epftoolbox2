@@ -464,12 +464,13 @@ def results_to_frame(results) -> pd.DataFrame: ...  # list, (name, result) pairs
 ```python
 class OLSModel(BaseModel):
     def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
-                 name: str = "Model", scaler: ScalerSpec = "standard"): ...
+                 name: str = "Model", scaler: ScalerSpec = "standard",
+                 newest_target: str = "d-1"): ...
 
 class LassoCVModel(BaseModel):
     def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
                  cv: int = 5, max_iter: int = 10000, name: str = "Model",
-                 scaler: ScalerSpec = "standard"): ...
+                 scaler: ScalerSpec = "standard", newest_target: str = "d-1"): ...
 ```
 
 `ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance.
