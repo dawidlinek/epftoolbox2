@@ -81,7 +81,7 @@ import pandas as pd
 
 from .._date_utils import zone_name
 from ..logging import get_logger
-from .availability import merge_listings
+from .availability import LISTING_TIMES, merge_listings
 from .windows import TEST, RunWindows, mask_key
 
 logger = get_logger(__name__)
@@ -172,7 +172,8 @@ class Manifest:
     # A predictor function of `ctx`: {"path", "fingerprint"} and one entry per distinct list (`PredictorPlan.describe`).
     predictor_function: Optional[Dict[str, str]] = None
     predictor_lists: Optional[List[Dict[str, Any]]] = None
-    # {"level": "warn" or "raise", "listing": rows of `results.availability.listing_rows`}; None at level "none".
+    # {"level": "warn" or "raise", "times": "instants", "listing": rows of `results.availability.listing_rows`}; None at
+    # level "none". Without "times" the rows were listed on the wall clock (see `results.availability.LISTING_TIMES`).
     availability: Optional[Dict[str, Any]] = None
     # A run with validation: `RunWindows.to_dict()`, the masks of fixed lists by `mask_key`, and
     # {"through": day, "hash": ...}, the target up to the last day a stored `actual` reads.
@@ -725,10 +726,13 @@ def _keep_listing(existing: Manifest, manifest: Manifest) -> None:
     A run over a narrower test period adds its rows to the earlier ones. A run at level "none" looks at nothing, so it can't
     take anything back, and results that were flagged must not read as clean because of how they were last resumed. Rules that
     changed leave nothing to keep: what the old ones said may no longer be true, and this run's rows are what the current ones
-    say. Without an information set there are no rules left to say otherwise.
+    say. Without an information set there are no rules left to say otherwise. A listing made when the check compared
+    wall-clock times (no `"times"`) is kept no more than one made under other rules.
     """
     if not existing.availability or manifest.information_set not in (None, existing.information_set):
         return
+    if existing.availability.get("times") != LISTING_TIMES:
+        return  # listed on the wall clock: like rules that changed, it says nothing this run can vouch for
     earlier = existing.availability.get("windows")
     if (
         earlier is None

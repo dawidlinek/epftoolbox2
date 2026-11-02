@@ -19,7 +19,7 @@ from ..scalers.standard import StandardScaler
 from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore
 from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
-from ..results.availability import listing_rows, warn_about
+from ..results.availability import LISTING_TIMES, listing_rows, warn_about
 from ..results.matching import training_day_rows, warn_about_thin
 from ..results.manifest import (
     PAST_THE_FRAME,
@@ -470,7 +470,7 @@ class BaseModel(ABC):
         """What a manifest records about the issue-time check; level "none" adds nothing, as if it had not run."""
         if information_set is None or availability == "none":
             return None
-        recorded = {"level": availability, "listing": listing}
+        recorded = {"level": availability, "times": LISTING_TIMES, "listing": listing}
         if window_listings:
             recorded["windows"] = window_listings
         return recorded
