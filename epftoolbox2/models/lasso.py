@@ -16,3 +16,11 @@ class LassoCVModel(BaseModel):
         model = LassoCV(cv=self.cv, max_iter=self.max_iter, n_jobs=1)
         model.fit(train_x, train_y)
         return model.predict(test_x)[0], model.coef_.tolist()
+
+    def _fit_model(self, train_x, train_y):
+        model = LassoCV(cv=self.cv, max_iter=self.max_iter, n_jobs=1)
+        model.fit(train_x, train_y)
+        return model
+
+    def _predict_fitted(self, fitted, test_x):
+        return fitted.predict(test_x)[0], fitted.coef_.tolist()
