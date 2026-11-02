@@ -552,6 +552,20 @@ def test_a_report_of_the_fridays_of_a_run_of_every_day_reads_only_them(tmp_path,
     assert every.forecast_counts()["planned"].tolist() == [46 * 72 - 6] * 3
 
 
+@pytest.mark.parametrize("told", [WEEKDAYS, ["friday", "monday"], ["monday"]])
+def test_an_ensemble_plans_the_weekdays_its_members_refs_plan(tmp_path, spring_data, told):
+    """Told every day of a Friday run, the models plan every day and miss the other six; so does the ensemble, which once fell
+    back to the Fridays of its members' manifests (168 planned against the members' 1,102)."""
+    small_pipeline().run(spring_data, test=MARCH, horizon=3, issue_days=["friday"], save_dir=tmp_path)
+    with pytest.warns(UserWarning, match="missing forecasts"):
+        report = small_pipeline().report(tmp_path, test=MARCH, horizon=3, issue_days=told)
+    counts = report.forecast_counts().set_index("model")
+    planned = IssueCalendar("1h", "Europe/Warsaw", (1, 2, 3), resolve_issue_days(told)).count(*MARCH)
+    assert counts["planned"].to_dict() == {"fixed": planned, "function": planned, "average": planned}
+    assert set(counts["produced"]) == ({FRIDAYS * 72 - 1} if "friday" in told else {0})
+    assert {ref.issue_days for ref in report.refs.values()} == {resolve_issue_days(told)}
+
+
 def test_models_run_on_other_weekdays_are_not_reported_or_averaged_together(tmp_path, spring_data):
     one = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="a"))
     one.run(spring_data, test=MARCH, horizon=1, issue_days=["friday"], save_dir=tmp_path)
