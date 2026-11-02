@@ -9,7 +9,7 @@ and when it is known from the same clock.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -162,7 +162,7 @@ def _short(names: List[str]) -> str:
 
 
 def list_table(
-    plan: PredictorPlan, horizons: range, training_days: Optional[Dict[Tuple[int, int], np.ndarray]] = None
+    plan: PredictorPlan, horizons: Sequence[int], training_days: Optional[Dict[Tuple[int, int], np.ndarray]] = None
 ) -> pd.DataFrame:
     """One row per (horizon, list that horizon uses), and what each adds to or drops from that horizon's most used list.
 
@@ -263,11 +263,16 @@ def explain_model(
     target: str,
     freq: str,
     echo: bool,
+    horizons: Optional[Sequence[int]] = None,
 ) -> Dict[str, pd.DataFrame]:
-    """The tables of `ModelPipeline.explain`. `model` is the caller's own copy, since planning leaves state on it."""
+    """The tables of `ModelPipeline.explain`. `model` is the caller's own copy, since planning leaves state on it.
+
+    `horizon` is the forecast shown, and `horizons` the ones a predictor function is planned for, every one from 1 to `horizon` if
+    not given; `horizon` is their largest."""
     model._set_freq(freq)
     if not isinstance(horizon, (int, np.integer)) or horizon < 1:
         raise ValueError(f"horizon must be a whole number of days from 1, got {horizon!r}")
+    horizons = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
     periods = model._periods_per_day
     if not isinstance(hour, (int, np.integer)) or not 0 <= hour < periods:
         raise ValueError(f"hour is a period of the day: 0-{periods - 1} with freq={freq!r}, got {hour!r}")
@@ -288,11 +293,9 @@ def explain_model(
         # At "warn", so that a late `ctx.value()` is a thing to show rather than an error.
         level = "none" if info is None else "warn"
         plan = model._plan_predictors(
-            data, target, horizon, freq, info, start, end, warn_unpublished=False, availability=level
+            data, target, horizon, freq, info, start, end, warn_unpublished=False, availability=level, horizons=horizons
         )
-        out["lists"] = list_table(
-            plan, range(1, horizon + 1), _matching_counts(model, plan, data, target, horizon, freq)
-        )
+        out["lists"] = list_table(plan, horizons, _matching_counts(model, plan, data, target, horizon, freq))
         ids = plan.assignment[(hour, horizon)]
         chosen = int(
             pd.Series(ids).value_counts(sort=False).sort_index().idxmax()

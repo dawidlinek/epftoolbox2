@@ -37,7 +37,14 @@ from ..results.manifest import (
 from ..results.windows import TEST, RunWindows, mask_key
 from ..logging import get_logger
 from . import _contract
-from ._calendar import IssueCalendar, NewestTargets, check_newest_target, training_span
+from ._calendar import (
+    IssueCalendar,
+    NewestTargets,
+    check_newest_target,
+    every_horizon,
+    resolve_horizons,
+    training_span,
+)
 from .context import TRAIN_ON_MATCHING, PredictorPlan, build_plan, mask_digest, takes_ctx, warn_never_published_in
 from ._worker import (
     NOT_PLANNED,
@@ -150,7 +157,7 @@ class BaseModel(ABC):
         test_start: str = None,
         test_end: str = None,
         target: str = "price",
-        horizon: int = 7,
+        horizon: Optional[int] = None,
         freq: str = "1h",
         save_to: str = None,
         forecast_only: bool = False,
@@ -163,11 +170,17 @@ class BaseModel(ABC):
         windows: Optional[RunWindows] = None,
         frame_hashes: Optional[FrameHashes] = None,
         cut_rules: Optional["InformationSet"] = None,
+        horizons: Optional[Sequence[int]] = None,
     ) -> ModelResultRef:
         """Forecast every period and horizon the clock has on each day in [test_start, test_end] and on its target day.
 
         A forecast (period, h, D) trains on the rows of its period dated in `training_span` and forecasts from the last row dated
         D: see `epftoolbox2.models._calendar`.
+
+        `horizon=H` forecasts every horizon from 1 to H, 7 if neither it nor `horizons` is given. `horizons` forecasts the ones it
+        lists, such as `[1, 3, 7]` or `range(3, 10)`, and nothing else; giving both raises (`resolve_horizons`). Each forecast
+        (period, h, D) reads its own rows whatever else is listed, so its record is what a run with `horizon=max(horizons)`
+        gives it, and `range(1, H + 1)` is `horizon=H` in everything. Targets are built for 1 to the largest horizon.
 
         With `information_set`, `availability` says what happens to a predictor known after the issue time (see
         epftoolbox2.information_set): "raise", the default here, refuses it before any fit; "warn" goes on and lists it in
@@ -201,6 +214,7 @@ class BaseModel(ABC):
         """
         self._set_freq(freq)
         check_level(availability)
+        horizon, horizons = resolve_horizons(horizon, horizons, 7)
         rules = self._cut_rules(information_set, cut_rules)
 
         if windows is not None:
@@ -239,10 +253,21 @@ class BaseModel(ABC):
                 availability=availability,
                 windows=windows,
                 cut_rules=cut_rules,
+                horizons=horizons,
             )
         else:
             self._check_plan_is_for(
-                plan, data, horizon, freq, information_set, test_start, test_end, availability, windows, newest
+                plan,
+                data,
+                horizon,
+                freq,
+                information_set,
+                test_start,
+                test_end,
+                availability,
+                windows,
+                newest,
+                horizons,
             )
         expanded = self._check_inputs(
             data,
@@ -256,6 +281,7 @@ class BaseModel(ABC):
             availability=availability,
             windows=windows,
             cut_rules=cut_rules,
+            horizons=horizons,
         )
         listing = self._availability_listing
         window_listings = self._window_listings
@@ -279,7 +305,7 @@ class BaseModel(ABC):
             run_days = [(datetime.date.fromisoformat(day) - first_day).days for day in windows.issue_days()]
         n_days = len(run_days)
         test_days = {d: first_day + datetime.timedelta(days=d) for d in run_days}
-        calendar = IssueCalendar(freq, data.index.tz, range(1, horizon + 1))
+        calendar = IssueCalendar(freq, data.index.tz, horizons)
         absent_slots = {
             (period, (day.date() - first_day).days)
             for period, day in _contract.missing_test_rows(self._data.index, freq, test_days.values())
@@ -290,7 +316,7 @@ class BaseModel(ABC):
 
         window_days = None if windows is None else self._window_days(windows, first_day)
         if windows is not None:
-            masks = self._window_masks(plan, windows, horizon, first_day)
+            masks = self._window_masks(plan, windows, horizons, first_day)
         else:
             masks = None if plan is None else self._plan_scalable_masks(plan)
         stored_windows = None
@@ -313,6 +339,7 @@ class BaseModel(ABC):
                 expanded=expanded,
                 target=target,
                 horizon=horizon,
+                horizons=horizons,
                 freq=freq,
                 test_start=test_start,
                 test_end=test_end,
@@ -384,7 +411,7 @@ class BaseModel(ABC):
             if tasks:
                 self._run_tasks(
                     tasks,
-                    horizon,
+                    horizons,
                     test_start,
                     n_days,
                     store,
@@ -424,6 +451,7 @@ class BaseModel(ABC):
             windows=windows,
             matching_lists=matching_lists,
             zone=data.index.tz,
+            horizons=None if every_horizon(horizon, horizons) else horizons,
         )
         if store:
             warn_off_the_clock({self.name: ref}, stacklevel=2)
@@ -571,13 +599,15 @@ class BaseModel(ABC):
                 position += 1
         return days
 
-    def _window_masks(self, plan, windows: RunWindows, horizon: int, first_day: datetime.date) -> Dict[str, Dict]:
+    def _window_masks(
+        self, plan, windows: RunWindows, horizons: Sequence[int], first_day: datetime.date
+    ) -> Dict[str, Dict]:
         """Window -> its binary-column masks, as a plain run over that window alone computes them, from its first day."""
         masks = {}
         for name, (start, end) in windows.periods:
             offset = self._offset + (datetime.date.fromisoformat(start) - first_day).days
             if plan is None:
-                masks[name] = self._precompute_scalable_masks(horizon, offset)
+                masks[name] = self._precompute_scalable_masks(horizons, offset)
             else:
                 days = (plan.position_of(start), plan.position_of(end) + 1)
                 masks[name] = self._plan_scalable_masks(plan, days, offset)
@@ -601,7 +631,7 @@ class BaseModel(ABC):
     def _run_tasks(
         self,
         tasks,
-        horizon,
+        horizons,
         test_start,
         n_days,
         store,
@@ -613,10 +643,11 @@ class BaseModel(ABC):
         window_days=None,
         window_skipped=None,
     ) -> None:
-        hour_arrays = self._build_hour_arrays(horizon)
+        # Targets for every horizon from 1 to the largest, whatever is planned: the worker reads the column of `hz - 1`.
+        hour_arrays = self._build_hour_arrays(max(horizons))
         if plan is None:
-            expanded_preds = self._precompute_expanded_predictors(horizon)
-            scalable_masks = self._precompute_scalable_masks(horizon) if masks is None else masks
+            expanded_preds = self._precompute_expanded_predictors(horizons)
+            scalable_masks = self._precompute_scalable_masks(horizons) if masks is None else masks
         else:
             expanded_preds = {list_id: list(names) for list_id, names in enumerate(plan.lists)}
             scalable_masks = masks
@@ -726,8 +757,12 @@ class BaseModel(ABC):
         availability: str = "raise",
         windows: Optional[RunWindows] = None,
         cut_rules: Optional["InformationSet"] = None,
+        horizons: Optional[Sequence[int]] = None,
     ) -> Dict[Tuple[int, int], List[str]]:
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
+
+        `horizon` is the largest horizon and `horizons` the ones planned, every one from 1 to `horizon` if not given (see
+        `run`). Targets, and the names refused as inputs, go up to `horizon` whatever is planned.
 
         Raises ValueError on a frequency mismatch, duplicate timestamps, reserved or colliding column names,
         a UTC index with existing day-lag (`_d-<k>`) columns, and missing or non-numeric predictors. `ModelPipeline` calls
@@ -747,6 +782,7 @@ class BaseModel(ABC):
         rule for the target, at every level. Its training target isn't checked: what it trains on is known by construction.
         """
         self._set_freq(freq)
+        horizons = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
         self._availability_listing = []
         self._window_listings = {}
         newest = self._newest_targets(
@@ -771,6 +807,7 @@ class BaseModel(ABC):
                     availability=availability,
                     windows=windows,
                     cut_rules=cut_rules,
+                    horizons=horizons,
                 )
             expanded = plan.names_by_pair()
             self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
@@ -783,7 +820,7 @@ class BaseModel(ABC):
             plan.release()
             return expanded
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
-        expanded = self._precompute_expanded_predictors(horizon)
+        expanded = self._precompute_expanded_predictors(horizons)
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
         days = None if windows is None else windows.issue_days()
         if information_set is not None and availability == "raise":
@@ -865,12 +902,14 @@ class BaseModel(ABC):
         availability: str = "raise",
         windows: Optional[RunWindows] = None,
         cut_rules: Optional["InformationSet"] = None,
+        horizons: Optional[Sequence[int]] = None,
     ) -> Optional[PredictorPlan]:
         """The plan of a predictor function of `ctx` for this data and test period, or None for a model with fixed lists.
 
         `issue_days` plans these days instead of [test_start, test_end]: `verify` samples a few to learn the inputs.
         `windows` plans the days of a run with validation, once each and none between them; the function doesn't see them.
         `availability` is the level `ctx` answers at (see `epftoolbox2.models.context`). `cut_rules` is as in `run`.
+        `horizons` are the horizons planned, every one from 1 to `horizon` (the largest) if not given.
         """
         if self._ctx_fn is None:
             return None
@@ -897,6 +936,7 @@ class BaseModel(ABC):
             training_window=self.training_window,
             newest_target=self.newest_target,
             reach=0 if newest is None else newest.reach,
+            horizons=horizons,
         )
         if windows is not None and warn_unpublished and len(windows.periods) > 1:
             for name, (start, end) in windows.periods:
@@ -915,6 +955,7 @@ class BaseModel(ABC):
         availability="raise",
         windows=None,
         newest=None,
+        horizons=None,
     ) -> None:
         """A plan answers for one function, frame and test period; on another run it would give wrong lists silently."""
         if plan.function is not self._ctx_fn:
@@ -931,6 +972,8 @@ class BaseModel(ABC):
             problems.append("test period")
         if plan.horizon != horizon:
             problems.append("horizon")
+        elif plan.horizons != (tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)):
+            problems.append("horizons")
         if plan.freq != freq:
             problems.append("freq")
         if information_set is not None and plan.information_set is not information_set:
@@ -1066,7 +1109,7 @@ class BaseModel(ABC):
                 out[on] = total[last_row[on]] - total[first_row[on]]
             if absent:
                 out[[(period, day.toordinal()) in absent for day in plan.issue_days]] = -1
-        calendar = IssueCalendar(plan.freq, plan.data.index.tz, range(1, plan.horizon + 1))
+        calendar = IssueCalendar(plan.freq, plan.data.index.tz, plan.horizons)
         for period, horizon, position in calendar.unplanned(plan.issue_days):
             if (period, horizon) in counts:
                 counts[(period, horizon)][position] = -1
@@ -1191,12 +1234,13 @@ class BaseModel(ABC):
         return hour_arrays
 
     def _precompute_scalable_masks(
-        self, horizon: int, offset: Optional[int] = None
+        self, horizons: Sequence[int], offset: Optional[int] = None
     ) -> Dict[Tuple[int, int], np.ndarray]:
+        """(period, horizon) -> which of a fixed list's columns are scaled, for each horizon planned."""
         offset = self._offset if offset is None else offset
         masks = {}
         for hour in range(self._periods_per_day):
-            for hz in range(1, horizon + 1):
+            for hz in horizons:
                 preds = self._expand_predictors(hz, hour=hour)
                 sample_x = self._training_sample(hour, offset, hz, preds)
                 masks[(hour, hz)] = StandardScaler.get_scalable_mask(sample_x)
@@ -1207,11 +1251,12 @@ class BaseModel(ABC):
         rows = training_rows(self._hour_days[hour], day, self.training_window, hz, self._newest_of(hour, day))
         return self._hour_data[hour].iloc[rows][predictors].to_numpy(dtype=np.float64)
 
-    def _precompute_expanded_predictors(self, horizon: int) -> Dict[Tuple[int, int], List[str]]:
+    def _precompute_expanded_predictors(self, horizons: Sequence[int]) -> Dict[Tuple[int, int], List[str]]:
+        """(period, horizon) -> a fixed list's names, `{horizon}` and callables expanded, for each horizon planned."""
         return {
             (hour, hz): self._expand_predictors(hz, hour=hour)
             for hour in range(self._periods_per_day)
-            for hz in range(1, horizon + 1)
+            for hz in horizons
         }
 
     def _expand_predictors(self, horizon: int, hour: int = 0) -> List[str]:

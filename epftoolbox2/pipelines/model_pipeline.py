@@ -9,7 +9,7 @@ import yaml
 
 from .._date_utils import resolve_date
 from ..information_set import InformationSet, InformationSetError, check_level
-from ..models._calendar import IssueCalendar
+from ..models._calendar import IssueCalendar, every_horizon, horizon_arguments, resolve_horizons
 from ..models.base import BaseModel
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model
@@ -157,7 +157,7 @@ class ModelPipeline:
         test_start: str = None,
         test_end: str = None,
         target: str = "price",
-        horizon: int = 7,
+        horizon: Optional[int] = None,
         freq: str = "1h",
         save_dir: Optional[str] = None,
         forecast_only: bool = False,
@@ -165,9 +165,14 @@ class ModelPipeline:
         require_manifest: bool = False,
         validation: Union[Tuple[Any, Any], str, None] = None,
         test: Optional[Tuple[Any, Any]] = None,
+        horizons: Optional[Sequence[int]] = None,
     ) -> EvaluationReport:
         """Run every model, compute the ensembles from what they stored, then (unless `forecast_only`) run the evaluators
         and exporters.
+
+        `horizon=H` forecasts every horizon from 1 to H (7 if neither is given), `horizons` only the ones it lists, such as
+        `[1, 3, 7]` or `range(3, 10)`; passing both raises. Each forecast is what a run with `horizon=max(horizons)` gives it, and
+        the results record the list (see the docs page Time and Calendars).
 
         With `save_dir`, each model's results are resumable JSONL with a manifest recording the
         configuration that produced them (epftoolbox2.results.manifest). Resuming into results made with
@@ -193,6 +198,7 @@ class ModelPipeline:
         """
         if not self.models:
             raise ValueError("At least one model is required")
+        horizon, horizons = resolve_horizons(horizon, horizons, 7)
         self._check_model_names()
         self._check_availability()
         if not forecast_only:
@@ -214,7 +220,16 @@ class ModelPipeline:
         listings: Dict[str, List[Dict]] = {}
         for model in self.models:
             plan = model._plan_predictors(
-                data, target, horizon, freq, info, check_start, check_end, availability=level, windows=windows
+                data,
+                target,
+                horizon,
+                freq,
+                info,
+                check_start,
+                check_end,
+                availability=level,
+                windows=windows,
+                horizons=horizons,
             )
             model._check_inputs(
                 data,
@@ -227,6 +242,7 @@ class ModelPipeline:
                 plan=plan,
                 availability=level,
                 windows=windows,
+                horizons=horizons,
             )
             listings[model.name] = model._availability_listing
             if plan is not None:
@@ -244,7 +260,6 @@ class ModelPipeline:
                 test_start=test_start,
                 test_end=test_end,
                 target=target,
-                horizon=horizon,
                 freq=freq,
                 save_to=save_to,
                 forecast_only=forecast_only,
@@ -255,6 +270,7 @@ class ModelPipeline:
                 warn_listing=False,
                 windows=windows,
                 frame_hashes=frame_hashes,
+                **horizon_arguments(horizon, horizons),
                 **planned,
             )
             refs[model.name] = ref
@@ -321,19 +337,21 @@ class ModelPipeline:
         save_dir: Union[str, Path],
         test_start: Optional[str] = None,
         test_end: Optional[str] = None,
-        horizon: int = 7,
+        horizon: Optional[int] = None,
         freq: str = "1h",
         forecast_only: bool = False,
         data: Optional[pd.DataFrame] = None,
         allow_missing: bool = False,
         validation: Union[Tuple[Any, Any], str, None] = None,
         test: Optional[Tuple[Any, Any]] = None,
+        horizons: Optional[Sequence[int]] = None,
     ) -> EvaluationReport:
         """Build one report from the per-model JSONL files in `save_dir`, then run evaluators and exporters.
 
         This is the merge step after runs that each wrote some models' results (e.g. a SLURM array with
-        `Workflow(model_index=...)`). The test period, horizon and freq must be those of the runs; with the time zone
-        each manifest records they give each model's planned forecast count (`IssueCalendar`). Raises FileNotFoundError if a
+        `Workflow(model_index=...)`). The test period, horizon (or `horizons`, as in `run`) and freq must be those of the runs;
+        with the time zone each manifest records they give each model's planned forecast count (`IssueCalendar`). Only records
+        of the horizons named are read. Raises FileNotFoundError if a
         model has no results file, unless `allow_missing` is set. `data` is only needed by exporters that join source columns.
 
         Ensembles are computed here from the stored results of their members, every time, so they can't go stale, and written
@@ -361,6 +379,7 @@ class ModelPipeline:
         """
         if not self.models:
             raise ValueError("At least one model is required")
+        horizon, horizons = resolve_horizons(horizon, horizons, 7)
         self._check_model_names()
         if not forecast_only:
             self._check_benchmarks()
@@ -399,7 +418,7 @@ class ModelPipeline:
                 missing.append(f"{model.name} ({path})")
                 continue
             zone = read_zone(manifest_path(path))
-            calendars[model.name] = IssueCalendar(freq, zone, range(1, horizon + 1))
+            calendars[model.name] = IssueCalendar(freq, zone, horizons)
             ref = ModelResultRef(
                 name=model.name,
                 path=path,
@@ -413,6 +432,7 @@ class ModelPipeline:
                 windows=windows,
                 matching_lists=read_matching_lists(manifest_path(path)),
                 zone=zone,
+                horizons=None if every_horizon(horizon, horizons) else horizons,
             )
             # Through the ref: the file can hold more than this period, and a line outside it is no forecast of it.
             ref.produced = sum(1 for _ in ref.iter_records(cols=["hour"]))
@@ -638,13 +658,14 @@ class ModelPipeline:
         test_start: str,
         test_end: str,
         target: str = "price",
-        horizon: int = 1,
+        horizon: Optional[int] = None,
         freq: str = "1h",
         days: int = 5,
         seed: int = 0,
         models: Optional[Sequence[str]] = None,
         positive_control: bool = True,
         rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
+        horizons: Optional[Sequence[int]] = None,
     ) -> VerifyReport:
         """Check on a sample of issue days that no forecast depends on anything unknown when it is issued.
 
@@ -686,18 +707,21 @@ class ModelPipeline:
             test_start: First issue day to sample from.
             test_end: Last issue day to sample from.
             target: Target column.
-            horizon: Max horizon. Leave no horizon you run out: a leak in another one can't be seen (`run` defaults to 7).
+            horizon: Max horizon: every horizon from 1 to it, 1 if neither it nor `horizons` is given. Leave no horizon you
+                run out: a leak in another one can't be seen (`run` defaults to 7).
             freq: "1h" or "15min"; must match the data.
             days: Issue days per model (all of the period if it has fewer).
             seed: Picks the issue days and the noise.
             models: Names of the models to verify. None verifies them all.
             positive_control: False skips the control, so `ok` only says that no forecast moved.
             rebuild: Builds the model's input from `data` (see above).
+            horizons: The horizons to verify, as `run(horizons=...)` lists them, in place of `horizon`; passing both raises.
 
         Raises:
             InformationSetError: The pipeline has no information set, or a checked column has no rule and the
                 information set's `unknown` is "raise".
         """
+        horizon, horizons = resolve_horizons(horizon, horizons, 1)
         if self.information_set is None:
             raise InformationSetError(
                 "verify() needs to know when forecasts are issued: pass issue_time or information_set to ModelPipeline"
@@ -715,13 +739,13 @@ class ModelPipeline:
                     run_days,
                     self.information_set,
                     target=target,
-                    horizon=horizon,
                     freq=freq,
                     seed=seed,
                     control=positive_control,
                     rebuild=rebuild,
                     test_period=(test_start, test_end),
                     availability=self.availability,
+                    **horizon_arguments(horizon, horizons),
                 )
             )
         return report
@@ -731,11 +755,12 @@ class ModelPipeline:
         data: pd.DataFrame,
         model: str,
         test: Optional[Tuple[Any, Any]] = None,
-        horizon: int = 1,
+        horizon: Optional[int] = None,
         hour: int = 12,
         target: str = "price",
         freq: str = "1h",
         echo: bool = True,
+        horizons: Optional[Sequence[int]] = None,
     ) -> Dict[str, pd.DataFrame]:
         """Show what a model's predictors mean for one forecast: an optional view, with no effect on a later run.
 
@@ -745,10 +770,10 @@ class ModelPipeline:
         latest), and `status` (`ok`, `late`, `late on 3 of 10 days`, `no rule`, `no issue time`, `not in data`). `grouped`
         is the same with runs of slots folded into one row (`price_h00 … price_h23_d-1 (24)`, `T-2 00:00 … 23:00`).
 
-        For a predictor function of `ctx`, `test` is required and `lists` has one row per horizon up to `horizon` and list
-        that horizon uses: how many forecasts and issue days use it, its first and last issue day, its periods, and what it
-        `adds` to and `drops` from the most used list of that horizon. `predictors` then shows the list used most at
-        (`horizon`, `hour`), judged on the days it is used. A late `ctx.value()` doesn't stop the view; see
+        For a predictor function of `ctx`, `test` is required and `lists` has one row per horizon up to `horizon` (or per
+        horizon `horizons` lists) and list that horizon uses: how many forecasts and issue days use it, its first and last
+        issue day, its periods, and what it `adds` to and `drops` from the most used list of that horizon. `predictors` then
+        shows the list used most at (`horizon`, `hour`), judged on the days it is used. A late `ctx.value()` doesn't stop the view; see
         `report.availability()` for what a function read.
 
         With `train_on="matching"` lists `lists` also has `smallest days`, `median days` and `largest days`: how many days the
@@ -758,16 +783,21 @@ class ModelPipeline:
             data: The frame the models run on.
             model: The model's name.
             test: (first, last) issue day. None takes every day of `data`, for fixed lists only.
-            horizon: Days ahead of the issue day of the forecast shown.
+            horizon: Days ahead of the issue day of the forecast shown, 1 if neither it nor `horizons` is given.
             hour: Its period of the target day: 0-23, or 0-95 for 15-minute data.
             target: Target column.
             freq: "1h" or "15min"; must match the data.
             echo: Print the tables.
+            horizons: The horizons a run lists (`run(horizons=...)`), in place of `horizon`: the forecast shown is at the
+                largest, and `lists` has these alone. Passing both raises.
         """
+        horizon, horizons = resolve_horizons(horizon, horizons, 1)
         chosen = copy.deepcopy(self._select_models([model])[0])  # planning leaves state on a model; this is only a look
         if test is not None:
             test = (resolve_date(test[0]), resolve_date(test[1]))
-        return explain_model(chosen, data, self.information_set, test, horizon, hour, target, freq, echo)
+        return explain_model(
+            chosen, data, self.information_set, test, horizon, hour, target, freq, echo, horizons=horizons
+        )
 
     def _select_models(self, names: Optional[Sequence[str]]) -> List[BaseModel]:
         if names is None:
