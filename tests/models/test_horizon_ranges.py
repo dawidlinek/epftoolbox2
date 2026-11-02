@@ -164,10 +164,12 @@ def test_both_raise_at_every_entry_point():
 def test_a_target_below_the_largest_horizon_is_refused_as_an_input(lists):
     """Targets are built for every horizon up to the largest, so `price_d+2` is the future price at horizons=[3] too."""
     data = market("autumn", horizon=3)
-    data["price_d+2"] = data["price"].shift(-48)
     day = day_of(SWITCH_DAYS["autumn"])
-    with pytest.raises(ValueError, match=r"price_d\+2"):
+    with pytest.raises(ValueError, match=r"\['price_d\+2'\] name the model's own targets"):
         OLSModel(lists, training_window=WINDOW).run(data, test_start=day, test_end=day, horizons=[3])
+    # Above the largest it is no target, and only missing from the frame.
+    with pytest.raises(ValueError, match=r"not in the data: \['price_d\+2'\]"):
+        OLSModel(lists, training_window=WINDOW).run(data, test_start=day, test_end=day, horizons=[1])
 
 
 def test_a_plan_for_other_horizons_is_refused():
@@ -342,6 +344,7 @@ def test_a_list_of_horizons_runs_resumes_and_reports(tmp_path, spring_data):
     assert planned == 12 * 3 * 24 - 5  # issued on S at three horizons, aimed at S from S-1 and S-3
     assert counts["planned"].tolist() == [planned] * 3
     assert counts["missing"].tolist() == [3, 3, 3]
+    assert counts["missing_test_predictors"].tolist() == [3, 3, 0]
 
     assert sorted(report.by_horizon()["horizon"].unique().tolist()) == THREE
     three = report.tests(benchmark="fixed", horizon=3, reps=50)
@@ -359,6 +362,9 @@ def test_a_list_of_horizons_runs_resumes_and_reports(tmp_path, spring_data):
     counts = only_three.forecast_counts().set_index("model")
     assert counts["planned"].tolist() == [planned_by_hand(*SPRING_TEST, [3])] * 3 == [12 * 24 - 2] * 3
     assert counts["produced"].tolist() == [12 * 24 - 3] * 3
+    # The manifest's skip reasons are of all three horizons and can't be split: a report of one has `missing` alone.
+    assert "missing_test_predictors" not in counts.columns
+    assert counts["missing"].tolist() == [1, 1, 1]
 
     # Told every horizon to 7, the models plan seven and lack four; the ensemble plans what its members ran.
     with pytest.warns(UserWarning, match="missing forecasts"):
