@@ -1059,13 +1059,18 @@ class BaseModel(ABC):
         plan's issue days and `offset` the day id of the first calendar day of the window they are in (the run's first day if not
         given), when masks are kept per window: what happens in another window then can't move them.
 
-        A list's mask is read from the window of its first test day, so nothing later than a forecast's own issue day
-        decides how it is scaled. A list in use on every test day of a (period, horizon) is a fixed list there and gets
-        exactly what a fixed list gets, read on the window's first calendar day whatever its weekday, which is what makes a
-        function returning that list identical to it. Any other list may hold a column that only starts with it, and a column
-        with no value can't tell whether it is binary (`get_scalable_mask` would leave it unscaled for good): it is read from the
-        first of the list's test days that has a value for it. Before that day the list's forecasts have no training row, since
-        none has the column. Test days are the plan's issue days, by date: with `issue_days` they aren't consecutive.
+        A list's mask is read on the window's first calendar day if the list is used on the window's first issue day, whatever
+        that day's weekday, as a fixed list's is, else on the first issue day that uses it. Either way it is read on that day or
+        before it, from rows no later than the forecast's own, and which day it is depends on nothing after it: not on later issue
+        days, their answers or the end of the test period. So a function returning one list on every issue day, or on Fridays
+        alone in a run of Fridays, is identical to that fixed list. Test days are the plan's issue days, by date: with
+        `issue_days` they aren't consecutive.
+
+        A column with no value on the day the mask is read can't tell whether it is binary (`get_scalable_mask` would leave it
+        unscaled for good). For a list not used on every issue day it is read on the first of the list's issue days, from the
+        first one used on, that has a value for it: before that day the list's forecasts have no training row, since none has
+        the column. A list used on every issue day keeps a fixed list's mask, such a column unscaled; whether a list is used on
+        every issue day depends on the last of them, a known issue (`tests/test_known_issues.py`).
         """
         offset = self._offset if offset is None else offset
         day_ids = np.array([day.toordinal() - self._first_ordinal for day in plan.issue_days], dtype=np.int64)
@@ -1076,21 +1081,21 @@ class BaseModel(ABC):
             for list_id in np.unique(ids).tolist():
                 predictors = list(plan.lists[list_id])
                 test_days = np.flatnonzero(ids == list_id)
-                every_day = len(test_days) == len(ids)
-                first = offset if every_day else int(ids_days[test_days[0]])
+                first = offset if test_days[0] == 0 else int(ids_days[test_days[0]])
                 sample = self._training_sample(hour, first, hz, predictors)
                 mask = StandardScaler.get_scalable_mask(sample)
-                if not every_day:
-                    self._read_columns_without_values(
-                        mask, np.isnan(sample).all(axis=0), hour, hz, predictors, ids_days[test_days]
-                    )
+                if len(test_days) < len(ids):
+                    # From the list's first issue day on, that day too when the mask was read before it.
+                    list_days = ids_days[test_days]
+                    later = list_days[1:] if list_days[0] == first else list_days
+                    self._read_columns_without_values(mask, np.isnan(sample).all(axis=0), hour, hz, predictors, later)
                 masks[(list_id, hour, hz)] = mask
         return masks
 
     def _read_columns_without_values(self, mask, without_values, hour, hz, predictors, list_days) -> None:
-        """Read the columns of a list's mask that have no value on its first test day from the next of `list_days` (the day
-        ids of its test days) that has one."""
-        for day in list_days[1:]:
+        """Read the columns of a list's mask that had no value where it was read from the first of `list_days` (day ids, in
+        order) that has one."""
+        for day in list_days:
             if not without_values.any():
                 return
             sample = self._training_sample(hour, int(day), hz, predictors)

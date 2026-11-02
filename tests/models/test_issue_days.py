@@ -279,19 +279,23 @@ def test_a_friday_run_is_the_fridays_of_a_run_of_every_day(switch, freq, lists, 
 
 
 # ---------------------------------------------------------------------------
-# Masks: read on the window's first calendar day, whatever its weekday
+# Masks: read on the window's first calendar day when the first issue day uses the list
 # ---------------------------------------------------------------------------
 
 SPRING_WEDNESDAY = (
     "2023-03-22"  # the first day of the test below; its first Friday is 2023-03-24, its second 2023-03-31
 )
+# The drivers alone: with the two weekday dummies, which a model leaves raw and which sum to 1, OLS spans a constant and gives a
+# raw and a centred `regime` the same forecasts, so no mask could be seen.
+DRIVERS = ["load_d+{horizon}", "wind_d+{horizon}"]
+MASKED = DRIVERS + ["regime"]
 
 
 def with_regime(data, first_continuous=SPRING_WEDNESDAY):
     """`regime`: the weekend flag, 0 or 1, before `first_continuous` and a continuous value from then on.
 
     A mask is read from training rows dated up to D - 1 - h, so at h=1 the column is binary on the Wednesday and continuous on
-    the Friday after it: it is scaled or not by which day the mask is read on, and OLS without an intercept moves with that.
+    the Friday after it: it is left raw or standardised by which day the mask is read on, and the forecasts move with that.
     """
     dates = pd.DatetimeIndex(data.index.tz_localize(None)).normalize()
     later = np.asarray(dates >= pd.Timestamp(first_continuous))
@@ -302,12 +306,12 @@ def with_regime(data, first_continuous=SPRING_WEDNESDAY):
 
 def on_fridays(ctx):
     """The fixed list on Fridays, something else on other days: in a Friday run it is the list of every issue day."""
-    return PREDICTORS + ["regime"] if ctx.issue_day.weekday() == FRIDAY else PREDICTORS
+    return MASKED if ctx.issue_day.weekday() == FRIDAY else DRIVERS
 
 
 def from_the_second_friday(ctx):
     """A list that starts on 2023-03-31, the second issue day of a Friday run and the tenth calendar day of the test."""
-    return PREDICTORS + ["regime"] if ctx.issue_day >= datetime.date(2023, 3, 31) else PREDICTORS
+    return MASKED if ctx.issue_day >= datetime.date(2023, 3, 31) else DRIVERS
 
 
 TESTS = {
@@ -321,45 +325,154 @@ TESTS = {
 @pytest.mark.parametrize("windows", ["plain", "validation"])
 def test_a_mask_is_read_on_the_first_calendar_day_of_its_window(windows):
     data = with_regime(market("spring"))
-    fixed = PREDICTORS + ["regime"]
 
     def run(lists, **kwargs):
         return by_key(
             OLSModel(lists, training_window=WINDOW).run(data, horizon=3, **{**TESTS[windows], **kwargs})._results
         )
 
-    every_day = run(fixed)
-    on_friday = run(fixed, issue_days=["friday"])
+    every_day = run(MASKED)
+    on_friday = run(MASKED, issue_days=["friday"])
     assert on_friday == fridays(every_day)
 
     # A Friday-only function is the fixed list of a Friday run, its mask included.
     assert without_list(run(on_fridays, issue_days=["friday"])) == without_list(on_friday)
 
-    # A list from the second Friday on is not on every issue day: its mask is read on that Friday, as in a run of every day.
+    # A list from the second Friday on is not used on the first issue day: its mask is read on that Friday, as in a run of every
+    # day.
     assert run(from_the_second_friday, issue_days=["friday"]) == fridays(run(from_the_second_friday))
 
     # What makes these tests see a mask: read on the first Friday, the same forecasts move at horizon 1.
-    first_friday = run(fixed, issue_days=["friday"], **({"test_start": "2023-03-24"} if windows == "plain" else {}))
     if windows == "plain":
+        first_friday = run(MASKED, issue_days=["friday"], test_start="2023-03-24")
         moved = {
             key[2]
             for key, record in first_friday.items()
-            if json.loads(record)["prediction"] != json.loads(on_friday[key])["prediction"]
+            if abs(json.loads(record)["prediction"] - json.loads(on_friday[key])["prediction"]) > 1e-6
         }
         assert moved == {1}
 
 
-def test_a_friday_only_list_of_a_run_of_every_day_reads_its_mask_on_its_first_friday():
-    """Decision 9's other side: in a run of every day the Friday list starts on a Friday, in a Friday run on the window's first
-    day, like the fixed list. The two differ only where a column turns binary or not between those days, as `regime` does."""
+def until_april(ctx):
+    """The list on the Fridays before 7 April."""
+    return MASKED if ctx.issue_day.weekday() == FRIDAY and ctx.issue_day < datetime.date(2023, 4, 7) else DRIVERS
+
+
+def while_aux(ctx):
+    """The list while `aux` is out: whether it is, on 7 April, says nothing about 24 March."""
+    return MASKED if ctx.published("aux") else DRIVERS
+
+
+AUX_RULES = {**RULES, "regime": Availability.static(), "aux": Availability.static()}
+
+
+def test_a_later_end_of_the_test_moves_no_earlier_forecast():
+    """A mask read on the first issue day that uses the list, when the list missed a later Friday, made the forecasts of 24
+    March depend on whether the test went on to 7 April (24 of 24 moved, by up to 0.41 with LassoCV)."""
     data = with_regime(market("spring"))
-    test = {"test_start": SPRING_WEDNESDAY, "test_end": "2023-04-07", "horizon": 1}
-    every_day = fridays(by_key(OLSModel(on_fridays, training_window=WINDOW).run(data, **test)._results))
-    on_friday = by_key(OLSModel(on_fridays, training_window=WINDOW).run(data, issue_days=["friday"], **test)._results)
-    assert set(every_day) == set(on_friday)
-    assert any(
-        json.loads(every_day[key])["prediction"] != json.loads(on_friday[key])["prediction"] for key in on_friday
-    )
+
+    def run(end):
+        model = OLSModel(until_april, training_window=WINDOW)
+        return by_key(model.run(data, SPRING_WEDNESDAY, end, horizon=3, issue_days=["friday"])._results)
+
+    shorter, longer = run("2023-03-31"), run("2023-04-07")
+    assert {key[0] for key in shorter} == {"2023-03-24", "2023-03-31"}
+    assert {key: longer[key] for key in shorter} == shorter
+
+
+def test_a_later_friday_s_data_moves_no_earlier_forecast():
+    """`aux` missing on 7 April changes the list of that Friday alone, and no forecast of an earlier one."""
+    data = with_regime(market("spring")).assign(aux=1.0)
+    gone = data.copy()
+    gone.loc[np.asarray(pd.DatetimeIndex(data.index.tz_localize(None)).normalize() == "2023-04-07"), "aux"] = np.nan
+    info = InformationSet(rules=AUX_RULES)
+
+    def run(frame):
+        model = OLSModel(while_aux, training_window=WINDOW)
+        test = {"test_start": SPRING_WEDNESDAY, "test_end": "2023-04-07", "horizon": 3, "issue_days": ["friday"]}
+        return by_key(model.run(frame, information_set=info, **test)._results)
+
+    every_friday, not_the_last = run(data), run(gone)
+    earlier = {key: record for key, record in every_friday.items() if key[0] < "2023-04-07"}
+    assert {key: not_the_last[key] for key in earlier} == earlier
+    assert {json.loads(r)["predictor_list"] for key, r in not_the_last.items() if key[0] == "2023-04-07"} != {
+        json.loads(r)["predictor_list"] for key, r in earlier.items()
+    }
+
+
+def test_data_after_a_friday_moves_none_of_its_forecasts_through_a_column_with_no_value():
+    """A list used on the first Friday reads its mask on Wednesday 22 March, where `late` has no value yet (its rows go up to 20
+    March at h=1). That column is read again from the first Friday on, the Friday itself included: read from the second, the
+    forecasts of 24 March would take it from rows dated after their issue day."""
+    data = market("spring")
+    dates = np.asarray(pd.DatetimeIndex(data.index.tz_localize(None)).normalize())
+    late = np.full(len(data), np.nan)
+    late[dates == np.datetime64("2023-03-21")] = 0.0
+    late[dates >= np.datetime64("2023-03-22")] = 1.0
+    late[dates >= np.datetime64("2023-03-23")] = data["is_weekend"].to_numpy()[dates >= np.datetime64("2023-03-23")]
+    after = dates >= np.datetime64("2023-03-25")
+    continuous = late.copy()
+    continuous[after] += np.linspace(0.1, 0.9, int(after.sum()))
+
+    def until_7_april(ctx):
+        return DRIVERS + ["late"] if ctx.issue_day < datetime.date(2023, 4, 7) else DRIVERS
+
+    def run(values):
+        model = OLSModel(until_7_april, training_window=WINDOW)
+        test = {"horizon": 1, "issue_days": ["friday"]}
+        return by_key(model.run(data.assign(late=values), SPRING_WEDNESDAY, "2023-04-07", **test)._results)
+
+    binary, later_continuous = run(late), run(continuous)
+    first_friday = {key: record for key, record in binary.items() if key[0] == "2023-03-24"}
+    assert len(first_friday) == 24
+    assert {key: later_continuous[key] for key in first_friday} == first_friday
+
+
+def on_wednesdays_and_fridays(ctx):
+    return MASKED if ctx.issue_day.weekday() in (2, FRIDAY) else DRIVERS
+
+
+def from_thursday_30_march(ctx):
+    return MASKED if ctx.issue_day >= datetime.date(2023, 3, 30) else DRIVERS
+
+
+# Where a Friday run and a run of every day read a list's mask on different days: (function, test start, the day the mask is read in
+# the run of every day, in the Friday run, and the first day `regime` is continuous, so that at h=1 it is binary in the rows of one
+# and not of the other). Each mask day is the forecast's issue day or earlier, so neither reads past D-1-h.
+DIFFERING = {
+    "fridays alone": (on_fridays, SPRING_WEDNESDAY, "2023-03-24", "2023-03-22", "2023-03-22"),
+    "wednesdays and fridays from a monday": (
+        on_wednesdays_and_fridays,
+        "2023-03-20",
+        "2023-03-22",
+        "2023-03-20",
+        "2023-03-20",
+    ),
+    "from a thursday": (from_thursday_30_march, SPRING_WEDNESDAY, "2023-03-30", "2023-03-31", "2023-03-29"),
+}
+
+
+@pytest.mark.parametrize("case", list(DIFFERING))
+def test_where_a_friday_record_and_a_run_of_every_day_s_differ(case):
+    """A list used on the Friday run's first issue day reads its mask on the window's first day, and in a run of every day on the
+    first day that uses it: a Friday-only list on the first Friday, a Wednesday-and-Friday list on the first Wednesday. A list
+    first used on a later Friday reads it there, and in a run of every day on the day before if that one uses it. Where a column is
+    binary on one of those days and not on the other, the forecasts of that list differ; with a column binary throughout they
+    are equal."""
+    fn, start, _, _, turns = DIFFERING[case]
+    test = {"test_start": start, "test_end": "2023-03-31", "horizon": 1}
+    base = market("spring")
+
+    def both(data):
+        every = fridays(by_key(OLSModel(fn, training_window=WINDOW).run(data, **test)._results))
+        friday = by_key(OLSModel(fn, training_window=WINDOW).run(data, issue_days=["friday"], **test)._results)
+        assert set(every) == set(friday)
+        return {key for key in friday if json.loads(friday[key])["prediction"] != json.loads(every[key])["prediction"]}
+
+    assert both(base.assign(regime=base["is_weekend"])) == set()
+    differ = both(with_regime(base, turns))
+    # The keys of that list alone: from 31 March for a list from a Thursday, every Friday for the others.
+    assert {key[0] for key in differ} == ({"2023-03-31"} if case == "from a thursday" else {"2023-03-24", "2023-03-31"})
 
 
 # ---------------------------------------------------------------------------
