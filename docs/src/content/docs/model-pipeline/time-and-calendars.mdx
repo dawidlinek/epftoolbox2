@@ -107,6 +107,23 @@ Plain lists of records have no zone. There the periods of a date are those any m
 [Working with Results](/epftoolbox2/model-pipeline/results/#daily-aggregates). `EconomicEvaluator` judges a whole day by the period ids,
 as it did.
 
+## When a value is known on a switch day
+
+The [information set](/epftoolbox2/model-pipeline/information-set/#clock-changes) compares instants, so the same clock decides
+what is known:
+
+| On a switch day | Read as |
+|---|---|
+| The issue time, if the clocks repeat it | Its first occurrence, the earliest |
+| The issue time, if they skip it | Its earliest reading, before the switch |
+| A rule's clock time (`published`, `as_of`, `weekly`), if the clocks repeat it | Its second occurrence, the later |
+| A rule's clock time, if they skip it | The switch |
+| A `weather_cutoff` run | Always UTC, which has no switch |
+| The row of a period the clock skips | No row, no value and no verdict: never late |
+| The row of a repeated hour | Its second occurrence, the row the forecast is made from |
+
+Each reading is the one that can't make a value look known earlier than it is.
+
 ## Checking it
 
 [`pipeline.verify`](/epftoolbox2/model-pipeline/verification/) perturbs what a forecast can't know, and what it trains on from the issue

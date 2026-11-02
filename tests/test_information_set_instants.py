@@ -59,6 +59,8 @@ SUFFIXES = [
     "_h-24",
     "_h+8",
     "_min-30",
+    "_min-1",  # a minute before the switch, and a day after such a minute
+    "_d-1_min-1",
     "_d+1_d-1",
     "_d+1_h-24",
     "_h-24_d+1",
@@ -692,3 +694,13 @@ def test_the_built_in_rules_are_built_once_and_handed_out_as_copies():
     rules["price"] = Availability.static()
     assert default_rules()["price"].kind == "published"
     assert InformationSet().resolve("price").rule.kind == "published"
+
+
+def test_an_assumption_that_makes_a_value_known_exactly_at_the_issue_time_is_named():
+    """Issued 10:00 Brussels, generation_solar_forecast_d+1 is published 18:00 on D by the built-in rule, late, and at 10:00
+    on D under the A69 assumption: in time, to the minute, so the refusal points at it."""
+    index = pd.date_range("2024-06-01", "2024-06-20", freq="1h", tz="Europe/Brussels", inclusive="left")
+    info = InformationSet("10:00", "Europe/Brussels")
+    expanded = {(12, 1): ["generation_solar_forecast_d+1"]}
+    with pytest.raises(InformationSetError, match="known in time if you accept assumption 'entsoe_a69_by_10'"):
+        info.check(expanded, "price_d-1", "1h", index, "2024-06-10", "2024-06-10")
