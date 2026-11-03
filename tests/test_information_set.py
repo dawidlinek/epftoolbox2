@@ -676,7 +676,8 @@ def test_violations_use_the_delivery_and_publication_instants_own_offsets(data_z
     on 2024-03-30, `load_forecast_d+1` at 22:00Z (delivered 2024-04-01 00:00 CEST, published 10:00 on 2024-03-31)
     passed: a leak. Issued on Thursday 2024-10-24, `load_forecast_daily_max_d+3` at 22:00Z (delivered Sunday
     2024-10-27 23:00 CET, published the Friday before that week) was rejected. The expected verdict is computed
-    independently, from real instants, for test ranges ending two days before to one day after each switch."""
+    independently, from real instants, for test ranges ending two days before to one day after each switch. The week of
+    the week-ahead load forecast is one of the data's dates (each market's own), published at 10:00 Brussels."""
     columns = {  # name: (published time Brussels, days_before or "weekly", day shift)
         "price": ("13:00", 1, 0),
         "price_d-1": ("13:00", 1, -1),
@@ -704,7 +705,8 @@ def test_violations_use_the_delivery_and_publication_instants_own_offsets(data_z
                 for name, (time, days_before, shift) in columns.items():
                     delivery = rows + pd.Timedelta(days=shift)  # no DST in the data zone: a calendar day is 24 h
                     delivery_day = delivery.tz_convert("Europe/Brussels").normalize().tz_localize(None)
-                    if days_before == "weekly":  # Friday of the week before the delivery's Monday-Sunday week
+                    if days_before == "weekly":  # Friday before the Monday-Sunday week of the data's dates
+                        delivery_day = delivery.tz_localize(None).normalize()
                         published_day = delivery_day - pd.to_timedelta(delivery_day.weekday + 3, unit="D")
                     else:
                         published_day = delivery_day - pd.Timedelta(days=days_before)
@@ -1962,7 +1964,8 @@ def test_perturbation_uses_the_delivery_and_publication_instants_own_offsets(dat
     2024-03-30 perturbed `price_d-1` at 2024-03-31 22:00Z (delivered 2024-03-30 23:00 CET, published the day
     before) and kept `load_forecast_d+1` at 2024-03-30 22:00Z (delivered 2024-04-01 00:00 CEST, published 10:00 on
     2024-03-31); issued 12:30, it kept every 2024-03-31 `price` (published 13:00 CET = 12:00Z, after the 11:30Z
-    issue). The expected verdict is computed independently, from real instants."""
+    issue). The expected verdict is computed independently, from real instants. The week of the week-ahead load forecast
+    is one of the data's dates (each market's own), published at 10:00 Brussels."""
     idx = pd.date_range(pd.Timestamp(run_day) - pd.Timedelta(days=6), periods=24 * 12, freq="1h", tz=data_zone)
     columns = {  # name: (published time Brussels, days_before or "weekly", day shift)
         "price": ("13:00", 1, 0),
@@ -1980,7 +1983,8 @@ def test_perturbation_uses_the_delivery_and_publication_instants_own_offsets(dat
     for name, (time, days_before, shift) in columns.items():
         delivery = idx + pd.Timedelta(days=shift)  # no DST in the data zone: a calendar day is 24 h
         delivery_day = delivery.tz_convert("Europe/Brussels").normalize().tz_localize(None)
-        if days_before == "weekly":  # Friday of the week before the delivery's Monday-Sunday week
+        if days_before == "weekly":  # Friday before the Monday-Sunday week of the data's dates
+            delivery_day = delivery.tz_localize(None).normalize()
             published_day = delivery_day - pd.to_timedelta(delivery_day.weekday + 3, unit="D")
         else:
             published_day = delivery_day - pd.Timedelta(days=days_before)
