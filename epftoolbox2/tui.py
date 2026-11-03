@@ -801,6 +801,60 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "RidgeModel": [
+        {"name": "name", "description": "Model display name", "required": False, "default": "Ridge", "kind": "text"},
+        {
+            "name": "predictors",
+            "description": "Predictor column names",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "training_window",
+            "description": "Training window in days",
+            "required": False,
+            "default": "365",
+            "kind": "int",
+        },
+        {
+            "name": "alphas",
+            "description": "Penalties to choose from by leave-one-out, as a JSON list such as [0.1, 1, 10]; empty: 36 values from 1e-3 to 1e4",
+            "required": False,
+            "default": None,
+            "kind": "json",
+        },
+        {
+            "name": "scaler",
+            "description": "Scaling: standard, or a variance-stabilising transformation (asinh, npit)",
+            "required": False,
+            "default": "standard",
+            "kind": "select",
+            "choices": ["standard", "asinh", "npit"],
+        },
+        {
+            "name": "newest_target",
+            "description": "Newest training target: d-1, or every target published by the issue time (needs an issue time)",
+            "required": False,
+            "default": "d-1",
+            "kind": "select",
+            "choices": ["d-1", "published"],
+        },
+        {
+            "name": "fit_intercept",
+            "description": "Fit an intercept",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
+        },
+        {
+            "name": "refit",
+            "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+    ],
     "NaiveModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "Naive", "kind": "text"},
         {
@@ -1209,7 +1263,7 @@ _VALIDATORS = [
     "CoverageValidator",
     "PlausibilityValidator",
 ]
-_MODELS = ["OLSModel", "LassoCVModel", "NaiveModel"]
+_MODELS = ["OLSModel", "LassoCVModel", "RidgeModel", "NaiveModel"]
 _EVALUATORS = [
     "MAEEvaluator",
     "RMSEEvaluator",

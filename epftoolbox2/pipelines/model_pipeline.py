@@ -59,6 +59,7 @@ COMPONENT_REGISTRY = {
     "models": {
         "OLSModel": "epftoolbox2.models.ols",
         "LassoCVModel": "epftoolbox2.models.lasso",
+        "RidgeModel": "epftoolbox2.models.ridge",
         "NaiveModel": "epftoolbox2.models.naive",
     },
     "ensembles": {
