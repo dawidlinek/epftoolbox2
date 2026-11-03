@@ -137,8 +137,8 @@ an issue day it didn't sample.
   anchor, and YAML writes `refit` only when set. A frame that doesn't hold W+h days before the refit day of the first issue day raises `ValueError` naming the day it
   must start on (one sized for `refit=None` is too short whenever the test doesn't start on a refit day), and a run uses
   at most one process per refit day. Other values raise, `"auto"` included, and so does `refit` on a custom model with only
-  `_fit_predict`, or that overrides `_fit_predict` but inherits `_fit_model` and `_predict_fitted` (it would be refitted with its
-  parent's estimator). `verify`, `leakage_probe` and `positive_control` run a refit model from the issue day to the end of its block,
+  `_fit_predict`, or whose `_fit_predict`, `_fit_model` and `_predict_fitted` aren't all defined in one class (a subclass that
+  overrides some of them would fit one model with `refit=None` and another with `refit`). `verify`, `leakage_probe` and `positive_control` run a refit model from the issue day to the end of its block,
   so a leak that needs several days of a block shows, and cost that many more days of forecasts. **Nothing moves without the keyword**: `refit=None` is every record, manifest and table as before. With it the
   numbers move, since fits are older: on Lago DE in 2017 at horizon 1 (LassoCV on the LEAR inputs, W = 364, the same 8712
   forecasts), MAE was 4.6665 refitting daily, 4.6560 (-0.23 %) with `"7D"` from 1248 fits and 4.7134 (+1.00 %) with `"1MS"` from 288,

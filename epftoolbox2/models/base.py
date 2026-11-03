@@ -166,8 +166,9 @@ class BaseModel(ABC):
                 raise ValueError(
                     f"{type(self).__name__} can't refit on a calendar (refit={value!r}): its `_fit_predict` is "
                     f"{owners['_fit_predict']}'s, and refit forecasts from `_fit_model` and `_predict_fitted`, which are "
-                    f"{owners['_fit_model']}'s and {owners['_predict_fitted']}'s, so it would fit another model. A model that "
-                    "overrides `_fit_predict` takes refit only if it overrides those two as well; else leave refit=None."
+                    f"{owners['_fit_model']}'s and {owners['_predict_fitted']}'s, so refit=None and refit would fit different "
+                    "models. One class must define all three; a subclass that overrides any of them takes refit only if it "
+                    "overrides all three, else leave refit=None."
                 )
         super().__setattr__(key, value)
 
@@ -179,13 +180,11 @@ class BaseModel(ABC):
     @classmethod
     def _can_refit(cls) -> bool:
         """Whether the model fits once and forecasts from the fit (`_fit_model`, `_predict_fitted`), which `refit` needs, and
-        that fit is the model's own: both are defined in the class that defines `_fit_predict` or in a subclass of it. A subclass
-        of OLSModel that overrides `_fit_predict` alone would otherwise be refitted with OLS, its parent's estimator."""
-        fit_predict = cls._owner_of("_fit_predict")
-        return all(
-            cls._owner_of(name) is not BaseModel and issubclass(cls._owner_of(name), fit_predict)
-            for name in ("_fit_model", "_predict_fitted")
-        )
+        that fit is the one `refit=None` makes: one class (not BaseModel) defines all three of `_fit_predict`, `_fit_model` and
+        `_predict_fitted`. A subclass of OLSModel that overrides `_fit_predict` alone would be refitted with OLS, and one that
+        overrides the other two alone would refit with its own estimator while `refit=None` fits OLS."""
+        owners = {cls._owner_of(name) for name in _REFIT_METHODS}
+        return len(owners) == 1 and BaseModel not in owners
 
     @property
     def _model_kwargs(self) -> Dict:
@@ -944,7 +943,7 @@ class BaseModel(ABC):
             self._cut_rules(information_set, cut_rules),
             self._days_of(test_start, test_end, windows),
         )
-        self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizon, newest)
+        self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest)
         check_target = self.newest_target == "d-1"
         if self._ctx_fn is not None:
             if plan is None:
@@ -1047,16 +1046,17 @@ class BaseModel(ABC):
         test_end: Optional[str],
         windows: Optional[RunWindows],
         weekdays: Optional[Sequence[int]],
-        horizon: int,
+        horizons: Sequence[int],
         newest: Optional[NewestTargets],
     ) -> None:
-        """With `refit`, a ValueError if the frame starts after the first row the first unit can train on.
+        """With `refit`, a ValueError if the frame starts after the earliest row a unit of the run trains on.
 
-        The first planned issue day's unit is fitted on its anchor a, which can be up to a year before the test starts, on the
-        rows dated from a - W - h (a - W - h - reach under `newest_target="published"`, `NewestTargets.reach`). A frame sized for
-        `refit=None` (from test_start - W - h) would train that block on fewer days, silently: its forecasts move and a comparison
-        keeps identical keys and counts. So that frame is refused, naming the day it must start on. Without `refit` nothing is
-        checked, as before."""
+        A unit (p, h, a) trains on the rows dated in `training_span(a, W, h, k)`, k its newest target read on the anchor (-1 with
+        `newest_target="d-1"`), and the first anchor can be up to a year before the test starts. The earliest first row over the
+        planned anchors, periods and horizons is the day the frame must start on, exactly: a frame starting a day later drops a
+        row some unit trains on. A frame sized for `refit=None` (from test_start - W - h) would train that block on fewer days,
+        silently: its forecasts move and a comparison keeps identical keys and counts. So that frame is refused, naming the day.
+        A matching list filters the same span, so it needs no more. Without `refit` nothing is checked, as before."""
         if self.refit is None:
             return
         if windows is not None:
@@ -1068,17 +1068,20 @@ class BaseModel(ABC):
         if not issued or not len(data.index):
             return
         first = min(datetime.date.fromisoformat(day) for day in issued)
-        anchor = refit_anchor(first, self.refit)
-        reach = 0 if newest is None else newest.reach
-        needed = anchor - datetime.timedelta(days=int(self.training_window) + int(horizon) + reach)
+        anchors = np.array([day.toordinal() for day in refit_anchors(issued, self.refit)], dtype=np.int64)
+        earliest = []
+        for period in range(self._periods_per_day) if newest is not None else [None]:
+            newest_of = -1 if newest is None else newest.at(period, anchors)
+            for horizon in horizons:
+                first_rows, _ = training_span(anchors, int(self.training_window), int(horizon), newest_of)
+                earliest.append(int(np.min(first_rows)))
+        needed = datetime.date.fromordinal(min(earliest))
         starts = _contract.wall_clock(data.index).min().date()
         if starts > needed:
-            reached = f" and {reach} more for the newest target's rule" if reach else ""
             raise ValueError(
-                f"{self.name}: with refit={self.refit!r} the forecasts issued on {first} are fitted on {anchor}, on the rows dated "
-                f"from {needed} ({self.training_window} days of training_window, {horizon} of the largest horizon{reached}), "
-                f"but the frame starts on {starts}: that block would train on fewer days. Start the frame on {needed} or "
-                "earlier, or the test later."
+                f"{self.name}: with refit={self.refit!r} the forecasts issued from {first} on are fitted on their refit days, the "
+                f"first {refit_anchor(first, self.refit)}, and the earliest row they train on is dated {needed}, but the frame starts "
+                f"on {starts}: that block would train on fewer days. Start the frame on {needed} or earlier, or the test later."
             )
 
     def _target_on_anchors(

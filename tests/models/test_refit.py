@@ -204,6 +204,11 @@ class RidgeOLS(OLSModel):
 
 
 class RidgeBoth(RidgeOLS):
+    """Ridge in all three methods, defined in one class."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
+
     def _fit_model(self, train_x, train_y):
         return Ridge(alpha=50.0, fit_intercept=False).fit(train_x, train_y)
 
@@ -216,21 +221,41 @@ class RidgeCV(LassoCVModel):
         return RidgeOLS._fit_predict(self, train_x, train_y, test_x)
 
 
-class Seam(OLSModel):
-    """Overrides the seam and inherits `_fit_predict`: the seam is a subclass's, so refit fits what the class says."""
+class RidgeRefit(OLSModel):
+    """The other way round: Ridge in the seam, OLS's `_fit_predict`. refit=None would fit OLS and refit Ridge."""
+
+    def _fit_model(self, train_x, train_y):
+        return Ridge(alpha=50.0, fit_intercept=False).fit(train_x, train_y)
 
     def _predict_fitted(self, fitted, test_x):
         return fitted.predict(test_x)[0], fitted.coef_.tolist()
 
 
-def test_a_subclass_overriding_only_fit_predict_raises_on_refit(market):
+class Seam(OLSModel):
+    """Overrides `_predict_fitted` alone: it may forecast otherwise than `_fit_predict` does, so it doesn't refit either."""
+
+    def _predict_fitted(self, fitted, test_x):
+        return fitted.predict(test_x)[0], fitted.coef_.tolist()
+
+
+class Renamed(LassoCVModel):
+    """Overrides none of the three: LassoCV's fit, whatever else it adds."""
+
+    def __init__(self, predictors, **kwargs):
+        super().__init__(predictors, cv=3, **kwargs)
+
+
+def test_refit_needs_one_class_to_define_all_three_fit_methods(market):
     """Inheriting `_fit_model` and `_predict_fitted` from OLSModel while fitting Ridge in `_fit_predict` would have refitted it
-    with OLS, silently, up to 47 off its own refit=None run. Overriding all three refits the subclass's own estimator."""
-    for cls in (RidgeOLS, RidgeCV):
+    with OLS, silently, up to 47 off its own refit=None run, and the other way round refit would fit Ridge where refit=None fits
+    OLS. So one class defines all three, or refit raises naming their owners. OLS, LassoCV, a subclass overriding all three and one
+    overriding none refit; overriding all three refits the subclass's own estimator."""
+    for cls, parent in ((RidgeOLS, "OLSModel"), (RidgeCV, "LassoCVModel"), (RidgeRefit, "RidgeRefit"), (Seam, "Seam")):
         cls(PREDICTORS)  # refit=None runs as before
-        with pytest.raises(ValueError, match="can't refit.*OLSModel's|can't refit.*LassoCVModel's"):
+        with pytest.raises(ValueError, match=f"can't refit.*{parent}'s"):
             cls(PREDICTORS, refit="7D")
-    assert Seam(PREDICTORS, refit="7D").refit == "7D"
+    for cls in (OLSModel, LassoCVModel, RidgeBoth, Renamed):
+        assert cls(PREDICTORS, refit="7D").refit == "7D"
     both = RidgeBoth(PREDICTORS, training_window=WINDOW, refit="1D").run(market, "2023-03-20", "2023-03-22", horizon=1)
     plain = RidgeBoth(PREDICTORS, training_window=WINDOW).run(market, "2023-03-20", "2023-03-22", horizon=1)
     assert keyed(both._results, "refit_anchor") == keyed(plain._results)
@@ -407,6 +432,30 @@ def test_a_frame_that_doesn_t_reach_back_from_the_first_anchor_raises(refit, win
     run(starting_on(data, shift(needed, 1)), refit=None)
 
 
+@pytest.mark.parametrize(
+    ("newest", "issue_time", "needed"),
+    [("d-1", "11:45", "2023-02-18"), ("published", "11:45", "2023-02-19"), ("published", "14:00", "2023-02-20")],
+    ids=["d-1", "published-k0", "published-k1"],
+)
+def test_the_frame_check_asks_for_exactly_the_earliest_row(market, monkeypatch, newest, issue_time, needed):
+    """The re-check's trimming probe (`recheck_probes/probe_frame_check.py`): the day asked for is the earliest row any unit
+    trains on, `training_span(a, W, h, k(a))` over periods and horizons. At 14:00 the price of D+1 is out (k = 1, capped at H-1),
+    so with H = 2 the newest row is a - 1 at both horizons and the frame needs a - W, not a - W - 2: a frame from that day gives the
+    long frame's records, and one from the day after is refused, and would have changed them."""
+    info = InformationSet(issue_time, "Europe/Brussels", rules=RULES)
+
+    def run(frame):
+        model = ols("7D", newest_target=newest)
+        return keyed(model.run(frame, "2023-03-15", "2023-03-20", horizon=2, information_set=info)._results)
+
+    long = run(market)
+    assert run(starting_on(market, needed)) == long
+    with pytest.raises(ValueError, match=f"earliest row they train on is dated {needed}"):
+        run(starting_on(market, shift(needed, 1)))
+    monkeypatch.setattr(BaseModel, "_check_reaches_back", lambda self, *args: None)
+    assert run(starting_on(market, shift(needed, 1))) != long
+
+
 def test_validation_starts_the_frame_check(market):
     """With validation and test windows the earliest anchor is the validation window's."""
     pipeline = ModelPipeline()
@@ -414,7 +463,7 @@ def test_validation_starts_the_frame_check(market):
     validation, test = ("2023-03-06", "2023-03-10"), ("2023-04-10", "2023-04-14")
     needed = "2023-02-07"  # 1 March - 21 - 1
     pipeline.run(starting_on(market, needed), validation=validation, test=test, horizon=1)
-    with pytest.raises(ValueError, match=f"rows dated from {needed}"):
+    with pytest.raises(ValueError, match=f"earliest row they train on is dated {needed}"):
         pipeline.run(starting_on(market, shift(needed, 1)), validation=validation, test=test, horizon=1)
 
 
