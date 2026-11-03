@@ -163,8 +163,8 @@ def test_a_function_of_ctx_gives_the_fixed_list_s_forecasts():
         (lambda: NaiveModel(["a", "b"]), ValueError),
         (lambda: NaiveModel("load"), TypeError),
         (lambda: NaiveModel([TSO], known_only="yes"), TypeError),
-        (lambda: NaiveModel([TSO], refit="7D"), ValueError),
-        (lambda: NaiveModel([TSO], newest_target="published"), ValueError),
+        (lambda: NaiveModel([TSO], refit="7D"), TypeError),
+        (lambda: NaiveModel([TSO], newest_target="published"), TypeError),
     ],
     ids=["two names", "a string", "known_only not a bool", "refit", "newest_target"],
 )

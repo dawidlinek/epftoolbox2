@@ -19,13 +19,13 @@ class NaiveModel(BaseModel):
             refused nor listed, at every availability level and in `verify`. False judges the column as any model's input
             instead: refused at "raise", listed at "warn". Without an information set every forecast is made either way.
 
-    `newest_target` and `refit` are a fit's and raise unless left at their defaults.
+    `newest_target` and `refit` are a fit's: they aren't parameters, and setting either to anything but its default raises.
     """
 
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "training_window": 0, "scaler": "standard"}
     _fits_nothing = True
 
-    def __init__(self, predictors, name: str = "Naive", *, known_only: bool = True, newest_target="d-1", refit=None):
+    def __init__(self, predictors, name: str = "Naive", *, known_only: bool = True):
         if isinstance(predictors, str):
             raise TypeError(
                 f"NaiveModel takes a list of one name, got the string {predictors!r}: write [{predictors!r}]"
@@ -37,7 +37,7 @@ class NaiveModel(BaseModel):
         if not isinstance(known_only, bool):
             raise TypeError(f"known_only must be True or False, got {known_only!r}")
         # No training rows: a forecast reads its issue row alone, so the frame needs no history before the test.
-        super().__init__(predictors, training_window=0, name=name, newest_target=newest_target, refit=refit)
+        super().__init__(predictors, training_window=0, name=name)
         self.known_only = known_only
 
     def __setattr__(self, key, value):
