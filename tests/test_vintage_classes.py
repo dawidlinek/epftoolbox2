@@ -10,6 +10,7 @@ without the metadata compared bit for bit.
 import dataclasses
 import datetime
 import json
+import warnings
 from concurrent.futures import Future
 
 import numpy as np
@@ -27,6 +28,7 @@ from epftoolbox2.information_set import (
     InformationSet,
     InformationSetError,
     RuleChain,
+    TrainingRows,
     default_rules,
     is_revised,
     source_rules,
@@ -716,7 +718,9 @@ def test_a_rule_that_doesn_t_change_over_time_reads_no_training_row(monkeypatch)
 def verdict(names, index, day, freq="1h", rules=None):
     info = InformationSet("11:45", PL, rules=rules or {"sk": PL_CHAIN, "price": Availability.published("13:00", 1, PL)})
     periods = [0] if freq == "1D" else range(24)
-    found, _ = info.violations({(p, 1): names for p in periods}, "price", freq, index, day, day)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the issue day's row alone, on purpose here: no window is in question
+        found, _ = info.violations({(p, 1): names for p in periods}, "price", freq, index, day, day)
     return {name: ("late" if any(v.predictor == name for v in found) else "known") for name in names}
 
 
@@ -799,3 +803,26 @@ def test_a_published_window_reaching_back_past_d_minus_w_plus_h_is_checked():
         with pytest.raises(InformationSetError, match="training target 'fs' of 59 days before"):
             run("2026-08-13", level)
     run("2026-08-12")
+
+
+def test_a_direct_check_of_a_column_whose_rule_changes_over_time_says_what_it_judged():
+    """`InformationSet.check()` without `training_rows` judges the issue day's row alone, and says so for such a column; with
+    them, and for a rule that doesn't change, it says nothing."""
+    index = pl_rows().index
+    info = InformationSet("11:45", PL, rules={"sk": PL_CHAIN, "price": Availability.published("13:00", 1, PL)})
+    expanded = {(p, 1): ["sk_d-2"] for p in range(24)}
+    with pytest.warns(UserWarning, match=r"\['sk'\] change over time, and only the issue day's row was judged"):
+        info.check(expanded, "price", "1h", index, "2026-10-10", "2026-10-10")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(InformationSetError, match="a training row holds a value known only then"):
+            info.check(expanded, "price", "1h", index, "2026-10-10", "2026-10-10", training_rows=TrainingRows(60))
+        info.check(expanded, "price", "1h", index, "2026-10-12", "2026-10-12", training_rows=TrainingRows(60))
+        steady = InformationSet("11:45", PL, rules={"sk": Availability.published("14:30", -1, PL)})
+        steady.check(expanded, "price", "1h", index, "2026-10-12", "2026-10-12")
+    rows = TrainingRows(60, reach=2, refit="7D")
+    assert list(rows.predictor_days(1)) == list(range(-63, -1))
+    assert list(rows.predictor_days(1, lag=4)) == list(range(-67, -5))
+    assert rows.lags(pd.DatetimeIndex(["2026-10-05", "2026-10-10", "2026-10-11"])).tolist() == [0, 5, 6]
+    assert list(TrainingRows(60, to_issue=True).predictor_days(2)) == list(range(-62, 0))
+    assert list(TrainingRows(60).target_days()) == list(range(-60, -1))

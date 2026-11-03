@@ -1130,6 +1130,15 @@ class InformationSet:
                 else:
                     self._check_source_zone(resolved[name], index)
 
+        changing = sorted({col.series for col in resolved.values() if over_time(col.rule)})
+        if changing and training_rows is None:
+            warnings.warn(
+                f"The rules of {changing} change over time, and only the issue day's row was judged: with such a rule an older "
+                "row a fit reads can hold a value known later than the issue day's. Pass training_rows=TrainingRows(window, "
+                "...), as a model run does, to judge those rows too.",
+                UserWarning,
+                stacklevel=3,
+            )
         days = pd.DatetimeIndex(issue_days) if issue_days is not None else self._issue_days(index, test_start, test_end)
         if not len(days):
             return [], unknown
@@ -2649,6 +2658,7 @@ __all__ = [
     "InformationSetError",
     "ProbeResult",
     "RuleChain",
+    "TrainingRows",
     "VINTAGES",
     "default_rules",
     "leakage_probe",
