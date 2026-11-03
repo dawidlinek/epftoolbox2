@@ -1,4 +1,4 @@
-"""LEAR's kernels: `models/_lars.py` (the numpy reference) against scikit-learn.
+"""LEAR's kernels: `models/_lars.py` (the numpy reference) against scikit-learn, and `models/_lars_numba.py` against it.
 
 scikit-learn 0.24.2, which Lago et al. ran, doesn't install next to the locked version, so these stand in for it:
 - LARS: today's `lars_path`. Its solver differs from 0.24.2's by one line, a rounding of the equiangular correlations to 15
@@ -13,6 +13,10 @@ enters, and the degenerate-entrant rule itself on Gram designs of dyadic numbers
 """
 
 import contextlib
+import math
+import os
+import subprocess
+import sys
 import warnings
 
 import numpy as np
@@ -22,6 +26,7 @@ from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import Lasso, lars_path_gram
 from sklearn.linear_model import lars_path as sklearn_lars_path
 
+from epftoolbox2._extras import MissingExtraError
 from epftoolbox2.models import _lars
 
 EPS = np.finfo(float).eps
@@ -512,3 +517,101 @@ def test_bad_inputs_raise():
         _lars.lars_path(np.eye(3), np.zeros(2), 3)
     with pytest.raises(ValueError, match="gram_stats"):
         _lars.gram_stats(np.zeros((3, 2)), np.zeros(4))
+
+
+# ------------------------------------------------------------------------------------------------------------- backends
+
+
+def _lago_size_design(n, seed):
+    """247 columns as LEAR has them: 240 correlated continuous inputs and seven weekday dummies."""
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, 60)) @ rng.standard_normal((60, 240)) * 0.3 + rng.standard_normal((n, 240))
+    X = np.c_[X, np.eye(7)[np.arange(n) % 7]]
+    beta = np.zeros(247)
+    beta[rng.choice(247, 40, replace=False)] = rng.standard_normal(40)
+    return X, X @ beta + 2 * rng.standard_normal(n)
+
+
+def _assert_backends_agree(numba_kernels, X, y, solvers=("lars", "cd")):
+    """Same kinks, the same kink chosen, coefficients within 1e-10. A dropped coefficient keeps a rounding residue at its drop
+    kink (0.24.2's `prev + gamma * ls`), and whether it is above float64 eps, so counted in df, depends on the summation order:
+    there the criteria may differ by K per residue, and nowhere else."""
+    stats = _lars.gram_stats(X, y)
+    R, qn = _lars._normalised(stats.G, stats.q)
+    reference, twin = _lars.lars_path(R, qn, stats.n), numba_kernels.lars_path(R, qn, stats.n)
+    _assert_same_path(twin, reference.alphas, reference.coefs)
+    assert twin.stop == reference.stop
+    np.testing.assert_allclose(twin.corr, reference.corr, rtol=0, atol=1e-10 * max(1.0, np.max(np.abs(reference.corr))))
+    counted = np.abs(reference.coefs) > EPS
+    residues = counted != (np.abs(twin.coefs) > EPS)
+    assert np.all(np.abs(reference.coefs[residues]) < 1e3 * EPS) and np.all(np.abs(twin.coefs[residues]) < 1e3 * EPS)
+    ddf = counted.sum(axis=1) - (np.abs(twin.coefs) > EPS).sum(axis=1)
+    for criterion in ("aic", "bic"):
+        a = _lars.ic_select(reference, qn, stats.yy, stats.n, criterion)
+        b = numba_kernels.ic_select(twin, qn, stats.yy, stats.n, criterion)
+        assert a.kink == b.kink
+        K = 2.0 if criterion == "aic" else math.log(stats.n)
+        scale = max(1.0, np.max(np.abs(a.criterion)))
+        np.testing.assert_allclose(b.criterion + K * ddf, a.criterion, rtol=0, atol=1e-9 * scale)
+        for solver in solvers:
+            a, b = _lars.lear_fit(stats, criterion, solver), numba_kernels.lear_fit(stats, criterion, solver)
+            assert (a.kink, a.converged) == (b.kink, b.converged)
+            assert abs(b.alpha - a.alpha) <= 1e-10 * reference.alphas[0]
+            np.testing.assert_allclose(b.w, a.w, rtol=0, atol=1e-10 * max(1.0, np.max(np.abs(a.w))))
+
+
+@pytest.fixture
+def numba_kernels(monkeypatch):
+    pytest.importorskip("numba")
+    monkeypatch.setenv("EPFTOOLBOX2_KERNELS", "numba")
+    return _lars._kernels()
+
+
+def test_numba_twins_agree_with_numpy_on_496_random_designs(numba_kernels):
+    """Both stages with "lars" on every design, with "cd" on every fourth (numpy's coordinate descent is a Python loop)."""
+    rng = np.random.default_rng(496)
+    for i in range(496):
+        _assert_backends_agree(numba_kernels, *_random_design(rng), solvers=("lars", "cd") if i % 4 == 0 else ("lars",))
+
+
+@pytest.mark.parametrize("n", [49, 77, 1085, 1449])
+def test_numba_twins_agree_with_numpy_at_lago_s_sizes(numba_kernels, n):
+    """p 247 and Lago's training rows for windows 56, 84, 1092 and 1456: with the 496 random ones, 500 designs."""
+    _assert_backends_agree(numba_kernels, *_lago_size_design(n, n), solvers=("lars", "cd") if n < 1000 else ("lars",))
+
+
+def test_the_kernel_backend_follows_epftoolbox2_kernels(monkeypatch):
+    monkeypatch.setenv("EPFTOOLBOX2_KERNELS", "numpy")
+    assert _lars._kernels() is _lars and _lars._kernels().BACKEND == "numpy"
+    monkeypatch.setenv("EPFTOOLBOX2_KERNELS", "fortran")
+    with pytest.raises(ValueError, match="EPFTOOLBOX2_KERNELS"):
+        _lars._kernels()
+    monkeypatch.setattr(_lars, "has_extra", lambda name: False)  # as without the [fast] extra
+    monkeypatch.setenv("EPFTOOLBOX2_KERNELS", "auto")
+    assert _lars._kernels() is _lars
+    monkeypatch.delenv("EPFTOOLBOX2_KERNELS")
+    assert _lars._kernels() is _lars
+    monkeypatch.setenv("EPFTOOLBOX2_KERNELS", "numba")
+    with pytest.raises(MissingExtraError, match=r"pip install 'epftoolbox2\[fast\]'"):
+        _lars._kernels()
+
+
+def test_numba_is_the_auto_backend_when_installed(monkeypatch):
+    pytest.importorskip("numba")
+    monkeypatch.delenv("EPFTOOLBOX2_KERNELS", raising=False)
+    kernels = _lars._kernels()
+    assert kernels.BACKEND == "numba" and kernels.__name__ == "epftoolbox2.models._lars_numba"
+
+
+def test_importing_the_package_and_the_numpy_kernels_imports_no_numba():
+    code = (
+        "import os, sys\n"
+        "os.environ['EPFTOOLBOX2_KERNELS'] = 'numpy'\n"
+        "import epftoolbox2, epftoolbox2.models\n"
+        "from epftoolbox2.models import _lars\n"
+        "assert _lars._kernels() is _lars\n"
+        "assert 'numba' not in sys.modules, 'numba was imported'\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "EPFTOOLBOX2_KERNELS"}
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr

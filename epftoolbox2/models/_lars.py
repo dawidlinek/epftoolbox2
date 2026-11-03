@@ -14,14 +14,25 @@ L2 term. Where that code has a quirk, these keep it and say so (the degenerate e
 where 0.24.2 would go wrong: a column whose Gram diagonal is 0 has its row, column and correlation set to exactly 0 first, so
 rounding left in shared statistics can't make it enter; and coefficients that reach 0 at exactly the same step all leave
 together (0.24.2 counts one of them out, after which its arrays no longer match in length and it raises).
+
+`_lars_numba.py` holds numba twins of the same functions. The two agree within 1e-9 with the same kinks, not to the bit: this
+module sums with BLAS, the twins in loops. `_kernels()` returns the module of the backend `EPFTOOLBOX2_KERNELS` asks for.
 """
 
+import functools
 import math
+import os
+import sys
+import warnings
 from typing import List, NamedTuple, Tuple
 
 import numpy as np
 from scipy.linalg import solve_triangular
 from scipy.linalg.lapack import dpotrs
+
+from .._extras import MissingExtraError, has_extra
+
+BACKEND = "numpy"
 
 EPS = float(np.finfo(np.float64).eps)
 # 0.24.2's `equality_tolerance` and `tiny32`. It added them to float64 values under numpy 1, so in float64; under numpy 2 a
@@ -32,7 +43,7 @@ DBL_MAX = float(np.finfo(np.float64).max)
 # A Cholesky pivot below this means the entering column lies in the span of the active ones (0.24.2: `diag < 1e-7`).
 DEGENERATE = 1e-7
 
-# Why a path ended.
+# Why a path ended. The numba twin returns the position in this tuple.
 STOPS = ("alpha_min", "max_steps", "all_active", "alpha_increasing")
 CRITERIA = ("aic", "bic")
 SOLVERS = ("lars", "cd")
@@ -408,3 +419,39 @@ def lear_fit(stats: GramStats, criterion: str = "bic", solver: str = "lars") -> 
     else:
         w, _, converged = cd_lasso(G, q, stats.yy, stats.n, choice.alpha)
     return LearFit(w, stats.xbar, stats.ybar, choice.alpha, choice.kink, bool(converged))
+
+
+KERNELS = ("auto", "numpy", "numba")
+
+
+def _kernels():
+    """The kernel module for `EPFTOOLBOX2_KERNELS` (auto, numpy or numba; default auto: numba when it imports).
+
+    Both modules have the same functions; `BACKEND` names the one returned. The first numba call compiles (or loads from
+    numba's cache) every kernel on a 3 x 2 problem, so call this in the parent before a process pool starts.
+    """
+    choice = os.environ.get("EPFTOOLBOX2_KERNELS", "auto").strip().lower() or "auto"
+    if choice not in KERNELS:
+        raise ValueError(f"EPFTOOLBOX2_KERNELS must be one of {KERNELS}, not {choice!r}")
+    this = sys.modules[__name__]
+    if choice == "numpy":
+        return this
+    if not has_extra("fast"):
+        if choice == "numba":
+            raise MissingExtraError("EPFTOOLBOX2_KERNELS=numba", "fast")
+        return this
+    try:
+        return _numba_kernels()
+    except ImportError as error:
+        if choice == "numba":
+            raise MissingExtraError("EPFTOOLBOX2_KERNELS=numba", "fast") from error
+        warnings.warn(f"numba is installed but doesn't import ({error}); using the numpy kernels", RuntimeWarning)
+        return this
+
+
+@functools.lru_cache(maxsize=None)
+def _numba_kernels():
+    from . import _lars_numba
+
+    _lars_numba.warm_up()
+    return _lars_numba
