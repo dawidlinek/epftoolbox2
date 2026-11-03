@@ -45,7 +45,9 @@ report = pipeline.run(data=df, test_start="2024-04-01", test_end="2024-06-01")
 
 If the pipeline has an `information_set` (see [Information Set](/epftoolbox2/model-pipeline/information-set/)),
 it is saved as a top-level `information_set` key, and a level you asked for as `availability`. Left out, a load takes the
-default: `warn` with an `information_set`, `none` without one.
+default: `warn` with an `information_set`, `none` without one. Its `rules` are saved as a mapping per column, or a list of them for a
+column's [rules over time](/epftoolbox2/model-pipeline/information-set/#rules-over-time); an `Availability` writes `vintage`,
+`valid_from` and `valid_until` only when set.
 
 ```yaml
 information_set:

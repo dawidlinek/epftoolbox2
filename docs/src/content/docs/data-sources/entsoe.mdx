@@ -239,7 +239,8 @@ as produced by `LagTransformer` (`x_d-1` is yesterday, `x_d+1` tomorrow):
 
 The API serves the latest revision of each series, not the version published at the deadline, so forecasts that
 are revised after the issue time (load forecasts, wind and solar forecasts) can still carry a small amount of
-look-ahead even within these limits.
+look-ahead even within these limits. The built-in information set rules class `load_actual`, `load_forecast` (and its daily min and max) and `generation_*` as `latest_revision` and `price` as `snapshot`
+([Vintage Classes](/epftoolbox2/model-pipeline/information-set/#vintage-classes)); capacity columns have no built-in rule.
 
 ---
 

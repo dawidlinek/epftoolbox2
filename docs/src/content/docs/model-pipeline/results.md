@@ -121,7 +121,7 @@ report.availability()  # model, predictor, role, status, list, periods, horizons
 
 `report.vintages()` lists the [class](/epftoolbox2/model-pipeline/information-set/#vintage-classes) of every input of every model:
 what the archive it was read from holds, by its rule. `series` is the column the rule is for (`price` for `price_d-1`), `class` is
-`snapshot`, `row_stamp`, `last_write_stamp`, `latest_revision` or `unknown` (a rule without one), and `ctx` says whether a predictor
+`snapshot`, `row_stamp`, `last_write_stamp`, `latest_revision` or `unknown` (a rule without one; a column's rules over time give theirs, each once, joined by commas), and `ctx` says whether a predictor
 function read the column through `ctx`. An ensemble's rows are its models'. It is empty, with the same columns, when no input has a
 class or the run had no information set. A report built from `save_dir` reads them from the manifests.
 

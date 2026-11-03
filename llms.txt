@@ -76,7 +76,7 @@ Rules to know before using the library:
 - [Incremental Training](docs/src/content/docs/model-pipeline/caching.mdx): `save_dir` results, resuming and the manifest
 - [Serialization](docs/src/content/docs/model-pipeline/serialization.mdx): YAML format of a `ModelPipeline`
 - [Forecast-Only Mode](docs/src/content/docs/model-pipeline/forecasting.mdx): operational forecasts for the next days without back-testing
-- [Information Set](docs/src/content/docs/model-pipeline/information-set.mdx): availability rules, the issue-time check at the levels none, warn and raise, `report.availability()`, `pipeline.explain()` and the leakage probe
+- [Information Set](docs/src/content/docs/model-pipeline/information-set.mdx): availability rules, vintage classes and rules over time, the issue-time check at the levels none, warn and raise, `report.availability()`, `report.vintages()`, `pipeline.explain()` and the leakage probe
 - [Verifying a Pipeline](docs/src/content/docs/model-pipeline/verification.mdx): `ModelPipeline.verify()` and `epf verify`, the leakage probe on sampled issue days with a positive control
 - [Time and Calendars](docs/src/content/docs/model-pipeline/time-and-calendars.mdx): which rows a forecast trains on, by date, which forecasts are planned, what a clock change does, `aggregate()` on switch days, and old results refused on resume
 - [Predictor Functions](docs/src/content/docs/model-pipeline/predictor-functions.mdx): a function of `ctx` that picks each forecast's list, what `published()` and `value()` mean at each availability level, how each list trains, `Use(list, train_on="matching")`, resuming and YAML

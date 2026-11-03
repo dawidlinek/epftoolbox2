@@ -277,7 +277,8 @@ pipeline = ModelPipeline(information_set=info)
     Keys in `rules=` may be exact column names or glob patterns (`fuel_*`), and take precedence over accepted
     assumptions, rules learned from data sources, and the built-in defaults, in that order. A
     [profile](#profile-columns) or a [day aggregate](#day-aggregates) takes the rule of the column it was built from,
-    unless a key in `rules=` matches its own name.
+    unless a key in `rules=` matches its own name. A value is an `Availability`, a dict of one, or a list of them with disjoint
+    periods ([Rules over time](#rules-over-time)).
   </TabItem>
 </Tabs>
 

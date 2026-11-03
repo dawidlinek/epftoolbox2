@@ -120,7 +120,7 @@ An ensemble is in `summary()`, the `by_*()` tables, `tests()`, `mcs()`, `ranks()
 `join()`, `predictions()`, `iter_details()`, the evaluators and the exporters, on the keys each comparison shares, and it can be a
 benchmark. Read `n_forecasts` as for any model: an ensemble with gaps has fewer forecasts than its members. `aggregate()` and `join()`
 keep `choices()`. The issue-time listing is not repeated for ensembles: `report.availability()` lists the members' inputs, and an
-ensemble uses what its members use. `verify()` and `explain()` take models, so point them at the members.
+ensemble uses what its members use. `report.vintages()` gives it its members' rows, so a comparison warns about mixed classes for it as for a model. `verify()` and `explain()` take models, so point them at the members.
 
 **A `top=1` ensemble is an exact clone of what it chose** (with `validation="previous_year"`, if one member wins every year). That is
 expected and works: see [exact clones](/epftoolbox2/model-pipeline/comparing-models/#exact-clones).
@@ -134,7 +134,7 @@ An ensemble may not be a member of a `top` ensemble, which raises: it would rank
 
 With `save_dir` an ensemble has its JSONL and its manifest next to its members', as a model has. The records have a model's keys, with
 empty `coefficients`. The manifest (`"kind": "ensemble"`) holds the members, `top`, `by`, the windows, the choice per segment with the
-validation scores, a hash of each member's manifest without its timestamps and provenance, and a hash of the numbers read from each
+validation scores, a hash of each member's manifest without its timestamps, provenance and vintage classes, and a hash of the numbers read from each
 member's records.
 
 **The file is recomputed from the members' results every time and written atomically, never resumed.** It costs nothing and can't go
@@ -164,7 +164,7 @@ the ensemble is built, added or loaded.
 When the results are read, `ManifestMismatchError`: members that disagree on the `actual` of a key or hold a key twice, or whose
 manifests differ on target, horizon, the list of horizons (`horizons=`), the weekdays issued on (`issue_days=`), frequency, time zone or data, or on the information set: a different issue time, issue zone or rules,
 or an information set against none. An average has one issue time, and a member issued later can read what the others can't. The order
-of the assumptions and a rule's `note` don't count, and neither do `unknown` and `availability`, which say what a run does about a column and
+of the assumptions and a rule's `note` and `vintage` class don't count, and neither do `unknown` and `availability`, which say what a run does about a column and
 not when it is known. All of this is read from the manifests of the leaf models, so nesting an average changes nothing. `report()` also refuses a model whose results file
 is an ensemble's, which would go stale as a model.
 
