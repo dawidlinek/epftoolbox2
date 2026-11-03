@@ -51,6 +51,7 @@ from ._calendar import (
     periods_per_day,
     refit_anchor,
     refit_anchors,
+    refit_lag,
     resolve_horizons,
     resolve_issue_days,
     training_span,
@@ -69,7 +70,7 @@ from ._worker import (
     training_rows,
 )
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days, zone_name
-from ..information_set import _STEP_MINUTES, InformationSetError, check_level, rule_dict
+from ..information_set import _STEP_MINUTES, InformationSetError, TrainingRows, check_level, rule_dict
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -615,10 +616,10 @@ class BaseModel(ABC):
                 "information_set to run()."
             )
         if issue_days is None:
-            rules.newest_targets(target, freq, data.index, [], horizon)
+            rules.newest_targets(target, freq, data.index, [], horizon, self.training_window)
             return None
         days = list(issue_days) if self.refit is None else refit_anchors(issue_days, self.refit)
-        return NewestTargets(days, rules.newest_targets(target, freq, data.index, days, horizon))
+        return NewestTargets(days, rules.newest_targets(target, freq, data.index, days, horizon, self.training_window))
 
     def _training_cut(self, rules: Optional["InformationSet"], target: str, freq: str) -> Dict[str, Any]:
         """What a manifest's `training_cut` says of this run: rows by date, with `refit` the rule and its epoch, and with
@@ -993,6 +994,7 @@ class BaseModel(ABC):
         # With `refit` the newest training target is checked on the anchors, where a unit's rows are cut.
         on_anchors = check_target and self.refit is not None
         check_target = check_target and self.refit is None
+        rows = self._training_rows(newest, self._days_of(test_start, test_end, windows))
         if information_set is not None and availability == "raise":
             information_set.check(
                 expanded,
@@ -1004,6 +1006,7 @@ class BaseModel(ABC):
                 model_name=self.name,
                 issue_days=days,
                 check_target=check_target,
+                training_rows=rows,
             )
             if on_anchors:
                 self._target_on_anchors(
@@ -1020,6 +1023,7 @@ class BaseModel(ABC):
                 model_name=self.name,
                 issue_days=days,
                 check_target=check_target,
+                training_rows=rows,
             )
             if on_anchors:
                 uses += self._target_on_anchors(
@@ -1037,6 +1041,7 @@ class BaseModel(ABC):
                     end,
                     model_name=self.name,
                     check_target=check_target,
+                    training_rows=rows,
                     **({} if listed is None else {"issue_days": listed}),
                 )
                 if on_anchors:
@@ -1106,11 +1111,22 @@ class BaseModel(ABC):
         on the anchors of the issue days (`issue_days`, else every day from `test_start` to `test_end`), since a unit's rows are
         cut as of the issue time on its anchor. Without days to read anchors from, on every day of the frame, as before."""
         boundary = {pair: [] for pair in expanded}
+        rows = TrainingRows(self.training_window)  # the targets of a unit's rows, back from its anchor
         if issue_days is None and (test_start is None or test_end is None):
-            return method(boundary, target, freq, index, test_start, test_end, model_name=self.name)
+            return method(boundary, target, freq, index, test_start, test_end, model_name=self.name, training_rows=rows)
         issued = issue_days if issue_days is not None else [day.isoformat() for day in _test_days(test_start, test_end)]
         anchors = [day.isoformat() for day in refit_anchors(issued, self.refit)]
-        return method(boundary, target, freq, index, model_name=self.name, issue_days=anchors)
+        return method(boundary, target, freq, index, model_name=self.name, issue_days=anchors, training_rows=rows)
+
+    def _training_rows(self, newest: Optional[NewestTargets], days: Optional[Sequence[Any]]) -> TrainingRows:
+        """The rows a fit of this model reads relative to its issue day (`TrainingRows`), for checking a column whose rule changes
+        over time on them too: the window, a newest target before D - 1 under `"published"`, and with `refit` how far its refit
+        day lies before an issue day (over `days`, or any block of the rule)."""
+        return TrainingRows(
+            self.training_window,
+            reach=(0 if newest is None else newest.reach) + refit_lag(days, self.refit),
+            to_issue=self.newest_target == "published",
+        )
 
     @staticmethod
     def _days_of(

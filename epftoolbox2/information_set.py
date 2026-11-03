@@ -71,6 +71,10 @@ _SLOT_MINUTES = {"h": 60, "s": 15}
 _DAY_AGGREGATE = re.compile(r"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:min|max|mean|last)$")
 
 
+# The note of a use that is late on a training row, not on the issue day's.
+_TRAINING_ROWS_HINT = (
+    "a training row holds a value known only then: under rules over time an older value can come later than a newer one"
+)
 _LATE_ADVICE = (
     "Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too strict for your data, "
     "override it with InformationSet(rules={...})."
@@ -413,6 +417,33 @@ def vintage_of(rule: Optional[Rule]) -> str:
         return UNKNOWN_VINTAGE
     classes = [one.vintage or UNKNOWN_VINTAGE for one in rule_elements(rule)]
     return ", ".join(dict.fromkeys(classes))
+
+
+def over_time(rule: Optional[Rule]) -> bool:
+    """Whether a column's rule changes over time: a `RuleChain`, or a rule with a validity period. Such a rule needn't make an
+    older value known before a newer one (a lag that shortens, a gap, a `valid_from`), so the check reads the training rows and
+    every slot of a day aggregate too; with any other rule a known value implies that every older one is."""
+    return isinstance(rule, RuleChain) or (rule is not None and rule.bounded)
+
+
+@dataclass(frozen=True)
+class TrainingRows:
+    """The rows a forecast's fit reads, relative to its issue day D, for checking a column whose rule changes over time
+    (`over_time`): at horizon h, rows dated from D - window - h - reach to D - 1 - h, or to D - 1 when the newest target is read
+    from the target's rule (`to_issue`, `newest_target="published"`). `reach` covers a newest target before D - 1 and how far a
+    refit day lies before its issue days. Their targets are dated from D - window - reach to D - 1."""
+
+    window: int
+    reach: int = 0
+    to_issue: bool = False
+
+    def predictor_days(self, horizon: int) -> range:
+        """The row days, relative to D, of the training rows at `horizon`."""
+        return range(-(self.window + horizon + self.reach), 0 if self.to_issue else -horizon)
+
+    def target_days(self) -> range:
+        """The days, relative to D, of the training targets before D - 1, the one the check reads anyway."""
+        return range(-(self.window + self.reach), -1)
 
 
 def is_revised(rule: Optional[Rule]) -> bool:
@@ -933,14 +964,24 @@ class InformationSet:
         model_name: str = "Model",
         issue_days: Optional[Sequence[str]] = None,
         check_target: bool = True,
+        training_rows: Optional[TrainingRows] = None,
     ) -> None:
         """Raise InformationSetError if a predictor (or the newest training target) is not known at issue time.
 
         `issue_days` checks these days instead of [test_start, test_end]: a run with validation forecasts no day between
         its windows. `check_target=False` leaves the training target out, for a model whose newest target is read from its
-        rule (`newest_target="published"`, see `newest_targets`): what it trains on is known by construction."""
+        rule (`newest_target="published"`, see `newest_targets`): what it trains on is known by construction. `training_rows`
+        are the rows the fits read, on which a column whose rule changes over time is checked too (see `violations`)."""
         violations, unknown = self.violations(
-            expanded, target, freq, index, test_start, test_end, issue_days, check_target=check_target
+            expanded,
+            target,
+            freq,
+            index,
+            test_start,
+            test_end,
+            issue_days,
+            check_target=check_target,
+            training_rows=training_rows,
         )
         self._report_unknown(unknown, model_name)
         if violations:
@@ -958,12 +999,21 @@ class InformationSet:
         model_name: str = "Model",
         issue_days: Optional[Sequence[str]] = None,
         check_target: bool = True,
+        training_rows: Optional[TrainingRows] = None,
     ) -> List[Violation]:
         """What `availability="warn"` lists: every use `check` refuses, and every use of a column without a rule, whatever
         `unknown` says, instead of an error. A column of a data source on an index in another zone still raises: neither
-        the check nor the listing could say anything true about it. `check_target` is as in `check`."""
+        the check nor the listing could say anything true about it. `check_target` and `training_rows` are as in `check`."""
         found, _ = self.violations(
-            expanded, target, freq, index, test_start, test_end, issue_days, check_target=check_target
+            expanded,
+            target,
+            freq,
+            index,
+            test_start,
+            test_end,
+            issue_days,
+            check_target=check_target,
+            training_rows=training_rows,
         )
         step = _STEP_MINUTES[freq]
         resolved: Dict[str, ResolvedColumn] = {}
@@ -1011,6 +1061,7 @@ class InformationSet:
         test_end: Optional[str] = None,
         issue_days: Optional[Sequence[str]] = None,
         check_target: bool = True,
+        training_rows: Optional[TrainingRows] = None,
     ) -> Tuple[List[Violation], set]:
         """All (predictor, period, horizon) uses of values not known at issue time, and unknown base columns.
 
@@ -1021,6 +1072,11 @@ class InformationSet:
 
         `check_target=False` has no use of the training target, for a model with `newest_target="published"`: its newest
         target is the newest its rule calls known (`newest_targets`), so it is known by construction.
+
+        A known value of the issue day's row says that every older one is known, unless the column's rule changes over time
+        (`over_time`): a lag that shortens, a gap or a `valid_from` can leave an older value unknown. Given `training_rows`, such a
+        column is also checked on every row the fits read at each horizon, and the training target on every target they read,
+        as `leakage_probe` perturbs them; any other column is checked as before.
         """
         step = _STEP_MINUTES[freq]
         resolved: Dict[str, ResolvedColumn] = {}
@@ -1028,9 +1084,11 @@ class InformationSet:
         # The newest training target is the value delivered on D-1 in the same period.
         uses = {ROLE_PREDICTOR: 0, ROLE_TARGET: -1}  # role -> the row's day relative to D
         periods: Dict[Tuple[str, str], set] = {}  # the periods reading each (name, role); the horizon doesn't matter
-        for (period, _), predictors in expanded.items():
+        by_horizon: Dict[Tuple[str, int], set] = {}  # the periods reading each (name, horizon), for the training rows
+        for (period, hz), predictors in expanded.items():
             for name in predictors:
                 periods.setdefault((name, ROLE_PREDICTOR), set()).add(period)
+                by_horizon.setdefault((name, hz), set()).add(period)
             if check_target:
                 periods.setdefault((target, ROLE_TARGET), set()).add(period)
         targets = [(target, ROLE_TARGET)] if check_target else []
@@ -1048,25 +1106,59 @@ class InformationSet:
         clock = self._issue_clock(days, index, freq)
 
         late: Dict[Tuple[str, str, int], _LatePeriod] = {}  # (name, role, period) -> its worst day
+        # (name, period, horizon) -> its worst day, of a predictor whose rule changes over time: its training rows depend on h.
+        late_at: Dict[Tuple[str, int, int], _LatePeriod] = {}
         for (name, role), rows in periods.items():
             col = resolved[name]
             if col.rule is None:
                 continue
             rows = np.array(sorted(rows))
             avail = clock.available(col, rows, step, uses[role])
-            for found in self._late_periods(col, rows, avail, clock, step, uses[role]):
+            own = None
+            if training_rows is not None and over_time(col.rule):
+                known = _RowsKnown(col, rows, clock, step)
+                if role == ROLE_PREDICTOR:
+                    for (other, hz), at in by_horizon.items():
+                        if other != name:
+                            continue
+                        at = np.array(sorted(at))
+                        where = np.searchsorted(rows, at)
+                        own = avail[where]
+                        trained = known.latest(training_rows.predictor_days(hz))[where]
+                        for found in self._late_periods(col, at, np.maximum(own, trained), clock, step, own=own):
+                            late_at[(name, found.period, hz)] = found
+                    continue
+                own = avail
+                avail = np.maximum(avail, known.latest(training_rows.target_days()))
+            for found in self._late_periods(col, rows, avail, clock, step, uses[role], own=own):
                 late[(name, role, found.period)] = found
 
         out: List[Violation] = []
         for (period, hz), predictors in sorted(expanded.items()):
             for name, role in [(p, ROLE_PREDICTOR) for p in predictors] + targets:
-                if (name, role, period) in late:
+                found = late_at.get((name, period, hz)) if role == ROLE_PREDICTOR else None
+                found = found or late.get((name, role, period))
+                if found is not None:
                     col = resolved[name]
-                    out.append(late[(name, role, period)].use(name, hz, col, role, self._weather_cutoff_hint(col)))
+                    out.append(found.use(name, hz, col, role, self._weather_cutoff_hint(col)))
         return out, unknown
 
+    @staticmethod
+    def _latest_of_rows(
+        col: ResolvedColumn, rows: np.ndarray, clock: "_IssueClock", step: int, row_days: Iterable[int]
+    ) -> np.ndarray:
+        """The latest instant a value of `col` on the rows of these periods dated D + each of `row_days` is known, for every
+        [period, issue day D]; -inf without a row day."""
+        return _RowsKnown(col, rows, clock, step).latest(row_days)
+
     def newest_targets(
-        self, target: str, freq: str, index: pd.DatetimeIndex, days: Sequence[Any], horizon: int
+        self,
+        target: str,
+        freq: str,
+        index: pd.DatetimeIndex,
+        days: Sequence[Any],
+        horizon: int,
+        training_window: Optional[int] = None,
     ) -> np.ndarray:
         """The newest training target of each forecast of a model with `newest_target="published"`, as `[period, issue day]`:
         the largest k such that the target at (D + k, period) and every older one down to (D - 31, period) are known by the
@@ -1081,6 +1173,9 @@ class InformationSet:
 
         `days` are the issue days, in order. Raises InformationSetError if the target has no rule, whatever `unknown` says
         (it decides numbers, which no setting may leave to chance), or if its value of D-31 isn't known on some issue day.
+
+        A known D-31 says every older target is known, unless the rule changes over time (`over_time`). Then, given the
+        `training_window` W, every target the window holds, back to D + k - W + 1, must be known too, or this raises.
         """
         step = _STEP_MINUTES[freq]
         col = self._resolve_for(target, step)
@@ -1103,11 +1198,12 @@ class InformationSet:
             _row_anchor(index, freq) if len(days) else None,
             tuple(days.asi8.tolist()),
             int(horizon),
+            training_window,
         )
         with _NEWEST_TABLES_LOCK:
             found = _NEWEST_TABLES.get(key)
         if found is None:
-            found = self._newest_targets(col, target, freq, index, days, int(horizon))
+            found = self._newest_targets(col, target, freq, index, days, int(horizon), training_window)
             found.setflags(write=False)
             with _NEWEST_TABLES_LOCK:
                 _NEWEST_TABLES[key] = found
@@ -1116,7 +1212,14 @@ class InformationSet:
         return found
 
     def _newest_targets(
-        self, col: ResolvedColumn, target: str, freq: str, index: pd.DatetimeIndex, days: pd.DatetimeIndex, horizon: int
+        self,
+        col: ResolvedColumn,
+        target: str,
+        freq: str,
+        index: pd.DatetimeIndex,
+        days: pd.DatetimeIndex,
+        horizon: int,
+        training_window: Optional[int] = None,
     ) -> np.ndarray:
         step = _STEP_MINUTES[freq]
         periods = np.arange(_periods_per_day(freq))
@@ -1140,6 +1243,20 @@ class InformationSet:
             open_cells &= known
             if not open_cells.any():
                 break
+        if training_window is not None and over_time(col.rule):
+            # The window's oldest target is D + k - W + 1. Under rules over time a known D-31 says nothing of those before it.
+            for k in range(int(newest.min()) - training_window + 1, NEWEST_TARGET_FROM):
+                unknown = (newest - training_window + 1 <= k) & (
+                    clock.available(col, periods, step, row_day=k) > clock.issue
+                )
+                if unknown.any():
+                    period, day = (int(i[0]) for i in np.nonzero(unknown))
+                    raise InformationSetError(
+                        f"newest_target='published' trains on the targets of a window of {training_window} days, and by its "
+                        f"rules over time ('{col.rule.describe()}') the training target '{target}' of {-k} days before the "
+                        f"issue day isn't known at the issue time, e.g. period {period} for the issue day {days[day].date()}. "
+                        "Shorten the training_window, or start the test later."
+                    )
         return newest
 
     def _issue_clock(
@@ -1163,11 +1280,13 @@ class InformationSet:
         step: int,
         row_day: int = 0,
         used: Optional[np.ndarray] = None,
+        own: Optional[np.ndarray] = None,
     ) -> List["_LatePeriod"]:
         """Each period with a value known after the issue time, on the issue day it is latest; its times are minutes since
         midnight of that day, as a context for it alone would give them. `avail` is `clock.available(col, rows, step,
         row_day)`. `used` limits the search to the cells [period, issue day] a forecast actually reads, for lists that
-        hold on some days only."""
+        hold on some days only. `own`, for a column whose rule changes over time, is the checked row's alone, `avail` then
+        holding the training rows' latest too: where those come later the use says so."""
         excess = avail - clock.issue
         if used is not None:
             excess = np.where(used, excess, -np.inf)
@@ -1178,6 +1297,8 @@ class InformationSet:
         for r, period, i in late:
             day_ctx = clock.context_of(i)
             hint = next((text for known_by, text in hints if known_by[r, i]), "")
+            if own is not None and avail[r, i] > own[r, i]:
+                hint = _TRAINING_ROWS_HINT
             known = clock.minute_of_day(avail[r, i], i)
             issue = day_ctx.issue_minute
             out.append(
@@ -1413,6 +1534,27 @@ class _IssueClock:
     def label(self, minutes: float, i: int) -> str:
         """Minutes since the first issue day's midnight as they read on issue day `i`, as `D+1 01:00`."""
         return _fmt_instant(self.minute_of_day(minutes, i), self.context_of(i))
+
+
+class _RowsKnown:
+    """When the values of a column on the rows of some periods are known, by the row's day relative to each issue day D, each
+    day read once however many windows ask for it (a check reads one window per horizon)."""
+
+    def __init__(self, col: ResolvedColumn, rows: np.ndarray, clock: "_IssueClock", step: int):
+        self._args = (col, rows, step)
+        self._clock = clock
+        self._by_day: Dict[int, np.ndarray] = {}
+
+    def latest(self, row_days: Iterable[int]) -> np.ndarray:
+        """The latest instant over these row days, for every [period, issue day]; -inf without a row day."""
+        col, rows, step = self._args
+        latest = np.full((len(rows), len(self._clock.days)), -np.inf)
+        for row_day in row_days:
+            known = self._by_day.get(row_day)
+            if known is None:
+                known = self._by_day[row_day] = self._clock.available(col, rows, step, row_day)
+            np.maximum(latest, known, out=latest)
+        return latest
 
 
 class _LatePeriod(NamedTuple):

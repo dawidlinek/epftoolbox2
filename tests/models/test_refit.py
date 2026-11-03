@@ -777,11 +777,13 @@ def test_the_training_target_is_checked_on_the_anchors(market, monkeypatch, pred
     calls = []
     original = InformationSet.violations
 
-    def spy(self, expanded, target, freq, index, test_start=None, test_end=None, issue_days=None, check_target=True):
+    def spy(
+        self, expanded, target, freq, index, test_start=None, test_end=None, issue_days=None, check_target=True, **more
+    ):
         names = {name for names in expanded.values() for name in names}
         calls.append((tuple(issue_days or ()), check_target, bool(names)))
         return original(
-            self, expanded, target, freq, index, test_start, test_end, issue_days, check_target=check_target
+            self, expanded, target, freq, index, test_start, test_end, issue_days, check_target=check_target, **more
         )
 
     monkeypatch.setattr(InformationSet, "violations", spy)

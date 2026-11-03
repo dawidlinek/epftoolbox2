@@ -48,12 +48,15 @@ from ..information_set import (
     InformationSet,
     InformationSetError,
     ResolvedColumn,
+    TrainingRows,
     Violation,
+    _RowsKnown,
+    over_time,
     rule_dict,
 )
 from ..results.availability import listing_rows, sort_rows
 from ..results.windows import mask_key
-from ._calendar import IssueCalendar, periods_per_day, refit_anchor, refit_anchors
+from ._calendar import IssueCalendar, periods_per_day, refit_anchor, refit_anchors, refit_lag
 from ._contract import period_index, wall_clock
 from ._worker import NOT_PLANNED, OTHER_LIST
 
@@ -556,6 +559,8 @@ class PredictorPlan:
             function is called for these alone, and `assignment` has no other.
         refit: The model's `refit`. With one, a forecast's rows are cut on its anchor, so the training target is checked on
             the anchors, and the training days of a matching list reach back from the anchor.
+        fit_window: The model's `training_window`, if known: a column whose rule changes over time (`over_time`) is checked
+            on every row the fits read (`training_rows`), not only on the issue day's.
     """
 
     function: Any
@@ -585,6 +590,11 @@ class PredictorPlan:
     _planned: Optional[Dict[Tuple[int, int], np.ndarray]] = field(default=None, repr=False)
     horizons: Tuple[int, ...] = ()
     refit: Optional[str] = None
+    fit_window: Optional[int] = None
+    # (name, horizon) -> when each [period, issue day] cell the fits read is known, for a column whose rule changes over time,
+    # and name -> what each row day of it is known at.
+    _trained: Dict[Tuple[str, int], np.ndarray] = field(default_factory=dict, repr=False)
+    _rows_known: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
         self._positions = {day.isoformat(): position for position, day in enumerate(self.issue_days)}
@@ -713,6 +723,8 @@ class PredictorPlan:
             self.data.index,
             issue_days=[day.isoformat() for day in scanned],
             check_target=self.newest_target == "d-1",
+            # The target's training rows, back from the anchors with `refit`.
+            training_rows=None if self.fit_window is None else TrainingRows(self.fit_window, self.reach),
         )
         late_names: List[str] = []
         no_rule: List[str] = []
@@ -722,9 +734,46 @@ class PredictorPlan:
             if col.rule is None:
                 no_rule.append(name)
                 unknown.add(col.series)
-            elif (cells.available(name) > cells._clock.issue).any():
+            elif any(
+                (self._known_for(cells, name, h)[0] > cells._clock.issue).any() for h in self._horizons_of(cells, name)
+            ):
                 late_names.append(name)
         return cells, target_violations, unknown, late_names, no_rule
+
+    def _training_rows(self) -> Optional[TrainingRows]:
+        """The rows the fits of the forecasts read, relative to each issue day (`TrainingRows`), if the window is known."""
+        if self.fit_window is None:
+            return None
+        return TrainingRows(
+            self.fit_window,
+            reach=self.reach + refit_lag(self.issue_days, self.refit),
+            to_issue=self.newest_target == "published",
+        )
+
+    def _horizons_of(self, cells: "_Cells", name: str) -> List[int]:
+        """The horizons whose lists use `name`, of a column whose rule changes over time; one, any, for another column."""
+        if self.fit_window is None or not over_time(cells.column(name).rule):
+            return [self.horizons[0]]
+        lists = {list_id for list_id, names in enumerate(self.lists) if name in names}
+        return sorted({h for (_, h), ids in self.assignment.items() if lists & set(np.unique(ids).tolist())})
+
+    def _known_for(self, cells: "_Cells", name: str, horizon: int) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """When each [period, issue day] cell of `name` a forecast at `horizon` reads is known: its issue day's row, and for a
+        column whose rule changes over time every training row too (see `InformationSet.violations`), with the issue row's
+        alone as the second item. A predictor function's `ctx` reads its own cell only (`_Cells.available`)."""
+        avail = cells.available(name)
+        rows = self._training_rows()
+        if rows is None or not over_time(cells.column(name).rule):
+            return avail, None
+        trained = self._trained.get((name, horizon))
+        if trained is None:
+            known = self._rows_known.get(name)
+            if known is None:
+                known = self._rows_known[name] = _RowsKnown(
+                    cells.column(name), cells._periods, cells._clock, cells._step
+                )
+            trained = self._trained[(name, horizon)] = np.maximum(avail, known.latest(rows.predictor_days(horizon)))
+        return trained, avail
 
     def check(self, target: str, model_name: str) -> None:
         """Raise `InformationSetError` if a forecast reads a value not known at its issue time, or if the newest training
@@ -892,7 +941,7 @@ class PredictorPlan:
         out: Dict[int, List[Violation]] = {}
         lists = [set(names) for names in self.lists]
         for name in late_names:
-            col, avail = cells.column(name), cells.available(name)
+            col = cells.column(name)
             for list_id in (list_id for list_id, names in enumerate(lists) if name in names):
                 for (period, horizon), ids in self.assignment.items():
                     used = (ids == list_id) & self.planned()[(period, horizon)]
@@ -900,8 +949,17 @@ class PredictorPlan:
                         used = used & days
                     if not used.any():
                         continue
+                    avail, own = self._known_for(cells, name, horizon)
                     row = np.array([period])
-                    late = info._late_periods(col, row, avail[row], cells._clock, step, used=used[np.newaxis])
+                    late = info._late_periods(
+                        col,
+                        row,
+                        avail[row],
+                        cells._clock,
+                        step,
+                        used=used[np.newaxis],
+                        own=None if own is None else own[row],
+                    )
                     for found in late:
                         use = found.use(name, horizon, col, hint=info._weather_cutoff_hint(col))
                         out.setdefault(list_id, []).append(use)
@@ -988,6 +1046,7 @@ def build_plan(
         reach=reach,
         horizons=() if horizons is None else tuple(horizons),
         refit=refit,
+        fit_window=training_window,
     )
     horizons = plan.horizons
     periods = range(cells.periods)

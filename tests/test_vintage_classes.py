@@ -584,3 +584,112 @@ def test_chains_classes_and_periods_survive_a_round_trip(tmp_path):
     by_hand = text.replace("'2026-10-07'", "2026-10-07")
     path.write_text(by_hand)
     assert ModelPipeline.load(path).information_set.rules["sk"] == loaded.information_set.rules["sk"]
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Older values under rules over time: the training rows, the slots of a day, and the newest target's window
+# ---------------------------------------------------------------------------------------------------------------------------
+
+
+def pl_rows():
+    """Hourly Warsaw rows from July to October 2026: a settlement series `sk` and what reads it, a target `fs`, `x` and `s`."""
+    index = pd.date_range("2026-07-01", "2026-10-25 23:00", freq="1h", tz=PL)
+    rng = np.random.default_rng(0)
+    columns = ["sk", "sk_d-2", "fs", "x_d-1", "price"]
+    data = pd.DataFrame({name: rng.normal(size=len(index)) for name in columns}, index=index)
+    data["sk_d-2"] = 0.5 * data["sk_d-2"] + data["price"]  # a predictor the fit leans on, so the probe sees it
+    data["x_d-1"] = 0.5 * data["x_d-1"] + data["price"]
+    return data.assign(s=1.0)
+
+
+SHORTENING = {
+    "fs": [
+        Availability.published("18:00", -2, PL).during(valid_until="2026-10-07"),
+        Availability.published("18:00", 0, PL).during(valid_from="2026-10-08"),
+    ]
+}
+
+
+def run_at_raise(predictors, rules, day, target="price", window=60, **model):
+    info = InformationSet(
+        "11:45", PL, rules={"price": Availability.published("13:00", 1, PL), "s": Availability.static(), **rules}
+    )
+    OLSModel(predictors, training_window=window, **model).run(
+        pl_rows(), test_start=day, test_end=day, horizon=1, target=target, information_set=info
+    )
+    return info
+
+
+def sk_d2(ctx):
+    return ["sk_d-2"]
+
+
+@pytest.mark.parametrize("predictors", [["sk_d-2"], sk_d2], ids=["fixed", "function"])
+def test_a_training_row_a_shortening_lag_leaves_unknown_is_refused_as_the_probe_finds(predictors):
+    """`sk_d-2` of issue day 10 October is the value of the 8th, out on the 9th; the row dated the 8th, which a forecast at h=1
+    trains on, holds the 6th's, out only at 14:30 on the 10th. The issue day's row is known and the training row isn't: refused,
+    and the probe moves every forecast. From 12 October every row is known: it runs, and the probe moves nothing."""
+    for day_ in ("2026-10-10", "2026-10-11"):
+        with pytest.raises(InformationSetError, match="a training row holds a value known only then"):
+            run_at_raise(predictors, {"sk": PL_CHAIN}, day_)
+    info = run_at_raise(predictors, {"sk": PL_CHAIN}, "2026-10-12")
+    model = lambda: OLSModel(["sk_d-2"], training_window=60)  # noqa: E731
+    late = information_set_module.leakage_probe(model, pl_rows(), "2026-10-10", info, horizon=1, columns=["sk_d-2"])
+    assert len(late.changed) == 24
+    clean = information_set_module.leakage_probe(model, pl_rows(), "2026-10-12", info, horizon=1, columns=["sk_d-2"])
+    assert clean.ok
+
+
+def test_a_training_target_a_shortening_lag_leaves_unknown_is_refused():
+    """`fs` was out two days after delivery up to 7 October and on the day from the 8th. On issue day 9 October the target of D-1
+    (the 8th) is out, and that of D-2 (the 7th), which trains at h=1, comes only on the 9th at 18:00."""
+    with pytest.raises(InformationSetError, match="training target fs"):
+        run_at_raise(["s"], SHORTENING, "2026-10-09", target="fs")
+    run_at_raise(["s"], SHORTENING, "2026-10-12", target="fs")
+
+
+def test_a_window_reaching_before_valid_from_is_refused_and_one_after_it_runs():
+    rules = {"x": Availability.realised("1h").during(valid_from="2026-09-01")}
+    with pytest.raises(InformationSetError, match="x_d-1 for period 0 is known never"):
+        run_at_raise(["x_d-1"], rules, "2026-10-10", window=60)
+    info = run_at_raise(["x_d-1"], rules, "2026-10-10", window=30)
+    model = lambda window: lambda: OLSModel(["x_d-1"], training_window=window)  # noqa: E731
+    found = information_set_module.leakage_probe(model(60), pl_rows(), "2026-10-10", info, horizon=1, columns=["x_d-1"])
+    assert len(found.changed) == 24
+    assert information_set_module.leakage_probe(
+        model(30), pl_rows(), "2026-10-10", info, horizon=1, columns=["x_d-1"]
+    ).ok
+
+
+def test_the_newest_target_s_window_must_be_known_back_to_its_oldest_target():
+    """A published model's window holds targets back to D + k - W + 1. Under rules over time a known D-31 says nothing of
+    those, so a window reaching before `valid_from` raises at every level, and a shorter one runs. At 11:45 the hour 10:00 of D
+    is known only at 12:00, so period 10's newest target is D-1 and a window of 70 reaches D-70, while `valid_from` is D-56."""
+    rules = {"fs": Availability.realised("1h").during(valid_from="2026-08-15")}
+    for level in ("raise", "none"):
+        info = InformationSet("11:45", PL, rules={**rules, "s": Availability.static()})
+        with pytest.raises(InformationSetError, match="training target 'fs' of 70 days before"):
+            OLSModel(["s"], training_window=70, newest_target="published").run(
+                pl_rows(),
+                test_start="2026-10-10",
+                test_end="2026-10-10",
+                horizon=1,
+                target="fs",
+                information_set=info,
+                availability=level,
+            )
+    run_at_raise(["s"], rules, "2026-10-10", target="fs", window=40, newest_target="published")
+
+
+def test_a_rule_that_doesn_t_change_over_time_reads_no_training_row(monkeypatch):
+    """Only a column whose rule changes over time is read on its training rows: nothing else is slower or moves."""
+
+    def never(*args, **kwargs):
+        raise AssertionError("a training row was read")
+
+    monkeypatch.setattr(information_set_module._RowsKnown, "latest", never)
+    rules = {"sk": Availability.published("14:30", -1, PL), "x": Availability.realised("1h"), **SHORTENING}
+    run_at_raise(["sk_d-2", "x_d-1"], {k: v for k, v in rules.items() if k != "fs"}, "2026-10-12")
+    run_at_raise(sk_d2, {"sk": rules["sk"]}, "2026-10-12")
+
+
