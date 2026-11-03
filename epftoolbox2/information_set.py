@@ -2324,6 +2324,18 @@ def _available_array(
         # the shifts after the aggregate reach. Each rule's availability never decreases with the slot's time, so no
         # earlier slot is known later; a repeated last slot is its second occurrence.
         reached = _shifted_day(col.shifts, day, minute, first, ctx)
+        if col.slot is None and over_time(rule):
+            # Under rules over time an earlier slot can be known after the last (a lag that shortens, a gap, a day of one zone
+            # that reaches two of another's): the aggregate is known when every slot of its day is.
+            latest = np.full(len(reached), -np.inf)
+            second = np.zeros(len(reached), dtype=bool)
+            for slot in np.arange(0.0, 1440.0, step):
+                read = np.full(len(reached), slot)
+                latest = np.maximum(
+                    latest,
+                    _available_array(col.built_from, rule, reached, read, step, ctx, second, issue_day + reached - day),
+                )
+            return latest
         slot, length = col.slot or (1440.0 - step, step)
         slots = np.full(len(reached), float(slot))
         occurrence = np.full(len(reached), col.slot is not None)
@@ -2333,10 +2345,46 @@ def _available_array(
     rules = rule_elements(rule)
     if len(rules) == 1 and not rules[0].bounded:
         return _rule_available(col, rules[0], day, minute, step, ctx, first, issue_day, daily)
+    out = _over_time_available(col, rules, day, minute, step, ctx, first, issue_day, daily)
+    if daily and all(shift.unit == "d" for shift in col.shifts) and any(one.kind in _WHOLE_DATE for one in rules):
+        # A plain published or weekly value of a daily row is the whole date's, read at its last slot. Under rules over time
+        # an earlier slot can be known later (the date reaching two delivery days of the rule's zone, one under a slower rule):
+        # it is known when every slot is.
+        for slot in np.arange(0.0, 1440.0, step):
+            read = np.full(len(day), slot)
+            out = np.maximum(
+                out, _over_time_available(col, rules, day, minute, step, ctx, first, issue_day, daily, read)
+            )
+    return out
+
+
+# The kinds whose value on a daily row is the whole date's, delivered in every slot of it.
+_WHOLE_DATE = ("published", "weekly")
+
+
+def _over_time_available(
+    col: ResolvedColumn,
+    rules: Sequence[Availability],
+    day: np.ndarray,
+    minute: np.ndarray,
+    step: int,
+    ctx: _Context,
+    first: np.ndarray,
+    issue_day: Union[int, np.ndarray],
+    daily: bool,
+    slot: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """`_available_array` of a plain column under rules with validity periods: each holds for the values whose day is in its
+    period, and a value none holds for is never known (`inf`). `slot` (wall-clock minutes) reads a published or weekly rule's
+    value there, as an hourly slot at its second occurrence, for one slot of a daily row; the other kinds read the row as it is."""
     out = np.full(len(day), np.inf)  # what no rule holds for is never known
     held = np.zeros(len(day), dtype=bool)
     for one in rules:
-        known, on = _rule_available(col, one, day, minute, step, ctx, first, issue_day, daily, with_day=True)
+        if slot is not None and one.kind in _WHOLE_DATE:
+            read = (slot, np.zeros(len(day), dtype=bool), False)
+        else:
+            read = (minute, first, daily)
+        known, on = _rule_available(col, one, day, read[0], step, ctx, read[1], issue_day, read[2], with_day=True)
         inside = one._holds_on(on, ctx.day)
         # Periods are disjoint dates, but two rules in zones a day apart could both claim a value: the later time counts.
         out = np.where(inside, np.where(held, np.maximum(out, known), known), out)

@@ -693,3 +693,39 @@ def test_a_rule_that_doesn_t_change_over_time_reads_no_training_row(monkeypatch)
     run_at_raise(sk_d2, {"sk": rules["sk"]}, "2026-10-12")
 
 
+def verdict(names, index, day, freq="1h", rules=None):
+    info = InformationSet("11:45", PL, rules=rules or {"sk": PL_CHAIN, "price": Availability.published("13:00", 1, PL)})
+    periods = [0] if freq == "1D" else range(24)
+    found, _ = info.violations({(p, 1): names for p in periods}, "price", freq, index, day, day)
+    return {name: ("late" if any(v.predictor == name for v in found) else "known") for name in names}
+
+
+def test_a_day_aggregate_is_known_when_every_slot_of_its_day_is():
+    """`sk_h-12_day_max_d-3` on 11 October is the maximum of sk from 12:00 on the 7th to 11:00 on the 8th: the 7th's values come
+    on the 11th at 14:30, the 8th's on the 9th. The last slot is known, the first isn't. On a UTC index a UTC date holds the last
+    two hours of the next Warsaw date: `sk_day_max_d-3` of 10 October (UTC 7 October) has 22 slots out only on the 11th."""
+    warsaw = pd.date_range("2026-08-01", "2026-10-25 23:00", freq="1h", tz=PL)
+    assert verdict(["sk_h-12_day_max_d-3", "sk_h-12_d-3"], warsaw, "2026-10-11") == dict.fromkeys(
+        ["sk_h-12_day_max_d-3", "sk_h-12_d-3"], "late"
+    )
+    assert verdict(["sk_h-12_day_max_d-3"], warsaw, "2026-10-12") == {"sk_h-12_day_max_d-3": "known"}
+    utc = pd.date_range("2026-08-01", "2026-10-25 23:00", freq="1h", tz="UTC")
+    assert verdict(["sk_day_max_d-3"], utc, "2026-10-10") == {"sk_day_max_d-3": "late"}
+    single = {"sk": Availability.published("14:30", -1, PL), "price": Availability.published("13:00", 1, PL)}
+    assert verdict(["sk_day_max_d-3"], utc, "2026-10-10", rules=single) == {"sk_day_max_d-3": "known"}  # as before
+    # The probe perturbs what the check calls late: every aggregate cell of 10 October's rows.
+    sk = pd.Series(np.arange(len(utc), dtype=float), index=utc)
+    data = pd.DataFrame({"sk": sk, "sk_day_max": sk.groupby(utc.date).transform("max")}, index=utc)
+    data["sk_day_max_d-3"] = data["sk_day_max"].shift(72)
+    info = InformationSet("11:45", PL, rules={"sk": PL_CHAIN})
+    out, _, _ = information_set_module.perturb_unknown(data, "2026-10-10", info, columns=["sk_day_max_d-3"])
+    rows = utc.normalize() == pd.Timestamp("2026-10-10", tz="UTC")
+    assert int((out["sk_day_max_d-3"] != data["sk_day_max_d-3"])[rows].sum()) == 24
+
+
+def test_a_daily_row_of_another_zone_is_known_when_every_slot_of_its_date_is():
+    """A Helsinki date runs from 23:00 Warsaw time on the day before: `sk_d-2` of 10 October holds the Helsinki 8 October, whose
+    first hour is Warsaw's 7 October, out on the 11th. On the 11th, the Helsinki 9 October is all out."""
+    helsinki = pd.date_range("2026-08-01 12:00", "2026-10-25 12:00", freq="1D", tz="Europe/Helsinki")
+    assert verdict(["sk_d-2"], helsinki, "2026-10-10", "1D") == {"sk_d-2": "late"}
+    assert verdict(["sk_d-2"], helsinki, "2026-10-11", "1D") == {"sk_d-2": "known"}
