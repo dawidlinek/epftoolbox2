@@ -215,18 +215,20 @@ keeps it (on three sampled Fridays 3 of 21 forecasts of the minimum moved and 7 
 ## Reproducing the study
 
 The library's test suite refits one Friday of the study for Poland (2024-10-25, a week with the autumn switch) from its own daily frame
-restamped at noon: the Lasso and the expert land within 0.0005 MW of the stored forecasts, which keep three decimals, and the TSO's
-forecast and the actual are the stored ones. It then reports the stored forecasts of all 104 Fridays: the Lasso beats the TSO by a
-log-gain of 23.6 % on the daily minimum and 20.3 % on the maximum (100 ln of the TSO's MAE over the Lasso's, on 728 forecasts each),
-and the DM statistic of each horizon is the study's own, with 4 lags.
+restamped at noon: the test allows the Lasso and the expert 0.01 MW from the stored forecasts (room for another scikit-learn), and
+0.0005 MW was measured, the rounding of the stored files' three decimals; the TSO's forecast and the actual are the stored ones. It then reports the stored forecasts of all 104 Fridays: the Lasso beats the TSO by a
+log-gain of 23.6 % on the daily minimum and 20.3 % on the maximum (100 ln of the TSO's MAE over the Lasso's, pooled over the seven
+horizons, 728 forecasts each), and the DM statistic of each horizon is the study's own, with 4 lags.
 
 Outside the test suite the Friday form above refitted all 1,456 Lasso and expert forecasts of Poland, then the 20 markets' 29,120 of each:
 every one within 0.0005 MW of the stored forecast, the TSO's forecasts and the actuals equal to them. The Lasso beats the TSO in all
-40 market-statistics, with a mean log-gain of +37.44 %, the stored forecasts' to within 0.0001. With today's defaults in place of
+40 market-statistics. The mean log-gain, 100 ln of the TSO's MAE over the Lasso's, depends on what a cell is: pooled over the seven
+horizons of each market and statistic (40 cells of 728 forecasts) it is +37.44 %, and per horizon (280 cells of 104 forecasts, the
+formula of the study's tuning script) +37.38 %, each the stored forecasts' to within 0.0001. With today's defaults in place of
 `S02` and `fit_intercept=True`, Poland's Lasso lands a median of 42 MW (minimum) and 49 MW (maximum) from the study's forecasts, with
 an MAE of 377.3 MW against 367.1, and the expert's MAE is 437.65 MW against 417.24.
 
 <Aside>
-  The study's own README says +36.5 %; its stored forecasts give +37.44 %. Which forecasts the published figure was computed from is
-  still to be tied to its source files.
+  The study's own README says +36.5 %, which neither definition gives on its stored forecasts (+37.44 % and +37.38 %). Which forecasts or
+  formula the published figure comes from is still to be tied to its source files.
 </Aside>

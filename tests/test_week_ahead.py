@@ -6,7 +6,7 @@ the local copy of the study, outside CI. The Friday form of the docs page Week-a
 regional NWP Lasso and the expert OLS within 0.01 MW of the stored forecasts (room for another scikit-learn, the CSV keeps three
 decimals), the TSO's forecast and the actual to the CSV's rounding. That needs the study's settings, which aren't today's
 defaults: with them the forecasts land tens of MW away. The stored forecasts of all 104 Fridays then go through a report: MAE per
-statistic and horizon, the study's log-gain over the TSO, and the DM statistic per horizon by the study's own formula with 4 lags,
+statistic and horizon, the log-gain over the TSO pooled over the horizons, and the DM statistic per horizon by the study's own formula with 4 lags,
 on 104 days.
 
 All 1,456 fits of Poland and the 20 markets are refitted outside CI (`epftoolbox2-research/library_check_step3/week_ahead/`).
@@ -47,7 +47,8 @@ RULES = {
 }
 S02 = dict(cv=7, max_iter=100_000, fit_intercept=False, scaler={"name": "standard", "params": {"scale_binary": True}})
 STORED = {"TSO": "tso_prediction", "lasso": "regional_nwp_prediction", "expert": "expert_prediction"}
-# 100 ln(MAE of the TSO / MAE of the Lasso) over the 728 forecasts of a statistic: the study's log-gain for Poland.
+# 100 ln(MAE of the TSO / MAE of the Lasso) over the 728 forecasts of a statistic, pooled over the horizons (the study's tuning
+# script, `tune.py:objective_value`, averages it per horizon instead).
 LOG_GAIN = {"min": 23.573, "max": 20.317}
 
 
