@@ -9,6 +9,7 @@ without the metadata compared bit for bit.
 
 import dataclasses
 import datetime
+import json
 from concurrent.futures import Future
 
 import numpy as np
@@ -659,6 +660,25 @@ def test_a_window_reaching_before_valid_from_is_refused_and_one_after_it_runs():
     assert information_set_module.leakage_probe(
         model(30), pl_rows(), "2026-10-10", info, horizon=1, columns=["x_d-1"]
     ).ok
+
+
+def test_the_listing_says_a_value_is_late_on_a_training_row_and_never_known_is_null_in_the_manifest(tmp_path):
+    rules = {
+        "price": Availability.published("13:00", 1, PL),
+        "x": Availability.realised("1h").during(valid_from="2026-09-01"),
+    }
+    pipeline = ModelPipeline(information_set=InformationSet("11:45", PL, rules={**rules, "sk": PL_CHAIN}))
+    pipeline.add_model(OLSModel(["sk_d-2", "x_d-1"], training_window=60, name="m"))
+    listed = pipeline.run(
+        pl_rows(), test=("2026-10-10", "2026-10-10"), horizon=1, save_dir=str(tmp_path)
+    ).availability()
+    assert set(listed["predictor"]) == {"sk_d-2", "x_d-1"}
+    assert set(listed["note"]) == {information_set_module._TRAINING_ROWS_HINT}
+    assert set(listed.loc[listed["predictor"] == "x_d-1", "known"]) == {NEVER}
+    text = (tmp_path / "m.manifest.json").read_text()
+    assert "Infinity" not in text
+    stored = [row for row in json.loads(text)["availability"]["listing"] if row["predictor"] == "x_d-1"]
+    assert stored and all(row["minutes_late"] is None and row["known"] == NEVER for row in stored)
 
 
 def test_the_newest_target_s_window_must_be_known_back_to_its_oldest_target():

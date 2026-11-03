@@ -17,7 +17,16 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import pandas as pd
 
-from ..information_set import ROLE_PREDICTOR, ROLE_PUBLISHED, ROLE_TARGET, ROLE_VALUE, Violation, _fmt_minute, _ranges
+from ..information_set import (
+    NEVER,
+    ROLE_PREDICTOR,
+    ROLE_PUBLISHED,
+    ROLE_TARGET,
+    ROLE_VALUE,
+    Violation,
+    _fmt_minute,
+    _ranges,
+)
 
 LATE = "late"
 NO_RULE = "no rule"
@@ -62,19 +71,29 @@ _NOTHING_KNOWN: Dict[str, Any] = {"rule": "", "known": "", "issued": "", "minute
 
 
 def _details(use: Violation) -> Dict[str, Any]:
+    late = float(use.available - use.issue)
     return {
         "rule": use.column.rule.describe(),
         "known": use.available_label or _fmt_minute(use.available),
         "issued": use.issue_label or _fmt_minute(use.issue),
-        "minutes_late": float(use.available - use.issue),
+        # A value no rule holds for is never known: null, as JSON has no infinity, and `known` says never.
+        "minutes_late": late if math.isfinite(late) else None,
         "note": use.hint,
     }
+
+
+def _lateness(details: Mapping[str, Any]) -> float:
+    """How late a use is, for keeping the latest: a never known one is the latest of all, one without a rule the earliest."""
+    late = details["minutes_late"]
+    if late is None:
+        return math.inf if str(details.get("known", "")) == NEVER else -math.inf
+    return late
 
 
 def _keep_latest(cells, key: _Key, cell: _Cell, details: Dict[str, Any]) -> None:
     held = cells.setdefault(key, {})
     current = held.get(cell)
-    if current is None or (details["minutes_late"] or -math.inf) > (current["minutes_late"] or -math.inf):
+    if current is None or _lateness(details) > _lateness(current):
         held[cell] = details
 
 
@@ -89,7 +108,7 @@ def _rows(cells: Dict[_Key, Dict[_Cell, Dict[str, Any]]]) -> List[Dict[str, Any]
             same_periods.setdefault(tuple(periods), []).append(horizon)
         for periods, horizons in same_periods.items():
             uses = [held[(horizon, period)] for horizon in horizons for period in periods]
-            latest = max(uses, key=lambda details: details["minutes_late"] or -math.inf)
+            latest = max(uses, key=_lateness)
             rows.append(
                 {
                     "predictor": predictor,
