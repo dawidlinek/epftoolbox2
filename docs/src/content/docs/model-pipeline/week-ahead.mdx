@@ -61,7 +61,7 @@ def expert(stat):
 ```
 
 `load_forecast_daily_{min,max}_d+k` are the TSO's A31 forecasts, which have a built-in rule: published on Fridays at 10:00 Brussels time
-for the next Monday-to-Sunday week. `all_avg_*` and `capital_*` are ECMWF forecasts averaged over a market's regions and read at its
+for the next Monday-to-Sunday week of the market's own local dates, those of the frame's zone. `all_avg_*` and `capital_*` are ECMWF forecasts averaged over a market's regions and read at its
 capital, `is_sunday_or_holiday` is a calendar column; they need rules of your own (below).
 
 ## Issued on Fridays
@@ -103,12 +103,11 @@ binary ones included (`scale_binary=True`), and an expert OLS with an intercept.
 [What the study needs](#what-the-study-needs).
 
 <Aside>
-  The built-in A31 rule's week is Brussels's, and a daily row's weekly value is read at its date's last slot. In a zone an hour behind
-  Brussels, such as Lisbon or Dublin, the last hour of the Sunday of next week is Monday in Brussels, so the TSO's forecast of D+9 counts
-  as published only the Friday after. Declare A31 in the market's own zone, at the same instant:
-  `"load_forecast_daily_*": Availability.weekly("friday", "09:00", timezone="Europe/Lisbon")`. Zones ahead of Brussels are affected
-  too, on hourly frames and the other way: in Helsinki the first hour of a Monday is Sunday in Brussels, so the rule takes it as
-  published a week early, a look-ahead. A fix (the week of the data zone's local dates) is coming.
+  The built-in A31 rule follows each market's own week: the week of the frame's local dates, published Friday 10:00 Brussels. It needs
+  no rule of yours in any zone. In Lisbon or Dublin the TSO's D+9 is out on Fridays at noon, and on an hourly frame in Helsinki the
+  first hour of a Monday belongs to the week it starts. Until this release the week was Brussels's: too strict west of Brussels (D+9
+  `not_published` on every Friday) and a look-ahead east of it on hourly frames. A rule declared per zone at the same instant, as this
+  page used to suggest, gives the same forecasts. Keep the frame in the market's zone.
 </Aside>
 
 ### The TSO's forecast as a model
