@@ -9,12 +9,14 @@ import numpy as np
 from threadpoolctl import ThreadpoolController
 
 from ..scalers.registry import make_scaler
-from ._calendar import training_span
+from ..scalers.standard import StandardScaler
+from ._calendar import FitUnit, refit_anchor, training_span
 
 _W_HOUR_ARRAYS: Dict = {}
 _W_EXPANDED_PREDS: Dict = {}
 _W_CONFIG: Dict = {}
 _W_FIT_PREDICT = None
+_W_MODEL = None  # the instance `_W_FIT_PREDICT` is bound to, whose `_fit_model` and `_predict_fitted` a refit uses
 
 # Native thread pools (BLAS, OpenMP) used by one task. The pool already runs MAX_PROCESSES x THREADS_PER_PROCESS
 # tasks at once, so more threads per task only oversubscribe the cores (an OLS run took 4-40x longer that way).
@@ -76,11 +78,13 @@ def _pool_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
 
 
 def _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
-    global _W_HOUR_ARRAYS, _W_EXPANDED_PREDS, _W_CONFIG, _W_FIT_PREDICT
+    global _W_HOUR_ARRAYS, _W_EXPANDED_PREDS, _W_CONFIG, _W_FIT_PREDICT, _W_MODEL
     _W_HOUR_ARRAYS = hour_arrays
     _W_EXPANDED_PREDS = expanded_preds
     _W_CONFIG = config
-    _W_FIT_PREDICT = model_cls(predictors=[], **model_kwargs)._fit_predict
+    # Built with refit=None whatever the model's: what a refit needs travels in `config["refit"]`.
+    _W_MODEL = model_cls(predictors=[], **model_kwargs)
+    _W_FIT_PREDICT = _W_MODEL._fit_predict
 
 
 def training_rows(days: np.ndarray, day: int, training_window: int, hz: int, newest: int = -1) -> slice:
@@ -282,4 +286,178 @@ def _run_day(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
         futures = {pool.submit(_run_task, t): t for t in tasks}
         for future in as_completed(futures):
             collect(futures[future], future.result())
+    return results, skipped
+
+
+def _place_of(day_in_test: int) -> Tuple[Optional[str], int, int]:
+    """(window, days since its start, place among the issue days) of a task's day, as `_fit_one_numpy` reads it."""
+    run_days = _W_CONFIG.get("run_days")
+    return (None, day_in_test, day_in_test) if run_days is None else run_days[day_in_test]
+
+
+def _unit_of(task: tuple) -> FitUnit:
+    """The fit a task of a model with `refit` forecasts from: its period and horizon, the anchor of its issue day, its list."""
+    hour, hz, day_in_test = task
+    cfg = _W_CONFIG
+    task_lists = cfg.get("task_lists")
+    list_id = None if task_lists is None else int(task_lists[(hour, hz)][_place_of(day_in_test)[2]])
+    run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
+    return FitUnit(hour, hz, refit_anchor(run_date, cfg["refit"]["rule"]), list_id)
+
+
+def _fit_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict, str]]]:
+    """Fit one unit of a model with `refit` and forecast each of `tasks` from it, one row at a time. Returns (task, record or
+    skip reason) of each.
+
+    The rows are those of a forecast issued on the anchor: `training_span(anchor, W, h, newest)` with the anchor's newest target,
+    filtered as `_fit_one_numpy` filters a task's. Which columns are binary is read from these rows, before any filter, so a
+    forecast's scaling depends on its anchor alone, never on where the run starts (the mask of a forecast with `refit=None` is
+    read on the window's first day). The scaler is fitted on the training rows and transforms the test rows of `tasks` together,
+    value by value, so a forecast is the same whichever other forecasts of its unit are run with it: one cut short and resumed
+    equals a fresh one.
+    """
+    cfg = _W_CONFIG
+    refit = cfg["refit"]
+    hour, hz = unit.period, unit.horizon
+    arrays = _W_HOUR_ARRAYS[hour]
+    days = arrays["days"]
+    anchor = unit.anchor.toordinal() - refit["first_ordinal"]
+    newest_targets = refit["newest"]
+    if newest_targets is None:
+        newest = -1
+        train = training_rows(days, anchor, cfg["training_window"], hz)
+    else:
+        # Read on the anchor: a target published between the anchor and the issue day doesn't reach the fit.
+        newest = int(newest_targets.at(hour, unit.anchor.toordinal()))
+        train = training_rows(days, anchor, cfg["training_window"], hz, newest)
+
+    predictors = _W_EXPANDED_PREDS[(hour, hz) if unit.list_id is None else unit.list_id]
+    col_idx = [arrays["col_index"][c] for c in predictors]
+    train_x = arrays["x"][train][:, col_idx]
+    train_y = arrays["y"][train][:, hz - 1]
+    scalable_mask = StandardScaler.get_scalable_mask(train_x)
+
+    outcomes: List[Tuple[tuple, Union[Dict, str]]] = []
+    issued = []
+    for task in tasks:
+        test = issue_row(days, cfg["offset"] + task[2])
+        if test is None:
+            outcomes.append((task, SKIP_MISSING_TEST_ROW))
+        else:
+            issued.append((task, test))
+
+    def skip_all(reason: str) -> List[Tuple[tuple, Union[Dict, str]]]:
+        return outcomes + [(task, reason) for task, _ in issued]
+
+    if train_x.shape[0] == 0:
+        return skip_all(SKIP_TOO_FEW_ROWS)
+
+    matching = cfg.get("matching")
+    matching_days = None
+    train_days = None
+    if matching is not None and unit.list_id in matching["ids"]:
+        train_days = days[train]
+        same = matching_rows(train_days, matching["lists"][(hour, hz)], matching["start"], unit.list_id)
+        train_x, train_y, train_days = train_x[same], train_y[same], train_days[same]
+        if train_days.size == 0:
+            return skip_all(SKIP_NO_MATCHING_DAYS)
+        matching_days = matching_digest(train_days, matching["first_ordinal"])
+
+    finite_rows = np.isfinite(train_y)
+    if train_x.size:
+        finite_rows &= np.isfinite(train_x).all(axis=1)
+    train_x = train_x[finite_rows]
+    train_y = train_y[finite_rows]
+    if train_x.shape[0] == 0:
+        return skip_all(SKIP_NO_FINITE_TRAINING_ROWS)
+
+    forecast = []
+    for task, test in issued:
+        if np.isfinite(arrays["x"][test, col_idx]).all():
+            forecast.append((task, test))
+        else:
+            outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
+    if not forecast:
+        return outcomes
+
+    scaler = make_scaler(cfg.get("scaler", "standard"))
+    train_x, train_y, test_x = scaler.fit_transform(
+        train_x.copy(),
+        train_y.copy(),
+        arrays["x"][[test for _, test in forecast]][:, col_idx],
+        scalable_mask=scalable_mask,
+        columns=predictors,
+    )
+    try:
+        fitted = _W_MODEL._fit_model(train_x, train_y)
+    except ValueError as exc:
+        return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]
+
+    for row, (task, test) in enumerate(forecast):
+        # One row at a time (decision 16 of the step 3 spec): a product over several rows can differ in the last bits.
+        pred, coefs = _W_MODEL._predict_fitted(fitted, test_x[row : row + 1])
+        window, day_in_window, _ = _place_of(task[2])
+        run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=task[2])
+        record = {
+            "run_date": run_date.isoformat(),
+            "target_date": (run_date + datetime.timedelta(days=hz)).isoformat(),
+            "run_weekday": run_date.weekday(),
+            "hour": hour,
+            "horizon": hz,
+            "day_in_test": day_in_window,
+            "prediction": scaler.inverse(float(pred)),
+            "actual": float(arrays["y"][test, hz - 1]),
+            "coefficients": coefs,
+            "freq": cfg.get("freq", "1h"),
+            "refit_anchor": unit.anchor.isoformat(),
+        }
+        if newest_targets is not None:
+            # The newest target date of the unit's span, anchor + min(k, h-1), as `_fit_one_numpy` writes it for its day.
+            record["newest_target_day"] = (unit.anchor + datetime.timedelta(days=min(newest, hz - 1))).isoformat()
+        if unit.list_id is not None:
+            record["predictor_list"] = cfg["list_hashes"][unit.list_id]
+        if matching_days is not None:
+            record["training_days"] = int(np.unique(train_days[finite_rows]).size)
+            record["matching_days"] = matching_days
+        if window is not None:
+            record["window"] = window
+        outcomes.append((task, record))
+    return outcomes
+
+
+def _run_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict, str]]]:
+    try:
+        return _fit_unit(unit, tasks)
+    except Exception as exc:
+        raise TaskFailed(
+            f"fit unit (period={unit.period}, horizon={unit.horizon}, anchor={unit.anchor}, list={unit.list_id}) of tasks "
+            f"{[task[2] for task in tasks]} raised {exc!r}\n{traceback.format_exc()}"
+        ) from None
+
+
+def _run_block(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
+    """Run the tasks of one refit block, those whose issue days share an anchor: each unit's fit once, then its forecasts.
+    Returns what `_run_day` does. Nothing carries over between units: each fits from scratch on its own rows."""
+    units: Dict[FitUnit, List[tuple]] = {}
+    for task in tasks:
+        units.setdefault(_unit_of(task), []).append(task)
+    threads = _W_CONFIG["threads_per_process"]
+    results, skipped = [], []
+
+    def collect(outcomes):
+        for task, outcome in outcomes:
+            if isinstance(outcome, str):
+                skipped.append((task, outcome))
+            else:
+                results.append(outcome)
+
+    if len(units) <= 1 or threads == 1:
+        for unit, unit_tasks in units.items():
+            collect(_run_unit(unit, unit_tasks))
+        return results, skipped
+
+    with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
+        futures = [pool.submit(_run_unit, unit, unit_tasks) for unit, unit_tasks in units.items()]
+        for future in as_completed(futures):
+            collect(future.result())
     return results, skipped

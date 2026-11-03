@@ -15,7 +15,7 @@ For the forecast (period, h, D) of a model with `training_window` W:
 
 - **It trains on** the rows of that period dated from D-W-h to D-1-h, both included. That is W dates, and the newest of them has
   its target on D-1. With [`newest_target="published"`](#the-newest-target) the W dates end where the target's rule says, and never
-  on D or later.
+  on D or later. With [`refit`](#refitting-on-a-calendar) they are the W dates of the forecast issued on D's refit day instead.
 - **It forecasts from** the last row dated D.
 - **Its `actual`** is the target of that row: the value on D+h at the same wall-clock time.
 
@@ -105,6 +105,82 @@ over several training windows. That figure was not reproduced in the library. Th
 Over 2017 the fourth quarter's MAE was 2.13 % higher, about what the first quarter's was lower. Nothing defaults to it: `"d-1"` stays the
 default of every model.
 </Aside>
+
+## Refitting on a calendar
+
+A model is fitted again for every forecast by default: each (period, h, D) has its own fit. A model's `refit` fits it less often, on a
+calendar, and forecasts the issue days in between from the last fit:
+
+- **`None`**, the default: every forecast is its own fit. Its records, manifest and YAML are what they were before the setting
+  existed.
+- **`"kD"`**, k a whole number from 1: once every k days. `"1D"` is the issue day itself, `"7D"` the Monday on or before it.
+- **`"kMS"`**, k a whole number from 1: on the first of every k-th month. `"1MS"` is the first of the month, `"3MS"` January, April,
+  July or October, and `"12MS"` 1 January.
+
+Anything else raises `ValueError` when the model is built, such as `"7d"`, `"0D"`, `7` or `"auto"`, which isn't offered yet. Only
+[`OLSModel`](/epftoolbox2/models/ols/) and [`LassoCVModel`](/epftoolbox2/models/lasso/) take it.
+
+```python
+from epftoolbox2.models import LassoCVModel
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.presets import lear_predictors
+
+lear = lear_predictors(exogenous=["load_forecast", "wind_solar_forecast"])
+pipeline = ModelPipeline()
+pipeline.add_model(LassoCVModel(lear, training_window=364, name="LEAR"))
+pipeline.add_model(LassoCVModel(lear, training_window=364, refit="7D", name="LEAR weekly"))
+pipeline.add_model(LassoCVModel(lear, training_window=364, refit="1MS", name="LEAR monthly"))
+```
+
+A forecast issued on D uses the fit of its **anchor** a, the refit day on or before D:
+
+| Issue day D | `"1D"` | `"7D"` | `"14D"` | `"1MS"` | `"3MS"` | `"12MS"` |
+|---|---|---|---|---|---|---|
+| Thursday 2024-05-16 | 2024-05-16 | 2024-05-13 | 2024-05-13 | 2024-05-01 | 2024-04-01 | 2024-01-01 |
+| Monday 2024-01-01 | 2024-01-01 | 2024-01-01 | 2023-12-25 | 2024-01-01 | 2024-01-01 | 2024-01-01 |
+
+- **The anchor depends on the issue day alone.** Local dates are counted from a fixed epoch, Monday 1970-01-05 for `"kD"` and January
+  1970 for `"kMS"`. A forecast issued on D has the same anchor in a run that starts a week earlier or later, and a clock change
+  moves nothing: a date has no clock. That is why `"14D"` gives Monday 2023-12-25 for 2024-01-01 in the table: its two-week blocks
+  are counted from the epoch, not from the run.
+- **The rows are cut on the anchor.** The forecast (period, h, D) trains on the rows of the forecast issued on a: dated from a-W-h to
+  a-1-h, whatever D is. With `newest_target="d-1"` the newest training target is that of a-1. With `"published"` it is the newest
+  that the target's rule says is known at the issue time on a, so a target published between a and D doesn't train. Nothing dated
+  after a-1-h trains. The forecast is still made from the row dated D, and its `actual` is that row's target. With W = 364 and h = 2,
+  the forecast issued on Thursday 2024-05-16 has the anchor Monday 2024-05-13 under `"7D"` and trains on the rows dated 2023-05-13 to
+  2024-05-10, where a plain model trains on 2023-05-16 to 2024-05-13. Its numbers move, as the data they train on is older.
+- **A unit is one fit.** A unit is a period, a horizon, an anchor and a predictor list, and the issue days of its anchor are forecast
+  from its one fit, each on its own row, one at a time: a forecast doesn't depend on which others share its fit. A run that issues on
+  every day makes about k times fewer fits with `"kD"`, and one fit per unit a month with `"1MS"`. With `issue_days=["friday"]`,
+  `"7D"` gives each Friday its own anchor, the Monday of its week, so no fit is shared and only the rows move.
+- **The scaler comes from the unit's rows.** It is fitted on the unit's training rows, and the binary columns it leaves alone are
+  found on those same rows (see [Binary columns](/epftoolbox2/models/scalers/#binary-columns)), not on the first test day. So a
+  forecast doesn't depend on where the run starts, as a plain model's binary columns do.
+- **The frame must go back from the anchor.** The rows a run reads, and so the days the [data checks](/epftoolbox2/model-pipeline/overview/#data-checks)
+  look at, reach W+h days back from the anchor of the first issue day, which can be before `test_start`: by up to 6 days under `"7D"`,
+  and by almost a year under `"12MS"`. A frame that starts after a - W - h (h the largest horizon, and further back by what
+  `newest_target="published"` reaches) raises `ValueError` naming the day it must start on, since the first block would otherwise
+  train on fewer days without a word. With validation and test windows the first issue day is the validation window's. A frame sized
+  for `refit=None`, from `test_start` - W - h, is too short whenever the test doesn't start on a refit day.
+- **The information set reads the anchors.** The check of the newest training target of a `"d-1"` model is made on the anchors of the
+  issue days, at the issue time of each, since that is where its rows are cut. Predictors are checked on the issue days, as before. With
+  `"published"` the target's rule is read on the anchors.
+- **Processes.** A worker runs one block, the issue days of one anchor, and `THREADS_PER_PROCESS` runs the units of a block at once. A
+  run therefore uses at most as many processes as it has anchors: about 52 for a year of `"7D"`, 12 for a calendar year of `"1MS"`, and
+  one for a calendar year of `"12MS"`.
+
+Each record has `refit_anchor`, the ISO date of the fit it used, and nothing else changes in it; with `"published"`, `newest_target_day`
+is that of the anchor, a + min(k, h-1). The manifest's `training_cut` gains `"refit"`, such as `"7D"`, and `"refit_epoch"`, which is
+`"1970-01-05"`, so changing `refit` refuses a resume with `ManifestMismatchError`. Such a manifest has no `binary_masks`, as a unit's mask
+follows from its rows, which the data hash covers, and a resume compares each stored record's `refit_anchor` with the one a fresh run
+would give it, also for fixed lists. A resume recomputes a unit that has pending forecasts and writes only those, bit for bit what a
+fresh run gives. `refit` is saved to YAML only when it is set. `pipeline.explain()` shows a `"published"` model's `newest_target`
+table relative to D, with the anchor's newest target.
+
+What it works with: `horizons=`, `issue_days=`, `freq="1D"`, `newest_target=`, `Use(..., train_on="matching")` (the rows of the
+anchor's span, filtered as usual, and a function is planned on the days that span reaches), `validation=` and `test=` windows, and
+[ensembles](/epftoolbox2/model-pipeline/ensembles/). A custom model that has only `_fit_predict` raises `ValueError` when given `refit`:
+see [Extending](/epftoolbox2/reference/extending/#custom-model).
 
 ## What a clock change does
 
@@ -302,7 +378,7 @@ print(report.forecast_counts())
 - **It is period 12 of the hourly run.** A daily run of `df.at_time("12:00")` gives, key by key and bit for bit, the records that
   period 12 of the hourly run of `df` gives, but for `hour` (0 against 12) and `freq`. The tests hold that for fixed lists, predictor
   functions, `train_on="matching"` and `newest_target="published"`, over both clock changes of a year.
-- **What it works with.** `horizons=`, `issue_days=`, `newest_target=`, `validation=` and `test=`, `train_on="matching"` and ensembles.
+- **What it works with.** `horizons=`, `issue_days=`, `newest_target=`, `refit=`, `validation=` and `test=`, `train_on="matching"` and ensembles.
   `ModelPipeline.run`, `report`, `verify` and `explain`, `BaseModel.run`, `leakage_probe` and `positive_control` take `freq="1D"`; a
   `Workflow` reads `model_pipeline.freq: 1D`; `epf model` and `epf verify` take `--freq 1D`, and so does the interactive wizard.
 - **Its results.** Each record has `hour` 0 and `freq` `"1D"`, the shape that `report.aggregate()` already gives, so `tests(by="hour")`

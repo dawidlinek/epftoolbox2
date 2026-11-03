@@ -98,6 +98,7 @@ exporters:
 | Callable predictors | **Raises `TypeError`** naming the model. Use `"{horizon}"` string templates instead |
 | A module-level function of `ctx` as `predictors` | Saved as `{function: "package.module:name"}` and loaded by importing it. A lambda, nested function or bound method **raises `TypeError`** |
 | Model `scaler` | Saved as a name (`standard`) or a `{name, params}` mapping. A scaler instance is converted when the model is built. A model without `scaler` loads with `standard` |
+| Model `refit` | Saved as `refit: 7D` (a `"kD"` or `"kMS"` string) only when set. A model without it fits every forecast on its own, as every file saved before the setting did. See [Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) |
 | `EconomicEvaluator` `strategy` | Saved inside the evaluator as `{class: BatteryArbitrage, params: {...}}` and rebuilt on load |
 | Private attrs (`_name`) | Excluded |
 

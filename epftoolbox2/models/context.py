@@ -52,7 +52,7 @@ from ..information_set import (
 )
 from ..results.availability import listing_rows, sort_rows
 from ..results.windows import mask_key
-from ._calendar import IssueCalendar, periods_per_day
+from ._calendar import IssueCalendar, periods_per_day, refit_anchor, refit_anchors
 from ._contract import period_index, wall_clock
 from ._worker import NOT_PLANNED, OTHER_LIST
 
@@ -550,6 +550,8 @@ class PredictorPlan:
             `NOT_PLANNED` for a day no matching forecast of that pair reads. Empty without a matching forecast.
         horizons: The horizons planned, in order: every one from 1 to `horizon` unless a run lists them (`horizons=`). The
             function is called for these alone, and `assignment` has no other.
+        refit: The model's `refit`. With one, a forecast's rows are cut on its anchor, so the training target is checked on
+            the anchors, and the training days of a matching list reach back from the anchor.
     """
 
     function: Any
@@ -578,6 +580,7 @@ class PredictorPlan:
     _training_cells: Optional[_Cells] = field(default=None, repr=False)
     _planned: Optional[Dict[Tuple[int, int], np.ndarray]] = field(default=None, repr=False)
     horizons: Tuple[int, ...] = ()
+    refit: Optional[str] = None
 
     def __post_init__(self):
         self._positions = {day.isoformat(): position for position, day in enumerate(self.issue_days)}
@@ -697,6 +700,8 @@ class PredictorPlan:
         info = self.information_set
         cells = self._cells or _Cells(self.data, info, self.freq, self.issue_days, self.availability)
         scanned = self.issue_days[days[0] : days[1]]
+        if self.refit is not None:  # a forecast's rows are cut as of the issue time on its anchor
+            scanned = refit_anchors(scanned, self.refit)
         target_violations, unknown = info.violations(
             pairs,
             target,
@@ -820,14 +825,23 @@ class PredictorPlan:
     def _days_read_by(self, ids: np.ndarray, grid: np.ndarray, horizon: int) -> Optional[np.ndarray]:
         """Which days of the grid these forecasts of one (period, horizon) can train on, or None if none of them is matching.
         Each reads `[D - training_window - horizon - reach, D - 1]`, which holds its `training_span` and more: the calls of a plan
-        don't depend on how far back from the issue day the rows end."""
+        don't depend on how far back from the issue day the rows end. With `refit` it starts from the anchor a of D instead,
+        `[a - training_window - horizon - reach, D - 1]`, where its unit's rows are."""
         matching = np.isin(ids, sorted(self.matching_ids))
         if not matching.any():
             return None
         marks = np.zeros(self._grid_size() + 1, dtype=np.int64)
-        np.add.at(marks, grid[matching] - self.training_window - horizon - self.reach, 1)
+        starts = grid[matching] - self._back_to_anchor(grid[matching])
+        np.add.at(marks, starts - self.training_window - horizon - self.reach, 1)
         np.add.at(marks, grid[matching], -1)
         return np.cumsum(marks[:-1]) > 0
+
+    def _back_to_anchor(self, grid: np.ndarray) -> np.ndarray:
+        """How many days before each of these grid days its anchor is: 0 everywhere without `refit`."""
+        if self.refit is None:
+            return np.zeros(len(grid), dtype=np.int64)
+        days = [self.first_grid_day + datetime.timedelta(days=int(place)) for place in grid]
+        return np.array([(day - refit_anchor(day, self.refit)).days for day in days], dtype=np.int64)
 
     def _grid_positions(self) -> np.ndarray:
         """Where each issue day is in the grid of `day_lists`."""
@@ -943,6 +957,7 @@ def build_plan(
     newest_target: str = "d-1",
     reach: int = 0,
     horizons: Optional[Sequence[int]] = None,
+    refit: Optional[str] = None,
 ) -> PredictorPlan:
     """Evaluate `fn` for every planned forecast, at each of `horizons` (every one from 1 to `horizon`, the largest, if not
     given). `warn_unpublished` warns for each `published()` argument that was never
@@ -951,7 +966,7 @@ def build_plan(
 
     If a forecast gets `Use(list, train_on="matching")`, `fn` is also evaluated on the days it can train on, which needs
     `training_window`. What `fn` answers on a day is then the same whether that day is issued or only trained on.
-    `newest_target` and `reach` are the model's (see `PredictorPlan`).
+    `newest_target`, `reach` and `refit` are the model's (see `PredictorPlan`).
     """
     started = time.perf_counter()
     days = list(issue_days)
@@ -968,6 +983,7 @@ def build_plan(
         newest_target=newest_target,
         reach=reach,
         horizons=() if horizons is None else tuple(horizons),
+        refit=refit,
     )
     horizons = plan.horizons
     periods = range(cells.periods)
@@ -1037,7 +1053,8 @@ def _plan_training_days(
             f"{function_name(fn)} returned Use(..., train_on='matching'), which needs the training_window to plan"
         )
     plan.training_window = training_window
-    plan.first_grid_day = min(plan.issue_days) - datetime.timedelta(days=training_window + plan.horizon + plan.reach)
+    first = min(plan.issue_days) if plan.refit is None else refit_anchor(min(plan.issue_days), plan.refit)
+    plan.first_grid_day = first - datetime.timedelta(days=training_window + plan.horizon + plan.reach)
     grid = plan._grid_positions()
     is_issue_day = np.zeros(plan._grid_size(), dtype=bool)
     is_issue_day[grid] = True

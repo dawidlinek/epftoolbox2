@@ -28,6 +28,7 @@ from ..information_set import (
 )
 from .._date_utils import fmt_minutes
 from . import _contract
+from ._calendar import refit_anchor
 from .context import TRAIN_ON_MATCHING, PredictorPlan, function_name
 
 COLUMNS = ["predictor", "target-relative", "rule", "known", "status"]
@@ -314,11 +315,26 @@ def explain_model(
     out["predictors"] = predictor_table(names, data, info, horizon, hour, freq, clock, used)
     out["grouped"] = grouped_table(out["predictors"])
     if newest is not None:
-        out["newest_target"] = newest_target_table(newest.k[hour][used], horizon)
+        out["newest_target"] = newest_target_table(
+            _newest_by_issue_day(model, newest, days, hour, horizon)[used], horizon
+        )
     if echo:
         minute = clock.row_minutes(np.array([hour]), _STEP_MINUTES[freq])[0]
         _print(out, subject, info, days, horizon, hour, freq, used, data.index, model._ctx_fn, minute)
     return out
+
+
+def _newest_by_issue_day(model: Any, newest: Any, days: pd.DatetimeIndex, hour: int, horizon: int) -> np.ndarray:
+    """The newest target of the forecast of each issue day, relative to it. With `refit` it was read on the anchor a, so it is
+    `a + min(k(a), horizon - 1)`, relative to the issue day."""
+    if model.refit is None:
+        return newest.k[hour]
+    dates = [day.date() for day in days]
+    anchors = [refit_anchor(date, model.refit) for date in dates]
+    return np.array(
+        [(a - d).days + min(int(newest.at(hour, a.toordinal())), horizon - 1) for d, a in zip(dates, anchors)],
+        dtype=np.int64,
+    )
 
 
 def newest_target_table(newest: np.ndarray, horizon: int) -> pd.DataFrame:
