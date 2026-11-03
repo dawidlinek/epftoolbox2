@@ -51,7 +51,6 @@ from ._calendar import (
     periods_per_day,
     refit_anchor,
     refit_anchors,
-    refit_lag,
     resolve_horizons,
     resolve_issue_days,
     training_span,
@@ -994,7 +993,7 @@ class BaseModel(ABC):
         # With `refit` the newest training target is checked on the anchors, where a unit's rows are cut.
         on_anchors = check_target and self.refit is not None
         check_target = check_target and self.refit is None
-        rows = self._training_rows(newest, self._days_of(test_start, test_end, windows))
+        rows = self._training_rows(newest)
         if information_set is not None and availability == "raise":
             information_set.check(
                 expanded,
@@ -1118,14 +1117,15 @@ class BaseModel(ABC):
         anchors = [day.isoformat() for day in refit_anchors(issued, self.refit)]
         return method(boundary, target, freq, index, model_name=self.name, issue_days=anchors, training_rows=rows)
 
-    def _training_rows(self, newest: Optional[NewestTargets], days: Optional[Sequence[Any]]) -> TrainingRows:
-        """The rows a fit of this model reads relative to its issue day (`TrainingRows`), for checking a column whose rule changes
-        over time on them too: the window, a newest target before D - 1 under `"published"`, and with `refit` how far its refit
-        day lies before an issue day (over `days`, or any block of the rule)."""
+    def _training_rows(self, newest: Optional[NewestTargets]) -> TrainingRows:
+        """The rows a fit of this model reads (`TrainingRows`), for checking a column whose rule changes over time on them too:
+        the window, a newest target before D - 1 under `"published"`, and with `refit` the refit day, whose fit a forecast uses:
+        its rows are those of a forecast issued on it (`training_span(a, W, h, k(a))`), as of the issue time on D."""
         return TrainingRows(
             self.training_window,
-            reach=(0 if newest is None else newest.reach) + refit_lag(days, self.refit),
+            reach=0 if newest is None else newest.reach,
             to_issue=self.newest_target == "published",
+            refit=self.refit,
         )
 
     @staticmethod

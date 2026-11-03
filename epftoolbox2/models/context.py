@@ -56,7 +56,7 @@ from ..information_set import (
 )
 from ..results.availability import listing_rows, sort_rows
 from ..results.windows import mask_key
-from ._calendar import IssueCalendar, periods_per_day, refit_anchor, refit_anchors, refit_lag
+from ._calendar import IssueCalendar, periods_per_day, refit_anchor, refit_anchors
 from ._contract import period_index, wall_clock
 from ._worker import NOT_PLANNED, OTHER_LIST
 
@@ -745,9 +745,7 @@ class PredictorPlan:
         if self.fit_window is None:
             return None
         return TrainingRows(
-            self.fit_window,
-            reach=self.reach + refit_lag(self.issue_days, self.refit),
-            to_issue=self.newest_target == "published",
+            self.fit_window, reach=self.reach, to_issue=self.newest_target == "published", refit=self.refit
         )
 
     def _horizons_of(self, cells: "_Cells", name: str) -> List[int]:
@@ -772,7 +770,7 @@ class PredictorPlan:
                 known = self._rows_known[name] = _RowsKnown(
                     cells.column(name), cells._periods, cells._clock, cells._step
                 )
-            trained = self._trained[(name, horizon)] = np.maximum(avail, known.latest(rows.predictor_days(horizon)))
+            trained = self._trained[(name, horizon)] = np.maximum(avail, rows.latest(known, horizon))
         return trained, avail
 
     def check(self, target: str, model_name: str) -> None:

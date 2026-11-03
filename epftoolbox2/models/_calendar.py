@@ -216,16 +216,6 @@ def refit_anchors(days: Iterable[Any], refit: str) -> List[datetime.date]:
     return sorted({refit_anchor(day, refit) for day in days})
 
 
-def refit_lag(days: Optional[Iterable[Any]], refit: Optional[str]) -> int:
-    """How many days the refit day of one of `days` lies before it at most: 0 without `refit`. Without days, the longest block
-    of the rule, read over 800 days from the epoch (a `"12MS"` block is at most 366)."""
-    if refit is None:
-        return 0
-    if days is None:
-        days = [_EPOCH + datetime.timedelta(days=offset) for offset in range(800)]
-    return max(((_as_date(day) - refit_anchor(day, refit)).days for day in days), default=0)
-
-
 class FitUnit(NamedTuple):
     """One fit of a model with `refit`: every forecast of a period and horizon issued in one block, with one list.
 

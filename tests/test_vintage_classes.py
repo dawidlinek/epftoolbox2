@@ -749,3 +749,26 @@ def test_a_daily_row_of_another_zone_is_known_when_every_slot_of_its_date_is():
     helsinki = pd.date_range("2026-08-01 12:00", "2026-10-25 12:00", freq="1D", tz="Europe/Helsinki")
     assert verdict(["sk_d-2"], helsinki, "2026-10-10", "1D") == {"sk_d-2": "late"}
     assert verdict(["sk_d-2"], helsinki, "2026-10-11", "1D") == {"sk_d-2": "known"}
+
+
+def test_a_refit_model_s_rows_are_those_of_its_refit_day_s_fit():
+    """With `refit="7D"` the forecasts of 10 and 11 October use the fit of Monday 5 October, whose rows end on the 3rd: `sk_d-2`
+    there holds the 1st's value, out on the 5th at 14:30, known by the 10th. Rows of 8 and 9 October, late on the 10th, are no
+    fit's: it runs, and the probe moves nothing. With `"1MS"` a fit of 1 October reads rows back to 31 August, where `x` (valid
+    from 1 September) is never known: refused, though a fit per forecast with the same window runs, and the probe moves."""
+    run_at_raise(["sk_d-2"], {"sk": PL_CHAIN}, "2026-10-10", refit="7D")
+    run_at_raise(sk_d2, {"sk": PL_CHAIN}, "2026-10-11", refit="7D")
+    with pytest.raises(InformationSetError):
+        run_at_raise(["sk_d-2"], {"sk": PL_CHAIN}, "2026-10-10")
+    info = run_at_raise(["sk_d-2"], {"sk": PL_CHAIN}, "2026-10-10", refit="7D")
+    model = lambda **kw: lambda: OLSModel(["sk_d-2"], training_window=60, **kw)  # noqa: E731
+    assert information_set_module.leakage_probe(model(refit="7D"), pl_rows(), "2026-10-10", info, columns=["sk_d-2"]).ok
+    rules = {"x": Availability.realised("1h").during(valid_from="2026-09-01")}
+    run_at_raise(["x_d-1"], rules, "2026-10-10", window=30)
+    with pytest.raises(InformationSetError, match="x_d-1 for period 0 is known never"):
+        run_at_raise(["x_d-1"], rules, "2026-10-10", window=30, refit="1MS")
+    info = run_at_raise(["x_d-1"], rules, "2026-10-10", window=30)
+    late = information_set_module.leakage_probe(
+        lambda: OLSModel(["x_d-1"], training_window=30, refit="1MS"), pl_rows(), "2026-10-10", info, columns=["x_d-1"]
+    )
+    assert not late.ok

@@ -428,18 +428,48 @@ def over_time(rule: Optional[Rule]) -> bool:
 
 @dataclass(frozen=True)
 class TrainingRows:
-    """The rows a forecast's fit reads, relative to its issue day D, for checking a column whose rule changes over time
-    (`over_time`): at horizon h, rows dated from D - window - h - reach to D - 1 - h, or to D - 1 when the newest target is read
-    from the target's rule (`to_issue`, `newest_target="published"`). `reach` covers a newest target before D - 1 and how far a
-    refit day lies before its issue days. Their targets are dated from D - window - reach to D - 1."""
+    """The rows a forecast's fit reads, for checking a column whose rule changes over time (`over_time`) on them as well as on
+    the issue day's row: `InformationSet.check(..., training_rows=TrainingRows(window))` and `late_uses`, which a model run passes.
+
+    At horizon h, relative to the issue day D, rows dated from D - window - h - reach to D - 1 - h, or to D - 1 when the newest
+    target is read from the target's rule (`to_issue`, `newest_target="published"`); `reach` is how far a newest target lies
+    before D - 1. Their targets are dated from D - window - reach to D - 1. With `refit` the forecast of D uses the fit of its
+    refit day A on or before D, whose rows are those of a forecast issued on A: the same, `D - A` days earlier. Either way they
+    are judged as of D's issue time, as `leakage_probe` judges them.
+
+    Args:
+        window: The model's `training_window`.
+        reach: Days a newest target lies before D - 1 at most (`NewestTargets.reach`, read on the refit days with `refit`).
+        to_issue: Rows reach D - 1, as with `newest_target="published"`.
+        refit: The model's `refit`, whose refit days move the rows back.
+    """
 
     window: int
     reach: int = 0
     to_issue: bool = False
+    refit: Optional[str] = None
 
-    def predictor_days(self, horizon: int) -> range:
-        """The row days, relative to D, of the training rows at `horizon`."""
-        return range(-(self.window + horizon + self.reach), 0 if self.to_issue else -horizon)
+    def predictor_days(self, horizon: int, lag: int = 0) -> range:
+        """The row days, relative to D, of the training rows at `horizon`, of a fit made `lag` days before D (its refit day)."""
+        return range(-(self.window + horizon + self.reach + lag), -lag if self.to_issue else -(horizon + lag))
+
+    def lags(self, days: pd.DatetimeIndex) -> np.ndarray:
+        """How many days before each of `days` its fit is made: 0, or with `refit` the days since its refit day."""
+        if self.refit is None:
+            return np.zeros(len(days), dtype=np.int64)
+        from .models._calendar import refit_anchor  # models import this module
+
+        return np.array([(day.date() - refit_anchor(day, self.refit)).days for day in days], dtype=np.int64)
+
+    def latest(self, known: "_RowsKnown", horizon: int) -> np.ndarray:
+        """When the training rows at `horizon` of the forecast of each [period, issue day] of `known`'s clock are all known."""
+        days = known.days
+        lags = self.lags(days)
+        out = np.full((known.size, len(days)), -np.inf)
+        for lag in np.unique(lags):
+            on = lags == lag
+            out[:, on] = known.latest(self.predictor_days(horizon, int(lag)))[:, on]
+        return out
 
     def target_days(self) -> range:
         """The days, relative to D, of the training targets before D - 1, the one the check reads anyway."""
@@ -1116,20 +1146,20 @@ class InformationSet:
             avail = clock.available(col, rows, step, uses[role])
             own = None
             if training_rows is not None and over_time(col.rule):
-                known = _RowsKnown(col, rows, clock, step)
                 if role == ROLE_PREDICTOR:
+                    known = _RowsKnown(col, rows, clock, step)
                     for (other, hz), at in by_horizon.items():
                         if other != name:
                             continue
                         at = np.array(sorted(at))
                         where = np.searchsorted(rows, at)
                         own = avail[where]
-                        trained = known.latest(training_rows.predictor_days(hz))[where]
+                        trained = training_rows.latest(known, hz)[where]
                         for found in self._late_periods(col, at, np.maximum(own, trained), clock, step, own=own):
                             late_at[(name, found.period, hz)] = found
                     continue
                 own = avail
-                avail = np.maximum(avail, known.latest(training_rows.target_days()))
+                avail = np.maximum(avail, _RowsKnown(col, rows, clock, step).latest(training_rows.target_days()))
             for found in self._late_periods(col, rows, avail, clock, step, uses[role], own=own):
                 late[(name, role, found.period)] = found
 
@@ -1544,6 +1574,8 @@ class _RowsKnown:
         self._args = (col, rows, step)
         self._clock = clock
         self._by_day: Dict[int, np.ndarray] = {}
+        self.days = clock.days
+        self.size = len(rows)
 
     def latest(self, row_days: Iterable[int]) -> np.ndarray:
         """The latest instant over these row days, for every [period, issue day]; -inf without a row day."""
