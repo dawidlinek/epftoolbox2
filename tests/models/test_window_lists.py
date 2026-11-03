@@ -567,6 +567,69 @@ def test_a_key_is_forecast_only_when_every_member_is(monkeypatch, refit):
 
 
 # ---------------------------------------------------------------------------
+# Rules over time and ensembles
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("window", "refused"),
+    [(14, False), (28, True), ([14, 28], True), ([7, 14], False), ([14, "expanding"], True)],
+)
+def test_a_rule_over_time_is_checked_on_every_member_s_rows(window, refused):
+    """`aux` is known only from 1 March (a bounded rule): a forecast on 24 March whose rows reach before it uses a value never
+    known, which the check refuses at "raise". The 14-day member's rows don't reach it, a 28-day member's and an expanding
+    one's do, so a list is refused exactly when one of its members alone would be."""
+    data = market("spring")
+    data = data.assign(aux=np.random.default_rng(2).normal(0, 1, len(data)))
+    info = InformationSet(
+        "11:45", "Europe/Brussels", rules={**RULES, "aux": Availability.static().during(valid_from="2023-03-01")}
+    )
+    model = OLSModel([*PREDICTORS, "aux"], training_window=window)
+    if refused:
+        with pytest.raises(ValueError, match="aux"):
+            model.run(data, "2023-03-24", "2023-03-24", horizon=1, information_set=info)
+    else:
+        assert model.run(data, "2023-03-24", "2023-03-24", horizon=1, information_set=info).produced == 24
+
+
+def test_a_published_target_under_a_rule_over_time_is_read_back_by_the_longest_member():
+    """The price's rule holds from 18 February: a list trains on the targets of its longest member, and an expanding one on every
+    target from the frame's first date, so the newest-target check refuses them where the 14-day window alone passes, and says
+    how an expanding window reads back."""
+    data = market("spring")
+    rules = {**RULES, "price": Availability.published("13:00", 1).during(valid_from="2023-02-18")}
+    info = InformationSet("11:45", "Europe/Brussels", rules=rules)
+
+    def run(window):
+        model = OLSModel(PREDICTORS, training_window=window, newest_target="published")
+        return model.run(data, "2023-03-24", "2023-03-24", horizon=1, information_set=info)
+
+    assert run(14).produced == 24
+    with pytest.raises(ValueError, match="window of 42 days"):
+        run([14, 42])
+    with pytest.raises(ValueError, match="With an 'expanding' window this reads back"):
+        run([14, "expanding"])
+
+
+def test_an_ensemble_averages_a_list_model_s_forecasts(tmp_path):
+    """Ensembles average models, lists average windows: an ensemble of a list model reads its `prediction`, the members' mean."""
+    from epftoolbox2.ensembles import AverageEnsemble
+
+    data = market("autumn")
+    pipeline = ModelPipeline()
+    pipeline.add_model(OLSModel(PREDICTORS, training_window=[14, "expanding"], name="cwa"))
+    pipeline.add_model(OLSModel(PREDICTORS, training_window=28, name="one"))
+    pipeline.add_ensemble(AverageEnsemble(["cwa", "one"], name="avg"))
+    report = pipeline.run(data, "2023-10-27", "2023-10-30", horizon=2, save_dir=str(tmp_path))
+    table = report.predictions().set_index(["model", "run_date", "hour", "horizon"])["prediction"]
+    cwa, one, avg = (table.xs(name, level="model") for name in ("cwa", "one", "avg"))
+    assert len(avg) == len(cwa) > 0
+    pd.testing.assert_series_equal(avg, (cwa + one) / 2, check_names=False, rtol=0, atol=1e-12)
+    stored = keyed(json.loads(line) for line in lines(tmp_path / "cwa.jsonl"))
+    assert all(record["prediction"] == math.fsum(record["member_predictions"]) / 2 for record in stored.values())
+
+
+# ---------------------------------------------------------------------------
 # What a list doesn't support yet
 # ---------------------------------------------------------------------------
 
