@@ -124,7 +124,7 @@ class BaseModel(ABC):
     def __init__(
         self,
         predictors: Union[List[Union[str, Callable]], Callable],
-        training_window: int = 365,
+        training_window: Union[int, str, List[Union[int, str]]] = 365,
         name: str = "Model",
         scaler: ScalerSpec = "standard",
         newest_target: str = "d-1",
