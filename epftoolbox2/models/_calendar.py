@@ -83,6 +83,61 @@ def resolve_horizons(horizon: Any, horizons: Any, default: int) -> Tuple[Any, Tu
     return found[-1], tuple(found)
 
 
+# The training window that holds every row from the frame's first local date (day id 0) up to a forecast's span's end.
+EXPANDING = "expanding"
+
+
+def resolve_training_window(value: Any) -> Tuple[Any, Tuple[Any, ...]]:
+    """(the model's `training_window`, its members) of `training_window=value`: an int W from 1, `"expanding"`, or a list of
+    them, whose members are fitted separately and averaged.
+
+    A list is normalised like `horizons=`: ints ascending, then `"expanding"`; a repeat, an empty list, a bool, a float, another
+    string or a value below 1 raises. A list of one is that one in everything (`[W]` is `W`), so the list form never moves a
+    single-window run; any longer list stays a list, the form YAML and the manifest write.
+    """
+    listed = list(value) if isinstance(value, (list, tuple, range, np.ndarray)) else [value]
+    if not listed:
+        raise ValueError("training_window is empty: give an int from 1, 'expanding', or a list of them")
+    found = []
+    for member in listed:
+        if isinstance(member, str) and member == EXPANDING:
+            found.append(EXPANDING)
+        elif isinstance(member, (bool, np.bool_)) or not isinstance(member, (int, np.integer)) or member < 1:
+            raise ValueError(
+                f"training_window takes whole numbers of days from 1 and 'expanding' (every row from the frame's first "
+                f"date), or a list of them, such as [56, 84, 728, 'expanding'], got {member!r}"
+                + ("" if len(listed) == 1 else f" in {listed}")
+            )
+        else:
+            found.append(int(member))
+    repeated = sorted({str(member) for member in found if found.count(member) > 1})
+    if repeated:
+        raise ValueError(f"training_window lists {repeated} more than once: {listed}")
+    members = tuple(sorted(member for member in found if member != EXPANDING)) + (
+        (EXPANDING,) if EXPANDING in found else ()
+    )
+    return (members[0] if len(members) == 1 else list(members)), members
+
+
+def window_members(training_window: Any) -> Tuple[Any, ...]:
+    """The members of a normalised `training_window` (what a manifest or a model holds): one for an int or `"expanding"`."""
+    return tuple(training_window) if isinstance(training_window, list) else (training_window,)
+
+
+def mask_members(training_window: Any) -> Tuple[Any, ...]:
+    """What each binary-column mask of a model is kept under next to its (period, horizon): (None,) for one window, whose masks
+    are keyed as they always were, else each member (`windows.mask_key(..., member)`)."""
+    members = window_members(training_window)
+    return (None,) if len(members) == 1 else members
+
+
+def member_window(member: Any, day: Any) -> Any:
+    """The int window of `training_span` that takes a member's rows for a fit on day id `day` (an array too): the member itself,
+    or for `"expanding"` `day + 1`, whose span starts before day id 0, the frame's first local date, at every horizon and newest
+    target, so that every row of the frame up to the span's end trains."""
+    return day + 1 if isinstance(member, str) and member == EXPANDING else member
+
+
 def every_horizon(horizon: Any, horizons: Sequence[int]) -> bool:
     """Whether `horizons` is every horizon from 1 to `horizon`, the run `horizon=H` plans."""
     return tuple(horizons) == tuple(range(1, horizon + 1))
@@ -222,13 +277,15 @@ class FitUnit(NamedTuple):
     Its rows are `training_span(anchor, W, horizon, newest)`, with `newest` the newest target known by the issue time on the
     anchor (-1 with `newest_target="d-1"`), so the cut is relative to the refit day and nothing after it trains. `anchor` is a
     local date (`refit_anchor`), `list_id` the plan's id of the list (None for fixed lists). Each of its forecasts is predicted on
-    its own from the one fit.
+    its own from the one fit. `member` is the index of its training window in the model's members (`resolve_training_window`): a
+    model with a list of windows fits one unit per member, and a forecast averages its members' units.
     """
 
     period: int
     horizon: int
     anchor: datetime.date
     list_id: Optional[int]
+    member: int = 0
 
 
 class NewestTargets:
