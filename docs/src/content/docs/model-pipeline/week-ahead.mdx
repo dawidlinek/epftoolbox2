@@ -68,7 +68,7 @@ capital, `is_sunday_or_holiday` is a calendar column; they need rules of your ow
 
 ```python
 from epftoolbox2.ensembles import AverageEnsemble
-from epftoolbox2.evaluators import DMEvaluator, MAEEvaluator
+from epftoolbox2.evaluators import DMEvaluator, MAEEvaluator, rMAEEvaluator
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import LassoCVModel, NaiveModel, OLSModel
 from epftoolbox2.pipelines import ModelPipeline
@@ -189,6 +189,7 @@ for stat in ("min", "max"):
         .add_model(OLSModel(predictors=expert_known[stat], training_window=1092, fit_intercept=True, name="expert"))
         .add_model(LassoCVModel(predictors=regional_nwp_known, training_window=1092, name="lasso", **S02))
         .add_evaluator(MAEEvaluator())
+        .add_evaluator(rMAEEvaluator(base_model="TSO"))
         .add_evaluator(DMEvaluator(benchmark="TSO"))
     )
     report = pipeline.run(df_daily, target=f"actual_daily_{stat}", freq="1D", horizons=range(1, 8),
@@ -196,8 +197,11 @@ for stat in ("min", "max"):
 ```
 
 The TSO needs nothing: `known_only` leaves out its forecasts that aren't out, 10 of its 49 keys of a week (h=7 on Monday, 6-7 on
-Tuesday, 5-7 on Wednesday, 4-7 on Thursday), each counted as `not_published`. The DM test runs on the keys a model and the TSO
-share, and says how many. The study issued on Fridays only, so there are no published numbers of this form to compare with.
+Tuesday, 5-7 on Wednesday, 4-7 on Thursday), each counted as `not_published`. So the models don't hold the same keys, and an MAE column
+(`MAEEvaluator` in `summary()` and `by_horizon()`) is each model's MAE on its own keys: the TSO's on fewer forecasts, without the long horizons issued early in
+the week. Compare with the TSO through `rMAEEvaluator(base_model="TSO")`, `DMEvaluator(benchmark="TSO")` or
+`report.tests(benchmark="TSO")`, which take the keys a model and the TSO share, and the last says how many. The study issued on Fridays
+only, so there are no published numbers of this form to compare with.
 
 ## Checking it
 

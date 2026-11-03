@@ -43,9 +43,11 @@ same keys are left out at every level, `"none"` included, and in `verify`, whose
 Without an information set every key is a forecast.
 
 The TSO's week-ahead forecast (A31) is published on Fridays at 10:00 for the next Monday-to-Sunday week, so issued every day at noon
-at horizons 1 to 7 it has 39 of the 49 keys of a week: Monday lacks horizon 7, Tuesday 6-7, Wednesday 5-7 and Thursday 4-7. Models
-compared with it are compared on the keys both hold (`tests()` says how many). See
-[Week-ahead Forecasting](/epftoolbox2/model-pipeline/week-ahead/#issued-every-day).
+at horizons 1 to 7 it has 39 of the 49 keys of a week: Monday lacks horizon 7, Tuesday 6-7, Wednesday 5-7 and Thursday 4-7. So the
+models of a report don't hold the same keys. `report.tests()`, `rMAEEvaluator(base_model="TSO")`, `DMEvaluator` and `compare()` take
+the keys a model and the benchmark share (`tests()` says how many), but an MAE column (`MAEEvaluator` in `summary()` and `by_horizon()`)
+is each model's MAE on its own keys, so next to a `known_only` benchmark it compares different forecasts: compare through the former.
+See [Week-ahead Forecasting](/epftoolbox2/model-pipeline/week-ahead/#issued-every-day).
 
 Which keys exist depends on the rules and the issue time, so the manifest records them (`training_cut`), and a resume with another
 issue time or rule for the column refuses, as a change of predictors does. A column without a rule counts as published, and is listed
