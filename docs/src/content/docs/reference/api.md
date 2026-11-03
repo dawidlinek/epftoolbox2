@@ -474,18 +474,22 @@ def results_to_frame(results) -> pd.DataFrame: ...  # list, (name, result) pairs
 
 ```python
 class OLSModel(BaseModel):
-    def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
-                 name: str = "Model", scaler: ScalerSpec = "standard",
+    def __init__(self, predictors: Union[List, Callable], training_window: int = 365, *,
+                 fit_intercept: bool = False, name: str = "Model", scaler: ScalerSpec = "standard",
                  newest_target: str = "d-1", refit: Optional[str] = None): ...
 
 class LassoCVModel(BaseModel):
     def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
-                 cv: int = 5, max_iter: int = 10000, name: str = "Model",
-                 scaler: ScalerSpec = "standard", newest_target: str = "d-1",
+                 cv: int = 5, max_iter: int = 10000, *, fit_intercept: bool = True,
+                 name: str = "Model", scaler: ScalerSpec = "standard", newest_target: str = "d-1",
                  refit: Optional[str] = None): ...
+
+class NaiveModel(BaseModel):                # one column's value on the issue row, no fit
+    def __init__(self, predictors: Union[List, Callable], name: str = "Naive", *,
+                 known_only: bool = True): ...
 ```
 
-`ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance.
+`ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance. `fit_intercept` is keyword-only and scikit-learn's; a set value is saved and compared on resume, the default isn't written, so results and files made before it keep their manifests. `NaiveModel` takes a list of one name (or a function of `ctx` returning one), forecasts its value on the row of the issue day and has no coefficients; with `known_only` and an information set a value its rule puts after the issue time is no forecast, counted as `not_published` (see [Week-ahead forecasting](/epftoolbox2/model-pipeline/week-ahead/)). It has no `training_window`, `scaler`, `newest_target` or `refit`: setting the last two raises.
 
 ### Predictor functions
 
@@ -519,7 +523,7 @@ class Use:                                  # What the function may return inste
 from epftoolbox2.scalers import StandardScaler, AsinhScaler, NPITScaler, make_scaler, scaler_spec
 
 class StandardScaler(BaseScaler):
-    def __init__(self): ...
+    def __init__(self, *, scale_binary: bool = False): ...   # True scales binary 0/1 columns too
 
 class AsinhScaler(BaseScaler):
     def __init__(self, apply_to: Union[str, List[str]] = "all"): ...

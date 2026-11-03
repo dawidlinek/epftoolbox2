@@ -1,0 +1,70 @@
+---
+title: NaiveModel
+description: One column's value on the issue row as the forecast, such as a TSO's published forecast taken as a benchmark
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A forecast that is one column's value on the row of the issue day, as it stands: a published forecast taken as a benchmark, such as a
+TSO's week-ahead load forecast, or a naive rule such as "the target day's hour a week earlier". Nothing is fitted, scaled or trained on, so a
+forecast needs no history before the test, and its record has no coefficients. It sits in a report as any model does: `tests()`,
+`DMEvaluator(benchmark=...)` and `forecast_counts()` take it like the others.
+
+## Basic Usage
+
+```python
+from epftoolbox2.models import NaiveModel
+
+tso = NaiveModel(predictors=["load_forecast_daily_max_d+{horizon}"], name="TSO")
+last_week = NaiveModel(predictors=[lambda horizon: f"price_d-{7 - horizon}"], name="last week")  # horizons 1 to 6
+```
+
+A forecast of horizon h issued on D is the value of the column at the period's row dated D, with `{horizon}` expanded as for any
+model; the repeated hour of an autumn switch reads its second occurrence, the row every model forecasts from. A missing value is a
+skipped forecast (`missing_test_predictors`), and so is a missing row (`missing_test_row`).
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `predictors` | list or function | Required | One name, as a list (`{horizon}` templates and callables work), or a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) returning a list of one name for each forecast. More than one name raises |
+| `name` | str | `"Naive"` | Display name for reports |
+| `known_only` | bool | `True` | Keyword-only. With an information set, a value its rule puts after the issue time is no forecast (`not_published`), at every level. `False` judges the column as any model's input: listed at `"warn"`, refused at `"raise"` |
+
+`training_window`, `scaler`, `newest_target` and `refit` belong to a fit, so they aren't parameters: setting `newest_target` or `refit`
+on a model raises, and so does a function that returns `Use(..., train_on="matching")`.
+
+## Only what was published
+
+A published forecast didn't exist before it was published. With an information set (`ModelPipeline(issue_time=...)` or
+`information_set=...`) and `known_only=True`, a key whose value the column's rule puts after the issue time is no forecast: it is
+counted as `not_published` in `report.forecast_counts()`, and is neither listed by `availability="warn"` nor refused by `"raise"`. The
+same keys are left out at every level, `"none"` included, and in `verify`, whose probe sees no forecast in either of its runs there.
+Without an information set every key is a forecast.
+
+The TSO's week-ahead forecast (A31) is published on Fridays at 10:00 for the next Monday-to-Sunday week, so issued every day at noon
+at horizons 1 to 7 it has 39 of the 49 keys of a week: Monday lacks horizon 7, Tuesday 6-7, Wednesday 5-7 and Thursday 4-7. So the
+models of a report don't hold the same keys. `report.tests()`, `rMAEEvaluator(base_model="TSO")`, `DMEvaluator` and `compare()` take
+the keys a model and the benchmark share (`tests()` says how many), but an MAE column (`MAEEvaluator` in `summary()` and `by_horizon()`)
+is each model's MAE on its own keys, so next to a `known_only` benchmark it compares different forecasts: compare through the former.
+See [Week-ahead Forecasting](/epftoolbox2/model-pipeline/week-ahead/#issued-every-day).
+
+Which keys exist depends on the rules and the issue time, so the manifest records them (`training_cut`), and a resume with another
+issue time or rule for the column refuses, as a change of predictors does. A column without a rule counts as published, and is listed
+or refused as `unknown` and the level say.
+
+## YAML
+
+```yaml
+models:
+- class: NaiveModel
+  params:
+    predictors: ["load_forecast_daily_max_d+{horizon}"]
+    name: TSO
+    known_only: true
+```
+
+<Aside>
+  A `NaiveModel` forecasts the value as it stands in the frame. If the column was revised after it was published, the frame holds
+  the revision, and so does the forecast.
+</Aside>

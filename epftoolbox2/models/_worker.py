@@ -40,6 +40,9 @@ SKIP_FIT_ERROR = "fit_error"
 SKIP_NO_MATCHING_DAYS = "no_matching_days"
 # The issue day has no row for this period (a gap in the data); without the row there is nothing to forecast from.
 SKIP_MISSING_TEST_ROW = "missing_test_row"
+# A model that forecasts a published value (`NaiveModel`, `known_only`) whose value its rule puts after the issue time: the
+# forecast didn't exist yet. Decided in the parent, before any task runs (`BaseModel._unpublished`).
+SKIP_NOT_PUBLISHED = "not_published"
 
 # In `PredictorPlan.day_lists`, next to list ids: a day no matching forecast of that (period, horizon) reads, and a day
 # the function returned a list on that no forecast uses, which matches nothing.
@@ -256,9 +259,49 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     return record
 
 
+def _row_value(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
+    """Forecast one task of a model that fits nothing (`NaiveModel`): its one predictor's value on the row the forecast is
+    issued from, the last row dated on the issue day, as it stands. No training row, scaler or mask is read, so a task needs
+    no history. Returns the record, with no coefficients, or a skip reason, as `_fit_one_numpy` does."""
+    arrays = _W_HOUR_ARRAYS[hour]
+    cfg = _W_CONFIG
+    day = cfg["offset"] + day_in_test
+    run_days = cfg.get("run_days")
+    window, day_in_window, position = (None, day_in_test, day_in_test) if run_days is None else run_days[day_in_test]
+    test = issue_row(arrays["days"], day)
+    if test is None:
+        return SKIP_MISSING_TEST_ROW
+    task_lists = cfg.get("task_lists")
+    list_id = None if task_lists is None else int(task_lists[(hour, hz)][position])
+    (name,) = _W_EXPANDED_PREDS[(hour, hz) if list_id is None else list_id]
+    value = float(arrays["x"][test, arrays["col_index"][name]])
+    if not np.isfinite(value):
+        return SKIP_MISSING_TEST_PREDICTORS
+
+    run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
+    record = {
+        "run_date": run_date.isoformat(),
+        "target_date": (run_date + datetime.timedelta(days=hz)).isoformat(),
+        "run_weekday": run_date.weekday(),
+        "hour": hour,
+        "horizon": hz,
+        "day_in_test": day_in_window,
+        "prediction": value,
+        "actual": float(arrays["y"][test, hz - 1]),
+        "coefficients": [],
+        "freq": cfg.get("freq", "1h"),
+    }
+    if list_id is not None:
+        record["predictor_list"] = cfg["list_hashes"][list_id]
+    if window is not None:
+        record["window"] = window
+    return record
+
+
 def _run_task(task: tuple) -> Union[Dict, str]:
     try:
-        return _fit_one_numpy(*task)
+        # A model that fits nothing has `config["fits"]` False and forecasts from the issue row alone.
+        return _fit_one_numpy(*task) if _W_CONFIG.get("fits", True) else _row_value(*task)
     except Exception as exc:
         hour, hz, day_in_test = task
         raise TaskFailed(

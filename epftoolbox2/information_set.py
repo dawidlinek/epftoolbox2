@@ -1964,7 +1964,8 @@ def _issue_day_forecasts(
 
     Such a function is planned on this very frame, so a value it reads can move its list, and it answers through the
     information set. The run itself gets none, so a late list isn't refused and the forecasts show it. A model with
-    `newest_target="published"` reads its training cut from it (`cut_rules`), and nothing else.
+    `newest_target="published"` reads its training cut from it (`cut_rules`), and nothing else; so does a `known_only` model
+    (`NaiveModel`) which of its forecasts are published, since one that isn't has no forecast in any run.
 
     A model with `refit` is run from `run_day` to the end of its refit block (or of the frame), and only `run_day`'s forecasts are
     returned: a unit fits once for every issue day of its block, so a fit that read one of the later days would show only in a
@@ -1995,7 +1996,7 @@ def _issue_day_forecasts(
         if plan is not None and last_day != run_day:
             run_plan = planned(last_day)
     extra = {} if run_plan is None else {"plan": run_plan}
-    if getattr(m, "newest_target", "d-1") == "published":
+    if getattr(m, "newest_target", "d-1") == "published" or getattr(m, "_known_only", False):
         extra["cut_rules"] = information_set
     read = {} if plan is None else plan.read_cells()  # the run lets go of them
     late = [] if plan is None else plan.late_reads()

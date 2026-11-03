@@ -48,6 +48,7 @@ def scaler_spec(spec: ScalerSpec = "standard") -> Union[str, Dict[str, Any]]:
     """Validate ``spec`` and return its YAML-safe form: the name, or ``{"name": ..., "params": {...}}``."""
     name, params = _split_spec(spec)
     scaler = make_scaler({"name": name, "params": params})
-    if not params:
+    # A scaler whose parameters are all at their defaults and left out by `get_params` (StandardScaler) is its name.
+    if not params or not scaler.get_params():
         return name
     return {"name": name, "params": scaler.get_params()}

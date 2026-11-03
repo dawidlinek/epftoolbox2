@@ -732,6 +732,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "choices": ["d-1", "published"],
         },
         {
+            "name": "fit_intercept",
+            "description": "Fit an intercept (off by default: the target is standardised and one-hot dummies carry the level)",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
+        },
+        {
             "name": "refit",
             "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
             "required": False,
@@ -780,11 +787,35 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "choices": ["d-1", "published"],
         },
         {
+            "name": "fit_intercept",
+            "description": "Fit an intercept",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
+        },
+        {
             "name": "refit",
             "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
             "required": False,
             "default": None,
             "kind": "text",
+        },
+    ],
+    "NaiveModel": [
+        {"name": "name", "description": "Model display name", "required": False, "default": "Naive", "kind": "text"},
+        {
+            "name": "predictors",
+            "description": "The one column whose value on the issue row is the forecast, e.g. a TSO's published forecast",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "known_only",
+            "description": "With an issue time, no forecast where the column isn't published by then (not_published)",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
         },
     ],
     "MAEEvaluator": [],
@@ -1178,7 +1209,7 @@ _VALIDATORS = [
     "CoverageValidator",
     "PlausibilityValidator",
 ]
-_MODELS = ["OLSModel", "LassoCVModel"]
+_MODELS = ["OLSModel", "LassoCVModel", "NaiveModel"]
 _EVALUATORS = [
     "MAEEvaluator",
     "RMSEEvaluator",

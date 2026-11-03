@@ -55,10 +55,19 @@ from ._calendar import (
     resolve_issue_days,
     training_span,
 )
-from .context import TRAIN_ON_MATCHING, PredictorPlan, build_plan, mask_digest, takes_ctx, warn_never_published_in
+from .context import (
+    TRAIN_ON_MATCHING,
+    PredictorPlan,
+    _Cells,
+    build_plan,
+    mask_digest,
+    takes_ctx,
+    warn_never_published_in,
+)
 from ._worker import (
     NOT_PLANNED,
     SKIP_MISSING_TEST_ROW,
+    SKIP_NOT_PUBLISHED,
     _pool_init,
     _run_block,
     _run_day,
@@ -101,6 +110,13 @@ def _usable_cpu_count() -> int:
 
 
 class BaseModel(ABC):
+    # Parameters a saved pipeline writes only when not at these values (`ModelPipeline._serialize_component`), so files saved
+    # before they existed don't move. A subclass adds its own.
+    _WRITTEN_WHEN_SET: Dict[str, Any] = {"newest_target": "d-1", "refit": None}
+    # True for a model that fits nothing and forecasts a column's value on the issue row (`NaiveModel`): its tasks read that row
+    # alone (`_worker._row_value`), with no training rows, scaler or fit.
+    _fits_nothing: bool = False
+
     def __init__(
         self,
         predictors: Union[List[Union[str, Callable]], Callable],
@@ -191,6 +207,12 @@ class BaseModel(ABC):
     def _model_kwargs(self) -> Dict:
         return {}
 
+    @property
+    def _known_only(self) -> bool:
+        """Whether a forecast whose input its rule puts after the issue time is no forecast (`not_published`), rather than an
+        input the information-set check refuses or lists: a benchmark that is a published forecast (`NaiveModel`)."""
+        return False
+
     def _resolve_day(self, date_str: str, label: str) -> int:
         """The day id of a local date the data has a row on. By date, not by `.loc[date_str]`: on a daily frame stamped at
         midnight pandas reads that as the one row's timestamp rather than its date."""
@@ -268,7 +290,8 @@ class BaseModel(ABC):
 
         A model with `newest_target="published"` reads its newest training target from the target's rule in `information_set`.
         `cut_rules` is an information set read for that alone, when `information_set` isn't given: nothing is checked or listed
-        with it, and a predictor function doesn't answer through it. `leakage_probe` runs models so.
+        with it, and a predictor function doesn't answer through it. `leakage_probe` runs models so. A `known_only` model
+        (`NaiveModel`) reads from either which of its forecasts are published by the issue time: the others are `not_published`.
         """
         self._set_freq(freq)
         check_level(availability)
@@ -489,6 +512,7 @@ class BaseModel(ABC):
                 training_day_rows(self.name, self._matching_uses(plan, counts), matching_lists), stacklevel=2
             )
         pending = store.get_missing(all_tasks) if store else all_tasks
+        unpublished = self._unpublished(data, rules, freq, expanded, plan, test_days, run_days, pending)
 
         skipped: Counter = Counter()
         window_skipped: Dict[str, Counter] = {} if windows is None else {name: Counter() for name, _ in windows.periods}
@@ -500,6 +524,13 @@ class BaseModel(ABC):
                 if window_days is not None:
                     window_skipped[window_days[task[2]][0]][SKIP_MISSING_TEST_ROW] += 1
                 skip_examples.setdefault(SKIP_MISSING_TEST_ROW, f"period {task[0]} on {test_days[task[2]]}")
+            elif task in unpublished:
+                skipped[SKIP_NOT_PUBLISHED] += 1
+                if window_days is not None:
+                    window_skipped[window_days[task[2]][0]][SKIP_NOT_PUBLISHED] += 1
+                skip_examples.setdefault(
+                    SKIP_NOT_PUBLISHED, f"period {task[0]}, horizon {task[1]}, run date {test_days[task[2]]}"
+                )
             else:
                 tasks.append(task)
 
@@ -628,6 +659,9 @@ class BaseModel(ABC):
         if self.refit is not None:
             # Which fit a forecast uses: its anchor depends on the rule and the epoch, and nothing else.
             cut.update(refit=self.refit, refit_epoch=REFIT_EPOCH)
+        if self._known_only and rules is not None:
+            # Which forecasts exist: the information set isn't compared, but its rules and issue time decide these.
+            cut["known_only"] = self._published_by(rules, freq)
         if self.newest_target == "d-1":
             return cut
         rule = rules._resolve_for(target, _STEP_MINUTES[freq]).rule
@@ -646,6 +680,62 @@ class BaseModel(ABC):
         if self._newest is None:
             return -1
         return self._newest.at(period, np.asarray(day, dtype=np.int64) + self._first_ordinal)
+
+    def _published_by(self, rules: "InformationSet", freq: str) -> Dict[str, Any]:
+        """What decides which forecasts of a `known_only` model exist: the issue time and each input's resolved rule (without the
+        note and the vintage class, which decide nothing, as `target_rule`; None for a column without one, which counts as known)."""
+        step = _STEP_MINUTES[freq]
+        resolved = {}
+        for name in self._used_predictors:
+            rule = rules._resolve_for(name, step).rule
+            resolved[name] = None if rule is None else rule_dict(rule, ("note", "vintage"))
+        return {"issue_time": rules.issue_time, "issue_timezone": rules.issue_timezone, "rules": resolved}
+
+    def _unpublished(
+        self,
+        data: pd.DataFrame,
+        rules: Optional["InformationSet"],
+        freq: str,
+        expanded: Dict[Tuple[int, int], List[str]],
+        plan: Optional[PredictorPlan],
+        test_days: Dict[int, datetime.date],
+        run_days: Sequence[int],
+        tasks: Iterable[Tuple[int, int, int]],
+    ) -> set:
+        """The tasks of a `known_only` model whose one input its rule puts after the issue time on their issue day: no forecast
+        existed yet, so the task is `not_published`, at every availability level. Empty for any other model, or without an
+        information set. The cell is read through `_Cells.known`, the path of `ctx.published` and `violations`; a column
+        without a rule counts as known, as at the level "warn" (at "raise" the check has already refused it, if `unknown`
+        says so)."""
+        tasks = list(tasks)
+        if not self._known_only or rules is None or not tasks:
+            return set()
+        position = {day: i for i, day in enumerate(run_days)}
+        cells = _Cells(data, rules, freq, [test_days[day] for day in run_days], "warn")
+        out = set()
+        for period, hz, day in tasks:
+            at = position[day]
+            names = expanded[(period, hz)] if plan is None else plan.lists[int(plan.assignment[(period, hz)][at])]
+            if not cells.known(names[0])[period, at]:
+                out.add((period, hz, day))
+        return out
+
+    def _issue_time_checks(self, information_set: "InformationSet") -> Tuple[Callable, Callable]:
+        """`information_set.check` and `information_set.late_uses`, as this model's fixed lists are judged by them. A cell a
+        `known_only` model's rule puts after the issue time is no forecast (`_unpublished`), so it is neither refused nor
+        listed; a column without a rule still is, as `unknown` and the level say."""
+        if not self._known_only:
+            return information_set.check, information_set.late_uses
+
+        def check(expanded, target, freq, index, test_start=None, test_end=None, model_name="Model", **kwargs):
+            _, unknown = information_set.violations(expanded, target, freq, index, test_start, test_end, **kwargs)
+            information_set._report_unknown(unknown, model_name)
+            information_set._log_assumptions(model_name)
+
+        def late_uses(*args, **kwargs):
+            return [use for use in information_set.late_uses(*args, **kwargs) if use.column.rule is None]
+
+        return check, late_uses
 
     def _as_run_of_test_window(
         self, on_file: RunWindows, test_start: str, test_end: str, forecast_only: bool, allow_mismatch: bool
@@ -827,6 +917,8 @@ class BaseModel(ABC):
                 }
         if run_positions is not None:
             config["run_days"] = run_positions
+        if self._fits_nothing:
+            config["fits"] = False  # each task reads its issue row alone (`_worker._row_value`)
         if self.refit is not None:
             # The newest targets were read on the anchors (`_newest_targets`), and a unit looks its own up by date.
             config["refit"] = {"rule": self.refit, "first_ordinal": self._first_ordinal, "newest": self._newest}
@@ -951,7 +1043,8 @@ class BaseModel(ABC):
             self._days_of(test_start, test_end, windows),
         )
         self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest)
-        check_target = self.newest_target == "d-1"
+        # A model that fits nothing has no training target to check.
+        check_target = self.newest_target == "d-1" and not self._fits_nothing
         if self._ctx_fn is not None:
             if plan is None:
                 plan = self._plan_predictors(
@@ -994,8 +1087,10 @@ class BaseModel(ABC):
         on_anchors = check_target and self.refit is not None
         check_target = check_target and self.refit is None
         rows = self._training_rows(newest)
+        if information_set is not None:
+            check, late_uses = self._issue_time_checks(information_set)
         if information_set is not None and availability == "raise":
-            information_set.check(
+            check(
                 expanded,
                 target,
                 freq,
@@ -1012,7 +1107,7 @@ class BaseModel(ABC):
                     information_set.check, expanded, target, freq, data.index, test_start, test_end, days
                 )
         elif information_set is not None and availability == "warn":
-            uses = information_set.late_uses(
+            uses = late_uses(
                 expanded,
                 target,
                 freq,
@@ -1031,7 +1126,7 @@ class BaseModel(ABC):
             self._availability_listing = listing_rows(uses)
             for name, (start, end) in windows.periods if windows is not None else ():
                 listed = None if weekdays is None else RunWindows.fixed(None, (start, end)).issue_days(weekdays)
-                uses = information_set.late_uses(
+                uses = late_uses(
                     expanded,
                     target,
                     freq,
@@ -1238,6 +1333,8 @@ class BaseModel(ABC):
             reach=0 if newest is None else newest.reach,
             horizons=horizons,
             refit=self.refit,
+            known_only=self._known_only,
+            trains=not self._fits_nothing,
         )
         if windows is not None and warn_unpublished and len(windows.periods) > 1:
             for name, (start, end) in windows.periods:

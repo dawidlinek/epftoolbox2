@@ -9,7 +9,7 @@ from epftoolbox2.data.sources import CalendarSource, CsvSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.ensembles import AverageEnsemble
-from epftoolbox2.models import OLSModel, LassoCVModel
+from epftoolbox2.models import OLSModel, LassoCVModel, NaiveModel
 from epftoolbox2.evaluators import (
     BatteryArbitrage,
     BiasEvaluator,
@@ -704,8 +704,19 @@ class TestModelPipelineParameterFidelity:
 
         originals = {
             "models": [
-                OLSModel(["price_d-1", "load_d+{horizon}"], training_window=90, name="O", scaler="asinh"),
-                LassoCVModel(["price_d-1"], training_window=60, cv=3, max_iter=77, name="L"),
+                OLSModel(
+                    ["price_d-1", "load_d+{horizon}"], training_window=90, name="O", scaler="asinh", fit_intercept=True
+                ),
+                LassoCVModel(
+                    ["price_d-1"],
+                    training_window=60,
+                    cv=3,
+                    max_iter=77,
+                    name="L",
+                    fit_intercept=False,
+                    scaler={"name": "standard", "params": {"scale_binary": True}},
+                ),
+                NaiveModel(["load_d+{horizon}"], name="N", known_only=False),
             ],
             "ensembles": [AverageEnsemble(["O", "L"], top=1, by="validation", name="best")],
             "evaluators": [

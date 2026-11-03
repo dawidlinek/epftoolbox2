@@ -83,6 +83,7 @@ Rules to know before using the library:
 - [Validation and Test](docs/src/content/docs/model-pipeline/validation-and-test.mdx): `run(df, validation=..., test=...)` and `"previous_year"`, records identical to plain runs, `report.validation`, resuming validation before test, SLURM merges
 - [Ensembles](docs/src/content/docs/model-pipeline/ensembles.mdx): `AverageEnsemble` and `add_ensemble()`, the rule of the average, what counts for choosing, why a `top` ensemble has no validation forecasts, `report.choices()`, SLURM merges and YAML
 - [Predictor Presets](docs/src/content/docs/model-pipeline/presets.mdx): LEAR and expert-model inputs in this library's column naming
+- [Week-ahead Forecasting](docs/src/content/docs/model-pipeline/week-ahead.mdx): daily minimum and maximum load for D+3 to D+9 issued on Fridays, or for D+1 to D+7 every day with lists that drop what isn't published, against a TSO's forecast as a `NaiveModel`, and the settings that reproduce a published study
 
 ## Workflow
 
@@ -92,6 +93,7 @@ Rules to know before using the library:
 
 - [OLSModel](docs/src/content/docs/models/ols.mdx): ordinary least squares
 - [LassoCVModel](docs/src/content/docs/models/lasso.mdx): Lasso with cross-validated regularization
+- [NaiveModel](docs/src/content/docs/models/naive.mdx): one column's value on the issue row, such as a published forecast taken as a benchmark; with an information set, no forecast where the value wasn't out at the issue time
 - [Scalers and VSTs](docs/src/content/docs/models/scalers.mdx): standard scaling and variance-stabilising transformations (asinh, N-PIT) for spiky prices
 
 ## Evaluators
