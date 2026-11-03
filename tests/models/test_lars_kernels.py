@@ -411,6 +411,23 @@ def test_cd_lasso_is_0_24_2_s_coordinate_descent(kind):
     assert len(stopped) > 1
 
 
+def test_cd_lasso_stopped_by_max_iter_is_0_24_2_s():
+    """Strongly correlated columns at a small α don't converge in 60 sweeps: the gap is checked on the last sweep, found too
+    large, and the descent stops there, unconverged, as Lago's refits at 2500 sweeps sometimes did."""
+    rng = np.random.default_rng(7)
+    X = rng.standard_normal((150, 1)) + 0.05 * rng.standard_normal((150, 25))
+    y = X[:, :5].sum(axis=1) + rng.standard_normal(150)
+    stats = _lars.gram_stats(X, y)
+    path = _lars.lars_path(stats.G, stats.q, stats.n)
+    for alpha in (path.alphas[len(path.alphas) // 2], path.alphas[-3]):
+        ours = _lars.cd_lasso(stats.G, stats.q, stats.yy, stats.n, alpha, max_iter=60)
+        theirs, gap, gap_tol, sweeps = _cd_0242(
+            np.zeros(25), alpha * stats.n, 0.0, stats.G, stats.q, y - y.mean(), 60, 1e-4
+        )
+        assert (ours.sweeps, ours.converged, sweeps, gap < gap_tol) == (60, False, 60, False)
+        np.testing.assert_allclose(ours.w, theirs, rtol=0, atol=1e-12 * max(1.0, np.max(np.abs(theirs))))
+
+
 @pytest.mark.parametrize("kind", ["n>p", "weekday dummies"])
 def test_cd_lasso_converged_is_the_exact_lasso(kind):
     X, y = _design(kind, 3)
