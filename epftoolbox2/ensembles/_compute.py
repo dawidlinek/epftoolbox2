@@ -41,6 +41,7 @@ from ..results.manifest import (
 )
 from ..results.ref import ModelResultRef, split_by_window
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
+from ..results.vintages import union_vintages
 from .base import Choice, Ensemble
 
 logger = get_logger(__name__)
@@ -173,7 +174,20 @@ def compute(
     # compared the members' manifests on it. The same for the weekdays: a ref's `issue_days` is what it plans, None for every day.
     horizons = like.horizons or tuple(range(1, like.horizon + 1))
     return Computed(
-        _ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only, horizons, like.issue_days),
+        _ref(
+            ensemble,
+            grid.codes[picked],
+            records,
+            like,
+            stored,
+            path,
+            freq,
+            test_only,
+            horizons,
+            like.issue_days,
+            # What its models read: an ensemble is compared as a model, and reads their inputs.
+            union_vintages(refs[leaf].vintages for leaf in leaves),
+        ),
         choices,
     )
 
@@ -305,13 +319,17 @@ def _what_decides_availability(information_set: Optional[Dict[str, Any]]) -> Opt
     return {
         "issue_time": information_set.get("issue_time"),
         "issue_timezone": information_set.get("issue_timezone"),
-        "rules": {
-            column: {key: value for key, value in rule.items() if key != "note"}
-            for column, rule in information_set.get("rules", {}).items()
-        },
+        "rules": {column: _what_a_rule_decides(rule) for column, rule in information_set.get("rules", {}).items()},
         "assumptions": sorted(information_set.get("assumptions", [])),
         "use_defaults": information_set.get("use_defaults", True),
     }
+
+
+def _what_a_rule_decides(rule: Any) -> Any:
+    """A stored rule without its note and its class, which decide nothing; a list of them for rules over time."""
+    if isinstance(rule, list):
+        return [_what_a_rule_decides(one) for one in rule]
+    return {key: value for key, value in rule.items() if key not in ("note", "vintage")}
 
 
 def _data_differences(manifests: Mapping[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
@@ -601,6 +619,7 @@ def _ref(
     test_only: bool,
     horizons: Sequence[int],
     weekdays: Optional[Sequence[int]] = None,
+    vintages: Optional[List[Dict[str, Any]]] = None,
 ) -> ModelResultRef:
     """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizons` are the ones
     the members were run with, and `weekdays` the weekdays they issued on (None for every day)."""
@@ -624,6 +643,7 @@ def _ref(
         if like.horizons is None and horizons == tuple(range(1, max(horizons, default=0) + 1))
         else horizons,
         issue_days=weekdays,
+        vintages=vintages,
     )
     if like.windows is None:
         run = codes >> _RUN_SHIFT

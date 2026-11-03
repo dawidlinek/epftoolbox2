@@ -18,12 +18,15 @@ from ..information_set import (
     _PROFILE_SLOT,
     _STEP_MINUTES,
     InformationSet,
+    TrainingRows,
+    _RowsKnown,
     _built_from_name,
     _delivered_span,
     _fmt_minute,
     _IssueClock,
     _profile_slot,
     _ranges,
+    over_time,
     parse_predictor,
 )
 from .._date_utils import fmt_minutes
@@ -75,9 +78,18 @@ def target_relative(name: str, period: int, horizon: int, freq: str, clock: _Iss
 
 
 def _judge(
-    name: str, period: int, data: pd.DataFrame, info: Optional[InformationSet], freq: str, clock: _IssueClock, used
+    name: str,
+    period: int,
+    data: pd.DataFrame,
+    info: Optional[InformationSet],
+    freq: str,
+    clock: _IssueClock,
+    used,
+    training_rows: Optional[TrainingRows] = None,
+    horizon: int = 1,
 ) -> Tuple[str, str, str]:
-    """The (rule, known, status) of `name` at `period` over the issue days `used`."""
+    """The (rule, known, status) of `name` at `period` over the issue days `used`. A column whose rule changes over time is
+    judged on the rows its fit at `horizon` reads too (`training_rows`), as the check judges it."""
     if name not in data.columns:
         return _DASH, _DASH, "not in data"
     if info is None:
@@ -90,7 +102,11 @@ def _judge(
     used = used & ~clock.skipped(np.array([period]), step)[0]  # a period the clocks skip has no row to judge
     if not used.any():
         return col.rule.describe(), _DASH, "no row"
-    available = clock.available(col, np.array([period]), step)[0][used]
+    available = clock.available(col, np.array([period]), step)[0]
+    if training_rows is not None and over_time(col.rule):
+        known = _RowsKnown(col, np.array([period]), clock, step)
+        available = np.maximum(available, training_rows.latest(known, horizon)[0])
+    available = available[used]
     excess = available - clock.issue[used]
     worst = int(excess.argmax())
     known = clock.label(available[worst], int(np.flatnonzero(used)[worst]))
@@ -108,12 +124,14 @@ def predictor_table(
     freq: str,
     clock: _IssueClock,
     used: Optional[np.ndarray] = None,
+    training_rows: Optional[TrainingRows] = None,
 ) -> pd.DataFrame:
-    """One row per predictor of the forecast of (`horizon`, `period`) over the issue days `used` (default: all)."""
+    """One row per predictor of the forecast of (`horizon`, `period`) over the issue days `used` (default: all). With
+    `training_rows` a column whose rule changes over time is judged on the rows its fit reads too."""
     used = np.ones(len(clock.days), dtype=bool) if used is None else used
     rows = []
     for name in names:
-        rule, known, status = _judge(name, period, data, info, freq, clock, used)
+        rule, known, status = _judge(name, period, data, info, freq, clock, used, training_rows, horizon)
         label = target_relative(name, period, horizon, freq, clock, used)
         rows.append(dict(zip(COLUMNS, (name, label, rule, known, status))))
     return pd.DataFrame(rows, columns=COLUMNS)
@@ -312,7 +330,8 @@ def explain_model(
         used = np.ones(len(days), dtype=bool)
         names = model._expand_predictors(horizon, hour=hour)
         subject = model.name
-    out["predictors"] = predictor_table(names, data, info, horizon, hour, freq, clock, used)
+    rows = model._training_rows(newest)
+    out["predictors"] = predictor_table(names, data, info, horizon, hour, freq, clock, used, rows)
     out["grouped"] = grouped_table(out["predictors"])
     if newest is not None:
         out["newest_target"] = newest_target_table(

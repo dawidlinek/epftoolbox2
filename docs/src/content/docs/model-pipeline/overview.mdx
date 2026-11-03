@@ -227,7 +227,8 @@ pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels", a
 Before any fit, a predictor (or the newest training target) not known at issue time is listed in `report.availability()`, a
 warning, the terminal exporter and the manifest, and the run goes on. With `availability="raise"` it raises
 `InformationSetError` instead. The rules are built in for the shipped sources (ENTSO-E prices/load/generation,
-Open-Meteo weather, calendar). See [Information Set](/epftoolbox2/model-pipeline/information-set/) for the
+Open-Meteo weather, calendar). A rule can also say what the archive of its column holds (a [vintage class](/epftoolbox2/model-pipeline/information-set/#vintage-classes),
+which moves no number) and on which days it holds, for a lag that changed. See [Information Set](/epftoolbox2/model-pipeline/information-set/) for the
 levels, the full rule reference, custom rules, `pipeline.explain()` and the empirical `leakage_probe`, and
 [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/) for `pipeline.verify()`, which runs it on sampled
 issue days.
@@ -242,6 +243,7 @@ The pipeline returns an `EvaluationReport`:
 report.summary()           # Overall metrics, with a `forecasts` count per model
 report.forecast_counts()   # Planned vs produced forecasts and skip reasons
 report.availability()      # Inputs not known at the issue time or without a rule
+report.vintages()          # What the archive of each input holds (its rule's vintage class)
 report.by_hour()           # Breakdown by hour
 report.by_horizon()        # Breakdown by horizon
 report.by_hour_horizon()   # Combined breakdown

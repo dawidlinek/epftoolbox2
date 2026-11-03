@@ -34,6 +34,7 @@ from .availability import listing_frame
 from .breakdowns import AGGREGATES, daily_aggregate, price_level, spike_threshold
 from .matching import rows_of_refs, training_day_frame
 from .ref import ModelResultRef
+from .vintages import flag_mixed_classes, vintage_frame
 from .windows import TEST, VALIDATION, RunWindows
 
 logger = get_logger(__name__)
@@ -323,6 +324,7 @@ class EvaluationReport:
                 produced=len(records),
                 skipped={"incomplete_day": missing},
                 availability_listing=ref.availability_listing,
+                vintages=ref.vintages,
                 window=ref.window,
                 target_before=ref.target_before,
                 windows=ref.windows,
@@ -508,6 +510,7 @@ class EvaluationReport:
             span, n_days = max(lengths) if by == "hour" else min(lengths)
             _flag_test_length(table, n_days, span)
         _flag_partial_days(table, partial)
+        self._flag_vintages(table, [(model, benchmark) for model in models])
         return table
 
     def mcs(
@@ -703,6 +706,7 @@ class EvaluationReport:
         )
         _flag_test_length(table, hac.n_days, hac.span_days)
         _flag_partial_days(table, {a: hac.partial_days})
+        self._flag_vintages(table, [(a, b)])
         return table
 
     def leaderboard(self, benchmark: Optional[str] = None, horizon: Union[int, str, None] = None) -> pd.DataFrame:
@@ -769,6 +773,7 @@ class EvaluationReport:
             _flag_test_length(table, n_days, span)
         if benchmark is not None:
             _flag_partial_days(table, partial)
+        self._flag_vintages(table, [panel.models])  # ranked by MAE all together
         return table
 
     # -- what the comparison tables share ---------------------------------------------------------------------------
@@ -902,6 +907,39 @@ class EvaluationReport:
         A report built from `save_dir` shows what the manifests hold, for every test period the results were run on.
         """
         return listing_frame({name: ref.availability_listing for name, ref in self.refs.items()})
+
+    def vintages(self) -> pd.DataFrame:
+        """The vintage class of each input of each model: what the archive it was read from holds, by its rule's `vintage`.
+        Empty, with the same columns, when no model read an input with a class (or a run had no information set).
+
+        Columns: `model`, `predictor` (as the model read it, `price_d-1`), `series` (the column its rule is for, `price`),
+        `class` (`snapshot`, `row_stamp`, `last_write_stamp`, `latest_revision`, or `unknown` for a rule without one; the classes
+        of a column's rules over time joined by ", ") and `ctx` (whether a predictor function read it through `ctx`). An
+        ensemble's rows are its models'.
+
+        A class changes no number. A `latest_revision` or `last_write_stamp` series holds values written after the issue day,
+        which no forecast saw then: a backtest reading it is more accurate than a live run would have been. Comparisons of
+        models that read one series with different classes warn (`df.attrs["vintages"]`).
+        """
+        return vintage_frame({name: ref.vintages for name, ref in self.refs.items()})
+
+    def _flag_vintages(self, table: pd.DataFrame, groups: Sequence[Sequence[str]], stacklevel: int = 2) -> None:
+        """Say so when models compared in `table` (each group compared together) read one series with different classes."""
+        flag_mixed_classes(
+            table, {name: ref.vintages for name, ref in self.refs.items()}, groups, stacklevel=stacklevel + 1
+        )
+
+    def _flag_dm_vintages(self, table: pd.DataFrame, models: Sequence[str], stacklevel: int = 2) -> None:
+        """`_flag_vintages` for the pairs a `DMEvaluator` column compares: each model with the benchmark."""
+        groups = [
+            (model, evaluator.benchmark)
+            for evaluator in self.evaluators
+            if isinstance(evaluator, DMEvaluator)
+            for model in models
+            if model != evaluator.benchmark
+        ]
+        if groups:
+            self._flag_vintages(table, groups, stacklevel=stacklevel + 1)
 
     def training_days(self) -> pd.DataFrame:
         """How many days the forecasts of each `train_on="matching"` list train on, from the records of this report's window.
@@ -1071,6 +1109,7 @@ class EvaluationReport:
         by_evaluator = {e.name: e.clones(frames) for e in self.evaluators if isinstance(e, SetEvaluator)}
         if by_evaluator:  # `DM` and `MCS` read them on other keys, so they needn't agree
             table.attrs["clones"] = by_evaluator
+        self._flag_dm_vintages(table, list(model_dfs), stacklevel=3)
         return table
 
     def _grouped_table(
@@ -1097,7 +1136,9 @@ class EvaluationReport:
                 if counts:
                     row["forecasts"] = len(group)
                 rows.append({**row, **metrics.get(name, {})})
-        return pd.DataFrame(rows)
+        table = pd.DataFrame(rows)
+        self._flag_dm_vintages(table, list(model_dfs), stacklevel=3)
+        return table
 
     @staticmethod
     def _split(

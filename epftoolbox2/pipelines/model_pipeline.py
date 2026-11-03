@@ -47,6 +47,7 @@ from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
+from ..results.vintages import read_vintages
 from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
 from ._yaml import dump_yaml, to_yaml_value
@@ -556,6 +557,7 @@ class ModelPipeline:
                     )
                 ),
                 availability_listing=read_listing(manifest_path(path)),
+                vintages=read_vintages(manifest_path(path)),
                 windows=windows,
                 matching_lists=read_matching_lists(manifest_path(path)),
                 zone=zone,

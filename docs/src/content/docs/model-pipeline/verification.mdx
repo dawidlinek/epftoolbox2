@@ -151,7 +151,14 @@ sampled day reads is `inconclusive`, until `days` covers it. These are `inconclu
 
 - an input with no availability rule (with `InformationSet(unknown="warn")` or `"ignore"`, otherwise it raises), because a
   leak through it can't be seen;
-- a horizon with no forecast on any sampled day, because nothing checked it.
+- a horizon with no forecast on any sampled day, because nothing checked it;
+- a predictor function that reads a column of [class](/epftoolbox2/model-pipeline/information-set/#vintage-classes)
+  `latest_revision` or `last_write_stamp` through `ctx` on a day a
+  [`train_on="matching"`](/epftoolbox2/model-pipeline/predictor-functions/#training-only-on-the-days-with-the-same-list) list
+  trains on, on the sampled days or anywhere in the test period. The frame holds that value as revised later, not as it was out on
+  that day, so a forecast's set of days can be one no live run would have chosen, and no probe can see it: the value is known by
+  its rule either way. The line names the columns and their classes. A `snapshot` or `row_stamp` column, one without a class, a
+  read on the issue day alone and a list that trains on every day are not affected.
 
 `positive_control=False` skips the control, and then `ok` only says that no forecast moved.
 
@@ -200,6 +207,9 @@ model is `inconclusive`. If it really is known in advance, for example a column 
 - **It trusts your rules.** A rule that says a value is known earlier than it really is keeps that value out of the probe.
 - **It can't see revisions.** A value in the frame revised after the issue day is known by its rule, so nothing perturbs it. A
   predictor function reading it can move its list or its [set of days](/epftoolbox2/model-pipeline/predictor-functions/#training-only-on-the-days-with-the-same-list) without a word.
+  Where a rule's [class](/epftoolbox2/model-pipeline/information-set/#vintage-classes) says the archive is revised, a read on a
+  day a `train_on="matching"` list trains on makes the model `inconclusive` (see the list above); a series you don't classify
+  can't be told.
 - **A day the model can't forecast at all stops it** with the reason, as `run()` does: `no forecasts produced`.
 
 <Aside type="tip">

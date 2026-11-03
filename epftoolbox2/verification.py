@@ -9,11 +9,17 @@ For each model and a sample of issue days it runs two experiments on top of `epf
   silence is no evidence: its perturbation isn't reaching the model.
 
 A model's status is `leak`, `inconclusive` (nothing moved, but that can't be vouched for) or `ok`, and only `ok` passes.
+
+One blind spot no perturbation can reach: a predictor function with a `train_on="matching"` list that reads, on a day it trains
+on, a column whose archive holds revised values (a rule of class `latest_revision` or `last_write_stamp`). The frame holds the
+value as revised later, not what was out on that day, so the set of days a forecast trains on can be one no live run would have
+chosen, and a probe sees a known value either way. Such a model is `inconclusive`, naming the column (decision 19 of the step 3
+spec). A class not declared doesn't count, and nor does a read on an issue day, which is the forecast's own.
 """
 
 import copy
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -26,8 +32,10 @@ from .information_set import (
     ControlResult,
     InformationSet,
     ProbeResult,
+    is_revised,
     leakage_probe,
     positive_control,
+    vintage_of,
 )
 from .models._calendar import every_horizon, horizon_arguments, resolve_horizons, resolve_issue_days
 from .models._contract import wall_clock
@@ -55,6 +63,8 @@ class IssueDayCheck:
         default_factory=list
     )  # what a predictor function uses late in the whole test period
     horizons: Optional[Tuple[int, ...]] = None  # the horizons verified; None is every one from 1 to `horizon`
+    # Columns of a revised class (with it) a predictor function reads on a training day of a `train_on="matching"` list.
+    revised_reads: Dict[str, str] = field(default_factory=dict)
 
     @property
     def planned_horizons(self) -> Tuple[int, ...]:
@@ -204,6 +214,14 @@ def _blind_spots(checks: List[IssueDayCheck]) -> List[str]:
             f"its predictor function uses {not_sampled} only on issue days outside the sample, so a leak through them "
             "can't be seen. Sample more days (`days=`), up to the whole period."
         )
+    revised = {name: vintage for check in checks for name, vintage in check.revised_reads.items()}
+    if revised:
+        lines.append(
+            f"its predictor function reads {dict(sorted(revised.items()))} on days a train_on='matching' list trains on, "
+            "and their archive holds revised values: the frame has each value as revised later, not what was out on that "
+            "day, so a forecast's set of days can be one no live run would have chosen, and no probe can see it. Snapshots "
+            "of these columns would settle it."
+        )
     not_from_frame = sorted({name for check in checks for name in check.not_from_frame})
     if not_from_frame:
         lines.append(
@@ -293,6 +311,7 @@ def verify_model(
         availability=availability,
         horizons=horizons,
     )
+    revised_reads = _revised_training_reads(plan, information_set, freq)  # before the check lets go of what it read
     checked._check_inputs(built, target, horizon, freq, plan=plan, cut_rules=information_set, horizons=horizons)
     used = sorted({*checked._used_predictors, *plan.queried}) if plan is not None else list(checked._used_predictors)
     not_sampled: List[str] = []
@@ -313,6 +332,7 @@ def verify_model(
             weekdays=weekdays,
         )
         not_sampled = sorted(({name for names in whole.lists for name in names} | whole.queried) - set(used))
+        revised_reads = {**revised_reads, **_revised_training_reads(whole, information_set, freq)}
         late_in_period = sorted(
             {row["predictor"] for row in whole.listing(target) if row["status"] == LATE and row["role"] != ROLE_TARGET}
         )
@@ -392,9 +412,27 @@ def verify_model(
                 not_sampled,
                 late_in_period,
                 None if every_horizon(horizon, horizons) else horizons,
+                revised_reads,
             )
         )
     return checks
+
+
+def _revised_training_reads(plan: Any, information_set: InformationSet, freq: str) -> Dict[str, str]:
+    """Column -> class, for each column of a revised class (`information_set.REVISED_VINTAGES`) a plan's function read through
+    `ctx` on a training day of a `train_on="matching"` list (`PredictorPlan._training_cells`): with `value`, or with `published`
+    where the rule calls it known, so that only whether the value is there decides. The noise of a probe needn't flip a list, so
+    a read counts, whatever the function did with it. A plan with no matching list reads no training day."""
+    cells = None if plan is None else plan._training_cells
+    if cells is None:
+        return {}
+    step = _STEP_MINUTES[freq]
+    found = {}
+    for (name, _), (read, _) in cells.read_cells().items():
+        rule = information_set._resolve_for(name, step).rule
+        if read.any() and is_revised(rule):
+            found[name] = vintage_of(rule)
+    return dict(sorted(found.items()))
 
 
 def _booleans_as_numbers(data: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:

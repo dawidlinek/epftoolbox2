@@ -96,7 +96,9 @@ that came an hour late on the day and was backfilled later reads as published, a
 often it was revised after that day. The availability rule stands for the usual publication time. It can't replay a day's outage
 or a revision, and only data with its vintages could; this library doesn't read those yet.
 
-`leakage_probe` and `verify` can't see any of this: a revised value in the frame looks like any other known value. A live run may also
+`leakage_probe` and `verify` can't see any of this: a revised value in the frame looks like any other known value. The one exception
+is a column whose rule has a revised [class](/epftoolbox2/model-pipeline/information-set/#vintage-classes): `verify` flags a read
+of it on a day a [matching list](#training-only-on-the-days-with-the-same-list) trains on. A live run may also
 see a gap the backtest doesn't, so a function can take a path no backtest took.
 </Aside>
 
@@ -204,8 +206,10 @@ What that means, for each (period, horizon):
 <Aside type="caution" title="Revised series and the set of days">
 A value the function reads on a past day is the one in the frame, as for a [forecast's own cell](#publishedcolumns), so a revision
 made after the forecast's issue day moves its set of days and the forecast with it: in one synthetic case all 24 forecasts of a day,
-by 4 on average. `leakage_probe` and `verify` can't see that, since the revised value is known by the rule. If the function reads a
-series that gets revised, the backtest's sets are the archive's.
+by 4 on average. `leakage_probe` can't see that, since the revised value is known by the rule. If the function reads a
+series that gets revised, the backtest's sets are the archive's. Give its rule a [class](/epftoolbox2/model-pipeline/information-set/#vintage-classes)
+(`vintage="latest_revision"`, as the built-in ENTSO-E load and generation rules have) and `verify` calls such a function
+`inconclusive`, naming the column.
 
 Backfilling works against a live run too. If `published()` is False today and the archive has backfilled that column on every past
 day, today's list is one no past day got: a fallback list used that way has `no_matching_days`, and no forecast, in the live run
@@ -322,7 +326,7 @@ report.refs["LEAR_dyn"].predictor_lists
 ```
 
 The manifest next to the results stores the function's import path, a fingerprint (a hash of its source and of the
-information set), and every distinct list by hash, so each record can be traced to its names.
+information set, without its rules' classes), and every distinct list by hash, so each record can be traced to its names.
 
 Resuming compares what matters directly, for each stored forecast inside the run's test period: the list a fresh run would
 give it and, for that list, the binary columns. Any difference raises `ManifestMismatchError`, also when the source shows no

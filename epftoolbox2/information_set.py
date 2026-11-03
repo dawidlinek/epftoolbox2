@@ -38,6 +38,17 @@ logger = get_logger(__name__)
 
 DEFAULT_ISSUE_TIME = "11:45"
 KINDS = ("static", "realised", "published", "weekly", "weather_run", "as_of", "weather_cutoff")
+# What the archive of a column holds (`Availability(vintage=...)`): `snapshot`, each value as published at a stated time (an
+# auction, a forecast's day-ahead vintage); `row_stamp`, every value with a trustworthy stamp of its first publication;
+# `last_write_stamp`, a stamp of its last write, which can tell a leak but is no vintage; `latest_revision`, the newest value
+# only. A class decides no number: it says what a backtest read, which `report.vintages()` lists.
+VINTAGES = ("snapshot", "row_stamp", "last_write_stamp", "latest_revision")
+# The classes whose archive holds values written after they were first out: a backtest reads what no forecast saw then.
+REVISED_VINTAGES = ("latest_revision", "last_write_stamp")
+# How a rule without a class (`vintage=None`, any rule of yours that doesn't say) is shown.
+UNKNOWN_VINTAGE = "unknown"
+# When a value that no rule of its column holds for is known: never, so it is always late.
+NEVER = "never (no rule holds then)"
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 _UNKNOWN_POLICIES = ("raise", "warn", "ignore")
 # What a run does with an input known after the issue time: nothing, list it and go on, or refuse before any fit.
@@ -60,6 +71,10 @@ _SLOT_MINUTES = {"h": 60, "s": 15}
 _DAY_AGGREGATE = re.compile(r"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:min|max|mean|last)$")
 
 
+# The note of a use that is late on a training row, not on the issue day's.
+_TRAINING_ROWS_HINT = (
+    "a training row holds a value known only then: under rules over time an older value can come later than a newer one"
+)
 _LATE_ADVICE = (
     "Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too strict for your data, "
     "override it with InformationSet(rules={...})."
@@ -82,6 +97,19 @@ def _parse_delay(value: str) -> float:
         return pd.Timedelta(value).total_seconds() / 60.0
     except (ValueError, TypeError) as exc:
         raise ValueError(f"Expected a delay such as '1h' or '30min', got '{value}'") from exc
+
+
+def _iso_day(value: Any, name: str) -> Optional[str]:
+    """A validity bound as an ISO date, "YYYY-MM-DD": a calendar date, not an instant."""
+    if value is None:
+        return None
+    try:
+        day = pd.Timestamp(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{name} must be a date such as '2026-10-08', got {value!r}") from exc
+    if day.tz is not None or day != day.normalize():
+        raise ValueError(f"{name} is a calendar date such as '2026-10-08', not an instant, got {value!r}")
+    return day.date().isoformat()
 
 
 def _check_zone(zone: str) -> None:
@@ -133,6 +161,14 @@ class Availability:
 
     A clock time of a rule (`time`) is a wall-clock time of `timezone`, read at the instant it denotes: one the clocks
     repeat at its second occurrence and one they skip at the switch, never earlier than it may be.
+
+    `vintage` is the rule's class, what the archive of the column holds (one of `VINTAGES`; None says nothing, shown as
+    "unknown"). It decides no number. `valid_from` and `valid_until` (ISO dates, both included; `.during()` sets them) say on
+    which days the rule holds, for a lag that changed: a value whose day is outside the period isn't known by this rule, and a
+    value no rule of its column holds for is never known. The day is the one the value is delivered on, a date of `timezone`
+    for `published` and `weekly` and of the data's zone for `realised`, `weather_run` and `static`; for `as_of` and
+    `weather_cutoff` it is the day the value is read on (the issue day, moved by a shift after a leading `_d+k`). A column's
+    rules over time are a list in `InformationSet(rules={name: [rule, rule]})`, with disjoint periods (`RuleChain`).
     """
 
     kind: str
@@ -142,6 +178,9 @@ class Availability:
     weekday: str = "friday"
     timezone: Optional[str] = "Europe/Brussels"
     note: str = ""
+    vintage: Optional[str] = None
+    valid_from: Optional[str] = None
+    valid_until: Optional[str] = None
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -161,47 +200,89 @@ class Availability:
                 )
         if self.timezone is not None:
             _check_zone(self.timezone)
+        if self.vintage is not None and self.vintage not in VINTAGES:
+            raise ValueError(f"Unknown vintage class {self.vintage!r}. Classes: {list(VINTAGES)}, or None")
+        object.__setattr__(self, "valid_from", _iso_day(self.valid_from, "valid_from"))
+        object.__setattr__(self, "valid_until", _iso_day(self.valid_until, "valid_until"))
+        if self.valid_from is not None and self.valid_until is not None and self.valid_from > self.valid_until:
+            raise ValueError(f"valid_from {self.valid_from} is after valid_until {self.valid_until}")
 
     @classmethod
-    def static(cls, note: str = "") -> "Availability":
-        return cls("static", note=note)
+    def static(cls, note: str = "", vintage: Optional[str] = None) -> "Availability":
+        return cls("static", note=note, vintage=vintage)
 
     @classmethod
-    def realised(cls, delay: str = "1h", note: str = "") -> "Availability":
-        return cls("realised", delay=delay, note=note)
+    def realised(cls, delay: str = "1h", note: str = "", vintage: Optional[str] = None) -> "Availability":
+        return cls("realised", delay=delay, note=note, vintage=vintage)
 
     @classmethod
     def published(
-        cls, time: str, days_before: int = 1, timezone: Optional[str] = "Europe/Brussels", note: str = ""
+        cls,
+        time: str,
+        days_before: int = 1,
+        timezone: Optional[str] = "Europe/Brussels",
+        note: str = "",
+        vintage: Optional[str] = None,
     ) -> "Availability":
-        return cls("published", time=time, days_before=int(days_before), timezone=timezone, note=note)
+        return cls("published", time=time, days_before=int(days_before), timezone=timezone, note=note, vintage=vintage)
 
     @classmethod
-    def daily_close(cls, time: str, timezone: Optional[str] = "Europe/Brussels", note: str = "") -> "Availability":
+    def daily_close(
+        cls, time: str, timezone: Optional[str] = "Europe/Brussels", note: str = "", vintage: Optional[str] = None
+    ) -> "Availability":
         """A value for trading day X known at its close on X (e.g. fuel or carbon settlement prices)."""
-        return cls.published(time, days_before=0, timezone=timezone, note=note)
+        return cls.published(time, days_before=0, timezone=timezone, note=note, vintage=vintage)
 
     @classmethod
     def weekly(
-        cls, weekday: str = "friday", time: str = "10:00", timezone: Optional[str] = "Europe/Brussels", note: str = ""
+        cls,
+        weekday: str = "friday",
+        time: str = "10:00",
+        timezone: Optional[str] = "Europe/Brussels",
+        note: str = "",
+        vintage: Optional[str] = None,
     ) -> "Availability":
-        return cls("weekly", weekday=weekday.lower(), time=time, timezone=timezone, note=note)
+        return cls("weekly", weekday=weekday.lower(), time=time, timezone=timezone, note=note, vintage=vintage)
 
     @classmethod
-    def weather_run(cls, delay: str = "6h", note: str = "") -> "Availability":
-        return cls("weather_run", delay=delay, note=note)
+    def weather_run(cls, delay: str = "6h", note: str = "", vintage: Optional[str] = None) -> "Availability":
+        return cls("weather_run", delay=delay, note=note, vintage=vintage)
 
     @classmethod
-    def as_of(cls, time: str, timezone: Optional[str] = "Europe/Brussels", note: str = "") -> "Availability":
+    def as_of(
+        cls, time: str, timezone: Optional[str] = "Europe/Brussels", note: str = "", vintage: Optional[str] = None
+    ) -> "Availability":
         """Known at a fixed `time` on the issue day D; a leading `_d+k` doesn't change that."""
-        return cls("as_of", time=time, timezone=timezone, note=note)
+        return cls("as_of", time=time, timezone=timezone, note=note, vintage=vintage)
 
     @classmethod
-    def weather_cutoff(cls, run: str, delay: str, note: str = "") -> "Availability":
+    def weather_cutoff(cls, run: str, delay: str, note: str = "", vintage: Optional[str] = None) -> "Availability":
         """An OpenMeteoSource column: known `delay` after `run` (a UTC hour "HH") on the issue day D, regardless
         of a leading `_d+k` — like `as_of`, but the fixed time is expressed as a UTC run hour plus a delay that
         may push it past 24:00 (into the next UTC calendar day), rather than a local "HH:MM" clock time."""
-        return cls("weather_cutoff", time=f"{run}:00", delay=delay, timezone="UTC", note=note)
+        return cls("weather_cutoff", time=f"{run}:00", delay=delay, timezone="UTC", note=note, vintage=vintage)
+
+    def during(self, valid_from: Any = None, valid_until: Any = None) -> "Availability":
+        """This rule holding only on the days from `valid_from` to `valid_until` (dates, both included; None leaves that
+        side open). A list of such rules with disjoint periods is a column's rule over time:
+        `[Availability.published("14:30", -4).during(valid_until="2026-10-07"),
+        Availability.published("14:30", -1).during(valid_from="2026-10-08")]`."""
+        return replace(self, valid_from=valid_from, valid_until=valid_until)
+
+    @property
+    def bounded(self) -> bool:
+        """Whether the rule holds on some days only."""
+        return self.valid_from is not None or self.valid_until is not None
+
+    def _holds_on(self, days: np.ndarray, origin: pd.Timestamp) -> np.ndarray:
+        """Whether each of `days` (days after the naive midnight `origin`) is in the validity period."""
+        days = np.asarray(days, dtype=float)
+        inside = np.ones(days.shape, dtype=bool)
+        if self.valid_from is not None:
+            inside &= days >= (pd.Timestamp(self.valid_from) - origin) // pd.Timedelta(days=1)
+        if self.valid_until is not None:
+            inside &= days <= (pd.Timestamp(self.valid_until) - origin) // pd.Timedelta(days=1)
+        return inside
 
     def to_dict(self) -> Dict[str, Any]:
         keys = {
@@ -215,6 +296,13 @@ class Availability:
         }[self.kind]
         out: Dict[str, Any] = {"kind": self.kind}
         out.update({k: getattr(self, k) for k in keys})
+        for name in (
+            "vintage",
+            "valid_from",
+            "valid_until",
+        ):  # only when set: a file without them reads as it always did
+            if getattr(self, name) is not None:
+                out[name] = getattr(self, name)
         if self.note:
             out["note"] = self.note
         return out
@@ -228,6 +316,17 @@ class Availability:
         return cls(**data)
 
     def describe(self) -> str:
+        if not self.bounded:
+            return self._describe_timing()
+        if self.valid_from is None:
+            period = f"to {self.valid_until}"
+        elif self.valid_until is None:
+            period = f"from {self.valid_from}"
+        else:
+            period = f"{self.valid_from} to {self.valid_until}"
+        return f"{self._describe_timing()} (valid {period})"
+
+    def _describe_timing(self) -> str:
         zone = f" {self.timezone}" if self.timezone else ""
         if self.kind == "static":
             return "known in advance"
@@ -249,16 +348,166 @@ class Availability:
         return f"weather model run published {self.delay} after its start (about the row time)"
 
 
+@dataclass(frozen=True)
+class RuleChain:
+    """The rules of one column over time, each holding on the days of its validity period (`Availability.during`). The periods
+    are disjoint, and a value no rule holds for is never known, so it is late, conservatively. `InformationSet(rules={name:
+    [rule, rule]})` makes one of a list, and it is written back as the list, in the order of the periods.
+
+    A gap between two periods is allowed: the values of those days are never known. Two periods that share a day, or two rules
+    open on the same side, raise `ValueError`.
+    """
+
+    rules: Tuple[Availability, ...]
+
+    def __post_init__(self):
+        rules = [Availability.from_dict(rule) for rule in self.rules]
+        if not rules:
+            raise ValueError("A list of availability rules needs at least one rule")
+        ordered = tuple(sorted(rules, key=lambda rule: rule.valid_from or ""))
+        for earlier, later in zip(ordered, ordered[1:]):
+            if earlier.valid_until is None or later.valid_from is None or earlier.valid_until >= later.valid_from:
+                raise ValueError(
+                    "The rules of one column must hold on disjoint periods, so that one rule decides each value: "
+                    f"'{earlier.describe()}' and '{later.describe()}' overlap. Give each its own days with "
+                    ".during(valid_from=..., valid_until=...)."
+                )
+        object.__setattr__(self, "rules", ordered)
+
+    @property
+    def kind(self) -> str:
+        """The kind of its rules if they share one, else "chain"."""
+        kinds = {rule.kind for rule in self.rules}
+        return kinds.pop() if len(kinds) == 1 else "chain"
+
+    def to_dict(self) -> List[Dict[str, Any]]:
+        return [rule.to_dict() for rule in self.rules]
+
+    def describe(self) -> str:
+        return "; ".join(rule.describe() for rule in self.rules)
+
+    def __iter__(self):
+        return iter(self.rules)
+
+    def __len__(self) -> int:
+        return len(self.rules)
+
+
+Rule = Union[Availability, RuleChain]
+
+
+def _as_rule(value: Any) -> Rule:
+    """A rule of `InformationSet(rules=...)`: an `Availability`, a dict of one, or a list of them (a `RuleChain`)."""
+    if isinstance(value, (Availability, RuleChain)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return RuleChain(tuple(value))
+    return Availability.from_dict(value)
+
+
+def rule_elements(rule: Rule) -> Tuple[Availability, ...]:
+    """The rules of a `RuleChain`, or a rule on its own."""
+    return rule.rules if isinstance(rule, RuleChain) else (rule,)
+
+
+def vintage_of(rule: Optional[Rule]) -> str:
+    """The class of a column's rule as shown: its `vintage`, "unknown" without one or without a rule, and the classes of a
+    `RuleChain`'s rules in the order of their periods, each once, joined by ", "."""
+    if rule is None:
+        return UNKNOWN_VINTAGE
+    classes = [one.vintage or UNKNOWN_VINTAGE for one in rule_elements(rule)]
+    return ", ".join(dict.fromkeys(classes))
+
+
+def over_time(rule: Optional[Rule]) -> bool:
+    """Whether a column's rule changes over time: a `RuleChain`, or a rule with a validity period. Such a rule needn't make an
+    older value known before a newer one (a lag that shortens, a gap, a `valid_from`), so the check reads the training rows and
+    every slot of a day aggregate too; with any other rule a known value implies that every older one is."""
+    return isinstance(rule, RuleChain) or (rule is not None and rule.bounded)
+
+
+@dataclass(frozen=True)
+class TrainingRows:
+    """The rows a forecast's fit reads, for checking a column whose rule changes over time (`over_time`) on them as well as on
+    the issue day's row: `InformationSet.check(..., training_rows=TrainingRows(window))` and `late_uses`, which a model run passes.
+
+    At horizon h, relative to the issue day D, rows dated from D - window - h - reach to D - 1 - h, or to D - 1 when the newest
+    target is read from the target's rule (`to_issue`, `newest_target="published"`); `reach` is how far a newest target lies
+    before D - 1. Their targets are dated from D - window - reach to D - 1. With `refit` the forecast of D uses the fit of its
+    refit day A on or before D, whose rows are those of a forecast issued on A: the same, `D - A` days earlier. Either way they
+    are judged as of D's issue time, as `leakage_probe` judges them.
+
+    Args:
+        window: The model's `training_window`.
+        reach: Days a newest target lies before D - 1 at most (`NewestTargets.reach`, read on the refit days with `refit`).
+        to_issue: Rows reach D - 1, as with `newest_target="published"`.
+        refit: The model's `refit`, whose refit days move the rows back.
+    """
+
+    window: int
+    reach: int = 0
+    to_issue: bool = False
+    refit: Optional[str] = None
+
+    def predictor_days(self, horizon: int, lag: int = 0) -> range:
+        """The row days, relative to D, of the training rows at `horizon`, of a fit made `lag` days before D (its refit day)."""
+        return range(-(self.window + horizon + self.reach + lag), -lag if self.to_issue else -(horizon + lag))
+
+    def lags(self, days: pd.DatetimeIndex) -> np.ndarray:
+        """How many days before each of `days` its fit is made: 0, or with `refit` the days since its refit day."""
+        if self.refit is None:
+            return np.zeros(len(days), dtype=np.int64)
+        from .models._calendar import refit_anchor  # models import this module
+
+        return np.array([(day.date() - refit_anchor(day, self.refit)).days for day in days], dtype=np.int64)
+
+    def latest(self, known: "_RowsKnown", horizon: int) -> np.ndarray:
+        """When the training rows at `horizon` of the forecast of each [period, issue day] of `known`'s clock are all known."""
+        days = known.days
+        lags = self.lags(days)
+        out = np.full((known.size, len(days)), -np.inf)
+        for lag in np.unique(lags):
+            on = lags == lag
+            out[:, on] = known.latest(self.predictor_days(horizon, int(lag)))[:, on]
+        return out
+
+    def target_days(self) -> range:
+        """The days, relative to D, of the training targets before D - 1, the one the check reads anyway."""
+        return range(-(self.window + self.reach), -1)
+
+
+def is_revised(rule: Optional[Rule]) -> bool:
+    """Whether some rule of a column has a class whose archive holds revised values (`REVISED_VINTAGES`)."""
+    return rule is not None and any(one.vintage in REVISED_VINTAGES for one in rule_elements(rule))
+
+
+def rule_dict(rule: Rule, leave_out: Sequence[str] = ()) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+    """`rule.to_dict()` without the keys `leave_out`, a list of them for a `RuleChain`: what a manifest compares of a rule
+    leaves out its note and its class, which decide no number."""
+    if isinstance(rule, RuleChain):
+        return [rule_dict(one, leave_out) for one in rule.rules]
+    return {key: value for key, value in rule.to_dict().items() if key not in leave_out}
+
+
 # Assumptions a user may accept explicitly. Each replaces the default rule for one pattern.
 ASSUMPTIONS: Dict[str, Tuple[str, Availability, str]] = {
     "entsoe_a69_by_10": (
         "generation_*_forecast",
-        Availability.published("10:00", 1, note="assumed: A69 wind/solar day-ahead forecast published by 10:00 D-1"),
+        Availability.published(
+            "10:00",
+            1,
+            note="assumed: A69 wind/solar day-ahead forecast published by 10:00 D-1",
+            vintage="latest_revision",
+        ),
         "ENTSO-E A69 day-ahead wind and solar forecasts are published by 10:00 Brussels on the day before delivery, "
         "like the day-ahead load forecast. The legal deadline is 18:00 (Reg. 543/2013 Art. 14(2)(d)), after gate "
         "closure, and ENTSO-E gives no publication time per value.",
     ),
 }
+
+
+# The class of the ENTSO-E series whose archive holds the newest value only (A65, A69, A75).
+_REVISED = "latest_revision"
 
 
 def default_rules() -> Dict[str, Availability]:
@@ -281,28 +530,45 @@ def _built_in_rules() -> Dict[str, Availability]:
     """What `default_rules` copies, built once: every resolution of a name reads it."""
     rules: Dict[str, Availability] = {
         # ENTSO-E
+        # An auction's result is published once: what the archive holds is what was out.
         "price": Availability.published(
-            "13:00", 1, note="A44 day-ahead prices: SDAC results within about 1 h after the 12:00 gate closure on D-1"
+            "13:00",
+            1,
+            note="A44 day-ahead prices: SDAC results within about 1 h after the 12:00 gate closure on D-1",
+            vintage="snapshot",
         ),
+        # ENTSO-E keeps the newest value of these only: A65 was revised after the gate on 22 of 42 days measured.
         "load_actual": Availability.realised(
-            "1h", note="A65/A16 actual load: 1 h after the period (Reg. 543/2013 Art. 6(2)(a))"
+            "1h", note="A65/A16 actual load: 1 h after the period (Reg. 543/2013 Art. 6(2)(a))", vintage=_REVISED
         ),
         "load_forecast": Availability.published(
-            "10:00", 1, note="A65/A01 day-ahead load forecast: 2 h before gate closure on D-1 (Art. 6(2)(b))"
+            "10:00",
+            1,
+            note="A65/A01 day-ahead load forecast: 2 h before gate closure on D-1 (Art. 6(2)(b))",
+            vintage=_REVISED,
         ),
         "load_forecast_daily_min": Availability.weekly(
-            "friday", "10:00", note="A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6(2)(c))"
+            "friday",
+            "10:00",
+            note="A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6(2)(c))",
+            vintage=_REVISED,
         ),
         "load_forecast_daily_max": Availability.weekly(
-            "friday", "10:00", note="A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6(2)(c))"
+            "friday",
+            "10:00",
+            note="A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6(2)(c))",
+            vintage=_REVISED,
         ),
         "generation_*_forecast": Availability.published(
             "18:00",
             1,
             note="A69 day-ahead wind/solar forecast: legally by 18:00 Brussels on D-1 (Art. 14(2)(d)); "
             "accept assumption 'entsoe_a69_by_10' to assume 10:00",
+            vintage=_REVISED,
         ),
-        "generation_*": Availability.realised("1h", note="A75 actual generation per type: 1 h after the period"),
+        "generation_*": Availability.realised(
+            "1h", note="A75 actual generation per type: 1 h after the period", vintage=_REVISED
+        ),
     }
     calendar = Availability.static(note="calendar (CalendarSource)")
     for name in ["is_holiday", "holiday_name", "weekday", "weekday_name", "month", "month_name"]:
@@ -358,6 +624,7 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
                 timezone=source._daily_zone(),
                 note="A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6(2)(c)), anchored to "
                 "the market's own local day",
+                vintage=_REVISED,
             )
             for name in ("load_forecast_daily_min", "load_forecast_daily_max"):
                 rules[f"{prefix}{name}"] = rule
@@ -372,7 +639,11 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             prefix = f"{source.prefix}_" if source.prefix else ""
             zone = source.index_timezone
             rules[f"{prefix}price"] = Availability.published(
-                "13:00", 1, timezone=zone, note="day-ahead price of the benchmark files, known the day before delivery"
+                "13:00",
+                1,
+                timezone=zone,
+                note="day-ahead price of the benchmark files, known the day before delivery",
+                vintage="snapshot",  # an auction's result
             )
             for name in DATASETS[source.dataset]["exogenous"].values():
                 rules[f"{prefix}{name}"] = Availability.published(
@@ -431,7 +702,10 @@ def _weather_availability(source: Any) -> Availability:
     run = getattr(source, "run", "00")
     delay_h = publication_delay_hours(getattr(source, "model", ""))
     return Availability.weather_cutoff(
-        run, f"{delay_h}h", note="Open-Meteo: known after the model run's typical publication delay"
+        run,
+        f"{delay_h}h",
+        note="Open-Meteo: known after the model run's typical publication delay",
+        vintage="snapshot",  # each issue day's own run, as the previous-runs archive holds it
     )
 
 
@@ -457,7 +731,7 @@ class ResolvedColumn:
     name: str
     base: str
     shifts: Tuple[Shift, ...]  # innermost (closest to the base name) first
-    rule: Optional[Availability]
+    rule: Optional[Rule]  # an `Availability` or a `RuleChain`
     key: Optional[str] = None  # the rule's key (exact name or pattern)
     layer: Optional[str] = None
     built_from: Optional["ResolvedColumn"] = None  # what `base` was built from, if a transformer's feature (see `slot`)
@@ -526,12 +800,12 @@ def _find_rule(name: str, chain: List[Tuple[str, Tuple[Shift, ...]]], rules, lay
     base up."""
     for candidate, shifts in chain:
         if candidate in rules:
-            return ResolvedColumn(name, candidate, shifts, rules[candidate], candidate, layer)
+            return ResolvedColumn(name, candidate, shifts, _as_rule(rules[candidate]), candidate, layer)
     patterns = [k for k in rules if any(ch in k for ch in "*?[")]
     for candidate, shifts in reversed(chain):
         for pattern in patterns:
             if fnmatch.fnmatchcase(candidate, pattern):
-                return ResolvedColumn(name, candidate, shifts, rules[pattern], pattern, layer)
+                return ResolvedColumn(name, candidate, shifts, _as_rule(rules[pattern]), pattern, layer)
     return None
 
 
@@ -576,7 +850,8 @@ class InformationSet:
     Args:
         issue_time: Local time the forecast is issued on day D, "HH:MM".
         issue_timezone: Zone of `issue_time`.
-        rules: Overrides and additions, `{column name or glob pattern: Availability or dict}`. They take
+        rules: Overrides and additions, `{column name or glob pattern: Availability or dict}`, or a list of them with
+            disjoint validity periods for a lag that changed over time (`Availability.during`, `RuleChain`). They take
             precedence over accepted assumptions, rules derived from data sources, and the built-in defaults.
         assumptions: Names from `ASSUMPTIONS` the user accepts explicitly (e.g. "entsoe_a69_by_10").
         unknown: What to do with a predictor whose base column has no rule: "raise" (default), "warn" or
@@ -593,7 +868,7 @@ class InformationSet:
         self,
         issue_time: str = DEFAULT_ISSUE_TIME,
         issue_timezone: str = "Europe/Brussels",
-        rules: Optional[Dict[str, Union[Availability, Dict[str, Any]]]] = None,
+        rules: Optional[Dict[str, Union[Availability, Dict[str, Any], Sequence[Any]]]] = None,
         assumptions: Optional[Sequence[str]] = None,
         unknown: str = "raise",
         use_defaults: bool = True,
@@ -607,11 +882,11 @@ class InformationSet:
             raise ValueError(f"Unknown assumption(s) {unknown_assumptions}. Available: {list(ASSUMPTIONS)}")
         self.issue_time = issue_time
         self.issue_timezone = issue_timezone
-        self.rules: Dict[str, Availability] = {k: Availability.from_dict(v) for k, v in (rules or {}).items()}
+        self.rules: Dict[str, Rule] = {k: _as_rule(v) for k, v in (rules or {}).items()}
         self.assumptions: List[str] = list(assumptions or [])
         self.unknown = unknown
         self.use_defaults = use_defaults
-        self._source_rules: Dict[str, Availability] = {}
+        self._source_rules: Dict[str, Rule] = {}
         self._source_zones: Dict[str, str] = {}
 
     # -- configuration --------------------------------------------------------
@@ -620,7 +895,7 @@ class InformationSet:
         """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables)."""
         sources = list(sources)
         out = self.copy()
-        out._source_rules = {**self._source_rules, **source_rules(sources)}
+        out._source_rules = {**self._source_rules, **{k: _as_rule(v) for k, v in source_rules(sources).items()}}
         out._source_zones = {**self._source_zones, **_source_market_zones(sources)}
         return out
 
@@ -719,14 +994,24 @@ class InformationSet:
         model_name: str = "Model",
         issue_days: Optional[Sequence[str]] = None,
         check_target: bool = True,
+        training_rows: Optional[TrainingRows] = None,
     ) -> None:
         """Raise InformationSetError if a predictor (or the newest training target) is not known at issue time.
 
         `issue_days` checks these days instead of [test_start, test_end]: a run with validation forecasts no day between
         its windows. `check_target=False` leaves the training target out, for a model whose newest target is read from its
-        rule (`newest_target="published"`, see `newest_targets`): what it trains on is known by construction."""
+        rule (`newest_target="published"`, see `newest_targets`): what it trains on is known by construction. `training_rows`
+        are the rows the fits read, on which a column whose rule changes over time is checked too (see `violations`)."""
         violations, unknown = self.violations(
-            expanded, target, freq, index, test_start, test_end, issue_days, check_target=check_target
+            expanded,
+            target,
+            freq,
+            index,
+            test_start,
+            test_end,
+            issue_days,
+            check_target=check_target,
+            training_rows=training_rows,
         )
         self._report_unknown(unknown, model_name)
         if violations:
@@ -744,12 +1029,21 @@ class InformationSet:
         model_name: str = "Model",
         issue_days: Optional[Sequence[str]] = None,
         check_target: bool = True,
+        training_rows: Optional[TrainingRows] = None,
     ) -> List[Violation]:
         """What `availability="warn"` lists: every use `check` refuses, and every use of a column without a rule, whatever
         `unknown` says, instead of an error. A column of a data source on an index in another zone still raises: neither
-        the check nor the listing could say anything true about it. `check_target` is as in `check`."""
+        the check nor the listing could say anything true about it. `check_target` and `training_rows` are as in `check`."""
         found, _ = self.violations(
-            expanded, target, freq, index, test_start, test_end, issue_days, check_target=check_target
+            expanded,
+            target,
+            freq,
+            index,
+            test_start,
+            test_end,
+            issue_days,
+            check_target=check_target,
+            training_rows=training_rows,
         )
         step = _STEP_MINUTES[freq]
         resolved: Dict[str, ResolvedColumn] = {}
@@ -797,6 +1091,7 @@ class InformationSet:
         test_end: Optional[str] = None,
         issue_days: Optional[Sequence[str]] = None,
         check_target: bool = True,
+        training_rows: Optional[TrainingRows] = None,
     ) -> Tuple[List[Violation], set]:
         """All (predictor, period, horizon) uses of values not known at issue time, and unknown base columns.
 
@@ -807,6 +1102,11 @@ class InformationSet:
 
         `check_target=False` has no use of the training target, for a model with `newest_target="published"`: its newest
         target is the newest its rule calls known (`newest_targets`), so it is known by construction.
+
+        A known value of the issue day's row says that every older one is known, unless the column's rule changes over time
+        (`over_time`): a lag that shortens, a gap or a `valid_from` can leave an older value unknown. Given `training_rows`, such a
+        column is also checked on every row the fits read at each horizon, and the training target on every target they read,
+        as `leakage_probe` perturbs them; any other column is checked as before.
         """
         step = _STEP_MINUTES[freq]
         resolved: Dict[str, ResolvedColumn] = {}
@@ -814,9 +1114,11 @@ class InformationSet:
         # The newest training target is the value delivered on D-1 in the same period.
         uses = {ROLE_PREDICTOR: 0, ROLE_TARGET: -1}  # role -> the row's day relative to D
         periods: Dict[Tuple[str, str], set] = {}  # the periods reading each (name, role); the horizon doesn't matter
-        for (period, _), predictors in expanded.items():
+        by_horizon: Dict[Tuple[str, int], set] = {}  # the periods reading each (name, horizon), for the training rows
+        for (period, hz), predictors in expanded.items():
             for name in predictors:
                 periods.setdefault((name, ROLE_PREDICTOR), set()).add(period)
+                by_horizon.setdefault((name, hz), set()).add(period)
             if check_target:
                 periods.setdefault((target, ROLE_TARGET), set()).add(period)
         targets = [(target, ROLE_TARGET)] if check_target else []
@@ -828,31 +1130,74 @@ class InformationSet:
                 else:
                     self._check_source_zone(resolved[name], index)
 
+        changing = sorted({col.series for col in resolved.values() if over_time(col.rule)})
+        if changing and training_rows is None:
+            warnings.warn(
+                f"The rules of {changing} change over time, and only the issue day's row was judged: with such a rule an older "
+                "row a fit reads can hold a value known later than the issue day's. Pass training_rows=TrainingRows(window, "
+                "...), as a model run does, to judge those rows too.",
+                UserWarning,
+                stacklevel=3,
+            )
         days = pd.DatetimeIndex(issue_days) if issue_days is not None else self._issue_days(index, test_start, test_end)
         if not len(days):
             return [], unknown
         clock = self._issue_clock(days, index, freq)
 
         late: Dict[Tuple[str, str, int], _LatePeriod] = {}  # (name, role, period) -> its worst day
+        # (name, period, horizon) -> its worst day, of a predictor whose rule changes over time: its training rows depend on h.
+        late_at: Dict[Tuple[str, int, int], _LatePeriod] = {}
         for (name, role), rows in periods.items():
             col = resolved[name]
             if col.rule is None:
                 continue
             rows = np.array(sorted(rows))
             avail = clock.available(col, rows, step, uses[role])
-            for found in self._late_periods(col, rows, avail, clock, step, uses[role]):
+            own = None
+            if training_rows is not None and over_time(col.rule):
+                if role == ROLE_PREDICTOR:
+                    known = _RowsKnown(col, rows, clock, step)
+                    for (other, hz), at in by_horizon.items():
+                        if other != name:
+                            continue
+                        at = np.array(sorted(at))
+                        where = np.searchsorted(rows, at)
+                        own = avail[where]
+                        trained = training_rows.latest(known, hz)[where]
+                        for found in self._late_periods(col, at, np.maximum(own, trained), clock, step, own=own):
+                            late_at[(name, found.period, hz)] = found
+                    continue
+                own = avail
+                avail = np.maximum(avail, _RowsKnown(col, rows, clock, step).latest(training_rows.target_days()))
+            for found in self._late_periods(col, rows, avail, clock, step, uses[role], own=own):
                 late[(name, role, found.period)] = found
 
         out: List[Violation] = []
         for (period, hz), predictors in sorted(expanded.items()):
             for name, role in [(p, ROLE_PREDICTOR) for p in predictors] + targets:
-                if (name, role, period) in late:
+                found = late_at.get((name, period, hz)) if role == ROLE_PREDICTOR else None
+                found = found or late.get((name, role, period))
+                if found is not None:
                     col = resolved[name]
-                    out.append(late[(name, role, period)].use(name, hz, col, role, self._weather_cutoff_hint(col)))
+                    out.append(found.use(name, hz, col, role, self._weather_cutoff_hint(col)))
         return out, unknown
 
+    @staticmethod
+    def _latest_of_rows(
+        col: ResolvedColumn, rows: np.ndarray, clock: "_IssueClock", step: int, row_days: Iterable[int]
+    ) -> np.ndarray:
+        """The latest instant a value of `col` on the rows of these periods dated D + each of `row_days` is known, for every
+        [period, issue day D]; -inf without a row day."""
+        return _RowsKnown(col, rows, clock, step).latest(row_days)
+
     def newest_targets(
-        self, target: str, freq: str, index: pd.DatetimeIndex, days: Sequence[Any], horizon: int
+        self,
+        target: str,
+        freq: str,
+        index: pd.DatetimeIndex,
+        days: Sequence[Any],
+        horizon: int,
+        training_window: Optional[int] = None,
     ) -> np.ndarray:
         """The newest training target of each forecast of a model with `newest_target="published"`, as `[period, issue day]`:
         the largest k such that the target at (D + k, period) and every older one down to (D - 31, period) are known by the
@@ -867,6 +1212,9 @@ class InformationSet:
 
         `days` are the issue days, in order. Raises InformationSetError if the target has no rule, whatever `unknown` says
         (it decides numbers, which no setting may leave to chance), or if its value of D-31 isn't known on some issue day.
+
+        A known D-31 says every older target is known, unless the rule changes over time (`over_time`). Then, given the
+        `training_window` W, every target the window holds, back to D + k - W + 1, must be known too, or this raises.
         """
         step = _STEP_MINUTES[freq]
         col = self._resolve_for(target, step)
@@ -889,11 +1237,12 @@ class InformationSet:
             _row_anchor(index, freq) if len(days) else None,
             tuple(days.asi8.tolist()),
             int(horizon),
+            training_window,
         )
         with _NEWEST_TABLES_LOCK:
             found = _NEWEST_TABLES.get(key)
         if found is None:
-            found = self._newest_targets(col, target, freq, index, days, int(horizon))
+            found = self._newest_targets(col, target, freq, index, days, int(horizon), training_window)
             found.setflags(write=False)
             with _NEWEST_TABLES_LOCK:
                 _NEWEST_TABLES[key] = found
@@ -902,7 +1251,14 @@ class InformationSet:
         return found
 
     def _newest_targets(
-        self, col: ResolvedColumn, target: str, freq: str, index: pd.DatetimeIndex, days: pd.DatetimeIndex, horizon: int
+        self,
+        col: ResolvedColumn,
+        target: str,
+        freq: str,
+        index: pd.DatetimeIndex,
+        days: pd.DatetimeIndex,
+        horizon: int,
+        training_window: Optional[int] = None,
     ) -> np.ndarray:
         step = _STEP_MINUTES[freq]
         periods = np.arange(_periods_per_day(freq))
@@ -926,6 +1282,21 @@ class InformationSet:
             open_cells &= known
             if not open_cells.any():
                 break
+        if training_window is not None and over_time(col.rule):
+            # The window's oldest target is D + min(k, 0) - W + 1: a row is never dated D or later, so at a horizon h <= k the
+            # newest row is D-1 and its target D-1+h, back W-1 days from there (`models._calendar.training_span`), h=1 the oldest.
+            # Under rules over time a known D-31 says nothing of those before it.
+            oldest = np.minimum(newest, 0) - training_window + 1
+            for k in range(int(oldest.min()), NEWEST_TARGET_FROM):
+                unknown = (oldest <= k) & (clock.available(col, periods, step, row_day=k) > clock.issue)
+                if unknown.any():
+                    period, day = (int(i[0]) for i in np.nonzero(unknown))
+                    raise InformationSetError(
+                        f"newest_target='published' trains on the targets of a window of {training_window} days, and by its "
+                        f"rules over time ('{col.rule.describe()}') the training target '{target}' of {-k} days before the "
+                        f"issue day isn't known at the issue time, e.g. period {period} for the issue day {days[day].date()}. "
+                        "Shorten the training_window, or start the test later."
+                    )
         return newest
 
     def _issue_clock(
@@ -949,11 +1320,13 @@ class InformationSet:
         step: int,
         row_day: int = 0,
         used: Optional[np.ndarray] = None,
+        own: Optional[np.ndarray] = None,
     ) -> List["_LatePeriod"]:
         """Each period with a value known after the issue time, on the issue day it is latest; its times are minutes since
         midnight of that day, as a context for it alone would give them. `avail` is `clock.available(col, rows, step,
         row_day)`. `used` limits the search to the cells [period, issue day] a forecast actually reads, for lists that
-        hold on some days only."""
+        hold on some days only. `own`, for a column whose rule changes over time, is the checked row's alone, `avail` then
+        holding the training rows' latest too: where those come later the use says so."""
         excess = avail - clock.issue
         if used is not None:
             excess = np.where(used, excess, -np.inf)
@@ -964,6 +1337,8 @@ class InformationSet:
         for r, period, i in late:
             day_ctx = clock.context_of(i)
             hint = next((text for known_by, text in hints if known_by[r, i]), "")
+            if own is not None and avail[r, i] > own[r, i]:
+                hint = _TRAINING_ROWS_HINT
             known = clock.minute_of_day(avail[r, i], i)
             issue = day_ctx.issue_minute
             out.append(
@@ -1013,8 +1388,10 @@ class InformationSet:
     @staticmethod
     def _weather_cutoff_hint(col: ResolvedColumn) -> str:
         """An OpenMeteoSource column's own cutoff is a source-side setting, not a data fact: point at it."""
-        if col.rule is None or col.rule.kind != "weather_cutoff":
+        cutoffs = [] if col.rule is None else [one for one in rule_elements(col.rule) if one.kind == "weather_cutoff"]
+        if not cutoffs:
             return ""
+        rule = cutoffs[-1]  # the newest period's, of a column's rules over time
         # The shifts after a profile's slot or a day aggregate always shift the row; only the column it was built from
         # has a lead.
         if col.built_from is not None:
@@ -1026,9 +1403,9 @@ class InformationSet:
                 "a forward shift after the source's own `_d+k` reads the run of a later issue day, which starts "
                 "after the issue time whatever `run` is; drop the forward shift"
             )
-        run = col.rule.time.split(":", 1)[0]
+        run = rule.time.split(":", 1)[0]
         return (
-            f"OpenMeteoSource(run={run!r}, ...) is known {col.rule.delay} after that UTC run; suggest an "
+            f"OpenMeteoSource(run={run!r}, ...) is known {rule.delay} after that UTC run; suggest an "
             "earlier run or a later issue time"
         )
 
@@ -1138,7 +1515,7 @@ class _IssueClock:
         return self.available_under(col, col.rule, periods, step, row_day)
 
     def available_under(
-        self, col: ResolvedColumn, rule: Availability, periods: np.ndarray, step: int, row_day: int = 0
+        self, col: ResolvedColumn, rule: Rule, periods: np.ndarray, step: int, row_day: int = 0
     ) -> np.ndarray:
         """`available` with `col` read through `rule` instead of its own."""
         periods = np.asarray(periods)
@@ -1197,6 +1574,29 @@ class _IssueClock:
     def label(self, minutes: float, i: int) -> str:
         """Minutes since the first issue day's midnight as they read on issue day `i`, as `D+1 01:00`."""
         return _fmt_instant(self.minute_of_day(minutes, i), self.context_of(i))
+
+
+class _RowsKnown:
+    """When the values of a column on the rows of some periods are known, by the row's day relative to each issue day D, each
+    day read once however many windows ask for it (a check reads one window per horizon)."""
+
+    def __init__(self, col: ResolvedColumn, rows: np.ndarray, clock: "_IssueClock", step: int):
+        self._args = (col, rows, step)
+        self._clock = clock
+        self._by_day: Dict[int, np.ndarray] = {}
+        self.days = clock.days
+        self.size = len(rows)
+
+    def latest(self, row_days: Iterable[int]) -> np.ndarray:
+        """The latest instant over these row days, for every [period, issue day]; -inf without a row day."""
+        col, rows, step = self._args
+        latest = np.full((len(rows), len(self._clock.days)), -np.inf)
+        for row_day in row_days:
+            known = self._by_day.get(row_day)
+            if known is None:
+                known = self._by_day[row_day] = self._clock.available(col, rows, step, row_day)
+            np.maximum(latest, known, out=latest)
+        return latest
 
 
 class _LatePeriod(NamedTuple):
@@ -1927,7 +2327,7 @@ def _report_unchecked(unchecked: List[str], information_set: InformationSet) -> 
 
 def _available_array(
     col: ResolvedColumn,
-    rule: Availability,
+    rule: Rule,
     day: np.ndarray,
     minute: np.ndarray,
     step: int,
@@ -1949,6 +2349,12 @@ def _available_array(
     plain `published` or `weekly` one is read at that date's last slot, or at the stamp if it is later, so a date spanning two
     of the rule's delivery days isn't read on the earlier. One with an `h`, `min` or `s` shift is an hourly slot, `x_h-1` the hour before the stamp. This
     holds for the column named alone; what a profile or a day aggregate is built from is read at its slot, as on hourly rows.
+
+    A rule with a validity period, or a `RuleChain`, holds for the values whose day is in its period: the day the value is
+    delivered (a date of the rule's zone for `published` and `weekly`, of the data's zone for `realised`, `weather_run` and
+    `static`), and for `as_of` and `weather_cutoff` the day it is read on. A value no rule holds for is never known: `inf`.
+    Each check, `ctx`, `explain`, the probes and `newest_targets` read through here, so they agree on every value. A rule with
+    no period is read as it always was.
     """
     if col.built_from is not None:
         # A profile column holds, on every row of a local day, the column it was built from at its slot of that day:
@@ -1960,38 +2366,120 @@ def _available_array(
         # the shifts after the aggregate reach. Each rule's availability never decreases with the slot's time, so no
         # earlier slot is known later; a repeated last slot is its second occurrence.
         reached = _shifted_day(col.shifts, day, minute, first, ctx)
+        if col.slot is None and over_time(rule):
+            # Under rules over time an earlier slot can be known after the last (a lag that shortens, a gap, a day of one zone
+            # that reaches two of another's): the aggregate is known when every slot of its day is.
+            latest = np.full(len(reached), -np.inf)
+            second = np.zeros(len(reached), dtype=bool)
+            for slot in np.arange(0.0, 1440.0, step):
+                read = np.full(len(reached), slot)
+                latest = np.maximum(
+                    latest,
+                    _available_array(col.built_from, rule, reached, read, step, ctx, second, issue_day + reached - day),
+                )
+            return latest
         slot, length = col.slot or (1440.0 - step, step)
         slots = np.full(len(reached), float(slot))
         occurrence = np.full(len(reached), col.slot is not None)
         return _available_array(
             col.built_from, rule, reached, slots, length, ctx, occurrence, issue_day + reached - day
         )
+    rules = rule_elements(rule)
+    if len(rules) == 1 and not rules[0].bounded:
+        return _rule_available(col, rules[0], day, minute, step, ctx, first, issue_day, daily)
+    out = _over_time_available(col, rules, day, minute, step, ctx, first, issue_day, daily)
+    if daily and all(shift.unit == "d" for shift in col.shifts) and any(one.kind in _WHOLE_DATE for one in rules):
+        # A plain published or weekly value of a daily row is the whole date's, read at its last slot. Under rules over time
+        # an earlier slot can be known later (the date reaching two delivery days of the rule's zone, one under a slower rule):
+        # it is known when every slot is.
+        for slot in np.arange(0.0, 1440.0, step):
+            read = np.full(len(day), slot)
+            out = np.maximum(
+                out, _over_time_available(col, rules, day, minute, step, ctx, first, issue_day, daily, read)
+            )
+    return out
+
+
+# The kinds whose value on a daily row is the whole date's, delivered in every slot of it.
+_WHOLE_DATE = ("published", "weekly")
+
+
+def _over_time_available(
+    col: ResolvedColumn,
+    rules: Sequence[Availability],
+    day: np.ndarray,
+    minute: np.ndarray,
+    step: int,
+    ctx: _Context,
+    first: np.ndarray,
+    issue_day: Union[int, np.ndarray],
+    daily: bool,
+    slot: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """`_available_array` of a plain column under rules with validity periods: each holds for the values whose day is in its
+    period, and a value none holds for is never known (`inf`). `slot` (wall-clock minutes) reads a published or weekly rule's
+    value there, as an hourly slot at its second occurrence, for one slot of a daily row; the other kinds read the row as it is."""
+    out = np.full(len(day), np.inf)  # what no rule holds for is never known
+    held = np.zeros(len(day), dtype=bool)
+    for one in rules:
+        if slot is not None and one.kind in _WHOLE_DATE:
+            read = (slot, np.zeros(len(day), dtype=bool), False)
+        else:
+            read = (minute, first, daily)
+        known, on = _rule_available(col, one, day, read[0], step, ctx, read[1], issue_day, read[2], with_day=True)
+        inside = one._holds_on(on, ctx.day)
+        # Periods are disjoint dates, but two rules in zones a day apart could both claim a value: the later time counts.
+        out = np.where(inside, np.where(held, np.maximum(out, known), known), out)
+        held |= inside
+    return out
+
+
+def _rule_available(
+    col: ResolvedColumn,
+    rule: Availability,
+    day: np.ndarray,
+    minute: np.ndarray,
+    step: int,
+    ctx: _Context,
+    first: np.ndarray,
+    issue_day: Union[int, np.ndarray] = 0,
+    daily: bool = False,
+    with_day: bool = False,
+) -> Any:
+    """`_available_array` of a plain column (no profile, no day aggregate) under one rule, its validity period aside. With
+    `with_day` also the day the period is read on, in days after `ctx.day`: the value's delivery day, or for `as_of` and
+    `weather_cutoff` the day it is read on."""
     if rule.kind == "static":
-        return np.full(len(day), -np.inf)
+        known = np.full(len(day), -np.inf)
+        return (known, _shifted_day(col.shifts, day, minute, first, ctx)) if with_day else known
     if rule.kind == "as_of":
         # Fixed to a time on the day the value is read from: the issue day D itself, moved by every shift after a
         # leading `_d+k` (see `_read_day_offset`), but not by the leading `_d+k`, the row's own day or minute.
         read_day = issue_day + _read_day_offset(col.shifts, day, minute, ctx, first)
         at = np.asarray(read_day, dtype=float) * 1440.0 + _minutes(rule.time)
-        return _to_instants(at, rule.timezone or ctx.data_zone, ctx, _second(at))
+        known = _to_instants(at, rule.timezone or ctx.data_zone, ctx, _second(at))
+        return (known, np.asarray(read_day, dtype=float)) if with_day else known
     if rule.kind == "weather_cutoff":
         # Fixed to `run`:00 UTC plus `delay` on the day the value is read from, same as `as_of` above; the delay is
         # elapsed time after the run and may run into the next day. The run is a UTC hour (`Availability` sees to it).
         read_day = issue_day + _read_day_offset(col.shifts, day, minute, ctx, first)
         run = _to_instants(np.asarray(read_day, dtype=float) * 1440.0 + _minutes(rule.time), "UTC", ctx)
-        return run + _parse_delay(rule.delay)
+        known = run + _parse_delay(rule.delay)
+        return (known, np.asarray(read_day, dtype=float)) if with_day else known
     shifts = list(col.shifts)
     if rule.kind == "weather_run" and shifts and shifts[0].unit == "d" and shifts[0].offset > 0:
         shifts = shifts[1:]
     point, wall = _shift_rows(day, minute, shifts, ctx, first)  # delivery instant of the value (weather: the row time)
-    if rule.kind == "realised":
-        if daily and all(shift.unit == "d" for shift in shifts):
+    if rule.kind in ("realised", "weather_run"):
+        if rule.kind == "weather_run":
+            known = point + _parse_delay(rule.delay)
+        elif daily and all(shift.unit == "d" for shift in shifts):
             # The value of a whole local date: known when that date ends, at the next midnight of the data zone.
             end = (np.floor(wall / 1440.0) + 1.0) * 1440.0
-            return _to_instants(end, ctx.data_zone, ctx, _second(end)) + _parse_delay(rule.delay)
-        return point + step + _parse_delay(rule.delay)
-    if rule.kind == "weather_run":
-        return point + _parse_delay(rule.delay)
+            known = _to_instants(end, ctx.data_zone, ctx, _second(end)) + _parse_delay(rule.delay)
+        else:
+            known = point + step + _parse_delay(rule.delay)
+        return (known, np.floor(wall / 1440.0)) if with_day else known  # delivered on a day of the data's zone
     if daily and all(shift.unit == "d" for shift in shifts):
         # The value of a whole local date is delivered in every slot of it, so it is known when its last slot is: no earlier
         # slot is published later. A date that spans two of the rule's delivery days (Helsinki's against Brussels') is known
@@ -2013,7 +2501,8 @@ def _available_array(
         delivery_weekday = np.mod(ctx.weekday + delivery_day, 7)
         publication_day = delivery_day - delivery_weekday - 7 + _WEEKDAYS.index(rule.weekday)
     at = publication_day * 1440.0 + _minutes(rule.time)
-    return _to_instants(at, zone, ctx, _second(at))
+    known = _to_instants(at, zone, ctx, _second(at))
+    return (known, delivery_day) if with_day else known
 
 
 # ---------------------------------------------------------------------------
@@ -2121,6 +2610,8 @@ def _read_day_offset(
 def _fmt_minute(value: float) -> str:
     if value == -math.inf:
         return "in advance"
+    if value == math.inf:
+        return NEVER
     day, minute = divmod(int(round(value)), 1440)
     label = "D" if day == 0 else f"D{day:+d}"
     return f"{label} {minute // 60:02d}:{minute % 60:02d}"
@@ -2132,6 +2623,8 @@ def _fmt_instant(value: float, ctx: _Context) -> str:
     where that wall time occurs twice, so a value known in the second 01:00 doesn't read as before an issue at 01:30."""
     if value == -math.inf:
         return "in advance"
+    if value == math.inf:
+        return NEVER
     instant = _instants(np.array([value]), ctx).tz_convert(ctx.data_zone)
     text = _fmt_minute(float(_wall(instant, ctx.data_zone, ctx)[0]))
     local = instant.tz_localize(None)
@@ -2164,6 +2657,9 @@ __all__ = [
     "InformationSet",
     "InformationSetError",
     "ProbeResult",
+    "RuleChain",
+    "TrainingRows",
+    "VINTAGES",
     "default_rules",
     "leakage_probe",
     "parse_predictor",

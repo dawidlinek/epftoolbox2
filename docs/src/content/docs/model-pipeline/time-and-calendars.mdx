@@ -83,7 +83,7 @@ Each record of such a model has `newest_target_day`, the newest target date of i
 necessarily a target that trained: on the day before a spring switch it is the switch day itself for the skipped hour, which has no
 target, and a missing value drops its row as anywhere else. Its
 manifest's `training_cut` says what k was read from: the target's rule and the issue time and zone. A resume compares them, so changing
-the issue time or the target's rule refuses to resume, while changing the level, or a rule of another column, doesn't. A model with
+the issue time or the target's rule (bar its note and vintage class) refuses to resume, while changing the level, or a rule of another column, doesn't. A model with
 `"d-1"` writes nothing new: its records, manifest and YAML are what they were, and `newest_target` is saved to YAML only when it is
 `"published"`. `pipeline.explain()` of such a model has a `newest_target` table: the newest target and row of the forecast shown, and
 on how many issue days.

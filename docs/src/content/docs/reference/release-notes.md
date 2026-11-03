@@ -127,6 +127,23 @@ an issue day it didn't sample.
 
 ### New
 
+- **Vintage classes and rules over time.** `Availability(..., vintage=...)` (and `vintage=` on every constructor) says what the archive
+  of a column holds: `snapshot`, `row_stamp`, `last_write_stamp` or `latest_revision`. The built-in ENTSO-E load and generation rules are
+  `latest_revision` and `price` and Open-Meteo's are `snapshot`; a rule of yours has none unless you say. A class moves no number:
+  `report.vintages()` lists every input's class, a run records them in its manifest as `vintages` (never compared), the terminal
+  exporter prints the revised ones, and `tests()`, `compare()`, `leaderboard()` and a DM column warn when compared models read one
+  series with different classes (`df.attrs["vintages"]`). `verify` calls a predictor function `inconclusive` when a
+  `train_on="matching"` list reads a `latest_revision` or `last_write_stamp` column on a day it trains on, naming it: a revised value
+  can move the set of days and no probe sees it. `.during(valid_from=, valid_until=)` gives a rule the days it holds on, and a list of
+  rules with disjoint periods is a column's rule over time, for a lag that changed (observed: PSE's settlement prices went from D+4 to
+  D+1 on business date 8 October 2026; the library has no PSE source yet). For such a column the check also reads the training rows
+  (with `refit`, those of the refit day's fit) and every slot of a day aggregate, since an older value can come after a newer one;
+  `check()` and `late_uses()` take them as `training_rows=TrainingRows(...)` and warn without. A value no rule holds for is never known. The check, `ctx`, `explain`, the probes and `newest_target="published"`
+  all read it the same way. **Nothing moves without them**: records and tables are as before, and YAML writes the new keys only when
+  set, so an old file is written back byte for byte. What moves: manifests of runs that read an input with a built-in class gain
+  `vintages` (an ensemble's manifest doesn't), and a matching function reading a revised built-in column on a training day goes from
+  `ok` to `inconclusive`. See [Vintage Classes](/epftoolbox2/model-pipeline/information-set/#vintage-classes) and
+  [Rules Over Time](/epftoolbox2/model-pipeline/information-set/#rules-over-time).
 - **`refit=`: fitting on a fixed calendar.** `OLSModel(..., refit="7D")` and `LassoCVModel(..., refit="1MS")` fit once per unit (a
   period, a horizon, a refit day and a predictor list) instead of once per forecast: `"kD"` every k days, `"kMS"` on the first of every
   k-th month, counted from Monday 1970-01-05, so a forecast's refit day depends on its issue day alone, never on where a run starts. A
