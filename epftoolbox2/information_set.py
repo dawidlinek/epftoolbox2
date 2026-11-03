@@ -1274,11 +1274,12 @@ class InformationSet:
             if not open_cells.any():
                 break
         if training_window is not None and over_time(col.rule):
-            # The window's oldest target is D + k - W + 1. Under rules over time a known D-31 says nothing of those before it.
-            for k in range(int(newest.min()) - training_window + 1, NEWEST_TARGET_FROM):
-                unknown = (newest - training_window + 1 <= k) & (
-                    clock.available(col, periods, step, row_day=k) > clock.issue
-                )
+            # The window's oldest target is D + min(k, 0) - W + 1: a row is never dated D or later, so at a horizon h <= k the
+            # newest row is D-1 and its target D-1+h, back W-1 days from there (`models._calendar.training_span`), h=1 the oldest.
+            # Under rules over time a known D-31 says nothing of those before it.
+            oldest = np.minimum(newest, 0) - training_window + 1
+            for k in range(int(oldest.min()), NEWEST_TARGET_FROM):
+                unknown = (oldest <= k) & (clock.available(col, periods, step, row_day=k) > clock.issue)
                 if unknown.any():
                     period, day = (int(i[0]) for i in np.nonzero(unknown))
                     raise InformationSetError(

@@ -772,3 +772,30 @@ def test_a_refit_model_s_rows_are_those_of_its_refit_day_s_fit():
         lambda: OLSModel(["x_d-1"], training_window=30, refit="1MS"), pl_rows(), "2026-10-10", info, columns=["x_d-1"]
     )
     assert not late.ok
+
+
+def test_a_published_window_reaching_back_past_d_minus_w_plus_h_is_checked():
+    """At 14:00 the prices of D+1, published 13:00 on D, are out: k = +1 at horizon 2. A row is never dated D or later, so at h=1
+    the newest row is D-1, its target D, and the window of 60 reaches back to the target of D-59, 12 August for 10 October, where
+    a rule valid from 13 August knows nothing: refused at every level, and the probe moves the forecasts of h=1. Valid from the
+    12th, every target is known: it runs."""
+    data = pl_rows()
+
+    def run(valid_from, level="raise"):
+        rules = {"fs": Availability.published("13:00", 1, PL).during(valid_from=valid_from), "s": Availability.static()}
+        info = InformationSet("14:00", PL, rules=rules)
+        OLSModel(["s"], training_window=60, newest_target="published").run(
+            data,
+            test_start="2026-10-10",
+            test_end="2026-10-10",
+            horizon=2,
+            target="fs",
+            information_set=info,
+            availability=level,
+        )
+        return info
+
+    for level in ("raise", "none"):
+        with pytest.raises(InformationSetError, match="training target 'fs' of 59 days before"):
+            run("2026-08-13", level)
+    run("2026-08-12")
