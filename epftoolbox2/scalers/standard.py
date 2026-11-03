@@ -1,11 +1,15 @@
 import numpy as np
-from typing import Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from .base import BaseScaler, mean_std, scale_training_column
 
 
 class StandardScaler(BaseScaler):
     """Standardise every non-binary predictor and the target to mean 0, standard deviation 1 (the default).
+
+    `scale_binary=True` standardises the binary 0/1 predictors too, ignoring the mask of columns that may be scaled, as a
+    study that standardises its whole design matrix does (the week-ahead study's Lasso, with no intercept). The default
+    False leaves them as they are.
 
     A predictor that is constant up to rounding noise (standard deviation at or below 1e-12 of its largest absolute
     value) has training values of exactly 0.0, and its test row is centred and divided by 1.0, not by about 1e-15. The
@@ -14,9 +18,14 @@ class StandardScaler(BaseScaler):
 
     name = "standard"
 
-    def __init__(self):
+    def __init__(self, *, scale_binary: bool = False):
+        self.scale_binary = scale_binary
         self._target_mean = 0.0
         self._target_std = 1.0
+
+    def get_params(self) -> Dict[str, Any]:
+        # The default is left out, so the spec of `StandardScaler()` stays "standard" and no manifest or YAML file moves.
+        return {"scale_binary": True} if self.scale_binary else {}
 
     def fit_transform(
         self,
@@ -36,7 +45,9 @@ class StandardScaler(BaseScaler):
         else:
             test_x = test_x.astype(np.float64)
 
-        if scalable_mask is None:
+        if self.scale_binary:
+            scalable_mask = np.ones(train_x.shape[1], dtype=bool)
+        elif scalable_mask is None:
             scalable_mask = self.get_scalable_mask(train_x)
 
         for i in range(train_x.shape[1]):

@@ -474,18 +474,18 @@ def results_to_frame(results) -> pd.DataFrame: ...  # list, (name, result) pairs
 
 ```python
 class OLSModel(BaseModel):
-    def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
-                 name: str = "Model", scaler: ScalerSpec = "standard",
+    def __init__(self, predictors: Union[List, Callable], training_window: int = 365, *,
+                 fit_intercept: bool = False, name: str = "Model", scaler: ScalerSpec = "standard",
                  newest_target: str = "d-1", refit: Optional[str] = None): ...
 
 class LassoCVModel(BaseModel):
     def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
-                 cv: int = 5, max_iter: int = 10000, name: str = "Model",
-                 scaler: ScalerSpec = "standard", newest_target: str = "d-1",
+                 cv: int = 5, max_iter: int = 10000, *, fit_intercept: bool = True,
+                 name: str = "Model", scaler: ScalerSpec = "standard", newest_target: str = "d-1",
                  refit: Optional[str] = None): ...
 ```
 
-`ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance.
+`ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance. `fit_intercept` is keyword-only and scikit-learn's; a set value is saved and compared on resume, the default isn't written, so results and files made before it keep their manifests.
 
 ### Predictor functions
 
@@ -519,7 +519,7 @@ class Use:                                  # What the function may return inste
 from epftoolbox2.scalers import StandardScaler, AsinhScaler, NPITScaler, make_scaler, scaler_spec
 
 class StandardScaler(BaseScaler):
-    def __init__(self): ...
+    def __init__(self, *, scale_binary: bool = False): ...   # True scales binary 0/1 columns too
 
 class AsinhScaler(BaseScaler):
     def __init__(self, apply_to: Union[str, List[str]] = "all"): ...

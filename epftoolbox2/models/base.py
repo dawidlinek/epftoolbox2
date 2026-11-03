@@ -101,6 +101,10 @@ def _usable_cpu_count() -> int:
 
 
 class BaseModel(ABC):
+    # Parameters a saved pipeline writes only when not at these values (`ModelPipeline._serialize_component`), so files saved
+    # before they existed don't move. A subclass adds its own.
+    _WRITTEN_WHEN_SET: Dict[str, Any] = {"newest_target": "d-1", "refit": None}
+
     def __init__(
         self,
         predictors: Union[List[Union[str, Callable]], Callable],

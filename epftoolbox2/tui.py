@@ -732,6 +732,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "choices": ["d-1", "published"],
         },
         {
+            "name": "fit_intercept",
+            "description": "Fit an intercept (off by default: the target is standardised and one-hot dummies carry the level)",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
+        },
+        {
             "name": "refit",
             "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
             "required": False,
@@ -778,6 +785,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": "d-1",
             "kind": "select",
             "choices": ["d-1", "published"],
+        },
+        {
+            "name": "fit_intercept",
+            "description": "Fit an intercept",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
         },
         {
             "name": "refit",
