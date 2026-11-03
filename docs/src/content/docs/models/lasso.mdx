@@ -36,7 +36,7 @@ model = LassoCVModel(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `predictors` | List or function | Required | Predictor specifications (strings, `{horizon}` templates, or callables), or a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) returning the list for each forecast |
-| `training_window` | int | `365` | Days of training data |
+| `training_window` | int, `"expanding"` or list | `365` | Days of training data (an int from 1), `"expanding"` for every row from the frame's first date, or a list such as `[56, 84, 728, "expanding"]` whose windows are fitted separately and averaged in the model. See [Training Windows](/epftoolbox2/model-pipeline/training-windows/) |
 | `cv` | int | `5` | Cross-validation folds |
 | `max_iter` | int | `10000` | Max optimization iterations |
 | `name` | str | `"Model"` | Display name for reports |

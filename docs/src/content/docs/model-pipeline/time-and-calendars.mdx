@@ -19,6 +19,8 @@ For the forecast (period, h, D) of a model with `training_window` W:
 - **It forecasts from** the last row dated D.
 - **Its `actual`** is the target of that row: the value on D+h at the same wall-clock time.
 
+W is a number of days, but can also be `"expanding"` (every row from the frame's first local date) or a list of windows averaged in the model: see [Training Windows](/epftoolbox2/model-pipeline/training-windows/).
+
 Rows are chosen by their date, never by counting them. So a date with two rows counts as one date, a date with none costs only
 itself, and no row dated D-h or later can reach a fit, whatever the calendar does (D or later with `"published"`).
 
