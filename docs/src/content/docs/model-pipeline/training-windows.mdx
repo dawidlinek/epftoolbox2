@@ -1,0 +1,118 @@
+---
+title: Training Windows
+description: training_window as days, "expanding", or a list of windows averaged inside one model
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every model that fits something (`OLSModel`, `LassoCVModel`) takes `training_window` in one of three forms:
+
+| Value | A forecast issued on D trains on |
+|---|---|
+| `365` (an int from 1, the default) | the rows dated in the 365 days before its newest target, D-365-h to D-1-h at horizon h |
+| `"expanding"` | every row from the frame's first local date up to the same last row |
+| `[56, 84, 728, "expanding"]` (a list) | each window on its own, and the forecast is their mean |
+
+Which rows a window holds, around clock changes and with `newest_target` or `refit`, is on
+[Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#which-rows-a-forecast-reads).
+
+## A list of windows
+
+A list fits one model per window, its **members**, and averages their forecasts inside the model:
+
+```python
+from epftoolbox2.models import LassoCVModel
+
+model = LassoCVModel(
+    predictors=["price_d-1", "price_d-2", "price_d-7", "load_forecast_d+{horizon}"],
+    training_window=[56, 84, 728, "expanding"],
+    name="LassoCV_CWA",
+)
+```
+
+- **Each member is the model with that window alone, to the bit.** It reads its own rows, fits its own
+  [scaler](/epftoolbox2/models/scalers/) on them, finds its own binary 0/1 columns (left unscaled) in them, as a model with that
+  window alone does, and is transformed back on its own. So a member's forecast equals the forecast of
+  `LassoCVModel(..., training_window=56)` with every other setting the same, at every horizon, issue day, frequency and refit rule.
+- **The forecast is the mean of the members in target units**: `math.fsum(member_predictions) / M`, which is exactly rounded, so
+  the order of the members can't change a bit. Each member counts equally.
+- **A key is forecast only when every member forecasts it.** Otherwise it is skipped with the first failing member's reason and
+  window, such as `no_finite_training_rows: window 56`, and counted once in `forecast_counts()`. A mean of whichever members
+  fitted would be another estimator on some keys.
+- **A list is normalised like `horizons=`**: ints ascending, then `"expanding"`. `[84, 56]` is `[56, 84]`, and a list of one is
+  that window in everything (`[365]` is `365` in the records, the manifest and YAML), so the list form never changes a
+  single-window run. A repeat, an empty list, a bool, a float, another string or a value below 1 raises.
+
+With `refit`, each member is fitted once per refit day, each on its own rows, and a forecast averages its members' fits of the
+same refit day. Ensembles average models; a list averages windows inside one model, so it is one name in `report()` and one file
+of results.
+
+<Aside>
+A window of 728 days needs 728 days of history before the first issue day, or more with `refit`. Without `refit` a frame that
+starts later isn't refused: the long member silently trains on what the frame has, as a single window of 728 would. Size the frame
+for the longest member.
+</Aside>
+
+## `"expanding"`
+
+An expanding window starts on the frame's first local date, whatever the issue day: a forecast issued on D trains on every row
+from that date up to the row its newest target allows. So **where the frame starts is part of the model**:
+
+- Dropping the frame's first day changes every expanding forecast (and no int-window forecast whose window doesn't reach it). The
+  manifest records the date as `training_cut["expanding_from"]`, so a resume with a frame that starts on another day refuses and
+  says why.
+- The data checks read the whole frame, not only the days a test can reach: an expanding window trains on all of it. A 15-minute
+  run over a frame whose early history is hourly (as ENTSO-E's DE_LU prices before 2025-10-01) is refused with `"expanding"`, and
+  accepted with a window that stays inside the 15-minute part. Cut the frame where its resolution changes.
+- Under an availability rule that changes over time (a rule with `valid_from`, or a list of rules), the checks read back from every
+  issue day to before the frame's first date. If they refuse, start the frame later, or use an int window.
+
+## What each record holds
+
+A record of a model with a list has `member_predictions`, each member's forecast in target units in member order, and
+`coefficients: []`: per-member coefficients would be several times a record's size for every forecast.
+
+```json
+{"run_date": "2017-03-01", "target_date": "2017-03-02", "run_weekday": 2, "hour": 12, "horizon": 1, "day_in_test": 0,
+ "prediction": 41.37, "member_predictions": [40.92, 41.18, 41.66, 41.72], "actual": 40.1, "coefficients": [], "freq": "1h"}
+```
+
+A model with one window writes the records it always wrote: its coefficients, and no `member_predictions`.
+
+## Resuming and YAML
+
+The manifest records `training_window` as the normalised list, so a resume with the same windows in another order continues, and
+one with other windows refuses. Each member's binary-column mask has its own digest, under the key of the (period, horizon) with
+`@` and the window (`12-1@56`). YAML writes the list as it is normalised:
+
+```yaml
+models:
+- class: LassoCVModel
+  params:
+    predictors:
+    - price_d-1
+    - price_d-2
+    - price_d-7
+    - load_forecast_d+{horizon}
+    training_window:
+    - 56
+    - 84
+    - 728
+    - expanding
+    name: LassoCV_CWA
+```
+
+The interactive builder (`epf` without a command) asks for a window as `56,84,728,expanding`.
+
+## Not supported yet
+
+- **`Use(list, train_on="matching")`** in a [predictor function](/epftoolbox2/model-pipeline/predictor-functions/) of a model whose
+  window is a list or `"expanding"` raises before any fit, naming the model: matching days are counted and checked per window.
+- **`NaiveModel`** fits nothing and has no training window; setting one raises.
+- Weights other than equal ones, and choosing a window instead of averaging them.
+
+## See Also
+
+- [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/): which rows a window holds
+- [Ensembles](/epftoolbox2/model-pipeline/ensembles/): averaging models rather than windows
+- [Incremental Training](/epftoolbox2/model-pipeline/caching/): the manifest and resuming

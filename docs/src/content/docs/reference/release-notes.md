@@ -9,6 +9,9 @@ Notes for changes that need something from you. The full list of changes of a re
 
 ### Breaking changes
 
+- **`training_window` is checked where it is set.** A float, a string other than `"expanding"`, a bool, None, or a value below 1 now
+  raises `ValueError`. An int window ran before with any of these (a float such as `45.0` trained as 45 days and checked the whole frame);
+  write the int.
 - **`ModelPipeline.report()` reads `freq` from the manifests and refuses one they contradict.** Its `freq` defaulted to `"1h"`
   and was taken at its word: daily results reported at the default planned 24 forecasts a day and called almost all of them missing,
   and hourly results reported with `freq="1D"`, or 15-minute ones with `"1h"`, showed no missing forecast at all, gaps included.
@@ -134,6 +137,14 @@ an issue day it didn't sample.
   when set. It takes `scaler`, `newest_target` and `refit` like the other models, a penalty below 1e-6 raises (scikit-learn's leave-one-out route loses digits as 1/penalty; use `OLSModel` for an unpenalised
   fit), and a fit needs at least 3 training rows (fewer is a counted `fit_error` skip). **Nothing moves for the other models**: no existing manifest, file or golden number changes. See
   [RidgeModel](/epftoolbox2/models/ridge/).
+- **Training windows: days, `"expanding"`, or a list averaged inside the model.** `LassoCVModel(..., training_window=[56, 84, 728,
+  "expanding"])` fits one member per window, each on its own rows with its own scaler and binary columns, exactly the model with that
+  window alone, and forecasts their mean in target units (`math.fsum(...) / M`); a key is forecast only when every member is, else it is
+  skipped with the first failing member's reason and window (`no_finite_training_rows: window 56`). Records add `member_predictions`
+  and have `coefficients: []`. `"expanding"` trains on every row from the frame's first local date, which the manifest records as
+  `training_cut["expanding_from"]`, and the data checks then read the whole frame. A list is sorted, and `[W]` is `W` in records,
+  manifests and YAML, so **nothing moves for a single window**. Not yet with `train_on="matching"`, which raises. See
+  [Training Windows](/epftoolbox2/model-pipeline/training-windows/).
 - **`NaiveModel`: a published forecast as a benchmark.** `NaiveModel(predictors=["load_forecast_daily_max_d+{horizon}"], name="TSO")`
   forecasts that column's value on the row of the issue day: no fit, scaler or training rows, no coefficients, so a forecast needs no
   history. `{horizon}`, callables and functions of `ctx` work; more than one name raises, and so do `refit`, `newest_target` and a
