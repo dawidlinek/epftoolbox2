@@ -166,8 +166,9 @@ class BaseModel(ABC):
                 raise ValueError(
                     f"{type(self).__name__} can't refit on a calendar (refit={value!r}): its `_fit_predict` is "
                     f"{owners['_fit_predict']}'s, and refit forecasts from `_fit_model` and `_predict_fitted`, which are "
-                    f"{owners['_fit_model']}'s and {owners['_predict_fitted']}'s, so it would fit another model. A model that "
-                    "overrides `_fit_predict` takes refit only if it overrides those two as well; else leave refit=None."
+                    f"{owners['_fit_model']}'s and {owners['_predict_fitted']}'s, so refit=None and refit would fit different "
+                    "models. One class must define all three; a subclass that overrides any of them takes refit only if it "
+                    "overrides all three, else leave refit=None."
                 )
         super().__setattr__(key, value)
 
@@ -179,13 +180,11 @@ class BaseModel(ABC):
     @classmethod
     def _can_refit(cls) -> bool:
         """Whether the model fits once and forecasts from the fit (`_fit_model`, `_predict_fitted`), which `refit` needs, and
-        that fit is the model's own: both are defined in the class that defines `_fit_predict` or in a subclass of it. A subclass
-        of OLSModel that overrides `_fit_predict` alone would otherwise be refitted with OLS, its parent's estimator."""
-        fit_predict = cls._owner_of("_fit_predict")
-        return all(
-            cls._owner_of(name) is not BaseModel and issubclass(cls._owner_of(name), fit_predict)
-            for name in ("_fit_model", "_predict_fitted")
-        )
+        that fit is the one `refit=None` makes: one class (not BaseModel) defines all three of `_fit_predict`, `_fit_model` and
+        `_predict_fitted`. A subclass of OLSModel that overrides `_fit_predict` alone would be refitted with OLS, and one that
+        overrides the other two alone would refit with its own estimator while `refit=None` fits OLS."""
+        owners = {cls._owner_of(name) for name in _REFIT_METHODS}
+        return len(owners) == 1 and BaseModel not in owners
 
     @property
     def _model_kwargs(self) -> Dict:

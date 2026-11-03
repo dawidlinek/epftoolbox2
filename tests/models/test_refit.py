@@ -204,6 +204,11 @@ class RidgeOLS(OLSModel):
 
 
 class RidgeBoth(RidgeOLS):
+    """Ridge in all three methods, defined in one class."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
+
     def _fit_model(self, train_x, train_y):
         return Ridge(alpha=50.0, fit_intercept=False).fit(train_x, train_y)
 
@@ -216,21 +221,41 @@ class RidgeCV(LassoCVModel):
         return RidgeOLS._fit_predict(self, train_x, train_y, test_x)
 
 
-class Seam(OLSModel):
-    """Overrides the seam and inherits `_fit_predict`: the seam is a subclass's, so refit fits what the class says."""
+class RidgeRefit(OLSModel):
+    """The other way round: Ridge in the seam, OLS's `_fit_predict`. refit=None would fit OLS and refit Ridge."""
+
+    def _fit_model(self, train_x, train_y):
+        return Ridge(alpha=50.0, fit_intercept=False).fit(train_x, train_y)
 
     def _predict_fitted(self, fitted, test_x):
         return fitted.predict(test_x)[0], fitted.coef_.tolist()
 
 
-def test_a_subclass_overriding_only_fit_predict_raises_on_refit(market):
+class Seam(OLSModel):
+    """Overrides `_predict_fitted` alone: it may forecast otherwise than `_fit_predict` does, so it doesn't refit either."""
+
+    def _predict_fitted(self, fitted, test_x):
+        return fitted.predict(test_x)[0], fitted.coef_.tolist()
+
+
+class Renamed(LassoCVModel):
+    """Overrides none of the three: LassoCV's fit, whatever else it adds."""
+
+    def __init__(self, predictors, **kwargs):
+        super().__init__(predictors, cv=3, **kwargs)
+
+
+def test_refit_needs_one_class_to_define_all_three_fit_methods(market):
     """Inheriting `_fit_model` and `_predict_fitted` from OLSModel while fitting Ridge in `_fit_predict` would have refitted it
-    with OLS, silently, up to 47 off its own refit=None run. Overriding all three refits the subclass's own estimator."""
-    for cls in (RidgeOLS, RidgeCV):
+    with OLS, silently, up to 47 off its own refit=None run, and the other way round refit would fit Ridge where refit=None fits
+    OLS. So one class defines all three, or refit raises naming their owners. OLS, LassoCV, a subclass overriding all three and one
+    overriding none refit; overriding all three refits the subclass's own estimator."""
+    for cls, parent in ((RidgeOLS, "OLSModel"), (RidgeCV, "LassoCVModel"), (RidgeRefit, "RidgeRefit"), (Seam, "Seam")):
         cls(PREDICTORS)  # refit=None runs as before
-        with pytest.raises(ValueError, match="can't refit.*OLSModel's|can't refit.*LassoCVModel's"):
+        with pytest.raises(ValueError, match=f"can't refit.*{parent}'s"):
             cls(PREDICTORS, refit="7D")
-    assert Seam(PREDICTORS, refit="7D").refit == "7D"
+    for cls in (OLSModel, LassoCVModel, RidgeBoth, Renamed):
+        assert cls(PREDICTORS, refit="7D").refit == "7D"
     both = RidgeBoth(PREDICTORS, training_window=WINDOW, refit="1D").run(market, "2023-03-20", "2023-03-22", horizon=1)
     plain = RidgeBoth(PREDICTORS, training_window=WINDOW).run(market, "2023-03-20", "2023-03-22", horizon=1)
     assert keyed(both._results, "refit_anchor") == keyed(plain._results)
