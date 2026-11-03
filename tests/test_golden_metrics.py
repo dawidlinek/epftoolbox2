@@ -13,16 +13,21 @@ from pathlib import Path
 import pytest
 
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
-from epftoolbox2.models import LassoCVModel, OLSModel
+from epftoolbox2.models import LassoCVModel, OLSModel, RidgeModel
 from epftoolbox2.pipelines import ModelPipeline
 from tests.synthetic import PREDICTORS, make_market_data
 
 GOLDEN_FILE = Path(__file__).parent / "golden" / "synthetic_metrics.json"
+# The models of the forecasting layer (step 4) are pinned in a file of their own, so the file above stays as it was: Ridge here,
+# LEAR added by its branch.
+LEAR_RIDGE_GOLDEN_FILE = Path(__file__).parent / "golden" / "lear_ridge_metrics.json"
 
 # OLS is exact up to float rounding. LassoCV stops at a convergence tolerance and the scikit-learn version differs
 # between environments (the lock has 1.8; the 3.15 and newest-dependencies CI runs resolve newer ones), so it gets
 # more room.
 RTOL = {"OLS": 1e-9, "LassoCV": 1e-6}
+# Ridge is a closed form (scikit-learn's leave-one-out `RidgeCV`), exact up to float rounding like OLS.
+LEAR_RIDGE_RTOL = {"Ridge": 1e-9}
 
 
 def compute_metrics() -> dict:
@@ -64,3 +69,41 @@ def test_metrics_match_golden(monkeypatch):
         for key, value in values.items():
             if key != "forecasts":
                 assert actual[model][key] == pytest.approx(value, rel=RTOL[model]), f"{model} {key}"
+
+
+def compute_lear_ridge_metrics() -> dict:
+    """The golden test's data and window, with the models of step 4 alone: Ridge at W 45, no benchmark to scale against."""
+    df = make_market_data(noise=5.0, seed=42)
+    pipeline = (
+        ModelPipeline()
+        .add_model(RidgeModel(PREDICTORS + ["price_d-1"], training_window=45, name="Ridge"))
+        .add_evaluator(MAEEvaluator())
+        .add_evaluator(RMSEEvaluator())
+    )
+    report = pipeline.run(df, test_start="2023-03-25", test_end="2023-03-27", target="price", horizon=2)
+    tables = report.compute_all()
+
+    metrics = {name: {"forecasts": len(details)} for name, details in report.iter_details()}
+    for row in tables["summary"].to_dict("records"):
+        metrics[row["model"]].update({k: float(row[k]) for k in ("MAE", "RMSE")})
+    for row in tables["horizon"].to_dict("records"):
+        metrics[row["model"]][f"MAE_h{row['horizon']}"] = float(row["MAE"])
+    return metrics
+
+
+def test_lear_ridge_metrics_match_golden(monkeypatch):
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    actual = compute_lear_ridge_metrics()
+
+    if os.environ.get("UPDATE_GOLDEN") == "1":
+        LEAR_RIDGE_GOLDEN_FILE.write_text(json.dumps(actual, indent=2, sort_keys=True) + "\n")
+        pytest.skip(f"golden values written to {LEAR_RIDGE_GOLDEN_FILE}")
+
+    expected = json.loads(LEAR_RIDGE_GOLDEN_FILE.read_text())
+    assert actual.keys() == expected.keys()
+    for model, values in expected.items():
+        assert actual[model]["forecasts"] == values["forecasts"], f"{model}: number of forecasts changed"
+        for key, value in values.items():
+            if key != "forecasts":
+                assert actual[model][key] == pytest.approx(value, rel=LEAR_RIDGE_RTOL[model]), f"{model} {key}"
