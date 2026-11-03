@@ -674,7 +674,6 @@ def same_list(ctx):
     return PREDICTORS
 
 
-@pytest.mark.parametrize("predictors", [PREDICTORS, same_list], ids=["fixed", "function"])
 def cut_on_the_last_issue_day(fit_unit):
     """The review's mutant: a unit's rows cut on the last issue day of its forecasts in the run, not on its anchor. A run of one
     day has one forecast per unit, which hides it."""
@@ -721,6 +720,7 @@ def test_the_probes_run_a_refit_model_over_the_rest_of_its_block(market, monkeyp
     assert pipeline.verify(market, monday, monday, horizon=2, days=1).status("weekly") == "leak"
 
 
+@pytest.mark.parametrize("predictors", [PREDICTORS, same_list], ids=["fixed", "function"])
 def test_the_training_target_is_checked_on_the_anchors(market, monkeypatch, predictors):
     """A unit's rows are cut as of the issue time on its anchor, so that is where its newest training target, a - 1, must be
     known: the check reads the anchors for the target, and the issue days for the inputs. A target known too late still
