@@ -20,8 +20,11 @@ import yaml
 from sklearn.linear_model import Ridge, RidgeCV
 from threadpoolctl import threadpool_limits
 
+import epftoolbox2.models as models_package
+from epftoolbox2 import tui
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import BaseModel, LassoCVModel, OLSModel, RidgeModel
+from epftoolbox2.models import ridge as ridge_module
 from epftoolbox2.models._calendar import refit_anchor
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.models.ridge import DEFAULT_ALPHAS
@@ -270,14 +273,9 @@ def test_a_grid_that_is_not_positive_finite_penalties_raises_at_once(make_bad):
 
 
 def test_the_registry_the_package_and_the_tui_know_it():
-    from epftoolbox2 import tui
-    from epftoolbox2.models import ridge as ridge_module
-
     assert COMPONENT_REGISTRY["models"]["RidgeModel"] == "epftoolbox2.models.ridge"
     assert ridge_module.RidgeModel is RidgeModel
-    import epftoolbox2.models
-
-    assert "RidgeModel" in epftoolbox2.models.__all__
+    assert "RidgeModel" in models_package.__all__
     assert "RidgeModel" in tui._MODELS and {f["name"] for f in tui.PARAM_SCHEMAS["RidgeModel"]} >= {
         "name",
         "predictors",
