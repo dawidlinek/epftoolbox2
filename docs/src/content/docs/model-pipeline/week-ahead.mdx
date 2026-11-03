@@ -106,7 +106,9 @@ binary ones included (`scale_binary=True`), and an expert OLS with an intercept.
   The built-in A31 rule's week is Brussels's, and a daily row's weekly value is read at its date's last slot. In a zone an hour behind
   Brussels, such as Lisbon or Dublin, the last hour of the Sunday of next week is Monday in Brussels, so the TSO's forecast of D+9 counts
   as published only the Friday after. Declare A31 in the market's own zone, at the same instant:
-  `"load_forecast_daily_*": Availability.weekly("friday", "09:00", timezone="Europe/Lisbon")`.
+  `"load_forecast_daily_*": Availability.weekly("friday", "09:00", timezone="Europe/Lisbon")`. Zones ahead of Brussels are affected
+  too, on hourly frames and the other way: in Helsinki the first hour of a Monday is Sunday in Brussels, so the rule takes it as
+  published a week early, a look-ahead. A fix (the week of the data zone's local dates) is coming.
 </Aside>
 
 ### The TSO's forecast as a model
