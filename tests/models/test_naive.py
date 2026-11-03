@@ -289,7 +289,16 @@ def test_the_rules_that_decide_which_forecasts_exist_are_compared_on_resume(tmp_
     )
     assert path.read_text() == first and again.produced == 78
 
-    # Another issue time would publish other cells: the stored set isn't this run's.
+    # Another vintage class decides no key, so it resumes; another issue time would publish other cells, so it refuses.
+    snapshot = InformationSet(
+        "12:00",
+        ZONE,
+        rules={**RULES, "load_forecast_daily_max": Availability.weekly("friday", "10:00", vintage="snapshot")},
+    )
+    NaiveModel([TSO]).run(
+        frame, START, END, target="actual_daily_max", horizon=7, freq="1D", save_to=str(path), information_set=snapshot
+    )
+    assert path.read_text() == first
     later = InformationSet("10:30", "Europe/Brussels", rules=RULES)
     with pytest.raises(ManifestMismatchError, match="training_cut"):
         NaiveModel([TSO]).run(

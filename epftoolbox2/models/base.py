@@ -682,13 +682,13 @@ class BaseModel(ABC):
         return self._newest.at(period, np.asarray(day, dtype=np.int64) + self._first_ordinal)
 
     def _published_by(self, rules: "InformationSet", freq: str) -> Dict[str, Any]:
-        """What decides which forecasts of a `known_only` model exist: the issue time and each input's resolved rule (its
-        `to_dict()` without the note; None for a column without one, which counts as known)."""
+        """What decides which forecasts of a `known_only` model exist: the issue time and each input's resolved rule (without the
+        note and the vintage class, which decide nothing, as `target_rule`; None for a column without one, which counts as known)."""
         step = _STEP_MINUTES[freq]
         resolved = {}
         for name in self._used_predictors:
             rule = rules._resolve_for(name, step).rule
-            resolved[name] = None if rule is None else {k: v for k, v in rule.to_dict().items() if k != "note"}
+            resolved[name] = None if rule is None else rule_dict(rule, ("note", "vintage"))
         return {"issue_time": rules.issue_time, "issue_timezone": rules.issue_timezone, "rules": resolved}
 
     def _unpublished(
