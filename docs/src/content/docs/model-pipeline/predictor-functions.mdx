@@ -204,8 +204,10 @@ What that means, for each (period, horizon):
 <Aside type="caution" title="Revised series and the set of days">
 A value the function reads on a past day is the one in the frame, as for a [forecast's own cell](#publishedcolumns), so a revision
 made after the forecast's issue day moves its set of days and the forecast with it: in one synthetic case all 24 forecasts of a day,
-by 4 on average. `leakage_probe` and `verify` can't see that, since the revised value is known by the rule. If the function reads a
-series that gets revised, the backtest's sets are the archive's.
+by 4 on average. `leakage_probe` can't see that, since the revised value is known by the rule. If the function reads a
+series that gets revised, the backtest's sets are the archive's. Give its rule a [class](/epftoolbox2/model-pipeline/information-set/#vintage-classes)
+(`vintage="latest_revision"`, as the built-in ENTSO-E load and generation rules have) and `verify` calls such a function
+`inconclusive`, naming the column.
 
 Backfilling works against a live run too. If `published()` is False today and the archive has backfilled that column on every past
 day, today's list is one no past day got: a fallback list used that way has `no_matching_days`, and no forecast, in the live run

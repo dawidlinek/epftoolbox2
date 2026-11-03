@@ -44,6 +44,11 @@ If the run has anything in [`report.availability()`](/epftoolbox2/model-pipeline
 whatever `show` says: inputs not known at the issue time, or without a rule, with their periods and horizons. The rule itself is left
 out for width. With nothing to list this table isn't printed.
 
+After it come the inputs read from an archive of revised values, the rows of
+[`report.vintages()`](/epftoolbox2/model-pipeline/results/#vintage-classes-of-the-inputs) whose class is `latest_revision` or
+`last_write_stamp`, also whatever `show` says, and only if there are any: a backtest on them is more accurate than a live run would
+have been.
+
 ```
 Availability: inputs not known to be out at the issue time
 ┏━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┓

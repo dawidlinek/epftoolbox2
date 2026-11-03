@@ -117,6 +117,18 @@ there is nothing to list. See [Information Set](/epftoolbox2/model-pipeline/info
 report.availability()  # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
 ```
 
+## Vintage classes of the inputs
+
+`report.vintages()` lists the [class](/epftoolbox2/model-pipeline/information-set/#vintage-classes) of every input of every model:
+what the archive it was read from holds, by its rule. `series` is the column the rule is for (`price` for `price_d-1`), `class` is
+`snapshot`, `row_stamp`, `last_write_stamp`, `latest_revision` or `unknown` (a rule without one), and `ctx` says whether a predictor
+function read the column through `ctx`. An ensemble's rows are its models'. It is empty, with the same columns, when no input has a
+class or the run had no information set. A report built from `save_dir` reads them from the manifests.
+
+```python
+report.vintages()  # model, predictor, series, class, ctx
+```
+
 ## Breakdowns by quarter, day and price level
 
 ```python

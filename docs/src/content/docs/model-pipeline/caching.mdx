@@ -78,6 +78,8 @@ last written) and the
 [information set](/epftoolbox2/model-pipeline/information-set/) settings, but neither is compared: a
 version bump or a new commit does not by itself invalidate a results directory, and the information set
 gates which predictors are allowed before fitting rather than changing what a fitted model predicts.
+A run that reads an input with a [vintage class](/epftoolbox2/model-pipeline/information-set/#vintage-classes) records each
+input's class as `vintages`, never compared either; a run whose inputs have none has no such key.
 
 Before resuming, the pipeline compares a manifest built from the current run to the one on disk. If they
 disagree, it raises rather than silently mixing forecasts made under two configurations:

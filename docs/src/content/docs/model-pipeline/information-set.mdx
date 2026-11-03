@@ -179,15 +179,17 @@ For a predictor function it shows [the distinct lists first](/epftoolbox2/model-
 
 ## Built-in Availability Rules
 
-| Column | Available from |
-|---|---|
-| `price` (ENTSO-E A44) | published ~13:00 Brussels on D-1 (within about 1h of the 12:00 gate closure) |
-| `load_actual` (A65/A16) | 1h after the end of the delivery period |
-| `load_forecast` (A65/A01) | published 10:00 Brussels on D-1 |
-| `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00, for the whole following week (Brussels by default, a bound `EntsoeSource` overrides this with the market's own zone, see below) |
-| `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) |
-| `generation_*` (A75 actual generation) | 1h after the end of the delivery period |
-| Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static, known in advance |
+| Column | Available from | [Class](#vintage-classes) |
+|---|---|---|
+| `price` (ENTSO-E A44) | published ~13:00 Brussels on D-1 (within about 1h of the 12:00 gate closure) | `snapshot` |
+| `load_actual` (A65/A16) | 1h after the end of the delivery period | `latest_revision` |
+| `load_forecast` (A65/A01) | published 10:00 Brussels on D-1 | `latest_revision` |
+| `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00, for the whole following week (Brussels by default, a bound `EntsoeSource` overrides this with the market's own zone, see below) | `latest_revision` |
+| `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) | `latest_revision` |
+| `generation_*` (A75 actual generation) | 1h after the end of the delivery period | `latest_revision` |
+| Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static, known in advance | none |
+
+An `OpenMeteoSource` column's rule (below) is a `snapshot`, and so is an `EpftoolboxBenchmarkSource`'s `price`.
 
 <Aside type="caution">
   A69 wind/solar's *legal* deadline (18:00 D-1) is after the day-ahead gate closure (12:00 D-1), and ENTSO-E
@@ -267,6 +269,9 @@ pipeline = ModelPipeline(information_set=info)
                                                                 # UTC on the issue day D; used by source_rules.
                                                                 # Always UTC: another zone raises
     ```
+
+    Every constructor also takes `vintage=`, the [class](#vintage-classes) of what the archive holds, and every rule has
+    `.during(valid_from=..., valid_until=...)` for the days it holds on ([Rules over time](#rules-over-time)).
   </TabItem>
   <TabItem label="Rule keys">
     Keys in `rules=` may be exact column names or glob patterns (`fuel_*`), and take precedence over accepted
@@ -275,6 +280,96 @@ pipeline = ModelPipeline(information_set=info)
     unless a key in `rules=` matches its own name.
   </TabItem>
 </Tabs>
+
+## Vintage Classes
+
+A rule says when a value was first out. A class says what the frame you backtest on holds of it, which is another question: the
+archive of most series keeps only the newest revision, not the value a forecast saw on its issue day.
+
+| Class | What the archive holds | Examples |
+|---|---|---|
+| `snapshot` | each value as published at a stated time | an auction's price, A69's 18:00 vintage, Open-Meteo's previous runs |
+| `row_stamp` | every value with a trustworthy stamp of its first publication | PSE `pdgsz` |
+| `last_write_stamp` | a stamp of each value's last write: it can tell a leak, but it is no vintage | other PSE tables |
+| `latest_revision` | the newest value only | ENTSO-E A65, A69 `current`, A75, SMARD, Energy-Charts `current` |
+
+```python
+from epftoolbox2.information_set import Availability, InformationSet
+
+info = InformationSet(rules={
+    "de_wind_forecast_da": Availability.published("18:00", 1, vintage="snapshot"),
+    "flows": Availability.realised("2h", vintage="latest_revision"),
+})
+```
+
+A class decides no number: the check, the probes and every forecast are the same with it or without it. What it changes is how
+far a backtest can be taken at its word. The latest wind and solar revision flattered the RMSE of German forecasts by 29–45 % against
+their day-ahead vintage in one measurement, and ENTSO-E's load was revised after the gate on 22 of 42 days, so a model that reads a
+`latest_revision` series is more accurate in a backtest than it would have been live.
+
+- A rule of yours has no class unless you give it one, and is shown as `unknown`. The [built-in rules](#built-in-availability-rules)
+  have theirs, and a rule of yours for the same name replaces the class too.
+- [`report.vintages()`](/epftoolbox2/model-pipeline/results/#vintage-classes-of-the-inputs) lists the class of every input of every
+  model, and the [terminal exporter](/epftoolbox2/exporters/terminal/#output) prints the revised ones next to the availability
+  listing. A run records them in its manifest as `vintages`, never compared on resume.
+- Compared models that read one series with different classes [warn](/epftoolbox2/model-pipeline/comparing-models/#vintage-classes),
+  and don't refuse: almost all usable history today is a latest revision.
+- [`verify`](/epftoolbox2/model-pipeline/verification/#the-positive-control) calls a predictor function `inconclusive` when a
+  `train_on="matching"` list reads a `latest_revision` or `last_write_stamp` column on a day it trains on.
+
+None of this replays what was known then: that needs data with its vintages, which this library doesn't read yet. The classes make
+visible what a backtest reads.
+
+## Rules Over Time
+
+A publication lag can change in the middle of a history. PSE published its settlement prices four days after the business date up
+to 7 October 2026, and one day after it from 8 October. A list of rules with disjoint validity periods says so:
+
+```python
+from epftoolbox2.information_set import Availability, InformationSet
+
+info = InformationSet("11:45", "Europe/Warsaw", rules={
+    "sk": [
+        Availability.published("14:30", -4, "Europe/Warsaw").during(valid_until="2026-10-07"),
+        Availability.published("14:30", -1, "Europe/Warsaw").during(valid_from="2026-10-08"),
+    ],
+})
+```
+
+- **Which rule.** A rule holds for the values whose day is in its period, both ends included: the day the value is delivered, a date
+  of the rule's `timezone` for `published` and `weekly` and of the data's zone for `realised`, `weather_run` and `static`. For
+  `as_of` and `weather_cutoff` it is the day the value is read on, the issue day moved by a shift after a leading `_d+k`. So
+  `sk_d-1` on 9 October holds 8 October's value, which the one-day rule describes.
+- **Outside every period** a value is never known: it is late, conservatively, and a gap between two periods is allowed. Two
+  periods that share a day raise `ValueError`.
+- **Everywhere alike.** The check, the listing (its `known` reads `never (no rule holds then)`), `ctx.published()` and
+  `ctx.value()`, `explain`, `leakage_probe` and `newest_target="published"` all read through it. With the rules above, at 11:45 the
+  newest known settlement price is that of D-5 up to issue day 11 October, though 8 October's value is out on the 9th, since 7
+  October's comes only on the 11th at 14:30; from 12 October it is D-2.
+- A single rule takes a period too, `Availability.realised("1h").during(valid_from="2024-06-13")`: before it nothing is known.
+- In YAML the list is written as a list, and the new keys only when set, so a file without them is written back as it was:
+
+```yaml
+information_set:
+  issue_time: '11:45'
+  issue_timezone: Europe/Warsaw
+  rules:
+    sk:
+    - kind: published
+      time: '14:30'
+      days_before: -4
+      timezone: Europe/Warsaw
+      vintage: last_write_stamp
+      valid_until: '2026-10-07'
+    - kind: published
+      time: '14:30'
+      days_before: -1
+      timezone: Europe/Warsaw
+      vintage: last_write_stamp
+      valid_from: '2026-10-08'
+```
+
+`info.rules["sk"]` is then a `RuleChain`, the rules in the order of their periods.
 
 **Unknown columns.** With `availability="raise"`, a predictor whose base column has no rule anywhere is, by default, a hard
 error (`unknown="raise"`): a check that silently skipped columns it knows nothing about would report a pass it

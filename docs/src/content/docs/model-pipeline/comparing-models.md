@@ -47,6 +47,15 @@ horizon in `tests()`, per evaluator in `summary()` (when it has a `DMEvaluator` 
 Models with the same losses and other predictions, one always as far above the actual as the other is below, are not clones: `mcs()` raises
 and `ranks()` warns, as they did.
 
+## Vintage classes
+
+A model that reads a series whose archive holds the latest revision is scored on values written after its issue day. Two models that
+read one series with different [classes](/epftoolbox2/model-pipeline/information-set/#vintage-classes), one its day-ahead snapshot and
+one its latest revision, say, are not compared like for like. `tests()`, `compare()`, `leaderboard()` and a table with a
+`DMEvaluator` column warn then, and say which in `df.attrs["vintages"]`: series, model, class. `tests()` and the DM column compare
+each model with the benchmark, `compare()` its two models and `leaderboard()` all of them. Only declared classes count, so a rule
+without one never warns, and a table of models that agree is what it was, attributes included.
+
 ## Test length
 
 One test year resolves differences of about 5 % of the MAE. Gaps of 1–2 % need about 2,700 days, so with one year most small gaps will read `no difference`, and that is the right answer. The `mde` column gives the minimum detectable effect for each pair: the difference (as a share of the benchmark's MAE) this test length would detect with 80 % power.
