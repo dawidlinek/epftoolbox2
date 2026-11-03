@@ -8,9 +8,10 @@ on its ref (`ModelResultRef.vintages`, `EvaluationReport.vintages()`) and in its
 compared on resume. A run whose inputs have no class at all records nothing, so its manifest is what it always was.
 
 Nothing here reads a number: a class moves no forecast. It says how far a backtest can be taken at its word. A latest revision
-holds values written after the issue day, which no forecast saw then (the latest wind and solar revision flattered RMSE by 29-45 %
-against the day-ahead vintage in one measurement), so compared models that read one series with different classes aren't
-compared like for like. They warn, and don't refuse, since all usable history of most series is a latest revision today
+holds values written after the issue day, which no forecast saw then (in one measurement, Germany 2025, the TSO's own wind and
+solar forecasts had an RMSE against actual generation 29-45 % lower in their latest revision than in their day-ahead vintage,
+vintages matched by name only; the effect on a price model wasn't measured), so compared models that read one series with
+different classes aren't compared like for like. They warn, and don't refuse, since all usable history of most series is a latest revision today
 (decision 18 of the step 3 spec): `tests()`, `compare()`, `leaderboard()` and a table with a `DMEvaluator` column say so in a
 warning and in `df.attrs["vintages"]`.
 """

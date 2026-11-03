@@ -135,8 +135,9 @@ an issue day it didn't sample.
   series with different classes (`df.attrs["vintages"]`). `verify` calls a predictor function `inconclusive` when a
   `train_on="matching"` list reads a `latest_revision` or `last_write_stamp` column on a day it trains on, naming it: a revised value
   can move the set of days and no probe sees it. `.during(valid_from=, valid_until=)` gives a rule the days it holds on, and a list of
-  rules with disjoint periods is a column's rule over time, for a lag that changed (PSE's settlement prices went from D+4 to D+1 on
-  8 October 2026). A value no rule holds for is never known. The check, `ctx`, `explain`, the probes and `newest_target="published"`
+  rules with disjoint periods is a column's rule over time, for a lag that changed (observed: PSE's settlement prices went from D+4 to
+  D+1 on business date 8 October 2026; the library has no PSE source yet). For such a column the check also reads the training rows
+  and every slot of a day aggregate, since an older value can come after a newer one. A value no rule holds for is never known. The check, `ctx`, `explain`, the probes and `newest_target="published"`
   all read it the same way. **Nothing moves without them**: records and tables are as before, and YAML writes the new keys only when
   set, so an old file is written back byte for byte. What moves: manifests of runs that read an input with a built-in class gain
   `vintages` (an ensemble's manifest doesn't), and a matching function reading a revised built-in column on a training day goes from
