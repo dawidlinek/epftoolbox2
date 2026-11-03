@@ -63,6 +63,9 @@ jobs:
         uv lock --upgrade
         uv sync --extra dev
 
+    - name: Check that no extra is installed (this is the core-only job)
+      run: uv run python -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('numba') is not None)"
+
     - name: Run tests
       env:
         ENTSOE_API_KEY: ${{ secrets.ENTSOE_API_KEY }}
@@ -75,6 +78,34 @@ jobs:
       with:
         file: ./coverage.xml
         fail_ci_if_error: false
+
+  fast-extra:
+    # The [fast] extra (numba): the numba twins of the LEAR kernels against the numpy reference
+    # (tests/models/test_lars_kernels.py), and the rest of the suite with numba installed. The test job above installs no
+    # extra, so there the numpy kernels run alone and the numba tests skip.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.14t']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up uv with Python ${{ matrix.python-version }}
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies with the fast extra
+      run: uv sync --locked --extra dev --extra fast
+
+    - name: Check that numba imports (the numba tests would skip without it)
+      run: uv run python -c "import numba; print('numba', numba.__version__)"
+
+    - name: Run tests
+      run: uv run pytest -m "not integration" -n auto --dist worksteal -q
 
   newest-dependencies:
     # The other jobs install the versions in uv.lock, so a release that breaks the library (pandas 3.1 did)
