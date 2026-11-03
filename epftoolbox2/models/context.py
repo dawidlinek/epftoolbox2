@@ -561,6 +561,9 @@ class PredictorPlan:
             the anchors, and the training days of a matching list reach back from the anchor.
         fit_window: The model's `training_window`, if known: a column whose rule changes over time (`over_time`) is checked
             on every row the fits read (`training_rows`), not only on the issue day's.
+        known_only: Whether the model is `known_only` (`NaiveModel`): a forecast whose list its rule puts after the issue time
+            is no forecast, so the check and the listing have no such use. What the function reads through `ctx` still counts.
+        trains: False for a model that fits nothing (`NaiveModel`), which has no training target to check.
     """
 
     function: Any
@@ -595,6 +598,8 @@ class PredictorPlan:
     # and name -> what each row day of it is known at.
     _trained: Dict[Tuple[str, int], np.ndarray] = field(default_factory=dict, repr=False)
     _rows_known: Dict[str, Any] = field(default_factory=dict, repr=False)
+    known_only: bool = False
+    trains: bool = True
 
     def __post_init__(self):
         self._positions = {day.isoformat(): position for position, day in enumerate(self.issue_days)}
@@ -722,7 +727,7 @@ class PredictorPlan:
             self.freq,
             self.data.index,
             issue_days=[day.isoformat() for day in scanned],
-            check_target=self.newest_target == "d-1",
+            check_target=self.newest_target == "d-1" and self.trains,
             # The target's training rows, back from the anchors with `refit`.
             training_rows=None if self.fit_window is None else TrainingRows(self.fit_window, self.reach),
         )
@@ -734,7 +739,7 @@ class PredictorPlan:
             if col.rule is None:
                 no_rule.append(name)
                 unknown.add(col.series)
-            elif any(
+            elif not self.known_only and any(
                 (self._known_for(cells, name, h)[0] > cells._clock.issue).any() for h in self._horizons_of(cells, name)
             ):
                 late_names.append(name)
@@ -825,7 +830,7 @@ class PredictorPlan:
             on_days[days[0] : days[1]] = True
             read_on, read_on_training = self._read_by_forecasts_of(days, on_days)
         col = cells.column(target)
-        if col.rule is None and self.newest_target == "d-1":
+        if col.rule is None and self.newest_target == "d-1" and self.trains:
             target_uses = [Violation(target, p, h, col, float("nan"), float("nan"), ROLE_TARGET) for p, h in pairs]
         rows = listing_rows(target_uses)
         by_list = self._late_uses(late_names, cells, on_days)
@@ -1018,6 +1023,8 @@ def build_plan(
     reach: int = 0,
     horizons: Optional[Sequence[int]] = None,
     refit: Optional[str] = None,
+    known_only: bool = False,
+    trains: bool = True,
 ) -> PredictorPlan:
     """Evaluate `fn` for every planned forecast, at each of `horizons` (every one from 1 to `horizon`, the largest, if not
     given). `warn_unpublished` warns for each `published()` argument that was never
@@ -1026,7 +1033,7 @@ def build_plan(
 
     If a forecast gets `Use(list, train_on="matching")`, `fn` is also evaluated on the days it can train on, which needs
     `training_window`. What `fn` answers on a day is then the same whether that day is issued or only trained on.
-    `newest_target`, `reach` and `refit` are the model's (see `PredictorPlan`).
+    `newest_target`, `reach`, `refit`, `known_only` and `trains` are the model's (see `PredictorPlan`).
     """
     started = time.perf_counter()
     days = list(issue_days)
@@ -1045,6 +1052,8 @@ def build_plan(
         horizons=() if horizons is None else tuple(horizons),
         refit=refit,
         fit_window=training_window,
+        known_only=known_only,
+        trains=trains,
     )
     horizons = plan.horizons
     periods = range(cells.periods)

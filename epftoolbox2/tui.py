@@ -801,6 +801,23 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "NaiveModel": [
+        {"name": "name", "description": "Model display name", "required": False, "default": "Naive", "kind": "text"},
+        {
+            "name": "predictors",
+            "description": "The one column whose value on the issue row is the forecast, e.g. a TSO's published forecast",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "known_only",
+            "description": "With an issue time, no forecast where the column isn't published by then (not_published)",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
+        },
+    ],
     "MAEEvaluator": [],
     "RMSEEvaluator": [],
     "rMAEEvaluator": [
@@ -1192,7 +1209,7 @@ _VALIDATORS = [
     "CoverageValidator",
     "PlausibilityValidator",
 ]
-_MODELS = ["OLSModel", "LassoCVModel"]
+_MODELS = ["OLSModel", "LassoCVModel", "NaiveModel"]
 _EVALUATORS = [
     "MAEEvaluator",
     "RMSEEvaluator",

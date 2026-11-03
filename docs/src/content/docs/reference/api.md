@@ -483,9 +483,14 @@ class LassoCVModel(BaseModel):
                  cv: int = 5, max_iter: int = 10000, *, fit_intercept: bool = True,
                  name: str = "Model", scaler: ScalerSpec = "standard", newest_target: str = "d-1",
                  refit: Optional[str] = None): ...
+
+class NaiveModel(BaseModel):                # one column's value on the issue row, no fit
+    def __init__(self, predictors: Union[List, Callable], name: str = "Naive", *,
+                 known_only: bool = True, newest_target: str = "d-1",
+                 refit: Optional[str] = None): ...
 ```
 
-`ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance. `fit_intercept` is keyword-only and scikit-learn's; a set value is saved and compared on resume, the default isn't written, so results and files made before it keep their manifests.
+`ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance. `fit_intercept` is keyword-only and scikit-learn's; a set value is saved and compared on resume, the default isn't written, so results and files made before it keep their manifests. `NaiveModel` takes a list of one name (or a function of `ctx` returning one), forecasts its value on the row of the issue day and has no coefficients; with `known_only` and an information set a value its rule puts after the issue time is no forecast, counted as `not_published` (see [Week-ahead forecasting](/epftoolbox2/model-pipeline/week-ahead/)). `newest_target` and `refit` raise unless left at their defaults.
 
 ### Predictor functions
 

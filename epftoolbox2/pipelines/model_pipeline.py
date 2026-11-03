@@ -59,6 +59,7 @@ COMPONENT_REGISTRY = {
     "models": {
         "OLSModel": "epftoolbox2.models.ols",
         "LassoCVModel": "epftoolbox2.models.lasso",
+        "NaiveModel": "epftoolbox2.models.naive",
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",
