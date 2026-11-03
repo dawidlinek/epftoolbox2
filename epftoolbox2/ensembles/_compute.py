@@ -305,13 +305,17 @@ def _what_decides_availability(information_set: Optional[Dict[str, Any]]) -> Opt
     return {
         "issue_time": information_set.get("issue_time"),
         "issue_timezone": information_set.get("issue_timezone"),
-        "rules": {
-            column: {key: value for key, value in rule.items() if key != "note"}
-            for column, rule in information_set.get("rules", {}).items()
-        },
+        "rules": {column: _what_a_rule_decides(rule) for column, rule in information_set.get("rules", {}).items()},
         "assumptions": sorted(information_set.get("assumptions", [])),
         "use_defaults": information_set.get("use_defaults", True),
     }
+
+
+def _what_a_rule_decides(rule: Any) -> Any:
+    """A stored rule without its note and its class, which decide nothing; a list of them for rules over time."""
+    if isinstance(rule, list):
+        return [_what_a_rule_decides(one) for one in rule]
+    return {key: value for key, value in rule.items() if key not in ("note", "vintage")}
 
 
 def _data_differences(manifests: Mapping[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:

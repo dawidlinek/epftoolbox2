@@ -49,6 +49,7 @@ from ..information_set import (
     InformationSetError,
     ResolvedColumn,
     Violation,
+    rule_dict,
 )
 from ..results.availability import listing_rows, sort_rows
 from ..results.windows import mask_key
@@ -163,8 +164,11 @@ def function_fingerprint(fn: Any, information_set: Optional[InformationSet]) -> 
         source = getattr(getattr(fn, "__code__", None), "co_code", b"").hex() or function_name(fn)
     rules = None
     if information_set is not None:
-        sources = {name: rule.to_dict() for name, rule in information_set._source_rules.items()}
+        # Without the rules' classes, which change no answer of `ctx`.
+        sources = {name: rule_dict(rule, ("vintage",)) for name, rule in information_set._source_rules.items()}
         rules = {**information_set.to_dict(), "source_rules": sources}
+        if information_set.rules:
+            rules["rules"] = {name: rule_dict(rule, ("vintage",)) for name, rule in information_set.rules.items()}
     payload = json.dumps([source, rules], sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 

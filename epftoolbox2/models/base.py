@@ -68,7 +68,7 @@ from ._worker import (
     training_rows,
 )
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days, zone_name
-from ..information_set import _STEP_MINUTES, InformationSetError, check_level
+from ..information_set import _STEP_MINUTES, InformationSetError, check_level, rule_dict
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -628,7 +628,8 @@ class BaseModel(ABC):
         return {
             **cut,
             "newest_target": self.newest_target,
-            "target_rule": {key: value for key, value in rule.to_dict().items() if key != "note"},
+            # Without the note and the class, which decide nothing: a list of rules with their periods for a `RuleChain`.
+            "target_rule": rule_dict(rule, ("note", "vintage")),
             "issue_time": rules.issue_time,
             "issue_timezone": rules.issue_timezone,
         }

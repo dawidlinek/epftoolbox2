@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from .._date_utils import daily_anchor, fmt_minutes, is_utc_index
-from ..information_set import parse_predictor
+from ..information_set import parse_predictor, rule_elements
 from ._calendar import DAILY, FREQ_STEPS, clock_periods
 
 DayRange = Tuple[pd.Timestamp, pd.Timestamp]
@@ -231,8 +231,9 @@ def warn_about_a_midnight_stamp(
     if information_set is not None:
         for name in shifted:
             rule = information_set._resolve_for(name, 60).rule
-            if rule is not None and rule.timezone is not None:
-                zones.add(rule.timezone)
+            for one in rule_elements(rule) if rule is not None else ():
+                if one.timezone is not None:
+                    zones.add(one.timezone)
     slack = 0.0
     if index.tz is not None:
         for zone in sorted(zones):
