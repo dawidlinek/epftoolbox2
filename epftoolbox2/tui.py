@@ -33,6 +33,7 @@ console = Console()
 #   "comma_list"   – comma-separated text → list[str]
 #   "column_select"– checkbox from available_columns (falls back to comma_list)
 #   "lag_list"     – comma-separated text → list[int] (e.g. "1,2,7" or "-7,-1,0")
+#   "window"       – a training window: days, "expanding", or a comma-separated list of them (e.g. "56,84,728,expanding")
 #   "json"         – free text parsed as JSON → dict/list (e.g. {"price": [-500, 4000]})
 
 PARAM_SCHEMAS: dict[str, list[dict]] = {
@@ -710,10 +711,10 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "training_window",
-            "description": "Training window in days",
+            "description": "Training window in days, 'expanding', or a list averaged inside the model (e.g. 56,84,728,expanding)",
             "required": False,
             "default": "365",
-            "kind": "int",
+            "kind": "window",
         },
         {
             "name": "scaler",
@@ -757,10 +758,10 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "training_window",
-            "description": "Training window in days",
+            "description": "Training window in days, 'expanding', or a list averaged inside the model (e.g. 56,84,728,expanding)",
             "required": False,
             "default": "365",
-            "kind": "int",
+            "kind": "window",
         },
         {"name": "cv", "description": "Cross-validation folds", "required": False, "default": "5", "kind": "int"},
         {
@@ -1090,6 +1091,22 @@ def _ask_field(field: dict, available_columns: Optional[list[str]] = None) -> An
                 return result
             except ValueError:
                 console.print("[red]Please enter comma-separated integers, e.g. 1,2,7 or -7,-1,0[/red]")
+
+    if kind == "window":
+        from .models._calendar import resolve_training_window
+
+        raw = questionary.text(label, default=str(default) if default is not None else "").ask()
+        if raw is None:
+            _abort()
+        raw = raw.strip() or str(default)
+        try:
+            parts = [part.strip() for part in raw.split(",") if part.strip()]
+            return resolve_training_window([part if part == "expanding" else int(part) for part in parts])[0]
+        except ValueError as exc:
+            console.print(
+                f"[red]Please enter days, 'expanding', or a list of them, e.g. 365 or 56,84,728,expanding ({exc})[/red]"
+            )
+            return _ask_field(field, available_columns)
 
     if kind == "battery":
         from .evaluators import BatteryArbitrage
