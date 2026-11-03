@@ -27,8 +27,11 @@ from pathlib import Path
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-import study  # noqa: E402
+try:
+    from . import study  # imported by the tests, as tests.fixtures.week_ahead.build
+except ImportError:  # run as a script
+    sys.path.insert(0, str(HERE))
+    import study
 
 SOURCE = Path.home() / "Desktop" / "min-max-hour-load-forecasting" / "data" / "parent"
 PARENT_CONFIG = Path.home() / "Desktop" / "min-max-hour-load-forecasting" / "src" / "mmh" / "parent_config.py"
@@ -68,18 +71,25 @@ def daily_targets(frame: pd.DataFrame, stat: str) -> pd.Series:
     return pd.Series(found.to_numpy(), index=frame.index)
 
 
+def at_noon(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Rows stamped at local midnight, restamped at noon wall clock of the same local date, in the same zone. Noon exists once on
+    every date of a European zone, so no stamp is skipped or repeated, and a switch day's row is at noon too (11 or 13 hours
+    after its midnight)."""
+    local = index.tz_localize(None)
+    if not (local == local.normalize()).all():
+        raise ValueError("the rows aren't all stamped at local midnight")
+    return (local + NOON).tz_localize(index.tz)
+
+
 def noon_frame(source: Path, market: str, zone: str) -> pd.DataFrame:
     """The study's whole daily frame of `market`, stamped at noon wall clock in `zone`, with the columns of the lists and the
     two targets."""
     raw = pd.read_csv(source / "features" / f"data_{market}.csv", index_col=0)
     raw.index = pd.to_datetime(raw.index, utc=True).tz_convert(zone)
-    local = raw.index.tz_localize(None)
-    if not (local == local.normalize()).all():
-        raise ValueError(f"{market}: the study's rows aren't all stamped at local midnight")
     frame = raw[study.columns()].copy()
     for stat in study.STATS:
         frame[f"actual_daily_{stat}"] = daily_targets(raw, stat)
-    frame.index = (local + NOON).tz_localize(zone)  # noon exists, once, on every European date
+    frame.index = at_noon(raw.index)
     return frame
 
 

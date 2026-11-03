@@ -32,7 +32,7 @@ from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.ref import ModelResultRef
 from epftoolbox2.results.report import EvaluationReport
-from tests.fixtures.week_ahead import study
+from tests.fixtures.week_ahead import build, study
 
 HERE = Path(__file__).parent / "fixtures" / "week_ahead"
 ZONE = "Europe/Warsaw"
@@ -136,6 +136,18 @@ def test_the_frame_is_the_study_s_stamped_at_noon(df_daily, stored):
         target_day = datetime.date.fromisoformat(row.run_date) + datetime.timedelta(days=int(row.horizon))
         value = df_daily.loc[(dates == target_day).to_numpy(), f"actual_daily_{row.target}"].iloc[0]
         assert abs(value - row.actual) <= 0.0005, (row.run_date, row.horizon, row.target)
+
+
+def test_the_build_restamps_the_study_s_midnight_rows_at_noon(df_daily):
+    """The study's file stamps each date at local midnight (`build.py` reads it so); `at_noon` puts every row at 12:00 of its own
+    date, across both switches, which is the frame the tests read. A frame not stamped at midnight is refused."""
+    midnight = (df_daily.index.tz_localize(None).normalize()).tz_localize(ZONE)
+    assert build.at_noon(midnight).equals(df_daily.index)
+    hours = pd.Series(build.at_noon(midnight) - midnight, index=midnight.date)
+    assert hours[datetime.date(2024, 3, 31)] == pd.Timedelta(hours=11)  # the spring switch day
+    assert hours[datetime.date(2024, 10, 27)] == pd.Timedelta(hours=13)  # the autumn one
+    with pytest.raises(ValueError, match="midnight"):
+        build.at_noon(df_daily.index)
 
 
 # --- refitting one Friday ---------------------------------------------------------------------------------------------------
