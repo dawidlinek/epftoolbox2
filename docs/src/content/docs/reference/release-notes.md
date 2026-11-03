@@ -115,6 +115,15 @@ an issue day it didn't sample.
   during validation, say), so one unfinished model cost the whole CSV or the `details` sheet. The model now keeps its columns, empty,
   where its place among the models puts them, and the other models' rows are as they were; a file of a report with no such model doesn't
   change by a byte. When no model has forecasts, the CSV is the header alone and the workbook holds the `Summary` and `Details` sheets only.
+- **`CsvExporter(extra_columns=...)` wrote a forecast once per source row.** The columns are joined by target date and period, and
+  only 15-minute and daily results checked the source. A quarter-hour source on hourly results wrote each forecast four times (96
+  hourly forecasts became 388 rows), and even an hourly source repeated the hour that occurs twice on an autumn switch day, once per source row, so any
+  count or Diebold-Mariano test run on the file was inflated. The source is now checked at every frequency, and one that is finer or
+  coarser than the results raises `ValueError` (`extra_columns need source data at the resolution of the 1h results`), saying to
+  resample or aggregate it first, where a coarser one used to leave most cells empty. The spacing is checked on the file's target dates
+  only. The repeated hour takes the values of its second occurrence, the row a run forecasts from, at 1 h and at 15 min. A file whose
+  results have no repeated hour and whose source has the results' resolution is the same, byte for byte, and so is every file written
+  without `extra_columns`.
 
 ### New
 

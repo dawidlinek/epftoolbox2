@@ -1,6 +1,7 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 from .base import Exporter
@@ -109,24 +110,33 @@ class CsvExporter(Exporter):
         if not available:
             return base_df
 
-        if freq in ("15min", DAILY):
-            # Quarter-hour results only line up with quarter-hour source rows, and daily ones with one row per date; any
-            # other resolution would fill most rows with NaN (a coarser source) or repeat them (a finer one: every hour of a
-            # date is period 0 at 1D) without saying so.
-            try:
-                check_index(source_data, freq)
-            except ValueError as exc:
-                raise ValueError(
-                    f"extra_columns need source data at the resolution of the {freq} results: {exc}"
-                ) from exc
+        # The join is on (target date, period of the day), so the source must have one row per date and period at the
+        # resolution of the results. A finer source would write each forecast once per source row (96 hourly forecasts
+        # became 388 rows from a quarter-hour source), a coarser one would fill most rows with NaN, and at 1D every hour of
+        # a date is period 0. Only the target dates of the file are read, as a run reads only the days it can use.
+        try:
+            check_index(source_data, freq, self._target_days(base_df))
+        except ValueError as exc:
+            hint = ""
+            if freq != DAILY:  # at 1D the message of check_index already says how to take one row a date
+                hint = (
+                    f" Each forecast takes the source row of its target date and period, so resample or aggregate the "
+                    f"source to {freq} first (ResampleTransformer(freq='{freq}'))."
+                )
+            raise ValueError(
+                f"extra_columns need source data at the resolution of the {freq} results: {exc}{hint}"
+            ) from exc
 
+        # check_index lets one wall-clock time repeat: the hour that occurs twice when clocks fall back. Both rows are
+        # (date, period) of one forecast; the later one is kept, the row a run forecasts from (`issue_row`).
         src = source_data[available].copy()
+        src = src.iloc[np.argsort(src.index.asi8, kind="stable")]  # in time order, so "last" is the second occurrence
         idx = src.index
         if hasattr(idx, "tz") and idx.tz is not None:
             idx = idx.tz_localize(None)
         src["_target_date"] = idx.date.astype(str)
         src["_hour"] = period_index(idx, freq)
-        src = src.reset_index(drop=True)
+        src = src.drop_duplicates(["_target_date", "_hour"], keep="last").reset_index(drop=True)
 
         base_df = base_df.merge(
             src,
@@ -136,3 +146,9 @@ class CsvExporter(Exporter):
         ).drop(columns=["_target_date", "_hour"])
 
         return base_df
+
+    @staticmethod
+    def _target_days(base_df: pd.DataFrame) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
+        """The first and last target date of the file, or None if it has none: the days of the source that can be joined."""
+        dates = pd.to_datetime(base_df["target_date"], errors="coerce").dropna()
+        return (dates.min(), dates.max()) if len(dates) else None
