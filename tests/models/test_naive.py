@@ -340,3 +340,43 @@ def test_verify_sees_a_late_cell_let_through(monkeypatch):
     pipeline = ModelPipeline(information_set=INFO).add_model(NaiveModel([TSO], name="TSO"))
     report = pipeline.verify(frame, START, "2024-03-31", target="actual_daily_max", horizon=7, freq="1D", days=7)
     assert report.status("TSO") == "leak"
+
+
+def test_each_window_counts_its_own_unpublished_keys(tmp_path):
+    frame = daily_frame()
+    pipeline = ModelPipeline(information_set=INFO).add_model(NaiveModel(tso_list, name="TSO"))
+    report = pipeline.run(
+        frame,
+        target="actual_daily_max",
+        horizon=7,
+        freq="1D",
+        validation=("2024-03-25", "2024-03-31"),
+        test=("2024-04-01", "2024-04-07"),
+        save_dir=str(tmp_path),
+    )
+    test, validation = report.refs["TSO"], report.validation.refs["TSO"]
+    assert {(r["run_date"], r["hour"], r["horizon"]) for r in test.iter_records()} == published_keys("2024-04-01", END)
+    # The validation report keeps the forecasts whose target day is before the first test issue day.
+    before_test = {
+        (day, period, h)
+        for day, period, h in published_keys(START, "2024-03-31")
+        if datetime.date.fromisoformat(day) + datetime.timedelta(days=h) < datetime.date(2024, 4, 1)
+    }
+    assert {(r["run_date"], r["hour"], r["horizon"]) for r in validation.iter_records()} == before_test
+    assert test.skipped == {"not_published": 10}
+    assert validation.skipped == {"not_published": 10, "target_in_test": 49 - 10 - len(before_test)}
+    again = ModelPipeline(information_set=INFO).add_model(NaiveModel(tso_list, name="TSO"))
+    assert (
+        again.run(
+            frame,
+            target="actual_daily_max",
+            horizon=7,
+            freq="1D",
+            validation=("2024-03-25", "2024-03-31"),
+            test=("2024-04-01", "2024-04-07"),
+            save_dir=str(tmp_path),
+        )
+        .refs["TSO"]
+        .produced
+        == 39
+    )
