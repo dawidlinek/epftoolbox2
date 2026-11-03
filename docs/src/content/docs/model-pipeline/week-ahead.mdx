@@ -1,0 +1,232 @@
+---
+title: Week-ahead Forecasting
+description: Daily minimum and maximum load for the week ahead, issued on Fridays or every day, against a TSO's published forecast
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A TSO publishes its week-ahead load forecast (ENTSO-E A31) on Fridays, for the daily minimum and maximum of each day of the next
+Monday-to-Sunday week. This page builds the same forecast with the library, issued at noon local time, and compares it with the
+TSO's. It puts together four things documented elsewhere: [a daily frame](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames)
+(`freq="1D"`), [some horizons only](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only) (`horizons=range(3, 10)`),
+[some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only) (`issue_days=["friday"]`), and a published
+forecast as a benchmark (`NaiveModel`, below).
+
+The models and lists are those of a published study for 20 European markets, which the library reproduces (see
+[Reproducing the study](#reproducing-the-study)): a LassoCV on regional weather averages, calendar dummies, hourly load lags and the
+TSO's own forecasts (`regional_nwp`), and an expert OLS.
+
+## The daily frame
+
+One row per local date, stamped at the issue time. Build the hourly frame as usual (sources, `TimezoneTransformer`, lags and the
+daily statistics), then keep the row of noon:
+
+```python
+df_daily = hourly.at_time("12:00")  # one row per local date, stamped 12:00
+```
+
+The stamp is what an hour shift counts from and when a value is known: `load_actual_h-1` on a row stamped 12:00 is the load of 11:00,
+known at 13:00 (a realised value, one hour after its period). Don't keep a stamp of midnight on rows that hold the values of noon:
+`load_actual_h-1` then reads as 23:00 on D-1, known long before the issue, and neither the check nor `verify` can see the look-ahead
+(a run warns about a stamp at or near midnight). See
+[Stamp at noon, not at midnight](/epftoolbox2/model-pipeline/time-and-calendars/#stamp-at-noon-not-at-midnight).
+
+The targets are the daily statistics of the row's own date, `actual_daily_min` and `actual_daily_max`; the library builds
+`actual_daily_max_d+3` and so on from them, by calendar day.
+
+## The lists
+
+```python
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+calendar_x = (
+    ["is_holiday"] + [f"is_holiday_d-{k}" for k in range(1, 8)] + [f"is_holiday_d+{k}" for k in range(1, 10)]
+    + [f"is_{day}_d+{{horizon}}" for day in WEEKDAYS] + ["daylight_hours_d+{horizon}"]
+)
+regional_nwp = (  # 266 names; their order is the order coordinate descent visits them
+    calendar_x
+    + [f"load_actual_h-{h}" for h in range(1, 169)] + [f"load_forecast_h+{h}" for h in range(1, 36)]
+    + ["load_forecast"]
+    + [f"actual_daily_{stat}_d-{k}" for stat in ("min", "max") for k in range(1, 8)]
+    + [f"load_forecast_daily_{stat}_d+{k}" for stat in ("min", "max") for k in range(3, 10)]
+    + [f"all_avg_{var}_dmean_d+{{horizon}}" for var in ("2t", "wind_speed", "rh", "tcc", "sp", "ssr_inc", "tp")]
+    + ["all_avg_hdd_d+{horizon}", "all_avg_cdd_d+{horizon}"]
+)
+
+
+def expert(stat):
+    return ["is_monday_d+{horizon}", "is_saturday_d+{horizon}", "is_sunday_or_holiday_d+{horizon}",
+            f"load_forecast_daily_{stat}_d+0", f"load_forecast_daily_{stat}_d+{{horizon}}",
+            f"actual_daily_{stat}_d-1", f"actual_daily_{stat}_d-6", "capital_2t_dmean_d+{horizon}"]
+```
+
+`load_forecast_daily_{min,max}_d+k` are the TSO's A31 forecasts, which have a built-in rule: published on Fridays at 10:00 Brussels time
+for the next Monday-to-Sunday week. `all_avg_*` and `capital_*` are ECMWF forecasts averaged over a market's regions and read at its
+capital, `is_sunday_or_holiday` is a calendar column; they need rules of your own (below).
+
+## Issued on Fridays
+
+```python
+from epftoolbox2.ensembles import AverageEnsemble
+from epftoolbox2.evaluators import DMEvaluator, MAEEvaluator
+from epftoolbox2.information_set import Availability, InformationSet
+from epftoolbox2.models import LassoCVModel, NaiveModel, OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+rules = {"actual_daily_*": Availability.realised("1h"), "all_avg_*": Availability.weather_cutoff("00", "8h"),
+         "capital_*": Availability.weather_cutoff("00", "8h"), "is_sunday_or_holiday": Availability.static()}
+S02 = dict(cv=7, max_iter=100_000, fit_intercept=False, scaler={"name": "standard", "params": {"scale_binary": True}})
+
+for stat in ("min", "max"):
+    pipeline = (
+        ModelPipeline(information_set=InformationSet("12:00", "Europe/Warsaw", rules=rules))
+        .add_model(NaiveModel(predictors=[f"load_forecast_daily_{stat}_d+{{horizon}}"], name="TSO"))
+        .add_model(OLSModel(predictors=expert(stat), training_window=1092, fit_intercept=True, name="expert"))
+        .add_model(LassoCVModel(predictors=regional_nwp, training_window=1092, name="lasso", **S02))
+        .add_ensemble(AverageEnsemble(members=["lasso", "expert"], name="avg"))
+        .add_evaluator(MAEEvaluator())
+        .add_evaluator(DMEvaluator(benchmark="TSO"))
+    )
+    report = pipeline.run(df_daily, target=f"actual_daily_{stat}", freq="1D", horizons=range(3, 10),
+                          issue_days=["friday"], validation=("2023-01-06", "2023-12-29"),
+                          test=("2024-01-05", "2025-12-26"), save_dir=f"runs/pl_week_{stat}")
+    report.by_horizon()  # horizon 3 is Monday, 9 is Sunday
+```
+
+Horizon 3 of a Friday is the next Monday and horizon 9 the Sunday after it: the week the TSO's forecast covers. Every date's row still
+trains each horizon's model; only the issue days are Fridays, 104 of them in the two test years. `report.tests()` compares each model
+with the TSO on the Fridays both hold, with a Newey-West variance whose lag is 4 at 104 issue days, and `n_days` counts issues, so it
+is 104. The length messages read the calendar span, two years.
+
+`S02` holds the study's estimator settings: a Lasso with 7 folds and no intercept on standardised data, every column standardised,
+binary ones included (`scale_binary=True`), and an expert OLS with an intercept. They aren't the library's defaults, see
+[What the study needs](#what-the-study-needs).
+
+<Aside>
+  The built-in A31 rule's week is Brussels's, and a daily row's weekly value is read at its date's last slot. In a zone an hour behind
+  Brussels, such as Lisbon or Dublin, the last hour of the Sunday of next week is Monday in Brussels, so the TSO's forecast of D+9 counts
+  as published only the Friday after. Declare A31 in the market's own zone, at the same instant:
+  `"load_forecast_daily_*": Availability.weekly("friday", "09:00", timezone="Europe/Lisbon")`.
+</Aside>
+
+### The TSO's forecast as a model
+
+[`NaiveModel`](/epftoolbox2/models/naive/) forecasts one column's value on the issue row: here the TSO's forecast of the target day. It fits
+nothing, so its forecasts need no history and have no coefficients, and it sits in the report like any model, so `DMEvaluator`,
+`tests()` and `forecast_counts()` treat it as one.
+
+With an information set, `known_only=True` (its default) makes a value the rules put after the issue time no forecast: the TSO hadn't
+published it yet. Such a key is counted as `not_published` in `forecast_counts()`, and is neither listed nor refused, at every
+availability level. On Fridays at noon every value of the next week is out, so the TSO has all 728 forecasts of a statistic.
+
+### The late hour
+
+`load_actual_h-1` is late by the rules. The study's list holds the load of 11:00, which a realised value makes known at 13:00, after a noon issue.
+So this run lists it at `availability="warn"` (the default), `availability="raise"` refuses it, and `verify` calls the Lasso a
+`leak`. To reproduce the study's numbers keep it and read the listing; for a forecast that could have been issued at noon, drop that
+one name:
+
+```python
+honest_nwp = [name for name in regional_nwp if name != "load_actual_h-1"]
+```
+
+### What the study needs
+
+Today's defaults don't reproduce the study. On its 1,456 forecasts for Poland a default `LassoCVModel` (5 folds, an intercept, binary
+columns left as they are) lands a median of 42 to 49 MW from the study's forecasts, with an MAE of 377.3 MW against 367.1, and a default
+`OLSModel` has no intercept, which an expert model whose three dummies aren't a one-hot needs: its MAE is 437.65 MW against the
+expert's 417.24. The settings in `S02` and `fit_intercept=True` on the OLS close both gaps, to the stored digits (see
+[Reproducing the study](#reproducing-the-study)).
+They are keyword-only options, and their defaults are what the models did before, so no earlier result moves.
+
+## Issued every day
+
+The traditional week-ahead forecast is issued every day for the seven days after it, `horizons=range(1, 8)` and no `issue_days`. The
+Friday lists can't be used as they are: on Monday to Thursday the TSO's forecast of next week isn't out at noon, and a list that holds
+it reads a value before it is published. Checked at noon Warsaw time, with A31 published on Fridays at 10:00:
+
+| Issue day | TSO's forecast of the target day late at horizons | `load_forecast_daily_*_d+k` late at k |
+|---|---|---|
+| Monday / Tuesday | 7 / 6-7 | 7-9 / 6-9 |
+| Wednesday / Thursday | 5-7 / 4-7 | 5-9 / 4-9 |
+| Friday / Saturday / Sunday | none | none / 9 / 8-9 |
+
+So each list is a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) that leaves out what isn't published on its issue
+day. Define them at the top level of a module, so that a saved pipeline finds them by their import path:
+
+```python
+MAYBE_LATE = {f"load_forecast_daily_{stat}_d+{k}" for stat in ("min", "max") for k in range(3, 10)} | {"load_actual_h-1"}
+
+
+def published_only(names, ctx):
+    names = [name.replace("{horizon}", str(ctx.horizon)) for name in names]
+    return [name for name in names if name not in MAYBE_LATE or ctx.published(name)]
+
+
+def regional_nwp_known(ctx):
+    return published_only(regional_nwp, ctx)
+
+
+def expert_known_min(ctx):
+    return published_only(expert("min"), ctx)
+
+
+def expert_known_max(ctx):
+    return published_only(expert("max"), ctx)
+```
+
+`ctx.published` answers through the rules of the information set, so `load_actual_h-1` is never in a list, and the TSO's forecast of
+a day is in it only where it is out. Each list trains on every row, as the Friday form's does: a forecast's list says what it may read
+on its issue day, not which days it trains on.
+
+```python
+expert_known = {"min": expert_known_min, "max": expert_known_max}
+
+for stat in ("min", "max"):
+    pipeline = (
+        ModelPipeline(information_set=InformationSet("12:00", "Europe/Warsaw", rules=rules))
+        .add_model(NaiveModel(predictors=[f"load_forecast_daily_{stat}_d+{{horizon}}"], name="TSO"))
+        .add_model(OLSModel(predictors=expert_known[stat], training_window=1092, fit_intercept=True, name="expert"))
+        .add_model(LassoCVModel(predictors=regional_nwp_known, training_window=1092, name="lasso", **S02))
+        .add_evaluator(MAEEvaluator())
+        .add_evaluator(DMEvaluator(benchmark="TSO"))
+    )
+    report = pipeline.run(df_daily, target=f"actual_daily_{stat}", freq="1D", horizons=range(1, 8),
+                          test=("2024-01-01", "2025-12-31"), save_dir=f"runs/pl_daily_{stat}")
+```
+
+The TSO needs nothing: `known_only` leaves out its forecasts that aren't out, 10 of its 49 keys of a week (h=7 on Monday, 6-7 on
+Tuesday, 5-7 on Wednesday, 4-7 on Thursday), each counted as `not_published`. The DM test runs on the keys a model and the TSO
+share, and says how many. The study issued on Fridays only, so there are no published numbers of this form to compare with.
+
+## Checking it
+
+```python
+check = pipeline.verify(df_daily, "2024-10-21", "2024-10-27", target="actual_daily_max", freq="1D",
+                        horizons=range(1, 8), days=7)  # one week: every weekday once
+check.table()
+```
+
+Each model's status must be `ok`: perturbing what isn't known at noon moves no forecast, and perturbing the freshest known values moves
+every one. For the daily form that holds on every weekday, the TSO's included: a forecast that isn't out is no forecast in either run of
+the probe. For the Friday form (`issue_days=["friday"]`) the study's Lasso list is a `leak` through `load_actual_h-1` wherever the Lasso
+keeps it (on three sampled Fridays 3 of 21 forecasts of the minimum moved and 7 of 21 of the maximum), and `honest_nwp` is `ok`. See [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/).
+
+## Reproducing the study
+
+The library's test suite refits one Friday of the study for Poland (2024-10-25, a week with the autumn switch) from its own daily frame
+restamped at noon: the Lasso and the expert land within 0.0005 MW of the stored forecasts, which keep three decimals, and the TSO's
+forecast and the actual are the stored ones. It then reports the stored forecasts of all 104 Fridays: the Lasso beats the TSO by a
+log-gain of 23.6 % on the daily minimum and 20.3 % on the maximum (100 ln of the TSO's MAE over the Lasso's, on 728 forecasts each),
+and the DM statistic of each horizon is the study's own, with 4 lags.
+
+Outside the test suite the Friday form above refitted all 1,456 Lasso and expert forecasts of Poland, then the 20 markets' 29,120 of each:
+every one within 0.0005 MW of the stored forecast, the TSO's forecasts and the actuals equal to them. The Lasso beats the TSO in all
+40 market-statistics, with a mean log-gain of +37.44 %, the stored forecasts' to within 0.0001. With today's defaults in place of
+`S02` and `fit_intercept=True`, Poland's Lasso lands a median of 42 MW (minimum) and 49 MW (maximum) from the study's forecasts, with
+an MAE of 377.3 MW against 367.1, and the expert's MAE is 437.65 MW against 417.24.
+
+<Aside>
+  The study's own README says +36.5 %; its stored forecasts give +37.44 %. Which forecasts the published figure was computed from is
+  still to be tied to its source files.
+</Aside>

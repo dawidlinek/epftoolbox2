@@ -43,7 +43,14 @@ A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `
 |-----------|------|---------|-------------|
 | `apply_to` | str or list | `"all"` | Which predictors get the VST besides the target: `"all"` (every non-binary predictor), `"target"` (none, predictors are standardised), or a list of glob patterns matched against the expanded predictor names, e.g. `["price", "price_d-*"]` |
 
-`StandardScaler` takes no parameters.
+`StandardScaler` takes one, keyword-only:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `scale_binary` | bool | `False` | Standardise the binary 0/1 predictors too, ignoring which columns are [binary](#binary-columns), as a study that standardises its whole design matrix does: `scaler={"name": "standard", "params": {"scale_binary": True}}` |
+
+The default is left out of the scaler's parameters, so `StandardScaler()` and `{"name": "standard", "params": {"scale_binary": False}}`
+are `"standard"`, in a manifest and in YAML.
 
 ## Which columns are transformed
 
@@ -56,7 +63,8 @@ A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `
 
 ## Binary columns
 
-A predictor whose values are all 0 or 1 is left as it is by every scaler. Which predictors those are is decided once per list,
+A predictor whose values are all 0 or 1 is left as it is by every scaler, unless `StandardScaler(scale_binary=True)` is asked to
+standardise it too. Which predictors those are is decided once per list,
 period and horizon, and per window in a run with [validation](/epftoolbox2/model-pipeline/validation-and-test/), not per forecast:
 from the training rows of the window's first day or, for a [predictor function](/epftoolbox2/model-pipeline/predictor-functions/)'s
 list first used later, of the first day it is used. A column with no value in those rows, such as one that starts inside the test,

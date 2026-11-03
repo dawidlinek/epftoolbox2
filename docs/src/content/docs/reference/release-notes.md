@@ -127,6 +127,22 @@ an issue day it didn't sample.
 
 ### New
 
+- **`NaiveModel`: a published forecast as a benchmark.** `NaiveModel(predictors=["load_forecast_daily_max_d+{horizon}"], name="TSO")`
+  forecasts that column's value on the row of the issue day: no fit, scaler or training rows, no coefficients, so a forecast needs no
+  history. `{horizon}`, callables and functions of `ctx` work; more than one name raises, and so do `refit`, `newest_target` and a
+  matching list. With an information set, `known_only=True` (the default) makes a value its rule puts after the issue time no
+  forecast: counted as `not_published` in `forecast_counts()`, neither listed nor refused, at every availability level and in `verify`.
+  The issue time and the column's rule are recorded in the manifest's `training_cut`, so a resume with others refuses. See
+  [NaiveModel](/epftoolbox2/models/naive/).
+- **Estimator options.** `LassoCVModel(fit_intercept=True)`, `OLSModel(fit_intercept=False)` and `StandardScaler(scale_binary=False)`, all
+  keyword-only, whose defaults are what the models did before: **nothing moves without them**, and a default isn't written to the
+  manifest or to YAML, so results and files made before keep resuming and loading as they were. `scale_binary=True` standardises the
+  binary 0/1 columns too. A published week-ahead study needs all three; see
+  [What the study needs](/epftoolbox2/model-pipeline/week-ahead/#what-the-study-needs).
+- **Week-ahead forecasting, documented.** A new page builds the daily minimum and maximum load of D+3 to D+9 on Fridays at noon, against
+  the TSO's A31 forecast, and the daily form for D+1 to D+7, whose lists drop the TSO's forecast where it isn't published yet. With the
+  study's settings the library refits a published 20-market study's forecasts within 0.0005 MW (the stored rounding), and its list's
+  `load_actual_h-1`, known at 13:00, is late at a noon issue. See [Week-ahead Forecasting](/epftoolbox2/model-pipeline/week-ahead/).
 - **Vintage classes and rules over time.** `Availability(..., vintage=...)` (and `vintage=` on every constructor) says what the archive
   of a column holds: `snapshot`, `row_stamp`, `last_write_stamp` or `latest_revision`. The built-in ENTSO-E load and generation rules are
   `latest_revision` and `price` and Open-Meteo's are `snapshot`; a rule of yours has none unless you say. A class moves no number:
