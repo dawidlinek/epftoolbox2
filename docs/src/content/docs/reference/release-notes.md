@@ -127,6 +127,13 @@ an issue day it didn't sample.
 
 ### New
 
+- **`RidgeModel`: ridge regression with a leave-one-out penalty.** `RidgeModel(predictors, training_window=365, alphas=None, *,
+  fit_intercept=True)` is scikit-learn's `RidgeCV` with `cv=None`: on every fit it chooses the penalty from a grid by the closed-form
+  leave-one-out error of the training rows and fits with it, on the same standardised rows as `OLSModel` and `LassoCVModel`. `alphas=None`
+  is `np.logspace(-3, 4, 36)`; the manifest records the grid in full (so a resume with another one is refused) and YAML writes `alphas` only
+  when set. It takes `scaler`, `newest_target` and `refit` like the other models, and a fit needs at least 3 training rows (fewer is a
+  counted `fit_error` skip). **Nothing moves for the other models**: no existing manifest, file or golden number changes. See
+  [RidgeModel](/epftoolbox2/models/ridge/).
 - **`NaiveModel`: a published forecast as a benchmark.** `NaiveModel(predictors=["load_forecast_daily_max_d+{horizon}"], name="TSO")`
   forecasts that column's value on the row of the issue day: no fit, scaler or training rows, no coefficients, so a forecast needs no
   history. `{horizon}`, callables and functions of `ctx` work; more than one name raises, and so do `refit`, `newest_target` and a
