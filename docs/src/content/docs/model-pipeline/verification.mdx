@@ -82,6 +82,13 @@ one line per thing that is wrong, and `verified.checks` holds each day's `leakag
 Only copies of the models run, in memory, so `verify` has no effect on a later `run()`. Each issue day costs four one-day
 runs per model, six with `rebuild` or with the target among a model's predictors.
 
+A model with [`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) fits once for every issue day of
+its block, so a leak can need several days of a block in one run to show (a fit that read the block's last day, say). Its runs
+therefore go from the issue day to the end of its block, or of the frame, and only that day's forecasts are compared: the same
+number of fits as a one-day run, but every later day of the block forecast as well, up to 6 more days under `"7D"`, about a month
+under `"1MS"` and up to a year under `"12MS"`. A predictor function is planned on those days too, and its reads are the issue
+day's. `leakage_probe` and `positive_control` do the same.
+
 ### The probe
 
 The probe is [`leakage_probe`](/epftoolbox2/model-pipeline/information-set/#leakage-probe): a value is replaced by noise

@@ -18,6 +18,7 @@ and hour or minute shifts are elapsed time.
 
 from __future__ import annotations
 
+import datetime
 import fnmatch
 import math
 import re
@@ -1500,6 +1501,9 @@ def leakage_probe(
     `late_reads`, whatever the noise did. The boundary tested is the same at every level.
 
     `horizon=H` runs every horizon from 1 to H, 1 if neither is given, and `horizons` the ones it lists, as `run` does.
+
+    A model with `refit` runs from `run_day` to the end of its refit block (or of the frame) and only `run_day`'s forecasts are
+    compared, since a fit serves every issue day of its block and a leak can need the later ones in the run to show.
     """
     run_day = str(pd.Timestamp(run_day).date())
     horizon = _horizon_arguments(horizon, horizons, 1)
@@ -1561,31 +1565,56 @@ def _issue_day_forecasts(
     Such a function is planned on this very frame, so a value it reads can move its list, and it answers through the
     information set. The run itself gets none, so a late list isn't refused and the forecasts show it. A model with
     `newest_target="published"` reads its training cut from it (`cut_rules`), and nothing else.
+
+    A model with `refit` is run from `run_day` to the end of its refit block (or of the frame), and only `run_day`'s forecasts are
+    returned: a unit fits once for every issue day of its block, so a fit that read one of the later days would show only in a
+    run that has them, never in a run of one day. The reads are `run_day`'s, from a plan of that day alone.
     """
     m = model() if callable(model) and not hasattr(model, "run") else model
     plan_predictors = getattr(m, "_plan_predictors", None)
-    plan = None
+    last_day = _last_day_of_block(m, frame, run_day)
+    plan = run_plan = None
     if plan_predictors is not None:
         horizons = horizon.get("horizons")
-        plan = plan_predictors(
-            frame,
-            target,
-            horizon.get("horizon") or max(horizons),
-            freq,
-            information_set,
-            run_day,
-            run_day,
-            warn_unpublished=False,
-            availability=availability,
-            **({} if horizons is None else {"horizons": horizons}),
-        )
-    extra = {} if plan is None else {"plan": plan}
+
+        def planned(end: str) -> Any:
+            return plan_predictors(
+                frame,
+                target,
+                horizon.get("horizon") or max(horizons),
+                freq,
+                information_set,
+                run_day,
+                end,
+                warn_unpublished=False,
+                availability=availability,
+                **({} if horizons is None else {"horizons": horizons}),
+            )
+
+        plan = run_plan = planned(run_day)
+        if plan is not None and last_day != run_day:
+            run_plan = planned(last_day)
+    extra = {} if run_plan is None else {"plan": run_plan}
     if getattr(m, "newest_target", "d-1") == "published":
         extra["cut_rules"] = information_set
     read = {} if plan is None else plan.read_cells()  # the run lets go of them
     late = [] if plan is None else plan.late_reads()
-    ref = m.run(frame, test_start=run_day, test_end=run_day, target=target, freq=freq, **horizon, **extra)
-    return {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results}, read, late
+    ref = m.run(frame, test_start=run_day, test_end=last_day, target=target, freq=freq, **horizon, **extra)
+    issued = [r for r in ref._results if r["run_date"] == run_day]
+    return {(r["hour"], r["horizon"]): r["prediction"] for r in issued}, read, late
+
+
+def _last_day_of_block(model: Any, frame: pd.DataFrame, run_day: str) -> str:
+    """The last day a probe runs `model` to from `run_day`: the day itself, or with `refit` the last issue day of its block,
+    at the latest the frame's last local date."""
+    refit = getattr(model, "refit", None)
+    if refit is None:
+        return run_day
+    from .models._calendar import refit_block_end  # models import this module
+
+    index = frame.index.tz_localize(None) if getattr(frame.index, "tz", None) is not None else frame.index
+    last = min(refit_block_end(run_day, refit), index.max().date())
+    return max(last, datetime.date.fromisoformat(run_day)).isoformat()
 
 
 def _moved_reads(
@@ -1683,7 +1712,7 @@ def positive_control(
     change, so that what row D builds from them (`x_d-1`) does, and every built row before D is put back.
 
     `model` is a model instance or a zero-argument factory, and `availability` the level a predictor function is planned
-    at, and `horizon` or `horizons` what it runs, as in `leakage_probe`.
+    at, and `horizon` or `horizons` what it runs, as in `leakage_probe`. A model with `refit` runs to the end of its block, as there.
     """
     run_day = str(pd.Timestamp(run_day).date())
     horizon = _horizon_arguments(horizon, horizons, 1)

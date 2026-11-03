@@ -201,6 +201,16 @@ def refit_anchor(day: Any, refit: str) -> datetime.date:
     return datetime.date(1970 + first // 12, first % 12 + 1, 1)
 
 
+def refit_block_end(day: Any, refit: str) -> datetime.date:
+    """The last issue day fitted on the anchor of `day`: the day before the next refit day."""
+    anchor = refit_anchor(day, refit)
+    k, unit = _REFIT_RULE.fullmatch(refit).groups()
+    if unit == "D":
+        return anchor + datetime.timedelta(days=int(k) - 1)
+    months = (anchor.year - 1970) * 12 + anchor.month - 1 + int(k)
+    return datetime.date(1970 + months // 12, months % 12 + 1, 1) - datetime.timedelta(days=1)
+
+
 def refit_anchors(days: Iterable[Any], refit: str) -> List[datetime.date]:
     """The anchors of these issue days, each once, in date order."""
     return sorted({refit_anchor(day, refit) for day in days})

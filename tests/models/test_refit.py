@@ -19,9 +19,16 @@ import yaml
 from sklearn.linear_model import Ridge
 
 from epftoolbox2.ensembles import AverageEnsemble
-from epftoolbox2.information_set import Availability, InformationSet, InformationSetError
+from epftoolbox2.information_set import (
+    Availability,
+    InformationSet,
+    InformationSetError,
+    leakage_probe,
+    positive_control,
+)
 from epftoolbox2.models import BaseModel, LassoCVModel, OLSModel, Use
 from epftoolbox2.models._calendar import FitUnit, check_refit, refit_anchor, refit_anchors
+from epftoolbox2.models import _worker as worker
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path
@@ -668,6 +675,52 @@ def same_list(ctx):
 
 
 @pytest.mark.parametrize("predictors", [PREDICTORS, same_list], ids=["fixed", "function"])
+def cut_on_the_last_issue_day(fit_unit):
+    """The review's mutant: a unit's rows cut on the last issue day of its forecasts in the run, not on its anchor. A run of one
+    day has one forecast per unit, which hides it."""
+
+    def mutant(unit, tasks):
+        start = day(worker._W_CONFIG["test_start"])
+        last = max(start + datetime.timedelta(days=task[2]) for task in tasks)
+        return fit_unit(unit._replace(anchor=last), tasks)
+
+    return mutant
+
+
+def test_the_probes_run_a_refit_model_over_the_rest_of_its_block(market, monkeypatch):
+    """A leak that needs several days of a block in one run: the probes run a refit model from the issue day to the end of its
+    block (or of the frame) and compare that day's forecasts, so `leakage_probe` and `verify` see it, and the positive control
+    still moves them. With a model that doesn't leak both are clean."""
+    monday = "2023-04-03"
+
+    def model():
+        return ols("7D")
+
+    pipeline = ModelPipeline(information_set=INFO)
+    pipeline.add_model(ols("7D", name="weekly"))
+    assert not leakage_probe(model, market, monday, INFO, horizon=2, check_target_boundary=True).changed
+    pipeline.verify(market, monday, monday, horizon=2, days=1).assert_ok()
+    runs = []
+    original = BaseModel.run
+
+    def spy(self, data, test_start=None, test_end=None, *args, **kwargs):
+        runs.append((test_start, test_end))
+        return original(self, data, test_start, test_end, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(BaseModel, "run", spy)
+        control = positive_control(model, market, monday, INFO, horizon=2)
+    assert control.ok and len(control.moved) == 48
+    assert set(runs) == {(monday, "2023-04-09")}
+    end_of_frame = market[local_dates(market) <= np.datetime64("2023-04-05")]
+    assert not leakage_probe(model, end_of_frame, monday, INFO, horizon=1, check_target_boundary=True).changed
+
+    monkeypatch.setattr(worker, "_fit_unit", cut_on_the_last_issue_day(worker._fit_unit))
+    probe = leakage_probe(model, market, monday, INFO, horizon=2, check_target_boundary=True)
+    assert len(probe.changed) == 48
+    assert pipeline.verify(market, monday, monday, horizon=2, days=1).status("weekly") == "leak"
+
+
 def test_the_training_target_is_checked_on_the_anchors(market, monkeypatch, predictors):
     """A unit's rows are cut as of the issue time on its anchor, so that is where its newest training target, a - 1, must be
     known: the check reads the anchors for the target, and the issue days for the inputs. A target known too late still
