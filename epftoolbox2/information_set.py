@@ -1295,7 +1295,9 @@ class InformationSet:
                         f"newest_target='published' trains on the targets of a window of {training_window} days, and by its "
                         f"rules over time ('{col.rule.describe()}') the training target '{target}' of {-k} days before the "
                         f"issue day isn't known at the issue time, e.g. period {period} for the issue day {days[day].date()}. "
-                        "Shorten the training_window, or start the test later."
+                        "Shorten the training_window, or start the test later. With an 'expanding' window this reads back "
+                        "from every issue day to before the frame's first date, so start the frame later, at least the test's "
+                        "length after the rule's first period."
                     )
         return newest
 

@@ -330,7 +330,7 @@ def explain_model(
         used = np.ones(len(days), dtype=bool)
         names = model._expand_predictors(horizon, hour=hour)
         subject = model.name
-    rows = model._training_rows(newest)
+    rows = model._training_rows(newest, model._reach_window(data, [day.date() for day in days]))
     out["predictors"] = predictor_table(names, data, info, horizon, hour, freq, clock, used, rows)
     out["grouped"] = grouped_table(out["predictors"])
     if newest is not None:

@@ -331,12 +331,20 @@ def test_no_test_window_checks_the_whole_frame():
         OLSModel(PREDICTORS, training_window=45)._check_inputs(df, "price", 1, "15min")
 
 
-@pytest.mark.parametrize("training_window", [45.0, None, "45"])
-def test_a_training_window_that_is_not_an_int_checks_the_whole_frame(training_window):
+@pytest.mark.parametrize("training_window", ["expanding", [45, "expanding"]])
+def test_an_expanding_training_window_checks_the_whole_frame(training_window):
+    """An expanding window trains on every row from the frame's first date, so the hourly history is read."""
     df = hourly_then_quarter_hour(days=300)
     model = OLSModel(PREDICTORS, training_window=training_window)
     with pytest.raises(ValueError, match="from 2023-01-01 00:00:00\\+01:00"):
         model._check_inputs(df, "price", 1, "15min", None, "2023-09-01", "2023-09-01")
+
+
+@pytest.mark.parametrize("training_window", [45.0, None, "45"])
+def test_a_training_window_that_is_not_an_int_is_refused(training_window):
+    """It used to check the whole frame and run; such a window is now refused where it is set (`resolve_training_window`)."""
+    with pytest.raises(ValueError, match="training_window takes whole numbers of days"):
+        OLSModel(PREDICTORS, training_window=training_window)
 
 
 def test_a_numpy_int_training_window_is_an_int():
