@@ -78,6 +78,9 @@ logger = get_logger(__name__)
 # Periods of an ordinary day: one model per period. "1D" has one, a row per local date at one time of day.
 _FREQ_TO_PERIODS: Dict[str, int] = {freq: periods_per_day(freq) for freq in FREQ_STEPS}
 
+# A model's own fit, and the two methods a refit forecasts from: `_can_refit` requires them to agree.
+_REFIT_METHODS = ("_fit_predict", "_fit_model", "_predict_fitted")
+
 # ProcessPoolExecutor refuses more workers than this on Windows.
 _WINDOWS_MAX_WORKERS = 61
 
@@ -159,17 +162,30 @@ class BaseModel(ABC):
         elif key == "refit":
             value = check_refit(value)
             if value is not None and not self._can_refit():
+                owners = {name: self._owner_of(name).__name__ for name in _REFIT_METHODS}
                 raise ValueError(
-                    f"{type(self).__name__} can't refit on a calendar (refit={value!r}): it fits and forecasts in one step "
-                    "(`_fit_predict`), and refit needs a fit to keep and forecast from (`_fit_model` and `_predict_fitted`). "
-                    "Leave refit=None."
+                    f"{type(self).__name__} can't refit on a calendar (refit={value!r}): its `_fit_predict` is "
+                    f"{owners['_fit_predict']}'s, and refit forecasts from `_fit_model` and `_predict_fitted`, which are "
+                    f"{owners['_fit_model']}'s and {owners['_predict_fitted']}'s, so it would fit another model. A model that "
+                    "overrides `_fit_predict` takes refit only if it overrides those two as well; else leave refit=None."
                 )
         super().__setattr__(key, value)
 
     @classmethod
+    def _owner_of(cls, name: str) -> type:
+        """The class of the model's method resolution order that defines `name`."""
+        return next(klass for klass in cls.__mro__ if name in vars(klass))
+
+    @classmethod
     def _can_refit(cls) -> bool:
-        """Whether the model fits once and forecasts from the fit (`_fit_model`, `_predict_fitted`), which `refit` needs."""
-        return cls._fit_model is not BaseModel._fit_model and cls._predict_fitted is not BaseModel._predict_fitted
+        """Whether the model fits once and forecasts from the fit (`_fit_model`, `_predict_fitted`), which `refit` needs, and
+        that fit is the model's own: both are defined in the class that defines `_fit_predict` or in a subclass of it. A subclass
+        of OLSModel that overrides `_fit_predict` alone would otherwise be refitted with OLS, its parent's estimator."""
+        fit_predict = cls._owner_of("_fit_predict")
+        return all(
+            cls._owner_of(name) is not BaseModel and issubclass(cls._owner_of(name), fit_predict)
+            for name in ("_fit_model", "_predict_fitted")
+        )
 
     @property
     def _model_kwargs(self) -> Dict:

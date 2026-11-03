@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import yaml
+from sklearn.linear_model import Ridge
 
 from epftoolbox2.ensembles import AverageEnsemble
 from epftoolbox2.information_set import Availability, InformationSet, InformationSetError
@@ -185,6 +186,47 @@ def test_a_model_with_only_fit_predict_raises_on_refit():
         OneStep(PREDICTORS, refit="7D")
     assert OLSModel(PREDICTORS, refit="7D").refit == "7D"
     assert LassoCVModel(PREDICTORS, refit="1MS").refit == "1MS"
+
+
+class RidgeOLS(OLSModel):
+    """Another estimator under OLS's name, the way `tests/pipelines/test_verify.py` builds its models: refit would fit OLS."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        model = Ridge(alpha=50.0, fit_intercept=False).fit(train_x, train_y)
+        return model.predict(test_x)[0], model.coef_.tolist()
+
+
+class RidgeBoth(RidgeOLS):
+    def _fit_model(self, train_x, train_y):
+        return Ridge(alpha=50.0, fit_intercept=False).fit(train_x, train_y)
+
+    def _predict_fitted(self, fitted, test_x):
+        return fitted.predict(test_x)[0], fitted.coef_.tolist()
+
+
+class RidgeCV(LassoCVModel):
+    def _fit_predict(self, train_x, train_y, test_x):
+        return RidgeOLS._fit_predict(self, train_x, train_y, test_x)
+
+
+class Seam(OLSModel):
+    """Overrides the seam and inherits `_fit_predict`: the seam is a subclass's, so refit fits what the class says."""
+
+    def _predict_fitted(self, fitted, test_x):
+        return fitted.predict(test_x)[0], fitted.coef_.tolist()
+
+
+def test_a_subclass_overriding_only_fit_predict_raises_on_refit(market):
+    """Inheriting `_fit_model` and `_predict_fitted` from OLSModel while fitting Ridge in `_fit_predict` would have refitted it
+    with OLS, silently, up to 47 off its own refit=None run. Overriding all three refits the subclass's own estimator."""
+    for cls in (RidgeOLS, RidgeCV):
+        cls(PREDICTORS)  # refit=None runs as before
+        with pytest.raises(ValueError, match="can't refit.*OLSModel's|can't refit.*LassoCVModel's"):
+            cls(PREDICTORS, refit="7D")
+    assert Seam(PREDICTORS, refit="7D").refit == "7D"
+    both = RidgeBoth(PREDICTORS, training_window=WINDOW, refit="1D").run(market, "2023-03-20", "2023-03-22", horizon=1)
+    plain = RidgeBoth(PREDICTORS, training_window=WINDOW).run(market, "2023-03-20", "2023-03-22", horizon=1)
+    assert keyed(both._results, "refit_anchor") == keyed(plain._results)
 
 
 def test_yaml_names_refit_only_when_set(tmp_path):
