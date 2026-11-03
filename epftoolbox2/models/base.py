@@ -35,6 +35,7 @@ from ..results.manifest import (
     record_skips,
 )
 from ..results.windows import TEST, RunWindows, mask_key
+from ..results.vintages import vintage_rows
 from ..logging import get_logger
 from . import _contract
 from ._calendar import (
@@ -349,6 +350,8 @@ class BaseModel(ABC):
         if warn_listing:
             warn_about({self.name: listing}, stacklevel=3)
         used_columns = list(dict.fromkeys([target, *self._used_predictors]))
+        # What the archive of each input holds, by its rule: recorded, read by nothing that makes a number.
+        vintages = vintage_rows(information_set, freq, self._used_predictors, () if plan is None else plan.queried)
 
         self._load_periods(data, used_columns, horizon, target)
         self._newest = newest
@@ -434,6 +437,7 @@ class BaseModel(ABC):
                 frame_hashes=frame_hashes,
                 training_cut=self._training_cut(rules, target, freq),
                 issue_days=weekdays,
+                vintages=vintages,
             )
 
             def check_stored():
@@ -474,6 +478,7 @@ class BaseModel(ABC):
             if availability != "none" and manifest.availability is not None:
                 listing = manifest.availability["listing"]  # with what earlier runs listed for other test periods
                 window_listings = manifest.availability.get("windows", window_listings)
+            vintages = manifest.vintages  # with what earlier runs read for other test periods
             stored_windows = None if manifest.windows is None else RunWindows.from_dict(manifest.windows)
         matching_lists = None
         if plan is not None and plan.uses_matching:
@@ -547,6 +552,7 @@ class BaseModel(ABC):
             zone=data.index.tz,
             horizons=None if every_horizon(horizon, horizons) else horizons,
             issue_days=weekdays,
+            vintages=vintages,
         )
         if store:
             warn_off_the_clock({self.name: ref}, stacklevel=2)

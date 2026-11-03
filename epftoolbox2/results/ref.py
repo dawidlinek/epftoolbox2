@@ -46,6 +46,9 @@ class ModelResultRef:
 
     `issue_days` are the weekdays a run issued on (`run(issue_days=["friday"])`), as `date.weekday()` numbers, None for every
     day. Only records issued on them are read (their `run_weekday`), for the same reason.
+
+    `vintages` holds the vintage class of each input (`epftoolbox2.results.vintages`), which `EvaluationReport.vintages()` shows
+    and the comparisons read; None when no input has a class, or without an information set. An ensemble's holds its models'.
     """
 
     name: str
@@ -69,6 +72,7 @@ class ModelResultRef:
     zone: Any = None
     horizons: Optional[Tuple[int, ...]] = None
     issue_days: Optional[Tuple[int, ...]] = None
+    vintages: Optional[List[Dict]] = None
 
     def iter_records(self, cols: Optional[List[str]] = None) -> Iterator[Dict]:
         """The records of this ref, wherever they live.

@@ -70,6 +70,11 @@ another list refuses: the file would hold forecasts of horizons no run plans, or
 A run that issues on some weekdays only (`issue_days=["friday"]`) records their names as `issue_days`, compared, and only then: a
 run of every day has no such key. A resume with other weekdays refuses for the same reason as other horizons.
 
+A run that reads an input with a vintage class (`Availability(vintage=...)`, such as the built-in rules of ENTSO-E series)
+records the class of each input as `vintages` (`epftoolbox2.results.vintages`), never compared and left out of
+`manifest_digest`: a class moves no forecast. A run whose inputs have none has no such key. A resume under the same information
+set keeps the rows of inputs only the earlier run read, as their records stay in the file.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -94,6 +99,7 @@ from .._date_utils import zone_name
 from ..models._calendar import issue_day_names, resolve_issue_days
 from ..logging import get_logger
 from .availability import LISTING_TIMES, merge_listings
+from .vintages import merge_vintages
 from .windows import TEST, RunWindows, mask_key
 
 logger = get_logger(__name__)
@@ -215,6 +221,8 @@ class Manifest:
     horizons: Optional[List[int]] = None
     # The weekdays issued on, by name, when they aren't all seven; None (and no key) for every day.
     issue_days: Optional[List[str]] = None
+    # Each input's vintage class (`results.vintages.vintage_rows`); None (and no key) when no input has one. Never compared.
+    vintages: Optional[List[Dict[str, Any]]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -252,6 +260,8 @@ class Manifest:
             del out["horizons"]
         if out["issue_days"] is None:  # every day
             del out["issue_days"]
+        if out["vintages"] is None:  # no input with a class
+            del out["vintages"]
         return out
 
     @classmethod
@@ -399,6 +409,7 @@ def build_manifest(
     training_cut: Optional[Dict[str, Any]] = None,
     horizons: Optional[Sequence[int]] = None,
     issue_days: Optional[Sequence[int]] = None,
+    vintages: Optional[List[Dict[str, Any]]] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -428,6 +439,7 @@ def build_manifest(
 
     `horizon` is the largest horizon and `horizons` the ones planned, recorded only when they aren't every one from 1 to it.
     `issue_days` are the weekdays issued on (`date.weekday()` numbers), recorded by name, and only when they aren't every day.
+    `vintages` are the rows of `results.vintages.vintage_rows`, recorded as they are.
     """
     now = datetime.now(timezone.utc).isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
@@ -466,6 +478,7 @@ def build_manifest(
         if horizons is None or list(horizons) == list(range(1, horizon + 1))
         else [int(h) for h in horizons],
         issue_days=issue_day_names(issue_days),
+        vintages=vintages,
     )
 
 
@@ -515,9 +528,9 @@ def is_ensemble_manifest(path: Union[str, Path]) -> bool:
 
 
 def manifest_digest(manifest: Dict[str, Any]) -> str:
-    """A hash of a manifest's content without its provenance and skip counts, which say nothing about a stored forecast: a member
-    re-run to the same results keeps it."""
-    kept = {key: value for key, value in manifest.items() if key not in (*_PROVENANCE_FIELDS, "skipped")}
+    """A hash of a manifest's content without its provenance, skip counts and vintage classes, which say nothing about a stored
+    forecast: a member re-run to the same results keeps it."""
+    kept = {key: value for key, value in manifest.items() if key not in (*_PROVENANCE_FIELDS, "skipped", "vintages")}
     return hashlib.sha256(json.dumps(kept, sort_keys=True).encode()).hexdigest()
 
 
@@ -691,6 +704,7 @@ def check_and_write(
         if manifest.binary_masks is not None and existing.binary_masks:
             manifest.binary_masks = {**existing.binary_masks, **manifest.binary_masks}
         _keep_listing(existing, manifest)
+        _keep_vintages(existing, manifest)
     elif has_existing_results:
         message = f"{model_name}: {path.parent} has results but no manifest ({path.name} not found)."
         if require_manifest:
@@ -865,6 +879,14 @@ def _keep_listing(existing: Manifest, manifest: Manifest) -> None:
             window: merge_listings(earlier.get(window, []), later.get(window, []))
             for window in sorted({*earlier, *later})
         }
+
+
+def _keep_vintages(existing: Manifest, manifest: Manifest) -> None:
+    """Keep the classes of what only an earlier run read, whose records stay in the file, unless the rules changed: then this
+    run's rows are what the current ones say. A run with no information set says nothing, and leaves them."""
+    if not existing.vintages or manifest.information_set not in (None, existing.information_set):
+        return
+    manifest.vintages = merge_vintages(existing.vintages, manifest.vintages or [])
 
 
 def check_stored_lists(

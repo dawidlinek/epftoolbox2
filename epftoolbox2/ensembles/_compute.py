@@ -41,6 +41,7 @@ from ..results.manifest import (
 )
 from ..results.ref import ModelResultRef, split_by_window
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
+from ..results.vintages import union_vintages
 from .base import Choice, Ensemble
 
 logger = get_logger(__name__)
@@ -173,7 +174,20 @@ def compute(
     # compared the members' manifests on it. The same for the weekdays: a ref's `issue_days` is what it plans, None for every day.
     horizons = like.horizons or tuple(range(1, like.horizon + 1))
     return Computed(
-        _ref(ensemble, grid.codes[picked], records, like, stored, path, freq, test_only, horizons, like.issue_days),
+        _ref(
+            ensemble,
+            grid.codes[picked],
+            records,
+            like,
+            stored,
+            path,
+            freq,
+            test_only,
+            horizons,
+            like.issue_days,
+            # What its models read: an ensemble is compared as a model, and reads their inputs.
+            union_vintages(refs[leaf].vintages for leaf in leaves),
+        ),
         choices,
     )
 
@@ -605,6 +619,7 @@ def _ref(
     test_only: bool,
     horizons: Sequence[int],
     weekdays: Optional[Sequence[int]] = None,
+    vintages: Optional[List[Dict[str, Any]]] = None,
 ) -> ModelResultRef:
     """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizons` are the ones
     the members were run with, and `weekdays` the weekdays they issued on (None for every day)."""
@@ -628,6 +643,7 @@ def _ref(
         if like.horizons is None and horizons == tuple(range(1, max(horizons, default=0) + 1))
         else horizons,
         issue_days=weekdays,
+        vintages=vintages,
     )
     if like.windows is None:
         run = codes >> _RUN_SHIFT

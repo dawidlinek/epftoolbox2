@@ -4,6 +4,7 @@ from rich.table import Table
 
 from .base import Exporter
 from ..results.report import EvaluationReport
+from ..results.vintages import is_revised_class
 
 
 class TerminalExporter(Exporter):
@@ -24,6 +25,7 @@ class TerminalExporter(Exporter):
         if report.window != "test":
             console.print(f"\n[bold]The {report.window} window[/bold]")
         self._print_availability(console, report.availability())
+        self._print_revised(console, report.vintages())
         self._print_thin_training(console, report.training_days())
         self._print_choices(console, report.choices())
         for key in self.show:
@@ -45,6 +47,20 @@ class TerminalExporter(Exporter):
         for col in shown.columns:
             table.add_column(str(col), overflow="fold")  # a predictor's name is no use cut short
         for _, row in shown.iterrows():
+            table.add_row(*[str(value) for value in row])
+        console.print(table)
+
+    def _print_revised(self, console: Console, vintages) -> None:
+        """The inputs read from an archive of revised values, next to what the rules put late, whatever `show` asks for, and
+        only if there are any: a backtest on them is more accurate than a live run would have been."""
+        revised = vintages[vintages["class"].map(is_revised_class)] if len(vintages) else vintages
+        if revised.empty:
+            return
+        console.print("\n[bold]Vintages: inputs read from an archive of revised values[/bold]")
+        table = Table()
+        for col in revised.columns:
+            table.add_column(str(col), overflow="fold")
+        for _, row in revised.iterrows():
             table.add_row(*[str(value) for value in row])
         console.print(table)
 
