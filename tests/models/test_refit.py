@@ -363,6 +363,54 @@ def test_another_refit_refuses_a_resume(market, tmp_path):
             ols(other).run(market, "2023-03-29", "2023-04-04", horizon=1, save_to=str(path))
 
 
+def starting_on(data, first):
+    """`data` from the local date `first` on."""
+    return data[local_dates(data) >= np.datetime64(first)]
+
+
+@pytest.mark.parametrize(
+    ("refit", "window", "test", "needed", "extra"),
+    [
+        # The reviewer's cases: a frame sized for refit=None, test_start - W - h.
+        ("1MS", WINDOW, ("2023-02-15", "2023-02-20"), "2023-01-10", {}),
+        ("12MS", 364, ("2023-07-03", "2023-07-09"), "2022-01-01", {}),
+        # The first issue day of a run of Fridays is 17 February: its anchor, not the test start's, decides.
+        ("1D", WINDOW, ("2023-02-13", "2023-02-20"), "2023-01-26", {"issue_days": ["friday"]}),
+        # D-1's price is out at 13:00 on D, so the newest known target is D-2 (reach 1).
+        ("7D", WINDOW, ("2023-02-15", "2023-02-20"), "2023-01-21", {"newest": True}),
+    ],
+    ids=["1MS", "12MS-a-year-back", "Fridays", "published-reach"],
+)
+def test_a_frame_that_doesn_t_reach_back_from_the_first_anchor_raises(refit, window, test, needed, extra):
+    """The first block is fitted on its anchor's rows, from a - W - h(max) - reach: a frame starting later would train it on fewer
+    days, silently (up to 5.0 off with "1MS", 1.3 with "12MS"). A frame starting on that day runs; one a day later raises, naming
+    it. refit=None is unchanged: it runs on the shorter frame as before."""
+    data = make_market_data(start="2021-12-01", days=600, horizon=1, noise=2.0, seed=3)
+    days = {} if "issue_days" not in extra else {"issue_days": extra["issue_days"]}
+    late = InformationSet("11:45", "Europe/Brussels", rules={**RULES, "price": Availability.published("13:00", -1)})
+    cut = {"newest_target": "published", "information_set": late} if extra.get("newest") else {}
+
+    def run(frame, refit=refit):
+        model = OLSModel(PREDICTORS, training_window=window, refit=refit, newest_target=cut.get("newest_target", "d-1"))
+        return model.run(frame, *test, horizon=1, information_set=cut.get("information_set"), **days)
+
+    run(starting_on(data, needed))
+    with pytest.raises(ValueError, match=f"start the frame on {needed} or earlier".replace("start", "Start")):
+        run(starting_on(data, shift(needed, 1)))
+    run(starting_on(data, shift(needed, 1)), refit=None)
+
+
+def test_validation_starts_the_frame_check(market):
+    """With validation and test windows the earliest anchor is the validation window's."""
+    pipeline = ModelPipeline()
+    pipeline.add_model(ols("1MS", name="m"))
+    validation, test = ("2023-03-06", "2023-03-10"), ("2023-04-10", "2023-04-14")
+    needed = "2023-02-07"  # 1 March - 21 - 1
+    pipeline.run(starting_on(market, needed), validation=validation, test=test, horizon=1)
+    with pytest.raises(ValueError, match=f"rows dated from {needed}"):
+        pipeline.run(starting_on(market, shift(needed, 1)), validation=validation, test=test, horizon=1)
+
+
 # ---------------------------------------------------------------------------
 # A forecast depends on its issue day and the configuration alone
 # ---------------------------------------------------------------------------

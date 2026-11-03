@@ -125,7 +125,8 @@ an issue day it didn't sample.
   `newest_target="published"` the newest target known at a's issue time), finds its binary columns on those rows, and is predicted from
   its own row on its own, so it is bit for bit the same whichever run, process count or resume made it. Records gain `refit_anchor`,
   the manifest's `training_cut` gains `refit` and `refit_epoch` (changing `refit` refuses a resume), resume compares each stored
-  anchor, and YAML writes `refit` only when set. The frame must hold W+h days before the refit day of the first test day, and a run uses
+  anchor, and YAML writes `refit` only when set. A frame that doesn't hold W+h days before the refit day of the first issue day raises `ValueError` naming the day it
+  must start on (one sized for `refit=None` is too short whenever the test doesn't start on a refit day), and a run uses
   at most one process per refit day. Other values raise, `"auto"` included, and so does `refit` on a custom model with only
   `_fit_predict`. **Nothing moves without the keyword**: `refit=None` is every record, manifest and table as before. With it the
   numbers move, since fits are older: on Lago DE in 2017 at horizon 1 (LassoCV on the LEAR inputs, W = 364, the same 8712

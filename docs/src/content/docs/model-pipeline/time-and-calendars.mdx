@@ -157,8 +157,11 @@ A forecast issued on D uses the fit of its **anchor** a, the refit day on or bef
   found on those same rows (see [Binary columns](/epftoolbox2/models/scalers/#binary-columns)), not on the first test day. So a
   forecast doesn't depend on where the run starts, as a plain model's binary columns do.
 - **The frame must go back from the anchor.** The rows a run reads, and so the days the [data checks](/epftoolbox2/model-pipeline/overview/#data-checks)
-  look at, reach W+h days back from the anchor of the first test day, which can be before `test_start`: by up to 6 days under `"7D"`,
-  and by almost a year under `"12MS"`.
+  look at, reach W+h days back from the anchor of the first issue day, which can be before `test_start`: by up to 6 days under `"7D"`,
+  and by almost a year under `"12MS"`. A frame that starts after a - W - h (h the largest horizon, and further back by what
+  `newest_target="published"` reaches) raises `ValueError` naming the day it must start on, since the first block would otherwise
+  train on fewer days without a word. With validation and test windows the first issue day is the validation window's. A frame sized
+  for `refit=None`, from `test_start` - W - h, is too short whenever the test doesn't start on a refit day.
 - **The information set reads the anchors.** The check of the newest training target of a `"d-1"` model is made on the anchors of the
   issue days, at the issue time of each, since that is where its rows are cut. Predictors are checked on the issue days, as before. With
   `"published"` the target's rule is read on the anchors.

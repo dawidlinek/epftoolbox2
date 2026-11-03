@@ -944,6 +944,7 @@ class BaseModel(ABC):
             self._cut_rules(information_set, cut_rules),
             self._days_of(test_start, test_end, windows),
         )
+        self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizon, newest)
         check_target = self.newest_target == "d-1"
         if self._ctx_fn is not None:
             if plan is None:
@@ -1038,6 +1039,47 @@ class BaseModel(ABC):
                     )
                 self._window_listings[name] = listing_rows(uses)
         return expanded
+
+    def _check_reaches_back(
+        self,
+        data: pd.DataFrame,
+        test_start: Optional[str],
+        test_end: Optional[str],
+        windows: Optional[RunWindows],
+        weekdays: Optional[Sequence[int]],
+        horizon: int,
+        newest: Optional[NewestTargets],
+    ) -> None:
+        """With `refit`, a ValueError if the frame starts after the first row the first unit can train on.
+
+        The first planned issue day's unit is fitted on its anchor a, which can be up to a year before the test starts, on the
+        rows dated from a - W - h (a - W - h - reach under `newest_target="published"`, `NewestTargets.reach`). A frame sized for
+        `refit=None` (from test_start - W - h) would train that block on fewer days, silently: its forecasts move and a comparison
+        keeps identical keys and counts. So that frame is refused, naming the day it must start on. Without `refit` nothing is
+        checked, as before."""
+        if self.refit is None:
+            return
+        if windows is not None:
+            issued = windows.issue_days(weekdays)
+        elif test_start is None or test_end is None:
+            return
+        else:
+            issued = [day.isoformat() for day in listed_days(_test_days(test_start, test_end), weekdays)]
+        if not issued or not len(data.index):
+            return
+        first = min(datetime.date.fromisoformat(day) for day in issued)
+        anchor = refit_anchor(first, self.refit)
+        reach = 0 if newest is None else newest.reach
+        needed = anchor - datetime.timedelta(days=int(self.training_window) + int(horizon) + reach)
+        starts = _contract.wall_clock(data.index).min().date()
+        if starts > needed:
+            reached = f" and {reach} more for the newest target's rule" if reach else ""
+            raise ValueError(
+                f"{self.name}: with refit={self.refit!r} the forecasts issued on {first} are fitted on {anchor}, on the rows dated "
+                f"from {needed} ({self.training_window} days of training_window, {horizon} of the largest horizon{reached}), "
+                f"but the frame starts on {starts}: that block would train on fewer days. Start the frame on {needed} or "
+                "earlier, or the test later."
+            )
 
     def _target_on_anchors(
         self,
