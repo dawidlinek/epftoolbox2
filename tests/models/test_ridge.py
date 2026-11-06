@@ -272,6 +272,21 @@ def test_a_grid_that_is_not_positive_finite_penalties_raises_at_once(make_bad):
     assert model.alphas == [1.0]
 
 
+@pytest.mark.parametrize(
+    "grid", [[1e-7], [1.0, 1e-9], (1e-12,), np.array([5e-7, 3.0])], ids=["1e-7", "mixed", "1e-12", "array"]
+)
+def test_a_penalty_below_1e_6_is_refused_and_points_to_ols(grid):
+    """scikit-learn's leave-one-out route loses digits as 1/alpha (0.17 in a coefficient at 1e-12 on 247 correlated columns), so a
+    grid with such a penalty raises at once; 1e-6 itself and the default grid's 1e-3 are accepted."""
+    with pytest.raises(ValueError, match=r"alphas below 1e-06 are refused.*Use OLSModel for an unpenalised fit"):
+        RidgeModel(PREDICTORS, alphas=grid)
+    model = RidgeModel(PREDICTORS, alphas=[1e-6, 1e-3])
+    with pytest.raises(ValueError, match="Use OLSModel"):
+        model.alphas = grid
+    assert model.alphas == [1e-6, 1e-3]
+    assert RidgeModel(PREDICTORS, alphas=[1e-6]).alphas == [1e-6] and min(DEFAULT_ALPHAS) == 1e-3
+
+
 def test_the_registry_the_package_and_the_tui_know_it():
     assert COMPONENT_REGISTRY["models"]["RidgeModel"] == "epftoolbox2.models.ridge"
     assert ridge_module.RidgeModel is RidgeModel
@@ -453,7 +468,8 @@ def test_a_one_element_grid_is_ridge_with_that_penalty(alpha, tolerance, fit_int
     collinear pair (the weekday dummy would make one with the weekend's): with one, the two solvers part by 5e-11 in a
     coefficient at 1e-3, and the hand fits above, which compare with `RidgeCV` itself, hold to 1e-12. At the grid's smallest
     penalty scikit-learn's leave-one-out route is less exact than `Ridge` (it loses digits as 1/alpha: 1.5e-10 in these forecasts
-    in standardised units, 4e-6 at 1e-9), so that one gets a tolerance of 1e-9."""
+    in standardised units; against an exact SVD ridge on 247 correlated columns 1.7e-10 at 1e-3, 1.7e-7 at 1e-6), so that one gets a
+    tolerance of 1e-9."""
     data = market("spring", horizon=1)
     names = ["load_d+{horizon}", "wind_d+{horizon}", "is_weekend_d+{horizon}", "price_d-1"]
     model = ridge(names, alphas=[alpha], fit_intercept=fit_intercept)
@@ -744,7 +760,7 @@ def test_a_late_predictor_is_a_leak_for_the_periods_it_is_late(verify_data, one_
 def test_ridge_with_a_tiny_penalty_approaches_the_ols_it_regularises():
     """On a well-posed design (no collinear pair) a penalty of 1e-6 on standardised columns is OLS up to the shrinkage it still
     has: a sanity check on scaling and rows against the library's own OLS, with an intercept. (Not smaller: scikit-learn's
-    leave-one-out route loses digits in proportion to 1/alpha, 4e-6 in a coefficient at 1e-9.)"""
+    leave-one-out route loses digits in proportion to 1/alpha, which is why `RidgeModel` refuses penalties below it.)"""
     data = daily_market()
     names = ["load_d+{horizon}", "wind_d+{horizon}", "flag"]
     small = by_key(run(ridge(names, 60, alphas=[1e-6]), data, "2023-04-10", "2023-04-16", 3, "1D", "demand"))

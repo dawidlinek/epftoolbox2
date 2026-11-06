@@ -36,7 +36,7 @@ model = RidgeModel(
 |-----------|------|---------|-------------|
 | `predictors` | List or function | Required | Predictor specifications (strings, `{horizon}` templates, or callables), or a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) returning the list for each forecast |
 | `training_window` | int | `365` | Days of training data |
-| `alphas` | sequence of float or None | `None` | The penalties to choose from, positive and finite, in the order tried. `None` is `np.logspace(-3, 4, 36)`: 36 values from 0.001 to 10 000. See [The penalty](#the-penalty) |
+| `alphas` | sequence of float or None | `None` | The penalties to choose from, positive, finite and at least 1e-6, in the order tried. `None` is `np.logspace(-3, 4, 36)`: 36 values from 0.001 to 10 000. See [The penalty](#the-penalty) |
 | `name` | str | `"Model"` | Display name for reports |
 | `scaler` | str, dict or scaler | `"standard"` | `"standard"`, `"asinh"` or `"npit"`, or `{"name": ..., "params": {...}}`. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
 | `newest_target` | str | `"d-1"` | The newest target a forecast issued on D trains on: `"d-1"`, or `"published"`, every target its rule says is known by the issue time, which needs an information set. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target) |
@@ -52,7 +52,7 @@ The columns and the target are standardised on the training rows before the fit 
 - **Leave-one-out, not K-fold.** The error of a penalty is the mean squared error of predicting each training row from a ridge fitted on all the others. The first penalty of the grid with the lowest error wins, so the order of a grid you set matters only for an exact tie. The training rows are consecutive days, which are not independent draws: the leave-one-out error ranks the penalties and is not an estimate of the forecast error.
 - **The grid is recorded.** A run's manifest holds the grid in full, also when `alphas=None`, so results made with another grid are refused on resume. A saved pipeline writes `alphas` only when you set it.
 - **At least 3 training rows.** With one or two rows every leave-one-out error is undefined, so such a forecast is skipped and counted as `fit_error` instead of being made with an arbitrary penalty.
-- **Not below 1e-6.** scikit-learn's leave-one-out route loses digits in proportion to 1/penalty: in the cases measured, the standardised coefficients differ from a plain `Ridge`'s by about 5e-11 at 0.001 and 4e-6 at 1e-9. The default grid starts at 0.001.
+- **Not below 1e-6.** scikit-learn's leave-one-out route loses digits in proportion to 1/penalty. Against an exact SVD ridge on 247 correlated standardised columns and 364 rows (coefficients of about 9), the largest coefficient error is 1.7e-10 at 0.001, 1.7e-7 at 1e-6, 1.8e-4 at 1e-9 and 0.17 at 1e-12. So a grid with a penalty below 1e-6 raises `ValueError`; for an unpenalised fit use [OLSModel](/epftoolbox2/models/ols/). The default grid starts at 0.001.
 - **Coefficients** are `coef_` in the standardised space, as for the other models. The penalty each forecast chose isn't in the records.
 
 ## When to Use

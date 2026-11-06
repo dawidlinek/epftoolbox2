@@ -7,6 +7,11 @@ from .base import BaseModel
 # no shrinkage to a ridge that leaves the intercept alone. The quality study's grid, so its Ridge row can be reproduced.
 DEFAULT_ALPHAS = np.logspace(-3, 4, 36).tolist()
 
+# The smallest penalty accepted. scikit-learn's leave-one-out route loses digits in proportion to 1/alpha: against an exact SVD
+# ridge on correlated standardised columns (n 364, p 247, coefficients of about 9) the largest coefficient error is 1.7e-10 at
+# 1e-3, 1.7e-7 at 1e-6, 1.8e-4 at 1e-9 and 0.17 at 1e-12.
+MIN_ALPHA = 1e-6
+
 
 def _check_alphas(value):
     """None, or the grid as a list of Python floats; anything else that isn't a non-empty 1-D sequence of positive, finite
@@ -15,6 +20,10 @@ def _check_alphas(value):
         return None
     message = (
         f"alphas must be None (the default grid) or a non-empty sequence of positive, finite penalties, got {value!r}"
+    )
+    too_small = (
+        f"alphas below {MIN_ALPHA:g} are refused: scikit-learn's leave-one-out route loses digits in proportion to 1/alpha "
+        "there. Use OLSModel for an unpenalised fit."
     )
     if isinstance(value, (str, bytes)) or any(
         isinstance(a, (bool, np.bool_)) for a in np.ravel(np.asarray(value, dtype=object))
@@ -26,6 +35,8 @@ def _check_alphas(value):
         raise ValueError(message) from None
     if grid.ndim != 1 or grid.size == 0 or not (np.isfinite(grid).all() and (grid > 0).all()):
         raise ValueError(message)
+    if (grid < MIN_ALPHA).any():
+        raise ValueError(f"{too_small} Got {value!r}")
     return grid.tolist()
 
 
