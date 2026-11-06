@@ -22,7 +22,7 @@ import pytest
 
 from epftoolbox2 import tui
 from epftoolbox2.information_set import Availability, InformationSet
-from epftoolbox2.models import LassoCVModel, NaiveModel, OLSModel, Use
+from epftoolbox2.models import LassoCVModel, NaiveModel, OLSModel, RidgeModel, Use
 from epftoolbox2.models import _worker as worker
 from epftoolbox2.models._calendar import resolve_training_window
 from epftoolbox2.models._worker import _worker_init
@@ -288,7 +288,7 @@ def test_a_reordered_list_resumes_and_another_list_refuses(tmp_path):
 
 
 class Cell(NamedTuple):
-    model: str  # "ols" or "lasso"
+    model: str  # "ols", "lasso" or "ridge"
     freq: str  # "1h", "15min" or "1D"
     switch: str  # "spring" or "autumn"
     refit: Optional[str]  # None or "7D"
@@ -299,9 +299,9 @@ class Cell(NamedTuple):
     paused: bool  # `aux`, whose mask a short member reads again on a later day (`with_paused_column`)
 
 
-# Every level of every axis and every pair of levels, not every cell: 8 cells, checked by the test below. LassoCV runs on 15-minute
-# data in one cell alone, a day of one horizon under "7D", which keeps its fits few. RidgeModel (step 4c, on its own branch) joins
-# the "model" axis when the two branches are merged, by whichever merges second.
+# Every level of every axis and every pair of levels, not every cell: 11 cells, checked by the test below. LassoCV runs on 15-minute
+# data in one cell alone, a day of one horizon under "7D", which keeps its fits few; the last three cells pair RidgeModel with every
+# level of the other axes.
 CELLS = [
     Cell("ols", "1D", "autumn", "7D", (1,), True, False, False, True),
     Cell("lasso", "1D", "spring", None, (1, 3), False, True, True, False),
@@ -311,9 +311,12 @@ CELLS = [
     Cell("ols", "15min", "spring", None, (1,), True, True, True, True),
     Cell("lasso", "15min", "spring", "7D", (1,), False, False, False, False),
     Cell("ols", "1h", "autumn", None, (1,), False, True, True, True),
+    Cell("ridge", "1h", "spring", None, (1,), False, False, False, False),
+    Cell("ridge", "15min", "autumn", "7D", (1, 3), True, True, True, True),
+    Cell("ridge", "1D", "spring", "7D", (1, 3), False, True, False, True),
 ]
 LEVELS = {
-    "model": {"ols", "lasso"},
+    "model": {"ols", "lasso", "ridge"},
     "freq": {"1h", "15min", "1D"},
     "switch": {"spring", "autumn"},
     "refit": {None, "7D"},
@@ -336,6 +339,8 @@ def run_cell(cell, window, data):
     options = {"refit": cell.refit, "newest_target": "published" if cell.published else "d-1", "name": "m"}
     if cell.model == "ols":
         model = OLSModel(predictors, training_window=window, **options)
+    elif cell.model == "ridge":
+        model = RidgeModel(predictors, training_window=window, **options)
     else:
         model = LassoCVModel(predictors, training_window=window, cv=3, max_iter=1000, **options)
     switch = SWITCH_DAYS[cell.switch]
