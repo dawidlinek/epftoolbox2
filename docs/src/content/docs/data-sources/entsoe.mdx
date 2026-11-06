@@ -101,6 +101,11 @@ pipeline = (
 (`fi_load_forecast_daily_min`) automatically too. See
 [TimezoneTransformer](/epftoolbox2/transformers/timezone/).
 
+The information set reads these columns the same way: the built-in rule publishes on Friday at 10:00 Brussels the
+Monday-to-Sunday week of the data's local dates, and `with_source_rules` (which `Workflow` calls) gives this source's
+columns the week of the zone it stamps them at (see
+[Built-in Availability Rules](/epftoolbox2/model-pipeline/information-set/#built-in-availability-rules)).
+
 ### Price Data (`type=["price"]`)
 
 | Column | Document | Description |

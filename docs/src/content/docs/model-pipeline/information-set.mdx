@@ -184,12 +184,29 @@ For a predictor function it shows [the distinct lists first](/epftoolbox2/model-
 | `price` (ENTSO-E A44) | published ~13:00 Brussels on D-1 (within about 1h of the 12:00 gate closure) | `snapshot` |
 | `load_actual` (A65/A16) | 1h after the end of the delivery period | `latest_revision` |
 | `load_forecast` (A65/A01) | published 10:00 Brussels on D-1 | `latest_revision` |
-| `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00, for the whole following week (Brussels by default, a bound `EntsoeSource` overrides this with the market's own zone, see below) | `latest_revision` |
+| `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00 Brussels for the whole following Monday-to-Sunday week of the data's local dates, each market's own (a bound `EntsoeSource` names its market's zone, see below) | `latest_revision` |
 | `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) | `latest_revision` |
 | `generation_*` (A75 actual generation) | 1h after the end of the delivery period | `latest_revision` |
 | Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static, known in advance | none |
 
 An `OpenMeteoSource` column's rule (below) is a `snapshot`, and so is an `EpftoolboxBenchmarkSource`'s `price`.
+
+A31 holds one value per local date of each market's Monday-to-Sunday week, and every TSO publishes the next week on Friday two hours
+before the 12:00 CET gate closure. So the built-in rule is `Availability.weekly("friday", "10:00", week_zone="data")`: the week is
+read in the data's local dates, and the publication instant is 10:00 Brussels in every zone. On an hourly frame in Helsinki the first
+hour of a Monday belongs to the week it starts, though it is Sunday in Brussels, and in Lisbon or Dublin the last hour of a Sunday to
+the week it ends.
+
+A frame in another zone than the issue time's (left in UTC, or at a fixed offset) still holds each value of the market's date: with
+`DataPipeline(timezone=None)` Warsaw's Monday starts at 23:00Z on Sunday. There the week is read in the issue zone's dates too, and
+the later of the two weeks counts, so it is never early. With the issue in the market's zone (`InformationSet("12:00",
+"Europe/Lisbon")`) that is exact on any frame; with neither zone the market's, a Lisbon frame issued on Brussels time say, the last
+hour of a Sunday is taken as published a week late. A rule from `with_source_rules` (below) or one of your own with `week_zone=` the
+market's zone reads the market's week on any frame.
+
+The day-ahead load forecast `load_forecast` (A01) keeps a Brussels day: it is the forecast of the day-ahead market's delivery day,
+a CET day in every SDAC zone, so in Lisbon or Dublin the hour from 23:00 belongs to the next day's forecast, published on the day
+before that. `load_forecast_h+35` on a noon row there is 23:00 on D+1, delivered on D+2 CET, and is late at a noon issue.
 
 <Aside type="caution">
   A69 wind/solar's *legal* deadline (18:00 D-1) is after the day-ahead gate closure (12:00 D-1), and ENTSO-E
@@ -206,11 +223,11 @@ overrides the default week-ahead rule for an `EntsoeSource`'s own columns, and a
 columns an `OpenMeteoSource` or an `EpftoolboxBenchmarkSource` emits:
 
 - An `EntsoeSource` with `"load"` in `type` gets its own `load_forecast_daily_min`/`_max` rule (prefixed the
-  same way as its other columns), evaluated in the source's own bound market zone (`EntsoeSource._daily_zone`)
-  instead of the `Europe/Brussels` default: the zone the value's local midnight is actually anchored to. A
-  neighbouring area combined into another market's `DataPipeline` (e.g. `EntsoeSource("FI", ..., prefix="fi")`
-  inside `DataPipeline(timezone="Europe/Warsaw")`) is checked in the market's zone, not Finland's own, matching
-  where the value is stamped.
+  same way as its other columns): published Friday 10:00 Brussels like the built-in one, for the week of the source's
+  bound market zone (`EntsoeSource._daily_zone`, as `week_zone=`), the zone the value's local midnight is stamped at,
+  rather than of the data's, so it holds on a frame left in UTC too. A neighbouring area combined into another market's
+  `DataPipeline` (e.g. `EntsoeSource("FI", ..., prefix="fi")` inside `DataPipeline(timezone="Europe/Warsaw")`) is read on
+  the market's week, not Finland's own, matching where the value is stamped.
 - An `EpftoolboxBenchmarkSource` gets its rules on the files' own wall clock, its `index_timezone`: `price` published
   13:00 on D-1 and the two exogenous forecasts 10:00 on D-1. That index only labels the wall clock, one hour off the
   true instants in summer, so a Brussels rule would read the file's 23:00 on D as 00:00 on D+1 all summer.
@@ -260,7 +277,10 @@ pipeline = ModelPipeline(information_set=info)
     Availability.realised(delay="1h")                        # known `delay` after the period ends
     Availability.published("13:00", days_before=1)           # published at a fixed local time, days_before delivery
     Availability.daily_close("18:00")                        # published(time, days_before=0)
-    Availability.weekly(weekday="friday", time="10:00")       # published once for the whole next week
+    Availability.weekly(weekday="friday", time="10:00")       # published once for the whole next week,
+                                                                # a week of `timezone`'s dates
+    Availability.weekly("friday", "10:00", week_zone="data")  # the week of the data's local dates, published
+                                                                # 10:00 Brussels: the built-in A31 rule
     Availability.weather_run(delay="6h")                      # a rolling forecast run ~ row time + delay
     Availability.as_of("09:00", "Europe/Brussels")             # known at a fixed time on the issue day D;
                                                                 # a leading `_d+k` doesn't change that, a
@@ -343,7 +363,8 @@ info = InformationSet("11:45", "Europe/Warsaw", rules={
 ```
 
 - **Which rule.** A rule holds for the values whose day is in its period, both ends included: the day the value is delivered, a date
-  of the rule's `timezone` for `published` and `weekly` and of the data's zone for `realised`, `weather_run` and `static`. For
+  of the rule's `timezone` for `published`, of its week's zone for `weekly` (`week_zone`, else its `timezone`), and of the data's
+  zone for `realised`, `weather_run` and `static`. For
   `as_of` and `weather_cutoff` it is the day the value is read on, the issue day moved by a shift after a leading `_d+k`. So
   `sk_d-1` on 9 October holds 8 October's value, which the one-day rule describes.
 - **Date a switch by delivery day.** The rules are read on the delivery day, so a period's dates are business dates, not
@@ -492,7 +513,8 @@ issue can't read as known before it:
   rule's own zone, converted at the instant they denote on that day. A time the clocks repeat is read at its second
   occurrence and one they skip at the switch, so a rule never reads earlier than it may be: `as_of("02:30")` on
   2024-10-27 in Warsaw is 01:30Z. A `weather_cutoff` run is a UTC hour: its rule is in UTC, `timezone=None` means UTC
-  too, and any other zone raises.
+  too, and any other zone raises. A `weekly` rule's week can be another zone's dates (`week_zone`), its publication time
+  staying in `timezone`.
 - **A period the clocks skip** (02:00 on the day they go forward) has no row, so it holds no value and gets no verdict:
   it is never late, `ctx.published()` is False there, and `explain` shows its status as `no row`.
 - **Delays and period lengths are elapsed time.** When Warsaw's clocks go forward, the hour starting at 01:00 ends at

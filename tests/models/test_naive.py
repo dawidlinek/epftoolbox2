@@ -278,6 +278,7 @@ def test_the_rules_that_decide_which_forecasts_exist_are_compared_on_resume(tmp_
                 "weekday": "friday",
                 "time": "10:00",
                 "timezone": "Europe/Brussels",
+                "week_zone": "data",
             }
             for h in range(1, 8)
         },
@@ -293,7 +294,10 @@ def test_the_rules_that_decide_which_forecasts_exist_are_compared_on_resume(tmp_
     snapshot = InformationSet(
         "12:00",
         ZONE,
-        rules={**RULES, "load_forecast_daily_max": Availability.weekly("friday", "10:00", vintage="snapshot")},
+        rules={
+            **RULES,
+            "load_forecast_daily_max": Availability.weekly("friday", "10:00", vintage="snapshot", week_zone="data"),
+        },
     )
     NaiveModel([TSO]).run(
         frame, START, END, target="actual_daily_max", horizon=7, freq="1D", save_to=str(path), information_set=snapshot

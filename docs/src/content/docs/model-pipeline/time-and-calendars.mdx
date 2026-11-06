@@ -324,8 +324,8 @@ report = pipeline.report("fridays", test=("2023-01-01", "2024-12-31"), horizons=
   `planned` in `forecast_counts()` counts the listed days alone, with the clock's rule above.
 - **The information set sees the listed days alone.** The check before any fit, the `availability="warn"` listing and
   [`verify`](/epftoolbox2/model-pipeline/verification/) look only at them, so a column published weekly is known or late by the
-  weekday. `Availability.weekly("friday", "10:00")`, the rule of the ENTSO-E week-ahead load forecast, publishes a Monday-to-Sunday
-  week on the Friday before it. For an issue time after 10:00, `load_forecast_daily_max_d+9` is the Sunday of next week on a Friday,
+  weekday. `Availability.weekly("friday", "10:00", week_zone="data")`, the rule of the ENTSO-E week-ahead load forecast, publishes
+  a Monday-to-Sunday week of the data's local dates on the Friday before it, at 10:00 Brussels. For an issue time after 10:00, `load_forecast_daily_max_d+9` is the Sunday of next week on a Friday,
   published that morning: known. On a Monday it is the Wednesday of next week, published on this week's Friday, still four days away:
   late. So `availability="raise"` passes it with `issue_days=["friday"]` and refuses it in a run of every day. A predictor function
   is planned on the listed days alone: what it reads on another weekday is no leak of this run.
