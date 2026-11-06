@@ -34,7 +34,9 @@ from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path
 from epftoolbox2.scalers import scaler_spec
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
-GRID = np.logspace(-3, 4, 36)  # the grid `alphas=None` means, written out here and not imported
+GRID = np.logspace(
+    -3, 4, 36
+)  # the grid `alphas=None` means, computed here and not imported (the library writes it as literals)
 WINDOW = 40
 ZONE = "Europe/Warsaw"
 SWITCH_DAYS = {"spring": "2023-03-26", "autumn": "2023-10-29"}  # the clocks change at 02:00 Warsaw time
@@ -214,8 +216,15 @@ def check_against_hand(records, data, freq, names, periods, horizons, target="pr
 def test_the_default_grid_is_the_quality_study_s_and_is_what_a_worker_gets():
     model = RidgeModel(PREDICTORS)
     assert model.alphas is None and model.fit_intercept is True and model.training_window == 365
-    assert model._model_kwargs == {"alphas": np.logspace(-3, 4, 36).tolist(), "fit_intercept": True}
+    assert model._model_kwargs == {"alphas": DEFAULT_ALPHAS, "fit_intercept": True}
     assert len(DEFAULT_ALPHAS) == 36 and DEFAULT_ALPHAS[0] == 1e-3 and DEFAULT_ALPHAS[-1] == 1e4
+    # written out as literals, so a last-bit difference of `np.logspace` between numpy builds can't change a manifest: they are
+    # that grid to 1e-15 anywhere (and to the bit on the build they were taken from, numpy 2.4.0, not asserted)
+    np.testing.assert_allclose(DEFAULT_ALPHAS, GRID, rtol=1e-15, atol=0)
+    np.testing.assert_allclose(
+        np.diff(np.log10(DEFAULT_ALPHAS)), 0.2, rtol=1e-12
+    )  # 36 values, a factor 10 ** 0.2 apart
+    assert all(type(a) is float for a in DEFAULT_ALPHAS)
     # a worker rebuilds the model from `_model_kwargs`, so the grid it fits with is that one
     worker_copy = RidgeModel(predictors=[], **model._model_kwargs)
     assert worker_copy._estimator().alphas == model._model_kwargs["alphas"] and worker_copy._estimator().cv is None
@@ -377,11 +386,11 @@ def test_the_manifest_records_the_resolved_grid_and_a_resume_with_another_one_is
     manifest = json.loads(manifest_path(path).read_text())
     assert manifest["model_params"] == {
         "scaler": "standard",
-        "alphas": np.logspace(-3, 4, 36).tolist(),
+        "alphas": DEFAULT_ALPHAS,
         "fit_intercept": True,
     }
     # the grid written out, and the model with the default, are one configuration: the run resumes
-    run(ridge(alphas=list(GRID)), data, "2023-03-25", "2023-03-26", save_to=str(path))
+    run(ridge(alphas=list(DEFAULT_ALPHAS)), data, "2023-03-25", "2023-03-26", save_to=str(path))
     assert lines(path) == stored
     for other in (
         {"alphas": GRID[:-1].tolist()},
@@ -510,7 +519,7 @@ def test_the_penalty_is_the_leave_one_out_minimiser_of_the_grid(rows, columns, f
     y = (y - y.mean()) / y.std(ddof=1)
     errors = np.array([leave_one_out(x, y, alpha, fit_intercept) for alpha in GRID])
     fitted = ridge(fit_intercept=fit_intercept)._fit_model(x, y)
-    assert fitted.alpha_ == GRID[int(np.argmin(errors))]
+    assert fitted.alpha_ == pytest.approx(GRID[int(np.argmin(errors))], rel=1e-15)
     assert fitted.cv is None
 
 
@@ -539,7 +548,7 @@ def test_fewer_than_three_training_rows_is_a_counted_skip_not_a_forecast():
         with pytest.raises(ValueError, match="at least 3 training rows"):
             ridge()._fit_model(np.ones((rows, 3)), np.ones(rows))
     rng = np.random.default_rng(0)
-    assert ridge()._fit_model(rng.normal(size=(3, 3)), rng.normal(size=3)).alpha_ in GRID
+    assert min(abs(ridge()._fit_model(rng.normal(size=(3, 3)), rng.normal(size=3)).alpha_ / GRID - 1)) < 1e-15
     data = market("spring", horizon=1)
     with pytest.raises(
         RuntimeError, match=r"no forecasts produced \(48 planned\)\. Skipped: fit_error x48 .*at least 3 training rows"
