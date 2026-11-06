@@ -35,8 +35,9 @@ class RidgeModel(BaseModel):
 
     def __init__(self, predictors, training_window=365, alphas=None, *, fit_intercept=True, **kwargs):
         """Ridge regression whose penalty is chosen on every fit by scikit-learn's `RidgeCV` with `cv=None`: the leave-one-out
-        error of each penalty on the training rows, in closed form, and the first penalty with the lowest one. The training rows
-        are standardised first, so one penalty means the same for every column.
+        error of each penalty on the training rows, in closed form, and the first penalty with the lowest one. The rows are
+        scaled first, but the default scaler leaves 0/1 columns as they are, so a dummy is shrunk harder than a standardised
+        column (a rare one most): `StandardScaler(scale_binary=True)` standardises them too, for the same penalty on every column.
 
         `alphas` is the grid, None for `np.logspace(-3, 4, 36)`; a manifest records the grid in full. `fit_intercept` is
         scikit-learn's: True (the default) fits an intercept on the standardised data, which the penalty doesn't shrink."""
