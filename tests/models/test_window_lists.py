@@ -300,7 +300,8 @@ class Cell(NamedTuple):
 
 
 # Every level of every axis and every pair of levels, not every cell: 8 cells, checked by the test below. LassoCV runs on 15-minute
-# data in one cell alone, a day of one horizon under "7D", which keeps its fits few.
+# data in one cell alone, a day of one horizon under "7D", which keeps its fits few. RidgeModel (step 4c, on its own branch) joins
+# the "model" axis when the two branches are merged, by whichever merges second.
 CELLS = [
     Cell("ols", "1D", "autumn", "7D", (1,), True, False, False, True),
     Cell("lasso", "1D", "spring", None, (1, 3), False, True, True, False),
