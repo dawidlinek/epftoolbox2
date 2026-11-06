@@ -252,18 +252,95 @@ def test_newest_targets_of_a_weekly_target_read_the_market_s_week(zone):
 
 
 @pytest.mark.parametrize(
-    ("zone", "issue", "out"), [("Europe/Helsinki", "09:30", False), ("Europe/Lisbon", "10:30", True)]
+    ("zone", "issue", "out"), [("Europe/Helsinki", "10:30", False), ("Europe/Lisbon", "09:30", True)]
 )
 def test_friday_s_publication_is_10_brussels_whatever_the_data_zone(zone, issue, out):
-    """At 09:30 Brussels next week isn't out, in Helsinki too, where it is 10:30; at 10:30 Brussels it is, in Lisbon too, where
-    it is 09:30. Publishing at 10:00 on the data's clock would be a look-ahead in Helsinki and too strict in Lisbon."""
-    info = InformationSet(issue, "Europe/Brussels")
+    """Issued at 10:30 in Helsinki, 09:30 Brussels, next week isn't out; at 09:30 in Lisbon, 10:30 Brussels, it is. Publishing at
+    10:00 on the data's clock would be a look-ahead in Helsinki and too strict in Lisbon."""
+    info = InformationSet(issue, zone)
     for freq in ("1D", "1h"):
         known, skipped, days = known_cells(info, COLUMN, zone, freq, "january", 3)
         on_friday = [day.weekday() == 4 for day in days]
         assert (known[:, on_friday] == out).all(), freq
-        expected = by_hand(days, known.shape[0], 3, issue, "Europe/Brussels")
+        expected = by_hand(days, known.shape[0], 3, issue, zone)
         assert np.array_equal(known | skipped, expected | skipped), freq
+
+
+# ---------------------------------------------------------------------------
+# A frame in another zone than the market's
+# ---------------------------------------------------------------------------
+
+
+def converted_frame(market: str, zone: str, first: str) -> pd.DataFrame:
+    """`tso_frame` of `market`'s hours, each `_d+k` the ordinal of the market's local date, then converted to `zone`: what
+    `DataPipeline(timezone=None)` gives, A31 stamped at the market's midnight on a UTC index."""
+    return tso_frame(market, "1h", first=first).tz_convert(zone)
+
+
+@pytest.mark.parametrize(
+    ("market", "zone", "first"),
+    [
+        (
+            "Europe/Warsaw",
+            "UTC",
+            "2024-01-13",
+        ),  # 14 keys read a value published after the issue when the week was UTC's
+        ("Europe/Warsaw", "UTC", "2024-06-08"),
+        ("Europe/Warsaw", "Etc/GMT-1", "2024-06-08"),  # no warning about the index at all
+        ("Europe/Helsinki", "UTC", "2024-01-13"),
+        ("Europe/Lisbon", "UTC", "2024-06-08"),
+    ],
+)
+def test_a_frame_behind_its_market_reads_the_market_s_week(market, zone, first, single_process):
+    """A frame whose clock is behind the market's holds each A31 value of the market's date: Warsaw's Monday from 23:00Z on
+    Sunday. Read in the data's dates that hour was Sunday's, published a week early. With the issue in the market's zone, the
+    later of the data's week and the issue zone's is the market's: every key exists exactly where its value was out."""
+    frame = converted_frame(market, zone, first)
+    test = tuple(str((pd.Timestamp(first) + pd.Timedelta(days=d)).date()) for d in (2, 15))
+    report = (
+        ModelPipeline(information_set=InformationSet("12:00", market), availability="raise")
+        .add_model(NaiveModel([TSO], name="TSO"))
+        .run(frame, target="y", freq="1h", test=test, horizon=HORIZON)
+    )
+    keys = {}
+    for record in report.refs["TSO"].iter_records():
+        read = datetime.date.fromordinal(int(record["prediction"]))  # the market's date whose value the row holds
+        keys[(record["run_date"], record["hour"], record["horizon"])] = read
+        assert published(read) <= issued(record["run_date"], "12:00", market), record
+    expected = set()
+    for row in frame.index[(frame.index >= pd.Timestamp(test[0], tz=zone))]:
+        day = row.tz_localize(None).date()
+        if day > datetime.date.fromisoformat(test[1]):
+            break
+        for horizon in range(1, HORIZON + 1):
+            read = datetime.date.fromordinal(int(frame.loc[row, f"{COLUMN}_d+{horizon}"]))
+            if published(read) <= issued(day, "12:00", market):
+                expected.add((day.isoformat(), row.hour, horizon))
+    assert set(keys) == expected
+
+
+@pytest.mark.parametrize(
+    ("market", "zone", "issue_zone"),
+    [("Europe/Warsaw", "Asia/Tokyo", "Europe/Warsaw"), ("Europe/Lisbon", "Europe/Lisbon", "Europe/Brussels")],
+)
+def test_where_neither_zone_is_the_market_s_the_week_is_never_early(market, zone, issue_zone):
+    """A frame ahead of its market (Warsaw's hours on Tokyo's clock), or a Lisbon frame issued on Brussels time: the later of the
+    two weeks may be a week too late (Lisbon's last hour of a Sunday is Monday in Brussels), never early."""
+    frame = converted_frame(market, zone, "2024-01-13")
+    info = InformationSet("12:00", issue_zone)
+    days = pd.date_range("2024-01-15", "2024-01-28", freq="D")
+    clock = info._issue_clock(days, frame.index, "1h")
+    strict = 0
+    for horizon in range(1, HORIZON + 1):
+        known = clock.available(info._resolve_for(f"{COLUMN}_d+{horizon}", 60), np.arange(24), 60) <= clock.issue
+        for d, day in enumerate(days):
+            for period in range(24):
+                row = pd.Timestamp(day + pd.Timedelta(hours=period)).tz_localize(zone)
+                read = datetime.date.fromordinal(int(frame.loc[row, f"{COLUMN}_d+{horizon}"]))
+                out = published(read) <= issued(day.date(), "12:00", issue_zone)
+                assert out or not known[period, d], (day.date(), period, horizon)
+                strict += int(out and not known[period, d])
+    assert strict > 0  # too strict somewhere: neither zone is the market's
 
 
 @pytest.mark.parametrize("freq", ["1D", "1h"])

@@ -149,8 +149,9 @@ class Availability:
                      a value known only after its delivery day: "00:00", days_before=-1).
         weekly:      published on `weekday` at `time` (in `timezone`) for the whole following Monday-Sunday week
                      (week-ahead load). The week is one of local dates of `week_zone`: None, `timezone`'s; "data", the
-                     data's own, so each market's Monday to Sunday on a frame in its zone; or a zone such as
-                     "Europe/Helsinki". The publication instant stays `time` in `timezone` whatever the week's zone.
+                     data's own, so each market's Monday to Sunday on a frame in its zone (on a frame in another zone than
+                     the issue time's, the later of the data's week and the issue zone's, so it is never early); or a zone
+                     such as "Europe/Helsinki". The publication instant stays `time` in `timezone` whatever the week's zone.
         weather_run: a weather forecast column `x_d+k` from the Open-Meteo previous-runs API. The value at row t
                      comes from the model run started about at t (lead time k days), published `delay` later, so
                      availability depends on the row time, not on k.
@@ -1326,7 +1327,9 @@ class InformationSet:
         """The issue times of these issue days (naive midnights, the first one first) on an index like `index`, whose rows are
         at `freq`: a daily frame's row is at the time of day its index says (`_date_utils.daily_anchor`), any other's at its
         period."""
-        ctx = _Context(days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None)
+        ctx = _Context(
+            days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None, issue_zone=self.issue_timezone
+        )
         offset = np.asarray((days - days[0]) // pd.Timedelta(days=1), dtype=np.int64)
         issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), self.issue_timezone, ctx)
         midnight = _to_instants(offset * 1440.0, ctx.data_zone, ctx)
@@ -1484,6 +1487,8 @@ class _Context:
     data_zone: str
     issue_minute: float = 0.0  # the issue instant on `day`; `violations` keeps one per issue day instead
     naive: bool = False  # the data's index has no zone (see `_shift_rows`)
+    # The issue time's zone: a week of the data's dates is read in it too (`_data_weeks`).
+    issue_zone: Optional[str] = None
 
     @property
     def weekday(self) -> int:
@@ -2324,7 +2329,12 @@ def _rows_around_issue(
     # for its delivery day, its publication instant for the way back), not at run_day's noon or at the row's own
     # date. They differ across a DST switch whenever the data zone and a rule's zone don't switch together, e.g. a
     # UTC or fixed-offset (benchmark source) index against Europe/Brussels rules.
-    ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index), naive=index.tz is None)
+    ctx = _Context(
+        pd.Timestamp(run_day),
+        information_set._data_zone(index),
+        naive=index.tz is None,
+        issue_zone=information_set.issue_timezone,
+    )
     issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), information_set.issue_timezone, ctx)
     ctx = replace(ctx, issue_minute=float(issue[0]))
     local = index.tz_localize(None) if index.tz is not None else index
@@ -2441,19 +2451,26 @@ def _over_time_available(
     """`_available_array` of a plain column under rules with validity periods: each holds for the values whose day is in its
     period, and a value none holds for is never known (`inf`). `slot` (wall-clock minutes) reads a published or weekly rule's
     value there, as an hourly slot at its second occurrence, for one slot of a daily row; the other kinds read the row as it is."""
-    out = np.full(len(day), np.inf)  # what no rule holds for is never known
-    held = np.zeros(len(day), dtype=bool)
-    for one in rules:
-        if slot is not None and one.kind in _WHOLE_DATE:
-            read = (slot, np.zeros(len(day), dtype=bool), False)
-        else:
-            read = (minute, first, daily)
-        known, on = _rule_available(col, one, day, read[0], step, ctx, read[1], issue_day, read[2], with_day=True)
-        inside = one._holds_on(on, ctx.day)
-        # Periods are disjoint dates, but two rules in zones a day apart could both claim a value: the later time counts.
-        out = np.where(inside, np.where(held, np.maximum(out, known), known), out)
-        held |= inside
-    return out
+    # A week of the data's dates can be read in two zones (`_data_weeks`): each reading picks its rules, and the later counts.
+    data_week = any(one.kind == "weekly" and one.week_zone == DATA_ZONE for one in rules)
+    latest = None
+    for week in _data_weeks(ctx) if data_week else (None,):
+        out = np.full(len(day), np.inf)  # what no rule holds for is never known
+        held = np.zeros(len(day), dtype=bool)
+        for one in rules:
+            if slot is not None and one.kind in _WHOLE_DATE:
+                read = (slot, np.zeros(len(day), dtype=bool), False)
+            else:
+                read = (minute, first, daily)
+            known, on = _rule_available(
+                col, one, day, read[0], step, ctx, read[1], issue_day, read[2], with_day=True, data_week=week
+            )
+            inside = one._holds_on(on, ctx.day)
+            # Periods are disjoint dates, but two rules in zones a day apart could both claim a value: the later time counts.
+            out = np.where(inside, np.where(held, np.maximum(out, known), known), out)
+            held |= inside
+        latest = out if latest is None else np.maximum(latest, out)
+    return latest
 
 
 def _rule_available(
@@ -2467,10 +2484,12 @@ def _rule_available(
     issue_day: Union[int, np.ndarray] = 0,
     daily: bool = False,
     with_day: bool = False,
+    data_week: Optional[str] = None,
 ) -> Any:
     """`_available_array` of a plain column (no profile, no day aggregate) under one rule, its validity period aside. With
     `with_day` also the day the period is read on, in days after `ctx.day`: the value's delivery day, or for `as_of` and
-    `weather_cutoff` the day it is read on."""
+    `weather_cutoff` the day it is read on. `data_week` reads a week of the data's dates in that one zone, not in each of
+    `_data_weeks`."""
     if rule.kind == "static":
         known = np.full(len(day), -np.inf)
         return (known, _shifted_day(col.shifts, day, minute, first, ctx)) if with_day else known
@@ -2517,15 +2536,21 @@ def _rule_available(
     # wall clock hasn't crossed midnight yet. A weekly rule's week may be another zone's (`week_zone`): the built-in
     # A31's is the data's, each market's Monday to Sunday, while it is published at 10:00 Brussels.
     zone = rule.timezone or ctx.data_zone
-    day_zone = _week_zone(rule, ctx) if rule.kind == "weekly" else zone
-    delivery_day = np.floor(_to_wall(point, day_zone, ctx, wall if day_zone == ctx.data_zone else None) / 1440.0)
-    if rule.kind == "published":
-        publication_day = delivery_day - rule.days_before
-    else:  # weekly: published on `weekday` of the week before the delivery week
-        delivery_weekday = np.mod(ctx.weekday + delivery_day, 7)
-        publication_day = delivery_day - delivery_weekday - 7 + _WEEKDAYS.index(rule.weekday)
-    at = publication_day * 1440.0 + _minutes(rule.time)
-    known = _to_instants(at, zone, ctx, _second(at))
+    known = delivery_day = None
+    for day_zone in _week_zones(rule, ctx, data_week) if rule.kind == "weekly" else (zone,):
+        day_of = np.floor(_to_wall(point, day_zone, ctx, wall if day_zone == ctx.data_zone else None) / 1440.0)
+        if rule.kind == "published":
+            publication_day = day_of - rule.days_before
+        else:  # weekly: published on `weekday` of the week before the delivery week
+            delivery_weekday = np.mod(ctx.weekday + day_of, 7)
+            publication_day = day_of - delivery_weekday - 7 + _WEEKDAYS.index(rule.weekday)
+        at = publication_day * 1440.0 + _minutes(rule.time)
+        reading = _to_instants(at, zone, ctx, _second(at))
+        if known is None:
+            known, delivery_day = reading, day_of
+        else:  # two readings of a week of the data's dates: the later counts, never an early one
+            later = reading > known
+            known, delivery_day = np.where(later, reading, known), np.where(later, day_of, delivery_day)
     return (known, delivery_day) if with_day else known
 
 
@@ -2534,11 +2559,22 @@ def _rule_available(
 # ---------------------------------------------------------------------------
 
 
-def _week_zone(rule: Availability, ctx: _Context) -> str:
-    """The zone whose local dates a weekly rule's week is made of: `week_zone`, the data's for "data", else the rule's own."""
-    if rule.week_zone == DATA_ZONE:
-        return ctx.data_zone
-    return rule.week_zone or rule.timezone or ctx.data_zone
+def _week_zones(rule: Availability, ctx: _Context, data_week: Optional[str] = None) -> Tuple[str, ...]:
+    """The zones whose local dates a weekly rule's week is read in: `week_zone`, else the rule's own zone; for "data" those of
+    `_data_weeks`, or `data_week` alone."""
+    if rule.week_zone != DATA_ZONE:
+        return (rule.week_zone or rule.timezone or ctx.data_zone,)
+    return (data_week,) if data_week is not None else _data_weeks(ctx)
+
+
+def _data_weeks(ctx: _Context) -> Tuple[str, ...]:
+    """The zones a week of the data's local dates is read in. The data's zone is the market's on a frame kept in it, but a frame
+    converted to another zone (UTC, a fixed offset) still holds each value of the market's date: a Warsaw hour stamped 23:00Z on
+    Sunday is Monday's. So on a frame whose zone isn't the issue's, the issue zone's dates are read too and the later week counts:
+    exact when the issue zone is the market's, never early, and too strict only where neither zone is the market's."""
+    if ctx.issue_zone is None or ctx.issue_zone == ctx.data_zone:
+        return (ctx.data_zone,)
+    return (ctx.data_zone, ctx.issue_zone)
 
 
 def _shifts_after_source_lead(shifts: Sequence[Shift]) -> List[Shift]:
