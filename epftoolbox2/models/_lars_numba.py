@@ -36,7 +36,7 @@ from ._lars import (
 BACKEND = "numba"
 
 __all__ = ["BACKEND", "GramStats", "LarsPath", "IcChoice", "CdResult", "LearFit", "gram_stats", "lars_path", "path_at"]
-__all__ += ["ic_select", "cd_lasso", "lear_fit", "warm_up"]
+__all__ += ["lasso_at", "ic_select", "cd_lasso", "lear_fit", "warm_up"]
 
 _jit = njit(cache=True, nogil=True, fastmath=False, error_model="numpy")
 
@@ -338,6 +338,22 @@ def path_at(path: LarsPath, alpha: float) -> np.ndarray:
 
 
 @_jit
+def _lasso_at_kernel(G, q, n, alpha, max_steps):
+    alphas, coefs, _, _ = _lars_kernel(G, q, n, max(alpha - 2.0 * EQUALITY_TOLERANCE, 0.0), max_steps)
+    reached = alpha >= alphas[0]
+    for a in alphas:
+        if a <= alpha:
+            reached = True
+    return _path_at_kernel(alphas, coefs, alpha), reached
+
+
+def lasso_at(G, q, n, alpha: float, max_steps: int = 2500):
+    G, q, n = _checked(G, q, n)
+    w, reached = _lasso_at_kernel(G, q, n, float(alpha), int(max_steps))
+    return w, bool(reached)
+
+
+@_jit
 def _ic_kernel(coefs, corr, q, yy, n, K):
     m, p = coefs.shape
     values = np.empty(m)
@@ -452,9 +468,7 @@ def _lear_kernel(G, q, yy, n, K, use_cd):
     if use_cd:
         w, _, converged = _cd_kernel(G, q, yy, n, alpha, 2500, 1e-4)
     else:
-        alphas2, coefs2, _, stop = _lars_kernel(G, q, n, alpha, 2500)
-        w = _path_at_kernel(alphas2, coefs2, alpha)
-        converged = stop == 0
+        w, converged = _lasso_at_kernel(G, q, n, alpha, 2500)
     return w, alpha, kink, converged
 
 

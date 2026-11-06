@@ -5,8 +5,9 @@ through which step 5's engine will hand in statistics it shares between models):
 
 1. α* as old `LassoLarsIC(normalize=True)` chose it: the LARS-lasso path on centred unit-norm columns, and at every kink of it
    `n·MSE/(var(y) + eps) + K·df` (K = 2 for AIC, log n for BIC), the first argmin (`lars_path`, `ic_select`).
-2. The Lasso at α* on the centred, unnormalised columns, either exactly, by a second LARS path stopped at α* (`solver="lars"`),
-   or as Lago's `Lasso(max_iter=2500)` ran it, by coordinate descent that may stop before convergence (`solver="cd"`).
+2. The Lasso at α* on the centred, unnormalised columns, either exactly, by a second LARS path run just past α* (`lasso_at`,
+   `solver="lars"`), or as Lago's `Lasso(max_iter=2500)` ran it, by coordinate descent that may stop before convergence
+   (`solver="cd"`).
 
 `lars_path` transcribes scikit-learn 0.24.2's `_least_angle._lars_path_solver` (the version Lago et al. ran) for
 `method="lasso"`, a given Gram and `positive=False`; `cd_lasso` transcribes its `_cd_fast.enet_coordinate_descent_gram` with no
@@ -89,7 +90,7 @@ class LearFit(NamedTuple):
     ybar: float
     alpha: float  # α*, on the normalised scale of stage 1
     kink: int  # the stage-1 kink of α*
-    converged: bool  # "lars": stage 2 reached α*; "cd": the duality gap fell below tol
+    converged: bool  # "lars": stage 2's path passed α*; "cd": the duality gap fell below tol
 
 
 def gram_stats(x, y) -> GramStats:
@@ -307,6 +308,18 @@ def path_at(path: LarsPath, alpha: float) -> np.ndarray:
     return coefs[i - 1] + t * (coefs[i] - coefs[i - 1])
 
 
+def lasso_at(G, q, n, alpha: float, max_steps: int = 2500) -> Tuple[np.ndarray, bool]:
+    """The exact lasso at `alpha` from a path that passes it, and whether it did (stage 2 of `solver="lars"`).
+
+    0.24.2's early stop ends a path at the first kink within float32 eps (1.19e-7, absolute) above `alpha_min` and doesn't
+    interpolate it, so a path stopped at `alpha` itself can end on a kink above it: on Lago's DE inputs at W 1456 that was 6 fits
+    of 144, off the exact refit by up to 2.3e-4 EUR/MWh. Stopped at `alpha - 2 * float32 eps`, the path ends below `alpha`, and
+    `path_at` interpolates the segment that holds it, on which the lasso is linear."""
+    path = lars_path(G, q, n, max(float(alpha) - 2.0 * EQUALITY_TOLERANCE, 0.0), max_steps)
+    reached = bool(alpha >= path.alphas[0] or np.any(path.alphas <= alpha))
+    return path_at(path, alpha), reached
+
+
 def _penalty(criterion: str, n: float) -> float:
     if criterion == "aic":
         return 2.0
@@ -406,16 +419,15 @@ def _check_choices(criterion: str, solver: str) -> None:
 
 def lear_fit(stats: GramStats, criterion: str = "bic", solver: str = "lars") -> LearFit:
     """A LEAR unit from its centred sums: α* by `ic_select` on the normalised path (2500 steps at most, as Lago's
-    `LassoLarsIC(max_iter=2500)`), then the Lasso at α* on the centred, unnormalised Gram, exactly (`"lars"`: a second path
-    stopped at α*) or by Lago's coordinate descent (`"cd"`: `max_iter=2500`, `tol=1e-4`)."""
+    `LassoLarsIC(max_iter=2500)`), then the Lasso at α* on the centred, unnormalised Gram, exactly (`"lars"`: `lasso_at`, a
+    second path run just past α*) or by Lago's coordinate descent (`"cd"`: `max_iter=2500`, `tol=1e-4`)."""
     _check_choices(criterion, solver)
     G = np.asarray(stats.G, dtype=np.float64)
     q = np.asarray(stats.q, dtype=np.float64)
     R, qn = _normalised(G, q)
     choice = ic_select(lars_path(R, qn, stats.n), qn, stats.yy, stats.n, criterion)
     if solver == "lars":
-        path = lars_path(G, q, stats.n, choice.alpha)
-        w, converged = path_at(path, choice.alpha), path.stop == "alpha_min"
+        w, converged = lasso_at(G, q, stats.n, choice.alpha)
     else:
         w, _, converged = cd_lasso(G, q, stats.yy, stats.n, choice.alpha)
     return LearFit(w, stats.xbar, stats.ybar, choice.alpha, choice.kink, bool(converged))

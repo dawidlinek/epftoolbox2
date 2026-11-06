@@ -234,6 +234,29 @@ def test_path_at_is_the_lasso_between_kinks(kind):
     np.testing.assert_array_equal(_lars.path_at(path, path.alphas[-1] / 2), path.coefs[-1])
 
 
+@pytest.mark.parametrize("kind", ["n>p", "n<p", "weekday dummies"])
+def test_lasso_at_is_exact_where_a_kink_lies_just_above_alpha(kind):
+    """A path stopped at α ends on a kink up to float32 eps above α without interpolating it (0.24.2's early stop), so
+    path_at(lars_path(G, q, n, α), α) is that kink's solution, not α's; lasso_at runs the path past α and is exact there."""
+    X, y = _design(kind, 5)
+    stats = _lars.gram_stats(X, y)
+    full = _lars.lars_path(stats.G, stats.q, stats.n)
+    missed = 0
+    for k in range(1, len(full.alphas) - 1):
+        if full.alphas[k] - full.alphas[k + 1] < 1e-6:
+            continue
+        alpha = full.alphas[k] - 5e-8
+        exact = _lars.path_at(full, alpha)
+        w, reached = _lars.lasso_at(stats.G, stats.q, stats.n, alpha)
+        assert reached
+        np.testing.assert_allclose(w, exact, rtol=0, atol=1e-12 * max(1.0, np.max(np.abs(exact))))
+        stopped = _lars.lars_path(stats.G, stats.q, stats.n, alpha)
+        missed += np.max(np.abs(_lars.path_at(stopped, alpha) - exact)) > 1e-12 * max(1.0, np.max(np.abs(exact)))
+    assert missed > 0
+    fit = _lars.lear_fit(stats, "aic", "lars")
+    np.testing.assert_array_equal(fit.w, _lars.lasso_at(stats.G, stats.q, stats.n, fit.alpha)[0])
+
+
 # ------------------------------------------------------------------------------------------------------------- ic_select
 
 
@@ -563,6 +586,12 @@ def _assert_backends_agree(numba_kernels, X, y, solvers=("lars", "cd")):
     residues = counted != (np.abs(twin.coefs) > EPS)
     assert np.all(np.abs(reference.coefs[residues]) < 1e3 * EPS) and np.all(np.abs(twin.coefs[residues]) < 1e3 * EPS)
     ddf = counted.sum(axis=1) - (np.abs(twin.coefs) > EPS).sum(axis=1)
+    for k in (1, len(reference.alphas) // 2):
+        if k < len(reference.alphas) - 1:  # just below a kink, where a path stopped at α would end on the kink
+            alpha = reference.alphas[k] - min(5e-8, 0.5 * (reference.alphas[k] - reference.alphas[k + 1]))
+            (a, ra), (b, rb) = _lars.lasso_at(R, qn, stats.n, alpha), numba_kernels.lasso_at(R, qn, stats.n, alpha)
+            assert ra == rb
+            np.testing.assert_allclose(b, a, rtol=0, atol=1e-10 * max(1.0, np.max(np.abs(a))))
     for criterion in ("aic", "bic"):
         a = _lars.ic_select(reference, qn, stats.yy, stats.n, criterion)
         b = numba_kernels.ic_select(twin, qn, stats.yy, stats.n, criterion)
