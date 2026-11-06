@@ -51,6 +51,7 @@ from ..information_set import (
     TrainingRows,
     Violation,
     _RowsKnown,
+    frame_first_day,
     over_time,
     rule_dict,
 )
@@ -730,7 +731,9 @@ class PredictorPlan:
             issue_days=[day.isoformat() for day in scanned],
             check_target=self.newest_target == "d-1" and self.trains,
             # The target's training rows, back from the anchors with `refit`.
-            training_rows=None if self.fit_window is None else TrainingRows(self.fit_window, self.reach),
+            training_rows=None
+            if self.fit_window is None
+            else TrainingRows(self.fit_window, self.reach, first_day=frame_first_day(self.data.index)),
         )
         late_names: List[str] = []
         no_rule: List[str] = []
@@ -751,7 +754,11 @@ class PredictorPlan:
         if self.fit_window is None:
             return None
         return TrainingRows(
-            self.fit_window, reach=self.reach, to_issue=self.newest_target == "published", refit=self.refit
+            self.fit_window,
+            reach=self.reach,
+            to_issue=self.newest_target == "published",
+            refit=self.refit,
+            first_day=frame_first_day(self.data.index),  # no row before the frame's first date exists to judge
         )
 
     def _horizons_of(self, cells: "_Cells", name: str) -> List[int]:

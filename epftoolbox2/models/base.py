@@ -82,7 +82,7 @@ from ._worker import (
     training_rows,
 )
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days, zone_name
-from ..information_set import _STEP_MINUTES, InformationSetError, TrainingRows, check_level, rule_dict
+from ..information_set import _STEP_MINUTES, InformationSetError, TrainingRows, check_level, frame_first_day, rule_dict
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -1111,7 +1111,7 @@ class BaseModel(ABC):
         on_anchors = check_target and self.refit is not None
         check_target = check_target and self.refit is None
         window = self._reach_window(data, issued)
-        rows = self._training_rows(newest, window)
+        rows = self._training_rows(newest, window, frame_first_day(data.index))
         if information_set is not None:
             check, late_uses = self._issue_time_checks(information_set)
         if information_set is not None and availability == "raise":
@@ -1234,26 +1234,31 @@ class BaseModel(ABC):
         """`method` (an information set's `check` or `late_uses`) of the newest training target alone, for a model with `refit`:
         on the anchors of the issue days (`issue_days`, else every day from `test_start` to `test_end`), since a unit's rows are
         cut as of the issue time on its anchor. Without days to read anchors from, on every day of the frame, as before.
-        `window` is the one a fit reads back (`_reach_window`), the model's int window if not given."""
+        `window` is the one a fit reads back (`_reach_window`), the model's int window if not given; no target before the frame's
+        first local date is judged, having no row there."""
         boundary = {pair: [] for pair in expanded}
         # The targets of a unit's rows, back from its anchor.
-        rows = TrainingRows(max(self._members) if window is None else window)
+        rows = TrainingRows(max(self._members) if window is None else window, first_day=frame_first_day(index))
         if issue_days is None and (test_start is None or test_end is None):
             return method(boundary, target, freq, index, test_start, test_end, model_name=self.name, training_rows=rows)
         issued = issue_days if issue_days is not None else [day.isoformat() for day in _test_days(test_start, test_end)]
         anchors = [day.isoformat() for day in refit_anchors(issued, self.refit)]
         return method(boundary, target, freq, index, model_name=self.name, issue_days=anchors, training_rows=rows)
 
-    def _training_rows(self, newest: Optional[NewestTargets], window: Optional[int] = None) -> TrainingRows:
+    def _training_rows(
+        self, newest: Optional[NewestTargets], window: Optional[int] = None, first_day: Optional[str] = None
+    ) -> TrainingRows:
         """The rows a fit of this model reads (`TrainingRows`), for checking a column whose rule changes over time on them too:
         the window, a newest target before D - 1 under `"published"`, and with `refit` the refit day, whose fit a forecast uses:
         its rows are those of a forecast issued on it (`training_span(a, W, h, k(a))`), as of the issue time on D. `window` is the
-        one a fit reads back (`_reach_window`), the model's int window if not given."""
+        one a fit reads back (`_reach_window`), the model's int window if not given; `first_day` the frame's first local date
+        (`frame_first_day`), before which no row exists to judge."""
         return TrainingRows(
             max(self._members) if window is None else window,
             reach=0 if newest is None else newest.reach,
             to_issue=self.newest_target == "published",
             refit=self.refit,
+            first_day=first_day,
         )
 
     def _reach_window(self, data: pd.DataFrame, issue_days: Optional[Sequence[Any]] = None) -> int:

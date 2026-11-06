@@ -613,8 +613,45 @@ def test_a_published_target_under_a_rule_over_time_is_read_back_by_the_longest_m
     assert run(14).produced == 24
     with pytest.raises(ValueError, match="window of 42 days"):
         run([14, 42])
-    with pytest.raises(ValueError, match="With an 'expanding' window this reads back"):
+    with pytest.raises(ValueError, match="an 'expanding' window reads back to it"):
         run([14, "expanding"])
+
+
+@pytest.mark.parametrize(
+    ("window", "refit"),
+    [("expanding", None), ("expanding", "7D"), ([14, "expanding"], None), ([14, "expanding"], "7D"), (47, None)],
+)  # 47 with "7D" is refused for the rows its first block can't find (`_check_reaches_back`), rightly
+def test_rows_before_the_frame_aren_t_judged_and_a_rule_from_its_first_day_passes(window, refit):
+    """The review's case: `aux` is known from the frame's first date on (1 February), and a window reaching before it (expanding
+    always does; 47 days from 20 March at horizon 1 reaches 31 January) used to be refused for rows the frame doesn't have. Those
+    rows aren't read, so they aren't judged; a rule that starts on the frame's second day still refuses, its first day's rows being
+    read and never known. The same holds for the target's rule under "published"."""
+    data = make_market_data(start="2023-02-01", days=70, horizon=3, noise=5.0, seed=3)
+    data = data.assign(aux=np.random.default_rng(2).normal(0, 1, len(data)))
+
+    def run(valid_from, published=False):
+        rules = {**RULES, "aux": Availability.static().during(valid_from=valid_from)}
+        if published:
+            rules = {**RULES, "price": Availability.published("13:00", 1).during(valid_from=valid_from)}
+        info = InformationSet("11:45", "Europe/Brussels", rules=rules)
+        model = OLSModel(
+            PREDICTORS if published else [*PREDICTORS, "aux"],
+            training_window=window,
+            refit=refit,
+            newest_target="published" if published else "d-1",
+        )
+        return model.run(data, "2023-03-20", "2023-03-21", horizon=1, information_set=info)
+
+    assert run("2023-02-01").produced == 48
+    with pytest.raises(ValueError, match="aux") as refused:
+        run("2023-02-02")
+    assert "start the frame where the rule begins" in str(refused.value)
+    assert run("2023-02-01", published=True).produced == 48
+    if (
+        window != 47
+    ):  # under "published" 47 days from 20 March train on targets from 2 February on, which that rule knows
+        with pytest.raises(ValueError, match="start the frame where the rule begins"):
+            run("2023-02-02", published=True)
 
 
 def test_an_ensemble_averages_a_list_model_s_forecasts(tmp_path):

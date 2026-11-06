@@ -26,6 +26,7 @@ from ..information_set import (
     _IssueClock,
     _profile_slot,
     _ranges,
+    frame_first_day,
     over_time,
     parse_predictor,
 )
@@ -330,7 +331,9 @@ def explain_model(
         used = np.ones(len(days), dtype=bool)
         names = model._expand_predictors(horizon, hour=hour)
         subject = model.name
-    rows = model._training_rows(newest, model._reach_window(data, [day.date() for day in days]))
+    rows = model._training_rows(
+        newest, model._reach_window(data, [day.date() for day in days]), frame_first_day(data.index)
+    )
     out["predictors"] = predictor_table(names, data, info, horizon, hour, freq, clock, used, rows)
     out["grouped"] = grouped_table(out["predictors"])
     if newest is not None:
