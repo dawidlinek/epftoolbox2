@@ -64,8 +64,10 @@ from that date up to the row its newest target allows. So **where the frame star
 - The data checks read the whole frame, not only the days a test can reach: an expanding window trains on all of it. A 15-minute
   run over a frame whose early history is hourly (as ENTSO-E's DE_LU prices before 2025-10-01) is refused with `"expanding"`, and
   accepted with a window that stays inside the 15-minute part. Cut the frame where its resolution changes.
-- Under an availability rule that changes over time (a rule with `valid_from`, or a list of rules), the checks read back from every
-  issue day to before the frame's first date. If they refuse, start the frame later, or use an int window.
+- Under an availability rule that changes over time (a rule with `valid_from`, or a list of rules), the issue-time checks judge
+  every training row the frame has, from its first date on. A rule that starts on the frame's first date passes; one that starts
+  inside the frame refuses an expanding window, whose rows before the rule's first day are never known: start the frame where the
+  rule begins.
 
 ## What each record holds
 

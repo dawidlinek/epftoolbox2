@@ -362,8 +362,9 @@ info = InformationSet("11:45", "Europe/Warsaw", rules={
   every row the fits read, the training target on every target they read, and a day aggregate, or a daily row whose date reaches two
   delivery days of the rule's zone, on every slot of its day; `newest_target="published"` needs every target of its window known back
   to the oldest, and raises otherwise. With `refit` the rows are those of the refit day's fit, the forecast's own, judged as of the
-  issue time of D. A use late on a training row is listed with a note that says so. Any other column is checked as before, and no
-  slower.
+  issue time of D. A row dated before the frame's first date doesn't exist and isn't judged, so a rule that starts on the frame's
+  first date passes whatever the window. A use late on a training row is listed with a note that says so. Any other column is
+  checked as before, and no slower.
 - A single rule takes a period too, `Availability.realised("1h").during(valid_from="2024-06-13")`: before it nothing is known.
 - In YAML the list is written as a list, and the new keys only when set, so a file without them is written back as it was:
 
@@ -556,8 +557,9 @@ the newest training row at horizon 1 is D-2 (see [The newest target](/epftoolbox
 
 `InformationSet.check()`, which `availability="raise"` runs, is a static analysis of predictor *names*, and
 `InformationSet.late_uses()`, which `availability="warn"` runs, returns what it refuses. A model run tells both which rows its fits
-read, `training_rows=TrainingRows(window, reach=0, to_issue=False, refit=None)`, which matters only for a column whose
-[rules change over time](#rules-over-time). Called without it they judge the issue day's row alone, and say so in a warning for such a
+read, `training_rows=TrainingRows(window, reach=0, to_issue=False, refit=None, first_day=None)`, which matters only for a column
+whose [rules change over time](#rules-over-time); a model passes the frame's first local date as `first_day`, before which no row is
+judged. Called without it they judge the issue day's row alone, and say so in a warning for such a
 column:
 
 ```python

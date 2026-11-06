@@ -172,7 +172,9 @@ an issue day it didn't sample.
   rules with disjoint periods is a column's rule over time, for a lag that changed (observed: PSE's settlement prices went from D+4 to
   D+1 on business date 8 October 2026; the library has no PSE source yet). For such a column the check also reads the training rows
   (with `refit`, those of the refit day's fit) and every slot of a day aggregate, since an older value can come after a newer one;
-  `check()` and `late_uses()` take them as `training_rows=TrainingRows(...)` and warn without. A value no rule holds for is never known. The check, `ctx`, `explain`, the probes and `newest_target="published"`
+  `check()` and `late_uses()` take them as `training_rows=TrainingRows(...)` and warn without; a model passes the frame's first date
+  (`first_day`), before which no row exists or is judged, so a rule that starts on the frame's first date passes whatever the window.
+  A value no rule holds for is never known. The check, `ctx`, `explain`, the probes and `newest_target="published"`
   all read it the same way. **Nothing moves without them**: records and tables are as before, and YAML writes the new keys only when
   set, so an old file is written back byte for byte. What moves: manifests of runs that read an input with a built-in class gain
   `vintages` (an ensemble's manifest doesn't), and a matching function reading a revised built-in column on a training day goes from
