@@ -50,6 +50,12 @@ Repository = "https://github.com/dawidlinek/epftoolbox2"
 Issues = "https://github.com/dawidlinek/epftoolbox2/issues"
 
 [project.optional-dependencies]
+# numba twins of the LEAR kernels (epftoolbox2/models/_lars_numba.py); the numpy ones always exist. numba 0.65 is the first
+# with free-threaded (3.14t) wheels. 3.15 is left out: numba 0.68.1 has cp315 wheels but none for 3.15t, and a marker can't
+# tell the two apart.
+fast = [
+    "numba>=0.65; python_version < '3.15'",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
