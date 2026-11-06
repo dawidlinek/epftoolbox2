@@ -35,7 +35,7 @@ model = RidgeModel(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `predictors` | List or function | Required | Predictor specifications (strings, `{horizon}` templates, or callables), or a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) returning the list for each forecast |
-| `training_window` | int | `365` | Days of training data |
+| `training_window` | int, `"expanding"` or list | `365` | Days of training data, every row from the frame's first date, or a list of windows averaged inside the model ([Training Windows](/epftoolbox2/model-pipeline/training-windows/)) |
 | `alphas` | sequence of float or None | `None` | The penalties to choose from, positive, finite and at least 1e-6, in the order tried. `None` is `np.logspace(-3, 4, 36)`: 36 values from 0.001 to 10 000. See [The penalty](#the-penalty) |
 | `name` | str | `"Model"` | Display name for reports |
 | `scaler` | str, dict or scaler | `"standard"` | `"standard"`, `"asinh"` or `"npit"`, or `{"name": ..., "params": {...}}`. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |

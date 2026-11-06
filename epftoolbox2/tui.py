@@ -813,10 +813,10 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "training_window",
-            "description": "Training window in days",
+            "description": "Training window in days, 'expanding', or a list averaged inside the model (e.g. 56,84,728,expanding)",
             "required": False,
             "default": "365",
-            "kind": "int",
+            "kind": "window",
         },
         {
             "name": "alphas",
