@@ -9,7 +9,7 @@ from epftoolbox2.data.sources import CalendarSource, CsvSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.ensembles import AverageEnsemble
-from epftoolbox2.models import OLSModel, LassoCVModel, NaiveModel
+from epftoolbox2.models import OLSModel, LassoCVModel, NaiveModel, RidgeModel
 from epftoolbox2.evaluators import (
     BatteryArbitrage,
     BiasEvaluator,
@@ -715,6 +715,14 @@ class TestModelPipelineParameterFidelity:
                     name="L",
                     fit_intercept=False,
                     scaler={"name": "standard", "params": {"scale_binary": True}},
+                ),
+                RidgeModel(
+                    ["price_d-1", "load_d+{horizon}"],
+                    training_window=80,
+                    alphas=[0.25, 4.0, 64.0],
+                    name="R",
+                    fit_intercept=False,
+                    scaler="asinh",
                 ),
                 NaiveModel(["load_d+{horizon}"], name="N", known_only=False),
             ],
