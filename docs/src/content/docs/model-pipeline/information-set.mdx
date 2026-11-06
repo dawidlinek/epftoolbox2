@@ -195,8 +195,14 @@ A31 holds one value per local date of each market's Monday-to-Sunday week, and e
 before the 12:00 CET gate closure. So the built-in rule is `Availability.weekly("friday", "10:00", week_zone="data")`: the week is
 read in the data's local dates, and the publication instant is 10:00 Brussels in every zone. On an hourly frame in Helsinki the first
 hour of a Monday belongs to the week it starts, though it is Sunday in Brussels, and in Lisbon or Dublin the last hour of a Sunday to
-the week it ends. Keep the frame in the market's zone, as `TimezoneTransformer` does: on a frame left in UTC the data's dates are UTC
-dates, and a rule from `with_source_rules` (below) or one of your own with `week_zone=` the market's zone reads the right week there.
+the week it ends.
+
+A frame in another zone than the issue time's (left in UTC, or at a fixed offset) still holds each value of the market's date: with
+`DataPipeline(timezone=None)` Warsaw's Monday starts at 23:00Z on Sunday. There the week is read in the issue zone's dates too, and
+the later of the two weeks counts, so it is never early. With the issue in the market's zone (`InformationSet("12:00",
+"Europe/Lisbon")`) that is exact on any frame; with neither zone the market's, a Lisbon frame issued on Brussels time say, the last
+hour of a Sunday is taken as published a week late. A rule from `with_source_rules` (below) or one of your own with `week_zone=` the
+market's zone reads the market's week on any frame.
 
 The day-ahead load forecast `load_forecast` (A01) keeps a Brussels day: it is the forecast of the day-ahead market's delivery day,
 a CET day in every SDAC zone, so in Lisbon or Dublin the hour from 23:00 belongs to the next day's forecast, published on the day

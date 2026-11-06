@@ -18,14 +18,17 @@ Notes for changes that need something from you. The full list of changes of a re
     15-minute frames east of Brussels (Helsinki, Athens, Bucharest) the first hour of a Monday was taken as published a week early, a
     look-ahead: `NaiveModel(known_only=True)` loses those keys (12 of two January weeks in Helsinki at horizons 1 to 9), and a model
     that reads them is listed at `"warn"` and refused at `"raise"`. Daily frames there were read at a date's last slot and don't move.
-    West of Brussels (Lisbon, Dublin) the last hour of a Sunday, and a daily row of a Sunday, was taken as published a week late: keys
+    West of Brussels (Lisbon, Dublin), issued in the market's zone, the last hour of a Sunday, and a daily row of a Sunday, was taken
+    as published a week late: keys
     called `not_published` come back (14 in the same two weeks), so on Fridays at noon the TSO has D+9 again, all 728 forecasts of a
     statistic in the [week-ahead study](/epftoolbox2/model-pipeline/week-ahead/).
   - **The source's rule publishes at 10:00 Brussels too.** `with_source_rules` (so every `Workflow`) gave an `EntsoeSource`'s A31
     columns Friday 10:00 on the bound market's clock: an hour early in an EET market, a look-ahead for an issue from 09:00 to 10:00
     Brussels on a Friday, and an hour late in Lisbon or Dublin. It is 10:00 Brussels now, for the week of that market's zone.
-  - **Keep the frame in the market's zone.** On a frame left in UTC the data's dates are UTC dates; the source's rule, or one of your
-    own with `week_zone=` the market's zone, reads the market's week there.
+  - **Issue in the market's zone for an exact week.** On a frame in another zone than the issue time's (UTC, a fixed offset) the
+    week is also read in the issue zone's dates and the later counts, so it is never early: exact when the issue zone is the market's,
+    a week late on the last hour of a Sunday where neither is (a Lisbon frame issued on Brussels time, which keeps the old rule's
+    verdicts there). The keys that come back west of Brussels need the issue in the market's zone, as in the week-ahead study.
   - **Resuming.** A `NaiveModel(known_only=True)` of these columns records the rules that decide its keys, so its results from before
     refuse to resume with `ManifestMismatchError` on `training_cut`. Use a new `save_dir`.
 - **`ModelPipeline.report()` reads `freq` from the manifests and refuses one they contradict.** Its `freq` defaulted to `"1h"`

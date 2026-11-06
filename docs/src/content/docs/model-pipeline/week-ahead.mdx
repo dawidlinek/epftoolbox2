@@ -107,7 +107,8 @@ binary ones included (`scale_binary=True`), and an expert OLS with an intercept.
   no rule of yours in any zone. In Lisbon or Dublin the TSO's D+9 is out on Fridays at noon, and on an hourly frame in Helsinki the
   first hour of a Monday belongs to the week it starts. Until this release the week was Brussels's: too strict west of Brussels (D+9
   `not_published` on every Friday) and a look-ahead east of it on hourly frames. A rule declared per zone at the same instant, as this
-  page used to suggest, gives the same forecasts. Keep the frame in the market's zone.
+  page used to suggest, gives the same forecasts. Issue in the market's zone, as here: issued on Brussels time a Lisbon frame's Sunday
+  is still taken as published a week late, since the rule never reads a week early.
 </Aside>
 
 ### The TSO's forecast as a model
