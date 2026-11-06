@@ -135,7 +135,7 @@ class BaseModel(ABC):
         first of every k-th month, on a calendar counted from Monday 1970-01-05 (`_calendar.refit_anchor`). A forecast issued on
         D then uses the fit of its anchor a, the refit day on or before D: rows cut as for a forecast issued on a, with the
         newest target as of a's issue time, so nothing after a trains, and each forecast predicted on its own from that fit. Only
-        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV) can."""
+        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV, Ridge) can."""
         # A function of `ctx` is planned per forecast (epftoolbox2.models.context); a `(horizon)` or `(horizon, hour)`
         # function gives one list per (period, horizon).
         self._ctx_fn: Optional[Callable] = predictors if callable(predictors) and takes_ctx(predictors) else None
