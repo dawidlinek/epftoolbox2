@@ -1,0 +1,207 @@
+---
+title: Benchmark Reproduction
+description: LEAR and Ridge on the five datasets of Lago et al. (2021) — the original epftoolbox, the published forecasts, the criteria, refit="auto", blocked CV and the recommended settings, each on identical forecast keys with counts
+---
+
+Every number the library has measured on the open-access benchmark of Lago, Marcjasz, De Schutter & Weron (2021), *Forecasting
+day-ahead electricity prices: A review of state-of-the-art algorithms, best practices and an open-access benchmark*, Applied
+Energy 293, 116983: the five markets NP, PJM, FR, BE and DE, one day ahead, over the paper's test periods. The CI tests hold
+the parts that fit in a test (the original's forecasts on the first DE and BE test day, to 1e-6 EUR/MWh); the rest was run once
+outside CI and is recorded here. [`examples/lear_lago.py`](https://github.com/dawidlinek/epftoolbox2/blob/main/examples/lear_lago.py)
+reruns the paper's LEAR and the recommended one on a market.
+
+This benchmark is for reproduction, not for choosing settings: the library's defaults and the
+[recommended LEAR](/epftoolbox2/models/lear/#recommended-settings) come from recent data (DE-LU and AT, 2022 to 2026), and the
+DE file's target-day wind and solar forecast may be later than an 11:45 issue.
+
+## Setup
+
+- **Data.** [`EpftoolboxBenchmarkSource`](/epftoolbox2/data-sources/epftoolbox-benchmark/) (Zenodo record 4624805, md5-checked),
+  from each file's first day, through the chain of the [LEAR page](/epftoolbox2/models/lear/#lago-et-al-2021-exactly): the
+  profiles of the price on D, D-1, D-2 and D-6, of both exogenous series on the target day, D and D-6, and the target day's
+  weekday, 247 inputs.
+- **Forecasts.** Issued on the day before each test day, h = 1: 728 issue days × 24 hours = **17,472 forecast keys per market and
+  model** (NP and PJM issue days 26 December 2016 to 23 December 2018, FR and BE 3 January 2015 to 30 December 2016, DE 3 January
+  2016 to 30 December 2017).
+- **Information set.** 11:45 Brussels, the price of D published at 13:00 on D-1 on the files' clock (`Etc/GMT-1`); PJM's issue
+  time and rule on its own clock, `Etc/GMT+5`. Models with `newest_target="published"` train on the issue day's prices.
+- **Keys.** Every comparison below is on identical keys: all 17,472 of each market in every cell, every model having produced
+  every forecast, except `refit="auto"` (17,448, below).
+- **DM tests** are Lago et al.'s multivariate Diebold-Mariano test (the daily mean of the 24 absolute errors, one-sided), as
+  `epftoolbox.evaluation.DM` computes it, not adjusted for the five markets. **Significant** means p < 0.05 throughout; a p-value
+  between 0.05 and 0.1 is given but called not significant.
+- **Machines.** WCSS Bem2 (Intel Xeon Platinum 8268), 8 processes, the numba kernels, one BLAS thread per process (`refit="auto"`:
+  a workstation, below). Records differ
+  across machines by up to about 3e-9 EUR/MWh (another BLAS rounds `X'X` differently), which moves no number here.
+
+## The original epftoolbox
+
+`LEARModel.lago()` against the original (github.com/jeslago/epftoolbox at 47d6e06, run under scikit-learn 0.24.2, numpy 1.23.5,
+Python 3.8) on five issue days of each market (the first two of the test period and three drawn with seed 0), every hour of every
+window: |difference| in EUR/MWh, largest / 99th percentile of 120 forecasts each.
+
+| Window (training rows) | NP | PJM | FR | BE | DE |
+|---|---|---|---|---|---|
+| 56 (49) | 3.7e-11 / 1.4e-11 | 3.9e-11 / 3.4e-11 | 2.0e-11 / 1.7e-11 | 2.3e-11 / 1.4e-11 | 8.7e-11 / 8.1e-11 |
+| 84 (77) | 4.8e-11 / 3.1e-11 | 6.4e-11 / 4.9e-11 | 7.6e-11 / 2.8e-11 | 2.2e-11 / 1.8e-11 | 1.4e-10 / 3.6e-11 |
+| 1092 (1085) | 1.6e-10 / 1.6e-10 | 2.4e-10 / 1.8e-10 | 3.1e-10 / 2.3e-10 | 4.5e-10 / 1.6e-10 | 1.6e-10 / 1.5e-10 |
+| 1456 (1449) | 2.5e-10 / 2.2e-10 | 3.5e-10 / 3.4e-10 | 5.6e-10 / 3.1e-10 | 2.2e-10 / 2.0e-10 | 6.2e-10 / 3.8e-10 |
+
+The design row is the original's `Xtest` to the bit on the first DE and BE day. The 49- and 77-row windows, where old
+`LassoLarsIC` ran its path on `X` rather than `X'X`, agree as closely as the long ones.
+
+## The published forecasts
+
+`lago()` over the test periods against the forecasts Lago et al. published (`forecasts/Forecasts_{market}_DNN_LEAR_ensembles.csv`
+of the repository), MAE in EUR/MWh, `lago()` / published, on the published file's 17,472 keys:
+
+| Window | NP | PJM | FR | BE | DE |
+|---|---|---|---|---|---|
+| 56 | 1.923 / 1.964 | 3.525 / 3.477 | 4.606 / 4.681 | 7.226 / 6.924 | 4.069 / 4.283 |
+| 84 | 1.870 / 1.952 | 3.514 / 3.467 | 4.559 / 4.575 | 7.197 / 6.798 | 3.983 / 4.180 |
+| 1092 | 1.993 / 1.993 | 3.101 / 3.098 | 4.256 / 4.250 | 6.606 / 6.594 | 3.931 / 3.930 |
+| 1456 | 1.990 / 1.990 | 3.098 / 3.095 | 4.387 / 4.378 | 6.645 / 6.634 | 3.989 / 3.988 |
+| average of the four | 1.728 / 1.738 | 3.032 / 3.013 | 3.990 / 3.980 | 6.278 / 6.140 | 3.570 / 3.609 |
+
+- **The long windows match.** 1092 days: +0.03, +0.07, +0.14, +0.18, +0.02 % of the published MAE; 1456 days: +0.01, +0.07, +0.21,
+  +0.17, +0.03 % (NP, PJM, FR, BE, DE). The library's gate is 0.3 %; all ten pass.
+- **The short windows can't.** No scikit-learn version reproduces the published 56- and 84-day forecasts (0.22.2, 0.23.2 and 0.24.2
+  differ by up to 2 to 9 EUR/MWh in single hours, the original epftoolbox among them): a LARS path on 49 rows of 247 inputs is
+  ill-conditioned, and its implementation decides about ±5 % of the MAE.
+- **DM of the averages**: the published forecasts are significantly better in BE (p < 0.001); the differences are not significant
+  at 5 % in PJM (published lower, p 0.066) and DE (`lago()` lower, p 0.065), nor in NP and FR.
+- Every number is the forecasting plan's earlier research port (quality study, "ours") within 0.0005 EUR/MWh.
+
+## Penalty, solver and newest target
+
+Variants of `lago()` that change one setting, MAE of the average of the four windows, 17,472 keys each:
+
+| `lago()` with | NP | PJM | FR | BE | DE |
+|---|---|---|---|---|---|
+| nothing changed (AIC, `"cd"`, published) | 1.728 | 3.032 | 3.990 | 6.278 | 3.570 |
+| `criterion="bic"` | 1.718 | 3.004 | 3.962 | 6.145 | 3.574 |
+| BIC against AIC | −0.58 % | −0.93 % | −0.69 % | −2.12 % | +0.10 % |
+| DM p, BIC better | 0.083 | 0.003 | 0.031 | < 0.001 | 0.62 |
+| `solver="lars"` (the exact refit), against `"cd"` | −0.0002 | −0.0012 | −0.0009 | −0.0043 | +0.0001 |
+| `newest_target="d-1"` | 1.760 | 3.096 | 4.070 | 6.394 | 3.622 |
+| `"d-1"` against `"published"` | +1.88 % | +2.11 % | +2.00 % | +1.85 % | +1.44 % |
+| DM p, `"published"` better | < 0.001 | < 0.001 | < 0.001 | < 0.001 | < 0.001 |
+
+The exact refit and Lago's coordinate descent differ in single forecasts by up to 0.2 (DE) to 3.5 EUR/MWh (BE) in the averages and
+7.6 in BE's 1456-day window, where the exact refit has the lower MAE in four markets (−0.011 EUR/MWh in BE) and ties in DE. The
+newest target costs 1.4 to 2.1 % with `"d-1"`: D's prices are known at 11:45, and only `"published"` trains on them.
+
+## `refit="auto"`
+
+`lago()` with `newest_target="d-1"` over DE, `refit="auto"` (the 56- and 84-day windows refitted daily, the long ones on Mondays)
+against `None`: **17,448 identical keys**, issue days 4 January 2016 to 30 December 2017 (727; under `"auto"` Lago's first issue day
+would fit its 1449-row window on 28 December 2015, whose rows reach before the file, and the run is refused).
+
+| | 56 | 84 | 1092 | 1456 | average |
+|---|---|---|---|---|---|
+| MAE, `None` | 4.2156 | 4.0901 | 3.9392 | 3.9974 | 3.6224 |
+| MAE, `"auto"` | 4.2156 | 4.0901 | 3.9547 | 4.0070 | 3.6252 |
+| change | 0 | 0 | +0.39 % | +0.24 % | **+0.08 %** |
+| DM p, `None` better | | | < 0.001 | 0.011 | 0.091 |
+
+Fits: 39,888 against 69,792 (0.57, two of the four windows still daily); compute 0.41 of `None`'s (2,579 against 6,360 core-seconds
+on a shared Ryzen 5 3600, 6 processes). The short windows are the same forecasts to the bit.
+
+## Blocked cross-validation
+
+`lago()` with the criterion changed, MAE of the average, 17,472 keys each. `criterion="cv"` differs from `"bic"` in the penalty and
+in the coefficients (the path's, no refit); the middle row, BIC's penalty with the path's coefficients, separates the two:
+
+| Penalty, coefficients | NP | PJM | FR | BE | DE |
+|---|---|---|---|---|---|
+| `"cv"`: CV's α\*, path coefficients | 1.734 | 3.030 | 3.965 | 6.142 | 3.591 |
+| BIC's α\*, path coefficients | 2.309 | 3.364 | 4.733 | 6.764 | 4.438 |
+| `"bic"`: BIC's α\*, the paper's refit | 1.718 | 3.004 | 3.962 | 6.145 | 3.574 |
+| `"cv"` against `"bic"` | +0.94 % | +0.89 % | +0.06 % | −0.06 % | +0.48 % |
+| DM p, BIC better / CV better | 0.012 / 0.988 | 0.046 / 0.954 | 0.44 / 0.56 | 0.54 / 0.46 | 0.11 / 0.89 |
+
+A `"cv"` run costs 1.5 to 1.7 times a `"bic"` run with `"cd"` and 1.7 to 1.9 times one with `"lars"` (8,466 to 9,686 core-seconds
+per market against 4,932 to 5,262).
+
+## Ridge
+
+The quality study's RidgeCV row: `RidgeModel(lear_predictors(x, order="lago"), training_window=[49, 77, 1085, 1449],
+scaler={"name": "asinh", "params": {"standardise": False}}, newest_target="published")`, the default grid of 36 penalties, MAE of
+the average of the four windows, 17,472 keys each:
+
+| | NP | PJM | FR | BE | DE |
+|---|---|---|---|---|---|
+| `RidgeModel`, these settings | 1.797 | 3.071 | 4.011 | 6.119 | 3.698 |
+| the quality study's RidgeCV | 1.797 | 3.071 | 4.011 | 6.119 | 3.698 |
+| difference, EUR/MWh | −0.0002 | +0.0002 | −0.0003 | −0.0004 | −0.0004 |
+| against `lago()` | +4.00 % | +1.30 % | +0.52 % | −2.54 % | +3.57 % |
+| DM p, `lago()` better / Ridge better | < 0.001 / 1 | 0.008 / 0.99 | 0.17 / 0.83 | 1 / < 0.001 | < 0.001 / 1 |
+
+Ridge's leave-one-out penalty keeps every input, where the Lasso drops most: it is worse than `lago()` in NP, PJM and DE and better
+in BE, as the study found.
+
+## The recommended settings and the defaults
+
+The [recommended LEAR](/epftoolbox2/models/lear/#recommended-settings) (the average of four `LEARModel`s that differ only in their
+scaler, Lago's Invariant asinh, mirror-log, polynomial and N-PIT, each on `[56, 84, 728, "expanding"]` with BIC and `"published"`),
+the same average with the standardised `AsinhScaler` as its first member (this page's first measurement, before the asinh member was
+made the one the research measured), and the library's defaults (`LEARModel(lear_predictors(x))`: BIC, `"lars"`, the standardised
+asinh, the same windows, `"d-1"`) against `lago()`. Every model on the same 17,472 keys of each market, every model having produced
+all of them, so no ensemble has a `member_missing` key; MAE in EUR/MWh:
+
+| | NP | PJM | FR | BE | DE |
+|---|---|---|---|---|---|
+| `lago()` | 1.728 | 3.032 | 3.990 | 6.278 | 3.570 |
+| **recommended "LEAR"** (the average of the four) | **1.655** | **2.932** | **3.866** | **6.089** | **3.494** |
+| — `LEAR_asinh`, Invariant asinh | 1.702 | 3.003 | 3.937 | 6.111 | 3.572 |
+| — `LEAR_mlog` | 1.704 | 2.984 | 3.908 | 6.205 | 3.564 |
+| — `LEAR_poly` | 1.711 | 2.989 | 3.920 | 6.246 | 3.578 |
+| — `LEAR_npit` | 1.695 | 2.922 | 3.935 | 6.071 | 3.608 |
+| the average with standardised asinh | 1.653 | 2.933 | 3.866 | 6.093 | 3.492 |
+| — its `LEAR_asinh`, standardised asinh | 1.694 | 3.004 | 3.936 | 6.123 | 3.559 |
+| the defaults | 1.723 | 3.060 | 4.000 | 6.208 | 3.597 |
+| recommended against `lago()` | −4.21 % | −3.28 % | −3.12 % | −3.01 % | −2.13 % |
+| DM p, recommended better than `lago()` | < 0.001 | < 0.001 | < 0.001 | < 0.001 | < 0.001 |
+| recommended against its Invariant asinh member | −2.74 % | −2.34 % | −1.81 % | −0.35 % | −2.18 % |
+| DM p, recommended better than that member | < 0.001 | < 0.001 | < 0.001 | 0.20 | < 0.001 |
+| with standardised asinh against `lago()` | −4.29 % | −3.25 % | −3.10 % | −2.95 % | −2.19 % |
+| recommended against the one with standardised asinh | +0.09 % | −0.04 % | −0.02 % | −0.06 % | +0.06 % |
+| DM p, recommended better / standardised better | 0.95 / 0.047 | 0.15 / 0.85 | 0.31 / 0.69 | 0.057 / 0.94 | 0.94 / 0.057 |
+| the defaults against `lago()` | −0.26 % | +0.93 % | +0.25 % | −1.12 % | +0.76 % |
+| DM p, defaults better / `lago()` better | 0.34 / 0.66 | 0.93 / 0.069 | 0.69 / 0.31 | 0.027 / 0.97 | 0.92 / 0.077 |
+
+RMSE, EUR/MWh: `lago()` 3.313 / 5.118 / 11.325 / 16.044 / 6.235, recommended 3.221 / 4.976 / 11.036 / 15.801 / 6.166, with
+standardised asinh 3.217 / 4.974 / 11.014 / 15.795 / 6.159, defaults 3.333 / 5.246 / 11.482 / 16.162 / 6.343 (NP, PJM, FR, BE, DE).
+
+- **The recommended settings beat the paper's LEAR in every market**, by 2.1 to 4.2 % of the MAE (DM p 3.2e-4 in DE, below 1e-7
+  elsewhere). The average of the four VSTs has a lower MAE than its Invariant asinh member alone in all five markets, significantly
+  in four (BE p 0.20). Each ensemble is the library's `AverageEnsemble`, which on every key equals `np.mean` of its four members to the
+  bit.
+- **With the standardised asinh instead** the average is within 0.1 % of the recommended one in every market, significantly better
+  only in NP (p 0.047). Of the two asinh members alone, the Invariant's MAE is +0.45 / −0.05 / +0.01 / −0.19 / +0.37 % against the
+  standardised one's (NP, PJM, FR, BE, DE). The recommended member is the Invariant because the research measured the average with
+  it, not because this benchmark prefers it.
+- **The defaults are within about 1 % of `lago()`**, better in NP and BE, worse in PJM, FR and DE, significantly only in BE (p
+  0.027): they have BIC and the window average but train to D-1, which costs LEAR 1.4 to 2.1 % on this benchmark (above). With an
+  information set, `newest_target="published"` gets it back.
+- The recommended settings were chosen on recent DE-LU and AT data; this benchmark had no say in them, so this is an out-of-sample
+  check on older, other markets, not a tuning result.
+
+## Cost
+
+Core-seconds (user and system time of a run and its pool) per market over the 728 issue days, numba kernels:
+
+| Model | NP | PJM | FR | BE | DE |
+|---|---|---|---|---|---|
+| `lago()` (AIC, `"cd"`) | 5,686 | 6,428 | 6,332 | 6,429 | 6,373 |
+| `lago()` with `criterion="bic"`, `solver="lars"` | 5,064 | 5,262 | 4,983 | 4,932 | 5,142 |
+| the defaults | 5,086 | 5,293 | 4,988 | 5,095 | 5,348 |
+| the recommended four (Invariant asinh + mlog + poly + npit) | 21,813 | 22,254 | 21,603 | 21,720 | 22,505 |
+| — of which the Invariant asinh member | 5,061 | 5,312 | 4,962 | 5,003 | 5,298 |
+| Ridge, T3's settings | 7,686 | 9,726 | 9,601 | 10,327 | 7,058 |
+
+With 8 processes a market's `lago()` takes 12 to 15 minutes of wall-clock time, the recommended members about 11 to 15 minutes
+each. N-PIT's member is the dearest of the four (about 5,900 core-seconds: its fit sorts every column).
+
+The numpy kernels take about 9 to 13 times as long (measured on 28 issue days of `lago()`: 53,000 to 86,000 core-seconds a market,
+extrapolated).

@@ -24,7 +24,7 @@ Rules to know before using the library:
 - **Significance.** `report.tests(benchmark=...)` compares each model with a benchmark on the keys the pair shares and prints `n_days`, `n_forecasts` and the number of models `m` behind its Holm correction. `report.mcs()` and `report.ranks()` run on the keys all models share. A per-hour DM test (`by="hour"`) is descriptive, never a verdict, and one test year resolves differences of about 5 % of the MAE.
 - **YAML.** `DataPipeline`, `ModelPipeline` and `Workflow` have `save(path)` and `load(path)`. `save()` writes the ENTSO-E key as `${ENTSOE_API_KEY}` and `load()` expands it from the environment. Pass `include_secrets=True` only for files you never commit. Callable predictors cannot be saved (`save()` raises `TypeError`), so use `{horizon}` templates; a module-level function of `ctx` is saved by its import path. An unregistered class name raises on load.
 - **Custom components** must be registered in `COMPONENT_REGISTRY` to load from YAML, see the Extending page.
-- **Examples.** Runnable scripts are in `examples/` and need `ENTSOE_API_KEY` in the environment. Each has a `main()` that takes its date ranges and, if it writes files, an output directory. Worked snippets are on the two Examples pages.
+- **Examples.** Runnable scripts are in `examples/` and need `ENTSOE_API_KEY` in the environment, except `lear_lago.py` (LEAR on the Lago benchmark, downloaded from Zenodo). Each has a `main()` that takes its date ranges and, if it writes files, an output directory. Worked snippets are on the two Examples pages.
 
 ## Getting started
 
@@ -95,9 +95,10 @@ Rules to know before using the library:
 - [OLSModel](docs/src/content/docs/models/ols.mdx): ordinary least squares
 - [LassoCVModel](docs/src/content/docs/models/lasso.mdx): Lasso with cross-validated regularization
 - [RidgeModel](docs/src/content/docs/models/ridge.mdx): ridge regression whose penalty is chosen on every fit by leave-one-out from a grid
-- [LEARModel](docs/src/content/docs/models/lear.mdx): LEAR (Lago et al. 2021), a Lasso whose penalty is chosen by AIC or BIC on the LARS path, refitted exactly or by Lago's coordinate descent, or by blocked 5-fold cross-validation (`criterion="cv"`, old `LassoLarsCV`, no refit); `LEARModel.lago()` reproduces the original epftoolbox's forecasts
+- [LEARModel](docs/src/content/docs/models/lear.mdx): LEAR (Lago et al. 2021), a Lasso whose penalty is chosen by AIC or BIC on the LARS path, refitted exactly or by Lago's coordinate descent, or by blocked 5-fold cross-validation (`criterion="cv"`, old `LassoLarsCV`, no refit); `LEARModel.lago()` reproduces the original epftoolbox's forecasts; the recommended settings are an `AverageEnsemble` of four `LEARModel`s, one per VST
+- [Benchmark Reproduction](docs/src/content/docs/models/lear-benchmark.mdx): LEAR and Ridge on the five Lago et al. (2021) datasets, against the original epftoolbox and the published forecasts, and the recommended settings against `lago()`, on identical keys
 - [NaiveModel](docs/src/content/docs/models/naive.mdx): one column's value on the issue row, such as a published forecast taken as a benchmark; with an information set, no forecast where the value wasn't out at the issue time
-- [Scalers and VSTs](docs/src/content/docs/models/scalers.mdx): standard scaling and variance-stabilising transformations (asinh, N-PIT) for spiky prices
+- [Scalers and VSTs](docs/src/content/docs/models/scalers.mdx): standard scaling and variance-stabilising transformations (asinh, mirror-log, polynomial, N-PIT) for spiky prices
 
 ## Evaluators
 

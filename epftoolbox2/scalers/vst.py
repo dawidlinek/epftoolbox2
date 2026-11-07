@@ -181,6 +181,35 @@ class _VSTScaler(BaseScaler):
         return float(restored) if np.ndim(restored) == 0 else restored
 
 
+def _median_mad(values: np.ndarray) -> Tuple[float, float]:
+    """The median and MAD / 0.6745 of a column's finite training values, which normalise it before asinh, mirror-log and
+    polynomial VSTs: ``x = (value - median) / scale``.
+
+    If the MAD is 0 (more than half of the values are equal) the sample standard deviation is the scale, and 1.0 if that is 0
+    too, or at most rounding noise (``scalers.base.CONSTANT_STD_RTOL``).
+    """
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 0.0, 1.0
+    center = float(np.median(values))
+    scale = float(np.median(np.abs(values - center))) / _Z75
+    if not scale > 0:
+        scale = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+        if not scale > 0 or is_constant(values):
+            scale = 1.0
+    return center, scale
+
+
+def _positive(name: str, value: Any, owner: str) -> float:
+    """A finite positive real parameter of a VST, as a float."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{owner}'s {name} must be a positive number, got {value!r}")
+    value = float(value)
+    if not (np.isfinite(value) and value > 0):
+        raise ValueError(f"{owner}'s {name} must be a finite positive number, got {value!r}")
+    return value
+
+
 class AsinhScaler(_VSTScaler):
     """Median/MAD normalisation followed by asinh, then standardisation; with ``standardise=False`` epftoolbox's
     "Invariant" scaler.
@@ -195,16 +224,7 @@ class AsinhScaler(_VSTScaler):
     name = "asinh"
 
     def _fit(self, values: np.ndarray) -> Tuple[float, float]:
-        values = values[np.isfinite(values)]
-        if values.size == 0:
-            return 0.0, 1.0
-        center = float(np.median(values))
-        scale = float(np.median(np.abs(values - center))) / _Z75
-        if not scale > 0:
-            scale = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
-            if not scale > 0 or is_constant(values):
-                scale = 1.0
-        return center, scale
+        return _median_mad(values)
 
     def _forward(self, params: Tuple[float, float], x: np.ndarray) -> np.ndarray:
         center, scale = params
@@ -213,6 +233,110 @@ class AsinhScaler(_VSTScaler):
     def _backward(self, params: Tuple[float, float], z: np.ndarray) -> np.ndarray:
         center, scale = params
         return center + scale * np.sinh(z)
+
+
+class MirrorLogScaler(_VSTScaler):
+    """Median/MAD normalisation followed by the mirror-log transformation, then standardisation.
+
+    On the normalised ``x = (value - median) / (MAD / 0.6745)``, normalised as by ``AsinhScaler``, Uniejewski, Weron & Ziel
+    (2018) define ``mlog(x) = sgn(x) * (log(|x| + 1/c) + log(c))``, which is ``sgn(x) * log(1 + c * |x|)``; it is computed in that
+    form (``log1p``, and the inverse ``sgn(z) * expm1(|z|) / c``), so values near the median keep their last digits. Odd,
+    linear with slope ``c`` near the median and logarithmic for spikes, so negative prices are fine; strictly increasing, with
+    an inverse defined for every z. ``c = 1/3`` is the paper's suggestion.
+
+    Args:
+        apply_to: As for every VST: ``"all"``, ``"target"`` or a list of glob patterns of predictor names.
+        c: Keyword-only. The transformation's ``c``, a positive number. Left out of ``get_params`` at its default.
+        standardise: Keyword-only. As for every VST.
+    """
+
+    name = "mlog"
+    DEFAULT_C = 1.0 / 3.0
+
+    def __init__(self, apply_to: Union[str, List[str]] = "all", *, c: float = 1 / 3, standardise: bool = True):
+        super().__init__(apply_to, standardise=standardise)
+        self.c = _positive("c", c, type(self).__name__)
+
+    def get_params(self) -> Dict[str, Any]:
+        params = super().get_params()
+        if self.c != self.DEFAULT_C:
+            params["c"] = self.c
+        return params
+
+    def _fit(self, values: np.ndarray) -> Tuple[float, float]:
+        return _median_mad(values)
+
+    def _forward(self, params: Tuple[float, float], x: np.ndarray) -> np.ndarray:
+        center, scale = params
+        x = (x - center) / scale
+        return np.copysign(np.log1p(self.c * np.abs(x)), x)
+
+    def _backward(self, params: Tuple[float, float], z: np.ndarray) -> np.ndarray:
+        center, scale = params
+        return center + scale * np.copysign(np.expm1(np.abs(z)) / self.c, z)
+
+
+class PolyScaler(_VSTScaler):
+    """Median/MAD normalisation followed by the polynomial transformation, then standardisation.
+
+    On the normalised ``x = (value - median) / (MAD / 0.6745)``, normalised as by ``AsinhScaler``, Uniejewski, Weron & Ziel
+    (2018) define ``poly(x) = sgn(x) * ((|x| + a)^lam - b)`` with ``a = (c/lam)^(1/(lam-1))`` and ``b = (c/lam)^(lam/(lam-1))``
+    (so ``b = a^lam`` and ``poly(0) = 0``), a Box-Cox generalisation for ``lam > 0``. It is computed as
+    ``sgn(x) * b * expm1(lam * log1p(|x| / a))``, the same function, and inverted as ``sgn(z) * a * expm1(log1p(|z| / b) / lam)``,
+    the paper's ``sgn(z) * ((|z| + b)^(1/lam) - a)``, so values near the median keep their last digits. Odd, linear with slope
+    ``c`` near the median and growing like ``|x|^lam`` for spikes; strictly increasing, with an inverse defined for every z.
+    ``lam = 0.125`` and ``c = 0.05`` are the paper's.
+
+    Args:
+        apply_to: As for every VST: ``"all"``, ``"target"`` or a list of glob patterns of predictor names.
+        lam: Keyword-only. The power ``lam``, a positive number other than 1. Left out of ``get_params`` at its default.
+        c: Keyword-only. The slope ``c`` at the median, a positive number. Left out of ``get_params`` at its default.
+        standardise: Keyword-only. As for every VST.
+    """
+
+    name = "poly"
+    DEFAULT_LAM = 0.125
+    DEFAULT_C = 0.05
+
+    def __init__(
+        self,
+        apply_to: Union[str, List[str]] = "all",
+        *,
+        lam: float = 0.125,
+        c: float = 0.05,
+        standardise: bool = True,
+    ):
+        super().__init__(apply_to, standardise=standardise)
+        owner = type(self).__name__
+        self.lam = _positive("lam", lam, owner)
+        if self.lam == 1.0:
+            raise ValueError(f"{owner}'s lam must not be 1, where (c/lam)^(1/(lam-1)) is undefined")
+        self.c = _positive("c", c, owner)
+        ratio = self.c / self.lam
+        self._a = ratio ** (1.0 / (self.lam - 1.0))
+        self._b = ratio ** (self.lam / (self.lam - 1.0))
+        if not (np.isfinite(self._a) and np.isfinite(self._b) and self._a > 0 and self._b > 0):
+            raise ValueError(f"{owner}(lam={self.lam!r}, c={self.c!r}) has no finite shift (c/lam)^(1/(lam-1))")
+
+    def get_params(self) -> Dict[str, Any]:
+        params = super().get_params()
+        if self.lam != self.DEFAULT_LAM:
+            params["lam"] = self.lam
+        if self.c != self.DEFAULT_C:
+            params["c"] = self.c
+        return params
+
+    def _fit(self, values: np.ndarray) -> Tuple[float, float]:
+        return _median_mad(values)
+
+    def _forward(self, params: Tuple[float, float], x: np.ndarray) -> np.ndarray:
+        center, scale = params
+        x = (x - center) / scale
+        return np.copysign(self._b * np.expm1(self.lam * np.log1p(np.abs(x) / self._a)), x)
+
+    def _backward(self, params: Tuple[float, float], z: np.ndarray) -> np.ndarray:
+        center, scale = params
+        return center + scale * np.copysign(self._a * np.expm1(np.log1p(np.abs(z) / self._b) / self.lam), z)
 
 
 class NPITScaler(_VSTScaler):

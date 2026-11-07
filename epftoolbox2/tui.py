@@ -718,11 +718,11 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "scaler",
-            "description": "Scaling: standard, or a variance-stabilising transformation (asinh, npit)",
+            "description": "Scaling: standard, or a variance-stabilising transformation (asinh, mlog, poly, npit)",
             "required": False,
             "default": "standard",
             "kind": "select",
-            "choices": ["standard", "asinh", "npit"],
+            "choices": ["standard", "asinh", "mlog", "poly", "npit"],
         },
         {
             "name": "newest_target",
@@ -776,11 +776,11 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "scaler",
-            "description": "Scaling: standard, or a variance-stabilising transformation (asinh, npit)",
+            "description": "Scaling: standard, or a variance-stabilising transformation (asinh, mlog, poly, npit)",
             "required": False,
             "default": "standard",
             "kind": "select",
-            "choices": ["standard", "asinh", "npit"],
+            "choices": ["standard", "asinh", "mlog", "poly", "npit"],
         },
         {
             "name": "newest_target",
@@ -833,11 +833,11 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "scaler",
-            "description": "Scaling: standard, or a variance-stabilising transformation (asinh, npit)",
+            "description": "Scaling: standard, or a variance-stabilising transformation (asinh, mlog, poly, npit)",
             "required": False,
             "default": "standard",
             "kind": "select",
-            "choices": ["standard", "asinh", "npit"],
+            "choices": ["standard", "asinh", "mlog", "poly", "npit"],
         },
         {
             "name": "newest_target",
@@ -899,11 +899,11 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "scaler",
-            "description": "Scaling: asinh (median/MAD asinh, standardised), standard, or npit",
+            "description": "Scaling: asinh (median/MAD asinh, standardised), standard, mlog, poly or npit",
             "required": False,
             "default": "asinh",
             "kind": "select",
-            "choices": ["asinh", "standard", "npit"],
+            "choices": ["asinh", "standard", "mlog", "poly", "npit"],
         },
         {
             "name": "newest_target",

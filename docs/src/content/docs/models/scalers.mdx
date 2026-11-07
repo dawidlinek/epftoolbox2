@@ -1,18 +1,20 @@
 ---
 title: Scalers and VSTs
-description: Standard scaling and variance-stabilising transformations (asinh, N-PIT) for spiky prices
+description: Standard scaling and variance-stabilising transformations (asinh, mirror-log, polynomial, N-PIT) for spiky prices
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Every model scales each task's data before the fit and maps the prediction back afterwards. The model's `scaler` parameter chooses how. Besides plain standardisation there are two variance-stabilising transformations (VSTs), which damp price spikes and work with negative prices.
+Every model scales each task's data before the fit and maps the prediction back afterwards. The model's `scaler` parameter chooses how. Besides plain standardisation there are four variance-stabilising transformations (VSTs), which damp price spikes and work with negative prices.
 
 ```python
-from epftoolbox2.models import OLSModel, LassoCVModel
+from epftoolbox2.models import OLSModel, LassoCVModel, RidgeModel
 
 ols = OLSModel(predictors, name="OLS")                            # scaler="standard" (default)
 ols_asinh = OLSModel(predictors, name="OLS asinh", scaler="asinh")
 lasso_npit = LassoCVModel(predictors, name="Lasso N-PIT", scaler="npit")
+ridge_mlog = RidgeModel(predictors, name="Ridge mirror-log", scaler="mlog")
+ridge_poly = RidgeModel(predictors, name="Ridge poly", scaler={"name": "poly", "params": {"lam": 0.25}})
 
 # With parameters: transform only the target and the price lags
 lasso_price_vst = LassoCVModel(
@@ -30,19 +32,41 @@ A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `
 |---|---|---|
 | `"standard"` | `StandardScaler` | `(x - mean) / sd` |
 | `"asinh"` | `AsinhScaler` | `asinh((x - median) / (MAD / 0.6745))`, then standardised (not with `standardise=False`) |
+| `"mlog"` | `MirrorLogScaler` | `sgn(u) · (log(|u| + 1/c) + log c)` with `u = (x - median) / (MAD / 0.6745)`, c = 1/3, then standardised |
+| `"poly"` | `PolyScaler` | `sgn(u) · ((|u| + a)^λ - b)`, `a = (c/λ)^(1/(λ-1))`, `b = (c/λ)^(λ/(λ-1))`, the same `u`, λ = 0.125, c = 0.05, then standardised |
 | `"npit"` | `NPITScaler` | `Φ⁻¹(F̂(x))` with `F̂` the empirical CDF of the training rows, then standardised |
 
 - **`AsinhScaler`** is, with `standardise=False`, the "Invariant" scaler of epftoolbox's LEAR (Lago et al., 2021): median/MAD normalisation (the MAD divided by 0.6745 estimates the standard deviation of normal data), then the inverse hyperbolic sine. Near the median it is almost linear. For spikes it grows like a logarithm, and it is symmetric, so negative prices are fine. If the MAD is 0 (more than half of the training values are equal, e.g. a price floor) the sample standard deviation is used, and 1.0 if that is 0 too, or [only rounding noise](#constant-columns). The inverse is `median + scale · sinh(z)`.
+- **`MirrorLogScaler`** and **`PolyScaler`** are the mirror-log and the polynomial transformation of Uniejewski, Weron & Ziel
+  (2018), on the median/MAD normalisation of `AsinhScaler` (with its fallback for a MAD of 0). Both are odd, zero at the median with
+  slope `c` there, and strictly increasing, with an inverse defined for every value: the mirror-log grows like a logarithm for
+  spikes, `log(1 + c·|u|)`, the polynomial like `|u|^λ`, a Box-Cox generalisation (λ > 0, not 1). The defaults are the paper's
+  (mirror-log c = 1/3; polynomial λ = 1/8, c = 1/20). They are computed in a form that keeps the last digits near the median
+  (`log1p`, `expm1`), equal to the paper's formulas within 4e-15 and inverted within 1e-14. In the forecasting plan's research
+  (LEAR on DE and AT, 2022–26) each beat the Invariant asinh in DE's 2022 crisis (−2.3 and −2.4 % MAE) and was slightly worse in
+  2023–25 (not significantly in DE, significantly in AT); averaged with asinh and N-PIT they are part of the
+  [recommended LEAR](/epftoolbox2/models/lear/#recommended-settings).
 - **`NPITScaler`** is the normal probability integral transform. The i-th smallest of n training values gets `F̂ = i / (n + 1)` (tied values share their mid-rank), so every value maps to a finite normal quantile. Between training values the map is linear. Values outside the training range are clamped to the extreme knots: a transformed predictor can't exceed the training range, and **a forecast can't go below the training window's lowest or above its highest price**.
 
 ## Parameters
 
-`AsinhScaler` and `NPITScaler` take two:
+`AsinhScaler`, `MirrorLogScaler`, `PolyScaler` and `NPITScaler` take these two:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `apply_to` | str or list | `"all"` | Which predictors get the VST besides the target: `"all"` (every non-binary predictor), `"target"` (none, predictors are standardised), or a list of glob patterns matched against the expanded predictor names, e.g. `["price", "price_d-*"]` |
 | `standardise` | bool | `True` | Keyword-only. Standardise each column after the VST (mean 0, standard deviation 1 on the training rows). `False` leaves that out: a transformed column is the VST alone, and a non-binary predictor that `apply_to` doesn't select stays as it is |
+
+`MirrorLogScaler` takes `c` and `PolyScaler` `lam` and `c` too, keyword-only:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `c` (`MirrorLogScaler`) | float | `1/3` | The mirror-log's `c`, positive: its slope at the median, and `1/c` the shift inside the logarithm |
+| `lam` (`PolyScaler`) | float | `0.125` | The power λ, positive and not 1 (below 1 compresses spikes) |
+| `c` (`PolyScaler`) | float | `0.05` | The slope at the median, positive |
+
+A parameter at its default is left out of the scaler's parameters, as `standardise=True` is, so `"mlog"` and
+`{"name": "mlog", "params": {"c": 1/3}}` are one scaler in a manifest and in YAML.
 
 `AsinhScaler(standardise=False)` is epftoolbox's Invariant scaler exactly, which [`LEARModel.lago()`](/epftoolbox2/models/lear/#lago-et-al-2021-exactly) uses:
 `scaler={"name": "asinh", "params": {"standardise": False}}`. Its MAD is statsmodels' `mad` (epftoolbox's) to the last bit or one
@@ -65,7 +89,7 @@ are `"standard"`, in a manifest and in YAML.
 - **The target** always gets the VST.
 - **Predictors** follow `apply_to`. The default `"all"` matches epftoolbox's LEAR, which applies the Invariant scaler to every input except the day-of-week dummies. The VST papers transform the price series. `apply_to=["price", "price_d-*"]` does that and only standardises exogenous inputs such as load or weather. If no pattern matches any predictor, a warning says that only the target is transformed.
 - **Binary 0/1 predictors** (dummies) are never changed, whatever `apply_to` says. The same rule as for `StandardScaler` decides what is binary: see [Binary columns](#binary-columns).
-- Every column gets its own parameters (median/MAD or empirical CDF), estimated from the task's training rows.
+- Every column gets its own parameters (median/MAD, or the empirical CDF for N-PIT), estimated from the task's training rows.
 - A predictor that is constant in the training rows is set to 0 instead of being divided by a standard deviation of about 1e-16. See [Constant columns](#constant-columns).
 - After the VST every transformed column, and the target, is standardised, so models always receive centred data with unit variance. This is why `OLSModel`, which fits without an intercept, stays valid. epftoolbox's LEAR skips this step. An affine rescaling doesn't change a least-squares fit with an intercept, but it does change the relative scale of the inputs that a Lasso penalty sees, so LassoCV results won't match LEAR's exactly.
 
@@ -86,7 +110,7 @@ rows (those of its period, horizon, refit day and list), not on the first test d
 
 A column whose standard deviation is zero can't be divided by it, so its scale is 1.0. The same goes for a column that is constant apart from rounding noise: one whose standard deviation is at or below 1e-12 of its largest absolute value is treated as constant. Floating-point arithmetic gives a standard deviation of about 1e-16, not 0, for such a column, for example 0.3 with rounding error, or `0.3` repeated 30 times, and dividing by it would turn the noise into a regressor: a test row that differs a little from the constant would reach the model as a value of 1e13 or more.
 
-The rule is the same for every scaler and for the target, which is centred and divided by 1.0 in that case. For `AsinhScaler` and `NPITScaler` it applies to the column as it is before the transformation, which is then fitted as for an exactly constant column. A constant predictor has training values of exactly 0 (missing values stay missing), so the model gives it the coefficient 0 whatever its solver does with a column of noise of about 1e-15. Its test row is centred and divided by 1.0 as usual and is not set to 0. An all-zero column and a column with fewer than two values keep scale 1.0, as before. Any other column is scaled exactly as before. A column with a real spread, however small next to its level (a standard deviation of 1e-9 of its largest value, say), is scaled normally.
+The rule is the same for every scaler and for the target, which is centred and divided by 1.0 in that case. For the four VSTs it applies to the column as it is before the transformation, which is then fitted as for an exactly constant column. A constant predictor has training values of exactly 0 (missing values stay missing), so the model gives it the coefficient 0 whatever its solver does with a column of noise of about 1e-15. Its test row is centred and divided by 1.0 as usual and is not set to 0. An all-zero column and a column with fewer than two values keep scale 1.0, as before. Any other column is scaled exactly as before. A column with a real spread, however small next to its level (a standard deviation of 1e-9 of its largest value, say), is scaled normally.
 
 ## No look-ahead
 
@@ -94,7 +118,7 @@ A fresh scaler is fitted for every (hour, horizon, run day) task on that task's 
 
 ## Back-transformed forecasts are median-type
 
-The model is fitted to the transformed target, and its prediction is mapped back with the inverse VST. The inverse is monotone but non-linear, so it maps a median to a median but not a mean to a mean (`E[sinh(Z)] ≠ sinh(E[Z])`). A model fitted to the transformed target therefore gives, after back-transformation, roughly the **conditional median** price, not the mean. That suits MAE, which the median minimises. RMSE is minimised by the mean, and with skewed, spiky prices the back-transformed forecast can be biased for it. No bias correction is applied.
+The model is fitted to the transformed target, and its prediction is mapped back with the inverse VST. Every inverse here is monotone but non-linear, so it maps a median to a median but not a mean to a mean (`E[sinh(Z)] ≠ sinh(E[Z])`). A model fitted to the transformed target therefore gives, after back-transformation, roughly the **conditional median** price, not the mean. That suits MAE, which the median minimises. RMSE is minimised by the mean, and with skewed, spiky prices the back-transformed forecast can be biased for it. No bias correction is applied.
 
 <Aside type="caution">
   Result files are named after the model and resumed by (hour, horizon, day) only. Give each scaler variant its own `name`, otherwise a run with `save_dir` reuses forecasts made with the other scaler.
@@ -122,12 +146,19 @@ models:
 
 A model without a `scaler` entry uses `standard`.
 
+## Averaging transformations
+
+No single VST wins in every year. An average of models that differ only in their scaler is an
+[`AverageEnsemble`](/epftoolbox2/model-pipeline/ensembles/) of them, as the [recommended LEAR](/epftoolbox2/models/lear/#recommended-settings)
+does with Lago's Invariant asinh (`standardise=False`), mirror-log, polynomial and N-PIT: one model per scaler, each with its own `name`, averaged on the forecasts all of
+them have. There is no list of scalers inside one model.
+
 ## Not implemented
 
-The shifted and mirror logarithm, Box-Cox, the parametrised asinh of Uniejewski (2026) and averaging forecasts across transformations are not available yet.
+The shifted logarithm, Box-Cox and the parametrised asinh of Uniejewski (2026) are not available yet.
 
 ## References
 
-- B. Uniejewski, R. Weron, F. Ziel (2018). Variance stabilizing transformations for electricity spot price forecasting. *IEEE Transactions on Power Systems* 33(2). Compares 16 transformations on 12 markets. The normal PIT performed best.
+- B. Uniejewski, R. Weron, F. Ziel (2018). Variance stabilizing transformations for electricity spot price forecasting. *IEEE Transactions on Power Systems* 33(2). Compares 16 transformations on 12 markets, the mirror-log and polynomial ones among them, after a median/MAD normalisation. The normal PIT performed best.
 - B. Uniejewski (2026). Variance stabilizing transformations for electricity price forecasting in periods of increased volatility. *Electric Power Systems Research* 257, 112992. [arXiv:2511.13603](https://arxiv.org/abs/2511.13603). On German, Spanish and French data from 2015–2024, VSTs reduced LEAR errors by up to 14.6%.
 - J. Lago, G. Marcjasz, B. De Schutter, R. Weron (2021). Forecasting day-ahead electricity prices: A review of state-of-the-art algorithms, best practices and an open-access benchmark. *Applied Energy* 293.

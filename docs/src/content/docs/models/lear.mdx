@@ -1,6 +1,6 @@
 ---
 title: LEARModel
-description: LEAR, the Lasso of Lago et al. (2021) with its penalty chosen by AIC, BIC or blocked cross-validation, and LEARModel.lago(), the original exactly
+description: LEAR, the Lasso of Lago et al. (2021) with its penalty chosen by AIC, BIC or blocked cross-validation; LEARModel.lago(), the original exactly; and the recommended settings, an average over four VSTs
 ---
 
 LEAR (Lasso-estimated autoregressive) is the linear benchmark of Lago, Marcjasz, De Schutter & Weron (2021), *Forecasting
@@ -23,6 +23,65 @@ The defaults are the recommended single model of the forecasting plan: BIC, the 
 training windows, `[56, 84, 728, "expanding"]`. They need no information set: the newest target is D-1, as for every model by default.
 With an issue time, `newest_target="published"` also trains on the issue day's prices once they are published.
 
+## Recommended settings
+
+Two LEAR settings are documented: the paper's, to reproduce it, and a recommended one for new work. The first is one call; the second
+is four models that differ only in their scaler (Lago's Invariant asinh, mirror-log, polynomial and N-PIT), and their average:
+
+```python
+from epftoolbox2.ensembles import AverageEnsemble
+from epftoolbox2.information_set import Availability, InformationSet
+from epftoolbox2.models import LEARModel
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.presets import lear_predictors
+
+lago = LEARModel.lago(["load_forecast_amprion", "wind_solar_forecast"])          # Lago et al. (2021), exactly
+
+lear_x = lear_predictors(["load_forecast_amprion", "wind_solar_forecast"])
+information_set = InformationSet(
+    "11:45", "Europe/Brussels", rules={"price": Availability.published("13:00", 1, timezone="Etc/GMT-1")}
+)
+pipeline = ModelPipeline(information_set=information_set)
+vsts = {"asinh": {"name": "asinh", "params": {"standardise": False}}, "mlog": "mlog", "poly": "poly", "npit": "npit"}
+for vst, scaler in vsts.items():                                                 # recommended
+    pipeline.add_model(LEARModel(predictors=lear_x, training_window=[56, 84, 728, "expanding"], criterion="bic",
+                                 scaler=scaler, newest_target="published", name=f"LEAR_{vst}"))
+pipeline.add_ensemble(AverageEnsemble(members=[f"LEAR_{v}" for v in vsts], name="LEAR"))
+```
+
+`lago()` is [below](#lago-et-al-2021-exactly). The recommended "LEAR" is the average of the four members on the forecasts all of
+them have (an [ensemble](/epftoolbox2/model-pipeline/ensembles/), which counts a key one member lacks as `member_missing` and never
+averages the other three there); each member is an ordinary `LEARModel` with its own results file. It costs four LEAR fits per
+forecast. [`examples/lear_lago.py`](https://github.com/dawidlinek/epftoolbox2/blob/main/examples/lear_lago.py) runs both on a
+benchmark market. What each setting rests on, from the forecasting plan's research on recent data (LEAR on DE-LU and AT day-ahead
+prices, 2022 to 2026, out of sample, one day ahead):
+
+- **The average of four VSTs** (Lago's Invariant asinh, `{"name": "asinh", "params": {"standardise": False}}`,
+  [mirror-log, polynomial](/epftoolbox2/models/scalers/) and N-PIT, the last three standardised after the transform). No single VST
+  held up in every year: mirror-log and polynomial won the 2022 crisis, N-PIT 2024 and 2025, and one picked on past years ranked 9th
+  of 11 the next. Their average was DM-better than the Invariant asinh alone in 5 of 5 DE years (−1.5 % MAE over the period) and
+  never significantly worse in AT. The research measured this average with the Invariant asinh, not the library's standardised
+  `AsinhScaler`, which forecasts differently (against the Invariant, DM-better in 2022 and DM-worse in 2024 and 2026 in DE, in 2024
+  and 2025 in AT), so the first member is the Invariant.
+- **The average of four windows**, `[56, 84, 728, "expanding"]`, beat every single window in 5 of 5 DE years and 4 of 5 AT years.
+  Windows are averaged, not chosen: in AT a choice made on 2022 and 2023 took the expanding window alone and lost 1.2 % on 2024 to
+  2026.
+- **BIC** was better than AIC (the paper's) in 5 of 5 DE years and 3 of 5 AT years, and tied with blocked 5-fold CV (+0.6 % for CV
+  in DE) at a fraction of the cost: 1/4.7 there, about 1/1.8 of a run here (see [Blocked cross-validation](#blocked-cross-validation)).
+- **`newest_target="published"`** trains on the issue day's prices, published at 13:00 the day before: −1.1 % (DE) and −1.0 % (AT)
+  MAE of the window average over 2022 to 2026, significant in every year. It needs an information set, which is why it isn't the
+  default.
+- **`refit=None`**: a fit per forecast. `refit="auto"` was within 0.04 % (DE) and 0.14 % (AT) of it at about half the compute, but
+  that stack (four VSTs, published, auto) wasn't run.
+- **Together**: chosen on 2022 and 2023 and tested on 2024 to 2026, this stack had a 2.0 % lower MAE in DE than the same windows
+  and BIC with Lago's Invariant asinh alone and the D-1 cut (DM p 5e-7, significant in each year; another choice rule picked another
+  VST average, −1.8 %), of which the newest target alone is −0.7 to −1.0 % a year; in AT, with the windows averaged as here, −1.1 %
+  (p 0.004).
+
+The benchmark of the paper is for reproduction, not for choosing settings (its DE file's target-day wind and solar forecast may be
+later than the issue time). [On it](/epftoolbox2/models/lear-benchmark/) the recommended settings and the defaults are measured
+against `lago()` all the same.
+
 ## Parameters
 
 | Parameter | Type | Default | Description |
@@ -31,7 +90,7 @@ With an issue time, `newest_target="published"` also trains on the issue day's p
 | `training_window` | int, `"expanding"` or list | `(56, 84, 728, "expanding")` | Days of training rows, every row from the frame's first date, or a list of windows averaged inside the model with equal weights ([Training Windows](/epftoolbox2/model-pipeline/training-windows/)). A list is stored as a list |
 | `criterion` | str | `"bic"` | How the penalty is chosen: `"bic"` or `"aic"` (the paper's) on the LARS path ([The fit](#the-fit)), or `"cv"`, five blocked folds of the training rows ([Blocked cross-validation](#blocked-cross-validation)) |
 | `solver` | str | `"lars"` | The Lasso at that penalty: `"lars"` solves it exactly, `"cd"` is the paper's coordinate descent, which stops after at most 2500 sweeps. `"cv"` takes `"lars"` only (it reads the path, with no refit); `"cd"` with it raises |
-| `scaler` | str, dict or scaler | `"asinh"` | Keyword-only. `"asinh"`, `"standard"` or `"npit"`, or `{"name": ..., "params": {...}}`; `{"name": "asinh", "params": {"standardise": False}}` is the paper's Invariant scaler. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
+| `scaler` | str, dict or scaler | `"asinh"` | Keyword-only. `"asinh"`, `"standard"`, `"mlog"`, `"poly"` or `"npit"`, or `{"name": ..., "params": {...}}`; `{"name": "asinh", "params": {"standardise": False}}` is the paper's Invariant scaler. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
 | `name` | str | `"LEAR"` | Keyword-only. Display name for reports |
 | `newest_target` | str | `"d-1"` | Keyword-only. `"d-1"`, or `"published"`, every target its rule says is known by the issue time, which needs an information set. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target) |
 | `refit` | str or None | `None` | Keyword-only. `None` fits every forecast on its own, `"kD"` once every k days and `"kMS"` on the first of every k-th month, on a fixed calendar; `"auto"` fits the windows of up to 84 days daily and the longer ones on Mondays. See [Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) |
@@ -227,8 +286,9 @@ published that far ahead can give.
 | 1456 | 1.990 / 1.990 | 3.098 / 3.095 | 4.387 / 4.378 | 6.645 / 6.634 | 3.989 / 3.988 |
 | average | 1.728 / 1.738 | 3.032 / 3.013 | 3.990 / 3.980 | 6.278 / 6.140 | 3.570 / 3.609 |
 
-  Lago et al.'s DM test of the averages: the published forecasts are better in BE (p < 0.001) and PJM (p 0.066), `lago()`'s in DE
-  (p 0.065), neither in NP and FR. 728 days × 24 hours in every cell, on the same keys as the published file.
+  Lago et al.'s DM test of the averages: the published forecasts are better in BE (p < 0.001); the differences are not significant at
+  5 % in PJM (published lower, p 0.066) and DE (`lago()` lower, p 0.065), nor in NP and FR. 728 days × 24 hours in every cell, on the
+  same keys as the published file.
 - **The cost of the library's default cut.** `newest_target="d-1"` instead of `"published"` raises the average's MAE by 1.4 % (DE)
   to 2.1 % (PJM), DM p < 0.001 in every market: D's prices are known at the issue time, and only `"published"` trains on them.
 

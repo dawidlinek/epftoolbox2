@@ -217,3 +217,31 @@ def test_06_15min_forecasting(live_dir, monkeypatch, information_set_checks):
     assert_excel(live_dir / "15min_workflow_results.xlsx", models, planned)
     assert_csv(live_dir / "15min_workflow_results.csv", models, planned)
     assert sorted(p.name for p in (live_dir / "results_15min").glob("*.jsonl")) == ["lassocv.jsonl", "ols.jsonl"]
+
+
+def test_lear_lago(keyless_live_dir, monkeypatch, information_set_checks):
+    """The benchmark needs no key (Zenodo), so this one runs without ENTSOE_API_KEY; it downloads DE.csv unless the md5-checked
+    copy is cached already (EpftoolboxBenchmarkSource's cache, not the working directory's)."""
+    example = load_example("lear_lago.py", monkeypatch)
+    members = ["LEAR_asinh", "LEAR_mlog", "LEAR_poly", "LEAR_npit"]
+    models = ["LEAR_lago", *members, "LEAR"]
+    planned = 2 * 24  # two issue days, h = 1
+
+    report = example.main(market="DE", test_start="2016-01-03", test_end="2016-01-04", output_dir=keyless_live_dir)
+
+    assert_data_frame(
+        report.source_data,
+        ["price", "price_h00", "price_h23_d-6", "load_forecast_amprion_h12_d+1", "wind_solar_forecast_h12_d-6"],
+        "None",  # DSTNormalizeTransformer's 24 slots a day on the naive wall clock
+        dt.date(2012, 1, 9),
+        dt.date(2016, 1, 5),
+    )
+    assert_forecasts(report, models, planned)
+    assert_metrics(report, models, planned)
+    assert_information_set_checked(information_set_checks, ["LEAR_lago", *members], zone="Europe/Brussels")
+    predictions = report.predictions().pivot_table(index=["run_date", "hour"], columns="model", values="prediction")
+    assert (predictions["LEAR"] - predictions[members].mean(axis=1)).abs().max() < 1e-9  # the ensemble is their mean
+    assert_csv(keyless_live_dir / "lear_DE.csv", models, planned)
+    assert sorted(p.name for p in (keyless_live_dir / "results_lear_DE").glob("*.jsonl")) == sorted(
+        f"{name.lower()}.jsonl" for name in models
+    )
