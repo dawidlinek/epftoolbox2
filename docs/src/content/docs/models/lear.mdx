@@ -34,7 +34,7 @@ With an issue time, `newest_target="published"` also trains on the issue day's p
 | `scaler` | str, dict or scaler | `"asinh"` | Keyword-only. `"asinh"`, `"standard"` or `"npit"`, or `{"name": ..., "params": {...}}`; `{"name": "asinh", "params": {"standardise": False}}` is the paper's Invariant scaler. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
 | `name` | str | `"LEAR"` | Keyword-only. Display name for reports |
 | `newest_target` | str | `"d-1"` | Keyword-only. `"d-1"`, or `"published"`, every target its rule says is known by the issue time, which needs an information set. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target) |
-| `refit` | str or None | `None` | Keyword-only. `None` fits every forecast on its own, `"kD"` once every k days and `"kMS"` on the first of every k-th month, on a fixed calendar. See [Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) |
+| `refit` | str or None | `None` | Keyword-only. `None` fits every forecast on its own, `"kD"` once every k days and `"kMS"` on the first of every k-th month, on a fixed calendar; `"auto"` fits the windows of up to 84 days daily and the longer ones on Mondays. See [Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) |
 
 A saved pipeline writes `criterion` and `solver` always, and the rest as for the other models.
 
@@ -77,6 +77,9 @@ four windows and up to 7.6 in the 1456-day window (BE), and the MAE of the avera
   weekdays, where the criterion doesn't choose; a dependency among three or more columns that enters early can still decide a tie
   by the last bit.
 - **`refit=`** works: one class defines the fit and the forecast from it, so a forecast issued on D uses the fit of its refit day.
+  `refit="auto"` refits the 56- and 84-day windows daily and the longer ones on Mondays; on `lago()` over DE with
+  `newest_target="d-1"` that costs the window average 0.08 % of its MAE at 57 % of the fits and 41 % of the compute (see
+  [`refit="auto"`](/epftoolbox2/model-pipeline/time-and-calendars/#refitauto)). The recommended model keeps `refit=None`.
 
 ## Lago et al. (2021) exactly
 
@@ -136,7 +139,8 @@ report = (
 ```
 
 The data must start on the file's first day: the longest window's first training row is the issue day minus 1449 days, and it reads
-the price six days before that. PJM's frame is on `Etc/GMT+5`, where the rule above would date the evening hours of a day on the
+the price six days before that. With `refit="auto"` that window is fitted on the Monday on or before the issue day, so in DE the test
+can start on Monday 4 January 2016 at the earliest; a start on the 3rd is refused, naming the window and the day. PJM's frame is on `Etc/GMT+5`, where the rule above would date the evening hours of a day on the
 next one and train them on the day before: give the rule and the issue time on PJM's clock,
 `InformationSet("11:45", "Etc/GMT+5", rules={"price": Availability.published("13:00", 1, timezone="Etc/GMT+5")})`. The paper
 forecasts one day ahead; other horizons run, with the inputs anchored at the issue day and `x_d+{horizon}`, which only a series

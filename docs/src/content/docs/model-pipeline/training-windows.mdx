@@ -44,7 +44,8 @@ model = LassoCVModel(
   single-window run. A repeat, an empty list, a bool, a float, another string or a value below 1 raises.
 
 With `refit`, each member is fitted once per refit day, each on its own rows, and a forecast averages its members' fits of the
-same refit day. Ensembles average models; a list averages windows inside one model, so it is one name in `report()` and one file
+same refit day. With [`refit="auto"`](/epftoolbox2/model-pipeline/time-and-calendars/#refitauto) each member has its own refit day: a
+window of up to 84 days is fitted on the issue day, a longer one or `"expanding"` on the Monday on or before it. Ensembles average models; a list averages windows inside one model, so it is one name in `report()` and one file
 of results.
 
 <Aside>
