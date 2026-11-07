@@ -883,15 +883,15 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "criterion",
-            "description": "How the penalty is chosen on the LARS path: bic or aic (Lago et al.'s)",
+            "description": "How the penalty is chosen: bic or aic (Lago et al.'s) on the LARS path, or cv (5 blocked folds)",
             "required": False,
             "default": "bic",
             "kind": "select",
-            "choices": ["bic", "aic"],
+            "choices": ["bic", "aic", "cv"],
         },
         {
             "name": "solver",
-            "description": "The Lasso at that penalty: lars (exact) or cd (Lago's coordinate descent, stops after 2500 sweeps)",
+            "description": "The Lasso at that penalty: lars (exact; cv takes it) or cd (Lago's coordinate descent, 2500 sweeps)",
             "required": False,
             "default": "lars",
             "kind": "select",

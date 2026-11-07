@@ -7,6 +7,10 @@ product, which numba wouldn't speed up.
 
 The kernels are compiled with `error_model="numpy"`, so a division by zero gives inf or nan as in numpy (the step-length rules
 rely on it) instead of raising.
+
+`criterion="cv"` (`lear_fit_cv`) runs its six paths here; the blocks' sums, the folds' designs, the held-out errors and the
+choice of α* are the reference's own (`cv_stats`, `cv_folds`, `held_out_mse`, `cv_choice`): BLAS products and a few reductions,
+which numba wouldn't speed up.
 """
 
 import math
@@ -15,22 +19,33 @@ import numpy as np
 from numba import njit
 
 from ._lars import (
-    CRITERIA,
+    CV_MAX_STEPS,
     DBL_MAX,
     DEGENERATE,
     EPS,
     EQUALITY_TOLERANCE,
+    IC_CRITERIA,
+    MAX_N_ALPHAS,
     STOPS,
     TINY32,
     CdResult,
+    CvFold,
+    CvStats,
     GramStats,
     IcChoice,
     LarsPath,
     LearFit,
     _check_choices,
     _checked,
+    _cv_stats_of,
     _penalty,
+    cv_choice,
+    cv_folds,
+    cv_grid,
+    cv_stats,
+    cv_window,
     gram_stats,
+    held_out_mse,
     without_twins,
 )
 
@@ -38,6 +53,17 @@ BACKEND = "numba"
 
 __all__ = ["BACKEND", "GramStats", "LarsPath", "IcChoice", "CdResult", "LearFit", "gram_stats", "lars_path", "path_at"]
 __all__ += ["lasso_at", "ic_select", "cd_lasso", "lear_fit", "warm_up", "without_twins"]
+__all__ += [
+    "CvStats",
+    "CvFold",
+    "cv_stats",
+    "cv_folds",
+    "cv_grid",
+    "held_out_mse",
+    "cv_choice",
+    "cv_window",
+    "lear_fit_cv",
+]
 
 _jit = njit(cache=True, nogil=True, fastmath=False, error_model="numpy")
 
@@ -473,20 +499,38 @@ def _lear_kernel(G, q, yy, n, K, use_cd):
     return w, alpha, kink, converged
 
 
-def lear_fit(stats: GramStats, criterion: str = "bic", solver: str = "lars") -> LearFit:
+def lear_fit(stats, criterion: str = "bic", solver: str = "lars") -> LearFit:
     _check_choices(criterion, solver)
+    if criterion == "cv":
+        return lear_fit_cv(_cv_stats_of(stats))
+    if not isinstance(stats, GramStats):
+        raise TypeError(f"criterion={criterion!r} fits from GramStats, got {type(stats).__name__}")
     G, q, n = _checked(stats.G, stats.q, stats.n)
     G, q, _ = without_twins(G, q)  # the reference's rule, so both backends fit the same design
     w, alpha, kink, converged = _lear_kernel(G, q, float(stats.yy), n, _penalty(criterion, n), solver == "cd")
     return LearFit(w, stats.xbar, stats.ybar, float(alpha), int(kink), bool(converged))
 
 
+def lear_fit_cv(stats: CvStats, max_n_alphas: int = MAX_N_ALPHAS) -> LearFit:
+    stats = _cv_stats_of(stats)
+    folds = cv_folds(stats)
+    paths = [_lars_kernel(*_checked(f.R, f.qn, f.n), 0.0, CV_MAX_STEPS)[:2] for f in folds]
+    grid = cv_grid([alphas for alphas, _ in paths], max_n_alphas)
+    mse = np.column_stack([held_out_mse(alphas, coefs, f, grid) for (alphas, coefs), f in zip(paths, folds)])
+    alpha, index = cv_choice(grid, mse)
+    full, R, qn, norm = cv_window(stats)
+    _, coefs, _, stop = _lars_kernel(*_checked(R, qn, full.n), alpha, CV_MAX_STEPS)
+    return LearFit(coefs[-1] / norm, full.xbar, full.ybar, alpha, index, bool(STOPS[stop] == "alpha_min"))
+
+
 def warm_up() -> None:
-    """Compile (or load from numba's cache) every kernel on a 3 x 2 problem."""
+    """Compile (or load from numba's cache) every kernel on a 3 x 2 problem (6 x 2 for the cross-validation)."""
     stats = gram_stats(np.array([[1.0, 0.5], [0.0, 2.0], [3.0, 1.0]]), np.array([1.0, 2.0, 0.5]))
-    for criterion in CRITERIA:
+    for criterion in IC_CRITERIA:
         for solver in ("lars", "cd"):
             lear_fit(stats, criterion, solver)
+    x = np.array([[1.0, 0.5], [0.0, 2.0], [3.0, 1.0], [2.0, 0.0], [1.5, 1.5], [0.5, 3.0]])
+    lear_fit(cv_stats(x, np.array([1.0, 2.0, 0.5, 0.0, 1.5, 2.5])), "cv", "lars")
     path = lars_path(stats.G, stats.q, stats.n)
     ic_select(path, stats.q, stats.yy, stats.n, "bic")
     path_at(path, float(path.alphas[-1]))
