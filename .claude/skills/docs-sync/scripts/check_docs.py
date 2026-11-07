@@ -106,6 +106,12 @@ def normalize(value: str) -> str:
     return "none" if value == "" else value
 
 
+def window_members(value: str) -> list[str]:
+    """A training-window default as its members: the TUI's "56,84,728,expanding" and the constructor's
+    `(56, 84, 728, "expanding")` are the same."""
+    return [v.strip().strip("'\"").lower() for v in value.strip().strip("[]()").split(",")]
+
+
 def code_blocks(path: Path) -> list[tuple[int, str]]:
     """(first_line_number, code) for python code blocks; a whole .py file is one block."""
     text = path.read_text(encoding="utf-8")
@@ -261,7 +267,11 @@ def check_registry(components: list[Component]) -> list[Finding]:
             code_default = comp.params.get(field["name"])
             if field["name"] == "name" or code_default is None or field.get("default") is None:
                 continue  # the TUI proposes display names ("OLS") on purpose
-            if normalize(str(field["default"])) != normalize(code_default):
+            if field.get("kind") == "window":
+                differs = window_members(str(field["default"])) != window_members(code_default)
+            else:
+                differs = normalize(str(field["default"])) != normalize(code_default)
+            if differs:
                 findings.append(
                     Finding(
                         "registry",
