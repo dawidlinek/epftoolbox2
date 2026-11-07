@@ -130,12 +130,12 @@ model_pipeline:
 | `MKL_NUM_THREADS` | `1` | Pins Intel MKL threads |
 | `OPENBLAS_NUM_THREADS` | `1` | Pins OpenBLAS threads |
 | `BLAS_NUM_THREADS` | `1` | Generic BLAS thread pin |
-| `PYTHON_GIL` | `0` | Enables free-threading on Python 3.13t+ |
+| `PYTHON_GIL` | `0` | Turns the GIL off in workers that start as new interpreters (Windows); see below |
 | `MAX_PROCESSES` | from config | Applied if `max_processes` is set |
 | `THREADS_PER_PROCESS` | from config | Applied if `threads_per_process` is set |
 
 <Aside type="caution">
-  `PYTHON_GIL=0` affects worker processes spawned by the workflow. For the main process on Python 3.13t+, set it before any imports or pass `-Xgil=0` to the interpreter.
+  An interpreter reads `PYTHON_GIL` as it starts, so setting it later changes nothing for the process that sets it. Workers on Linux and macOS are forks of the main process and keep its GIL state; only workers that start as new interpreters (Windows, which spawns them) read the `PYTHON_GIL=0` that `Workflow.run()` sets. On Python 3.13t+, start the script with `PYTHON_GIL=0 python script.py` or `python -X gil=0 script.py`.
 </Aside>
 
 ---
@@ -210,7 +210,6 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
 
    ```python
    import os
-   os.environ["PYTHON_GIL"] = "0"
 
    from epftoolbox2.pipelines import DataPipeline, ModelPipeline
    from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSource
@@ -286,15 +285,20 @@ Pipeline sections can be specified directly in the workflow YAML, overriding the
 3. **Run job**
 
    ```python
-   import os
-   os.environ["PYTHON_GIL"] = "0"
-
    from epftoolbox2.pipelines import Workflow
 
    if __name__ == "__main__":
        report = Workflow.load("experiment.yaml").run()
        print(report.summary())
    ```
+
+   To run with the GIL off on a free-threaded build (3.13t+), set it in the shell, as the interpreter starts:
+
+   ```bash
+   PYTHON_GIL=0 python run_job.py     # or: python -X gil=0 run_job.py
+   ```
+
+   An `os.environ["PYTHON_GIL"] = "0"` in the script comes too late for the interpreter that runs it. [Environment Variables](#environment-variables) says what `Workflow.run()` sets for its workers.
 
 </Steps>
 

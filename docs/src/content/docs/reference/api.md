@@ -195,7 +195,7 @@ class Workflow:
     def load(cls, path: Union[str, Path]) -> "Workflow": ...
 ```
 
-`Workflow.run()` always sets `OMP_NUM_THREADS=1` and `PYTHON_GIL=0` before spawning workers.
+`Workflow.run()` always sets `OMP_NUM_THREADS=1` and `PYTHON_GIL=0` in the environment before starting workers. The GIL setting reaches only workers that start as new interpreters (Windows); to run the main process and its forked workers with the GIL off, start Python with `PYTHON_GIL=0` set.
 Pipeline paths are resolved relative to the workflow YAML's directory. `$VAR` in paths is expanded at runtime.
 
 ---

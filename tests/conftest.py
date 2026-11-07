@@ -20,7 +20,7 @@ def entsoe_api_key():
     return api_key
 
 
-# Variables that the examples (at import), Workflow.run() and the documentation set on the whole process.
+# Variables that Workflow.run() sets on the whole process.
 PROCESS_ENV = (
     "PYTHON_GIL",
     "OMP_NUM_THREADS",

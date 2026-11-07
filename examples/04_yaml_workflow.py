@@ -13,12 +13,12 @@ be serialized. Use "col_d+{horizon}" template syntax instead of lambdas.
 
 main() runs phase 1 only, which needs no network: it writes the three YAML files to output_dir.
 Call main(run=True) to run phase 2 as well, which downloads the data and trains the models.
+
+On a free-threaded Python (3.13t+) start the script with the GIL off: PYTHON_GIL=0 python examples/04_yaml_workflow.py.
+Setting os.environ["PYTHON_GIL"] inside the script would be too late for the interpreter that runs it.
 """
 
 import os
-
-os.environ["PYTHON_GIL"] = "0"
-
 from pathlib import Path
 
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow

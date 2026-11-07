@@ -91,7 +91,6 @@ def test_shipped_configs_predictors_pass_the_information_set_check():
 def test_example_4_with_its_defaults_writes_the_shipped_configs(tmp_path, monkeypatch):
     """examples/04_yaml_workflow.py is where the three root YAMLs come from. Its phase 1 needs no network, so the
     example and the shipped files can be compared byte for byte and can't drift apart."""
-    monkeypatch.delenv("PYTHON_GIL", raising=False)  # the example sets it while it is imported
     spec = importlib.util.spec_from_file_location("example_04", ROOT / "examples" / "04_yaml_workflow.py")
     example = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(example)
