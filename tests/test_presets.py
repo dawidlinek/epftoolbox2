@@ -45,6 +45,51 @@ def test_lear_has_247_inputs_for_two_exogenous_series():
     assert "is_monday_d+{horizon}" in predictors
 
 
+def test_lago_s_order_is_the_original_s_slot_major_order_of_the_same_names():
+    lago = lear_predictors(exogenous=EXOGENOUS, order="lago")
+    assert sorted(lago) == sorted(lear_predictors(exogenous=EXOGENOUS)) and len(set(lago)) == 247
+    # `LEAR._build_and_split_XYs`: per hour the prices of d-1, d-2, d-3, d-7; then per hour each exogenous series for d-1,
+    # each for d-7, each for d; then the dummies
+    expected = [f"price_h{h:02d}{lag}" for h in range(24) for lag in ("", "_d-1", "_d-2", "_d-6")]
+    for h in range(24):
+        expected += [f"{x}_h{h:02d}{lag}" for lag in ("", "_d-6") for x in EXOGENOUS]
+        expected += [f"{x}_h{h:02d}_d+{{horizon}}" for x in EXOGENOUS]
+    expected += [f"is_{d}_d+{{horizon}}" for d in WEEKDAYS]
+    assert lago == expected
+    assert lago[96:102] == [
+        "load_h00",
+        "wind_h00",
+        "load_h00_d-6",
+        "wind_h00_d-6",
+        "load_h00_d+{horizon}",
+        "wind_h00_d+{horizon}",
+    ]
+    # the exogenous series keep the order they are given in, which the original's file order decides
+    swapped = lear_predictors(exogenous=["wind", "load"], order="lago")
+    assert swapped[96:98] == ["wind_h00", "load_h00"]
+
+
+def test_the_default_order_is_the_library_s_as_before():
+    library = lear_predictors(exogenous=EXOGENOUS)
+    assert library == lear_predictors(exogenous=EXOGENOUS, order="library")
+    assert library[:3] == ["price_h00", "price_h01", "price_h02"] and library[96:98] == [
+        "load_h00_d+{horizon}",
+        "load_h01_d+{horizon}",
+    ]
+    with pytest.raises(ValueError, match="order"):
+        lear_predictors(exogenous=EXOGENOUS, order="hour-major")
+
+
+def test_lago_s_order_has_every_slot_of_a_15_minute_day():
+    lago = lear_predictors(exogenous=["load"], freq="15min", order="lago", calendar_prefix="cal_")
+    assert len(lago) == 4 * 96 + 3 * 96 + 7
+    assert lago[:5] == ["price_s00", "price_s00_d-1", "price_s00_d-2", "price_s00_d-6", "price_s01"]
+    assert (
+        lago[384:387] == ["load_s00", "load_s00_d-6", "load_s00_d+{horizon}"]
+        and lago[-1] == "cal_is_sunday_d+{horizon}"
+    )
+
+
 def test_expert_inputs():
     predictors = expert_predictors(exogenous=["load"])
     assert predictors[:6] == ["price", "price_d-1", "price_d-6", "price_day_min", "price_day_max", "price_day_last"]
