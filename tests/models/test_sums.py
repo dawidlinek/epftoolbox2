@@ -93,6 +93,12 @@ def _block(rng, p):
     return int(np.exp(rng.uniform(np.log(lo), np.log(max(p, lo) + 1)))) if p else 1
 
 
+def _chunk(rng, n):
+    """Rows per chunk, log-uniform from max(1, n // 256) to min(n, CHUNK_ROWS) (at most about 256 chunks)."""
+    lo, hi = max(1, n // 256), min(n, _sums.CHUNK_ROWS)
+    return int(np.exp(rng.uniform(np.log(lo), np.log(hi + 1))))
+
+
 def bitwise_case(seed: int, n_max: int, p_max: int, cells_max: int = 12_000_000) -> int:
     """Build one random span and request, compute `over` six ways, assert all bitwise equal. Returns n·p for the log."""
     rng = np.random.default_rng(seed)
@@ -106,7 +112,7 @@ def bitwise_case(seed: int, n_max: int, p_max: int, cells_max: int = 12_000_000)
 
     # 2. the same union, as a downdate, other tiling and row chunks, 4 BLAS threads
     with threadpool_limits(4):
-        alt = _sums.SpanSums(x, y, block_cols=_block(rng, p), chunk_rows=int(rng.integers(1, n + 1)))
+        alt = _sums.SpanSums(x, y, block_cols=_block(rng, p), chunk_rows=_chunk(rng, n))
         _assert_same(ref, alt.over(rows, cols, method="downdate"), f"seed {seed}: downdate")
 
     # 3. another union: the requested columns shuffled among new ones, Fortran order, "auto"
@@ -121,7 +127,7 @@ def bitwise_case(seed: int, n_max: int, p_max: int, cells_max: int = 12_000_000)
 
     # 4. a span whose cache other requests have filled in part, then the request, with a row mask
     with threadpool_limits(1):
-        warm = _sums.SpanSums(x, y, block_cols=_block(rng, p), chunk_rows=int(rng.integers(1, n + 1)))
+        warm = _sums.SpanSums(x, y, block_cols=_block(rng, p), chunk_rows=_chunk(rng, n))
         for _ in range(2):
             some = rng.permutation(p)[: rng.integers(1, p + 1)]
             ok = np.flatnonzero(np.isfinite(x[:, some]).all(axis=1) & np.isfinite(y))
@@ -317,23 +323,23 @@ def test_accuracy_on_longer_spans_against_a_correctly_rounded_sum(n):
 
 
 def _assert_fixed_point_bound(x, y, rows, cols):
+    """|error| < r·4·m_j·m_k·(2^-53 + 2^(-53-β+2δ)) + ulp(|exact|), m the largest |x - c| over the requested rows."""
     raw = _sums.SpanSums(x, y).over(rows, cols)
     d, _, _, S, _, _, _ = _exact_raw(x, y, rows, cols, raw.shift, raw.yshift)
-    span = x[:, cols] - raw.shift
-    span[~np.isfinite(span)] = 0.0
-    e = np.frexp(np.abs(span).max(axis=0))[1]  # the span's exponents, not the subset's
+    m = np.abs(d).max(axis=0) if len(rows) else np.zeros(len(cols))
     beta, r = _sums.slice_bits(x.shape[0]), len(rows)
+    delta = _sums.rebase_margin(beta)
     for j in range(len(cols)):
         for k in range(len(cols)):
-            scale = 2.0 ** (int(e[j]) + int(e[k]))
-            bound = r * scale * (2.0 ** (1 - 3 * beta) + 2.0 ** (-52 - beta)) + math.ulp(abs(float(S[j][k])))
-            assert abs(Fraction(raw.S[j, k]) - S[j][k]) < Fraction(bound)
+            scale = 4 * Fraction(m[j]) * Fraction(m[k])
+            bound = r * scale * (Fraction(2) ** -53 + Fraction(2) ** (-53 - beta + 2 * delta))
+            assert abs(Fraction(raw.S[j, k]) - S[j][k]) < bound + Fraction(math.ulp(abs(float(S[j][k]))))
 
 
 def test_fixed_point_bound_holds_on_columns_whose_products_hide_in_small_values():
-    """The guarantee: |error| < r·2^(e_j+e_k)·(2^(1-3β) + 2^(-52-β)) + an ulp of the result, relative to each column's
-    largest |x - c| in the span. Built case: each column's large values meet the other's tiny ones, so Σ|d_j||d_k| is small
-    beside that scale; random cases of every kind (spikes, Cauchy, a subset that drops the large rows) too."""
+    """The guarantee, relative to the largest |x - c| of each column over the requested rows (after re-slicing). Built case:
+    each column's large values meet the other's tiny ones, so Σ|d_j||d_k| is small beside r·m_j·m_k; random cases of every
+    kind (spikes, Cauchy, subsets that drop the large rows) too."""
     rng = np.random.default_rng(5)
     n = 64
     a = rng.normal(size=n) * 1e-9
@@ -346,6 +352,39 @@ def test_fixed_point_bound_holds_on_columns_whose_products_hide_in_small_values(
         x, y = _span(rng, n, p)
         rows, cols = _request(rng, x, y)
         _assert_fixed_point_bound(x, y, rows, cols)
+
+
+def test_a_request_without_a_columns_large_values_reslices_it():
+    """Rows that leave out a column's (or y's) large values: the column is sliced again on them, so the sums keep their
+    digits (within 4 ulp of Σ|d_j||d_k|; with the span's exponent they were 1e10 ulp off), and still bitwise the same
+    whichever way they are summed, in another union, in another column order."""
+    rng = np.random.default_rng(8)
+    n = 2000
+    x = np.stack([rng.normal(size=n) * 1e-3, rng.normal(size=n) * 1e-3, rng.normal(40, 20, size=n)], axis=1)
+    x[:2, 0], x[2:4, 1] = [1e6, -1e6], [5e5, 7e5]  # glitches in rows the requests leave out
+    y = rng.normal(size=n) * 10 + 50
+    y[4] = 1e9
+    rows = np.arange(5, n)
+    ss = _sums.SpanSums(x, y)
+    raw = ss.over(rows, [0, 1, 2])
+    rebase, y_rebase = ss._rebased(rows, np.arange(5), np.arange(3), True)
+    assert rebase.tolist() == [True, True, False] and y_rebase
+    d, dy, u, S, v, sy, syy = _exact_raw(x, y, rows, [0, 1, 2], raw.shift, raw.yshift)
+    T = np.abs(d).T @ np.abs(d)
+    for j in range(3):
+        for k in range(3):
+            assert _ulps(raw.S[j, k], S[j][k], T[j, k]) <= 4
+        assert _ulps(raw.u[j], u[j], np.abs(d[:, j]).sum()) <= 4
+        assert _ulps(raw.v[j], v[j], np.abs(d[:, j]) @ np.abs(dy)) <= 4
+    assert _ulps(raw.syy, syy, dy @ dy) <= 4 and _ulps(raw.sy, sy, np.abs(dy).sum()) <= 4
+    for method in ("direct", "downdate"):
+        with threadpool_limits(4):
+            _assert_same(raw, _sums.SpanSums(x, y, block_cols=2, chunk_rows=300).over(rows, [0, 1, 2], method=method))
+    wide = np.concatenate([rng.normal(size=(n, 2)), x[:, [2, 0, 1]]], axis=1)
+    other = _sums.SpanSums(wide, y).over(rows, [3, 4, 2])
+    _assert_same(raw, other)
+    one = _sums.SpanSums(x, y).over(rows, [1])
+    assert one.S.tobytes() == raw.S[1:2, 1:2].tobytes() and one.v.tobytes() == raw.v[1:2].tobytes()
 
 
 # --- edge cases ---------------------------------------------------------------------------------------------------------

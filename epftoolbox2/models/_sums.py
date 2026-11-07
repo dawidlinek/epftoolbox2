@@ -3,7 +3,7 @@
 `SpanSums(x, y)` holds one span's rows (x: n rows by p union columns, NaN where a value is missing; y: the target) and
 `over(rows, cols)` returns `RawSums`: Σ(x - c), Σ(x - c)(x - c)', Σ(x - c)(y - c_y), Σ(y - c_y) and Σ(y - c_y)² over a subset
 of the span's rows, for a subset of its columns, about per-column shifts c of the span. Every element is a function of the two
-columns' values in those rows and of the span alone: the same whatever other columns the `SpanSums` holds, in any column order
+columns' values in those rows and of the span: the same whatever other columns the `SpanSums` holds, in any column order
 or tiling, at any BLAS thread count, with rows chunked or not, and summed directly or as all rows minus the others (a downdate).
 A BLAS Gram has none of these properties: its blocking, and so its rounding, follows the shape of the whole matrix.
 
@@ -26,6 +26,13 @@ How (per span; n rows, m = min(n, 2^15), L = ceil(log2 m)):
   T4 = Σ(Q1Q3' + Q3Q1' + Q2Q2'). With the Gram's symmetry a diagonal block takes four products: Q1'Q1, Q2'Q2 and P'P with
   P = Q1 + Q2 (three `syrk`s; T3 = P'P - Q1'Q1 - Q2'Q2) and Q1'Q3 (added to its transpose). An off-diagonal block takes the
   same five as `gemm`s (Q1a'Q3b and Q3a'Q1b both). Against y, the six pairs are matrix-vector products.
+- **Re-slicing** for a request: a column (or y) none of whose values in the requested rows is large, |d| >= 2^(e - δ - 1)
+  with δ = floor((3β - 54) / 2), has its largest |d| there more than δ binades under 2^e. It is sliced again on those rows with
+  their own exponent (same shift, same β), and its sums with every requested column are formed over the rows directly; the
+  other pairs come from the span's slices (direct or downdate). Whether a column is re-sliced is decided by an exact count of
+  its large values in the rows (all large values minus those in the removed rows, or those in the rows), from its own values,
+  so the same in every way of summing. Without it, a request that leaves out a column's large values (rows with a glitch and a
+  missing target, say) would hold the rest to the span's scale: 1e10 ulp off where BLAS is 2 ulp off, on a test case.
 
 Why the integers are exact, in any order. Every kept slice-pair product is an integer of magnitude at most 2^β·2^β = 2^2β, and
 a sum of at most m of them, or any part of one, an integer of magnitude at most m·2^2β <= 2^L·2^(53-L) = 2^53. Every integer
@@ -41,24 +48,30 @@ downdate subtracts the removed rows' int64 sums from the span's totals, so it eq
 Chunk boundaries, the tiling into column blocks and the order of the columns therefore change no integer.
 
 The float result is made from these integers by one fixed sequence, the same for every element:
-S_jk = 2^(e_j + e_k - 2β) · fl(fl(fl(T4)·2^-β + fl(T3))·2^-β + fl(T2)), the last scaling exact (by multiplication while every
-intermediate is a normal float, else `ldexp`). Equal integers give equal bits, which proves the invariances above. Σ(x - c) uses
-(ΣQ1, ΣQ2, ΣQ3) and 2^(e - β) the same way; Σ(x - c)(y - c_y), Σ(y - c_y) and Σ(y - c_y)² use y's own slices.
+S_jk = 2^(e_j + e_k - 2β) · fl(fl(fl(T4)·2^-β + fl(T3))·2^-β + fl(T2)), e the exponent the column was sliced with, the last
+scaling exact (by multiplication while every intermediate is a normal float, else `ldexp`). Equal integers and exponents give
+equal bits, which proves the invariances above: every input to an element is a function of the two columns' values in the
+requested rows and of the span. Σ(x - c) uses (ΣQ1, ΣQ2, ΣQ3) and 2^(e - β) the same way; Σ(x - c)(y - c_y), Σ(y - c_y) and
+Σ(y - c_y)² use y's own slices.
 
 Which pairs, and how accurate. Per row z = d / 2^e is held to |ε|·2^-3β <= 2^(-3β-1). The dropped pairs (2,3), (3,2) are at most
 2^(2β-2)·2^-5β = 2^(-3β-2) each and (3,3) at most 2^(-4β-2): the order of that residual, so keeping them (three more products)
 would not make the sums more accurate, while dropping a kept one would (the smallest kept, (1,3) and (2,2), are of order
 2^-2β, about n times float64's rounding). Per row the error of z_j z_k is at most 2^(-3β-1)(1 + |z_j| + |z_k|) + 2^(-4β)
-< 2^(1-3β), so over r rows |error| < r·2^(1-3β)·2^(e_j + e_k). The combination adds half an ulp of the result, at most
-r·2^(-53-β)·2^(e_j + e_k) from its inner sum and, past 2^53 (so past 2^15 rows), the int64-to-float roundings, about 2^-53 of
-Σ|x_j - c_j||x_k - c_k|. With β >= 19 (3β >= 57) each value is held to 2^-57 of its column's largest |x - c|, finer than its
-own float64 rounding unless it is under about 1/16 of that largest value. So the sums are within a few ulp of
-Σ|x_j - c_j||x_k - c_k| unless that sum is small beside r·max|x_j - c_j|·max|x_k - c_k| (a column whose few large values meet
-the other's small ones); the guarantee is the fixed-point bound above, relative to the columns' largest values. A BLAS Gram's
-bound is n·2^-53·Σ|x_j||x_k|. `tests/models/test_sums.py` checks both against exact rational sums.
+< 2^(1-3β), an absolute error at the scale 2^(e_j + e_k) whatever the size of the values: the dropped pairs are below
+float64's rounding of a product only where the product is not far below that scale. Re-slicing bounds how far: with m_j the
+largest |x_j - c_j| over the r requested rows, e_j <= frexp(m_j) + δ, so per row the error is under
+2^(1-3β+2δ)·2^(ẽ_j + ẽ_k) <= 2^-53·4·m_j·m_k, and over the rows under r·2^-51·m_j·m_k: one float64 rounding per row at the
+scale of the largest product. The combination adds half an ulp of the result, at most r·2^(-53-β+2δ)·4·m_j·m_k from its inner
+sum and, past 2^53 (so past 2^15 rows), the int64-to-float roundings, about 2^-53 of Σ|x_j - c_j||x_k - c_k|. In practice the
+rint slices' errors cancel and the result is within an ulp of the exact sum (tests: at most 0.5 ulp of Σ|x_j - c_j||x_k - c_k|
+where `X.T @ X` is up to 12 ulp off). The guarantee is still relative to m_j·m_k, not to Σ|x_j - c_j||x_k - c_k|: in rows
+where a column is heavy-tailed (its few large values meeting the other's small ones) that sum can be far below r·m_j·m_k, and
+the bound above, not "a few ulp of it", is what holds. A BLAS Gram's bound is n·2^-53·Σ|x_j||x_k|.
+`tests/models/test_sums.py` checks both against exact rational sums.
 
-The shift and the exponent come from the span's rows alone (all dated before the issue day), so data after it, or the start of
-the frame, moves no bit.
+The shift comes from the span's rows, the exponent from the span's rows or the requested ones, all dated before the issue day,
+so data after it, or the start of the frame, moves no bit.
 
 Cost: per pair of columns 2.5 times the multiply-adds of a `gemm` over the rows, five times those of `X.T @ X` (`syrk`), plus the
 slicing. The column blocks of the span's totals are computed when an `over` first needs them and kept. Memory per span:
@@ -86,7 +99,7 @@ _SAFE_EXPONENT = 400
 class RawSums(NamedTuple):
     """Sums over a subset of a span's rows, about the span's shifts (`SpanSums.over`).
 
-    `u` = Σ(x - c), `S` = Σ(x - c)(x - c)', `v` = Σ(x - c)(y - c_y), `sy` = Σ(y - c_y), `syy` = Σ(y - c_y)², over `n` rows;
+    `u` = Σ(x - c), `S` = Σ(x - c)(x - c)', `v` = Σ(x - c)(y - c_y), `sy` = Σ(y - c_y), `syy` = Σ(y - c_y)², over `n` rows,
     `shift` holds c for the requested columns, in their order, and `yshift` c_y.
     """
 
@@ -109,6 +122,12 @@ def slice_bits(n: int) -> int:
 def pair_rows(beta: int) -> int:
     """The most rows over which P'P (P = Q1 + Q2, |P| <= 1.5·2^β) sums exactly: floor(2^(53-2β)·4/9); 0 for none."""
     return (4 << (53 - 2 * beta)) // 9
+
+
+def rebase_margin(beta: int) -> int:
+    """δ = floor((3β - 54) / 2): how many binades a column's largest |x - c| over the requested rows may fall below its
+    span's before the column is sliced again for that request (then 2^(1-3β+2δ) <= 2^-53, see the module)."""
+    return (3 * beta - 54) // 2
 
 
 # --- shifts and slices ------------------------------------------------------------------------------------------------
@@ -168,10 +187,16 @@ def _shifts(xt: np.ndarray, finite: np.ndarray) -> np.ndarray:
     return out
 
 
-def _slice_into(xt: np.ndarray, beta: int, q: np.ndarray):
-    """Shifts, exponents and the non-finite mask of columns given as rows of `xt`; their three slices written into `q`."""
+def _slice_into(xt: np.ndarray, beta: int, q: np.ndarray, shift=None):
+    """Shifts, exponents, non-finite and large-value masks of columns given as rows of `xt`; their slices written into `q`.
+
+    `shift` given (a re-slice for a request) skips the shift. A value is large when |d| >= 2^(e - δ - 1): a request whose rows
+    hold no large value of a column has that column's largest |d| more than δ binades under 2^e.
+    """
     finite = np.isfinite(xt)
-    shift = _shifts(xt, finite)
+    if shift is None:
+        shift = _shifts(xt, finite)
+    shift = np.asarray(shift, dtype=np.float64)
     with np.errstate(over="ignore", invalid="ignore"):
         d = xt - shift[:, None]
     bad = ~finite
@@ -181,6 +206,7 @@ def _slice_into(xt: np.ndarray, beta: int, q: np.ndarray):
     if not np.isfinite(largest).all():
         raise ValueError("a column's values are too large for exact sums (x - shift overflows)")
     exponent = np.frexp(largest)[1].astype(np.int64)
+    big = np.abs(d) >= np.ldexp(1.0, exponent - rebase_margin(beta) - 1)[:, None]
     k = beta - exponent
     if k.size and np.abs(k).max() <= 1000:
         d *= np.ldexp(1.0, k)[:, None]
@@ -194,7 +220,7 @@ def _slice_into(xt: np.ndarray, beta: int, q: np.ndarray):
     d -= q[1]
     d *= step
     np.rint(d, out=q[2])
-    return shift, exponent, bad
+    return shift, exponent, bad, big
 
 
 # --- integer sums of slice products -----------------------------------------------------------------------------------
@@ -358,15 +384,19 @@ class SpanSums:
         self._q = np.zeros((3, self.p, self.n))
         self._bad = np.zeros((self.p, self.n), dtype=bool)
         self._n_bad = np.zeros(self.p, dtype=np.int64)
+        self._big = np.zeros((self.p, self.n), dtype=bool)
+        self._n_big = np.zeros(self.p, dtype=np.int64)
         self._lin = np.zeros((3, self.p), dtype=np.int64)
         self._vec = np.zeros((3, self.p), dtype=np.int64)
         self._gram = np.zeros((3, self.p, self.p), dtype=np.int64)
+        self._y = y
         qy = np.zeros((3, 1, self.n))
-        yshift, yexp, ybad = _slice_into(y[None, :], self.beta, qy)
+        yshift, yexp, ybad, ybig = _slice_into(y[None, :], self.beta, qy)
         self.yshift = float(yshift[0])
         self._yexp = int(yexp[0])
         self._qy = np.ascontiguousarray(qy[:, 0, :])
         self._ybad = ybad[0]
+        self._ybig = ybig[0]
         self._ylin = _linear_terms(qy)[:, 0]
         self._yy = _gram_terms(qy, None, self._chunk, self._pair_chunk)[:, 0, 0]
 
@@ -381,11 +411,13 @@ class SpanSums:
                 continue
             cols = self._cols_of(b)
             q = self._q[:, cols]
-            shift, exponent, bad = _slice_into(np.ascontiguousarray(self._x[:, cols].T), self.beta, q)
+            shift, exponent, bad, big = _slice_into(np.ascontiguousarray(self._x[:, cols].T), self.beta, q)
             self._shift[cols] = shift
             self._exponent[cols] = exponent
             self._bad[cols] = bad
             self._n_bad[cols] = bad.sum(axis=1)
+            self._big[cols] = big
+            self._n_big[cols] = big.sum(axis=1)
             self._lin[:, cols] = _linear_terms(q)
             self._vec[:, cols] = _vector_terms(q, self._qy, self._chunk)
             self._ready[b] = True
@@ -432,19 +464,81 @@ class SpanSums:
         self._prepare(blocks)
         self._check_finite(rows, cols)
         removed = np.setdiff1d(np.arange(self.n), rows, assume_unique=True)
+        fewer = removed.size < rows.size
         if method == "auto":
-            method = "downdate" if removed.size < rows.size else "direct"
-        if method == "direct":
-            gram, lin, vec, ylin, yy = self._subset_terms(rows, cols)
+            method = "downdate" if fewer else "direct"
+        rebase, y_rebase = self._rebased(rows, removed, cols, fewer)
+        e, ey = self._exponent[cols].copy(), self._yexp
+        if method == "direct" or rebase.all():
+            a, qy, e, ey = self._rows_slices(rows, cols, rebase, y_rebase)
+            gram, lin, vec, ylin, yy = self._terms(a, qy)
+            return self._raw(rows.size, cols, gram, lin, vec, ylin, yy, e, ey)
+        keep = np.flatnonzero(~rebase)
+        kept = cols[keep]
+        self._totals(np.unique(kept // self._block).tolist())
+        run = _as_run(kept)
+        gram = self._gram[:, run, run] if run is not None else self._gram[:, kept[:, None], kept[None, :]]
+        lin, vec, ylin, yy = self._lin[:, kept], self._vec[:, kept], self._ylin, self._yy
+        if removed.size:
+            g_r, lin_r, vec_r, ylin_r, yy_r = self._terms(
+                self._q[:, kept[:, None], removed[None, :]], self._qy[:, removed]
+            )
+            gram, lin, vec, ylin, yy = gram - g_r, lin - lin_r, vec - vec_r, ylin - ylin_r, yy - yy_r
+        if not rebase.any() and not y_rebase:
+            return self._raw(rows.size, cols, gram, lin, vec, ylin, yy, e, ey)
+        # Columns sliced again for these rows (and y, if so): their sums with every requested column, over the rows directly.
+        a, qy, e, ey = self._rows_slices(rows, cols, rebase, y_rebase)
+        moved = np.flatnonzero(rebase)
+        full = np.zeros((3, cols.size, cols.size), dtype=np.int64)
+        full[:, keep[:, None], keep[None, :]] = gram
+        if moved.size:
+            cross = _gram_terms(a[:, moved], a, self._chunk, self._pair_chunk)
+            full[:, moved, :] = cross
+            full[:, :, moved] = cross.transpose(0, 2, 1)
+        line = np.zeros((3, cols.size), dtype=np.int64)
+        line[:, keep] = lin
+        line[:, moved] = _linear_terms(a[:, moved])
+        if y_rebase:
+            vec = _vector_terms(a, qy, self._chunk)
+            ylin = _linear_terms(qy[:, None, :])[:, 0]
+            yy = _gram_terms(qy[:, None, :], None, self._chunk, self._pair_chunk)[:, 0, 0]
         else:
-            self._totals(blocks)
-            run = _as_run(cols)
-            gram = self._gram[:, run, run] if run is not None else self._gram[:, cols[:, None], cols[None, :]]
-            lin, vec, ylin, yy = self._lin[:, cols], self._vec[:, cols], self._ylin, self._yy
-            if removed.size:
-                g_r, lin_r, vec_r, ylin_r, yy_r = self._subset_terms(removed, cols)
-                gram, lin, vec, ylin, yy = gram - g_r, lin - lin_r, vec - vec_r, ylin - ylin_r, yy - yy_r
-        return self._raw(rows.size, cols, gram, lin, vec, ylin, yy)
+            vec_all = np.zeros((3, cols.size), dtype=np.int64)
+            vec_all[:, keep] = vec
+            vec_all[:, moved] = _vector_terms(a[:, moved], qy, self._chunk)
+            vec = vec_all
+        return self._raw(rows.size, cols, full, line, vec, ylin, yy, e, ey)
+
+    def _rebased(self, rows: np.ndarray, removed: np.ndarray, cols: np.ndarray, fewer: bool):
+        """Which requested columns (and whether y) have no large value in `rows`, by an exact count either way round.
+
+        A column with no large value in the whole span is 0 there (finite part) and needs nothing.
+        """
+        if fewer:
+            big = self._n_big[cols] - self._big[cols[:, None], removed[None, :]].sum(axis=1)
+            ybig = int(self._ybig.sum()) - int(self._ybig[removed].sum())
+        else:
+            big = self._big[cols[:, None], rows[None, :]].sum(axis=1)
+            ybig = int(self._ybig[rows].sum())
+        return (big == 0) & (self._n_big[cols] > 0), ybig == 0 and bool(self._ybig.any())
+
+    def _rows_slices(self, rows: np.ndarray, cols: np.ndarray, rebase: np.ndarray, y_rebase: bool):
+        """The requested columns' and y's slices on `rows`, those to rebase sliced again with these rows' own exponent."""
+        a = self._q[:, cols[:, None], rows[None, :]]
+        qy = self._qy[:, rows]
+        e, ey = self._exponent[cols].copy(), self._yexp
+        for i in np.flatnonzero(rebase).tolist():
+            j = int(cols[i])
+            part = np.zeros((3, 1, rows.size))
+            _, exponent, _, _ = _slice_into(self._x[rows, j][None, :], self.beta, part, shift=self._shift[j : j + 1])
+            a[:, i, :] = part[:, 0, :]
+            e[i] = exponent[0]
+        if y_rebase:
+            part = np.zeros((3, 1, rows.size))
+            _, exponent, _, _ = _slice_into(self._y[rows][None, :], self.beta, part, shift=[self.yshift])
+            qy = np.ascontiguousarray(part[:, 0, :])
+            ey = int(exponent[0])
+        return a, qy, e, ey
 
     def _rows(self, rows) -> np.ndarray:
         rows = np.asarray(rows)
@@ -471,9 +565,8 @@ class SpanSums:
         if gappy.size and self._bad[gappy[:, None], rows[None, :]].any():
             raise ValueError("x has a NaN or inf in the requested rows and columns")
 
-    def _subset_terms(self, rows: np.ndarray, cols: np.ndarray):
-        a = self._q[:, cols[:, None], rows[None, :]]
-        qy = self._qy[:, rows]
+    def _terms(self, a: np.ndarray, qy: np.ndarray):
+        """The integer sums of slices `a` (3 × columns × rows) and y's `qy` (3 × rows): Gram, linear, against y, y's."""
         return (
             _gram_terms(a, None, self._chunk, self._pair_chunk),
             _linear_terms(a),
@@ -482,8 +575,8 @@ class SpanSums:
             _gram_terms(qy[:, None, :], None, self._chunk, self._pair_chunk)[:, 0, 0],
         )
 
-    def _raw(self, n: int, cols: np.ndarray, gram, lin, vec, ylin, yy) -> RawSums:
-        beta, e, ey = self.beta, self._exponent[cols], self._yexp
+    def _raw(self, n: int, cols: np.ndarray, gram, lin, vec, ylin, yy, e, ey) -> RawSums:
+        beta = self.beta
         return RawSums(
             n=int(n),
             shift=self._shift[cols].copy(),
