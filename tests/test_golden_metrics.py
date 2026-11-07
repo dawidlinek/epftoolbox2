@@ -28,8 +28,8 @@ RTOL = {"OLS": 1e-9, "LassoCV": 1e-6}
 # Ridge is a closed form (scikit-learn's leave-one-out `RidgeCV`), exact up to float rounding like OLS. LEAR's kernels run in numpy
 # or numba, which agree within 1e-9 with the same kinks, not to the bit (decision 17 of the step 4 spec): the golden holds on either.
 LEAR_RIDGE_RTOL = {"Ridge": 1e-9, "LEAR": 1e-9, "LEAR_lago": 1e-9}
-# LEAR without `is_weekday`: with an intercept it is minus `is_weekend` after centring, an exact twin, at whose tie in LARS the two
-# backends can part.
+# LEAR without `is_weekday`: with an intercept it is minus `is_weekend` after centring, an exact twin, which the fit drops anyway
+# (`_lars.without_twins`); the inputs are as they were pinned.
 LEAR_INPUTS = ["load_d+{horizon}", "wind_d+{horizon}", "is_weekend_d+{horizon}", "price_d-1"]
 
 

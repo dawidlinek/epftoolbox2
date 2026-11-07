@@ -36,9 +36,8 @@ from epftoolbox2.scalers import make_scaler
 from tests.models.test_lars_kernels import _lars_old_ic
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
-# `is_weekday` left out: with an intercept it is minus `is_weekend` after centring, an exact twin, at whose tie LARS takes 0.24.2's
-# degenerate-entrant turn on a last bit, where the numpy and numba kernels can part (see `_lars`). Two inputs the price doesn't
-# depend on, for the Lasso to drop.
+# `is_weekday` left out: with an intercept it is minus `is_weekend` after centring, an exact twin, which the fit would drop
+# (`_lars.without_twins`; twins have their own tests). Two inputs the price doesn't depend on, for the Lasso to drop.
 BASE = ["load_d+{horizon}", "wind_d+{horizon}", "is_weekend_d+{horizon}"]
 NAMES = BASE + ["price_d-1", "noise_a", "noise_b"]
 WINDOW = 40

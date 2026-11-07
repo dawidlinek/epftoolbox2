@@ -345,7 +345,7 @@ def run_cell(cell, window, data):
     elif cell.model == "ridge":
         model = RidgeModel(predictors, training_window=window, **options)
     elif cell.model == "lear":
-        # Without is_weekday, minus is_weekend after LEAR's centring: an exact twin, whose tie in LARS turns on a last bit.
+        # Without is_weekday, minus is_weekend after LEAR's centring: an exact twin, which the fit would drop.
         lear_predictors = [p for p in predictors if not p.startswith("is_weekday")]
         model = LEARModel(lear_predictors, training_window=window, criterion="aic", solver="cd", **options)
     else:
