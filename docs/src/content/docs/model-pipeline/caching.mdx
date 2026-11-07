@@ -30,33 +30,73 @@ benchmark data: resume where a file was started if it must be one machine's. A r
 
 ## Cache Directory Structure
 
-Each model gets a results file and a manifest next to it:
+Each model gets a results file and a manifest next to it, and a lock file that a run holds while it writes them:
 
 <FileTree>
 
 - results/
     - ols.jsonl
     - ols.manifest.json
+    - ols.lock
     - lasso.jsonl
     - lasso.manifest.json
+    - lasso.lock
 
 </FileTree>
 
+A second run into the same model's results, from another process or the same one, raises `ResultsLockedError` naming the lock
+file at once, before it reads or writes anything: two writers would put two forecasts on one key. The lock is the operating system's
+(`flock`), so a run that is killed holds none. On a file system that refuses locks the run warns and goes on, and nothing then stops
+a second writer: run one writer per model's results there. The empty `.lock` file stays in the directory.
+
 ## Results File Format
 
-Each line in `results.jsonl` is a JSON object:
+Each line of `<model>.jsonl` is a JSON object, written as UTF-8. A forecast:
 
 ```json
-{"run_date": "2024-02-01", "target_date": "2024-02-02", "hour": 1, "horizon": 1, "day_in_test": 0, "prediction": 92.08884109589042, "actual": 58.0, "coefficients": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
-{"run_date": "2024-02-01", "target_date": "2024-02-02", "hour": 0, "horizon": 1, "day_in_test": 0, "prediction": 92.33908219178082, "actual": 58.62, "coefficients": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+{"run_date": "2023-04-12", "target_date": "2023-04-13", "run_weekday": 2, "hour": 3, "horizon": 1, "day_in_test": 0, "prediction": 72.41, "actual": 70.84, "coefficients": [0.16, -0.75, 0.65, -0.25], "freq": "1h", "status": "ok", "list_hash": "6fc96c3892ad", "refit_anchor": "2023-04-12", "revision": 1}
 ```
 
-A task is considered already done by its `(hour, horizon, run_date)`, the actual calendar date, not the
-`day_in_test` offset from `test_start`, so extending or shifting `test_start` between runs into the same
-directory can't make an unrelated date look already computed. In a run with
-[validation](/epftoolbox2/model-pipeline/validation-and-test/) a record also has `window`, and its `day_in_test` counts from the
-start of that window. A model with [`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) adds
-`refit_anchor` to every record, the ISO date of the fit it used; a model without it has no such key.
+and a key that has none, a **skip record**:
+
+```json
+{"run_date": "2023-04-12", "target_date": "2023-04-13", "run_weekday": 2, "hour": 4, "horizon": 1, "day_in_test": 0, "prediction": null, "actual": 71.02, "coefficients": [], "freq": "1h", "status": "missing_test_predictors", "list_hash": "6fc96c3892ad", "refit_anchor": "2023-04-12", "revision": 1}
+```
+
+Every record ends with four keys, after the ones before them, which keep their order and values:
+
+- `status`: `"ok"` for a forecast, the [skip reason](/epftoolbox2/model-pipeline/results/#forecast-counts) for a key without one
+  (`missing_test_predictors`, `missing_test_row`, `not_published`, `too_few_rows`, `no_finite_training_rows`, `no_matching_days`,
+  `fit_error`).
+- `list_hash`: a hash of the forecast's predictor list and its training rule, for a fixed list the one a
+  [predictor function](/epftoolbox2/model-pipeline/predictor-functions/#results) returning that list gets.
+- `refit_anchor`: the date of the fit the forecast came from, its own `run_date` without `refit`.
+- `revision`: 1 for every record a backtest writes.
+
+A skip record has the key fields, `prediction` null, `actual` the target of the row the forecast would have been issued from (null
+when there is no such row), `coefficients` empty, the four keys, and `detail` where the reason has one (`"window 56"`: the member of a
+[training window list](/epftoolbox2/model-pipeline/training-windows/) that failed). Records a run keeps in memory, without `save_dir`,
+are the forecasts alone. An [ensemble](/epftoolbox2/model-pipeline/ensembles/)'s records end with `status` and `revision` only.
+
+A record also has `window` in a run with [validation](/epftoolbox2/model-pipeline/validation-and-test/) (its `day_in_test` counts from
+the start of that window), `predictor_list` for a predictor function, `member_predictions` for a training window list, and a model with
+[`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) has `refit_anchor` after `freq`, where it always
+had it.
+
+**What is read.** Every table, count, ensemble and exporter reads the forecasts alone: records with `status` `"ok"`, or without
+`status` (written before it). Per key `(hour, horizon, run_date)` the highest `revision` counts; within it a forecast counts over skip
+records, and of two forecasts of one key the first in the file, with a warning that says how many were left out and how many differ.
+The per-window skip counts of `report.forecast_counts()` come from the manifest, as before. Files written before these keys resume and
+report as they did, and a file holding both kinds reads as one.
+
+**Resuming.** A task is done by its `(hour, horizon, run_date)`, the actual calendar date, not the `day_in_test` offset from
+`test_start`, so extending or shifting `test_start` between runs into the same directory can't make an unrelated date look already
+computed. Only a forecast makes a key done: a skipped key is tried again by every run, and gets a new skip record only when its reason
+changed, so resuming again doesn't grow the file.
+
+**A crash while writing** can leave the last line half-written. Reading skips it with a warning, and the next run into the file cuts
+it off, with a warning naming its bytes, before it appends: its key is forecast again, and the file ends as a fresh run's would. A line
+that isn't a record anywhere else raises `ValueError` with its line number.
 
 <Aside type="tip">
   For long training runs, use `save_dir` to avoid losing progress if the script crashes or is interrupted.
