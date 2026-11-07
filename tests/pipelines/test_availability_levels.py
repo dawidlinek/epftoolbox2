@@ -742,6 +742,7 @@ def test_level_none_adds_nothing_to_the_manifest(df, tmp_path):
         "column_hashes",
         "frame_hash",
         "training_cut",
+        "record_schema",
     }
     ModelPipeline().add_model(ols()).run(df, *TEST, horizon=1, save_dir=str(tmp_path / "plain"))
     plain = json.loads(manifest_path(tmp_path / "plain" / "m.jsonl").read_text())

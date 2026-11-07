@@ -587,7 +587,11 @@ def test_epf_model_with_horizons_gives_the_in_process_forecasts(tmp_path, spring
     argv += ["--test-end", "2023-03-27", "--horizons", "1,3", "--save-dir", str(tmp_path / "out")]
     cli.cmd_model(cli.build_parser().parse_args(argv))
 
-    stored = by_key(json.loads(line) for line in (tmp_path / "out" / "ols.jsonl").read_text().splitlines())
+    stored = by_key(
+        r
+        for r in map(json.loads, (tmp_path / "out" / "ols.jsonl").read_text().splitlines())
+        if r["status"] == "ok"  # not the skip records
+    )
     in_process = by_key(
         OLSModel(predictors, training_window=WINDOW, name="OLS")
         .run(data, test_start="2023-03-24", test_end="2023-03-27", horizons=[1, 3])

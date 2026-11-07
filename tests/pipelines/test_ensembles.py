@@ -147,7 +147,10 @@ def keyed(records):
 def forecast_lines(records):
     """Records without what only a model has, as text, which compares them bit for bit and NaN equal to NaN."""
     return sorted(
-        json.dumps({k: v for k, v in r.items() if k not in ("coefficients", "predictor_list")}, sort_keys=True)
+        json.dumps(
+            {k: v for k, v in r.items() if k not in ("coefficients", "predictor_list", "list_hash", "refit_anchor")},
+            sort_keys=True,
+        )
         for r in records
     )
 
@@ -323,9 +326,10 @@ def test_an_ensembles_record_has_the_keys_of_a_models(tmp_path):
     write_members(tmp_path, a=1.0, b=2.0)
     report_of(tmp_path, AverageEnsemble(["a", "b"], name="plain"), members=("a", "b"))
     model, ensemble = stored(tmp_path / "a.jsonl")[0], stored(tmp_path / "plain.jsonl")[0]
-    assert list(ensemble) == list(model)
-    assert ensemble["coefficients"] == []
-    assert {k: v for k, v in ensemble.items() if k not in ("prediction", "coefficients")} == {
+    # The members' records are written as before step 5a; an ensemble's end with `status` and `revision` (it has no list or fit).
+    assert list(ensemble) == [*model, "status", "revision"]
+    assert ensemble["coefficients"] == [] and (ensemble["status"], ensemble["revision"]) == ("ok", 1)
+    assert {k: v for k, v in ensemble.items() if k not in ("prediction", "coefficients", "status", "revision")} == {
         k: v for k, v in model.items() if k not in ("prediction", "coefficients")
     }
 
@@ -1418,13 +1422,21 @@ def test_disagreeing_actuals_are_refused(tmp_path):
         report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
 
 
-def test_a_key_held_twice_is_refused(tmp_path):
+def test_a_key_held_twice_reads_the_first_with_a_warning(tmp_path):
+    """A results file gives one forecast per key, the first, and warns of the others (step 5a, `results.store.read_records`), so
+    an ensemble averages that one: what it did before the file held the repeat."""
     days = HAND.issue_days()
     write_member(tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND)
     records = forecasts(days, 2.0, windows=HAND)
-    write_member(tmp_path, "b", [*records, records[0]], HAND)
-    with pytest.raises(ManifestMismatchError, match="twice"):
-        report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+    write_member(tmp_path, "b", records, HAND)
+    once = forecast_lines(
+        records_of(report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b")), "e")
+    )
+    write_member(tmp_path, "b", [*records, {**records[0], "prediction": records[0]["prediction"] + 1.0}], HAND)
+    with pytest.warns(UserWarning, match=r"1 records repeat a forecast key .* \(1 of them differ from it\)"):
+        twice = records_of(report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b")), "e")
+    twice = forecast_lines(twice)
+    assert twice == once
 
 
 def test_no_common_validation_key_is_refused(tmp_path):

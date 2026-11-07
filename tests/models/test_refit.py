@@ -259,7 +259,7 @@ def test_refit_needs_one_class_to_define_all_three_fit_methods(market):
         assert cls(PREDICTORS, refit="7D").refit == "7D"
     both = RidgeBoth(PREDICTORS, training_window=WINDOW, refit="1D").run(market, "2023-03-20", "2023-03-22", horizon=1)
     plain = RidgeBoth(PREDICTORS, training_window=WINDOW).run(market, "2023-03-20", "2023-03-22", horizon=1)
-    assert keyed(both._results, "refit_anchor") == keyed(plain._results)
+    assert keyed(both._results, "refit_anchor") == keyed(plain._results, "refit_anchor")
 
 
 def test_yaml_names_refit_only_when_set(tmp_path):
@@ -295,7 +295,7 @@ def test_refit_1d_is_refit_none_where_the_masks_agree(market):
     the first day and in those of a forecast until its rows reach 29 March; from there `"1D"` scales it and `None` doesn't."""
     start, end = "2023-03-20", "2023-04-12"
     predictors = PREDICTORS + ["flag"]
-    plain = keyed(ols(None, predictors).run(market, start, end, horizon=2)._results)
+    plain = keyed(ols(None, predictors).run(market, start, end, horizon=2)._results, "refit_anchor")
     daily = ols("1D", predictors).run(market, start, end, horizon=2)._results
     assert {r["refit_anchor"] for r in daily} == {r["run_date"] for r in daily}
     daily = keyed(daily, "refit_anchor")
@@ -305,7 +305,7 @@ def test_refit_1d_is_refit_none_where_the_masks_agree(market):
         mask_agrees = shift(run_date, -1 - horizon) < "2023-03-29"  # the newest row has no other value of `flag` yet
         assert (record == plain[key]) == mask_agrees, key
     without_flag = keyed(ols("1D").run(market, start, end, horizon=2)._results, "refit_anchor")
-    assert without_flag == keyed(ols(None).run(market, start, end, horizon=2)._results)
+    assert without_flag == keyed(ols(None).run(market, start, end, horizon=2)._results, "refit_anchor")
 
 
 def hand_fit(data, period, anchor, issue, horizon, names, window=WINDOW):
@@ -379,7 +379,8 @@ def test_records_carry_the_anchor_and_the_manifest_the_rule(market, tmp_path):
     ols(None).run(market, "2023-03-29", "2023-04-04", horizon=1, save_to=str(explicit))
     OLSModel(PREDICTORS, training_window=WINDOW).run(market, "2023-03-29", "2023-04-04", horizon=1, save_to=str(plain))
     assert lines(plain) == lines(explicit)
-    assert all("refit_anchor" not in json.loads(line) for line in lines(plain))
+    # Without refit each forecast is its own fit: its anchor is its run date, at the end of the record (step 5a).
+    assert all(json.loads(line)["refit_anchor"] == json.loads(line)["run_date"] for line in lines(plain))
     manifests = [json.loads(manifest_path(p).read_text()) for p in (plain, explicit)]
     for manifest in manifests:
         for name in PROVENANCE:

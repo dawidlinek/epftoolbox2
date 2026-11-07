@@ -40,6 +40,7 @@ from ..results.manifest import (
     manifest_path,
 )
 from ..results.ref import ModelResultRef, split_by_window
+from ..results.store import with_status
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 from ..results.vintages import union_vintages
 from .base import Choice, Ensemble
@@ -515,7 +516,7 @@ def _warn_if_thin(
 def _records(
     grid: _Grid, picked: np.ndarray, prediction: np.ndarray, freq: str, stored: Optional[RunWindows]
 ) -> List[Dict[str, Any]]:
-    """Records in key order, with the keys of a model's, in the same order."""
+    """Records in key order, with the keys of a model's, in the same order, ending with `status` and `revision`."""
     records = []
     days: Dict[int, Tuple[str, int, Optional[str]]] = {}
     targets: Dict[int, str] = {}
@@ -548,7 +549,7 @@ def _records(
         }
         if window is not None:
             record["window"] = window
-        records.append(record)
+        records.append(with_status(record))  # `status` and `revision`: an ensemble has no list or fit of its own
     return records
 
 
@@ -556,7 +557,7 @@ def _write_atomically(path: Path, lines: Iterable[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
-        with open(temporary, "w") as f:
+        with open(temporary, "w", encoding="utf-8") as f:
             f.writelines(lines)
         os.replace(temporary, path)
     finally:

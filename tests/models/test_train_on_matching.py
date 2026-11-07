@@ -267,7 +267,7 @@ def test_one_list_on_every_day_is_bitwise_train_on_all_across_a_switch(switch, f
     run = dict(test_start=days[0], test_end=days[1], horizon=3, freq=freq, information_set=INFO)
     matching = OLSModel(one_list, training_window=30).run(data, **run)
     every_day = OLSModel(one_list_on_all, training_window=30).run(data, **run)
-    strip = {"predictor_list", "training_days", "matching_days"}
+    strip = {"predictor_list", "list_hash", "training_days", "matching_days"}  # the hashes hold `train_on`
 
     def compared(ref):
         return sorted(json.dumps({k: v for k, v in r.items() if k not in strip}, sort_keys=True) for r in ref._results)
