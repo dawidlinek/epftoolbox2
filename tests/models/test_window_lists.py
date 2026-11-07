@@ -22,7 +22,7 @@ import pytest
 
 from epftoolbox2 import tui
 from epftoolbox2.information_set import Availability, InformationSet
-from epftoolbox2.models import LassoCVModel, NaiveModel, OLSModel, RidgeModel, Use
+from epftoolbox2.models import LassoCVModel, LEARModel, NaiveModel, OLSModel, RidgeModel, Use
 from epftoolbox2.models import _worker as worker
 from epftoolbox2.models._calendar import resolve_training_window
 from epftoolbox2.models._worker import _worker_init
@@ -299,9 +299,9 @@ class Cell(NamedTuple):
     paused: bool  # `aux`, whose mask a short member reads again on a later day (`with_paused_column`)
 
 
-# Every level of every axis and every pair of levels, not every cell: 11 cells, checked by the test below. LassoCV runs on 15-minute
-# data in one cell alone, a day of one horizon under "7D", which keeps its fits few; the last three cells pair RidgeModel with every
-# level of the other axes.
+# Every level of every axis and every pair of levels, not every cell: 14 cells, checked by the test below. LassoCV runs on 15-minute
+# data in one cell alone, a day of one horizon under "7D", which keeps its fits few; the three cells after the eighth pair RidgeModel
+# with every level of the other axes, and the last three LEARModel.
 CELLS = [
     Cell("ols", "1D", "autumn", "7D", (1,), True, False, False, True),
     Cell("lasso", "1D", "spring", None, (1, 3), False, True, True, False),
@@ -314,9 +314,12 @@ CELLS = [
     Cell("ridge", "1h", "spring", None, (1,), False, False, False, False),
     Cell("ridge", "15min", "autumn", "7D", (1, 3), True, True, True, True),
     Cell("ridge", "1D", "spring", "7D", (1, 3), False, True, False, True),
+    Cell("lear", "1h", "autumn", "7D", (1, 3), False, True, True, False),
+    Cell("lear", "15min", "spring", None, (1,), True, False, False, True),
+    Cell("lear", "1D", "spring", "7D", (1,), True, True, False, True),
 ]
 LEVELS = {
-    "model": {"ols", "lasso", "ridge"},
+    "model": {"ols", "lasso", "ridge", "lear"},
     "freq": {"1h", "15min", "1D"},
     "switch": {"spring", "autumn"},
     "refit": {None, "7D"},
@@ -341,6 +344,10 @@ def run_cell(cell, window, data):
         model = OLSModel(predictors, training_window=window, **options)
     elif cell.model == "ridge":
         model = RidgeModel(predictors, training_window=window, **options)
+    elif cell.model == "lear":
+        # Without is_weekday, minus is_weekend after LEAR's centring: an exact twin, whose tie in LARS turns on a last bit.
+        lear_predictors = [p for p in predictors if not p.startswith("is_weekday")]
+        model = LEARModel(lear_predictors, training_window=window, criterion="aic", solver="cd", **options)
     else:
         model = LassoCVModel(predictors, training_window=window, cv=3, max_iter=1000, **options)
     switch = SWITCH_DAYS[cell.switch]
