@@ -118,8 +118,10 @@ calendar, and forecasts the issue days in between from the last fit:
 - **`"kD"`**, k a whole number from 1: once every k days. `"1D"` is the issue day itself, `"7D"` the Monday on or before it.
 - **`"kMS"`**, k a whole number from 1: on the first of every k-th month. `"1MS"` is the first of the month, `"3MS"` January, April,
   July or October, and `"12MS"` 1 January.
+- **`"auto"`**: a rule per [training window](/epftoolbox2/model-pipeline/training-windows/), `"1D"` for a window of up to 84 days
+  and `"7D"` for a longer one or `"expanding"`. See [`refit="auto"`](#refitauto) below.
 
-Anything else raises `ValueError` when the model is built, such as `"7d"`, `"0D"`, `7` or `"auto"`, which isn't offered yet. Only
+Anything else raises `ValueError` when the model is built, such as `"7d"`, `"0D"`, `7` or `"Auto"`. Only
 [`OLSModel`](/epftoolbox2/models/ols/), [`LassoCVModel`](/epftoolbox2/models/lasso/), [`RidgeModel`](/epftoolbox2/models/ridge/) and [`LEARModel`](/epftoolbox2/models/lear/) take it.
 
 ```python
@@ -164,8 +166,12 @@ A forecast issued on D uses the fit of its **anchor** a, the refit day on or bef
   naming that day, since the first block would otherwise train on fewer days without a word. It is a - W - h with
   `newest_target="d-1"` (a the first refit day, h the largest horizon); with `"published"` it follows each period's newest target on
   each refit day, so later when D's target is out by the issue time (a - W with a price out at 14:00 and h = 2) and earlier when the
-  rule reaches further back. The day asked for is exact: a frame from it gives a longer frame's records. With validation and test windows the first issue day is the validation window's. A frame sized
-  for `refit=None`, from `test_start` - W - h, is too short whenever the test doesn't start on a refit day.
+  rule reaches further back. The predictors' lags count too: with `price_d-6` among them the frame must start 6 days before that
+  row, and an hour lag counts as a day, since in a frame built from the row's date its lag is empty and the row drops out of the fit.
+  The day asked for is then exact for a frame built from it (one whose lags were built before it was cut is refused too). With
+  validation and test windows the first issue day is the validation window's. A frame sized
+  for `refit=None`, from `test_start` - W - h, is too short whenever the test doesn't start on a refit day. `refit=None` itself is
+  not checked so: its first forecasts train on what the frame has.
 - **The information set reads the anchors.** The check of the newest training target of a `"d-1"` model is made on the anchors of the
   issue days, at the issue time of each, since that is where its rows are cut. Predictors are checked on the issue days, as before. With
   `"published"` the target's rule is read on the anchors.
@@ -185,6 +191,47 @@ What it works with: `horizons=`, `issue_days=`, `freq="1D"`, `newest_target=`, `
 anchor's span, filtered as usual, and a function is planned on the days that span reaches), `validation=` and `test=` windows, and
 [ensembles](/epftoolbox2/model-pipeline/ensembles/). A custom model that has only `_fit_predict` raises `ValueError` when given `refit`:
 see [Extending](/epftoolbox2/reference/extending/#custom-model).
+
+### `refit="auto"`
+
+A short window loses more to a stale fit than a long one: refitted weekly instead of daily, a 56-day LEAR window's MAE rose by 2.7
+to 6.9 % in the forecasting plan's study of the five Lago markets, a 1092- or 1456-day window's by at most 0.4 %, and the long windows
+are about 80 % of the compute. `refit="auto"` therefore gives each window of a [list](/epftoolbox2/model-pipeline/training-windows/)
+its own rule, read from the window alone:
+
+| Window | Rule under `"auto"` |
+|---|---|
+| 1 to 84 days | `"1D"`: fitted on every issue day |
+| 85 days or more, `"expanding"` | `"7D"`: fitted on Mondays |
+
+```python
+from epftoolbox2.models import LEARModel
+
+lear = LEARModel(["load_d+{horizon}", "wind_d+{horizon}"], training_window=[56, 84, 728, "expanding"], refit="auto")
+```
+
+- **Each window is the model with its rule.** The 56- and 84-day windows of a forecast issued on D are fitted on D, the 728-day and
+  expanding ones on the Monday on or before D, each exactly as `LEARModel(..., training_window=W, refit=rule)` would fit it, rows,
+  scaler and newest target included, and the forecast is their mean. A single window under `"auto"` is that model in every record:
+  `training_window=56, refit="auto"` forecasts as `refit="1D"` does, and 728 as `"7D"`.
+- **The record names the oldest fit.** Its `refit_anchor` is the anchor of the coarsest rule, the Monday, which is the oldest fit the
+  forecast uses (a fit's age is the run date minus it). With `"published"`, `newest_target_day` is the newest of the windows'
+  targets, the short ones'.
+- **A week is one job.** A worker runs the issue days of one Monday-to-Sunday block: the long windows' one fit for the block and the
+  short windows' fit of each day. The frame must reach back from each window's own anchor, so a long window asks for up to 6 days more
+  history than with `refit=None`, and the error names the window. The newest training target is checked, and with `"published"` read,
+  on every day some window is fitted on, each day back by the windows fitted on it; a column whose rule changes over time is judged
+  on the rows of every window's own fit, and not on the days between them that no window reads.
+- **The manifest** has `"refit": "auto"` and `"refit_rules"`, the rule of each window in the list's order (`["1D", "1D", "7D", "7D"]`),
+  so a resume with another `refit` is refused even where the rules would agree. YAML writes `refit: auto`.
+
+**What it costs.** On [`LEARModel.lago()`](/epftoolbox2/models/lear/#lago-et-al-2021-exactly) with `newest_target="d-1"` over
+Lago's DE test period without its first day (727 issue days from Monday 4 January 2016, where `"auto"` can start, h = 1, the same
+17,448 forecasts), `"auto"` against `refit=None`: the 56- and 84-day windows are the same to the bit, the 1092- and 1456-day ones
+lose 0.39 and 0.24 % of their MAE, and the average moves from 3.6224 to 3.6252 EUR/MWh (+0.08 %, RMSE +0.07 %; DM p 0.09 that
+`None` is better). It makes 57 % of the fits, exactly (2 + 2/7) / 4 since two windows of four still refit daily, at about 40 % of
+the compute (one run of each on a shared machine; the short windows are about a third of a fit's cost here, not the fifth they were in
+the study). Forecasts issued on a Monday are those of `refit=None`, bit for bit.
 
 ## What a clock change does
 

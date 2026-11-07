@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, List, Dict, Callable, Iterable, Sequence,
 import datetime
 import gc
 import inspect
+import math
 import multiprocessing
 import os
 import sys
@@ -43,13 +44,17 @@ from ._calendar import (
     FREQ_STEPS,
     IssueCalendar,
     NewestTargets,
+    REFIT_AUTO,
     REFIT_EPOCH,
+    anchors_of_rules,
+    block_rule,
     check_issue_days_in,
     check_newest_target,
     check_refit,
     every_horizon,
     listed_days,
     mask_members,
+    member_rules,
     member_window,
     periods_per_day,
     refit_anchor,
@@ -82,7 +87,15 @@ from ._worker import (
     training_rows,
 )
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days, zone_name
-from ..information_set import _STEP_MINUTES, InformationSetError, TrainingRows, check_level, frame_first_day, rule_dict
+from ..information_set import (
+    _STEP_MINUTES,
+    InformationSetError,
+    TrainingRows,
+    check_level,
+    frame_first_day,
+    parse_predictor,
+    rule_dict,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -102,6 +115,24 @@ _WINDOWS_MAX_WORKERS = 61
 def _test_days(test_start: str, test_end: str) -> List[datetime.date]:
     first, last = datetime.date.fromisoformat(test_start), datetime.date.fromisoformat(test_end)
     return [first + datetime.timedelta(days=d) for d in range((last - first).days + 1)]
+
+
+def _days_back(names: Iterable[str]) -> Tuple[int, Optional[str]]:
+    """How many whole days before its row's date the oldest value of these predictors is, by their suffixes (`price_h05_d-6` 6,
+    `load_h-1` an hour, so 1: rounded up to a day), and that predictor; (0, None) if none looks back. A frame built from its
+    first date has no such lag on its first days, so a row there has a missing predictor and doesn't train."""
+    deepest, which = 0, None
+    for name in dict.fromkeys(names):
+        minutes = sum(shift.minutes for shift in parse_predictor(name)[-1][1])
+        days = math.ceil(-minutes / 1440) if minutes < 0 else 0
+        if days > deepest:
+            deepest, which = days, name
+    return deepest, which
+
+
+def _names_of(lists: Dict[Any, List[str]]) -> List[str]:
+    """Every predictor name of these lists, each once, in order."""
+    return list(dict.fromkeys(name for names in lists.values() for name in names))
 
 
 def _usable_cpu_count() -> int:
@@ -139,7 +170,8 @@ class BaseModel(ABC):
         first of every k-th month, on a calendar counted from Monday 1970-01-05 (`_calendar.refit_anchor`). A forecast issued on
         D then uses the fit of its anchor a, the refit day on or before D: rows cut as for a forecast issued on a, with the
         newest target as of a's issue time, so nothing after a trains, and each forecast predicted on its own from that fit. Only
-        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV, Ridge, LEAR) can.
+        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV, Ridge, LEAR) can. `"auto"` gives each training window its
+        own rule (`_calendar.member_rules`): `"1D"` up to 84 days, `"7D"` for a longer one or `"expanding"`.
 
         `training_window` is how many days of rows a forecast trains on (`_calendar.training_span`), `"expanding"` every row from
         the frame's first local date, or a list of them, such as `[56, 84, 728, "expanding"]`: each member is fitted on its own
@@ -216,6 +248,24 @@ class BaseModel(ABC):
         overrides the other two alone would refit with its own estimator while `refit=None` fits OLS."""
         owners = {cls._owner_of(name) for name in _REFIT_METHODS}
         return len(owners) == 1 and BaseModel not in owners
+
+    @property
+    def _refit_rules(self) -> Tuple[Optional[str], ...]:
+        """The refit rule of each training window, in member order (`_calendar.member_rules`): `refit` for each, or with `"auto"`
+        each window's own. All None without `refit`."""
+        return member_rules(self._members, self.refit)
+
+    @property
+    def _refit_block(self) -> Optional[str]:
+        """The coarsest of the members' rules (`_calendar.block_rule`): `refit` itself unless it is `"auto"` with windows on both
+        sides of 84 days. A pool job is one of its blocks, a record's `refit_anchor` is its anchor, the oldest fit a forecast
+        uses, and the rows a run reads go back from it. None without `refit`."""
+        return block_rule(self._refit_rules)
+
+    def _anchor_days(self, issue_days: Iterable[Any]) -> List[datetime.date]:
+        """Every day a fit of a forecast on these issue days is made on: the anchors of each member's rule, each once, in date
+        order (`_calendar.anchors_of_rules`). With one rule, `refit_anchors`."""
+        return anchors_of_rules(issue_days, self._refit_rules)
 
     @property
     def _model_kwargs(self) -> Dict:
@@ -659,7 +709,8 @@ class BaseModel(ABC):
         numbers. `issue_days` None only checks that it could be read.
 
         With `refit` they are read on the anchors of these days instead, as of the issue time on each anchor: a unit's rows are
-        cut there, so a target published between the anchor and the issue day doesn't train (`_newest_of` then takes anchors)."""
+        cut there, so a target published between the anchor and the issue day doesn't train (`_newest_of` then takes anchors).
+        With `"auto"` on the anchors of every member's rule, each once (`_anchor_days`)."""
         if self.newest_target == "d-1":
             return None
         if rules is None:
@@ -673,14 +724,14 @@ class BaseModel(ABC):
         if issue_days is None:
             rules.newest_targets(target, freq, data.index, [], horizon, window)
             return None
-        days = list(issue_days) if self.refit is None else refit_anchors(issue_days, self.refit)
+        days = list(issue_days) if self.refit is None else self._anchor_days(issue_days)
         return NewestTargets(days, rules.newest_targets(target, freq, data.index, days, horizon, window))
 
     def _training_cut(self, rules: Optional["InformationSet"], target: str, freq: str) -> Dict[str, Any]:
         """What a manifest's `training_cut` says of this run: rows by date, with an `"expanding"` training window the frame's
-        first local date its rows start on (`expanding_from`; read after `_load_periods`), with `refit` the rule and its epoch, and
-        with `newest_target="published"` what the newest target is read from. The information set isn't compared on resume, but
-        these decide numbers."""
+        first local date its rows start on (`expanding_from`; read after `_load_periods`), with `refit` the rule and its epoch (and
+        with `"auto"` each member's resolved rule, `refit_rules`), and with `newest_target="published"` what the newest target is
+        read from. The information set isn't compared on resume, but these decide numbers."""
         cut = dict(TRAINING_CUT_BY_DATE)
         if EXPANDING in self._members:
             # Where an expanding window's rows start: the frame's first local date, day id 0 (the data hash covers it too).
@@ -688,6 +739,9 @@ class BaseModel(ABC):
         if self.refit is not None:
             # Which fit a forecast uses: its anchor depends on the rule and the epoch, and nothing else.
             cut.update(refit=self.refit, refit_epoch=REFIT_EPOCH)
+            if self.refit == REFIT_AUTO:
+                # The rule each member resolved to, in member order: what the code made of "auto", which decides numbers.
+                cut["refit_rules"] = list(self._refit_rules)
         if self._known_only and rules is not None:
             # Which forecasts exist: the information set isn't compared, but its rules and issue time decide these.
             cut["known_only"] = self._published_by(rules, freq)
@@ -705,7 +759,7 @@ class BaseModel(ABC):
 
     def _newest_of(self, period: int, day: Any) -> Any:
         """The newest target, relative to each issue day, of these day ids of a run: -1 with `newest_target="d-1"`. With
-        `refit` the day ids are anchors, the only days it was read on."""
+        `refit` the day ids are anchors (of any member's rule), the only days it was read on."""
         if self._newest is None:
             return -1
         return self._newest.at(period, np.asarray(day, dtype=np.int64) + self._first_ordinal)
@@ -913,10 +967,12 @@ class BaseModel(ABC):
             scalable_masks = masks
 
         first_day = datetime.date.fromisoformat(test_start)
-        # A pool job is a day, or with `refit` a block: the issue days of one anchor, whose units it fits once each.
+        # A pool job is a day, or with `refit` a block: the issue days of one anchor, whose units it fits once each. With
+        # "auto" a block of the coarsest member's rule, which holds its one fit and the finer members' fits of the same days.
+        block = self._refit_block
         tasks_by_day: Dict[Any, list] = {}
         for t in tasks:
-            job = t[2] if self.refit is None else refit_anchor(first_day + datetime.timedelta(days=t[2]), self.refit)
+            job = t[2] if block is None else refit_anchor(first_day + datetime.timedelta(days=t[2]), block)
             tasks_by_day.setdefault(job, []).append(t)
         days_with_tasks = len({t[2] for t in tasks})
 
@@ -952,8 +1008,14 @@ class BaseModel(ABC):
         if self._fits_nothing:
             config["fits"] = False  # each task reads its issue row alone (`_worker._row_value`)
         if self.refit is not None:
-            # The newest targets were read on the anchors (`_newest_targets`), and a unit looks its own up by date.
-            config["refit"] = {"rule": self.refit, "first_ordinal": self._first_ordinal, "newest": self._newest}
+            # The newest targets were read on the anchors (`_newest_targets`), and a unit looks its own up by date. `rule` is the
+            # block's, `rules` each member's (`member_rules`): a unit is anchored on its member's.
+            config["refit"] = {
+                "rule": block,
+                "rules": self._refit_rules,
+                "first_ordinal": self._first_ordinal,
+                "newest": self._newest,
+            }
         elif self._newest is not None:
             # By a task's place among the issue days: with `issue_days`, among the days of the listed weekdays alone.
             config["newest"] = self._newest.by_position(newest_days)
@@ -1075,7 +1137,9 @@ class BaseModel(ABC):
             self._cut_rules(information_set, cut_rules),
             issued,
         )
-        self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest)
+        if self._ctx_fn is None:  # a predictor function's lists are known after its plan, below
+            fixed = self._precompute_expanded_predictors(horizons)
+            self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest, _names_of(fixed))
         # A model that fits nothing has no training target to check.
         check_target = self.newest_target == "d-1" and not self._fits_nothing
         if self._ctx_fn is not None:
@@ -1095,6 +1159,9 @@ class BaseModel(ABC):
                     weekdays=weekdays,
                 )
             expanded = plan.names_by_pair()
+            self._check_reaches_back(
+                data, test_start, test_end, windows, weekdays, horizons, newest, _names_of(expanded)
+            )
             self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
             _contract.warn_about_a_midnight_stamp(
                 data.index, freq, self._used_predictors, self._cut_rules(information_set, cut_rules), self.name
@@ -1108,7 +1175,7 @@ class BaseModel(ABC):
             plan.release()
             return expanded
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
-        expanded = self._precompute_expanded_predictors(horizons)
+        expanded = fixed
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
         _contract.warn_about_a_midnight_stamp(
             data.index, freq, self._used_predictors, self._cut_rules(information_set, cut_rules), self.name
@@ -1188,8 +1255,10 @@ class BaseModel(ABC):
         weekdays: Optional[Sequence[int]],
         horizons: Sequence[int],
         newest: Optional[NewestTargets],
+        predictors: Iterable[str] = (),
     ) -> None:
-        """With `refit`, a ValueError if the frame starts after the earliest row a unit of the run trains on.
+        """With `refit`, a ValueError if the frame starts after the earliest row a unit of the run trains on, or less than its
+        predictors' deepest lag before it.
 
         A unit (p, h, a) trains on the rows dated in `training_span(a, W, h, k)`, k its newest target read on the anchor (-1 with
         `newest_target="d-1"`), and the first anchor can be up to a year before the test starts. The earliest first row over the
@@ -1198,9 +1267,16 @@ class BaseModel(ABC):
         silently: its forecasts move and a comparison keeps identical keys and counts. So that frame is refused, naming the day.
         A matching list filters the same span, so it needs no more. Without `refit` nothing is checked, as before.
 
-        With a list of training windows each member's units are checked, which the largest int member decides; an `"expanding"`
-        member trains on whatever the frame has from its first date, so it asks for nothing."""
-        widths = [member for member in self._members if member != EXPANDING]
+        With a list of training windows each member's units are checked, on the anchors of its own rule (`_refit_rules`: with
+        `"auto"` a long member's anchor can be 6 days before a short one's); an `"expanding"` member trains on whatever the frame has
+        from its first date, so it asks for nothing.
+
+        A predictor with a day lag (`price_d-6`, or an hour lag counted as a day, rounded up: `_days_back`) holds on that row a
+        value 6 days older, which a frame built from the row's date doesn't have: the row would have a missing predictor and drop
+        out of the fit, as silently. So the frame must start the deepest lag of `predictors` before the earliest row. A frame
+        whose lags were built before it was cut is refused too; nothing is checked for `refit=None`, whose rows are cut on the
+        issue day, as before."""
+        widths = [(member, rule) for member, rule in zip(self._members, self._refit_rules) if member != EXPANDING]
         if self.refit is None or not widths:
             return
         if windows is not None:
@@ -1212,20 +1288,27 @@ class BaseModel(ABC):
         if not issued or not len(data.index):
             return
         first = min(datetime.date.fromisoformat(day) for day in issued)
-        anchors = np.array([day.toordinal() for day in refit_anchors(issued, self.refit)], dtype=np.int64)
-        earliest = []
-        for period in range(self._periods_per_day) if newest is not None else [None]:
-            newest_of = -1 if newest is None else newest.at(period, anchors)
-            for horizon in horizons:
-                first_rows, _ = training_span(anchors, max(widths), int(horizon), newest_of)
-                earliest.append(int(np.min(first_rows)))
-        needed = datetime.date.fromordinal(min(earliest))
+        earliest = []  # (the earliest first row, the member's window, its rule)
+        for width, rule in widths:
+            anchors = np.array([day.toordinal() for day in refit_anchors(issued, rule)], dtype=np.int64)
+            for period in range(self._periods_per_day) if newest is not None else [None]:
+                newest_of = -1 if newest is None else newest.at(period, anchors)
+                for horizon in horizons:
+                    first_rows, _ = training_span(anchors, width, int(horizon), newest_of)
+                    earliest.append((int(np.min(first_rows)), width, rule))
+        row, width, rule = min(earliest, key=lambda found: found[0])
+        lag, lagged = _days_back(predictors)
+        earliest_row = datetime.date.fromordinal(row)
+        needed = datetime.date.fromordinal(row - lag)
         starts = _contract.wall_clock(data.index).min().date()
         if starts > needed:
+            which = "" if self.refit != REFIT_AUTO else f" (training window {width}, refit {rule!r})"
+            back = "" if not lag else f", and its {lagged} reads {lag} day{'s' if lag > 1 else ''} before that"
             raise ValueError(
                 f"{self.name}: with refit={self.refit!r} the forecasts issued from {first} on are fitted on their refit days, the "
-                f"first {refit_anchor(first, self.refit)}, and the earliest row they train on is dated {needed}, but the frame starts "
-                f"on {starts}: that block would train on fewer days. Start the frame on {needed} or earlier, or the test later."
+                f"first {refit_anchor(first, rule)}{which}, and the earliest row they train on is dated {earliest_row}{back}, but "
+                f"the frame starts on {starts}: that block would train on fewer days. Start the frame on {needed} or earlier, or "
+                "the test later."
             )
 
     def _target_on_anchors(
@@ -1242,16 +1325,19 @@ class BaseModel(ABC):
     ) -> Any:
         """`method` (an information set's `check` or `late_uses`) of the newest training target alone, for a model with `refit`:
         on the anchors of the issue days (`issue_days`, else every day from `test_start` to `test_end`), since a unit's rows are
-        cut as of the issue time on its anchor. Without days to read anchors from, on every day of the frame, as before.
+        cut as of the issue time on its anchor; with `"auto"` on the anchors of every member's rule. Without days to read anchors
+        from, on every day of the frame, as before.
         `window` is the one a fit reads back (`_reach_window`), the model's int window if not given; no target before the frame's
-        first local date is judged, having no row there."""
+        first local date is judged, having no row there. With `"auto"` an anchor's targets are those of the windows refitted on it
+        (`_member_spans`): a daily anchor reads back by the short windows alone."""
         boundary = {pair: [] for pair in expanded}
         # The targets of a unit's rows, back from its anchor.
-        rows = TrainingRows(max(self._members) if window is None else window, first_day=frame_first_day(index))
+        window = max(self._members) if window is None else window
+        rows = TrainingRows(window, first_day=frame_first_day(index), members=self._member_spans(window))
         if issue_days is None and (test_start is None or test_end is None):
             return method(boundary, target, freq, index, test_start, test_end, model_name=self.name, training_rows=rows)
         issued = issue_days if issue_days is not None else [day.isoformat() for day in _test_days(test_start, test_end)]
-        anchors = [day.isoformat() for day in refit_anchors(issued, self.refit)]
+        anchors = [day.isoformat() for day in self._anchor_days(issued)]
         return method(boundary, target, freq, index, model_name=self.name, issue_days=anchors, training_rows=rows)
 
     def _training_rows(
@@ -1261,14 +1347,28 @@ class BaseModel(ABC):
         the window, a newest target before D - 1 under `"published"`, and with `refit` the refit day, whose fit a forecast uses:
         its rows are those of a forecast issued on it (`training_span(a, W, h, k(a))`), as of the issue time on D. `window` is the
         one a fit reads back (`_reach_window`), the model's int window if not given; `first_day` the frame's first local date
-        (`frame_first_day`), before which no row exists to judge."""
+        (`frame_first_day`), before which no row exists to judge.
+
+        With `"auto"` each member's own rows are judged, from its own anchor (`_member_spans`), and no row between them that no
+        member reads."""
+        window = max(self._members) if window is None else window
         return TrainingRows(
-            max(self._members) if window is None else window,
+            window,
             reach=0 if newest is None else newest.reach,
             to_issue=self.newest_target == "published",
-            refit=self.refit,
+            refit=self._refit_block,
             first_day=first_day,
+            members=self._member_spans(window),
         )
+
+    def _member_spans(self, window: int) -> Tuple[Tuple[int, Optional[str]], ...]:
+        """(window, refit rule) of each training window where they refit on different rules (`"auto"`), what
+        `TrainingRows(members=)` judges: an `"expanding"` member's window is `window`, the reach (`_reach_window`). Empty when every
+        member has one rule, whose largest window holds every other's rows from the same anchor."""
+        rules = self._refit_rules
+        if len(set(rules)) <= 1:
+            return ()
+        return tuple((window if member == EXPANDING else member, rule) for member, rule in zip(self._members, rules))
 
     def _reach_window(self, data: pd.DataFrame, issue_days: Optional[Sequence[Any]] = None) -> int:
         """The window of the rows a fit of this model can read, as one int, for whatever asks which days a fit reads (the checks
@@ -1322,22 +1422,25 @@ class BaseModel(ABC):
         _contract.check_names(data, target, horizon)
 
     def _fit_start(self, start: Optional[str]) -> Optional[str]:
-        """The first day a forecast issued from `start` on is fitted on: `start`, or with `refit` its anchor, from which a
-        unit's rows are cut, so that the rows a run reads (`_contract.read_days`) go back from it."""
+        """The first day a forecast issued from `start` on is fitted on: `start`, or with `refit` its anchor (the coarsest
+        member's with `"auto"`, the oldest), from which a unit's rows are cut, so that the rows a run reads
+        (`_contract.read_days`) go back from it."""
         if self.refit is None or start is None:
             return start
         try:
-            return refit_anchor(datetime.date.fromisoformat(start), self.refit).isoformat()
+            return refit_anchor(datetime.date.fromisoformat(start), self._refit_block).isoformat()
         except (TypeError, ValueError):  # `read_days` says what it can't read
             return start
 
     def _fit_days(self, days: Any) -> Any:
-        """The day id each of these issue day ids is fitted on: itself, or with `refit` its anchor."""
+        """The day id each of these issue day ids is fitted on: itself, or with `refit` its anchor (a matching list, which
+        reads this, has one int window, so one rule)."""
         if self.refit is None:
             return days
         ordinals = np.atleast_1d(np.asarray(days, dtype=np.int64)) + self._first_ordinal
         anchors = np.array(
-            [refit_anchor(datetime.date.fromordinal(int(o)), self.refit).toordinal() for o in ordinals], dtype=np.int64
+            [refit_anchor(datetime.date.fromordinal(int(o)), self._refit_block).toordinal() for o in ordinals],
+            dtype=np.int64,
         )
         anchors -= self._first_ordinal
         return int(anchors[0]) if np.ndim(days) == 0 else anchors
@@ -1399,6 +1502,8 @@ class BaseModel(ABC):
             reach=0 if newest is None else newest.reach,
             horizons=horizons,
             refit=self.refit,
+            refit_rules=self._refit_rules,
+            member_windows=self._members,
             known_only=self._known_only,
             trains=not self._fits_nothing,
             matching_refused=None
@@ -1454,7 +1559,9 @@ class BaseModel(ABC):
             plan.uses_matching and plan.reach != (0 if newest is None else newest.reach)
         ):
             problems.append("newest target")
-        if plan.refit != self.refit:
+        if plan.refit != self.refit or (
+            self.refit is not None and (plan.refit_rules, plan.member_windows) != (self._refit_rules, self._members)
+        ):
             problems.append("refit")
         if problems:
             raise ValueError(f"{self.name}: this plan was built for another {', '.join(problems)}")
@@ -1663,7 +1770,8 @@ class BaseModel(ABC):
             key = (period, horizon) if plan is None else (list_id, period, horizon)
             each = [digests[window].get(key if member is None else (*key, member)) for member in members]
             digest = each[0]
-            anchor = None if self.refit is None else refit_anchor(run_date, self.refit).isoformat()
+            # The coarsest member's anchor with "auto": what a record holds (`_worker._run_block`).
+            anchor = None if self.refit is None else refit_anchor(run_date, self._refit_block).isoformat()
             if digest is None and (anchor is None or (plan is not None and list_id is None)):
                 return None
             matching = plan is not None and plan.train_on[list_id] == TRAIN_ON_MATCHING

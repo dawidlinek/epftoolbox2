@@ -57,7 +57,7 @@ from ..information_set import (
 )
 from ..results.availability import listing_rows, sort_rows
 from ..results.windows import mask_key
-from ._calendar import IssueCalendar, periods_per_day, refit_anchor, refit_anchors
+from ._calendar import EXPANDING, IssueCalendar, anchors_of_rules, block_rule, periods_per_day, refit_anchor
 from ._contract import period_index, wall_clock
 from ._worker import NOT_PLANNED, OTHER_LIST
 
@@ -560,6 +560,9 @@ class PredictorPlan:
             function is called for these alone, and `assignment` has no other.
         refit: The model's `refit`. With one, a forecast's rows are cut on its anchor, so the training target is checked on
             the anchors, and the training days of a matching list reach back from the anchor.
+        refit_rules: The rule of each of the model's training windows (`_calendar.member_rules`), `(refit,)` if empty: with
+            `refit="auto"` the windows refit on their own rules, so the target is checked on the anchors of each.
+        member_windows: The model's training windows (`BaseModel._members`), whose own rows are judged with `refit_rules`.
         fit_window: The model's `training_window`, if known: a column whose rule changes over time (`over_time`) is checked
             on every row the fits read (`training_rows`), not only on the issue day's.
         known_only: Whether the model is `known_only` (`NaiveModel`): a forecast whose list its rule puts after the issue time
@@ -594,6 +597,8 @@ class PredictorPlan:
     _planned: Optional[Dict[Tuple[int, int], np.ndarray]] = field(default=None, repr=False)
     horizons: Tuple[int, ...] = ()
     refit: Optional[str] = None
+    refit_rules: Tuple[Optional[str], ...] = ()
+    member_windows: Tuple[Any, ...] = ()
     fit_window: Optional[int] = None
     # (name, horizon) -> when each [period, issue day] cell the fits read is known, for a column whose rule changes over time,
     # and name -> what each row day of it is known at.
@@ -721,8 +726,10 @@ class PredictorPlan:
         info = self.information_set
         cells = self._cells or _Cells(self.data, info, self.freq, self.issue_days, self.availability)
         scanned = self.issue_days[days[0] : days[1]]
-        if self.refit is not None:  # a forecast's rows are cut as of the issue time on its anchor
-            scanned = refit_anchors(scanned, self.refit)
+        if (
+            self.refit is not None
+        ):  # a forecast's rows are cut as of the issue time on its anchor, of each window's rule
+            scanned = anchors_of_rules(scanned, self._rules)
         target_violations, unknown = info.violations(
             pairs,
             target,
@@ -730,10 +737,12 @@ class PredictorPlan:
             self.data.index,
             issue_days=[day.isoformat() for day in scanned],
             check_target=self.newest_target == "d-1" and self.trains,
-            # The target's training rows, back from the anchors with `refit`.
+            # The target's training rows, back from the anchors with `refit`: with "auto" those of the windows refitted there.
             training_rows=None
             if self.fit_window is None
-            else TrainingRows(self.fit_window, self.reach, first_day=frame_first_day(self.data.index)),
+            else TrainingRows(
+                self.fit_window, self.reach, first_day=frame_first_day(self.data.index), members=self._member_spans()
+            ),
         )
         late_names: List[str] = []
         no_rule: List[str] = []
@@ -757,9 +766,31 @@ class PredictorPlan:
             self.fit_window,
             reach=self.reach,
             to_issue=self.newest_target == "published",
-            refit=self.refit,
+            refit=None if self.refit is None else self.refit_block,
             first_day=frame_first_day(self.data.index),  # no row before the frame's first date exists to judge
+            members=self._member_spans(),  # with windows on different rules, each one's own rows (`BaseModel._member_spans`)
         )
+
+    @property
+    def _rules(self) -> Tuple[Optional[str], ...]:
+        return tuple(self.refit_rules) or (self.refit,)
+
+    def _member_spans(self) -> Tuple[Tuple[int, Optional[str]], ...]:
+        """(window, rule) of each training window where they refit on different rules (`refit="auto"`), an `"expanding"` one's
+        window `fit_window`, the reach; empty otherwise (`BaseModel._member_spans`)."""
+        rules = self._rules
+        if self.refit is None or len(set(rules)) <= 1 or not self.member_windows:
+            return ()
+        return tuple(
+            (self.fit_window if member == EXPANDING else member, rule)
+            for member, rule in zip(self.member_windows, rules)
+        )
+
+    @property
+    def refit_block(self) -> Optional[str]:
+        """The coarsest of the windows' rules (`_calendar.block_rule`), the rule of a forecast's oldest fit: `refit` unless it is
+        `"auto"` with windows on both sides of 84 days. A matching list has one int window, so one rule."""
+        return block_rule(self._rules)
 
     def _horizons_of(self, cells: "_Cells", name: str) -> List[int]:
         """The horizons whose lists use `name`, of a column whose rule changes over time; one, any, for another column."""
@@ -905,7 +936,7 @@ class PredictorPlan:
         if self.refit is None:
             return np.zeros(len(grid), dtype=np.int64)
         days = [self.first_grid_day + datetime.timedelta(days=int(place)) for place in grid]
-        return np.array([(day - refit_anchor(day, self.refit)).days for day in days], dtype=np.int64)
+        return np.array([(day - refit_anchor(day, self.refit_block)).days for day in days], dtype=np.int64)
 
     def _grid_positions(self) -> np.ndarray:
         """Where each issue day is in the grid of `day_lists`."""
@@ -1034,6 +1065,8 @@ def build_plan(
     known_only: bool = False,
     trains: bool = True,
     matching_refused: Optional[str] = None,
+    refit_rules: Sequence[Optional[str]] = (),
+    member_windows: Sequence[Any] = (),
 ) -> PredictorPlan:
     """Evaluate `fn` for every planned forecast, at each of `horizons` (every one from 1 to `horizon`, the largest, if not
     given). `warn_unpublished` warns for each `published()` argument that was never
@@ -1042,7 +1075,9 @@ def build_plan(
 
     If a forecast gets `Use(list, train_on="matching")`, `fn` is also evaluated on the days it can train on, which needs
     `training_window`. What `fn` answers on a day is then the same whether that day is issued or only trained on.
-    `newest_target`, `reach`, `refit`, `known_only` and `trains` are the model's (see `PredictorPlan`). `matching_refused` is why
+    `newest_target`, `reach`, `refit`, `refit_rules`, `member_windows`, `known_only` and `trains` are the model's (see
+    `PredictorPlan`).
+    `matching_refused` is why
     the model can't train on matching days (a list of training windows): a ValueError with it as soon as a forecast gets such a
     list, before its training days are planned.
     """
@@ -1062,6 +1097,8 @@ def build_plan(
         reach=reach,
         horizons=() if horizons is None else tuple(horizons),
         refit=refit,
+        refit_rules=tuple(refit_rules),
+        member_windows=tuple(member_windows),
         fit_window=training_window,
         known_only=known_only,
         trains=trains,
@@ -1136,7 +1173,7 @@ def _plan_training_days(
             f"{function_name(fn)} returned Use(..., train_on='matching'), which needs the training_window to plan"
         )
     plan.training_window = training_window
-    first = min(plan.issue_days) if plan.refit is None else refit_anchor(min(plan.issue_days), plan.refit)
+    first = min(plan.issue_days) if plan.refit is None else refit_anchor(min(plan.issue_days), plan.refit_block)
     plan.first_grid_day = first - datetime.timedelta(days=training_window + plan.horizon + plan.reach)
     grid = plan._grid_positions()
     is_issue_day = np.zeros(plan._grid_size(), dtype=bool)

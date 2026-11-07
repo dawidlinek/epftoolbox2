@@ -466,6 +466,11 @@ class TrainingRows:
     refit day A on or before D, whose rows are those of a forecast issued on A: the same, `D - A` days earlier. Either way they
     are judged as of D's issue time, as `leakage_probe` judges them.
 
+    `members` is for a model whose training windows refit on different rules (`refit="auto"`): each window's (window, rule), and
+    the rows judged are those of each window's own fit, from its own refit day, and no row between them that no window reads.
+    The training targets of a day are then those of the windows refitted on it, since a refit model's target is checked on its
+    refit days. Without `members`, `window` and `refit` are the one span.
+
     Rows dated before `first_day`, the frame's first local date, don't exist, so no fit reads them and they aren't judged: a
     window that reaches before the frame (an `"expanding"` one always does, `BaseModel._reach_window`) is judged on the rows the
     frame has. Without `first_day` every row day of the window is judged.
@@ -474,8 +479,9 @@ class TrainingRows:
         window: The model's `training_window`.
         reach: Days a newest target lies before D - 1 at most (`NewestTargets.reach`, read on the refit days with `refit`).
         to_issue: Rows reach D - 1, as with `newest_target="published"`.
-        refit: The model's `refit`, whose refit days move the rows back.
+        refit: The model's `refit` (a rule), whose refit days move the rows back.
         first_day: The frame's first local date (ISO), before which nothing is judged; None judges the whole window.
+        members: (window, rule) of each training window, where the windows refit on different rules; empty otherwise.
     """
 
     window: int
@@ -483,41 +489,64 @@ class TrainingRows:
     to_issue: bool = False
     refit: Optional[str] = None
     first_day: Optional[str] = None
+    members: Tuple[Tuple[int, Optional[str]], ...] = ()
 
-    def predictor_days(self, horizon: int, lag: int = 0) -> range:
-        """The row days, relative to D, of the training rows at `horizon`, of a fit made `lag` days before D (its refit day)."""
-        return range(-(self.window + horizon + self.reach + lag), -lag if self.to_issue else -(horizon + lag))
+    def predictor_days(self, horizon: int, lag: int = 0, window: Optional[int] = None) -> range:
+        """The row days, relative to D, of the training rows at `horizon`, of a fit made `lag` days before D (its refit day), of
+        `window` days (the model's if not given)."""
+        window = self.window if window is None else window
+        return range(-(window + horizon + self.reach + lag), -lag if self.to_issue else -(horizon + lag))
 
-    def lags(self, days: pd.DatetimeIndex) -> np.ndarray:
-        """How many days before each of `days` its fit is made: 0, or with `refit` the days since its refit day."""
-        if self.refit is None:
+    def lags(self, days: pd.DatetimeIndex, rule: Optional[str] = None) -> np.ndarray:
+        """How many days before each of `days` its fit is made: 0, or with `refit` (or `rule`) the days since its refit day."""
+        rule = self.refit if rule is None else rule
+        if rule is None:
             return np.zeros(len(days), dtype=np.int64)
         from .models._calendar import refit_anchor  # models import this module
 
-        return np.array([(day.date() - refit_anchor(day, self.refit)).days for day in days], dtype=np.int64)
+        return np.array([(day.date() - refit_anchor(day, rule)).days for day in days], dtype=np.int64)
 
     def latest(self, known: "_RowsKnown", horizon: int) -> np.ndarray:
         """When the training rows at `horizon` of the forecast of each [period, issue day] of `known`'s clock are all known, of
-        the rows dated on or after `first_day`."""
+        the rows dated on or after `first_day`; with `members`, the rows of every window's own fit."""
         days = known.days
-        lags = self.lags(days)
         floors = self.floors(days)
         out = np.full((known.size, len(days)), -np.inf)
-        for lag in np.unique(lags):
-            on = lags == lag
-            span = self.predictor_days(horizon, int(lag))
-            out[:, on] = (known.latest(span) if floors is None else known.latest_since(span, floors))[:, on]
+        for window, rule in self.members or ((self.window, self.refit),):
+            lags = self.lags(days, rule)
+            for lag in np.unique(lags):
+                on = lags == lag
+                span = self.predictor_days(horizon, int(lag), window)
+                found = (known.latest(span) if floors is None else known.latest_since(span, floors))[:, on]
+                out[:, on] = np.maximum(out[:, on], found) if self.members else found
         return out
 
-    def target_days(self) -> range:
-        """The days, relative to D, of the training targets before D - 1, the one the check reads anyway."""
-        return range(-(self.window + self.reach), -1)
+    def target_days(self, window: Optional[int] = None) -> range:
+        """The days, relative to D, of the training targets before D - 1, the one the check reads anyway, of `window` days (the
+        model's if not given)."""
+        return range(-((self.window if window is None else window) + self.reach), -1)
 
     def target_latest(self, known: "_RowsKnown") -> np.ndarray:
         """When the training targets of `target_days` are all known, for each [period, issue day], of those dated on or after
-        `first_day` (a target is a row's: one dated before the frame's first date has no row there)."""
+        `first_day` (a target is a row's: one dated before the frame's first date has no row there). With `members`, the days
+        are refit days, and a day's targets are those of the longest window refitted on it; a day no window is refitted on has
+        none."""
         floors = self.floors(known.days)
-        return known.latest(self.target_days()) if floors is None else known.latest_since(self.target_days(), floors)
+        if not self.members:
+            return (
+                known.latest(self.target_days()) if floors is None else known.latest_since(self.target_days(), floors)
+            )
+        days = known.days
+        windows = np.zeros(len(days), dtype=np.int64)
+        for window, rule in self.members:
+            refitted = self.lags(days, rule) == 0
+            windows[refitted] = np.maximum(windows[refitted], window)
+        out = np.full((known.size, len(days)), -np.inf)
+        for window in np.unique(windows[windows > 0]).tolist():
+            on = windows == window
+            span = self.target_days(window)
+            out[:, on] = (known.latest(span) if floors is None else known.latest_since(span, floors))[:, on]
+        return out
 
     def floors(self, days: pd.DatetimeIndex) -> Optional[np.ndarray]:
         """The first row day, relative to each of `days`, that the frame has: `first_day - D`; None without `first_day`."""
@@ -2097,8 +2126,9 @@ def _issue_day_forecasts(
 
 def _last_day_of_block(model: Any, frame: pd.DataFrame, run_day: str) -> str:
     """The last day a probe runs `model` to from `run_day`: the day itself, or with `refit` the last issue day of its block,
-    at the latest the frame's last local date."""
-    refit = getattr(model, "refit", None)
+    at the latest the frame's last local date. With `refit="auto"` the block is the coarsest of its windows' rules
+    (`BaseModel._refit_block`), whose fit serves the most issue days."""
+    refit = getattr(model, "_refit_block", getattr(model, "refit", None))
     if refit is None:
         return run_day
     from .models._calendar import refit_block_end  # models import this module

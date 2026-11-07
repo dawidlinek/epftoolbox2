@@ -236,9 +236,10 @@ an issue day it didn't sample.
   `newest_target="published"` the newest target known at a's issue time), finds its binary columns on those rows, and is predicted from
   its own row on its own, so it is bit for bit the same whichever run, process count or resume made it. Records gain `refit_anchor`,
   the manifest's `training_cut` gains `refit` and `refit_epoch` (changing `refit` refuses a resume), resume compares each stored
-  anchor, and YAML writes `refit` only when set. A frame that doesn't hold W+h days before the refit day of the first issue day raises `ValueError` naming the day it
-  must start on (one sized for `refit=None` is too short whenever the test doesn't start on a refit day), and a run uses
-  at most one process per refit day. Other values raise, `"auto"` included, and so does `refit` on a custom model with only
+  anchor, and YAML writes `refit` only when set. A frame that doesn't hold W+h days before the refit day of the first issue day, and the predictors' deepest lag before
+  that (`price_d-6` 6 days, an hour lag a day: else the first training rows miss their lags and drop out), raises `ValueError` naming
+  the day it must start on (one sized for `refit=None` is too short whenever the test doesn't start on a refit day), and a run uses
+  at most one process per refit day. Other values raise, and so does `refit` on a custom model with only
   `_fit_predict`, or whose `_fit_predict`, `_fit_model` and `_predict_fitted` aren't all defined in one class (a subclass that
   overrides some of them would fit one model with `refit=None` and another with `refit`). `verify`, `leakage_probe` and `positive_control` run a refit model from the issue day to the end of its block,
   so a leak that needs several days of a block shows, and cost that many more days of forecasts. **Nothing moves without the keyword**: `refit=None` is every record, manifest and table as before. With it the
@@ -247,6 +248,18 @@ an issue day it didn't sample.
   with naive standard errors of the daily difference of 0.6 % and 1.4 % of the MAE; forecasts issued on a refit day equal the daily
   refit's bit for bit. See
   [Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar).
+- **`refit="auto"`: a refit rule per training window.** `LEARModel(..., training_window=[56, 84, 728, "expanding"], refit="auto")`
+  (any model that takes `refit`) fits the windows of up to 84 days on every issue day and the longer ones and `"expanding"` on Mondays,
+  each exactly as the single-window model with `refit="1D"` or `"7D"`, and forecasts their mean; a single window under `"auto"` is
+  its rule in every record. A record's `refit_anchor` is the Monday, the oldest fit it uses, and `newest_target_day` the newest of its
+  windows'; `training_cut` gains `refit_rules`, the rule of each window, so a resume with another `refit` is refused. A worker runs a
+  Monday-to-Sunday block, the frame must reach back from each window's own refit day (a long window asks up to 6 days more than with
+  `refit=None`, and the error names it), the training target is checked on every window's refit days, and a column whose rule changes
+  over time on the rows of every window's own fit. **Nothing moves for `None`, `"kD"` or `"kMS"`**: records, manifests and YAML are as
+  before. On `LEARModel.lago()` with `newest_target="d-1"` over DE (Lago's test period without its first day: 727 issue days, the same
+  17,448 forecasts) the window average's MAE went from 3.6224 to 3.6252 (+0.08 %, DM p 0.09) at 57 % of the fits and about 40 % of the
+  compute. See
+  [`refit="auto"`](/epftoolbox2/model-pipeline/time-and-calendars/#refitauto).
 - **`freq="1D"`: one model per day.** `pipeline.run(df.at_time("12:00"), ..., freq="1D")` fits one model per day on a frame with one row
   per local date, every row at one time of day. It is accepted wherever `freq` is: `ModelPipeline.run`, `report`, `verify` and
   `explain`, `BaseModel.run`, `leakage_probe` and `positive_control`, `Workflow` YAML (`model_pipeline.freq: 1D`), `epf model` and
