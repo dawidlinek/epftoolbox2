@@ -55,7 +55,6 @@ from ._calendar import (
     mask_members,
     member_rules,
     member_window,
-    newest_rule,
     periods_per_day,
     refit_anchor,
     refit_anchors,
@@ -1286,10 +1285,12 @@ class BaseModel(ABC):
         cut as of the issue time on its anchor; with `"auto"` on the anchors of every member's rule. Without days to read anchors
         from, on every day of the frame, as before.
         `window` is the one a fit reads back (`_reach_window`), the model's int window if not given; no target before the frame's
-        first local date is judged, having no row there."""
+        first local date is judged, having no row there. With `"auto"` an anchor's targets are those of the windows refitted on it
+        (`_member_spans`): a daily anchor reads back by the short windows alone."""
         boundary = {pair: [] for pair in expanded}
         # The targets of a unit's rows, back from its anchor.
-        rows = TrainingRows(max(self._members) if window is None else window, first_day=frame_first_day(index))
+        window = max(self._members) if window is None else window
+        rows = TrainingRows(window, first_day=frame_first_day(index), members=self._member_spans(window))
         if issue_days is None and (test_start is None or test_end is None):
             return method(boundary, target, freq, index, test_start, test_end, model_name=self.name, training_rows=rows)
         issued = issue_days if issue_days is not None else [day.isoformat() for day in _test_days(test_start, test_end)]
@@ -1305,17 +1306,26 @@ class BaseModel(ABC):
         one a fit reads back (`_reach_window`), the model's int window if not given; `first_day` the frame's first local date
         (`frame_first_day`), before which no row exists to judge.
 
-        With `"auto"` the rows of the members' fits are judged together, from the coarsest member's anchor back by the reach window
-        (`refit`, the oldest fit) to the finest member's anchor (`refit_newest`, the newest fit): a superset of each member's."""
-        block, newest_fit = self._refit_block, newest_rule(self._refit_rules)
+        With `"auto"` each member's own rows are judged, from its own anchor (`_member_spans`), and no row between them that no
+        member reads."""
+        window = max(self._members) if window is None else window
         return TrainingRows(
-            max(self._members) if window is None else window,
+            window,
             reach=0 if newest is None else newest.reach,
             to_issue=self.newest_target == "published",
-            refit=block,
+            refit=self._refit_block,
             first_day=first_day,
-            **({} if newest_fit == block else {"refit_newest": newest_fit}),
+            members=self._member_spans(window),
         )
+
+    def _member_spans(self, window: int) -> Tuple[Tuple[int, Optional[str]], ...]:
+        """(window, refit rule) of each training window where they refit on different rules (`"auto"`), what
+        `TrainingRows(members=)` judges: an `"expanding"` member's window is `window`, the reach (`_reach_window`). Empty when every
+        member has one rule, whose largest window holds every other's rows from the same anchor."""
+        rules = self._refit_rules
+        if len(set(rules)) <= 1:
+            return ()
+        return tuple((window if member == EXPANDING else member, rule) for member, rule in zip(self._members, rules))
 
     def _reach_window(self, data: pd.DataFrame, issue_days: Optional[Sequence[Any]] = None) -> int:
         """The window of the rows a fit of this model can read, as one int, for whatever asks which days a fit reads (the checks
@@ -1450,6 +1460,7 @@ class BaseModel(ABC):
             horizons=horizons,
             refit=self.refit,
             refit_rules=self._refit_rules,
+            member_windows=self._members,
             known_only=self._known_only,
             trains=not self._fits_nothing,
             matching_refused=None
@@ -1505,7 +1516,9 @@ class BaseModel(ABC):
             plan.uses_matching and plan.reach != (0 if newest is None else newest.reach)
         ):
             problems.append("newest target")
-        if plan.refit != self.refit or (self.refit is not None and plan.refit_rules != self._refit_rules):
+        if plan.refit != self.refit or (
+            self.refit is not None and (plan.refit_rules, plan.member_windows) != (self._refit_rules, self._members)
+        ):
             problems.append("refit")
         if problems:
             raise ValueError(f"{self.name}: this plan was built for another {', '.join(problems)}")

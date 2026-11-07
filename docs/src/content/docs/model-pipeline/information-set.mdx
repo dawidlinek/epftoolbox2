@@ -579,9 +579,10 @@ the newest training row at horizon 1 is D-2 (see [The newest target](/epftoolbox
 
 `InformationSet.check()`, which `availability="raise"` runs, is a static analysis of predictor *names*, and
 `InformationSet.late_uses()`, which `availability="warn"` runs, returns what it refuses. A model run tells both which rows its fits
-read, `training_rows=TrainingRows(window, reach=0, to_issue=False, refit=None, first_day=None)`, which matters only for a column
-whose [rules change over time](#rules-over-time); a model passes the frame's first local date as `first_day`, before which no row is
-judged. Called without it they judge the issue day's row alone, and say so in a warning for such a
+read, `training_rows=TrainingRows(window, reach=0, to_issue=False, refit=None, first_day=None, members=())`, which matters only for a
+column whose [rules change over time](#rules-over-time); a model passes the frame's first local date as `first_day`, before which no
+row is judged, and with [`refit="auto"`](/epftoolbox2/model-pipeline/time-and-calendars/#refitauto) each training window's
+`(window, rule)` as `members`, so that each window's own rows are judged and none between them. Called without it they judge the issue day's row alone, and say so in a warning for such a
 column:
 
 ```python

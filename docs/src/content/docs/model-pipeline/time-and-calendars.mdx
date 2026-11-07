@@ -216,8 +216,8 @@ lear = LEARModel(["load_d+{horizon}", "wind_d+{horizon}"], training_window=[56, 
 - **A week is one job.** A worker runs the issue days of one Monday-to-Sunday block: the long windows' one fit for the block and the
   short windows' fit of each day. The frame must reach back from each window's own anchor, so a long window asks for up to 6 days more
   history than with `refit=None`, and the error names the window. The newest training target is checked, and with `"published"` read,
-  on every day some window is fitted on; a column whose rule changes over time is judged on every row of every window's fit, from the
-  long windows' Monday back to the short windows' newest rows.
+  on every day some window is fitted on, each day back by the windows fitted on it; a column whose rule changes over time is judged
+  on the rows of every window's own fit, and not on the days between them that no window reads.
 - **The manifest** has `"refit": "auto"` and `"refit_rules"`, the rule of each window in the list's order (`["1D", "1D", "7D", "7D"]`),
   so a resume with another `refit` is refused even where the rules would agree. YAML writes `refit: auto`.
 

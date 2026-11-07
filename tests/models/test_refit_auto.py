@@ -651,6 +651,55 @@ def test_a_rule_with_a_gap_is_checked_on_the_short_member_s_newest_rows():
             run(window, refit)
 
 
+def test_rows_between_the_members_spans_are_read_by_none_and_not_judged():
+    """`aux` is never known from 2 to 4 April. On Sunday 9 April at horizon 1 a 3-day window refitted daily reads rows 5 to 7 April
+    and an 85-day one refitted on Monday the 3rd rows up to 1 April: no window reads the gap, so `[3, 85]` passes as each window
+    does alone. A 6-day window reads 2 April, and the list with it is refused."""
+    data = market("spring")
+    data = data.assign(aux=np.random.default_rng(2).normal(0, 1, len(data)))
+    gap = [
+        Availability.static().during(valid_until="2023-04-01"),
+        Availability.static().during(valid_from="2023-04-05"),
+    ]
+    info = InformationSet("11:45", "Europe/Brussels", rules={**RULES, "aux": gap})
+
+    def run(window, refit):
+        model = OLSModel([*PREDICTORS, "aux"], training_window=window, refit=refit)
+        return model.run(data, "2023-04-09", "2023-04-09", horizon=1, information_set=info)
+
+    for window, refit in ((3, "1D"), (LONG, "7D"), ([3, LONG], "auto")):
+        assert run(window, refit).produced == 24, (window, refit)
+    for window, refit in ((6, "1D"), ([6, LONG], "auto")):
+        with pytest.raises(ValueError, match="aux"):
+            run(window, refit)
+
+
+def same_list(ctx):
+    return PREDICTORS
+
+
+@pytest.mark.parametrize("predictors", [PREDICTORS, same_list], ids=["fixed", "function"])
+def test_each_anchor_s_training_targets_are_those_of_the_windows_refitted_on_it(predictors):
+    """The price is never known on 3 April. On Sunday 9 April at horizon 1 the 3-day window, refitted on the 9th, trains on the
+    targets of 6 to 8 April, and the 85-day one, refitted on Monday the 3rd, on those up to the 2nd: neither reads the 3rd, so
+    `[3, 85]` passes; judged by the longest window back from the 9th it was refused. A price unknown on 7 April is the short
+    window's, and refuses the list, for fixed lists and a predictor function alike."""
+    data = market("spring")
+
+    def run(valid_until, valid_from):
+        price = [
+            Availability.published("13:00", 1).during(valid_until=valid_until),
+            Availability.published("13:00", 1).during(valid_from=valid_from),
+        ]
+        info = InformationSet("11:45", "Europe/Brussels", rules={**RULES, "price": price})
+        model = OLSModel(predictors, training_window=[3, LONG], refit="auto")
+        return model.run(data, "2023-04-09", "2023-04-09", horizon=1, information_set=info)
+
+    assert run("2023-04-02", "2023-04-04").produced == 24
+    with pytest.raises(ValueError, match="training target"):
+        run("2023-04-06", "2023-04-08")
+
+
 def test_published_reads_each_member_s_newest_target_on_its_own_anchor():
     """D's price is known at 11:45 on D, so the 14-day member of a forecast issued on D trains on targets up to D and the 85-day
     one up to its Monday: the record's `newest_target_day` is the newer, D's at horizon 1, and the prices of the days after Monday,
