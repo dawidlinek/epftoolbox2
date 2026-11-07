@@ -45,8 +45,9 @@ class LEARModel(BaseModel):
         normalised on them, scored on the fifth; α* the first minimum of the folds' mean held-out squared error over their
         pooled kinks (at most 1,000 of them); the coefficients the full window's normalised path at α*, divided by the norms,
         with no refit. Each fold drops the exact twins and the columns constant up to rounding of its own training rows, as
-        the window's fit drops them on the window. It takes `solver="lars"` (`"cd"` raises); a fit costs about as much as
-        3.5 to 5 fits of `"bic"`, a whole run 1.5 to 1.7 times as much.
+        the window's fit drops them on the window. It takes `solver="lars"` (`"cd"` raises). A fit costs 5.0 to 6.8 times one of
+        `"bic"` with the default `solver="lars"` and 3.5 to 4.8 times one with `"cd"` (from the 1449- to the 49-row window); a
+        whole run 1.7 to 1.9 and 1.5 to 1.7 times as much.
 
         The intercept is the centring: a forecast is `ybar + (x - xbar) @ w` on the scaled row. A column the scaler made
         constant gets the coefficient 0 in both stages.
