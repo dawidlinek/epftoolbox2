@@ -1,4 +1,5 @@
-"""AsinhScaler and NPITScaler: fitted on training rows only, invertible, defined for negative prices."""
+"""AsinhScaler, MirrorLogScaler, PolyScaler and NPITScaler: fitted on training rows only, invertible, defined for negative
+prices."""
 
 import warnings
 
@@ -6,10 +7,10 @@ import numpy as np
 import pytest
 
 from epftoolbox2.models import LassoCVModel, OLSModel
-from epftoolbox2.scalers import AsinhScaler, NPITScaler, StandardScaler
+from epftoolbox2.scalers import AsinhScaler, MirrorLogScaler, NPITScaler, PolyScaler, StandardScaler
 from epftoolbox2.scalers.base import CONSTANT_STD_RTOL
 
-VST_SCALERS = [AsinhScaler, NPITScaler]
+VST_SCALERS = [AsinhScaler, MirrorLogScaler, PolyScaler, NPITScaler]
 MAD_TO_STD = 1.482602218505602  # 1 / Phi^-1(0.75)
 
 
@@ -519,7 +520,7 @@ def test_without_standardising_a_near_constant_column_still_trains_on_zeros(scal
     train_x, train_y, test_x = near_constant_case()
     x, _, test = scaler_cls(standardise=False).fit_transform(train_x, train_y, test_x)
     assert (x[:, 1] == 0.0).all() and np.isfinite(test).all()
-    assert np.std(x[:, 0]) > 0.1
+    assert np.std(x[:, 0]) > 0.01  # the ordinary column isn't zeroed (poly's slope at the median is c = 0.05)
 
 
 @pytest.mark.parametrize("scaler_cls", VST_SCALERS)

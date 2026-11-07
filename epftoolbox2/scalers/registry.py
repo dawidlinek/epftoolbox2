@@ -3,12 +3,14 @@ from typing import Any, Dict, Tuple, Type, Union
 
 from .base import BaseScaler
 from .standard import StandardScaler
-from .vst import AsinhScaler, NPITScaler
+from .vst import AsinhScaler, MirrorLogScaler, NPITScaler, PolyScaler
 
 SCALERS: Dict[str, Type[BaseScaler]] = {
     "standard": StandardScaler,
     "asinh": AsinhScaler,
     "npit": NPITScaler,
+    "mlog": MirrorLogScaler,
+    "poly": PolyScaler,
 }
 
 ScalerSpec = Union[str, Dict[str, Any], BaseScaler]
