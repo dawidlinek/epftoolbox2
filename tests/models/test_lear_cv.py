@@ -79,9 +79,10 @@ def _path(Xn, yc, alpha_min=0.0):
     return alphas, coefs
 
 
-def _lasso_lars_cv(X, y, max_n_alphas=1000):
+def _lasso_lars_cv(X, y, max_n_alphas=1000, path=False):
     """(alpha_, coef_, intercept_) of 0.24.2's `LassoLarsCV(cv=KFold(5), normalize=True, max_iter=2500, max_n_alphas)`, its
-    `fit` and `_lars_path_residues` line by line on the rows (the Gram for every path, as the kernel)."""
+    `fit` and `_lars_path_residues` line by line on the rows (the Gram for every path, as the kernel); with `path=True` its
+    `cv_alphas_` and `mse_path_` instead."""
     cv_paths = []
     for train, test in KFold(5).split(X):
         X_train, y_train, X_test, y_test = X[train].copy(), y[train].copy(), X[test].copy(), y[test].copy()
@@ -117,6 +118,8 @@ def _lasso_lars_cv(X, y, max_n_alphas=1000):
         mse_path[:, index] = np.mean(this_residues, axis=-1)
     mask = np.all(np.isfinite(mse_path), axis=-1)
     all_alphas = all_alphas[mask]
+    if path:
+        return all_alphas, mse_path[mask]
     best_alpha = all_alphas[np.argmin(mse_path[mask].mean(axis=-1))]
     X_offset = X.mean(axis=0)
     Xc = X - X_offset
@@ -241,6 +244,34 @@ def test_a_twin_on_a_fold_s_training_rows_is_dropped_in_that_fold_only():
         assert fold.R[9, 9] == pytest.approx(1.0) and abs(fold.R[2, 9]) < 1.0 - 1e-6
     _, R, _, _ = _lars.cv_window(_lars.cv_stats(X, y))
     assert R[9, 9] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("seed", [1, 3, 5])
+def test_each_fold_counts_once_whatever_its_block_s_length(seed):
+    """52 rows: blocks of 11, 11, 10, 10, 10. α* minimises the mean of the folds' mean squared errors, as 0.24.2 did, not the
+    pooled error of all held-out rows (each fold weighted by its block's length), which picks another penalty on these designs."""
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((52, 12)) * rng.uniform(0.5, 3.0, 12) + rng.normal(0, 2, 12)
+    beta = np.zeros(12)
+    beta[:3] = rng.standard_normal(3)
+    y = X @ beta + 2.0 * rng.standard_normal(52)
+    alphas, mse = _lasso_lars_cv(X, y, path=True)
+    sizes = np.array([len(test) for _, test in KFold(5).split(X)])
+    assert sizes.tolist() == [11, 11, 10, 10, 10]
+    mean_of_folds = alphas[np.argmin(mse.mean(axis=-1))]
+    pooled = alphas[np.argmin(mse @ sizes / sizes.sum())]
+    assert pooled != pytest.approx(mean_of_folds, rel=1e-6)  # the design tells the two apart
+    assert _lars.lear_fit_cv(_lars.cv_stats(X, y)).alpha == pytest.approx(mean_of_folds, rel=TIGHT)
+
+
+def test_the_first_of_tied_penalties_is_chosen_among_those_finite_in_every_fold():
+    """`cv_choice`: penalties with a nan in any fold are dropped (0.24.2's mask), and of equal mean errors the first, the
+    smallest penalty, wins (numpy's argmin, as 0.24.2's); the index counts in the grid that is left."""
+    grid = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+    mse = np.array([[np.nan, 1.0], [3.0, 1.0], [1.5, 0.5], [2.0, 2.0], [0.5, 1.5], [1.0, 1.0]])
+    assert _lars.cv_choice(grid, mse) == (0.2, 1)
+    with pytest.raises(ValueError, match="no penalty"):
+        _lars.cv_choice(grid, np.full((6, 2), np.nan))
 
 
 def test_the_cd_solver_and_the_wrong_statistics_are_refused():
