@@ -1852,11 +1852,12 @@ class BaseModel(ABC):
         hour_arrays = {}
         for hour in range(self._periods_per_day):
             hour_df = self._hour_data[hour]
+            instants = hour_df.index.tz_convert(None) if hour_df.index.tz is not None else hour_df.index  # UTC values
             hour_arrays[hour] = {
                 "x": hour_df[feature_cols].to_numpy(dtype=np.float64, copy=True),
                 "y": hour_df[target_cols].to_numpy(dtype=np.float64, copy=True),
                 "days": self._hour_days[hour].copy(),
-                "timestamps": hour_df.index.values.copy(),
+                "timestamps": instants.to_numpy().copy(),
                 "col_index": {c: i for i, c in enumerate(feature_cols)},
             }
         return hour_arrays

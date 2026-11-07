@@ -249,7 +249,7 @@ def sample_issue_days(
     dates = wall_clock(index).normalize().unique().sort_values()
     candidates = dates[(dates >= start) & (dates <= end)]
     if issue_days is not None:
-        candidates = candidates[np.isin(candidates.weekday, list(issue_days))]
+        candidates = candidates[np.isin(candidates.day_of_week, list(issue_days))]
     if not len(candidates):
         raise ValueError(f"The data has no rows from {start.date()} to {end.date()}, so there is nothing to verify")
     chosen = np.random.default_rng(seed).choice(len(candidates), size=min(days, len(candidates)), replace=False)

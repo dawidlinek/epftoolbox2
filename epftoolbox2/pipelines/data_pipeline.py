@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import numpy as np
 import pandas as pd
 from pathlib import Path
 import yaml
@@ -30,7 +31,8 @@ from epftoolbox2.data.cache_manager import (
     without_settled_until,
 )
 from epftoolbox2.logging import get_logger
-from epftoolbox2._date_utils import _DATE_PATTERN
+from epftoolbox2._date_utils import _DATE_PATTERN, epoch_ns
+from epftoolbox2._frame_csv import EXACT_FLOATS
 from ._yaml import dump_yaml, to_yaml_value
 
 logger = get_logger(__name__)
@@ -318,7 +320,7 @@ class DataPipeline:
         if not parts:
             return pd.DataFrame(), unsettled
         # What is left of the cache and the refetched ranges are disjoint, so there are no duplicate timestamps.
-        return pd.concat(parts).sort_index(kind="stable"), unsettled
+        return pd.concat(parts, sort=False).sort_index(kind="stable"), unsettled  # columns in order of appearance
 
     def _parse_timestamp(self, ts: Union[str, date, pd.Timestamp], is_end: bool = False) -> pd.Timestamp:
         """UTC bound for ``run``. See the class docstring for how dates, keywords and timestamps are read."""
@@ -470,7 +472,15 @@ class DataPipeline:
             return pd.DataFrame(), unsettled
 
         _check_unique_columns(labelled)
-        return pd.concat([df for _, df in labelled], axis=1), unsettled
+        frames = [df for _, df in labelled]
+        # Frames on different indexes are joined on their sorted union and aligned ones keep their order, as pandas did
+        # by default for DatetimeIndex frames before 3.1 deprecated it. The columns follow the sources in order. Aligned
+        # means the same zone and instants, whatever the datetime unit (`Index.equals` says no across units).
+        first = frames[0].index
+        aligned = all(
+            df.index.tz == first.tz and np.array_equal(epoch_ns(df.index), epoch_ns(first)) for df in frames[1:]
+        )
+        return pd.concat(frames, axis=1, sort=not aligned), unsettled
 
     def _run_transformers(self, df: pd.DataFrame) -> pd.DataFrame:
         for transformer in self.transformers:
@@ -797,7 +807,7 @@ def _write_frame(df: pd.DataFrame, tmp: Path, path: Path) -> None:
 def _read_frame(path: Path, meta: Dict[str, Any]) -> pd.DataFrame:
     if _is_parquet(path):
         return pd.read_parquet(path)
-    df = pd.read_csv(path, index_col=0, float_precision="round_trip")
+    df = pd.read_csv(path, index_col=0, **EXACT_FLOATS)
     df.index = pd.to_datetime(df.index, utc=True)
     df.index.name = meta.get("index_name")
     # CSV loses column names (duplicates get ".1") and dtypes (an all-null column comes back as float).

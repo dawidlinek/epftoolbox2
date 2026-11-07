@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from epftoolbox2 import cli
-from epftoolbox2._frame_csv import load_frame_csv, save_frame_csv
+from epftoolbox2._frame_csv import EXACT_FLOATS, load_frame_csv, save_frame_csv
 from epftoolbox2.ensembles import AverageEnsemble
 from epftoolbox2.evaluators import DMEvaluator, EconomicEvaluator, MAEEvaluator
 from epftoolbox2.exporters import CsvExporter
@@ -171,7 +171,7 @@ def test_csv_extra_columns_join_a_daily_source_once_per_forecast(frames, tmp_pat
     path = tmp_path / "forecasts.csv"
     pipe = pipeline().add_exporter(CsvExporter(str(path), extra_columns=["load_actual_h-2", "is_weekend"]))
     report = pipe.run(daily, test=TEST, horizon=2, freq="1D")
-    table = pd.read_csv(path, float_precision="round_trip")
+    table = pd.read_csv(path, **EXACT_FLOATS)
     assert len(table) == 14 * 2 and set(table["hour"]) == {0}
     by_date = pd.Series(daily["load_actual_h-2"].to_numpy(), index=daily.index.date.astype(str))
     assert np.array_equal(table["load_actual_h-2"].to_numpy(), by_date.reindex(table["target_date"]).to_numpy())
