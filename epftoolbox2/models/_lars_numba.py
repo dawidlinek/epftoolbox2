@@ -31,12 +31,13 @@ from ._lars import (
     _checked,
     _penalty,
     gram_stats,
+    without_twins,
 )
 
 BACKEND = "numba"
 
 __all__ = ["BACKEND", "GramStats", "LarsPath", "IcChoice", "CdResult", "LearFit", "gram_stats", "lars_path", "path_at"]
-__all__ += ["lasso_at", "ic_select", "cd_lasso", "lear_fit", "warm_up"]
+__all__ += ["lasso_at", "ic_select", "cd_lasso", "lear_fit", "warm_up", "without_twins"]
 
 _jit = njit(cache=True, nogil=True, fastmath=False, error_model="numpy")
 
@@ -475,6 +476,7 @@ def _lear_kernel(G, q, yy, n, K, use_cd):
 def lear_fit(stats: GramStats, criterion: str = "bic", solver: str = "lars") -> LearFit:
     _check_choices(criterion, solver)
     G, q, n = _checked(stats.G, stats.q, stats.n)
+    G, q, _ = without_twins(G, q)  # the reference's rule, so both backends fit the same design
     w, alpha, kink, converged = _lear_kernel(G, q, float(stats.yy), n, _penalty(criterion, n), solver == "cd")
     return LearFit(w, stats.xbar, stats.ybar, float(alpha), int(kink), bool(converged))
 

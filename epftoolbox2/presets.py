@@ -41,16 +41,28 @@ def _weekday_columns(weekdays: Sequence[str], calendar_prefix: str) -> list[str]
     return [f"{calendar_prefix}is_{d}_d+{{horizon}}" for d in weekdays]
 
 
+ORDERS = ("library", "lago")
+
+
 def lear_predictors(
     exogenous: Sequence[str],
     price: str = "price",
     freq: str = "1h",
     calendar_prefix: str = "",
+    order: str = "library",
 ) -> list[str]:
     """Inputs of the LEAR model (Lago, Marcjasz, De Schutter & Weron 2021, Applied Energy 293).
 
     All slot prices of d-1, d-2, d-3 and d-7; all slot values of each exogenous series for d, d-1 and d-7; seven
     weekday dummies of d. With hourly data and two exogenous series that is 96 + 144 + 7 = 247 inputs.
+
+    `order` is the order of the same names. `"library"` (the default) is lag-major: every slot's price of d-1, then of d-2,
+    d-3 and d-7, then per exogenous series every slot for d, d-1 and d-7, then the dummies. `"lago"` is the original
+    epftoolbox's (`LEAR._build_and_split_XYs`), slot-major: per slot the prices of d-1, d-2, d-3 and d-7; then per slot
+    each exogenous series for d-1, each for d-7 and each for d; then the dummies, Monday to Sunday. The order changes no
+    fit that converges, but coordinate descent that stops early (`LEARModel(solver="cd")`, Lago's `Lasso(max_iter=2500)`)
+    sweeps the columns in it, so reproducing the original's forecasts needs `"lago"` and the exogenous series in the order
+    of the dataset's file.
 
     The data pipeline must produce (hourly shown; see the module docstring for the mapping):
     - `DailyProfileTransformer(columns=[price, *exogenous])` after `DSTNormalizeTransformer`;
@@ -58,9 +70,22 @@ def lear_predictors(
     - `LagTransformer(columns=<profile columns of each exogenous series>, lags=[-1, ..., -H, 6], freq="day")`;
     - weekday dummies `is_monday` .. `is_sunday` lagged by -1 .. -H days.
     """
+    if order not in ORDERS:
+        raise ValueError(f"order must be one of {list(ORDERS)}, got {order!r}")
+    dummies = _weekday_columns(WEEKDAYS, calendar_prefix)
+    if order == "lago":
+        prices = profile_columns(price, freq)
+        slots = {x: profile_columns(x, freq) for x in exogenous}
+        out = []
+        for column in prices:
+            out += [f"{column}{lag}" for lag in ("", "_d-1", "_d-2", "_d-6")]
+        for slot in range(len(prices)):
+            out += [f"{slots[x][slot]}{lag}" for lag in ("", "_d-6") for x in exogenous]
+            out += [f"{slots[x][slot]}_d+{{horizon}}" for x in exogenous]
+        return out + dummies
     prices = [f"{c}{lag}" for lag in ("", "_d-1", "_d-2", "_d-6") for c in profile_columns(price, freq)]
     exog = [f"{c}{lag}" for x in exogenous for lag in ("_d+{horizon}", "", "_d-6") for c in profile_columns(x, freq)]
-    return prices + exog + _weekday_columns(WEEKDAYS, calendar_prefix)
+    return prices + exog + dummies
 
 
 def expert_predictors(
@@ -90,4 +115,4 @@ def expert_predictors(
     return own + exog + _weekday_columns(weekdays, calendar_prefix)
 
 
-__all__ = ["WEEKDAYS", "expert_predictors", "lear_predictors", "profile_columns"]
+__all__ = ["ORDERS", "WEEKDAYS", "expert_predictors", "lear_predictors", "profile_columns"]

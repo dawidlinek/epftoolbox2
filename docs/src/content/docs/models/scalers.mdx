@@ -29,19 +29,27 @@ A scaler instance works too, e.g. `scaler=AsinhScaler(apply_to="target")` with `
 | `scaler` | Class | Transformation of a column `x` (parameters from the training rows) |
 |---|---|---|
 | `"standard"` | `StandardScaler` | `(x - mean) / sd` |
-| `"asinh"` | `AsinhScaler` | `asinh((x - median) / (MAD / 0.6745))`, then standardised |
+| `"asinh"` | `AsinhScaler` | `asinh((x - median) / (MAD / 0.6745))`, then standardised (not with `standardise=False`) |
 | `"npit"` | `NPITScaler` | `Φ⁻¹(F̂(x))` with `F̂` the empirical CDF of the training rows, then standardised |
 
-- **`AsinhScaler`** is the "Invariant" scaler of epftoolbox's LEAR (Lago et al., 2021): median/MAD normalisation (the MAD divided by 0.6745 estimates the standard deviation of normal data), then the inverse hyperbolic sine. Near the median it is almost linear. For spikes it grows like a logarithm, and it is symmetric, so negative prices are fine. If the MAD is 0 (more than half of the training values are equal, e.g. a price floor) the sample standard deviation is used, and 1.0 if that is 0 too, or [only rounding noise](#constant-columns). The inverse is `median + scale · sinh(z)`.
+- **`AsinhScaler`** is, with `standardise=False`, the "Invariant" scaler of epftoolbox's LEAR (Lago et al., 2021): median/MAD normalisation (the MAD divided by 0.6745 estimates the standard deviation of normal data), then the inverse hyperbolic sine. Near the median it is almost linear. For spikes it grows like a logarithm, and it is symmetric, so negative prices are fine. If the MAD is 0 (more than half of the training values are equal, e.g. a price floor) the sample standard deviation is used, and 1.0 if that is 0 too, or [only rounding noise](#constant-columns). The inverse is `median + scale · sinh(z)`.
 - **`NPITScaler`** is the normal probability integral transform. The i-th smallest of n training values gets `F̂ = i / (n + 1)` (tied values share their mid-rank), so every value maps to a finite normal quantile. Between training values the map is linear. Values outside the training range are clamped to the extreme knots: a transformed predictor can't exceed the training range, and **a forecast can't go below the training window's lowest or above its highest price**.
 
 ## Parameters
 
-`AsinhScaler` and `NPITScaler` take one parameter:
+`AsinhScaler` and `NPITScaler` take two:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `apply_to` | str or list | `"all"` | Which predictors get the VST besides the target: `"all"` (every non-binary predictor), `"target"` (none, predictors are standardised), or a list of glob patterns matched against the expanded predictor names, e.g. `["price", "price_d-*"]` |
+| `standardise` | bool | `True` | Keyword-only. Standardise each column after the VST (mean 0, standard deviation 1 on the training rows). `False` leaves that out: a transformed column is the VST alone, and a non-binary predictor that `apply_to` doesn't select stays as it is |
+
+`AsinhScaler(standardise=False)` is epftoolbox's Invariant scaler exactly, which [`LEARModel.lago()`](/epftoolbox2/models/lear/#lago-et-al-2021-exactly) uses:
+`scaler={"name": "asinh", "params": {"standardise": False}}`. Its MAD is statsmodels' `mad` (epftoolbox's) to the last bit or one
+unit in the last place: statsmodels divides each absolute deviation by 0.6745 before taking the median, this library after. A MAD of 0
+divides by 0 in epftoolbox, and takes the fallback above here. A near-constant predictor still trains on exact zeros (see
+[Constant columns](#constant-columns)). The default `True` is left out of the scaler's parameters, so a spec, a manifest or a YAML
+file of the default is what it was before the option existed.
 
 `StandardScaler` takes one, keyword-only:
 

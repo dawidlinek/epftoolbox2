@@ -139,7 +139,7 @@ class BaseModel(ABC):
         first of every k-th month, on a calendar counted from Monday 1970-01-05 (`_calendar.refit_anchor`). A forecast issued on
         D then uses the fit of its anchor a, the refit day on or before D: rows cut as for a forecast issued on a, with the
         newest target as of a's issue time, so nothing after a trains, and each forecast predicted on its own from that fit. Only
-        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV, Ridge) can.
+        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV, Ridge, LEAR) can.
 
         `training_window` is how many days of rows a forecast trains on (`_calendar.training_span`), `"expanding"` every row from
         the frame's first local date, or a list of them, such as `[56, 84, 728, "expanding"]`: each member is fitted on its own
@@ -220,6 +220,13 @@ class BaseModel(ABC):
     @property
     def _model_kwargs(self) -> Dict:
         return {}
+
+    @property
+    def _kernel_backend(self) -> Optional[str]:
+        """The backend of the LEAR kernels the model fits with (`models._lars._kernels`), None for one that uses none. A run
+        reads it once in the parent, before its pool starts (which also compiles numba's kernels there), and records it with
+        the manifest's provenance."""
+        return None
 
     @property
     def _known_only(self) -> bool:
@@ -442,6 +449,7 @@ class BaseModel(ABC):
             masks = self._precompute_scalable_masks(horizons)
         stored_windows = None
 
+        kernels = self._kernel_backend  # before any pool forks: numba compiles once, here
         store = ResultStore(save_to, test_start=test_start) if save_to else None
         if store and data.index.tz is not None and zone_name(data.index.tz) is None:
             warnings.warn(
@@ -475,6 +483,7 @@ class BaseModel(ABC):
                 training_cut=self._training_cut(rules, target, freq),
                 issue_days=weekdays,
                 vintages=vintages,
+                kernels=kernels,
             )
 
             def check_stored():

@@ -1,0 +1,45 @@
+{
+ "epftoolbox_commit": "47d6e0629f65ebd19d3c12cb5689dbad0c2ea078",
+ "inputs": {
+  "BE.csv": "e05ce0b1d869bff23d81faac4737c623bfeedc65c1965d792c8b509e20c65a20",
+  "DE.csv": "e421cf4eb160cecfec6c7c8222e7168b3c751d0dd6771ba21401784f3f2a4565"
+ },
+ "lear_py_sha256": "45a06dd46260d037ba7c2f25c55292613839c70eb5482b03a5aca100beb25834",
+ "outputs": {
+  "data_BE.parquet": "c439609a22680978a63e2ac7f2535f552ee3673594087ed00a397856fb42435c",
+  "data_DE.parquet": "d24633a9a8daf7fd5bdbfb28b83c6afcd3063ec77c9cac4143d414c11ac72759",
+  "original_BE.csv": "c88ae4c544ebf6890c21d263aa556f89df011a47dc4f8b5fdf23bd122c21f739",
+  "original_DE.csv": "5bd8e0dc93b6d3f1ff844858d7b75939fb7c3a3e222116117699ca9904f506a4",
+  "xtest_BE.csv": "cb6d62cec2a4b208eb9794d6e6438044dd8e983c6d72240d962f72aa737ff430",
+  "xtest_DE.csv": "38c0aab3c7020bcd463b3eba8fe7494449ea2b89020f1c5976480ae9acff583c"
+ },
+ "python": "3.8.20",
+ "seconds": {
+  "BE": {
+   "1092 2015-01-04": 11.46,
+   "1456 2015-01-04": 14.95,
+   "56 2015-01-04": 1.23,
+   "84 2015-01-04": 1.6
+  },
+  "DE": {
+   "1092 2016-01-04": 10.45,
+   "1456 2016-01-04": 13.46,
+   "56 2016-01-04": 1.36,
+   "84 2016-01-04": 1.97
+  }
+ },
+ "test_offsets": {
+  "BE": [
+   0
+  ],
+  "DE": [
+   0
+  ]
+ },
+ "versions": {
+  "numpy": "1.23.5",
+  "pandas": "1.5.3",
+  "scikit-learn": "0.24.2",
+  "statsmodels": "0.13.5"
+ }
+}

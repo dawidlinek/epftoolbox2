@@ -13,21 +13,24 @@ from pathlib import Path
 import pytest
 
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
-from epftoolbox2.models import LassoCVModel, OLSModel, RidgeModel
+from epftoolbox2.models import LassoCVModel, LEARModel, OLSModel, RidgeModel
 from epftoolbox2.pipelines import ModelPipeline
 from tests.synthetic import PREDICTORS, make_market_data
 
 GOLDEN_FILE = Path(__file__).parent / "golden" / "synthetic_metrics.json"
-# The models of the forecasting layer (step 4) are pinned in a file of their own, so the file above stays as it was: Ridge here,
-# LEAR added by its branch.
+# The models of the forecasting layer (step 4) are pinned in a file of their own, so the file above stays as it was: Ridge and LEAR.
 LEAR_RIDGE_GOLDEN_FILE = Path(__file__).parent / "golden" / "lear_ridge_metrics.json"
 
 # OLS is exact up to float rounding. LassoCV stops at a convergence tolerance and the scikit-learn version differs
 # between environments (the lock has 1.8; the 3.15 and newest-dependencies CI runs resolve newer ones), so it gets
 # more room.
 RTOL = {"OLS": 1e-9, "LassoCV": 1e-6}
-# Ridge is a closed form (scikit-learn's leave-one-out `RidgeCV`), exact up to float rounding like OLS.
-LEAR_RIDGE_RTOL = {"Ridge": 1e-9}
+# Ridge is a closed form (scikit-learn's leave-one-out `RidgeCV`), exact up to float rounding like OLS. LEAR's kernels run in numpy
+# or numba, which agree within 1e-9 with the same kinks, not to the bit (decision 17 of the step 4 spec): the golden holds on either.
+LEAR_RIDGE_RTOL = {"Ridge": 1e-9, "LEAR": 1e-9, "LEAR_lago": 1e-9}
+# LEAR without `is_weekday`: with an intercept it is minus `is_weekend` after centring, an exact twin, which the fit drops anyway
+# (`_lars.without_twins`); the inputs are as they were pinned.
+LEAR_INPUTS = ["load_d+{horizon}", "wind_d+{horizon}", "is_weekend_d+{horizon}", "price_d-1"]
 
 
 def compute_metrics() -> dict:
@@ -72,11 +75,16 @@ def test_metrics_match_golden(monkeypatch):
 
 
 def compute_lear_ridge_metrics() -> dict:
-    """The golden test's data and window, with the models of step 4 alone: Ridge at W 45, no benchmark to scale against."""
+    """The golden test's data and window, with the models of step 4 alone, no benchmark to scale against: Ridge at W 45, LEAR with
+    its defaults but the windows [30, 45] (BIC, the exact refit, asinh) and with `lago()`'s estimator (AIC, Lago's coordinate
+    descent, the Invariant scaler)."""
     df = make_market_data(noise=5.0, seed=42)
+    invariant = {"name": "asinh", "params": {"standardise": False}}
     pipeline = (
         ModelPipeline()
         .add_model(RidgeModel(PREDICTORS + ["price_d-1"], training_window=45, name="Ridge"))
+        .add_model(LEARModel(LEAR_INPUTS, training_window=[30, 45], name="LEAR"))
+        .add_model(LEARModel(LEAR_INPUTS, [30, 45], criterion="aic", solver="cd", scaler=invariant, name="LEAR_lago"))
         .add_evaluator(MAEEvaluator())
         .add_evaluator(RMSEEvaluator())
     )

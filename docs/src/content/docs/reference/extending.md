@@ -140,7 +140,7 @@ A model with only `_fit_predict` fits once per forecast and raises `ValueError` 
 [`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar), also implement `_fit_model(train_x, train_y)`, which
 returns the fit, and `_predict_fitted(fitted, test_x)`, which returns `(prediction, coefficients)` for the one row `test_x` and is called once
 per forecast. `_predict_fitted(_fit_model(x, y), test_x)` must equal `_fit_predict(x, y, test_x)` to the bit. Define all three in the
-same class: a subclass of `OLSModel`, `LassoCVModel` or `RidgeModel` that overrides one or two of them raises on `refit`, since `refit=None` and
+same class: a subclass of `OLSModel`, `LassoCVModel`, `RidgeModel` or `LEARModel` that overrides one or two of them raises on `refit`, since `refit=None` and
 `refit` would fit different models; one that overrides none keeps its parent's fit and refits.
 
 ---

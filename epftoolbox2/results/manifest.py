@@ -112,8 +112,9 @@ PREDICTOR_FUNCTION_LAYOUT = "predictor function: lists are compared per record"
 # The `kind` of an ensemble's manifest.
 ENSEMBLE_KIND = "ensemble"
 
-# Who wrote a manifest and when, which says nothing about the results it describes.
-_PROVENANCE_FIELDS = ("package_version", "git_sha", "created_at", "updated_at")
+# Who wrote a manifest and when, which says nothing about the results it describes. `kernels` is the backend of the LEAR
+# kernels (`models._lars._kernels`), or the backends, whose two agree within 1e-9, not to the bit: a mixed file warns on resume.
+_PROVENANCE_FIELDS = ("package_version", "git_sha", "created_at", "updated_at", "kernels")
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -226,6 +227,10 @@ class Manifest:
     issue_days: Optional[List[str]] = None
     # Each input's vintage class (`results.vintages.vintage_rows`); None (and no key) when no input has one. Never compared.
     vintages: Optional[List[Dict[str, Any]]] = None
+    # The backend of the LEAR kernels the model fitted with ("numpy" or "numba"), or the list of them in the order first used once
+    # a resume ran on another; None (and no key) for a model without them. Provenance: never compared, and a resume warns while
+    # the file holds forecasts of another backend than its own.
+    kernels: Optional[Union[str, List[str]]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -265,6 +270,8 @@ class Manifest:
             del out["issue_days"]
         if out["vintages"] is None:  # no input with a class
             del out["vintages"]
+        if out["kernels"] is None:  # a model that fits with no LEAR kernel
+            del out["kernels"]
         return out
 
     @classmethod
@@ -413,6 +420,7 @@ def build_manifest(
     horizons: Optional[Sequence[int]] = None,
     issue_days: Optional[Sequence[int]] = None,
     vintages: Optional[List[Dict[str, Any]]] = None,
+    kernels: Optional[str] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -442,7 +450,8 @@ def build_manifest(
 
     `horizon` is the largest horizon and `horizons` the ones planned, recorded only when they aren't every one from 1 to it.
     `issue_days` are the weekdays issued on (`date.weekday()` numbers), recorded by name, and only when they aren't every day.
-    `vintages` are the rows of `results.vintages.vintage_rows`, recorded as they are.
+    `vintages` are the rows of `results.vintages.vintage_rows`, recorded as they are. `kernels` is the backend of the LEAR
+    kernels the model fits with (`BaseModel._kernel_backend`), None for a model without them.
     """
     now = datetime.now(timezone.utc).isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
@@ -482,6 +491,7 @@ def build_manifest(
         else [int(h) for h in horizons],
         issue_days=issue_day_names(issue_days),
         vintages=vintages,
+        kernels=kernels,
     )
 
 
@@ -683,6 +693,7 @@ def check_and_write(
             logger.warning(f"{model_name}: manifest mismatch at {path} overridden: {'; '.join(diffs)}")
         if check_stored is not None:
             check_stored()
+        manifest.kernels = _kernels_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.created_at = existing.created_at  # keep the first run's provenance
         manifest.skipped = existing.skipped  # until this run finishes and says otherwise: it may not
         if existing.data_unverified or (
@@ -721,6 +732,29 @@ def check_and_write(
         manifest.data_unverified = True
         _mark_rows_unverified(manifest, model_name, path, "they have no manifest")
     manifest.write(path)
+
+
+def _kernels_on_file(
+    existing: Manifest, manifest: Manifest, model_name: str, path: Path, has_existing_results: bool
+) -> Optional[Union[str, List[str]]]:
+    """What the manifest records as `kernels` after this run: every backend the file's forecasts were fitted with, a name while
+    there is one and a list in the order first used once there are more. The two backends agree within 1e-9 with the same kinks,
+    not to the bit, so a resume warns whenever the file then holds forecasts of another backend than this run's, every time, not
+    only on the first change. Not refused, as the backend is provenance."""
+    if not (has_existing_results and existing.kernels and manifest.kernels):
+        return manifest.kernels
+    stored = [existing.kernels] if isinstance(existing.kernels, str) else list(existing.kernels)
+    used = stored if manifest.kernels in stored else [*stored, manifest.kernels]
+    if used != [manifest.kernels]:
+        warnings.warn(
+            f"{model_name}: the results in {path.parent} hold forecasts fitted with the {' and '.join(stored)} kernels and this "
+            f"run fits with the {manifest.kernels} ones, which agree within 1e-9 with the same kinks but not to the bit, so the "
+            f"file mixes them (its manifest records kernels: {used}). Set EPFTOOLBOX2_KERNELS to one backend and use a new "
+            "save_dir for results of one.",
+            UserWarning,
+            stacklevel=4,
+        )
+    return used[0] if len(used) == 1 else used
 
 
 def unrecorded_masks(existing: Manifest, manifest: Manifest, has_existing_results: bool) -> List[str]:

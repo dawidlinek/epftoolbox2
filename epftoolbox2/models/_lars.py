@@ -16,8 +16,16 @@ where 0.24.2 would go wrong: a column whose Gram diagonal is 0 has its row, colu
 rounding left in shared statistics can't make it enter; and coefficients that reach 0 at exactly the same step all leave
 together (0.24.2 counts one of them out, after which its arrays no longer match in length and it raises).
 
-`_lars_numba.py` holds numba twins of the same functions. The two agree within 1e-9 with the same kinks, not to the bit: this
-module sums with BLAS, the twins in loops. `_kernels()` returns the module of the backend `EPFTOOLBOX2_KERNELS` asks for.
+`lear_fit` adds a third, before both stages: of columns that are exact twins on the training rows (copies or exact negatives,
+|G_jk| >= (1 - 1e-12) sqrt(G_jj G_kk)), one is kept, the first in column order unless a later one is longer, and the others' rows,
+columns and correlations are set to 0 (`without_twins`). LARS can't take a second twin: its entry meets the degenerate-entrant rule on a tie that the last bit decides,
+the path then carries coefficients of about 1e14 that cancel between the twins, and its result is far from the lasso (scikit-learn's
+own `lars_path` does the same). A dropped twin's coefficient is exactly 0, and since the lasso splits a twin's weight any way it
+likes, the fit is a lasso solution, one whose forecast stays the same wherever the twins stay equal.
+
+`_lars_numba.py` holds numba twins of the same functions. On designs without exact twins (in `lear_fit`, every design) the two agree
+within 1e-9 with the same kinks, not to the bit: this module sums with BLAS, the twins in loops. `_kernels()` returns the module of
+the backend `EPFTOOLBOX2_KERNELS` asks for.
 """
 
 import functools
@@ -403,6 +411,48 @@ def _duality_gap(w: np.ndarray, H: np.ndarray, q: np.ndarray, y_norm2: float, l1
     return gap + (l1 * float(np.sum(np.abs(w))) - const * y_norm2 + const * q_dot_w)
 
 
+# Two columns are twins when the cosine of their centred training values is 1 or -1 to this relative tolerance: one is the other
+# times a constant (a copy, an exact negative, a daily value repeated on every slot), up to rounding.
+TWIN_RTOL = 1e-12
+
+
+def without_twins(G, q) -> Tuple[np.ndarray, np.ndarray, Tuple[int, ...]]:
+    """G and q with all but one column of each group of exact twins dropped: its row, column and correlation set to 0, so it
+    never enters LARS or moves in coordinate descent and gets the coefficient 0. Twins are columns j < k with G[j, j], G[k, k] > 0
+    and |G[j, k]| >= (1 - TWIN_RTOL) sqrt(G[j, j] G[k, k]); a group is a column and its later twins. The one kept is the first in
+    column order of those whose norm is the group's largest to TWIN_RTOL: the lasso, on the unnormalised columns, puts a group's
+    weight on its longest column (the cheapest in |w|), and is indifferent between columns of one norm, which is every group a
+    scaler leaves (copies and exact negatives scale alike). Returns (G, q, the dropped columns); the inputs themselves when there
+    are none."""
+    G = np.asarray(G, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+    d = np.diag(G)
+    live = d > 0.0
+    if q.size < 2 or live.sum() < 2:
+        return G, q, ()
+    scale = np.sqrt(np.where(live, d, 0.0))
+    twin = (np.abs(G) >= (1.0 - TWIN_RTOL) * np.outer(scale, scale)) & np.outer(live, live)
+    np.fill_diagonal(twin, False)
+    if not twin.any():
+        return G, q, ()
+    dropped = np.zeros(q.size, dtype=bool)
+    for j in np.flatnonzero(live):
+        if dropped[j]:
+            continue
+        group = np.r_[j, np.flatnonzero(twin[j, j + 1 :] & ~dropped[j + 1 :]) + j + 1]
+        if group.size == 1:
+            continue
+        norms = scale[group]
+        kept = group[np.flatnonzero(norms >= (1.0 - TWIN_RTOL) * norms.max())[0]]
+        dropped[group[group != kept]] = True
+    G = G.copy()
+    q = q.copy()
+    G[dropped, :] = 0.0
+    G[:, dropped] = 0.0
+    q[dropped] = 0.0
+    return G, q, tuple(int(j) for j in np.flatnonzero(dropped))
+
+
 def _normalised(G: np.ndarray, q: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """G and q of unit-norm columns, as `_preprocess_data(normalize=True)` scaled them: by sqrt(G[j, j]), 0 -> 1."""
     d = np.diag(G)
@@ -418,12 +468,11 @@ def _check_choices(criterion: str, solver: str) -> None:
 
 
 def lear_fit(stats: GramStats, criterion: str = "bic", solver: str = "lars") -> LearFit:
-    """A LEAR unit from its centred sums: α* by `ic_select` on the normalised path (2500 steps at most, as Lago's
+    """A LEAR unit from its centred sums, exact twins dropped first (`without_twins`): α* by `ic_select` on the normalised path (2500 steps at most, as Lago's
     `LassoLarsIC(max_iter=2500)`), then the Lasso at α* on the centred, unnormalised Gram, exactly (`"lars"`: `lasso_at`, a
     second path run just past α*) or by Lago's coordinate descent (`"cd"`: `max_iter=2500`, `tol=1e-4`)."""
     _check_choices(criterion, solver)
-    G = np.asarray(stats.G, dtype=np.float64)
-    q = np.asarray(stats.q, dtype=np.float64)
+    G, q, _ = without_twins(stats.G, stats.q)
     R, qn = _normalised(G, q)
     choice = ic_select(lars_path(R, qn, stats.n), qn, stats.yy, stats.n, criterion)
     if solver == "lars":

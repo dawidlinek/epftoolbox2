@@ -11,7 +11,7 @@ import functools
 import warnings
 from abc import abstractmethod
 from statistics import NormalDist
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -65,9 +65,15 @@ class _VSTScaler(BaseScaler):
     fitted as for that constant and the standardising scale is 1.0, so its noise isn't stretched into a regressor.
     A predictor like that has training values of exactly 0.0 (NaNs stay NaN); its test row and the target are
     transformed and centred as usual.
+
+    ``standardise=False`` leaves out the standardisation: every column the scaler changes, the target included, keeps
+    mean 0 and scale 1, so a transformed column is the VST alone and a non-binary predictor that ``apply_to`` doesn't
+    select stays as it is. A near-constant predictor's training values are still exactly 0.0. ``AsinhScaler``'s is
+    epftoolbox's "Invariant" scaler, which LEAR (Lago et al., 2021) fits on. The default True is left out of
+    ``get_params``, so a scaler spec, a manifest or a YAML file of the default doesn't change.
     """
 
-    def __init__(self, apply_to: Union[str, List[str]] = "all"):
+    def __init__(self, apply_to: Union[str, List[str]] = "all", *, standardise: bool = True):
         if isinstance(apply_to, str):
             if apply_to not in ("all", "target"):
                 raise ValueError(
@@ -81,11 +87,21 @@ class _VSTScaler(BaseScaler):
                 f"apply_to must be 'all', 'target' or a non-empty list of column patterns, got {apply_to!r}"
             )
         self.apply_to = apply_to
+        if not isinstance(standardise, (bool, np.bool_)):
+            raise ValueError(f"standardise must be True or False, got {standardise!r}")
+        self.standardise = bool(standardise)
 
         self._column_params: List[Optional[Tuple[Any, float, float]]] = []
         self._target_params: Any = None
         self._target_mean = 0.0
         self._target_std = 1.0
+
+    def get_params(self) -> Dict[str, Any]:
+        # `standardise` only when False, so the spec of every scaler made before it existed stays what it was.
+        params = {"apply_to": self.apply_to}
+        if not self.standardise:
+            params["standardise"] = False
+        return params
 
     @abstractmethod
     def _fit(self, values: np.ndarray) -> Any:
@@ -143,10 +159,10 @@ class _VSTScaler(BaseScaler):
     ) -> Tuple[Any, float, float, bool, List[np.ndarray]]:
         """VST parameters (``vst``), mean, scale and constant flag of one column, and the VST of it and of ``others``.
 
-        The mean and scale are those of the transformed training values. If the raw column is constant up to rounding
-        noise, the VST is fitted on its median repeated, as for an exactly constant column, and the scale is 1.0. It
-        takes the raw column to tell: the transformed noise is as small as the noise was, but not small next to its
-        own largest value.
+        The mean and scale are those of the transformed training values, or 0 and 1 with ``standardise=False``. If the
+        raw column is constant up to rounding noise, the VST is fitted on its median repeated, as for an exactly constant
+        column, and the scale is 1.0. It takes the raw column to tell: the transformed noise is as small as the noise
+        was, but not small next to its own largest value.
         """
         constant = vst and is_constant(train)
         params = None
@@ -155,6 +171,8 @@ class _VSTScaler(BaseScaler):
             train, others = self._forward(params, train), [self._forward(params, o) for o in others]
         mean, std, flat = mean_std(train)
         constant = constant or flat
+        if not self.standardise:
+            return params, 0.0, 1.0, constant, [train, *others]
         return params, mean, 1.0 if constant else std, constant, [train, *others]
 
     def inverse(self, value: float) -> float:
@@ -164,12 +182,14 @@ class _VSTScaler(BaseScaler):
 
 
 class AsinhScaler(_VSTScaler):
-    """Median/MAD normalisation followed by asinh; epftoolbox's "Invariant" scaler.
+    """Median/MAD normalisation followed by asinh, then standardisation; with ``standardise=False`` epftoolbox's
+    "Invariant" scaler.
 
     ``x -> asinh((x - median) / (MAD / 0.6745))`` with median and MAD from the training rows. If the MAD is 0 (more
     than half of the training values are equal) the sample standard deviation is used instead, and 1.0 if that is 0
-    too, or at most rounding noise (``scalers.base.CONSTANT_STD_RTOL``). Defined for negative prices; the inverse is
-    ``median + scale * sinh(z)``.
+    too, or at most rounding noise (``scalers.base.CONSTANT_STD_RTOL``); epftoolbox divides by the 0 there. Defined for
+    negative prices; the inverse is ``median + scale * sinh(z)``. The MAD is statsmodels' ``mad`` (epftoolbox's) to
+    the last bit or within one unit in the last place: it divides each deviation by 0.6745 before the median.
     """
 
     name = "asinh"

@@ -17,7 +17,7 @@ expert = expert_predictors(exogenous=["load_forecast"])
 
 | Function | Parameters (defaults) | Returns |
 |----------|-----------------------|---------|
-| `lear_predictors` | `exogenous` (required), `price="price"`, `freq="1h"`, `calendar_prefix=""` | LEAR inputs (Lago et al. 2021) |
+| `lear_predictors` | `exogenous` (required), `price="price"`, `freq="1h"`, `calendar_prefix=""`, `order="library"` | LEAR inputs (Lago et al. 2021) |
 | `expert_predictors` | `exogenous=("load_forecast",)`, `price="price"`, `weekdays=WEEKDAYS`, `calendar_prefix=""` | Expert-model inputs (Ziel & Weron 2018) |
 | `profile_columns` | `column`, `freq="1h"` | The names `DailyProfileTransformer` creates, e.g. `price_h00` … `price_h23` |
 
@@ -57,6 +57,21 @@ day D the forecast is issued on, and horizon h targets D+h. For h = 1 (d = D+1):
 d-1 and d-7, and seven weekday dummies of d. With hourly data and two exogenous series that is
 96 + 144 + 7 = 247 inputs, as in the paper. Every hour's model gets the same inputs.
 
+`order` is the order of the same names. The default `"library"` lists every slot's price of d-1, then of d-2, d-3 and d-7, then
+per exogenous series every slot for d, d-1 and d-7, then the dummies. `"lago"` is the original epftoolbox's order, slot by slot:
+the four prices of slot 0, then of slot 1, …; then per slot each exogenous series for d-1, each for d-7 and each for d; then the
+dummies, Monday to Sunday. A fit that converges doesn't depend on it, but coordinate descent stopped after 2500 sweeps, as in the
+original LEAR (`LEARModel(solver="cd")`), sweeps the columns in this order, so the original's forecasts are reproduced only with
+`order="lago"` and the exogenous series in the order of the dataset's file. [`LEARModel.lago()`](/epftoolbox2/models/lear/#lago-et-al-2021-exactly)
+does both.
+
+```python
+from epftoolbox2.presets import lear_predictors
+
+lago_order = lear_predictors(exogenous=["load_forecast_amprion", "wind_solar_forecast"], order="lago")
+assert lago_order[:4] == ["price_h00", "price_h00_d-1", "price_h00_d-2", "price_h00_d-6"]
+```
+
 ```python
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.data.sources import EntsoeSource, CalendarSource
@@ -64,7 +79,7 @@ from epftoolbox2.data.transformers import (
     TimezoneTransformer, ResampleTransformer, DSTNormalizeTransformer, LambdaTransformer,
     DailyProfileTransformer, LagTransformer,
 )
-from epftoolbox2.models import LassoCVModel
+from epftoolbox2.models import LEARModel
 from epftoolbox2.presets import WEEKDAYS, lear_predictors, profile_columns
 
 EXOGENOUS = ["load_forecast", "residual_load"]
@@ -95,7 +110,7 @@ df = data.run("2022-01-01", "2024-12-31", cache=True)
 
 report = (
     ModelPipeline()
-    .add_model(LassoCVModel(lear_predictors(exogenous=EXOGENOUS), training_window=728, name="LEAR"))
+    .add_model(LEARModel(lear_predictors(exogenous=EXOGENOUS), name="LEAR"))  # LEAR's own estimator
     .run(df, test_start="2024-01-01", test_end="2024-12-30", target="price", horizon=H)
 )
 ```
