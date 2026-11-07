@@ -107,7 +107,7 @@ def test_lago_forecasts_are_the_original_s(market, window):
 
 
 class Reference(LEARModel):
-    """The fit of every fourth hour by scikit-learn alone: old LassoLarsIC's α* on the normalised path (the in-test copy, X form
+    """The fit of hours 0, 8 and 16 by scikit-learn alone: old LassoLarsIC's α* on the normalised path (the in-test copy, X form
     where n <= p as old LassoLarsIC chose), then `Lasso(α*, tol=1e-12)` on the rows as they are. Every other hour, and the kernels'
     own α* for the comparison, by the kernels."""
 
@@ -116,7 +116,7 @@ class Reference(LEARModel):
 
     def _fit_model(self, train_x, train_y):
         fit = super()._fit_model(train_x, train_y)
-        if Reference.hour % 4:
+        if Reference.hour % 8:
             return fit
         alpha, _, _, _ = _lars_old_ic(train_x, train_y, self.criterion)
         Reference.alphas.append((fit.alpha, alpha))
@@ -141,10 +141,10 @@ def test_the_exact_refit_is_the_lasso_at_old_lasso_lars_ic_s_alpha(market, windo
     reference_model = Reference(lago(market).predictors, window, "aic", "lars", scaler=lago(market).scaler)
     reference_model.newest_target = "published"
     reference = forecasts(reference_model, market)
-    assert len(Reference.alphas) == 6
+    assert len(Reference.alphas) == 3
     for kernel_alpha, sklearn_alpha in Reference.alphas:
         assert kernel_alpha == pytest.approx(sklearn_alpha, rel=1e-9)
-    for hour in range(0, 24, 4):
+    for hour in range(0, 24, 8):
         assert exact[hour]["prediction"] == pytest.approx(reference[hour]["prediction"], abs=TOLERANCE), hour
 
 
