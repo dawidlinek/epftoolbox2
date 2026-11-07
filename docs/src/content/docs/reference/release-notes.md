@@ -174,7 +174,7 @@ an issue day it didn't sample.
   scaler give the same numbers, bit for bit. See [Scalers and VSTs](/epftoolbox2/models/scalers/).
 - **The recommended LEAR, `examples/lear_lago.py` and the benchmark page.** The LEAR page now documents two settings: `LEARModel.lago()`,
   the paper's, and the recommended one, four `LEARModel`s on `[56, 84, 728, "expanding"]` with BIC and `newest_target="published"`
-  that differ only in their scaler (asinh, mirror-log, polynomial, N-PIT), averaged by an `AverageEnsemble`, with the evidence for
+  that differ only in their scaler (Lago's Invariant asinh, mirror-log, polynomial, N-PIT), averaged by an `AverageEnsemble`, with the evidence for
   each setting. `examples/lear_lago.py` runs both on a benchmark market (`main(market, test_start, test_end, output_dir)`; no API key,
   the data come from Zenodo). [Benchmark Reproduction](/epftoolbox2/models/lear-benchmark/) holds every number measured on the
   benchmark, each on identical forecast keys with their counts: the original epftoolbox, the published forecasts, the criteria and

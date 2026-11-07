@@ -5,8 +5,8 @@ The two documented LEAR settings (docs page models/lear) on one of the paper's f
 over its test period:
 
 - "LEAR_lago": LEARModel.lago(), the paper's LEAR. It reproduces the original epftoolbox's forecasts.
-- "LEAR": the recommended LEAR, four LEARModels that differ only in their scaler (asinh, mirror-log, polynomial, N-PIT),
-  each on the window average [56, 84, 728, "expanding"] with BIC, averaged by an AverageEnsemble.
+- "LEAR": the recommended LEAR, four LEARModels that differ only in their scaler (Lago's Invariant asinh, mirror-log,
+  polynomial, N-PIT), each on the window average [56, 84, 728, "expanding"] with BIC, averaged by an AverageEnsemble.
 
 No API key is needed: EpftoolboxBenchmarkSource downloads the dataset from Zenodo once and checks its md5. Forecasts are
 issued at 11:45 Brussels on the day before each target day, and the newest training target of every model is the issue
@@ -48,7 +48,8 @@ EXOGENOUS = {
 # Only the weekday dummies are taken from CalendarSource (holidays=False), and they depend on the local date alone; Nord Pool
 # and PJM have no calendar of their own, so they borrow one.
 CALENDAR_COUNTRY = {"NP": "NO", "PJM": "DE", "FR": "FR", "BE": "BE", "DE": "DE"}
-VSTS = ("asinh", "mlog", "poly", "npit")
+# The recommended LEAR's four scalers: Lago's Invariant asinh (no standardisation), then mirror-log, polynomial and N-PIT.
+VSTS = {"asinh": {"name": "asinh", "params": {"standardise": False}}, "mlog": "mlog", "poly": "poly", "npit": "npit"}
 
 
 def main(market="DE", test_start=None, test_end=None, output_dir="."):
@@ -94,13 +95,13 @@ def main(market="DE", test_start=None, test_end=None, output_dir="."):
     pipeline = ModelPipeline(information_set=information_set, availability="raise")
     pipeline.add_model(LEARModel.lago(exogenous, name="LEAR_lago"))  # Lago et al. (2021), exactly
     lear_x = lear_predictors(exogenous)
-    for vst in VSTS:  # recommended
+    for vst, scaler in VSTS.items():  # recommended
         pipeline.add_model(
             LEARModel(
                 predictors=lear_x,
                 training_window=[56, 84, 728, "expanding"],
                 criterion="bic",
-                scaler=vst,
+                scaler=scaler,
                 newest_target="published",
                 name=f"LEAR_{vst}",
             )

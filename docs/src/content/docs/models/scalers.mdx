@@ -150,7 +150,7 @@ A model without a `scaler` entry uses `standard`.
 
 No single VST wins in every year. An average of models that differ only in their scaler is an
 [`AverageEnsemble`](/epftoolbox2/model-pipeline/ensembles/) of them, as the [recommended LEAR](/epftoolbox2/models/lear/#recommended-settings)
-does with asinh, mirror-log, polynomial and N-PIT: one model per scaler, each with its own `name`, averaged on the forecasts all of
+does with Lago's Invariant asinh (`standardise=False`), mirror-log, polynomial and N-PIT: one model per scaler, each with its own `name`, averaged on the forecasts all of
 them have. There is no list of scalers inside one model.
 
 ## Not implemented

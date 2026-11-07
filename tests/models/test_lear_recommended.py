@@ -1,5 +1,5 @@
-"""D2's recommended LEAR (`models/lear.mdx`, "Recommended settings"): one `LEARModel` per VST (asinh, mirror-log, polynomial,
-N-PIT) and their `AverageEnsemble`, run for real on synthetic data.
+"""D2's recommended LEAR (`models/lear.mdx`, "Recommended settings"): one `LEARModel` per VST (Lago's Invariant asinh,
+mirror-log, polynomial, N-PIT) and their `AverageEnsemble`, run for real on synthetic data.
 
 The windows are scaled down from the docs' `[56, 84, 728, "expanding"]` to fit a 120-day frame; everything else is the docs'
 loop. The ensemble is the mean of its four members bit for bit on the keys they share, and a key one member lacks is missing
@@ -20,7 +20,8 @@ from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline
 from tests.synthetic import calendar_shift, make_market_data
 
-VSTS = ("asinh", "mlog", "poly", "npit")
+# The docs' members: Lago's Invariant asinh (the one the research measured), then the three standardised VSTs.
+VSTS = {"asinh": {"name": "asinh", "params": {"standardise": False}}, "mlog": "mlog", "poly": "poly", "npit": "npit"}
 WINDOWS = [20, 40, "expanding"]
 PREDICTORS = ["load_d+{horizon}", "wind_d+{horizon}", "is_weekend_d+{horizon}", "price_d-1", "price_d-2", "noise_a"]
 RULES = {
@@ -77,13 +78,13 @@ def recommended(windows=WINDOWS):
     pipeline = ModelPipeline(
         information_set=InformationSet("11:45", "Europe/Brussels", rules=RULES), availability="raise"
     )
-    for vst in VSTS:
+    for vst, scaler in VSTS.items():
         pipeline.add_model(
             LEARModel(
                 predictors=PREDICTORS,
                 training_window=windows,
                 criterion="bic",
-                scaler=vst,
+                scaler=scaler,
                 newest_target="published",
                 name=f"LEAR_{vst}",
             )
@@ -114,7 +115,12 @@ def test_the_members_are_plain_lear_models_that_differ_only_in_their_scaler():
     pipeline = recommended()
     members = pipeline.models
     assert [m.name for m in members] == [f"LEAR_{v}" for v in VSTS]
-    assert [m.scaler for m in members] == list(VSTS)
+    assert [m.scaler for m in members] == [
+        {"name": "asinh", "params": {"apply_to": "all", "standardise": False}},
+        "mlog",
+        "poly",
+        "npit",
+    ]
     assert {(m.criterion, m.solver, m.newest_target, m.refit, tuple(m.training_window)) for m in members} == {
         ("bic", "lars", "published", None, tuple(WINDOWS))
     }
