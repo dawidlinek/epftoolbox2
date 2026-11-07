@@ -22,6 +22,7 @@ import pandas as pd
 import pytest
 import yaml
 
+from epftoolbox2 import tui
 from epftoolbox2.information_set import Availability, InformationSet, InformationSetError, positive_control
 from epftoolbox2.models import BaseModel, LassoCVModel, LEARModel, OLSModel, RidgeModel
 from epftoolbox2.models import _worker as worker
@@ -187,6 +188,11 @@ def test_yaml_and_the_tui_keep_auto(tmp_path):
     assert yaml.safe_load(path.read_text())["models"][0]["params"]["refit"] == "auto"
     loaded = ModelPipeline.load(path).models[0]
     assert loaded.refit == "auto" and loaded._refit_rules == ("1D", "1D", "7D", "7D")
+    for name in ("OLSModel", "LassoCVModel", "RidgeModel", "LEARModel"):
+        field = next(f for f in tui.PARAM_SCHEMAS[name] if f["name"] == "refit")
+        assert "auto" in field["description"], name
+        model = tui._instantiate(name, {"predictors": PREDICTORS, "training_window": [56, 728], "refit": "auto"})
+        assert model._refit_rules == ("1D", "7D"), name
 
 
 # ---------------------------------------------------------------------------
