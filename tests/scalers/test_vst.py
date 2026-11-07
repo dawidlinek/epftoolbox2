@@ -437,3 +437,117 @@ class TestNearConstantTarget:
         with_nans = scaler_cls()
         with_nans.fit_transform(x, noisy, np.zeros((1, 1)))
         assert with_nans._target_std == 1.0 and with_nans.inverse(0.0) == pytest.approx(0.3, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# standardise=False: the VST alone (AsinhScaler's is epftoolbox's Invariant scaler)
+# ---------------------------------------------------------------------------
+
+
+def invariant_by_hand(train_x, train_y, test_x):
+    """epftoolbox's InvariantScaler, written out: per column `arcsinh((x - median) / mad)` with statsmodels' `mad`, the median
+    of `|x - median| / 0.6744897501960817` (each deviation divided before the median), on every column but the binary one."""
+    c = 0.6744897501960817  # scipy.stats.norm.ppf(0.75), statsmodels' constant
+
+    def fit(values):
+        centre = np.median(values)
+        return centre, np.median(np.abs(values - centre) / c)
+
+    out_x, out_test = train_x.copy(), test_x.copy()
+    for i in range(train_x.shape[1] - 1):  # the last column is the dummy
+        centre, mad = fit(train_x[:, i])
+        out_x[:, i] = np.arcsinh((train_x[:, i] - centre) / mad)
+        out_test[:, i] = np.arcsinh((test_x[:, i] - centre) / mad)
+    centre, mad = fit(train_y)
+    return out_x, np.arcsinh((train_y - centre) / mad), out_test, (centre, mad)
+
+
+@pytest.mark.parametrize("n", [200, 201])  # an even count takes the mean of the two middle values, an odd one doesn't
+def test_asinh_without_standardising_is_epftoolbox_s_invariant_scaler(spiky_prices, n):
+    train_x, train_y, test_x = spiky_prices
+    if n == 201:
+        extra = train_x[:1].copy()
+        extra[0, :2] += 1.5  # the dummy stays 0/1
+        train_x, train_y = np.vstack([train_x, extra]), np.append(train_y, 61.0)
+    scaler = AsinhScaler(standardise=False)
+    x, y, test = scaler.fit_transform(train_x, train_y, test_x)
+    hand_x, hand_y, hand_test, (centre, mad) = invariant_by_hand(train_x, train_y, test_x)
+
+    # statsmodels divides each deviation by its constant before the median, this library after: equal or one ulp apart
+    np.testing.assert_allclose(x, hand_x, rtol=4e-16, atol=0)
+    np.testing.assert_allclose(y, hand_y, rtol=4e-16, atol=0)
+    np.testing.assert_allclose(test, hand_test, rtol=4e-16, atol=0)
+    np.testing.assert_array_equal(x[:, 2], train_x[:, 2])  # the dummy as it is
+    assert (scaler._target_mean, scaler._target_std) == (0.0, 1.0)
+    assert scaler._target_params[0] == centre and scaler._target_params[1] == pytest.approx(mad, rel=2.3e-16)
+    # the inverse is median + mad * sinh(z), as InvariantScaler.inverse_transform
+    z = np.array([-2.0, 0.0, 0.7, 3.1])
+    centre, scale = scaler._target_params
+    np.testing.assert_array_equal(scaler.inverse(z), centre + scale * np.sinh(z))
+
+
+@pytest.mark.parametrize("scaler_cls", VST_SCALERS)
+def test_without_standardising_the_transform_is_the_standardised_one_before_its_last_step(scaler_cls, spiky_prices):
+    train_x, train_y, test_x = spiky_prices
+    raw = scaler_cls(standardise=False)
+    x_raw, y_raw, test_raw = raw.fit_transform(train_x, train_y, test_x)
+    full = scaler_cls()
+    x_full, y_full, test_full = full.fit_transform(train_x, train_y, test_x)
+    for i in range(2):  # the price and the load
+        params, mean, std = full._column_params[i]
+        assert raw._column_params[i][1:] == (0.0, 1.0)
+        np.testing.assert_array_equal(np.asarray(raw._column_params[i][0]), np.asarray(params))
+        np.testing.assert_allclose(x_full[:, i], (x_raw[:, i] - mean) / std, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(test_full[:, i], (test_raw[:, i] - mean) / std, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(y_full, (y_raw - full._target_mean) / full._target_std, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(raw.inverse(y_raw), train_y, rtol=1e-12, atol=1e-9)
+    assert all(full._column_params[i][1:] != (0.0, 1.0) for i in range(2))  # the standardisation did something
+
+
+def test_without_standardising_a_column_apply_to_leaves_out_stays_as_it_is(spiky_prices):
+    train_x, train_y, test_x = spiky_prices
+    columns = ["price_d-1", "load_d+1", "is_holiday_d+1"]
+    x, _, test = AsinhScaler(apply_to=["price*"], standardise=False).fit_transform(
+        train_x, train_y, test_x, columns=columns
+    )
+    np.testing.assert_array_equal(x[:, 1:], train_x[:, 1:])
+    np.testing.assert_array_equal(test[:, 1:], test_x[:, 1:])
+
+
+@pytest.mark.parametrize("scaler_cls", VST_SCALERS)
+def test_without_standardising_a_near_constant_column_still_trains_on_zeros(scaler_cls):
+    train_x, train_y, test_x = near_constant_case()
+    x, _, test = scaler_cls(standardise=False).fit_transform(train_x, train_y, test_x)
+    assert (x[:, 1] == 0.0).all() and np.isfinite(test).all()
+    assert np.std(x[:, 0]) > 0.1
+
+
+@pytest.mark.parametrize("scaler_cls", VST_SCALERS)
+def test_standardise_is_left_out_of_the_spec_unless_false(scaler_cls):
+    from epftoolbox2.scalers import scaler_spec
+
+    name = scaler_cls.name
+    assert scaler_cls().get_params() == {"apply_to": "all"} == scaler_cls(standardise=True).get_params()
+    assert scaler_cls(standardise=False).get_params() == {"apply_to": "all", "standardise": False}
+    assert scaler_spec(name) == name and scaler_spec({"name": name, "params": {"standardise": True}}) == {
+        "name": name,
+        "params": {"apply_to": "all"},
+    }
+    assert scaler_spec({"name": name, "params": {"standardise": False}}) == {
+        "name": name,
+        "params": {"apply_to": "all", "standardise": False},
+    }
+    assert (
+        OLSModel(["x"], scaler={"name": name, "params": {"standardise": False}}).scaler["params"]["standardise"]
+        is False
+    )
+    assert OLSModel(["x"], scaler=scaler_cls(standardise=False)).scaler["params"] == {
+        "apply_to": "all",
+        "standardise": False,
+    }
+
+
+@pytest.mark.parametrize("bad", ["no", 0, 1, None])
+def test_standardise_takes_a_bool(bad):
+    with pytest.raises(ValueError, match="standardise"):
+        AsinhScaler(standardise=bad)
