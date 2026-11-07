@@ -116,6 +116,7 @@ at least; fewer is a skipped forecast (`fit_error`). Where it departs from 0.24.
   normalised its rounding noise into a unit column, which the held-out block then multiplied by about 1e15.
 - **The paths run on `X'X`** for every fold and window, as for the criteria, where 0.24.2 ran folds of fewer rows than inputs on `X`.
 - **A constant target** gives the coefficients 0 (every fold's path is the single kink α = 0, where 0.24.2 raised).
+- **The blocks are cut by rows, not by dates, as 0.24.2 cut them.** A frame that keeps both rows of a doubled autumn hour (one date, one target) can have them on either side of a block edge, so one fold trains on a copy of a row it is scored on: 4 of 2928 fits with 49- and 56-row windows and 3 with 84 over September to December on an hourly Warsaw frame, about 0.05 % of the keys, which moved two forecasts by 0.03 and 0.07 EUR/MWh. Frames through `DSTNormalizeTransformer` have no doubled rows. A known issue.
 
 **What it reproduces.** On the first DE and BE test days of [the paper's setup](#lago-et-al-2021-exactly), with `criterion="cv"`
 and `solver="lars"`, every window and hour is old `LassoLarsCV` under scikit-learn 0.24.2 on the original's scaled rows, within 1e-9
