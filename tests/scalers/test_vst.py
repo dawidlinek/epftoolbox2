@@ -520,7 +520,9 @@ def test_without_standardising_a_near_constant_column_still_trains_on_zeros(scal
     train_x, train_y, test_x = near_constant_case()
     x, _, test = scaler_cls(standardise=False).fit_transform(train_x, train_y, test_x)
     assert (x[:, 1] == 0.0).all() and np.isfinite(test).all()
-    assert np.std(x[:, 0]) > 0.01  # the ordinary column isn't zeroed (poly's slope at the median is c = 0.05)
+    # the ordinary column isn't zeroed; PolyScaler's slope at the median is c = 0.05, so its spread is about 0.04 (the others'
+    # 0.28 to 0.90)
+    assert np.std(x[:, 0]) > (0.01 if scaler_cls is PolyScaler else 0.1)
 
 
 @pytest.mark.parametrize("scaler_cls", VST_SCALERS)
