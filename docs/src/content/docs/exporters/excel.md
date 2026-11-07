@@ -36,6 +36,13 @@ A model with no forecasts in the report's window has a row with 0 forecasts in `
 
 An evaluator with several columns, such as `DMEvaluator`, gets one sheet per column in the breakdowns (`horizon_DM ratio`, `horizon_DM p`, ...). Empty cells are values that do not exist for that group, such as `DM p_holm` in a per-hour sheet.
 
+Each breakdown also gets a sheet of counts after its metric sheets (`horizon_forecasts`, `HourHorizon_forecasts`, `RunWeekdayHorizon_forecasts`, ...): the number of
+forecasts of each model in each group, laid out like the metric sheets. A model with no forecast in a group has 0 there, and in the sheets with a block for
+each model every block has the groups of the whole table, where the metric sheets leave an empty cell or no cell at all. The sheets of counts have no
+colours, since a large count is not a bad value. Compare them with a metric sheet before reading differences between models: models with different counts
+in a group are scored on different forecasts there ([Forecasts per group](/epftoolbox2/model-pipeline/results/#forecasts-per-group)). The `Summary` sheet has
+the model's total in its `forecasts` column, which its colour scale leaves out.
+
 ## Example
 
 ```python

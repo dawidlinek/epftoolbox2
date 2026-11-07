@@ -177,28 +177,43 @@ class EvaluationReport:
         return next((ref.windows for ref in self.refs.values() if ref.windows is not None), None)
 
     def summary(self) -> pd.DataFrame:
+        """One row per model: `model, forecasts`, then the metrics. `forecasts` is the model's own number of forecasts."""
         return self._summary_table(self._model_frames())
 
     def by_hour(self) -> pd.DataFrame:
-        return self._compute_grouped(["hour"])
+        """One row per (group, model): `model`, the grouping columns, `forecasts`, then the metrics.
+
+        This is the shape of every `by_*()` table (`by_hour`, `by_horizon`, `by_hour_horizon`, `by_year`,
+        `by_year_horizon`, `by_run_weekday_horizon`, `by_target_weekday_horizon`, `by_quarter`, `by_day`,
+        `by_price_level`). `forecasts` is the model's own number of forecasts in that group, as in `summary()`. A model
+        with none in a group has no row there.
+
+        The metrics of a group are on the forecasts each model has in it, and models can have different ones (a model
+        that skips keys, or a `NaiveModel(known_only=True)` whose source isn't published yet). When the models of a
+        group have different counts, the table warns, and `df.attrs["unequal_counts"]` lists those groups (a model
+        absent from a group counts 0). The relative metrics and tests are on the keys a pair shares; MAE, RMSE and the
+        like are not. Equal counts do not prove equal keys: `forecast_counts()` and the `n_forecasts` columns of the
+        comparisons say more.
+        """
+        return self._grouped_table(self._model_frames(), ["hour"])
 
     def by_horizon(self) -> pd.DataFrame:
-        return self._compute_grouped(["horizon"])
+        return self._grouped_table(self._model_frames(), ["horizon"])
 
     def by_hour_horizon(self) -> pd.DataFrame:
-        return self._compute_grouped(["hour", "horizon"])
+        return self._grouped_table(self._model_frames(), ["hour", "horizon"])
 
     def by_year(self) -> pd.DataFrame:
-        return self._compute_grouped(["year"])
+        return self._grouped_table(self._model_frames(), ["year"])
 
     def by_year_horizon(self) -> pd.DataFrame:
-        return self._compute_grouped(["year", "horizon"])
+        return self._grouped_table(self._model_frames(), ["year", "horizon"])
 
     def by_run_weekday_horizon(self) -> pd.DataFrame:
-        return self._compute_grouped(["run_weekday", "horizon"])
+        return self._grouped_table(self._model_frames(), ["run_weekday", "horizon"])
 
     def by_target_weekday_horizon(self) -> pd.DataFrame:
-        return self._compute_grouped(["target_weekday", "horizon"])
+        return self._grouped_table(self._model_frames(), ["target_weekday", "horizon"])
 
     def by_quarter(self) -> pd.DataFrame:
         """One row per (calendar quarter of the target date, model): `model, year, quarter, forecasts`, then the metrics.
@@ -207,7 +222,7 @@ class EvaluationReport:
         metrics and tests compare the models on the forecasts they share inside it. A quarter is short by nature: the
         tests print `n_days` and say nothing below 30 days.
         """
-        return self._grouped_table(self._model_frames(), ["year", "quarter"], counts=True)
+        return self._grouped_table(self._model_frames(), ["year", "quarter"])
 
     def by_day(self) -> pd.DataFrame:
         """One row per (target date, model): `model, target_date, forecasts`, then the metrics.
@@ -215,7 +230,7 @@ class EvaluationReport:
         All horizons that forecast the date are in its group. A day holds one run date per horizon, so the tests have
         almost nothing to run on and their columns stay empty (`n_days` says how many days they had).
         """
-        return self._grouped_table(self._model_frames(), ["target_date"], counts=True)
+        return self._grouped_table(self._model_frames(), ["target_date"])
 
     def by_price_level(self, spike: Optional[float] = None) -> pd.DataFrame:
         """One row per (price level, model): `model, price_level, forecasts`, then the metrics.
@@ -234,7 +249,7 @@ class EvaluationReport:
         frames = self._model_frames()
         threshold, rule, quantile = spike_threshold(frames, spike)
         labels = {"price_level": lambda df: price_level(df["actual"], threshold)}
-        table = self._grouped_table(frames, ["price_level"], labels=labels, counts=True)
+        table = self._grouped_table(frames, ["price_level"], labels=labels)
         table.attrs.update(
             spike_threshold=threshold,
             spike_rule=rule,
@@ -1042,9 +1057,6 @@ class EvaluationReport:
             result[config_name] = self._grouped_table(model_dfs, group_keys)
         return result
 
-    def _compute_grouped(self, group_keys: List[str]) -> pd.DataFrame:
-        return self._grouped_table(self._model_frames(), group_keys)
-
     def _model_frames(self) -> Dict[str, pd.DataFrame]:
         """One DataFrame per model, read once: `FORECAST_KEYS`, `prediction` and `actual`.
 
@@ -1117,14 +1129,16 @@ class EvaluationReport:
         model_dfs: Dict[str, pd.DataFrame],
         group_keys: List[str],
         labels: Optional[Mapping[str, Callable[[pd.DataFrame], pd.Series]]] = None,
-        counts: bool = False,
     ) -> pd.DataFrame:
         """One row per (group, model): each model's evaluators run on its own rows of the group, with every
         model's rows of that group as `model_dfs`. Rows are ordered by group, then by model.
 
+        `forecasts` is each model's number of forecasts in the group, after the group keys. A model with none in a group
+        has no row there; when the models of a group differ in their counts (a model without a row counts 0) the table
+        warns and `table.attrs["unequal_counts"]` lists those groups.
+
         `labels` gives a group key that is not a column of the frames or one `_split` knows: a function of a model's frame
-        to the group of each row. `counts` puts each model's number of forecasts in the group in a `forecasts` column
-        after the group keys (the breakdowns that are not in `compute_all()` have it)."""
+        to the group of each row."""
         self._check_set_evaluators()
         groups = {name: dict(self._split(df, group_keys, labels)) for name, df in model_dfs.items()}
         rows = []
@@ -1132,11 +1146,10 @@ class EvaluationReport:
             group_dfs = {name: g[key] for name, g in groups.items() if key in g}
             metrics = self._apply_evaluators(group_dfs, group_keys)
             for name, group in group_dfs.items():
-                row = {"model": name, **dict(zip(group_keys, key))}
-                if counts:
-                    row["forecasts"] = len(group)
+                row = {"model": name, **dict(zip(group_keys, key)), "forecasts": len(group)}
                 rows.append({**row, **metrics.get(name, {})})
         table = pd.DataFrame(rows)
+        _flag_unequal_counts(table, group_keys, list(model_dfs))
         self._flag_dm_vintages(table, list(model_dfs), stacklevel=3)
         return table
 
@@ -1279,6 +1292,34 @@ def _flag_test_length(table: pd.DataFrame, n_days: int, span_days: Optional[int]
         warnings.warn(f"{note} Below {SHORT_TEST_DAYS} days read it as indicative only.", stacklevel=3)
     else:
         logger.info(note)
+
+
+def _flag_unequal_counts(table: pd.DataFrame, group_keys: Sequence[str], models: Sequence[str]) -> None:
+    """Say so when the models of a group of `table` have different numbers of forecasts: their metrics there are on
+    different samples. A model with no row in a group counts 0 (it has no forecast there), so a model that is missing from
+    a group where another has forecasts is as much a difference as a model with fewer. The groups go to
+    `table.attrs["unequal_counts"]` (a table without any gets no attribute). The warning shows the group with the widest gap
+    and says how many groups differ; it is raised by the public method that built the table (`stacklevel=4`)."""
+    if len(models) < 2 or table.empty:
+        return
+    wide = table.pivot(index=list(group_keys), columns="model", values="forecasts").reindex(columns=list(models))
+    wide = wide.fillna(0).astype(int)
+    spread = wide.max(axis=1) - wide.min(axis=1)
+    uneven = wide[spread > 0]
+    if uneven.empty:
+        return
+    table.attrs["unequal_counts"] = [key if isinstance(key, tuple) else (key,) for key in uneven.index]
+    widest = spread[spread > 0].idxmax()
+    widest = widest if isinstance(widest, tuple) else (widest,)
+    where = ", ".join(f"{k}={v}" for k, v in zip(group_keys, widest))
+    counts = ", ".join(f"{model}: {n}" for model, n in wide.loc[widest if len(widest) > 1 else widest[0]].items())
+    warnings.warn(
+        f"The models have different numbers of forecasts in {len(uneven)} of {len(wide)} groups by {', '.join(group_keys)}, "
+        f"so their metrics there are on different samples (widest gap at {where}: {counts}). Relative metrics and tests "
+        "use the keys a pair shares, MAE and RMSE do not; see report.forecast_counts() and "
+        'df.attrs["unequal_counts"].',
+        stacklevel=4,
+    )
 
 
 def _flag_partial_days(table: pd.DataFrame, partial: Mapping[str, int]) -> None:

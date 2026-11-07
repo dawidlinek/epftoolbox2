@@ -83,11 +83,13 @@ print(report.forecast_counts())
 # 1  Lasso     5040      5038        2                        2
 
 print(report.by_horizon())
-#    model  horizon      MAE
-# 0    OLS        1  18.5432
-# 1    OLS        2  22.1234
-# 2    OLS        7  35.4567
+#    model  horizon  forecasts      MAE
+# 0    OLS        1        720  18.5432
+# 1    OLS        2        720  22.1234
+# 2    OLS        7        718  35.4567
 ```
+
+Every `by_*()` table has the `forecasts` column of `summary()`, after the group keys: [how many forecasts each model has in each group](#forecasts-per-group).
 
 ## Forecast counts
 
@@ -106,6 +108,35 @@ A task (period × horizon × run day) that cannot give a forecast is skipped and
 A shortfall is logged as a warning when the model runs, and a model that produces nothing raises. Any other exception inside a task stops the run (results already written to `save_dir` are kept, so a rerun resumes).
 
 Models are only comparable on the forecasts they all produced: check that `produced` agrees before comparing metrics.
+
+## Forecasts per group
+
+`summary()` and every `by_*()` table (`by_hour`, `by_horizon`, `by_hour_horizon`, `by_year`, `by_year_horizon`, `by_run_weekday_horizon`,
+`by_target_weekday_horizon`, `by_quarter`, `by_day`, `by_price_level`) have a `forecasts` column: the model's own number of forecasts
+in that group, `model, <group columns>, forecasts, <metrics>`. A model with no forecast in a group has no row there, and the counts of a
+model add up to its `summary()` count (`by_price_level` leaves out the forecasts without a finite actual price, which `df.attrs["no_level"]`
+counts). It counts the model's rows in the group, finite or not, as `summary()` does: a forecast whose prediction or actual is NaN is counted, and MAE
+and RMSE skip it. A relative metric (`rMAE`) or a test rests on the keys the model shares with its benchmark inside the group, with a finite
+prediction and actual on both sides.
+
+Models do not always have the same forecasts. A model that skips keys, or a `NaiveModel(known_only=True)` whose source is not published yet on
+some issue days, has fewer in some groups than a model with every key, and its MAE there is on another sample:
+
+```python
+print(report.by_horizon())  # a TSO benchmark and an OLS model over 56 issue days; horizons 1 to 6 left out here
+#    model  horizon  forecasts     MAE
+# ...
+# 12   TSO        7         24  1472.9
+# 13   OLS        7         56  1180.4
+# UserWarning: The models have different numbers of forecasts in 4 of 7 groups by horizon, so their metrics there
+# are on different samples (widest gap at horizon=7: TSO: 24, OLS: 56). ...
+```
+
+When the models of a group have different counts, the table warns once, naming how many groups differ and the one with the widest gap
+(`horizon=7: TSO: 24, OLS: 56`), and `df.attrs["unequal_counts"]` lists those groups as tuples of their key values (`[(4,), (5,), (6,), (7,)]` here). A model
+with no row in a group counts 0, so a model that lacks a whole horizon is a difference too. Tables whose models have the same counts
+everywhere don't warn and get no attribute. Equal counts do not prove equal keys, or the same number of finite values: for those, read `forecast_counts()` and the
+`n_forecasts` columns of [the comparison tables](/epftoolbox2/model-pipeline/comparing-models/). `summary()` has the count but doesn't warn.
 
 ## Inputs not known at the issue time
 
@@ -153,7 +184,7 @@ print(report.by_price_level())
 # 5  Lasso       spike         88   4.8244  0.8018
 ```
 
-They are cut like `by_year()`: each model's forecasts are split into groups, and every evaluator runs on a group alone. A relative metric (`rMAE`) or a test (`DM ...`, `MCS ...`) therefore compares the models on the forecasts they share inside the group, and prints its own `n_days` and `n_forecasts`. These tables also have a `forecasts` column, the model's own number of forecasts in the group: in the example Lasso lacks 10 forecasts in the first quarter and `rMAE` is taken without them. A group is short by nature, so the tests say nothing below 30 days (`DM verdict` and `in MCS` stay empty). They are not in `compute_all()`, so the exporters do not write them.
+They are cut like `by_year()`: each model's forecasts are split into groups, and every evaluator runs on a group alone. A relative metric (`rMAE`) or a test (`DM ...`, `MCS ...`) therefore compares the models on the forecasts they share inside the group, and prints its own `n_days` and `n_forecasts`. Like every `by_*()` table they have a [`forecasts` column](#forecasts-per-group), the model's own number of forecasts in the group: in the example Lasso lacks 10 forecasts in the first quarter and `rMAE` is taken without them. A group is short by nature, so the tests say nothing below 30 days (`DM verdict` and `in MCS` stay empty). They are not in `compute_all()`, so the exporters do not write them.
 
 | Method | Groups | Columns |
 |---|---|---|

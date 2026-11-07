@@ -94,6 +94,19 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **Every `by_*()` table counts the forecasts of each model, and warns when the models of a group differ.** `by_hour()`, `by_horizon()`,
+  `by_hour_horizon()`, `by_year()`, `by_year_horizon()`, `by_run_weekday_horizon()` and `by_target_weekday_horizon()` printed a metric per
+  (model, group) and not how many forecasts it rests on, so a `NaiveModel(known_only=True)` benchmark at horizon 7 could show a MAE on 24
+  forecasts next to an OLS model's on 56 with nothing in the table to say so. They now have the `forecasts` column of `summary()`, `by_quarter()`,
+  `by_day()` and `by_price_level()`, after the group keys, and a `UserWarning` when the models of a group have different counts (a model with no row
+  in a group counts 0), with `df.attrs["unequal_counts"]` listing those groups. See [Forecasts per group](/epftoolbox2/model-pipeline/results/#forecasts-per-group).
+  - **What moves.** Only the shape of these tables, `compute_all()` and what the exporters write: every metric value is bit for bit as before.
+    The tables have one more column (`model, <group columns>, forecasts, <metrics>`; `metric_columns()` does not list it), so code that
+    picks columns by position must change, not code that picks them by name. `TerminalExporter` prints the column, and `ExcelExporter` writes a
+    sheet of counts after the metric sheets of each breakdown (`horizon_forecasts`, `HourHorizon_forecasts`, ...), with 0 where a model has no
+    forecast and no colours, which shifts the sheets after it. The `Summary` sheet's colour scale no longer covers the `forecasts` column, which
+    it coloured like an error. `CsvExporter` is unchanged. `summary()` does not warn.
+
 - **Nothing after the issue day decides how a column is scaled.** A model leaves a 0/1 column unscaled and decides which columns
   those are once per list, period and horizon (and window), from the training rows of one day. A column with no value in those rows,
   such as one that starts inside the test, can't tell. It stayed unscaled for good in a fixed list and in a function's list used on
