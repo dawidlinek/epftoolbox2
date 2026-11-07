@@ -226,11 +226,12 @@ lear = LEARModel(["load_d+{horizon}", "wind_d+{horizon}"], training_window=[56, 
   so a resume with another `refit` is refused even where the rules would agree. YAML writes `refit: auto`.
 
 **What it costs.** On [`LEARModel.lago()`](/epftoolbox2/models/lear/#lago-et-al-2021-exactly) with `newest_target="d-1"` over
-Lago's DE test period (727 issue days from 4 January 2016, h = 1, the same 17,448 forecasts), `"auto"` against `refit=None`: the 56-
-and 84-day windows are the same to the bit, the 1092- and 1456-day ones lose 0.39 and 0.24 % of their MAE, and the average moves
-from 3.6224 to 3.6252 EUR/MWh (+0.08 %, RMSE +0.07 %; DM p 0.09 that `None` is better). It makes 57 % of the fits, since two windows
-of four still refit daily, and took 41 % of the core-seconds (2,579 against 6,360 on six processes): here the short windows are about
-a third of a fit's cost, not the fifth they were in the study. Forecasts issued on a Monday are those of `refit=None`, bit for bit.
+Lago's DE test period without its first day (727 issue days from Monday 4 January 2016, where `"auto"` can start, h = 1, the same
+17,448 forecasts), `"auto"` against `refit=None`: the 56- and 84-day windows are the same to the bit, the 1092- and 1456-day ones
+lose 0.39 and 0.24 % of their MAE, and the average moves from 3.6224 to 3.6252 EUR/MWh (+0.08 %, RMSE +0.07 %; DM p 0.09 that
+`None` is better). It makes 57 % of the fits, exactly (2 + 2/7) / 4 since two windows of four still refit daily, at about 40 % of
+the compute (one run of each on a shared machine; the short windows are about a third of a fit's cost here, not the fifth they were in
+the study). Forecasts issued on a Monday are those of `refit=None`, bit for bit.
 
 ## What a clock change does
 

@@ -226,7 +226,8 @@ _REFIT_RULE = re.compile(r"([1-9][0-9]*)(D|MS)")
 
 # `refit="auto"`: each training window refits on its own rule (`member_rules`), daily up to `AUTO_DAILY_UP_TO` days and weekly beyond
 # (decision 16 of the step 4 spec). The rule reads the window alone: research Q5 found a weekly refit costs a short window 2.7 to
-# 6.9 % and a long one at most 0.4 %, so this keeps the window average's MAE at about a third of the compute.
+# 6.9 % and a long one at most 0.4 %. With [56, 84, 728, "expanding"] it makes (2 + 2/7) / 4 = 57 % of the fits; on lago() over DE
+# the window average lost 0.08 % of its MAE at about 40 % of the compute (the short windows are about a third of a fit's cost there).
 REFIT_AUTO = "auto"
 AUTO_DAILY_UP_TO = 84
 AUTO_SHORT_RULE, AUTO_LONG_RULE = "1D", "7D"

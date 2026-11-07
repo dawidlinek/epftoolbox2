@@ -255,9 +255,10 @@ an issue day it didn't sample.
   windows'; `training_cut` gains `refit_rules`, the rule of each window, so a resume with another `refit` is refused. A worker runs a
   Monday-to-Sunday block, the frame must reach back from each window's own refit day (a long window asks up to 6 days more than with
   `refit=None`, and the error names it), the training target is checked on every window's refit days, and a column whose rule changes
-  over time on the rows of every window's fit. **Nothing moves for `None`, `"kD"` or `"kMS"`**: records, manifests and YAML are as
-  before. On `LEARModel.lago()` with `newest_target="d-1"` over DE (727 issue days, the same 17,448 forecasts) the window average's MAE
-  went from 3.6224 to 3.6252 (+0.08 %, DM p 0.09) at 57 % of the fits and 41 % of the core-seconds. See
+  over time on the rows of every window's own fit. **Nothing moves for `None`, `"kD"` or `"kMS"`**: records, manifests and YAML are as
+  before. On `LEARModel.lago()` with `newest_target="d-1"` over DE (Lago's test period without its first day: 727 issue days, the same
+  17,448 forecasts) the window average's MAE went from 3.6224 to 3.6252 (+0.08 %, DM p 0.09) at 57 % of the fits and about 40 % of the
+  compute. See
   [`refit="auto"`](/epftoolbox2/model-pipeline/time-and-calendars/#refitauto).
 - **`freq="1D"`: one model per day.** `pipeline.run(df.at_time("12:00"), ..., freq="1D")` fits one model per day on a frame with one row
   per local date, every row at one time of day. It is accepted wherever `freq` is: `ModelPipeline.run`, `report`, `verify` and
