@@ -1,13 +1,13 @@
 ---
 title: LEARModel
-description: LEAR, the Lasso of Lago et al. (2021) with its penalty chosen by AIC or BIC, and LEARModel.lago(), the original exactly
+description: LEAR, the Lasso of Lago et al. (2021) with its penalty chosen by AIC, BIC or blocked cross-validation, and LEARModel.lago(), the original exactly
 ---
 
 LEAR (Lasso-estimated autoregressive) is the linear benchmark of Lago, Marcjasz, De Schutter & Weron (2021), *Forecasting
 day-ahead electricity prices: A review of state-of-the-art algorithms, best practices and an open-access benchmark*, Applied
 Energy 293, 116983. `LEARModel` fits one Lasso per period of day, horizon and run day, as every model here does, and chooses its
-penalty on every fit by an information criterion on the LARS path. Its own LARS and coordinate-descent kernels follow scikit-learn
-0.24.2, the version the paper ran, rule for rule. [`LEARModel.lago()`](#lago-et-al-2021-exactly) is the paper's model, and
+penalty on every fit by an information criterion on the LARS path, or by [blocked cross-validation](#blocked-cross-validation). Its
+own LARS and coordinate-descent kernels follow scikit-learn 0.24.2, the version the paper ran, rule for rule. [`LEARModel.lago()`](#lago-et-al-2021-exactly) is the paper's model, and
 reproduces the original epftoolbox's forecasts.
 
 ## Basic Usage
@@ -29,8 +29,8 @@ With an issue time, `newest_target="published"` also trains on the issue day's p
 |-----------|------|---------|-------------|
 | `predictors` | List or function | Required | Predictor specifications (strings, `{horizon}` templates, or callables), or a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/). [`lear_predictors`](/epftoolbox2/model-pipeline/presets/#lear) gives LEAR's 247 |
 | `training_window` | int, `"expanding"` or list | `(56, 84, 728, "expanding")` | Days of training rows, every row from the frame's first date, or a list of windows averaged inside the model with equal weights ([Training Windows](/epftoolbox2/model-pipeline/training-windows/)). A list is stored as a list |
-| `criterion` | str | `"bic"` | How the penalty is chosen on the LARS path: `"bic"` or `"aic"` (the paper's). See [The fit](#the-fit) |
-| `solver` | str | `"lars"` | The Lasso at that penalty: `"lars"` solves it exactly, `"cd"` is the paper's coordinate descent, which stops after at most 2500 sweeps |
+| `criterion` | str | `"bic"` | How the penalty is chosen: `"bic"` or `"aic"` (the paper's) on the LARS path ([The fit](#the-fit)), or `"cv"`, five blocked folds of the training rows ([Blocked cross-validation](#blocked-cross-validation)) |
+| `solver` | str | `"lars"` | The Lasso at that penalty: `"lars"` solves it exactly, `"cd"` is the paper's coordinate descent, which stops after at most 2500 sweeps. `"cv"` takes `"lars"` only (it reads the path, with no refit); `"cd"` with it raises |
 | `scaler` | str, dict or scaler | `"asinh"` | Keyword-only. `"asinh"`, `"standard"` or `"npit"`, or `{"name": ..., "params": {...}}`; `{"name": "asinh", "params": {"standardise": False}}` is the paper's Invariant scaler. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
 | `name` | str | `"LEAR"` | Keyword-only. Display name for reports |
 | `newest_target` | str | `"d-1"` | Keyword-only. `"d-1"`, or `"published"`, every target its rule says is known by the issue time, which needs an information set. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target) |
@@ -80,6 +80,61 @@ four windows and up to 7.6 in the 1456-day window (BE), and the MAE of the avera
   `refit="auto"` refits the 56- and 84-day windows daily and the longer ones on Mondays; on `lago()` over DE with
   `newest_target="d-1"` that costs the window average 0.08 % of its MAE at 57 % of the fits and about 40 % of the compute (see
   [`refit="auto"`](/epftoolbox2/model-pipeline/time-and-calendars/#refitauto)). The recommended model keeps `refit=None`.
+
+## Blocked cross-validation
+
+`criterion="cv"` chooses α\* as old scikit-learn `LassoLarsCV(cv=5, normalize=True, max_iter=2500)` did (up to version 1.1), by
+cross-validation on blocks of the training rows, and takes the coefficients from the LARS path, with no refit:
+
+```python
+from epftoolbox2.models import LEARModel
+from epftoolbox2.presets import lear_predictors
+
+model = LEARModel(lear_predictors(exogenous=["load_forecast", "residual_load"]), criterion="cv", name="LEAR_cv")
+```
+
+1. **Five blocks.** The training rows, in date order, are cut into five contiguous blocks, as scikit-learn's `KFold(5)` without
+   shuffling cuts them (the first n mod 5 blocks one row longer). Fold k trains on the other four and is scored on block k.
+2. **A path per fold.** Each fold's training part is centred on its own means and normalised by its own column norms, and its
+   LARS-lasso path runs to α = 0.
+3. **The penalties tried** are the kinks of all five paths, every second (third, …) of them when there are 2,000 or more, so about
+   1,000 at most (scikit-learn's `max_n_alphas`).
+4. **The held-out error.** At each penalty, each fold's coefficients (linear between its kinks, divided by its norms) forecast its
+   held-out block, centred on the training part's means. α\* is the penalty with the lowest mean over the five folds of their blocks'
+   mean squared errors, the first if two tie.
+5. **The coefficients** are the full window's path on unit-norm columns, stopped at α\* and divided by the norms, as 0.24.2's
+   `LassoLarsCV` returned them: its early stop takes a kink within 1.2e-7 of α\* as it is. They are the path's own, so more penalised
+   than the refit of the criteria (stage 2 above), and `solver` must stay `"lars"`: `"cd"` with `"cv"` raises.
+
+Every block holds training rows of the forecast only, so the choice reads nothing the forecast can't, and four of the five folds train on
+rows after their held-out block, as scikit-learn's does. The fit reads the five blocks' centred sums, so it needs five training rows
+at least; fewer is a skipped forecast (`fit_error`). Where it departs from 0.24.2:
+
+- **Each fold applies the window's rules to its own training rows**: of exact twins there one is kept, and a column constant up to
+  rounding there (standard deviation at most 1e-12 of its root mean square, the scalers' rule) is left out. A column can be either on
+  four blocks without being so on the window, a dummy or a night-time solar column that varies only in the held-out block: 0.24.2
+  normalised its rounding noise into a unit column, which the held-out block then multiplied by about 1e15.
+- **The paths run on `X'X`** for every fold and window, as for the criteria, where 0.24.2 ran folds of fewer rows than inputs on `X`.
+- **A constant target** gives the coefficients 0 (every fold's path is the single kink α = 0, where 0.24.2 raised).
+
+**What it reproduces.** On the first DE and BE test days of [the paper's setup](#lago-et-al-2021-exactly), with `criterion="cv"`
+and `solver="lars"`, every window and hour is old `LassoLarsCV` under scikit-learn 0.24.2 on the original's scaled rows, within 1e-9
+in α\* (relative) and in every coefficient, the 49- and 77-row windows (X form there) and the 34 DE fits whose penalties were
+thinned to every second kink included. `tests/models/test_lear_lago.py` holds it.
+
+**Against BIC.** Over the paper's test periods, with `lago()`'s settings and `criterion="cv"` (h = 1, 728 days × 24 hours in every
+market, the same keys for both), MAE in EUR/MWh of the average of the four windows:
+
+| Criterion | NP | PJM | FR | BE | DE |
+|-----------|----|-----|----|----|----|
+| `"cv"` | 1.734 | 3.030 | 3.965 | 6.142 | 3.591 |
+| `"bic"` (the paper's refit, `"cd"`) | 1.718 | 3.004 | 3.962 | 6.145 | 3.574 |
+| difference | +0.9 % | +0.9 % | +0.1 % | −0.1 % | +0.5 % |
+
+By Lago et al.'s DM test BIC's averages are better in NP (p 0.012) and PJM (p 0.046), and neither is in FR, BE and DE (p 0.11 or more). BIC
+with the exact refit (`"lars"`) is within 0.001 EUR/MWh of the `"cd"` row. Cross-validation loses most on the short windows (56
+days: +4.1 % in NP, +3.1 % in PJM) and gains on some long ones (−1.2 % at 1092 days in PJM, −1.1 % at 1456 in BE). A fit costs
+about 3.5 times BIC's with `"cd"` and 5 times with `"lars"`, a whole run 1.5 to 1.7 times (the rest is the same for both).
 
 ## Lago et al. (2021) exactly
 
@@ -175,7 +230,7 @@ published that far ahead can give.
 The fit runs in numpy, or compiled by numba with the [`[fast]` extra](/epftoolbox2/getting-started/installation/#the-fast-extra):
 `pip install 'epftoolbox2[fast]'`. `EPFTOOLBOX2_KERNELS=auto|numpy|numba` chooses (`auto`, the default, takes numba when it imports).
 On one core a fit of the 1449-row window takes about 16 ms (exact refit) and 28 ms (coordinate descent) with numba, and 150 ms and
-1 s in numpy. They sum in different orders, so they agree within 1e-9 with the same kinks, not to the bit, wherever no tie between
+1 s in numpy; with `criterion="cv"` about 80 ms and 0.55 s. They sum in different orders, so they agree within 1e-9 with the same kinks, not to the bit, wherever no tie between
 columns decides an entry: exact twins are dropped before the fit, so this holds on every design but one of the
 [other collinear inputs](#the-fit) above (on the paper's data, in every fit compared). A run's manifest records which ran (`kernels`,
 with the provenance, never compared; a list once a resume added the other), and a resume warns while the file mixes them. Records
