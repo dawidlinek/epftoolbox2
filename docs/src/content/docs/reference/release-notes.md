@@ -165,6 +165,13 @@ an issue day it didn't sample.
 
 ### New
 
+- **`MirrorLogScaler` and `PolyScaler`: the mirror-log and polynomial VSTs.** `scaler="mlog"` and `scaler="poly"` are the
+  transformations of Uniejewski, Weron & Ziel (2018) on `AsinhScaler`'s median/MAD normalisation, then standardised like every VST:
+  `sgn(u) (log(|u| + 1/c) + log c)` with `c=1/3`, and `sgn(u) ((|u| + (c/λ)^(1/(λ-1)))^λ - (c/λ)^(λ/(λ-1)))` with `lam=0.125`,
+  `c=0.05` (keyword-only; at their defaults left out of the scaler's parameters, so `"mlog"` is the spec of the default). Both are odd,
+  strictly increasing and invertible for every value; they take `apply_to` and `standardise` as the other VSTs do, and the same
+  near-constant rule. They are two of the four scalers of the recommended LEAR. **Nothing else moves**: `AsinhScaler` and every other
+  scaler give the same numbers, bit for bit. See [Scalers and VSTs](/epftoolbox2/models/scalers/).
 - **`LEARModel`: LEAR, and `LEARModel.lago()`, Lago et al. (2021) exactly.** `LEARModel(predictors, training_window=[56, 84, 728,
   "expanding"], criterion="bic", solver="lars", *, scaler="asinh", name="LEAR", newest_target="d-1", refit=None)` fits a Lasso per
   period whose penalty is chosen on every fit as old scikit-learn `LassoLarsIC(normalize=True)` chose it, AIC or BIC on the LARS path of

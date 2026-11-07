@@ -535,13 +535,21 @@ class Use:                                  # What the function may return inste
 ### Scalers
 
 ```python
-from epftoolbox2.scalers import StandardScaler, AsinhScaler, NPITScaler, make_scaler, scaler_spec
+from epftoolbox2.scalers import StandardScaler, AsinhScaler, MirrorLogScaler, PolyScaler, NPITScaler, make_scaler, scaler_spec
 
 class StandardScaler(BaseScaler):
     def __init__(self, *, scale_binary: bool = False): ...   # True scales binary 0/1 columns too
 
 class AsinhScaler(BaseScaler):
     def __init__(self, apply_to: Union[str, List[str]] = "all", *, standardise: bool = True): ...  # False: Lago's Invariant
+
+class MirrorLogScaler(BaseScaler):  # "mlog": sgn(u) (log(|u| + 1/c) + log c) on the median/MAD-normalised u
+    def __init__(self, apply_to: Union[str, List[str]] = "all", *, c: float = 1 / 3, standardise: bool = True): ...
+
+class PolyScaler(BaseScaler):  # "poly": sgn(u) ((|u| + (c/lam)^(1/(lam-1)))^lam - (c/lam)^(lam/(lam-1)))
+    def __init__(
+        self, apply_to: Union[str, List[str]] = "all", *, lam: float = 0.125, c: float = 0.05, standardise: bool = True
+    ): ...
 
 class NPITScaler(BaseScaler):
     def __init__(self, apply_to: Union[str, List[str]] = "all", *, standardise: bool = True): ...

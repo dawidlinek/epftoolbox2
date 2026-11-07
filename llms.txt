@@ -97,7 +97,7 @@ Rules to know before using the library:
 - [RidgeModel](docs/src/content/docs/models/ridge.mdx): ridge regression whose penalty is chosen on every fit by leave-one-out from a grid
 - [LEARModel](docs/src/content/docs/models/lear.mdx): LEAR (Lago et al. 2021), a Lasso whose penalty is chosen by AIC or BIC on the LARS path, refitted exactly or by Lago's coordinate descent, or by blocked 5-fold cross-validation (`criterion="cv"`, old `LassoLarsCV`, no refit); `LEARModel.lago()` reproduces the original epftoolbox's forecasts
 - [NaiveModel](docs/src/content/docs/models/naive.mdx): one column's value on the issue row, such as a published forecast taken as a benchmark; with an information set, no forecast where the value wasn't out at the issue time
-- [Scalers and VSTs](docs/src/content/docs/models/scalers.mdx): standard scaling and variance-stabilising transformations (asinh, N-PIT) for spiky prices
+- [Scalers and VSTs](docs/src/content/docs/models/scalers.mdx): standard scaling and variance-stabilising transformations (asinh, mirror-log, polynomial, N-PIT) for spiky prices
 
 ## Evaluators
 

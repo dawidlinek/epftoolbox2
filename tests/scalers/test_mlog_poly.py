@@ -146,6 +146,30 @@ def test_the_normalisation_is_asinh_s_median_and_mad(cls, prices):
     assert other._target_params == pytest.approx((median, mad / 0.6744897501960817), rel=1e-15)
 
 
+@pytest.mark.parametrize("kind", ["mlog", "poly"])
+@pytest.mark.parametrize("standardise", [True, False])
+def test_the_scaler_is_the_paper_s_formula_on_the_normalised_column_then_standardised(kind, standardise, prices):
+    """By hand: u = (x - median) / (MAD / 0.6745) of the training values, the paper's formula, then (x - mean) / sd of the
+    transformed training values (ddof 1); for the target, every predictor but the dummy, and the test row."""
+    train_x, train_y, test_x = prices
+    x, y, test = SCALERS_BY_KIND[kind](standardise=standardise).fit_transform(train_x, train_y, test_x)
+
+    def by_hand(train, others):
+        median = np.median(train)
+        scale = np.median(np.abs(train - median)) / 0.6744897501960817
+        z = paper_forward(kind, (train - median) / scale)
+        mean, sd = (z.mean(), z.std(ddof=1)) if standardise else (0.0, 1.0)
+        return (z - mean) / sd, [(paper_forward(kind, (o - median) / scale) - mean) / sd for o in others]
+
+    hand_y, _ = by_hand(train_y, [])
+    np.testing.assert_allclose(y, hand_y, rtol=1e-13, atol=1e-13)
+    for i in range(2):
+        hand_x, (hand_test,) = by_hand(train_x[:, i], [test_x[:, i]])
+        np.testing.assert_allclose(x[:, i], hand_x, rtol=1e-13, atol=1e-13)
+        np.testing.assert_allclose(test[:, i], hand_test, rtol=1e-13, atol=1e-13)
+    np.testing.assert_array_equal(x[:, 2], train_x[:, 2])
+
+
 @pytest.mark.parametrize("cls", [MirrorLogScaler, PolyScaler])
 def test_the_mad_fallback_is_asinh_s(cls):
     train_y = np.array([5.0, 5.0, 5.0, 5.0, 6.0, 9.0])
