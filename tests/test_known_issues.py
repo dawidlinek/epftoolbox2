@@ -33,3 +33,40 @@ def test_a_half_hour_profile_slot_is_judged_at_its_own_time():
     found, _ = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-16")
 
     assert {v.period for v in found} == set(range(24))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="criterion='cv' cuts its five blocks by rows: the two rows of a doubled autumn hour can fall on either side of an edge",
+)
+def test_cv_keeps_both_rows_of_a_doubled_autumn_hour_in_one_block(monkeypatch):
+    """On a Warsaw frame 2023-10-29 02:00 happens twice: two training rows of period 2 with one date and one target. Issued on
+    2023-11-08 with a 49-row window, `LEARModel(criterion="cv")` cuts those rows at 10, 20, 30 and 40 (KFold's sizes) and the
+    pair sits at rows 39 and 40, so the fold that holds out the last block trains on one copy and is scored on the other. Over
+    September to December that is 4 of 2928 fits at W 49 and 56 and 3 at 84 (about 0.05 % of hourly keys); moving the edge
+    changed 2 of the 4 W-49 forecasts, by 0.03 and 0.07 EUR/MWh. Frames through DSTNormalizeTransformer have no doubled rows."""
+    import epftoolbox2.models.lear as lear_module
+    from epftoolbox2.models import LEARModel
+    from tests.models.test_lear import NAMES, InProcessPool, with_noise
+    from tests.synthetic import make_market_data
+
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
+    blocks_of = lear_module.cv_stats
+    seen = []
+
+    def noting(x, y, folds=5):
+        stats = blocks_of(x, y, folds)
+        edges = np.cumsum([block.n for block in stats.blocks])[:-1]
+        pairs = np.flatnonzero(np.asarray(y)[1:] == np.asarray(y)[:-1]) + 1  # row i and i - 1: the doubled hour
+        seen.extend((int(i), tuple(int(e) for e in edges)) for i in pairs)
+        return stats
+
+    monkeypatch.setattr(lear_module, "cv_stats", noting)
+    frame = with_noise(make_market_data(start="2023-07-01", days=190, noise=5.0, seed=3, horizon=1))
+    LEARModel(NAMES, training_window=49, criterion="cv").run(frame, "2023-11-08", "2023-11-08", horizon=1)
+    if not seen:
+        pytest.fail("no fit held both rows of the doubled hour: the case isn't exercised")
+    assert all(i not in edges for i, edges in seen), seen

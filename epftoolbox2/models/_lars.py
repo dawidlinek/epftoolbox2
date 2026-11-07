@@ -23,6 +23,10 @@ the path then carries coefficients of about 1e14 that cancel between the twins, 
 own `lars_path` does the same). A dropped twin's coefficient is exactly 0, and since the lasso splits a twin's weight any way it
 likes, the fit is a lasso solution, one whose forecast stays the same wherever the twins stay equal.
 
+`criterion="cv"` is old `LassoLarsCV(cv=KFold(5), normalize=True, max_iter=2500)` instead (`lear_fit_cv`, from `CvStats`: the
+centred sums of five contiguous blocks of the rows in date order): α* by blocked cross-validation on per-fold normalised paths,
+the coefficients read from the full window's normalised path at α*, with no refit. Its departures are in `cv_folds`.
+
 `_lars_numba.py` holds numba twins of the same functions. On designs without exact twins (in `lear_fit`, every design) the two agree
 within 1e-9 with the same kinks, not to the bit: this module sums with BLAS, the twins in loops. `_kernels()` returns the module of
 the backend `EPFTOOLBOX2_KERNELS` asks for.
@@ -33,13 +37,14 @@ import math
 import os
 import sys
 import warnings
-from typing import List, NamedTuple, Tuple
+from typing import List, NamedTuple, Sequence, Tuple, Union
 
 import numpy as np
 from scipy.linalg import solve_triangular
 from scipy.linalg.lapack import dpotrs
 
 from .._extras import MissingExtraError, has_extra
+from ..scalers.base import CONSTANT_STD_RTOL
 
 BACKEND = "numpy"
 
@@ -54,8 +59,15 @@ DEGENERATE = 1e-7
 
 # Why a path ended. The numba twin returns the position in this tuple.
 STOPS = ("alpha_min", "max_steps", "all_active", "alpha_increasing")
-CRITERIA = ("aic", "bic")
+IC_CRITERIA = ("aic", "bic")
+CRITERIA = IC_CRITERIA + ("cv",)
 SOLVERS = ("lars", "cd")
+
+# Old `LassoLarsCV`'s settings as Lago's code would have set them: `cv=5` (KFold(5), no shuffling), `max_iter=2500`, and its
+# `max_n_alphas=1000`.
+CV_FOLDS = 5
+CV_MAX_STEPS = 2500
+MAX_N_ALPHAS = 1000
 
 
 class GramStats(NamedTuple):
@@ -97,8 +109,10 @@ class LearFit(NamedTuple):
     xbar: np.ndarray
     ybar: float
     alpha: float  # α*, on the normalised scale of stage 1
-    kink: int  # the stage-1 kink of α*
-    converged: bool  # "lars": stage 2's path passed α*; "cd": the duality gap fell below tol
+    kink: (
+        int  # the stage-1 kink of α*; with "cv" its position in the grid of penalties with a finite error in every fold
+    )
+    converged: bool  # "lars": stage 2's path passed α*; "cd": the duality gap fell below tol; "cv": the path reached α*
 
 
 def gram_stats(x, y) -> GramStats:
@@ -333,7 +347,7 @@ def _penalty(criterion: str, n: float) -> float:
         return 2.0
     if criterion == "bic":
         return math.log(n)
-    raise ValueError(f"criterion must be one of {CRITERIA}, not {criterion!r}")
+    raise ValueError(f"an information criterion is one of {IC_CRITERIA}, not {criterion!r}")
 
 
 def ic_select(path: LarsPath, q, yy: float, n, criterion: str) -> IcChoice:
@@ -453,11 +467,22 @@ def without_twins(G, q) -> Tuple[np.ndarray, np.ndarray, Tuple[int, ...]]:
     return G, q, tuple(int(j) for j in np.flatnonzero(dropped))
 
 
+def _norms(G: np.ndarray) -> np.ndarray:
+    """The column norms `_preprocess_data(normalize=True)` divided by: sqrt(G[j, j]), 0 -> 1."""
+    d = np.diag(G)
+    return np.where(d > 0.0, np.sqrt(np.where(d > 0.0, d, 1.0)), 1.0)
+
+
 def _normalised(G: np.ndarray, q: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """G and q of unit-norm columns, as `_preprocess_data(normalize=True)` scaled them: by sqrt(G[j, j]), 0 -> 1."""
-    d = np.diag(G)
-    norm = np.where(d > 0.0, np.sqrt(np.where(d > 0.0, d, 1.0)), 1.0)
+    norm = _norms(G)
     return G / np.outer(norm, norm), q / norm
+
+
+CV_SOLVER_ERROR = (
+    "criterion='cv' reads the coefficients from the LARS path at its penalty, as old LassoLarsCV did, with no refit, so it "
+    "takes solver='lars', not 'cd'"
+)
 
 
 def _check_choices(criterion: str, solver: str) -> None:
@@ -465,13 +490,21 @@ def _check_choices(criterion: str, solver: str) -> None:
         raise ValueError(f"criterion must be one of {CRITERIA}, not {criterion!r}")
     if solver not in SOLVERS:
         raise ValueError(f"solver must be one of {SOLVERS}, not {solver!r}")
+    if criterion == "cv" and solver == "cd":
+        raise ValueError(CV_SOLVER_ERROR)
 
 
-def lear_fit(stats: GramStats, criterion: str = "bic", solver: str = "lars") -> LearFit:
+def lear_fit(stats: Union[GramStats, "CvStats"], criterion: str = "bic", solver: str = "lars") -> LearFit:
     """A LEAR unit from its centred sums, exact twins dropped first (`without_twins`): α* by `ic_select` on the normalised path (2500 steps at most, as Lago's
     `LassoLarsIC(max_iter=2500)`), then the Lasso at α* on the centred, unnormalised Gram, exactly (`"lars"`: `lasso_at`, a
-    second path run just past α*) or by Lago's coordinate descent (`"cd"`: `max_iter=2500`, `tol=1e-4`)."""
+    second path run just past α*) or by Lago's coordinate descent (`"cd"`: `max_iter=2500`, `tol=1e-4`).
+
+    `criterion="cv"` takes the blocks' sums (`CvStats`) and is `lear_fit_cv`."""
     _check_choices(criterion, solver)
+    if criterion == "cv":
+        return lear_fit_cv(_cv_stats_of(stats))
+    if not isinstance(stats, GramStats):
+        raise TypeError(f"criterion={criterion!r} fits from GramStats, got {type(stats).__name__}")
     G, q, _ = without_twins(stats.G, stats.q)
     R, qn = _normalised(G, q)
     choice = ic_select(lars_path(R, qn, stats.n), qn, stats.yy, stats.n, criterion)
@@ -480,6 +513,208 @@ def lear_fit(stats: GramStats, criterion: str = "bic", solver: str = "lars") -> 
     else:
         w, _, converged = cd_lasso(G, q, stats.yy, stats.n, choice.alpha)
     return LearFit(w, stats.xbar, stats.ybar, choice.alpha, choice.kink, bool(converged))
+
+
+# ---------------------------------------------------------------------------
+# criterion="cv": old LassoLarsCV(cv=KFold(5), normalize=True, max_iter=2500)
+# ---------------------------------------------------------------------------
+
+
+class CvStats(NamedTuple):
+    """A unit's training rows cut into `CV_FOLDS` contiguous blocks in their order (date order), as KFold(5) without shuffling
+    cuts them, the first n % 5 blocks one row longer: each block's centred sums. Fold k trains on the other blocks and is scored
+    on block k; the full window is all of them (`pooled`). Everything `lear_fit_cv` reads, as `GramStats` is for the criteria."""
+
+    blocks: Tuple[GramStats, ...]
+
+
+class CvFold(NamedTuple):
+    """One fold of `lear_fit_cv`: the normalised Gram of its training part, and the held-out block's sums about the training
+    part's means, from which the block's squared residuals at any coefficients w are `w'Aw - 2 b'w + c`."""
+
+    n: int  # training rows
+    R: np.ndarray  # the training part's G / (norm ⊗ norm), after its constant and twin columns are dropped
+    qn: np.ndarray  # q / norm
+    norm: np.ndarray  # the training part's column norms, 0 -> 1
+    A: np.ndarray  # Σ (x - xbar_train)(x - xbar_train)' over the held-out rows
+    b: np.ndarray  # Σ (x - xbar_train)(y - ybar_train)
+    c: float  # Σ (y - ybar_train)²
+    n_test: int  # held-out rows
+
+
+def cv_stats(x, y, folds: int = CV_FOLDS) -> CvStats:
+    """The centred sums of each of `folds` contiguous blocks of the rows `x` (n, p), `y` (n,), in row order: KFold's sizes, n //
+    folds and one more for the first n % folds. Fewer rows than folds raises ValueError, as KFold did."""
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if x.ndim != 2 or y.ndim != 1 or x.shape[0] != y.shape[0]:
+        raise ValueError(f"cv_stats needs x of shape (n, p) and y of shape (n,), got {x.shape} and {y.shape}")
+    n = x.shape[0]
+    if n < folds:
+        raise ValueError(f"criterion='cv' needs at least {folds} training rows for its {folds} folds, got {n}")
+    sizes = np.full(folds, n // folds)
+    sizes[: n % folds] += 1
+    edges = np.r_[0, np.cumsum(sizes)]
+    return CvStats(tuple(gram_stats(x[a:b], y[a:b]) for a, b in zip(edges[:-1], edges[1:])))
+
+
+def _cv_stats_of(stats) -> CvStats:
+    if not isinstance(stats, CvStats):
+        raise TypeError(f"criterion='cv' fits from CvStats (cv_stats(x, y)), got {type(stats).__name__}")
+    return stats
+
+
+def pooled(blocks: Sequence[GramStats]) -> GramStats:
+    """The centred sums of the union of `blocks`' rows, from theirs: G = Σ G_b + n_b (xbar_b - xbar)(xbar_b - xbar)', and so on."""
+    n = sum(int(b.n) for b in blocks)
+    xbar = sum(b.n * b.xbar for b in blocks) / n
+    ybar = float(sum(b.n * b.ybar for b in blocks) / n)
+    p = xbar.size
+    G = np.zeros((p, p))
+    q = np.zeros(p)
+    yy = 0.0
+    for b in blocks:
+        dx = b.xbar - xbar
+        dy = b.ybar - ybar
+        G += b.G + b.n * np.outer(dx, dx)
+        q += b.q + (b.n * dy) * dx
+        yy += b.yy + b.n * dy * dy
+    return GramStats(n, xbar, ybar, G, q, float(yy))
+
+
+def _constant_dropped(stats: GramStats) -> Tuple[np.ndarray, np.ndarray]:
+    """G and q with every column that is constant on these rows up to rounding dropped (row, column and q set to 0): its
+    standard deviation at or below `CONSTANT_STD_RTOL` of its root mean square, the scalers' rule (`scalers.base`) on the sums.
+    The scaler zeroes such a column over the whole window; a fold's training part can hold one the window doesn't (a dummy or
+    a night-time solar column that varies only in the held-out block), and normalising its rounding noise to a unit column
+    would make it a regressor that the held-out block multiplies by about 1e15. The inputs themselves when there is none."""
+    d = np.diag(stats.G)
+    constant = d <= CONSTANT_STD_RTOL**2 * (d + stats.n * stats.xbar**2)
+    constant &= d != 0.0  # exact zeros never enter already
+    if not constant.any():
+        return stats.G, stats.q
+    G = stats.G.copy()
+    q = stats.q.copy()
+    G[constant, :] = 0.0
+    G[:, constant] = 0.0
+    q[constant] = 0.0
+    return G, q
+
+
+def _design(stats: GramStats) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The normalised Gram, correlations and norms of rows' sums, after their constant columns and exact twins are dropped."""
+    G, q = _constant_dropped(stats)
+    G, q, _ = without_twins(G, q)
+    norm = _norms(G)
+    return G / np.outer(norm, norm), q / norm, norm
+
+
+def cv_folds(stats: CvStats) -> Tuple[CvFold, ...]:
+    """The folds of `lear_fit_cv`, numbered by their held-out block. Each training part is centred on its own means and
+    normalised by its own norms, as `_lars_path_residues` did, after the rules of `lear_fit` applied to it as if it were the window:
+    exact twins on those rows are dropped (`without_twins`), so a column can be a twin in one fold only. One rule more than
+    0.24.2: a column constant on the training part up to rounding is dropped there (`_constant_dropped`)."""
+    blocks = stats.blocks
+    folds = []
+    for k, test in enumerate(blocks):
+        train = pooled([b for i, b in enumerate(blocks) if i != k])
+        R, qn, norm = _design(train)
+        dx = test.xbar - train.xbar
+        dy = test.ybar - train.ybar
+        A = test.G + test.n * np.outer(dx, dx)
+        b = test.q + (test.n * dy) * dx
+        c = float(test.yy + test.n * dy * dy)
+        folds.append(CvFold(int(train.n), R, qn, norm, A, b, c, int(test.n)))
+    return tuple(folds)
+
+
+def cv_grid(fold_alphas: Sequence[np.ndarray], max_n_alphas: int = MAX_N_ALPHAS) -> np.ndarray:
+    """`LarsCV.fit`'s penalties: the unique kinks of every fold's path, ascending, every `stride`-th of them kept, stride =
+    int(len / max_n_alphas) or 1."""
+    grid = np.unique(np.concatenate([np.asarray(a, dtype=np.float64) for a in fold_alphas]))
+    stride = int(max(1, int(len(grid) / float(max_n_alphas))))
+    return grid[::stride]
+
+
+def _held_out_points(alphas: np.ndarray, grid: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """The points `LarsCV.fit` interpolates a fold's residues between, ascending: (α, the kink whose coefficients sit there).
+    The kinks in ascending α, the last kink at α = 0 unless the path ends there, the first (all zero) at grid[-1] unless the
+    path's largest α is it, then sorted stably, as `interp1d` sorts with mergesort; the appended point can land inside."""
+    m = alphas.size
+    x = alphas[::-1]
+    kink = np.arange(m)[::-1]
+    if x[0] != 0:
+        x = np.r_[0.0, x]
+        kink = np.r_[m - 1, kink]
+    if x[-1] != grid[-1]:
+        x = np.r_[x, grid[-1]]
+        kink = np.r_[kink, 0]
+    order = np.argsort(x, kind="mergesort")
+    return x[order], kink[order]
+
+
+def held_out_mse(alphas, coefs, fold: CvFold, grid) -> np.ndarray:
+    """The held-out block's mean squared residual at each penalty of `grid`, as `LarsCV.fit` reads it off a fold's path
+    (`alphas`, `coefs` of the normalised training part): scipy's linear `interp1d` of the residues between `_held_out_points`
+    (`searchsorted` on the left, clipped to [1, len - 1]; a segment of zero width gives nan, which the caller drops), squared
+    and averaged over the block's rows. The residues are linear in the coefficients, so this interpolates the coefficients,
+    divided by the training part's norms, and takes the squares from the block's sums (`CvFold`)."""
+    grid = np.asarray(grid, dtype=np.float64)
+    x, kink = _held_out_points(np.asarray(alphas), grid)
+    V = np.asarray(coefs)[kink] / fold.norm
+    VA = V @ fold.A
+    own = np.einsum("ij,ij->i", VA, V)
+    beta = V @ fold.b
+    if x.size == 1:  # every fold's path is the single kink α = 0, and so is the grid (0.24.2's interp1d raised there)
+        return np.full(grid.size, (own[0] - 2.0 * beta[0] + fold.c) / fold.n_test)
+    cross = np.einsum("ij,ij->i", VA[:-1], V[1:])
+    hi = np.clip(np.searchsorted(x, grid), 1, x.size - 1)
+    lo = hi - 1
+    width = x[hi] - x[lo]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = (grid - x[lo]) / width
+    s = 1.0 - t
+    sse = s * s * own[lo] + 2.0 * (t * s) * cross[lo] + t * t * own[hi] - 2.0 * (s * beta[lo] + t * beta[hi]) + fold.c
+    sse[width == 0.0] = np.nan
+    return sse / fold.n_test
+
+
+def cv_choice(grid: np.ndarray, mse: np.ndarray) -> Tuple[float, int]:
+    """α* and its position: of the penalties whose held-out error is finite in every fold, the first argmin of the mean over the
+    folds (each fold's mean squared residual counts once, whatever its block's length)."""
+    finite = np.all(np.isfinite(mse), axis=-1)
+    if not finite.any():
+        raise ValueError("criterion='cv': no penalty has a finite held-out error in every fold")
+    kept = np.asarray(grid)[finite]
+    index = int(np.argmin(mse[finite].mean(axis=-1)))
+    return float(kept[index]), index
+
+
+def cv_window(stats: CvStats) -> Tuple[GramStats, np.ndarray, np.ndarray, np.ndarray]:
+    """The full window's sums, and its normalised Gram, correlations and norms after `lear_fit`'s rules."""
+    full = pooled(stats.blocks)
+    R, qn, norm = _design(full)
+    return full, R, qn, norm
+
+
+def lear_fit_cv(stats: CvStats, max_n_alphas: int = MAX_N_ALPHAS) -> LearFit:
+    """A LEAR unit by old `LassoLarsCV(cv=KFold(5), normalize=True, max_iter=2500)` (scikit-learn 0.24.2's `LarsCV.fit` and
+    `_lars_path_residues`), from the blocks' sums.
+
+    Each fold's normalised path runs to α = 0 (`cv_folds`, `lars_path`); the penalties are `cv_grid`'s; each fold's held-out
+    error is read off its path at every one (`held_out_mse`); α* is `cv_choice`'s. The coefficients are the full window's
+    normalised path stopped at α* (`lars_path(R, qn, n, α*)`, its last row), divided by the norms, which is what 0.24.2's
+    `_fit(alpha=α*)` returned: its early stop takes a kink within float32 eps (1.19e-7) of α* as it is instead of the lasso at
+    α* exactly. No refit. `kink` is α*'s position in the grid of finite errors, `converged` whether the path reached α*."""
+    stats = _cv_stats_of(stats)
+    folds = cv_folds(stats)
+    paths = [lars_path(f.R, f.qn, f.n, 0.0, CV_MAX_STEPS) for f in folds]
+    grid = cv_grid([path.alphas for path in paths], max_n_alphas)
+    mse = np.column_stack([held_out_mse(path.alphas, path.coefs, f, grid) for path, f in zip(paths, folds)])
+    alpha, index = cv_choice(grid, mse)
+    full, R, qn, norm = cv_window(stats)
+    path = lars_path(R, qn, full.n, alpha, CV_MAX_STEPS)
+    return LearFit(path.coefs[-1] / norm, full.xbar, full.ybar, alpha, index, path.stop == "alpha_min")
 
 
 KERNELS = ("auto", "numpy", "numba")

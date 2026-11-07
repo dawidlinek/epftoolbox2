@@ -1,12 +1,12 @@
 """LEAR, the Lasso-estimated autoregressive model of Lago, Marcjasz, De Schutter & Weron (2021), Applied Energy 293: one Lasso per
-period, its penalty chosen on every fit by an information criterion on the LARS path."""
+period, its penalty chosen on every fit by an information criterion on the LARS path, or by blocked cross-validation."""
 
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
 
 from . import _lars
-from ._lars import CRITERIA, SOLVERS, GramStats, LearFit, gram_stats
+from ._lars import CRITERIA, CV_SOLVER_ERROR, SOLVERS, CvStats, GramStats, LearFit, cv_stats, gram_stats
 from .base import BaseModel
 
 # Lago et al.'s calibration windows of 56, 84, 1092 and 1456 days as this library's training rows. The original keeps the last
@@ -40,6 +40,15 @@ class LEARModel(BaseModel):
            α*); `"cd"` is Lago's `Lasso(max_iter=2500)`, coordinate descent in column order with tol 1e-4, which can stop
            before it converges and then depends on the order of the predictors.
 
+        `criterion="cv"` is old `LassoLarsCV(cv=KFold(5), normalize=True, max_iter=2500)` instead (`_lars.lear_fit_cv`):
+        the training rows in five contiguous blocks in date order, each fold's LARS path on its four blocks, centred and
+        normalised on them, scored on the fifth; α* the first minimum of the folds' mean held-out squared error over their
+        pooled kinks (at most 1,000 of them); the coefficients the full window's normalised path at α*, divided by the norms,
+        with no refit. Each fold drops the exact twins and the columns constant up to rounding of its own training rows, as
+        the window's fit drops them on the window. It takes `solver="lars"` (`"cd"` raises). A fit costs 5.0 to 6.8 times one of
+        `"bic"` with the default `solver="lars"` and 3.5 to 4.8 times one with `"cd"` (from the 1449- to the 49-row window); a
+        whole run 1.7 to 1.9 and 1.5 to 1.7 times as much.
+
         The intercept is the centring: a forecast is `ybar + (x - xbar) @ w` on the scaled row. A column the scaler made
         constant gets the coefficient 0 in both stages.
 
@@ -68,6 +77,10 @@ class LEARModel(BaseModel):
             raise ValueError(f"criterion must be one of {list(CRITERIA)}, got {value!r}")
         if key == "solver" and value not in SOLVERS:
             raise ValueError(f"solver must be one of {list(SOLVERS)}, got {value!r}")
+        if key in ("criterion", "solver"):
+            other = self.__dict__.get("solver" if key == "criterion" else "criterion")
+            if {value, other} == {"cv", "cd"}:
+                raise ValueError(CV_SOLVER_ERROR)
         super().__setattr__(key, value)
 
     @classmethod
@@ -123,11 +136,14 @@ class LEARModel(BaseModel):
         return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
 
     def _fit_model(self, train_x, train_y) -> LearFit:
+        if self.criterion == "cv":
+            return self._fit_stats(cv_stats(train_x, train_y))
         return self._fit_stats(gram_stats(train_x, train_y))
 
-    def _fit_stats(self, stats: GramStats) -> LearFit:
-        """The fit from the centred sums of a unit's scaled training rows alone: where step 5's engine hands in statistics it
-        shares between models."""
+    def _fit_stats(self, stats: Union[GramStats, CvStats]) -> LearFit:
+        """The fit from the centred sums of a unit's scaled training rows alone, `GramStats` for an information criterion and
+        `CvStats` (those of the five blocks in date order) for `"cv"`: where step 5's engine hands in statistics it shares
+        between models."""
         return _lars._kernels().lear_fit(stats, self.criterion, self.solver)
 
     def _predict_fitted(self, fitted: LearFit, test_x) -> Tuple[float, list]:

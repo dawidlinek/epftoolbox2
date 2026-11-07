@@ -179,6 +179,19 @@ an issue day it didn't sample.
   scaler, and `lear_predictors(..., order="lago")` lists the same 247 inputs in the original's order. **Nothing moves for the other
   models or for the defaults of those two**: no existing manifest, scaler spec, YAML file or golden number changes. See
   [LEARModel](/epftoolbox2/models/lear/).
+- **`LEARModel(criterion="cv")`: the penalty by blocked cross-validation.** Old scikit-learn `LassoLarsCV(cv=5,
+  normalize=True, max_iter=2500)`: five contiguous blocks of the training rows in date order, each fold's LARS path on its own
+  centred, normalised training part, α\* the first minimum of the folds' mean held-out squared error over their kinks (at most
+  about 1,000), and the coefficients of the full window's path at α\*, with no refit. It takes `solver="lars"`; `"cd"` with it
+  raises. On the first DE and BE test days of `lago()`'s setup it is 0.24.2's `LassoLarsCV` within 1e-9 in α\* and every
+  coefficient. Over the paper's test periods the average of its four windows is within −0.1 to +0.9 % of the MAE of `"bic"` with
+  Lago's refit (one-sided DM, unadjusted: BIC better in NP and PJM), at 1.7 to 1.9 times the cost of a run of `"bic"` with the
+  default `solver="lars"` (1.5 to 1.7 against `"cd"`). It differs from `"bic"` in the penalty and in the coefficients: with the
+  path's coefficients for both, CV's penalty has a 9 to 25 % lower MAE than BIC's; with BIC's penalty, the refit a 9 to 26 %
+  lower MAE than the path. Each fold drops the exact twins and the columns constant up to rounding of its own training rows, which
+  0.24.2 didn't; its blocks are cut by rows, as 0.24.2's were, so a doubled autumn hour can straddle a block edge (a known issue,
+  about 0.05 % of hourly keys). **Nothing else moves**: `"aic"` and `"bic"` fit as before, bit for bit. See
+  [LEARModel](/epftoolbox2/models/lear/#blocked-cross-validation).
 - **`RidgeModel`: ridge regression with a leave-one-out penalty.** `RidgeModel(predictors, training_window=365, alphas=None, *,
   fit_intercept=True)` is scikit-learn's `RidgeCV` with `cv=None`: on every fit it chooses the penalty from a grid by the closed-form
   leave-one-out error of the training rows and fits with it, on the same standardised rows as `OLSModel` and `LassoCVModel`. `alphas=None`

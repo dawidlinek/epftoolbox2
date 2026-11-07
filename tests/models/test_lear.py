@@ -159,7 +159,7 @@ def test_the_defaults_are_d2_s_recommended_single_model():
 
 
 @pytest.mark.parametrize(
-    "field, bad", [("criterion", "cv"), ("criterion", "AIC"), ("solver", "exact"), ("solver", None)]
+    "field, bad", [("criterion", "cv5"), ("criterion", "AIC"), ("solver", "exact"), ("solver", None)]
 )
 def test_an_unknown_criterion_or_solver_raises_at_once(field, bad):
     with pytest.raises(ValueError, match=field):
@@ -198,7 +198,7 @@ def test_the_registry_the_package_and_the_tui_know_it():
         "newest_target",
         "refit",
     }
-    assert fields["criterion"]["choices"] == ["bic", "aic"] and fields["solver"]["choices"] == ["lars", "cd"]
+    assert fields["criterion"]["choices"] == ["bic", "aic", "cv"] and fields["solver"]["choices"] == ["lars", "cd"]
     made = tui._instantiate("LEARModel", {"predictors": ["load"], "criterion": "aic", "solver": "cd"})
     assert isinstance(made, LEARModel) and (made.criterion, made.solver) == ("aic", "cd")
 
