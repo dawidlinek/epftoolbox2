@@ -6,7 +6,7 @@ scipy, matplotlib and pyarrow, and a clone of https://github.com/jeslago/epftool
 exogenous lags d-1 and d-7). The clone's `epftoolbox/models/_lear.py` is executed from its source with the clone on `sys.path`,
 so the clone isn't installed and tensorflow isn't needed:
 
-    VENV38/bin/python -I tests/fixtures/lago/build.py CLONE DATA_DIR tests/fixtures/lago --markets DE BE --days 0 --data
+    VENV38/bin/python -I tests/fixtures/lago/build.py CLONE DATA_DIR tests/fixtures/lago --markets DE BE --days 0 --data --cv
 
 DATA_DIR holds Zenodo record 4624805's `{market}.csv` (`EpftoolboxBenchmarkSource`'s cache). The original runs as its own
 `evaluate_lear_in_test_dataset` does: the data up to the target day, that day's prices set to NaN, then
@@ -21,6 +21,12 @@ N - 2 drawn by `numpy.random.default_rng(S)`, the sample of the research's `orig
 - with `--data`, `data_{M}.parquet` (zstd): `price` and the two exogenous series under this library's names, in the file's
   column order, from the file's first hour through the last target day, on the file's naive wall-clock index, as pandas 1.5
   parsed the CSV for the original (level 19, about 1.1 MB for DE and BE);
+- with `--cv`, the reference of `LEARModel(criterion="cv")`: the original with its `recalibrate` fitting old
+  `LassoLarsCV(cv=KFold(5), normalize=True, max_iter=2500)` per hour on the same scaled rows (Invariant, the dummies as they
+  are) instead of `LassoLarsIC` and `Lasso`, and forecasting with it. `cv_{M}.csv`: `issue_day`, `target_day`, `window`,
+  `hour`, `forecast`, `alpha` (`alpha_`), `grid` (`len(cv_alphas_)`), `alpha_cap{CAP}` (`alpha_` with `max_n_alphas=CAP`, so
+  that the grid is strided), by repr; `cv_coefs_{M}.parquet` (zstd): `issue_day`, `window`, `hour`, `column` and `coef`, the nonzero
+  entries of `coef_` by their position in the original's column order (about 40 of 247 per fit);
 - `SOURCES.json`: the clone's commit, the versions, and the sha256 of every file read and written.
 """
 
@@ -31,6 +37,7 @@ import os
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
@@ -96,6 +103,67 @@ def target_days(market, days, sample, seed):
     return [first + pd.Timedelta(days=offset) for offset in offsets], offsets
 
 
+# `alpha_cap{CV_CAP}`: LassoLarsCV with max_n_alphas=CV_CAP, whose stride is 2 or more on every fixture fit.
+CV_CAP = 50
+
+
+def cv_recalibrate(self, Xtrain, Ytrain):
+    """The original's `LEAR.recalibrate` with old `LassoLarsCV` in place of `LassoLarsIC` and `Lasso`: the same Invariant scaling
+    of the target and of every input but the last seven (the dummies), then per hour `LassoLarsCV(cv=KFold(5), normalize=True,
+    max_iter=2500)`, whose `predict` the original's `predict` calls. Also `alpha_` with `max_n_alphas=CV_CAP`."""
+    from sklearn.linear_model import LassoLarsCV
+    from sklearn.model_selection import KFold
+
+    [Ytrain], self.scalerY = self.scaling([Ytrain], "Invariant")
+    [Xtrain_no_dummies], self.scalerX = self.scaling([Xtrain[:, :-7]], "Invariant")
+    Xtrain[:, :-7] = Xtrain_no_dummies
+    self.models, self.capped = {}, {}
+    for h in range(24):
+        settings = dict(cv=KFold(5), normalize=True, max_iter=2500)
+        self.models[h] = LassoLarsCV(**settings).fit(Xtrain, Ytrain[:, h])
+        self.capped[h] = LassoLarsCV(max_n_alphas=CV_CAP, **settings).fit(Xtrain, Ytrain[:, h]).alpha_
+
+
+def run_cv(orig, data, market, dates):
+    """`cv_{M}.csv` rows and `cv_coefs_{M}.parquet` rows of the original with old LassoLarsCV, for each target day and window."""
+    first = pd.Timestamp(TEST[market][0])
+    train = data.loc[: first - pd.Timedelta(hours=1)]
+    test = data.loc[first:]
+    rows, coefs = [], []
+    for cw in WINDOWS:
+        model = orig.LEAR(calibration_window=cw)
+        model.scaling = orig.scaling
+        model.recalibrate = types.MethodType(cv_recalibrate, model)
+        for date in dates:
+            available = pd.concat([train, test.loc[: date + pd.Timedelta(hours=23)]], axis=0)
+            available.loc[date : date + pd.Timedelta(hours=23), "Price"] = np.nan
+            tic = time.perf_counter()
+            forecast = model.recalibrate_and_forecast_next_day(df=available, next_day_date=date, calibration_window=cw)
+            forecast = np.asarray(forecast, dtype=float).ravel()
+            assert forecast.shape == (24,), forecast.shape
+            issue = (date - pd.Timedelta(days=1)).date().isoformat()
+            for hour in range(24):
+                fitted = model.models[hour]
+                assert fitted.coef_.shape == (247,), fitted.coef_.shape
+                rows.append(
+                    {
+                        "issue_day": issue,
+                        "target_day": date.date().isoformat(),
+                        "window": cw,
+                        "hour": hour,
+                        "forecast": repr(float(forecast[hour])),
+                        "alpha": repr(float(fitted.alpha_)),
+                        "grid": int(len(fitted.cv_alphas_)),
+                        f"alpha_cap{CV_CAP}": repr(float(model.capped[hour])),
+                    }
+                )
+                for column in np.flatnonzero(fitted.coef_):
+                    coefs.append((issue, cw, hour, int(column), float(fitted.coef_[column])))
+            print(f"{market} cv cw {cw} {date.date()}: {time.perf_counter() - tic:.1f} s", flush=True)
+    coefs = pd.DataFrame(coefs, columns=["issue_day", "window", "hour", "column", "coef"])
+    return rows, coefs.astype({"window": "int16", "hour": "int8", "column": "int16"})
+
+
 def run_market(orig, data, market, dates):
     """Forecast rows and test rows of the original for each target day and window."""
     first = pd.Timestamp(TEST[market][0])
@@ -155,6 +223,9 @@ def main(argv=None):
     parser.add_argument("--sample", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--data", action="store_true", help="also write data_{M}.parquet")
+    parser.add_argument(
+        "--cv", action="store_true", help="also write cv_{M}.csv and cv_coefs_{M}.parquet (LassoLarsCV)"
+    )
     args = parser.parse_args(argv)
 
     import sklearn
@@ -201,6 +272,11 @@ def main(argv=None):
             frame.index.name = "datetime"
             written.append(out / f"data_{market}.parquet")
             frame.to_parquet(written[-1], compression="zstd", compression_level=19)
+        if args.cv:
+            cv_rows, cv_coefs = run_cv(orig, data, market, dates)
+            written += [out / f"cv_{market}.csv", out / f"cv_coefs_{market}.parquet"]
+            pd.DataFrame(cv_rows).to_csv(written[-2], index=False, lineterminator="\n")
+            cv_coefs.to_parquet(written[-1], index=False, compression="zstd", compression_level=19)
         for path in written:
             sources["outputs"][path.name] = sha256(path)
         sources["seconds"][market] = {f"{cw} {d.date()}": round(s, 2) for (cw, d), s in seconds.items()}

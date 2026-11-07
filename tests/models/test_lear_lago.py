@@ -10,13 +10,17 @@ library builds the frame from that data by the documented chain (`fixtures/lago/
   window, so that xdist spreads the numpy kernels' coordinate descent;
 - `solver="lars"` on the same rows is scikit-learn's `Lasso(α*, tol=1e-12)` at old `LassoLarsIC`'s α* within 1e-6;
 - the four windows' average is `fsum` of the single-window models' forecasts over 4, to the bit, and the numba kernels agree with
-  the numpy ones with the same kink.
+  the numpy ones with the same kink;
+- `criterion="cv"` is old `LassoLarsCV(cv=KFold(5), normalize=True, max_iter=2500)` under 0.24.2, which `build.py --cv` ran on
+  the original's scaled rows (`cv_{M}.csv`, `cv_coefs_{M}.parquet`): α* within 1e-9 (relative), every coefficient within 1e-9,
+  the forecast within 1e-6 EUR/MWh, and α* with `max_n_alphas=50`, whose grid is strided, within 1e-9.
 """
 
 import functools
 import math
 import warnings
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -211,3 +215,97 @@ def test_the_fixture_is_what_its_sources_file_says(tmp_path):
     assert len(sources["epftoolbox_commit"]) == 40
     for name, digest in sources["outputs"].items():
         assert hashlib.sha256(Path(HERE / name).read_bytes()).hexdigest() == digest, name
+
+
+# ---------------------------------------------------------------------------
+# criterion="cv": old LassoLarsCV under 0.24.2
+# ---------------------------------------------------------------------------
+
+CV_CAP = 50  # build.py's: `alpha_cap50` is LassoLarsCV's alpha_ with max_n_alphas=50
+CV_TOLERANCE = 1e-9  # α* (relative) and the coefficients (absolute, on the scaled inputs)
+
+
+@functools.lru_cache(maxsize=None)
+def cv_reference(market):
+    """(window, hour) -> (forecast, alpha_, alpha_ with max_n_alphas=50, len(cv_alphas_)), and (window, hour) -> coef_."""
+    rows = pd.read_csv(HERE / f"cv_{market}.csv")
+    assert set(rows["issue_day"]) == {FIXTURE_ISSUE_DAYS[market]}
+    coefs = pd.read_parquet(HERE / f"cv_coefs_{market}.parquet")
+    found = {
+        (int(r.window), int(r.hour)): (
+            float(r.forecast),
+            float(r.alpha),
+            float(getattr(r, f"alpha_cap{CV_CAP}")),
+            int(r.grid),
+        )
+        for r in rows.itertuples()
+    }
+    dense = {key: np.zeros(247) for key in found}
+    for c in coefs.itertuples():
+        dense[(int(c.window), int(c.hour))][int(c.column)] = float(c.coef)
+    return found, dense
+
+
+class CvCapture(LEARModel):
+    """`criterion="cv"` keeping each hour's blocks' sums and fit."""
+
+    hour = None
+    fits = {}
+
+    def _fit_stats(self, stats):
+        fit = super()._fit_stats(stats)
+        CvCapture.fits[CvCapture.hour] = (stats, fit)
+        return fit
+
+
+@functools.lru_cache(maxsize=None)
+def cv_single(market, window):
+    """hour -> the record, and hour -> (CvStats, LearFit), of `lago()` with `criterion="cv"` (and `solver="lars"`, which it
+    takes) at `window`."""
+    original_fit = worker._fit_member
+
+    def noting_the_hour(arrays, cfg, hour, *args):
+        CvCapture.hour = hour
+        return original_fit(arrays, cfg, hour, *args)
+
+    base = lago(market)
+    model = CvCapture(base.predictors, window, "cv", "lars", scaler=base.scaler, newest_target="published")
+    CvCapture.fits = {}
+    with mock.patch.object(worker, "_fit_member", noting_the_hour):
+        records = forecasts(model, market)
+    fits = dict(CvCapture.fits)
+    assert sorted(fits) == list(range(24))
+    return records, fits
+
+
+@pytest.mark.parametrize("market, window", CASES, ids=[f"{m}-{w}" for m, w in CASES])
+def test_cv_is_old_lasso_lars_cv(market, window):
+    """Every hour: α*, the coefficients and the forecast. At hours 0, 8 and 16 also α* with `max_n_alphas=50`, from the run's
+    blocks' sums: every fixture fit's grid is strided then (0.24.2 counted 394 to 1998 penalties). At the default 1,000, 34 of
+    the 48 DE fits of W 1085 and 1449 are strided too (more than 2000 kinks), no BE fit."""
+    reference, coefs = cv_reference(market)
+    records, fits = cv_single(market, window)
+    for hour in range(24):
+        forecast, alpha, capped, grid = reference[(CALIBRATION[window], hour)]
+        stats, fit = fits[hour]
+        assert fit.alpha == pytest.approx(alpha, rel=CV_TOLERANCE), hour
+        np.testing.assert_allclose(
+            records[hour]["coefficients"], coefs[(CALIBRATION[window], hour)], rtol=0, atol=CV_TOLERANCE
+        )
+        assert records[hour]["prediction"] == pytest.approx(forecast, abs=TOLERANCE), hour
+        if hour % 8 == 0:
+            assert grid >= 2 * CV_CAP
+            assert _lars._kernels().lear_fit_cv(stats, CV_CAP).alpha == pytest.approx(capped, rel=CV_TOLERANCE), hour
+
+
+@pytest.mark.skipif(not has_extra("fast"), reason="needs the [fast] extra (numba)")
+@pytest.mark.parametrize("market, window", CASES, ids=[f"{m}-{w}" for m, w in CASES])
+def test_the_backends_agree_on_cv_on_the_fixture(market, window):
+    numba = _lars._numba_kernels()
+    _, fits = cv_single(market, window)
+    for hour in (0, 8, 16):
+        stats, _ = fits[hour]
+        a, b = _lars.lear_fit_cv(stats), numba.lear_fit_cv(stats)
+        assert (a.kink, a.converged) == (b.kink, b.converged), hour
+        assert a.alpha == pytest.approx(b.alpha, rel=1e-12)
+        np.testing.assert_allclose(a.w, b.w, rtol=0, atol=1e-9)
