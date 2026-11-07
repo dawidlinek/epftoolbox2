@@ -17,6 +17,12 @@ _HEADER = re.compile(r"^(?P<name>.*)\[(?P<tz>[^\[\]]+)\]$")
 _OFFSET = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 _UTC_OFFSET = re.compile(r"(?:Z|[+-]00:?00)$")
 
+# `read_csv` keywords that parse every float to the nearest double, so that a float written by `to_csv` reads back as the
+# same bits. Before pandas 3.1 only `float_precision="round_trip"` does; the default converter can be off in the last
+# digit. From 3.1 the one converter is exact and the argument is deprecated.
+_PANDAS_VERSION = tuple(int(part) for part in pd.__version__.split(".")[:2])
+EXACT_FLOATS = {} if _PANDAS_VERSION >= (3, 1) else {"float_precision": "round_trip"}
+
 
 def save_frame_csv(df: pd.DataFrame, path: Union[str, Path]) -> None:
     """Write `df` to CSV; a time-zone-aware index keeps its zone name in the header."""
@@ -36,9 +42,9 @@ def load_frame_csv(path: Union[str, Path], tz: Optional[str] = None) -> pd.DataF
 
     `tz` overrides the zone named in the file. A file whose timestamps carry non-zero UTC offsets but no
     zone name raises unless `tz` is given, because reading it as UTC would move local days and hours.
-    Floats are parsed exactly (`float_precision="round_trip"`).
+    Floats are parsed exactly (`EXACT_FLOATS`).
     """
-    df = pd.read_csv(path, index_col=0, float_precision="round_trip")
+    df = pd.read_csv(path, index_col=0, **EXACT_FLOATS)
     header = str(df.index.name) if df.index.name is not None else ""
     match = _HEADER.match(header)
     zone = tz or (match["tz"] if match else None)

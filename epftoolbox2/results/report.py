@@ -1169,9 +1169,9 @@ class EvaluationReport:
             elif k == "quarter":
                 column = df["target_date"].dt.quarter if "target_date" in df else None
             elif k == "run_weekday":
-                column = df["run_date"].dt.dayofweek if "run_date" in df else None
+                column = df["run_date"].dt.day_of_week if "run_date" in df else None
             elif k == "target_weekday":
-                column = df["target_date"].dt.dayofweek if "target_date" in df else None
+                column = df["target_date"].dt.day_of_week if "target_date" in df else None
             else:
                 column = df[k] if k in df else None
             if column is None:
@@ -1234,7 +1234,7 @@ def _daily_records(days: pd.DataFrame, start: pd.Timestamp, window: Optional[str
     columns = (
         run.dt.strftime("%Y-%m-%d").tolist(),
         target.dt.strftime("%Y-%m-%d").tolist(),
-        run.dt.dayofweek.tolist(),
+        run.dt.day_of_week.tolist(),
         days["horizon"].tolist(),
         (run - start).dt.days.tolist(),
         days["prediction"].tolist(),

@@ -1,8 +1,10 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional, Sequence, Union
 from pathlib import Path
 import os
 import warnings
+import numpy as np
+import pandas as pd
 import yaml
 
 from .data_pipeline import DataPipeline
@@ -20,14 +22,43 @@ _MP_SECTIONS = ("models", "ensembles", "evaluators", "exporters")
 _MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set", "availability")
 
 
+def _plain(value: Any) -> Any:
+    """`value` as the plain Python values that YAML writes and reads back as themselves, in lists and dicts too.
+
+    A numpy scalar or array becomes a Python number, bool, string or list, and a `pd.Timestamp` or `np.datetime64` its ISO
+    text with the time of day and offset: `DataPipeline.run` reads the text `2024-01-31` as the whole day and a Timestamp as
+    that instant, so only the full text keeps the instant. Anything else, such as a `datetime.date`, which YAML reads
+    natively, stays as it is.
+    """
+    if isinstance(value, np.datetime64):
+        value = pd.Timestamp(value)
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, np.generic):
+        item = value.item()
+        return item if isinstance(item, np.generic) else _plain(item)
+    if isinstance(value, np.ndarray):
+        return _plain(value.tolist())
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _as_day(day: Any) -> Any:
+    """A date with a time of day (`datetime`, `pd.Timestamp`, `np.datetime64`) as its ISO day, as the models read days.
+    A string and a `datetime.date` stay as they are."""
+    if isinstance(day, np.datetime64):
+        day = pd.Timestamp(day)
+    return day.date().isoformat() if isinstance(day, datetime) else day
+
+
 def _as_yaml_period(period: Any) -> Any:
     """A period as YAML takes it: a string stands for itself, and dates in any form become ISO days."""
     if isinstance(period, str):
         return period
-    return [
-        day.date().isoformat() if isinstance(day, datetime) else getattr(day, "isoformat", lambda: day)()
-        for day in period
-    ]
+    return [day.isoformat() if isinstance(day, date) else day for day in map(_as_day, period)]
 
 
 def _read_model_index(raw: Any) -> Union[int, str, None]:
@@ -364,9 +395,9 @@ class Workflow:
             mp["issue_days"] = issue_day_names(weekdays)
         mp.update({"freq": self.model_freq, "forecast_only": self.model_forecast_only})
         if self.model_test_start is not None:
-            mp["test_start"] = self.model_test_start
+            mp["test_start"] = _as_day(self.model_test_start)
         if self.model_test_end is not None:
-            mp["test_end"] = self.model_test_end
+            mp["test_end"] = _as_day(self.model_test_end)
         if self.model_validation is not None:
             mp["validation"] = _as_yaml_period(self.model_validation)
         if self.model_test is not None:
@@ -382,7 +413,7 @@ class Workflow:
         mp.update(self._mp_inline)
         config["model_pipeline"] = mp
 
-        return config
+        return _plain(config)
 
     def save(self, path: Union[str, Path]) -> None:
         path = Path(path)

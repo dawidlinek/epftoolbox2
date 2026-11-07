@@ -147,7 +147,7 @@ def daily_aggregate(
     run, target, horizon = run[keep], target[keep], horizon[keep]
     codes, first = np.unique(day_key, return_index=True)
     day = np.searchsorted(codes, day_key)
-    sunday = pd.DatetimeIndex(targets[target[first]]).dayofweek == 6
+    sunday = pd.DatetimeIndex(targets[target[first]]).day_of_week == 6
 
     reduce = _REDUCE[agg]
     n = len(codes)

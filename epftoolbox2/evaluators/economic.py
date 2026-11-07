@@ -119,7 +119,7 @@ class EconomicEvaluator(Evaluator):
         target_of_day = np.arange(n_days) // max(len(horizons), 1)
         earned = np.full(n_days, np.nan)
         perfect = np.full(n_days, np.nan)
-        sunday = pd.DatetimeIndex(target_dates).dayofweek == 6
+        sunday = pd.DatetimeIndex(target_dates).day_of_week == 6
         for periods, days in whole_days(day, hour, sunday[target_of_day], per_hour):
             rows = np.isin(day, days)
             forecast = prediction[rows].reshape(-1, periods)
