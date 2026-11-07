@@ -66,10 +66,16 @@ four windows and up to 7.6 in the 1456-day window (BE), and the MAE of the avera
   empty `coefficients`, as every model does.
 - **More inputs than rows** (49 rows of 247 inputs in the paper's shortest window): the path runs on `X'X` for every window. Old
   `LassoLarsIC` ran the path on `X` there; on the paper's data both chose the same α\* in every fit compared.
-- **Collinear inputs.** With the intercept, a complete set of one-hot dummies is collinear (their sum is constant). As in
-  scikit-learn, LARS then meets its degenerate-entrant rule when the last dummy would enter, at the end of the path for LEAR's seven
-  weekdays. A complementary pair (`is_weekend` and `is_weekday`) meets it early, where the two [kernels](#kernels) can take different
-  turns on a tie decided by the last bit: give LEAR one of the pair, as it fits the intercept itself.
+- **Exact twins.** Two columns that are one up to a constant factor on the training rows (a copy, an exact negative such as
+  `is_weekday` against `is_weekend` once centred, `price` and `price_day_last` at hour 23, a daily value profiled onto 24 slots, an
+  hourly input filled onto four quarter-hours) are fitted as one: every twin but one gets the coefficient exactly 0, the first in
+  predictor order unless a later one is longer (the lasso puts the weight on the longest; a scaler leaves twins of one length). LARS
+  can't take a second twin: scikit-learn's own path, like the paper's, enters it on a tie decided by the last bit and then carries
+  cancelling coefficients of about 1e14. Where the twins are equal on the forecast's row too, the forecast is the lasso's.
+- **Other collinear inputs.** A full set of one-hot dummies is collinear with the intercept (their sum is constant) without any two
+  being twins. LARS meets its degenerate-entrant rule there when the last dummy would enter, at the end of the path for LEAR's seven
+  weekdays, where the criterion doesn't choose; a dependency among three or more columns that enters early can still decide a tie
+  by the last bit.
 - **`refit=`** works: one class defines the fit and the forecast from it, so a forecast issued on D uses the fit of its refit day.
 
 ## Lago et al. (2021) exactly
@@ -163,5 +169,8 @@ published that far ahead can give.
 The fit runs in numpy, or compiled by numba with the [`[fast]` extra](/epftoolbox2/getting-started/installation/#the-fast-extra):
 `pip install 'epftoolbox2[fast]'`. `EPFTOOLBOX2_KERNELS=auto|numpy|numba` chooses (`auto`, the default, takes numba when it imports).
 On one core a fit of the 1449-row window takes about 16 ms (exact refit) and 28 ms (coordinate descent) with numba, and 150 ms and
-1 s in numpy. The two agree within 1e-9 with the same kinks, not to the bit, since they sum in different orders: a run's manifest
-records which ran (`kernels`, with the provenance, never compared), and a resume on the other one warns.
+1 s in numpy. They sum in different orders, so they agree within 1e-9 with the same kinks, not to the bit, wherever no tie between
+columns decides an entry: exact twins are dropped before the fit, so this holds on every design but one of the
+[other collinear inputs](#the-fit) above (on the paper's data, in every fit compared). A run's manifest records which ran (`kernels`,
+with the provenance, never compared; a list once a resume added the other), and a resume warns while the file mixes them. Records
+also differ across machines, by up to about 3e-9 EUR/MWh on the paper's data: another CPU's BLAS rounds `X'X` differently.

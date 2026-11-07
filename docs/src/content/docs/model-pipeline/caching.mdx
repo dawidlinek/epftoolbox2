@@ -24,6 +24,10 @@ report = pipeline.run(
 2. If the script is interrupted, re-running loads completed tasks
 3. Only missing tasks are computed
 
+On one machine a resumed file is bit for bit a fresh run's. On another, the linear algebra library (BLAS) rounds sums differently, so
+records can differ in their last digits, by up to about 3e-9 EUR/MWh for [`LEARModel`](/epftoolbox2/models/lear/#kernels) on the
+benchmark data: resume where a file was started if it must be one machine's. A resume on the other backend of LEAR's kernels warns.
+
 ## Cache Directory Structure
 
 Each model gets a results file and a manifest next to it:
@@ -74,8 +78,8 @@ time zone (converting the same instants to a different zone keeps the same hash,
 value's own representation, not the zone label), and how the training rows are chosen (`training_cut`): everything that defines what
 a forecast in the file actually *is*. A manifest without `training_cut` was [made with counted rows](/epftoolbox2/model-pipeline/time-and-calendars/#results-made-with-counted-rows)
 and is refused; results accepted anyway are marked unverified, for good. It also records provenance (package version, git SHA if available, when it was first and
-last written, and for [`LEARModel`](/epftoolbox2/models/lear/#kernels) the backend of its kernels, `kernels`, whose two agree within
-1e-9 and not to the bit, so a resume on the other one warns) and the
+last written, and for [`LEARModel`](/epftoolbox2/models/lear/#kernels) the backend of its kernels, `kernels`, a list once a resume
+used the other, whose two agree within 1e-9 and not to the bit, so a resume warns while a file mixes them) and the
 [information set](/epftoolbox2/model-pipeline/information-set/) settings, but neither is compared: a
 version bump or a new commit does not by itself invalidate a results directory, and the information set
 gates which predictors are allowed before fitting rather than changing what a fitted model predicts.

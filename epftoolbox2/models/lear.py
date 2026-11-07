@@ -49,8 +49,9 @@ class LEARModel(BaseModel):
         Lago et al. (2021) exactly.
 
         The kernels run in numpy, or compiled by numba with the `[fast]` extra (`pip install 'epftoolbox2[fast]'`), chosen by
-        `EPFTOOLBOX2_KERNELS=auto|numpy|numba` (auto: numba when it imports). The two agree within 1e-9 with the same kinks,
-        not to the bit; the manifest records which ran."""
+        `EPFTOOLBOX2_KERNELS=auto|numpy|numba` (auto: numba when it imports). Exact twin columns are dropped before both stages
+        but one (`_lars.without_twins`), and the two backends then agree within 1e-9 with the same kinks, not to the bit, wherever
+        no other tie between columns decides an entry; the manifest records which ran."""
         super().__init__(
             predictors,
             training_window,
