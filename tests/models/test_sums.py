@@ -267,7 +267,9 @@ def _ulps(value, exact, scale):
 
 
 def test_accuracy_within_4_ulp_and_closer_than_a_blas_gram():
-    """Small spans: every element within 4 ulp of Σ|d_j||d_k| of the exact sum, and no farther than `D.T @ D` from it."""
+    """Small spans of benign columns: every element within 4 ulp of Σ|d_j||d_k| of the exact sum, and no farther than
+    `D.T @ D` from it. An observation on such data, not the guarantee: that is the bound of
+    `test_fixed_point_bound_holds_on_columns_whose_products_hide_in_small_values`."""
     rng = np.random.default_rng(11)
     ours_total = blas_total = 0.0
     for case in range(40):
@@ -309,7 +311,8 @@ def _fsum_dot(a, b):
 
 @pytest.mark.parametrize("n", [1449, 40_000])
 def test_accuracy_on_longer_spans_against_a_correctly_rounded_sum(n):
-    """Within 4 ulp of Σ|d_j||d_k| (plus the reference's own half ulp), at the β of LEAR's window and past 2^15 rows."""
+    """Benign columns within 4 ulp of Σ|d_j||d_k| (plus the reference's own half ulp), at the β of LEAR's window and past
+    2^15 rows (an observation, as in the small-span test)."""
     rng = np.random.default_rng(n)
     x = np.stack([_column(rng, n, BENIGN) for _ in range(6)], axis=1)
     x[:, 4] = rng.normal(size=n) * 3 + 100
@@ -494,6 +497,40 @@ def test_the_sums_read_the_span_rows_only():
     later[hi:] *= 1000.0
     later[:lo] = np.nan
     _assert_same(view, _sums.SpanSums(later[lo:hi], y[lo:hi]).over(rows, cols))
+
+
+def test_an_overflowing_column_spoils_only_the_requests_that_include_it():
+    """A column whose sum or x - c overflows float64 doesn't stop its block: the other columns' sums are bitwise those of a
+    union without it, at any block width, and only a request that includes it raises, naming it."""
+    rng = np.random.default_rng(9)
+    n = 400
+    price, dummy = np.round(rng.normal(40, 25, n), 2), (rng.random(n) < 0.2).astype(float)
+    load = 1e4 + rng.integers(0, 5000, n).astype(float)
+    x_minus_c = np.zeros(n)
+    x_minus_c[:3] = [
+        1.797e308,
+        1.797e308,
+        -1.797e308,
+    ]  # the sum is finite, the shift 4.5e305, -1.797e308 - shift is not
+    summed = np.where(np.arange(n) % 2 == 0, 1.7e308, 1.6e308)  # the exact sum overflows
+    fsummed = summed.copy()
+    fsummed[1] = 1e-300  # too wide for two slices: math.fsum overflows
+    y = rng.normal(size=n) * 20 + 50
+    base = np.stack([price, load, dummy], axis=1)
+    mixed = np.stack([price, x_minus_c, load, summed, fsummed, dummy], axis=1)
+    for rows in (np.arange(n), np.arange(1, n), np.arange(0, n, 3)):
+        ref = _sums.SpanSums(base, y, block_cols=1).over(rows, [0, 1, 2])
+        for block in (1, 256):
+            _assert_same(ref, _sums.SpanSums(base, y, block_cols=block).over(rows, [0, 1, 2]), f"base, {block}")
+            _assert_same(ref, _sums.SpanSums(mixed, y, block_cols=block).over(rows, [0, 2, 5]), f"mixed, {block}")
+    ss = _sums.SpanSums(mixed, y)
+    for bad in (1, 3, 4):
+        with pytest.raises(ValueError, match=rf"column\(s\) \[{bad}\] of x have values too large"):
+            ss.over(np.arange(n), [0, bad])
+    with pytest.raises(ValueError, match=r"y has values too large"):
+        _sums.SpanSums(base, summed).over(np.arange(n), [0])
+    shifts = _sums._shifts(mixed.T, np.isfinite(mixed.T))
+    assert np.isnan(shifts[[3, 4]]).all() and np.isfinite(shifts[[0, 1, 2, 5]]).all()
 
 
 def test_bad_requests_raise():

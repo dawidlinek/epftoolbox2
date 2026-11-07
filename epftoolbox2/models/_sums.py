@@ -14,7 +14,9 @@ How (per span; n rows, m = min(n, 2^15), L = ceil(log2 m)):
 - **Shift** c_j: the `math.fsum` mean of column j's finite values in the span; 0 if it has none, the value itself when they are
   all equal (so a constant column has d = 0 and S = 0 exactly; fsum's mean of 0.1 three times is 0.1 + 1 ulp). `_shifts`
   computes it from exact integer sums, equal to `math.fsum`'s correctly rounded sum, and calls `math.fsum` where those can't hold
-  a column exactly. d = fl(x - c) is a float; NaN and ±inf are 0 from here on.
+  a column exactly. d = fl(x - c) is a float; NaN and ±inf are 0 from here on. A column whose sum or some x - c overflows
+  float64 is unusable: its slices are 0, the rest of its block is computed as usual, and only a request including it raises
+  (naming it), so whether a fit runs never depends on which other columns share the union.
 - **Exponent** e_j: `frexp` of max |d| over the span, so |d| < 2^e_j (0 for an all-zero column).
 - **Slices**, β = floor((53 - L) / 2) bits each: w = d·2^(β-e) (a power-of-two scaling, exact) has |w| < 2^β; Q1 = rint(w),
   Q2 = rint(2^β(w - Q1)), Q3 = rint(2^β(2^β(w - Q1) - Q2)). Each remainder is exact (w - rint(w) is a multiple of w's ulp of
@@ -67,7 +69,8 @@ sum and, past 2^53 (so past 2^15 rows), the int64-to-float roundings, about 2^-5
 rint slices' errors cancel and the result is within an ulp of the exact sum (tests: at most 0.5 ulp of Σ|x_j - c_j||x_k - c_k|
 where `X.T @ X` is up to 12 ulp off). The guarantee is still relative to m_j·m_k, not to Σ|x_j - c_j||x_k - c_k|: in rows
 where a column is heavy-tailed (its few large values meeting the other's small ones) that sum can be far below r·m_j·m_k, and
-the bound above, not "a few ulp of it", is what holds. A BLAS Gram's bound is n·2^-53·Σ|x_j||x_k|.
+the bound above, not "a few ulp of it", is what holds. In standardised units (x - μ)/σ over the rows, the units the solvers
+see, the bound is r·2^-51·(m_j/σ_j)(m_k/σ_k). A BLAS Gram's bound is n·2^-53·Σ|x_j||x_k|.
 `tests/models/test_sums.py` checks both against exact rational sums.
 
 The shift comes from the span's rows, the exponent from the span's rows or the requested ones, all dated before the issue day,
@@ -134,7 +137,8 @@ def rebase_margin(beta: int) -> int:
 
 
 def _shifts(xt: np.ndarray, finite: np.ndarray) -> np.ndarray:
-    """Per row of `xt` (columns × rows): the `math.fsum` mean of its finite values, 0.0 for none, the value if all are equal.
+    """Per row of `xt` (columns × rows): the `math.fsum` mean of its finite values, 0.0 for none, the value if all are equal,
+    NaN when their sum overflows float64 (where `math.fsum` raises).
 
     The sum is formed exactly where two integer slices of W = 53 - ceil(log2 n) bits hold every value: t = v·2^(2W - E)
     (|v| < 2^E) must be an integer, which makes t = 2^W·T + R with integers |T| <= 2^W, |R| <= 2^(W-1) whose column sums
@@ -176,22 +180,31 @@ def _shifts(xt: np.ndarray, finite: np.ndarray) -> np.ndarray:
             j = int(fast[i])
             num = int(s_top[i]) * (1 << width) + int(s_low[i])
             kk = int(k[j])
-            total = float(num << -kk) if kk <= 0 else num / (1 << kk)
-            out[j] = total / int(count[j])
             exact[j] = True
+            try:
+                total = float(num << -kk) if kk <= 0 else num / (1 << kk)
+            except OverflowError:  # the sum is past float64's range: this column is unusable, the others go on
+                out[j] = np.nan
+                continue
+            out[j] = total / int(count[j])
     for j in np.flatnonzero(varies & ~exact).tolist():
         values = xt[j][finite[j]]
-        out[j] = math.fsum(memoryview(np.ascontiguousarray(values))) / values.shape[0]
+        try:
+            out[j] = math.fsum(memoryview(np.ascontiguousarray(values))) / values.shape[0]
+        except OverflowError:
+            out[j] = np.nan
     equal = (count > 0) & (lo == hi)
     out[equal] = lo[equal] + 0.0  # -0.0 becomes 0.0, whichever zero a reduction met first
     return out
 
 
 def _slice_into(xt: np.ndarray, beta: int, q: np.ndarray, shift=None):
-    """Shifts, exponents, non-finite and large-value masks of columns given as rows of `xt`; their slices written into `q`.
+    """Shifts, exponents, non-finite, large-value and unusable masks of columns given as rows of `xt`; slices into `q`.
 
     `shift` given (a re-slice for a request) skips the shift. A value is large when |d| >= 2^(e - δ - 1): a request whose rows
-    hold no large value of a column has that column's largest |d| more than δ binades under 2^e.
+    hold no large value of a column has that column's largest |d| more than δ binades under 2^e. A column is unusable when its
+    sum or some x - c overflows float64; its slices are 0 and only a request that includes it raises, so no column's sums
+    depend on whether such a column shares its block.
     """
     finite = np.isfinite(xt)
     if shift is None:
@@ -203,8 +216,10 @@ def _slice_into(xt: np.ndarray, beta: int, q: np.ndarray, shift=None):
     if bad.any():
         d[bad] = 0.0
     largest = np.abs(d).max(axis=1) if xt.shape[1] else np.zeros(xt.shape[0])
-    if not np.isfinite(largest).all():
-        raise ValueError("a column's values are too large for exact sums (x - shift overflows)")
+    unusable = ~(np.isfinite(largest) & np.isfinite(shift))
+    if unusable.any():
+        d[unusable] = 0.0
+        largest[unusable] = 0.0
     exponent = np.frexp(largest)[1].astype(np.int64)
     big = np.abs(d) >= np.ldexp(1.0, exponent - rebase_margin(beta) - 1)[:, None]
     k = beta - exponent
@@ -220,7 +235,7 @@ def _slice_into(xt: np.ndarray, beta: int, q: np.ndarray, shift=None):
     d -= q[1]
     d *= step
     np.rint(d, out=q[2])
-    return shift, exponent, bad, big
+    return shift, exponent, bad, big, unusable
 
 
 # --- integer sums of slice products -----------------------------------------------------------------------------------
@@ -386,12 +401,14 @@ class SpanSums:
         self._n_bad = np.zeros(self.p, dtype=np.int64)
         self._big = np.zeros((self.p, self.n), dtype=bool)
         self._n_big = np.zeros(self.p, dtype=np.int64)
+        self._unusable = np.zeros(self.p, dtype=bool)
         self._lin = np.zeros((3, self.p), dtype=np.int64)
         self._vec = np.zeros((3, self.p), dtype=np.int64)
         self._gram = np.zeros((3, self.p, self.p), dtype=np.int64)
         self._y = y
         qy = np.zeros((3, 1, self.n))
-        yshift, yexp, ybad, ybig = _slice_into(y[None, :], self.beta, qy)
+        yshift, yexp, ybad, ybig, yunusable = _slice_into(y[None, :], self.beta, qy)
+        self._y_unusable = bool(yunusable[0])
         self.yshift = float(yshift[0])
         self._yexp = int(yexp[0])
         self._qy = np.ascontiguousarray(qy[:, 0, :])
@@ -411,7 +428,8 @@ class SpanSums:
                 continue
             cols = self._cols_of(b)
             q = self._q[:, cols]
-            shift, exponent, bad, big = _slice_into(np.ascontiguousarray(self._x[:, cols].T), self.beta, q)
+            shift, exponent, bad, big, unusable = _slice_into(np.ascontiguousarray(self._x[:, cols].T), self.beta, q)
+            self._unusable[cols] = unusable
             self._shift[cols] = shift
             self._exponent[cols] = exponent
             self._bad[cols] = bad
@@ -530,12 +548,12 @@ class SpanSums:
         for i in np.flatnonzero(rebase).tolist():
             j = int(cols[i])
             part = np.zeros((3, 1, rows.size))
-            _, exponent, _, _ = _slice_into(self._x[rows, j][None, :], self.beta, part, shift=self._shift[j : j + 1])
+            _, exponent, _, _, _ = _slice_into(self._x[rows, j][None, :], self.beta, part, shift=self._shift[j : j + 1])
             a[:, i, :] = part[:, 0, :]
             e[i] = exponent[0]
         if y_rebase:
             part = np.zeros((3, 1, rows.size))
-            _, exponent, _, _ = _slice_into(self._y[rows][None, :], self.beta, part, shift=[self.yshift])
+            _, exponent, _, _, _ = _slice_into(self._y[rows][None, :], self.beta, part, shift=[self.yshift])
             qy = np.ascontiguousarray(part[:, 0, :])
             ey = int(exponent[0])
         return a, qy, e, ey
@@ -559,6 +577,14 @@ class SpanSums:
         return unique
 
     def _check_finite(self, rows: np.ndarray, cols: np.ndarray) -> None:
+        too_large = np.unique(cols[self._unusable[cols]])
+        if too_large.size:
+            raise ValueError(
+                f"column(s) {too_large.tolist()} of x have values too large for exact sums (their sum or x - shift "
+                "overflows float64)"
+            )
+        if self._y_unusable:
+            raise ValueError("y has values too large for exact sums (its sum or y - shift overflows float64)")
         if self._ybad[rows].any():
             raise ValueError("y has a NaN or inf in the requested rows")
         gappy = np.unique(cols[self._n_bad[cols] > 0])
