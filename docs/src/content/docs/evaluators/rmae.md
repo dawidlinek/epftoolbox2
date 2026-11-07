@@ -60,6 +60,6 @@ The rMAE is computed per data slice, so grouped views (`by_hour`, `by_horizon`, 
 
 - The `base_model` name must match the `name` parameter of one of the models in the pipeline.
 - If the base model's MAE is zero for a given group, rMAE returns `inf`. If the model and the base model share no forecast in a group, it returns `NaN`.
-- The `forecasts` column of `summary()` still counts all of a model's forecasts, not only the shared ones; check `report.forecast_counts()` to see how many each model produced.
+- The `forecasts` column of `summary()` and of every `by_*()` table still counts all of a model's forecasts in the group, not only the shared ones; a `by_*()` table warns when the models of a group differ in that count, and `report.forecast_counts()` says how many each model produced.
 - Result records need `run_date`, `target_date`, `hour` and `horizon` (every record from `ModelPipeline` has them). Without them, or with a duplicated forecast, rMAE raises a `ValueError` instead of comparing unaligned rows.
 - rMAE is serializable to YAML and works with `ModelPipeline.save()`/`load()`.

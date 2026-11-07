@@ -58,21 +58,25 @@ Availability: inputs not known to be out at the issue time
 └───────┴─────────────┴────────┴─────────┴──────────┴───────────┴─────────┘
 
 Summary
-┏━━━━━━━━━━┳━━━━━━━━━┓
-┃ model    ┃ MAE     ┃
-┡━━━━━━━━━━╇━━━━━━━━━┩
-│ OLS      │ 26.0199 │
-│ LassoCV  │ 28.1098 │
-└──────────┴─────────┘
+┏━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┓
+┃ model    ┃ forecasts ┃ MAE     ┃
+┡━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━┩
+│ OLS      │ 5038      │ 26.0199 │
+│ LassoCV  │ 5038      │ 28.1098 │
+└──────────┴───────────┴─────────┘
 
 By Horizon
-┏━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┓
-┃ model    ┃ horizon  ┃ MAE     ┃
-┡━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━┩
-│ OLS      │ 1        │ 18.5432 │
-│ OLS      │ 2        │ 22.1234 │
-└──────────┴──────────┴─────────┘
+┏━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┓
+┃ model    ┃ horizon  ┃ forecasts ┃ MAE     ┃
+┡━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━┩
+│ OLS      │ 1        │ 720       │ 18.5432 │
+│ OLS      │ 2        │ 720       │ 22.1234 │
+└──────────┴──────────┴───────────┴─────────┘
 ```
+
+Every table has a `forecasts` column: the number of forecasts of the model in that row's group (after the group keys), so a model that
+has fewer in a group than another is visible in the table. When the models of a table differ in their counts the exporter also emits the
+`UserWarning` of the report: see [Forecasts per group](/epftoolbox2/model-pipeline/results/#forecasts-per-group).
 
 ## In Pipeline
 

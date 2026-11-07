@@ -11,7 +11,7 @@ Exports detailed prediction results to a wide-format CSV file. Each row represen
 |-----------|------|---------|-------------|
 | `path` | str | Required | Output CSV file path |
 | `extra_columns` | List[str] | `[]` | Columns from the source dataset to include |
-| `summary_path` | str | `None` | Also write `report.summary()` to this CSV file: one row per model with every evaluator's columns |
+| `summary_path` | str | `None` | Also write `report.summary()` to this CSV file: one row per model with its number of forecasts (`forecasts`) and every evaluator's columns |
 
 ## Basic Usage
 
