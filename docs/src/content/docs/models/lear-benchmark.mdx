@@ -28,7 +28,8 @@ DE file's target-day wind and solar forecast may be later than an 11:45 issue.
 - **Keys.** Every comparison below is on identical keys: all 17,472 of each market in every cell, every model having produced
   every forecast, except `refit="auto"` (17,448, below).
 - **DM tests** are Lago et al.'s multivariate Diebold-Mariano test (the daily mean of the 24 absolute errors, one-sided), as
-  `epftoolbox.evaluation.DM` computes it, not adjusted for the five markets.
+  `epftoolbox.evaluation.DM` computes it, not adjusted for the five markets. **Significant** means p < 0.05 throughout; a p-value
+  between 0.05 and 0.1 is given but called not significant.
 - **Machines.** WCSS Bem2 (Intel Xeon Platinum 8268), 8 processes, the numba kernels, one BLAS thread per process (`refit="auto"`:
   a workstation, below). Records differ
   across machines by up to about 3e-9 EUR/MWh (another BLAS rounds `X'X` differently), which moves no number here.
@@ -67,7 +68,8 @@ of the repository), MAE in EUR/MWh, `lago()` / published, on the published file'
 - **The short windows can't.** No scikit-learn version reproduces the published 56- and 84-day forecasts (0.22.2, 0.23.2 and 0.24.2
   differ by up to 2 to 9 EUR/MWh in single hours, the original epftoolbox among them): a LARS path on 49 rows of 247 inputs is
   ill-conditioned, and its implementation decides about ±5 % of the MAE.
-- **DM of the averages**: published better in BE (p < 0.001) and PJM (p 0.066), `lago()` better in DE (p 0.065), neither in NP and FR.
+- **DM of the averages**: the published forecasts are significantly better in BE (p < 0.001); the differences are not significant
+  at 5 % in PJM (published lower, p 0.066) and DE (`lago()` lower, p 0.065), nor in NP and FR.
 - Every number is the forecasting plan's earlier research port (quality study, "ours") within 0.0005 EUR/MWh.
 
 ## Penalty, solver and newest target

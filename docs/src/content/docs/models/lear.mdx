@@ -286,8 +286,9 @@ published that far ahead can give.
 | 1456 | 1.990 / 1.990 | 3.098 / 3.095 | 4.387 / 4.378 | 6.645 / 6.634 | 3.989 / 3.988 |
 | average | 1.728 / 1.738 | 3.032 / 3.013 | 3.990 / 3.980 | 6.278 / 6.140 | 3.570 / 3.609 |
 
-  Lago et al.'s DM test of the averages: the published forecasts are better in BE (p < 0.001) and PJM (p 0.066), `lago()`'s in DE
-  (p 0.065), neither in NP and FR. 728 days × 24 hours in every cell, on the same keys as the published file.
+  Lago et al.'s DM test of the averages: the published forecasts are better in BE (p < 0.001); the differences are not significant at
+  5 % in PJM (published lower, p 0.066) and DE (`lago()` lower, p 0.065), nor in NP and FR. 728 days × 24 hours in every cell, on the
+  same keys as the published file.
 - **The cost of the library's default cut.** `newest_target="d-1"` instead of `"published"` raises the average's MAE by 1.4 % (DE)
   to 2.1 % (PJM), DM p < 0.001 in every market: D's prices are known at the issue time, and only `"published"` trains on them.
 
