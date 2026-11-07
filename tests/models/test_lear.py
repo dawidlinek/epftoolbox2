@@ -282,12 +282,22 @@ def test_a_resume_on_the_other_kernels_warns_and_resumes(tmp_path, data):
     other = "numba" if manifest["kernels"] == "numpy" else "numpy"
     manifest["kernels"] = other
     path.write_text(json.dumps(manifest, indent=2) + "\n")
+    mine = _lars._kernels().BACKEND
     with pytest.warns(UserWarning, match=f"fitted with the {other} kernels"):
         run(lear(), data, "2023-03-20", "2023-03-21", save_to=str(save))
-    assert len(lines(save)) == len(stored) and json.loads(path.read_text())["kernels"] == _lars._kernels().BACKEND
+    # the file holds both now, and says so: every later resume warns, whatever its backend
+    assert len(lines(save)) == len(stored) and json.loads(path.read_text())["kernels"] == [other, mine]
+    with pytest.warns(UserWarning, match=f"fitted with the {other} and {mine} kernels"):
+        run(lear(), data, "2023-03-20", "2023-03-21", save_to=str(save))
+    assert json.loads(path.read_text())["kernels"] == [other, mine]
+    # a file of one backend, resumed on it, is quiet and stays a name
+    fresh = tmp_path / "fresh.jsonl"
+    run(lear(), data, "2023-03-20", "2023-03-21", save_to=str(fresh))
+    fresh.write_text("\n".join(lines(fresh)[:10]) + "\n")
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        run(lear(), data, "2023-03-20", "2023-03-21", save_to=str(save))  # the same backend: quiet
+        run(lear(), data, "2023-03-20", "2023-03-21", save_to=str(fresh))
+    assert json.loads(manifest_path(fresh).read_text())["kernels"] == mine
 
 
 def test_the_kernels_are_ready_before_the_pool_starts(data, monkeypatch):
