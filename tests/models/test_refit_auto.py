@@ -336,11 +336,15 @@ def test_a_list_of_one_rule_is_unchanged_by_the_rules_of_its_members():
 @pytest.fixture(scope="module")
 def two_years():
     """From 1 February 2022 to the end of October 2024 at 1 h and 15 min: 728 days before a Monday anchor of the leap day's week
-    and of both 2024 switches (31 March, 27 October in Europe/Warsaw)."""
-    return {
-        freq: make_market_data(start="2022-02-01", days=1005, freq=freq, horizon=2, noise=5.0, seed=11)
-        for freq in ("1h", "15min")
-    }
+    and of both 2024 switches (31 March, 27 October in Europe/Warsaw). Each frequency is built when a test first asks for it."""
+    frames = {}
+
+    def frame(freq):
+        if freq not in frames:
+            frames[freq] = make_market_data(start="2022-02-01", days=1005, freq=freq, horizon=2, noise=5.0, seed=11)
+        return frames[freq]
+
+    return frame
 
 
 def period_of(wall, freq):
@@ -389,7 +393,7 @@ def test_56_and_728_are_hand_fits_on_their_own_anchors(two_years, freq, issues, 
     one on the rows cut on the Monday on or before it, scaler included, and the forecast their mean. Over the leap day, and over
     the 2024 switches, where the hour skipped in spring has no forecast on its day and the repeated autumn hour two training rows;
     the spring and autumn runs end on a Monday, which starts a block."""
-    data = two_years[freq]
+    data = two_years(freq)
     names = ["load_d+{horizon}", "wind_d+{horizon}", "is_weekend_d+{horizon}", "is_weekday_d+{horizon}"]
     model = OLSModel(names, training_window=[56, 728], refit="auto")
     records = keyed(model.run(data, *issues, horizon=2, freq=freq)._results)
