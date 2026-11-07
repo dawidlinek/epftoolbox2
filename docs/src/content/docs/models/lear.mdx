@@ -55,8 +55,10 @@ Each fit reads the scaled training rows through their centred sums alone (`X'X`,
 `solver="lars"` gets the stage-2 Lasso exactly, from a second LARS path run just past α\*. `solver="cd"` is the paper's
 `Lasso(alpha, max_iter=2500)`: cyclic coordinate descent from zero, in the order of the predictors, stopped when the duality gap is
 below 1e-4 of `y'y` or after 2500 sweeps. It often stops before it converges, so its coefficients depend on the order of the
-predictors, which is why [`lear_predictors(..., order="lago")`](/epftoolbox2/model-pipeline/presets/#lear) exists. On 20 days of
-the paper's DE data (BIC) the two differed by up to 0.06 EUR/MWh in single forecasts at 1092 days and 0.16 at 56.
+predictors, which is why [`lear_predictors(..., order="lago")`](/epftoolbox2/model-pipeline/presets/#lear) exists. Over the paper's
+test periods (`lago()` and the same with `solver="lars"`) single forecasts differ by up to 0.2 (DE) to 3.5 EUR/MWh (BE) in the averages of the
+four windows and up to 7.6 in the 1456-day window (BE), and the MAE of the averages by at most 0.004 EUR/MWh (BE, in favour of
+`"lars"`).
 
 - **An intercept** is always fitted, by the centring: a forecast is `ybar + (x - xbar) @ w` on the scaled row. A column the scaler made
   constant gets the coefficient 0 in both stages.
@@ -136,11 +138,25 @@ published that far ahead can give.
 
 ### What it reproduces
 
-- **The original's forecasts**, against the original epftoolbox (github.com/jeslago/epftoolbox at 47d6e06) run under scikit-learn
-  0.24.2: every hour of every window on the first target day of the DE and BE test periods within 1e-9 EUR/MWh (the test
-  `tests/models/test_lear_lago.py` holds them to 1e-6), and the design row of those days to the bit.
-- **The published forecasts** where they can be: no scikit-learn version reproduces the paper's published 56- and 84-day forecasts
-  (up to 2 to 9 EUR/MWh in single hours), and the 1092- and 1456-day ones within 0.0 to 0.2 % of their MAE.
+- **The original's forecasts.** Against the original epftoolbox (github.com/jeslago/epftoolbox at 47d6e06) run under scikit-learn
+  0.24.2, on five issue days of each market's test period, every hour of every window is within 1e-9 EUR/MWh (largest difference
+  6.2e-10), and so is the design row, to the bit. `tests/models/test_lear_lago.py` holds the first DE and BE days to 1e-6.
+- **The published forecasts, where anything can.** No scikit-learn version reproduces the paper's published 56- and 84-day
+  forecasts (up to 2 to 9 EUR/MWh in single hours, the original included), so those differ; the 1092- and 1456-day ones are within
+  0.0 to 0.2 % of their MAE. Over the test periods, h = 1, MAE in EUR/MWh, `lago()` / published:
+
+| Window | NP | PJM | FR | BE | DE |
+|--------|----|-----|----|----|----|
+| 56 | 1.923 / 1.964 | 3.525 / 3.477 | 4.606 / 4.681 | 7.226 / 6.924 | 4.069 / 4.283 |
+| 84 | 1.870 / 1.952 | 3.514 / 3.467 | 4.559 / 4.575 | 7.197 / 6.798 | 3.983 / 4.180 |
+| 1092 | 1.993 / 1.993 | 3.101 / 3.098 | 4.256 / 4.250 | 6.606 / 6.594 | 3.931 / 3.930 |
+| 1456 | 1.990 / 1.990 | 3.098 / 3.095 | 4.387 / 4.378 | 6.645 / 6.634 | 3.989 / 3.988 |
+| average | 1.728 / 1.738 | 3.032 / 3.013 | 3.990 / 3.980 | 6.278 / 6.140 | 3.570 / 3.609 |
+
+  Lago et al.'s DM test of the averages: the published forecasts are better in BE (p < 0.001) and PJM (p 0.066), `lago()`'s in DE
+  (p 0.065), neither in NP and FR. 728 days × 24 hours in every cell, on the same keys as the published file.
+- **The cost of the library's default cut.** `newest_target="d-1"` instead of `"published"` raises the average's MAE by 1.4 % (DE)
+  to 2.1 % (PJM), DM p < 0.001 in every market: D's prices are known at the issue time, and only `"published"` trains on them.
 
 ## Kernels
 
