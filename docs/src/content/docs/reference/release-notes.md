@@ -172,6 +172,13 @@ an issue day it didn't sample.
   strictly increasing and invertible for every value; they take `apply_to` and `standardise` as the other VSTs do, and the same
   near-constant rule. They are two of the four scalers of the recommended LEAR. **Nothing else moves**: `AsinhScaler` and every other
   scaler give the same numbers, bit for bit. See [Scalers and VSTs](/epftoolbox2/models/scalers/).
+- **The recommended LEAR, `examples/lear_lago.py` and the benchmark page.** The LEAR page now documents two settings: `LEARModel.lago()`,
+  the paper's, and the recommended one, four `LEARModel`s on `[56, 84, 728, "expanding"]` with BIC and `newest_target="published"`
+  that differ only in their scaler (asinh, mirror-log, polynomial, N-PIT), averaged by an `AverageEnsemble`, with the evidence for
+  each setting. `examples/lear_lago.py` runs both on a benchmark market (`main(market, test_start, test_end, output_dir)`; no API key,
+  the data come from Zenodo). [Benchmark Reproduction](/epftoolbox2/models/lear-benchmark/) holds every number measured on the
+  benchmark, each on identical forecast keys with their counts: the original epftoolbox, the published forecasts, the criteria and
+  solvers, the newest target, `refit="auto"`, blocked CV, Ridge, and the recommended settings and the defaults against `lago()`.
 - **`LEARModel`: LEAR, and `LEARModel.lago()`, Lago et al. (2021) exactly.** `LEARModel(predictors, training_window=[56, 84, 728,
   "expanding"], criterion="bic", solver="lars", *, scaler="asinh", name="LEAR", newest_target="d-1", refit=None)` fits a Lasso per
   period whose penalty is chosen on every fit as old scikit-learn `LassoLarsIC(normalize=True)` chose it, AIC or BIC on the LARS path of
