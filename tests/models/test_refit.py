@@ -166,7 +166,7 @@ def test_anchors_count_from_monday_5_january_1970():
     assert FitUnit(3, 1, day("2024-01-01"), None).anchor == day("2024-01-01")
 
 
-@pytest.mark.parametrize("bad", ["auto", "0D", "7d", "07D", "D", "1M", "1W", "1 D", "", 7, 7.0, True])
+@pytest.mark.parametrize("bad", ["Auto", "auto ", "0D", "7d", "07D", "D", "1M", "1W", "1 D", "", 7, 7.0, True])
 def test_other_refit_values_raise(bad):
     with pytest.raises(ValueError, match="refit must be"):
         check_refit(bad)
@@ -178,9 +178,10 @@ def test_other_refit_values_raise(bad):
     assert model.refit is None
 
 
-def test_auto_is_named_as_not_there_yet():
-    with pytest.raises(ValueError, match="'auto' isn't one yet"):
-        OLSModel(PREDICTORS, refit="auto")
+def test_auto_is_a_refit_value():
+    """`"auto"` is step 4e's: a rule per training window (`tests/models/test_refit_auto.py`)."""
+    assert check_refit("auto") == "auto"
+    assert OLSModel(PREDICTORS, refit="auto").refit == "auto"
 
 
 def test_a_model_with_only_fit_predict_raises_on_refit():

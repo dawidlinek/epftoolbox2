@@ -348,13 +348,20 @@ def explain_model(
 
 def _newest_by_issue_day(model: Any, newest: Any, days: pd.DatetimeIndex, hour: int, horizon: int) -> np.ndarray:
     """The newest target of the forecast of each issue day, relative to it. With `refit` it was read on the anchor a, so it is
-    `a + min(k(a), horizon - 1)`, relative to the issue day."""
+    `a + min(k(a), horizon - 1)`, relative to the issue day; with `refit="auto"` the newest of its windows' (each on the anchor of
+    its own rule), as its record's `newest_target_day`."""
     if model.refit is None:
         return newest.k[hour]
     dates = [day.date() for day in days]
-    anchors = [refit_anchor(date, model.refit) for date in dates]
+    rules = list(dict.fromkeys(model._refit_rules))
     return np.array(
-        [(a - d).days + min(int(newest.at(hour, a.toordinal())), horizon - 1) for d, a in zip(dates, anchors)],
+        [
+            max(
+                (a - d).days + min(int(newest.at(hour, a.toordinal())), horizon - 1)
+                for a in (refit_anchor(d, rule) for rule in rules)
+            )
+            for d in dates
+        ],
         dtype=np.int64,
     )
 

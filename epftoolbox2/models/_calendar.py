@@ -224,19 +224,81 @@ _EPOCH = datetime.date(1970, 1, 5)
 REFIT_EPOCH = _EPOCH.isoformat()
 _REFIT_RULE = re.compile(r"([1-9][0-9]*)(D|MS)")
 
+# `refit="auto"`: each training window refits on its own rule (`member_rules`), daily up to `AUTO_DAILY_UP_TO` days and weekly beyond
+# (decision 16 of the step 4 spec). The rule reads the window alone: research Q5 found a weekly refit costs a short window 2.7 to
+# 6.9 % and a long one at most 0.4 %, so this keeps the window average's MAE at about a third of the compute.
+REFIT_AUTO = "auto"
+AUTO_DAILY_UP_TO = 84
+AUTO_SHORT_RULE, AUTO_LONG_RULE = "1D", "7D"
+
 
 def check_refit(value: Any) -> Optional[str]:
-    """`value` if it is None (a fit per forecast), `"kD"` or `"kMS"` with a whole k from 1, else a ValueError."""
-    if value is None:
-        return None
+    """`value` if it is None (a fit per forecast), `"kD"` or `"kMS"` with a whole k from 1, or `"auto"` (a rule per training
+    window, `member_rules`), else a ValueError."""
+    if value is None or value == REFIT_AUTO:
+        return value
     if not isinstance(value, str) or _REFIT_RULE.fullmatch(value) is None:
-        hint = " ('auto' isn't one yet)" if value == "auto" else ""
         raise ValueError(
-            f"refit must be None, 'kD' or 'kMS' with a whole k from 1, such as '7D' or '1MS', got {value!r}{hint}: None fits "
-            "every forecast on its own, '7D' once every 7 days and '1MS' on the first of every month, counted from Monday "
-            f"{REFIT_EPOCH}"
+            f"refit must be None, 'kD' or 'kMS' with a whole k from 1, such as '7D' or '1MS', or 'auto', got {value!r}: None "
+            "fits every forecast on its own, '7D' once every 7 days and '1MS' on the first of every month, counted from Monday "
+            f"{REFIT_EPOCH}, and 'auto' a window of up to {AUTO_DAILY_UP_TO} days daily and a longer or 'expanding' one weekly"
         )
     return value
+
+
+def member_rules(members: Sequence[Any], refit: Optional[str]) -> Tuple[Optional[str], ...]:
+    """The refit rule of each training window of a model (`resolve_training_window`'s members), in their order: `refit` for every
+    one of them, or with `"auto"` `"1D"` for a window of at most 84 days and `"7D"` for a longer one or `"expanding"`.
+
+    Each member is then fitted on the anchors of its own rule, so a list such as `[56, 728]` fits its 56-day window every day and
+    its 728-day window on Mondays, and a forecast averages the newest fit of each. A single window under `"auto"` is the model with
+    its rule: `training_window=56, refit="auto"` forecasts as `refit="1D"` does, 728 as `"7D"`."""
+    if refit != REFIT_AUTO:
+        return tuple(refit for _ in members)
+    return tuple(
+        AUTO_SHORT_RULE if member != EXPANDING and member <= AUTO_DAILY_UP_TO else AUTO_LONG_RULE for member in members
+    )
+
+
+def _nests(fine: str, coarse: str) -> bool:
+    """Whether every block of `fine` lies inside a block of `coarse`, so that each anchor of `coarse` is one of `fine`: `"1D"` in
+    every rule, `"kD"` in `"KD"` and `"kMS"` in `"KMS"` when k divides K (both count from the same epoch)."""
+    (k_fine, unit_fine), (k_coarse, unit_coarse) = (_REFIT_RULE.fullmatch(rule).groups() for rule in (fine, coarse))
+    if unit_fine == unit_coarse:
+        return int(k_coarse) % int(k_fine) == 0
+    return unit_fine == "D" and int(k_fine) == 1
+
+
+def block_rule(rules: Sequence[Optional[str]]) -> Optional[str]:
+    """The coarsest of the members' rules (`member_rules`), whose blocks hold every other rule's: a pool job is one of its blocks,
+    a record's `refit_anchor` its anchor (the oldest fit a forecast uses), and the rows a run reads go back from it. None without
+    `refit`; a ValueError for rules whose blocks don't nest, which `"auto"` never gives."""
+    distinct = sorted({rule for rule in rules if rule is not None})
+    if not distinct:
+        return None
+    for coarse in distinct:
+        if all(_nests(fine, coarse) for fine in distinct):
+            return coarse
+    raise ValueError(f"the refit rules {distinct} don't nest: no one of them holds the blocks of every other")
+
+
+def newest_rule(rules: Sequence[Optional[str]]) -> Optional[str]:
+    """The finest of the members' rules, whose anchor is the newest a forecast's fits are made on: the rows of its fits end there.
+    None without `refit`."""
+    distinct = sorted({rule for rule in rules if rule is not None})
+    if not distinct:
+        return None
+    for fine in distinct:
+        if all(_nests(fine, coarse) for coarse in distinct):
+            return fine
+    raise ValueError(f"the refit rules {distinct} don't nest: no one of them fits within every other")
+
+
+def anchors_of_rules(days: Iterable[Any], rules: Sequence[Optional[str]]) -> List[datetime.date]:
+    """The anchors of these issue days under any of `rules` (a model's `member_rules`), each once, in date order: every day a fit
+    of a forecast on them is made on, so where its rows are cut. With one rule, `refit_anchors`."""
+    days = list(days)
+    return sorted({anchor for rule in dict.fromkeys(rules) for anchor in refit_anchors(days, rule)})
 
 
 def refit_anchor(day: Any, refit: str) -> datetime.date:
@@ -278,7 +340,8 @@ class FitUnit(NamedTuple):
     anchor (-1 with `newest_target="d-1"`), so the cut is relative to the refit day and nothing after it trains. `anchor` is a
     local date (`refit_anchor`), `list_id` the plan's id of the list (None for fixed lists). Each of its forecasts is predicted on
     its own from the one fit. `member` is the index of its training window in the model's members (`resolve_training_window`): a
-    model with a list of windows fits one unit per member, and a forecast averages its members' units.
+    model with a list of windows fits one unit per member, and a forecast averages its members' units. With `refit="auto"` the
+    anchor is that of the member's own rule (`member_rules`), so the members of one forecast can have different anchors.
     """
 
     period: int

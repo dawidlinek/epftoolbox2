@@ -741,7 +741,10 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "refit",
-            "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
+            "description": (
+                "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month, auto "
+                "a window of up to 84 days daily and a longer one weekly"
+            ),
             "required": False,
             "default": None,
             "kind": "text",
@@ -796,7 +799,10 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "refit",
-            "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
+            "description": (
+                "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month, auto "
+                "a window of up to 84 days daily and a longer one weekly"
+            ),
             "required": False,
             "default": None,
             "kind": "text",
@@ -850,7 +856,10 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "refit",
-            "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
+            "description": (
+                "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month, auto "
+                "a window of up to 84 days daily and a longer one weekly"
+            ),
             "required": False,
             "default": None,
             "kind": "text",
@@ -906,7 +915,10 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "refit",
-            "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
+            "description": (
+                "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month, auto "
+                "a window of up to 84 days daily and a longer one weekly"
+            ),
             "required": False,
             "default": None,
             "kind": "text",

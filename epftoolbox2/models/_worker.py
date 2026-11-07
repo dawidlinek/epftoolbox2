@@ -407,14 +407,15 @@ def _place_of(day_in_test: int) -> Tuple[Optional[str], int, int]:
 
 
 def _unit_of(task: tuple, member: int = 0) -> FitUnit:
-    """The fit a task of a model with `refit` forecasts from: its period and horizon, the anchor of its issue day, its list, and
-    the index of its training window among the model's (0 with one window)."""
+    """The fit a task of a model with `refit` forecasts from: its period and horizon, the anchor of its issue day under its
+    member's rule (`config["refit"]["rules"]`, each member's with `"auto"`), its list, and the index of its training window among
+    the model's (0 with one window)."""
     hour, hz, day_in_test = task
     cfg = _W_CONFIG
     task_lists = cfg.get("task_lists")
     list_id = None if task_lists is None else int(task_lists[(hour, hz)][_place_of(day_in_test)[2]])
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
-    return FitUnit(hour, hz, refit_anchor(run_date, cfg["refit"]["rule"]), list_id, member)
+    return FitUnit(hour, hz, refit_anchor(run_date, cfg["refit"]["rules"][member]), list_id, member)
 
 
 def _units_of(task: tuple) -> List[FitUnit]:
@@ -562,7 +563,9 @@ def _run_block(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
 
     With a list of training windows a task has a unit per member, all in its block, and its record is made after every one of
     them ran: the members' mean if each forecast it, else the first failing member's reason (in member order), tagged with its
-    window, as `_fit_one_numpy` does."""
+    window, as `_fit_one_numpy` does. With `refit="auto"` the block is one of the coarsest member's rule (`config["refit"]["rule"]`)
+    and a finer member has a unit per anchor of its own in it; the record's `refit_anchor` is the block's, the oldest fit the
+    forecast uses, and its `newest_target_day` the newest of its members'."""
     units: Dict[FitUnit, List[tuple]] = {}
     for task in tasks:
         for unit in _units_of(task):
@@ -595,5 +598,19 @@ def _run_block(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
         if failed is not None:
             skipped.append((task, _tagged(failed[1], members[failed[0]])))
         else:
-            results.append(_combined(ordered[0], [record["prediction"] for record in ordered]))
+            results.append(_combined(_across_members(ordered), [record["prediction"] for record in ordered]))
     return results, skipped
+
+
+def _across_members(records: List[Dict]) -> Dict:
+    """The first member's record of a task of a refit model with a list of windows, with what differs between its members when
+    their rules do (`refit="auto"`): `refit_anchor`, the block's anchor, which is the coarsest member's, and `newest_target_day`,
+    the newest of the members'. With one rule for every member these are every member's, so the record is the first's."""
+    first = records[0]
+    anchor = refit_anchor(first["run_date"], _W_CONFIG["refit"]["rule"]).isoformat()
+    if anchor == first["refit_anchor"] and all(record["refit_anchor"] == anchor for record in records):
+        return first
+    out = dict(first, refit_anchor=anchor)
+    if "newest_target_day" in first:
+        out["newest_target_day"] = max(record["newest_target_day"] for record in records)
+    return out
