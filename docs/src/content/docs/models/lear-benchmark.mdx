@@ -142,34 +142,45 @@ in BE, as the study found.
 
 ## The recommended settings and the defaults
 
-The [recommended LEAR](/epftoolbox2/models/lear/#recommended-settings) (the average of four `LEARModel`s, one per VST, each on
-`[56, 84, 728, "expanding"]` with BIC and `"published"`) and the library's defaults (`LEARModel(lear_predictors(x))`: BIC,
-`"lars"`, asinh, the same windows, `"d-1"`) against `lago()`, every model on the same 17,472 keys of each market, every model
-having produced all of them, MAE in EUR/MWh:
+The [recommended LEAR](/epftoolbox2/models/lear/#recommended-settings) (the average of four `LEARModel`s that differ only in their
+scaler, Lago's Invariant asinh, mirror-log, polynomial and N-PIT, each on `[56, 84, 728, "expanding"]` with BIC and `"published"`),
+the same average with the standardised `AsinhScaler` as its first member (this page's first measurement, before the asinh member was
+made the one the research measured), and the library's defaults (`LEARModel(lear_predictors(x))`: BIC, `"lars"`, the standardised
+asinh, the same windows, `"d-1"`) against `lago()`. Every model on the same 17,472 keys of each market, every model having produced
+all of them, so no ensemble has a `member_missing` key; MAE in EUR/MWh:
 
 | | NP | PJM | FR | BE | DE |
 |---|---|---|---|---|---|
 | `lago()` | 1.728 | 3.032 | 3.990 | 6.278 | 3.570 |
-| **recommended "LEAR"** (the average of the four) | **1.653** | **2.933** | **3.866** | **6.093** | **3.492** |
-| — `LEAR_asinh` | 1.694 | 3.004 | 3.936 | 6.123 | 3.559 |
+| **recommended "LEAR"** (the average of the four) | **1.655** | **2.932** | **3.866** | **6.089** | **3.494** |
+| — `LEAR_asinh`, Invariant asinh | 1.702 | 3.003 | 3.937 | 6.111 | 3.572 |
 | — `LEAR_mlog` | 1.704 | 2.984 | 3.908 | 6.205 | 3.564 |
 | — `LEAR_poly` | 1.711 | 2.989 | 3.920 | 6.246 | 3.578 |
 | — `LEAR_npit` | 1.695 | 2.922 | 3.935 | 6.071 | 3.608 |
+| the average with standardised asinh | 1.653 | 2.933 | 3.866 | 6.093 | 3.492 |
+| — its `LEAR_asinh`, standardised asinh | 1.694 | 3.004 | 3.936 | 6.123 | 3.559 |
 | the defaults | 1.723 | 3.060 | 4.000 | 6.208 | 3.597 |
-| recommended against `lago()` | −4.29 % | −3.25 % | −3.10 % | −2.95 % | −2.19 % |
+| recommended against `lago()` | −4.21 % | −3.28 % | −3.12 % | −3.01 % | −2.13 % |
 | DM p, recommended better than `lago()` | < 0.001 | < 0.001 | < 0.001 | < 0.001 | < 0.001 |
-| recommended against `LEAR_asinh` alone | −2.39 % | −2.36 % | −1.78 % | −0.48 % | −1.87 % |
-| DM p, recommended better than `LEAR_asinh` | < 0.001 | < 0.001 | < 0.001 | 0.13 | < 0.001 |
+| recommended against its Invariant asinh member | −2.74 % | −2.34 % | −1.81 % | −0.35 % | −2.18 % |
+| DM p, recommended better than that member | < 0.001 | < 0.001 | < 0.001 | 0.20 | < 0.001 |
+| with standardised asinh against `lago()` | −4.29 % | −3.25 % | −3.10 % | −2.95 % | −2.19 % |
+| recommended against the one with standardised asinh | +0.09 % | −0.04 % | −0.02 % | −0.06 % | +0.06 % |
+| DM p, recommended better / standardised better | 0.95 / 0.047 | 0.15 / 0.85 | 0.31 / 0.69 | 0.057 / 0.94 | 0.94 / 0.057 |
 | the defaults against `lago()` | −0.26 % | +0.93 % | +0.25 % | −1.12 % | +0.76 % |
 | DM p, defaults better / `lago()` better | 0.34 / 0.66 | 0.93 / 0.069 | 0.69 / 0.31 | 0.027 / 0.97 | 0.92 / 0.077 |
 
-RMSE, EUR/MWh: `lago()` 3.313 / 5.118 / 11.325 / 16.044 / 6.235, recommended 3.217 / 4.974 / 11.014 / 15.795 / 6.159, defaults
-3.333 / 5.246 / 11.482 / 16.162 / 6.343 (NP, PJM, FR, BE, DE).
+RMSE, EUR/MWh: `lago()` 3.313 / 5.118 / 11.325 / 16.044 / 6.235, recommended 3.221 / 4.976 / 11.036 / 15.801 / 6.166, with
+standardised asinh 3.217 / 4.974 / 11.014 / 15.795 / 6.159, defaults 3.333 / 5.246 / 11.482 / 16.162 / 6.343 (NP, PJM, FR, BE, DE).
 
-- **The recommended settings beat the paper's LEAR in every market**, by 2.2 to 4.3 % of the MAE (DM p 2.4e-4 in DE, below 1e-8
-  elsewhere), and the average of the four VSTs beats its asinh member alone in four of five (not significantly in BE). The ensemble
-  is the library's `AverageEnsemble`, which on every key equals `np.mean` of the four members to the bit; every member produced all
-  17,472 forecasts, so none is `member_missing`.
+- **The recommended settings beat the paper's LEAR in every market**, by 2.1 to 4.2 % of the MAE (DM p 3.2e-4 in DE, below 1e-7
+  elsewhere). The average of the four VSTs has a lower MAE than its Invariant asinh member alone in all five markets, significantly
+  in four (BE p 0.20). Each ensemble is the library's `AverageEnsemble`, which on every key equals `np.mean` of its four members to the
+  bit.
+- **With the standardised asinh instead** the average is within 0.1 % of the recommended one in every market, significantly better
+  only in NP (p 0.047). Of the two asinh members alone, the Invariant's MAE is +0.45 / −0.05 / +0.01 / −0.19 / +0.37 % against the
+  standardised one's (NP, PJM, FR, BE, DE). The recommended member is the Invariant because the research measured the average with
+  it, not because this benchmark prefers it.
 - **The defaults are within about 1 % of `lago()`**, better in NP and BE, worse in PJM, FR and DE, significantly only in BE (p
   0.027): they have BIC and the window average but train to D-1, which costs LEAR 1.4 to 2.1 % on this benchmark (above). With an
   information set, `newest_target="published"` gets it back.
@@ -185,7 +196,8 @@ Core-seconds (user and system time of a run and its pool) per market over the 72
 | `lago()` (AIC, `"cd"`) | 5,686 | 6,428 | 6,332 | 6,429 | 6,373 |
 | `lago()` with `criterion="bic"`, `solver="lars"` | 5,064 | 5,262 | 4,983 | 4,932 | 5,142 |
 | the defaults | 5,086 | 5,293 | 4,988 | 5,095 | 5,348 |
-| the recommended four (asinh + mlog + poly + npit) | 21,883 | 22,290 | 21,652 | 21,779 | 22,465 |
+| the recommended four (Invariant asinh + mlog + poly + npit) | 21,813 | 22,254 | 21,603 | 21,720 | 22,505 |
+| — of which the Invariant asinh member | 5,061 | 5,312 | 4,962 | 5,003 | 5,298 |
 | Ridge, T3's settings | 7,686 | 9,726 | 9,601 | 10,327 | 7,058 |
 
 With 8 processes a market's `lago()` takes 12 to 15 minutes of wall-clock time, the recommended members about 11 to 15 minutes
