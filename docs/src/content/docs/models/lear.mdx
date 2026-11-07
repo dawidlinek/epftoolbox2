@@ -135,8 +135,8 @@ option), tells the two apart:
 | `"bic"`: BIC's α\*, the paper's refit (`"cd"`) | 1.718 | 3.004 | 3.962 | 6.145 | 3.574 |
 | `"cv"` against `"bic"` | +0.9 % | +0.9 % | +0.1 % | −0.1 % | +0.5 % |
 
-With the path's coefficients CV's penalty is 9 to 25 % better than BIC's; with BIC's penalty the refit is 10 to 34 % better than the
-path (stage 2 above). Against `"bic"` the two about cancel. One-sided DM tests of the averages, not adjusted for the five markets,
+With the path's coefficients CV's penalty has a 9 to 25 % lower MAE than BIC's; with BIC's penalty the refit has a 9 to 26 % lower
+MAE than the path (stage 2 above). Against `"bic"` the two about cancel. One-sided DM tests of the averages, not adjusted for the five markets,
 find BIC better in NP (p 0.012) and PJM (p 0.046, which an adjustment for five tests would not keep), and neither better in FR, BE
 and DE (p 0.11 or more). BIC with the exact refit (`"lars"`, the default) is within 0.001 EUR/MWh of the `"cd"` row. Per window,
 `"cv"` is worse at 56 days in four markets (NP +4.1 %, PJM +3.1 %, FR +2.6 %, DE +1.7 %) and better in all four windows in BE (−2.2

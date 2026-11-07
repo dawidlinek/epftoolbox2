@@ -187,8 +187,8 @@ an issue day it didn't sample.
   coefficient. Over the paper's test periods the average of its four windows is within −0.1 to +0.9 % of the MAE of `"bic"` with
   Lago's refit (one-sided DM, unadjusted: BIC better in NP and PJM), at 1.7 to 1.9 times the cost of a run of `"bic"` with the
   default `solver="lars"` (1.5 to 1.7 against `"cd"`). It differs from `"bic"` in the penalty and in the coefficients: with the
-  path's coefficients for both, CV's penalty is 9 to 25 % better than BIC's; with BIC's penalty, the refit is 10 to 34 % better
-  than the path. Each fold drops the exact twins and the columns constant up to rounding of its own training rows, which
+  path's coefficients for both, CV's penalty has a 9 to 25 % lower MAE than BIC's; with BIC's penalty, the refit a 9 to 26 %
+  lower MAE than the path. Each fold drops the exact twins and the columns constant up to rounding of its own training rows, which
   0.24.2 didn't; its blocks are cut by rows, as 0.24.2's were, so a doubled autumn hour can straddle a block edge (a known issue,
   about 0.05 % of hourly keys). **Nothing else moves**: `"aic"` and `"bic"` fit as before, bit for bit. See
   [LEARModel](/epftoolbox2/models/lear/#blocked-cross-validation).
