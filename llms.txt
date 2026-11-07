@@ -24,7 +24,7 @@ Rules to know before using the library:
 - **Significance.** `report.tests(benchmark=...)` compares each model with a benchmark on the keys the pair shares and prints `n_days`, `n_forecasts` and the number of models `m` behind its Holm correction. `report.mcs()` and `report.ranks()` run on the keys all models share. A per-hour DM test (`by="hour"`) is descriptive, never a verdict, and one test year resolves differences of about 5 % of the MAE.
 - **YAML.** `DataPipeline`, `ModelPipeline` and `Workflow` have `save(path)` and `load(path)`. `save()` writes the ENTSO-E key as `${ENTSOE_API_KEY}` and `load()` expands it from the environment. Pass `include_secrets=True` only for files you never commit. Callable predictors cannot be saved (`save()` raises `TypeError`), so use `{horizon}` templates; a module-level function of `ctx` is saved by its import path. An unregistered class name raises on load.
 - **Custom components** must be registered in `COMPONENT_REGISTRY` to load from YAML, see the Extending page.
-- **Examples.** Runnable scripts are in `examples/` and need `ENTSOE_API_KEY` in the environment. Each has a `main()` that takes its date ranges and, if it writes files, an output directory. Worked snippets are on the two Examples pages.
+- **Examples.** Runnable scripts are in `examples/` and need `ENTSOE_API_KEY` in the environment, except `lear_lago.py` (LEAR on the Lago benchmark, downloaded from Zenodo). Each has a `main()` that takes its date ranges and, if it writes files, an output directory. Worked snippets are on the two Examples pages.
 
 ## Getting started
 

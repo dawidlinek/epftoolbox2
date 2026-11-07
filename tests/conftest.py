@@ -49,8 +49,9 @@ def restore_process_env():
 
 
 @pytest.fixture
-def live_dir(tmp_path, monkeypatch, entsoe_api_key):
-    """The directory a live test (examples, documentation quick start) runs in. Skips without ENTSOE_API_KEY.
+def keyless_live_dir(tmp_path, monkeypatch):
+    """The directory a live test runs in, for an example whose sources need no key (`examples/lear_lago.py`: the benchmark
+    datasets come from Zenodo). `live_dir` without the key.
 
     It is the working directory, so the source cache (`.cache/sources`) and the files written land there. One
     process and one thread run the models. The examples and Workflow.run() set MAX_PROCESSES, THREADS_PER_PROCESS
@@ -58,12 +59,21 @@ def live_dir(tmp_path, monkeypatch, entsoe_api_key):
     on teardown.
     """
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("ENTSOE_API_KEY", entsoe_api_key)
     for name in PROCESS_ENV:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
     return tmp_path
+
+
+@pytest.fixture
+def live_dir(keyless_live_dir, monkeypatch, entsoe_api_key):
+    """The directory a live test (examples, documentation quick start) runs in. Skips without ENTSOE_API_KEY.
+
+    `keyless_live_dir` with the key in the environment.
+    """
+    monkeypatch.setenv("ENTSOE_API_KEY", entsoe_api_key)
+    return keyless_live_dir
 
 
 @pytest.fixture
