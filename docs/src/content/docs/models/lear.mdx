@@ -139,8 +139,10 @@ report = (
 ```
 
 The data must start on the file's first day: the longest window's first training row is the issue day minus 1449 days, and it reads
-the price six days before that. With `refit="auto"` that window is fitted on the Monday on or before the issue day, so in DE the test
-can start on Monday 4 January 2016 at the earliest; a start on the 3rd is refused, naming the window and the day. PJM's frame is on `Etc/GMT+5`, where the rule above would date the evening hours of a day on the
+the price six days before that. With `refit="auto"` that window is fitted on the Monday on or before the issue day, and a refit
+model's frame check counts the six-day lag, so in DE the test can start on Monday 4 January 2016 at the earliest: from the 3rd its
+fit of 28 December 2015 would train on rows from 9 January 2012 whose lags the file doesn't have, and the run is refused, naming
+the window and the day the frame would need. PJM's frame is on `Etc/GMT+5`, where the rule above would date the evening hours of a day on the
 next one and train them on the day before: give the rule and the issue time on PJM's clock,
 `InformationSet("11:45", "Etc/GMT+5", rules={"price": Availability.published("13:00", 1, timezone="Etc/GMT+5")})`. The paper
 forecasts one day ahead; other horizons run, with the inputs anchored at the issue day and `x_d+{horizon}`, which only a series

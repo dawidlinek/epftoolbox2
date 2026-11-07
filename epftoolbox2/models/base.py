@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, List, Dict, Callable, Iterable, Sequence,
 import datetime
 import gc
 import inspect
+import math
 import multiprocessing
 import os
 import sys
@@ -86,7 +87,15 @@ from ._worker import (
     training_rows,
 )
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days, zone_name
-from ..information_set import _STEP_MINUTES, InformationSetError, TrainingRows, check_level, frame_first_day, rule_dict
+from ..information_set import (
+    _STEP_MINUTES,
+    InformationSetError,
+    TrainingRows,
+    check_level,
+    frame_first_day,
+    parse_predictor,
+    rule_dict,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -106,6 +115,24 @@ _WINDOWS_MAX_WORKERS = 61
 def _test_days(test_start: str, test_end: str) -> List[datetime.date]:
     first, last = datetime.date.fromisoformat(test_start), datetime.date.fromisoformat(test_end)
     return [first + datetime.timedelta(days=d) for d in range((last - first).days + 1)]
+
+
+def _days_back(names: Iterable[str]) -> Tuple[int, Optional[str]]:
+    """How many whole days before its row's date the oldest value of these predictors is, by their suffixes (`price_h05_d-6` 6,
+    `load_h-1` an hour, so 1: rounded up to a day), and that predictor; (0, None) if none looks back. A frame built from its
+    first date has no such lag on its first days, so a row there has a missing predictor and doesn't train."""
+    deepest, which = 0, None
+    for name in dict.fromkeys(names):
+        minutes = sum(shift.minutes for shift in parse_predictor(name)[-1][1])
+        days = math.ceil(-minutes / 1440) if minutes < 0 else 0
+        if days > deepest:
+            deepest, which = days, name
+    return deepest, which
+
+
+def _names_of(lists: Dict[Any, List[str]]) -> List[str]:
+    """Every predictor name of these lists, each once, in order."""
+    return list(dict.fromkeys(name for names in lists.values() for name in names))
 
 
 def _usable_cpu_count() -> int:
@@ -1110,7 +1137,9 @@ class BaseModel(ABC):
             self._cut_rules(information_set, cut_rules),
             issued,
         )
-        self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest)
+        if self._ctx_fn is None:  # a predictor function's lists are known after its plan, below
+            fixed = self._precompute_expanded_predictors(horizons)
+            self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest, _names_of(fixed))
         # A model that fits nothing has no training target to check.
         check_target = self.newest_target == "d-1" and not self._fits_nothing
         if self._ctx_fn is not None:
@@ -1130,6 +1159,9 @@ class BaseModel(ABC):
                     weekdays=weekdays,
                 )
             expanded = plan.names_by_pair()
+            self._check_reaches_back(
+                data, test_start, test_end, windows, weekdays, horizons, newest, _names_of(expanded)
+            )
             self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
             _contract.warn_about_a_midnight_stamp(
                 data.index, freq, self._used_predictors, self._cut_rules(information_set, cut_rules), self.name
@@ -1143,7 +1175,7 @@ class BaseModel(ABC):
             plan.release()
             return expanded
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
-        expanded = self._precompute_expanded_predictors(horizons)
+        expanded = fixed
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
         _contract.warn_about_a_midnight_stamp(
             data.index, freq, self._used_predictors, self._cut_rules(information_set, cut_rules), self.name
@@ -1223,8 +1255,10 @@ class BaseModel(ABC):
         weekdays: Optional[Sequence[int]],
         horizons: Sequence[int],
         newest: Optional[NewestTargets],
+        predictors: Iterable[str] = (),
     ) -> None:
-        """With `refit`, a ValueError if the frame starts after the earliest row a unit of the run trains on.
+        """With `refit`, a ValueError if the frame starts after the earliest row a unit of the run trains on, or less than its
+        predictors' deepest lag before it.
 
         A unit (p, h, a) trains on the rows dated in `training_span(a, W, h, k)`, k its newest target read on the anchor (-1 with
         `newest_target="d-1"`), and the first anchor can be up to a year before the test starts. The earliest first row over the
@@ -1235,7 +1269,13 @@ class BaseModel(ABC):
 
         With a list of training windows each member's units are checked, on the anchors of its own rule (`_refit_rules`: with
         `"auto"` a long member's anchor can be 6 days before a short one's); an `"expanding"` member trains on whatever the frame has
-        from its first date, so it asks for nothing."""
+        from its first date, so it asks for nothing.
+
+        A predictor with a day lag (`price_d-6`, or an hour lag counted as a day, rounded up: `_days_back`) holds on that row a
+        value 6 days older, which a frame built from the row's date doesn't have: the row would have a missing predictor and drop
+        out of the fit, as silently. So the frame must start the deepest lag of `predictors` before the earliest row. A frame
+        whose lags were built before it was cut is refused too; nothing is checked for `refit=None`, whose rows are cut on the
+        issue day, as before."""
         widths = [(member, rule) for member, rule in zip(self._members, self._refit_rules) if member != EXPANDING]
         if self.refit is None or not widths:
             return
@@ -1257,15 +1297,18 @@ class BaseModel(ABC):
                     first_rows, _ = training_span(anchors, width, int(horizon), newest_of)
                     earliest.append((int(np.min(first_rows)), width, rule))
         row, width, rule = min(earliest, key=lambda found: found[0])
-        needed = datetime.date.fromordinal(row)
+        lag, lagged = _days_back(predictors)
+        earliest_row = datetime.date.fromordinal(row)
+        needed = datetime.date.fromordinal(row - lag)
         starts = _contract.wall_clock(data.index).min().date()
         if starts > needed:
             which = "" if self.refit != REFIT_AUTO else f" (training window {width}, refit {rule!r})"
+            back = "" if not lag else f", and its {lagged} reads {lag} day{'s' if lag > 1 else ''} before that"
             raise ValueError(
                 f"{self.name}: with refit={self.refit!r} the forecasts issued from {first} on are fitted on their refit days, the "
-                f"first {refit_anchor(first, rule)}{which}, and the earliest row they train on is dated {needed}, but the frame "
-                f"starts on {starts}: that block would train on fewer days. Start the frame on {needed} or earlier, or the test "
-                "later."
+                f"first {refit_anchor(first, rule)}{which}, and the earliest row they train on is dated {earliest_row}{back}, but "
+                f"the frame starts on {starts}: that block would train on fewer days. Start the frame on {needed} or earlier, or "
+                "the test later."
             )
 
     def _target_on_anchors(

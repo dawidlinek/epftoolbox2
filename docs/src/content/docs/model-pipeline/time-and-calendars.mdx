@@ -166,8 +166,12 @@ A forecast issued on D uses the fit of its **anchor** a, the refit day on or bef
   naming that day, since the first block would otherwise train on fewer days without a word. It is a - W - h with
   `newest_target="d-1"` (a the first refit day, h the largest horizon); with `"published"` it follows each period's newest target on
   each refit day, so later when D's target is out by the issue time (a - W with a price out at 14:00 and h = 2) and earlier when the
-  rule reaches further back. The day asked for is exact: a frame from it gives a longer frame's records. With validation and test windows the first issue day is the validation window's. A frame sized
-  for `refit=None`, from `test_start` - W - h, is too short whenever the test doesn't start on a refit day.
+  rule reaches further back. The predictors' lags count too: with `price_d-6` among them the frame must start 6 days before that
+  row, and an hour lag counts as a day, since in a frame built from the row's date its lag is empty and the row drops out of the fit.
+  The day asked for is then exact for a frame built from it (one whose lags were built before it was cut is refused too). With
+  validation and test windows the first issue day is the validation window's. A frame sized
+  for `refit=None`, from `test_start` - W - h, is too short whenever the test doesn't start on a refit day. `refit=None` itself is
+  not checked so: its first forecasts train on what the frame has.
 - **The information set reads the anchors.** The check of the newest training target of a `"d-1"` model is made on the anchors of the
   issue days, at the issue time of each, since that is where its rows are cut. Predictors are checked on the issue days, as before. With
   `"published"` the target's rule is read on the anchors.

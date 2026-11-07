@@ -236,8 +236,9 @@ an issue day it didn't sample.
   `newest_target="published"` the newest target known at a's issue time), finds its binary columns on those rows, and is predicted from
   its own row on its own, so it is bit for bit the same whichever run, process count or resume made it. Records gain `refit_anchor`,
   the manifest's `training_cut` gains `refit` and `refit_epoch` (changing `refit` refuses a resume), resume compares each stored
-  anchor, and YAML writes `refit` only when set. A frame that doesn't hold W+h days before the refit day of the first issue day raises `ValueError` naming the day it
-  must start on (one sized for `refit=None` is too short whenever the test doesn't start on a refit day), and a run uses
+  anchor, and YAML writes `refit` only when set. A frame that doesn't hold W+h days before the refit day of the first issue day, and the predictors' deepest lag before
+  that (`price_d-6` 6 days, an hour lag a day: else the first training rows miss their lags and drop out), raises `ValueError` naming
+  the day it must start on (one sized for `refit=None` is too short whenever the test doesn't start on a refit day), and a run uses
   at most one process per refit day. Other values raise, and so does `refit` on a custom model with only
   `_fit_predict`, or whose `_fit_predict`, `_fit_model` and `_predict_fitted` aren't all defined in one class (a subclass that
   overrides some of them would fit one model with `refit=None` and another with `refit`). `verify`, `leakage_probe` and `positive_control` run a refit model from the issue day to the end of its block,

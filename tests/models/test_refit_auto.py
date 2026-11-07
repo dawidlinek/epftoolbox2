@@ -34,9 +34,11 @@ from epftoolbox2.models._calendar import (
     newest_rule,
 )
 from epftoolbox2.models._worker import _worker_init
+from epftoolbox2.models.base import _days_back
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path
 from epftoolbox2.results.windows import RunWindows
+from tests.fixtures.lago.frames import EXOGENOUS, FixtureSource, lear_frame
 from tests.synthetic import PREDICTORS, make_market_data
 
 RULES = {
@@ -480,6 +482,84 @@ def test_the_frame_must_reach_back_from_each_member_s_own_anchor():
     run(starting_on(shift(needed, 2)), refit="1D")
     with pytest.raises(ValueError, match="earliest row they train on is dated"):
         run(starting_on(shift(needed, 3)), refit="1D")
+
+
+def test_predictor_lags_count_back_whole_days():
+    """A day lag counts its days and an hour lag the days it reaches into, rounded up; a lead or a profile slot counts none."""
+    assert _days_back(["price_h05_d-6", "load_h-1", "is_monday_d+1", "price"]) == (6, "price_h05_d-6")
+    assert _days_back(["load_h-1"]) == (1, "load_h-1") and _days_back(["load_h-25"]) == (2, "load_h-25")
+    assert _days_back(["x_d-1_h-1", "y_d-1"]) == (2, "x_d-1_h-1")
+    assert _days_back(["load_d+1", "price_h23"]) == (0, None)
+
+
+def built_from(data, first):
+    """`data` from the local date `first` on, as a frame built from that date has it: the lagged columns empty where their
+    value would be from before it (`price_d-1` on the first date, `load_h-3` on its first three hours)."""
+    out = data[local_dates(data) >= np.datetime64(first)].copy()
+    first_day = local_dates(out) == np.datetime64(first)
+    out.loc[first_day, "price_d-1"] = np.nan
+    out.iloc[:3, out.columns.get_loc("load_h-3")] = np.nan
+    return out
+
+
+def lagged_list(ctx):
+    """A predictor function's list with a day lag."""
+    return [*PREDICTORS, "price_d-1"]
+
+
+@pytest.mark.parametrize(
+    ("lagged", "kind"), [("price_d-1", "fixed"), ("load_h-3", "fixed"), ("price_d-1", "function")], ids=str
+)
+def test_the_frame_must_hold_the_lags_of_the_earliest_training_row(lagged, kind):
+    """With `price_d-1` (or `load_h-3`, an hour lag that reaches into the day before) the earliest row a fit trains on, 3 April
+    - 85 - 1, needs the frame to start a day before it. A frame built from that day gives the long frame's records; one built from
+    the row's own date is refused, naming the predictor and the day, and would have dropped that row from the fit. The same for a
+    predictor function's lists."""
+    data = market("spring")
+    data = data.assign(**{"load_h-3": data["load"].shift(3)})
+    row = shift("2023-04-03", -86)
+    needed = shift(row, -1)
+
+    def run(frame):
+        predictors = lagged_list if kind == "function" else [*PREDICTORS, lagged]
+        model = OLSModel(predictors, training_window=[SHORT, LONG], refit="auto")
+        info = {"information_set": INFO} if kind == "function" else {}
+        return texts(model.run(frame, "2023-04-05", "2023-04-06", horizon=1, **info)._results)
+
+    long = run(data)
+    assert run(built_from(data, needed)) == long
+    with pytest.raises(
+        ValueError, match=rf"dated {row}, and its {lagged} reads 1 day before that, .* Start the frame on {needed}"
+    ):
+        run(built_from(data, row))
+    original = BaseModel._check_reaches_back
+    try:
+        BaseModel._check_reaches_back = lambda self, *args: None
+        assert run(built_from(data, row)) != long
+    finally:
+        BaseModel._check_reaches_back = original
+
+
+@pytest.mark.parametrize("newest", ["published", "d-1"])
+def test_lago_with_auto_can_start_on_monday_4_january_2016_in_de(newest):
+    """`lago()` under "auto": the 1449-row window of the forecasts issued on Sunday 3 January 2016 is fitted on 28 December 2015,
+    whose earliest row (9 January 2012 under "published", the 8th under "d-1") has its six-day price lag before the file's first
+    day, so that start is refused; one on Monday the 4th isn't. `refit=None` is not checked so, as before."""
+    frame = lear_frame(FixtureSource("DE"), "2012-01-09", "2016-01-05")
+    info = InformationSet(
+        "11:45", "Europe/Brussels", rules={"price": Availability.published("13:00", 1, timezone="Etc/GMT-1")}
+    )
+
+    def check(start, refit="auto"):
+        model = LEARModel.lago(EXOGENOUS["DE"])
+        model.newest_target, model.refit = newest, refit
+        model._check_inputs(frame, "price", 1, "1h", None, start, start, cut_rules=info)
+
+    row = "2012-01-09" if newest == "published" else "2012-01-08"
+    with pytest.raises(ValueError, match=rf"dated {row}, and its price_h00_d-6 reads 6 days before that"):
+        check("2016-01-03")
+    check("2016-01-04")
+    check("2016-01-03", refit=None)
 
 
 # ---------------------------------------------------------------------------
