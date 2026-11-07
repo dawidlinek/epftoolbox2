@@ -523,7 +523,7 @@ def _twin_design(kind, seed):
 
 
 @pytest.mark.parametrize("kind", ["24 slots", "negative", "scaled copy"])
-def test_exact_twins_are_dropped_but_the_first_and_the_fit_is_the_lasso(kind):
+def test_exact_twins_are_dropped_but_one_and_the_fit_is_the_lasso(kind):
     """LARS can't take a second exact twin (its entry is 0.24.2's degenerate entrant, decided by a last bit, after which the path
     carries cancelling coefficients of about 1e14): `lear_fit` keeps the first twin in column order, gives the others exactly 0, and
     is then the exact lasso at its α* (scikit-learn's `Lasso(tol=1e-14)`, whose split between twins is its own) in the forecast and
