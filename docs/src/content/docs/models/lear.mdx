@@ -123,19 +123,25 @@ and `solver="lars"`, every window and hour is old `LassoLarsCV` under scikit-lea
 in α\* (relative) and in every coefficient, the 49- and 77-row windows (X form there) and the 34 DE fits whose penalties were
 thinned to every second kink included. `tests/models/test_lear_lago.py` holds it.
 
-**Against BIC.** Over the paper's test periods, with `lago()`'s settings and `criterion="cv"` (h = 1, 728 days × 24 hours in every
-market, the same keys for both), MAE in EUR/MWh of the average of the four windows:
+**Against BIC.** Over the paper's test periods with `lago()`'s settings (h = 1, 728 days × 24 hours in every market, the same keys
+in every row), MAE in EUR/MWh of the average of the four windows. `"cv"` differs from `"bic"` twice, in the penalty and in the
+coefficients (the path's, with no refit), so the middle row, BIC's penalty with the path's coefficients (a research arm, not an
+option), tells the two apart:
 
-| Criterion | NP | PJM | FR | BE | DE |
-|-----------|----|-----|----|----|----|
-| `"cv"` | 1.734 | 3.030 | 3.965 | 6.142 | 3.591 |
-| `"bic"` (the paper's refit, `"cd"`) | 1.718 | 3.004 | 3.962 | 6.145 | 3.574 |
-| difference | +0.9 % | +0.9 % | +0.1 % | −0.1 % | +0.5 % |
+| Penalty, coefficients | NP | PJM | FR | BE | DE |
+|-----------------------|----|-----|----|----|----|
+| `"cv"`: CV's α\*, path coefficients, no refit | 1.734 | 3.030 | 3.965 | 6.142 | 3.591 |
+| BIC's α\*, path coefficients, no refit | 2.309 | 3.364 | 4.733 | 6.764 | 4.438 |
+| `"bic"`: BIC's α\*, the paper's refit (`"cd"`) | 1.718 | 3.004 | 3.962 | 6.145 | 3.574 |
+| `"cv"` against `"bic"` | +0.9 % | +0.9 % | +0.1 % | −0.1 % | +0.5 % |
 
-By Lago et al.'s DM test BIC's averages are better in NP (p 0.012) and PJM (p 0.046), and neither is in FR, BE and DE (p 0.11 or more). BIC
-with the exact refit (`"lars"`) is within 0.001 EUR/MWh of the `"cd"` row. Cross-validation loses most on the short windows (56
-days: +4.1 % in NP, +3.1 % in PJM) and gains on some long ones (−1.2 % at 1092 days in PJM, −1.1 % at 1456 in BE). A fit costs
-about 3.5 times BIC's with `"cd"` and 5 times with `"lars"`, a whole run 1.5 to 1.7 times (the rest is the same for both).
+With the path's coefficients CV's penalty is 9 to 25 % better than BIC's; with BIC's penalty the refit is 10 to 34 % better than the
+path (stage 2 above). Against `"bic"` the two about cancel. One-sided DM tests of the averages, not adjusted for the five markets,
+find BIC better in NP (p 0.012) and PJM (p 0.046, which an adjustment for five tests would not keep), and neither better in FR, BE
+and DE (p 0.11 or more). BIC with the exact refit (`"lars"`, the default) is within 0.001 EUR/MWh of the `"cd"` row. Per window,
+`"cv"` is worse at 56 days in four markets (NP +4.1 %, PJM +3.1 %, FR +2.6 %, DE +1.7 %) and better in all four windows in BE (−2.2
+% at 84 days). A fit costs 5.0 to 6.8 times one of `"bic"` with the default `"lars"` and 3.5 to 4.8 times one with `"cd"` (from the
+1449- to the 49-row window); a whole run, whose rows, scaling and records cost the same, 1.7 to 1.9 and 1.5 to 1.7 times as much.
 
 ## Lago et al. (2021) exactly
 
