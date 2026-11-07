@@ -52,6 +52,19 @@ import { Steps, Tabs, TabItem, Aside, Badge, Code } from '@astrojs/starlight/com
 - openpyxl (for Excel export)
 - rich (for terminal output)
 
+### The `[fast]` extra
+
+```bash
+pip install 'epftoolbox2[fast]'
+```
+
+installs numba, which compiles the LARS and coordinate-descent kernels of [`LEARModel`](/epftoolbox2/models/lear/): about 10 times
+faster for its default exact refit and 35 times for Lago's coordinate descent (`solver="cd"`) than the numpy kernels, which are always
+there. `EPFTOOLBOX2_KERNELS` chooses: `auto` (the default) uses numba when it imports, `numpy` never, and `numba` raises
+`MissingExtraError` without it. The two agree within 1e-9 with the same kinks, not to the bit, and a run's manifest records which
+ran. numba compiles on its first use (some 20 s, then cached on disk) in the process that starts the pool, before any worker
+forks. The extra is for Python 3.11 to 3.14, free-threaded 3.14t included.
+
 ---
 
 ## Parallel Model Training
@@ -107,6 +120,7 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 |---|---|---|
 | `MAX_PROCESSES` | usable CPUs `// THREADS_PER_PROCESS` | Number of worker processes, never more than the run days (nor 61 on Windows). Usable CPUs are those this process may run on, e.g. a SLURM or `taskset` allocation |
 | `THREADS_PER_PROCESS` | `1` | Tasks each worker process runs at once, on threads |
+| `EPFTOOLBOX2_KERNELS` | `auto` | `LEARModel`'s kernels: `auto` (numba when the [`[fast]` extra](#the-fast-extra) imports), `numpy` or `numba` |
 
 You don't need `OMP_NUM_THREADS`, `MKL_NUM_THREADS` or `OPENBLAS_NUM_THREADS`: each worker process limits BLAS and OpenMP to one thread per task itself (with `threadpoolctl`), and your own process keeps its settings.
 

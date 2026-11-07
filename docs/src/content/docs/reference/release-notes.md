@@ -152,6 +152,19 @@ an issue day it didn't sample.
 
 ### New
 
+- **`LEARModel`: LEAR, and `LEARModel.lago()`, Lago et al. (2021) exactly.** `LEARModel(predictors, training_window=[56, 84, 728,
+  "expanding"], criterion="bic", solver="lars", *, scaler="asinh", name="LEAR", newest_target="d-1", refit=None)` fits a Lasso per
+  period whose penalty is chosen on every fit as old scikit-learn `LassoLarsIC(normalize=True)` chose it, AIC or BIC on the LARS path of
+  unit-norm columns, then refits it on the columns as they are (Lago's refit), exactly (`"lars"`) or by Lago's coordinate descent of at
+  most 2500 sweeps (`"cd"`). Its kernels follow scikit-learn 0.24.2, which the paper ran, and run in numpy or, with the new `[fast]`
+  extra (`pip install 'epftoolbox2[fast]'`, numba), compiled (`EPFTOOLBOX2_KERNELS=auto|numpy|numba`); the two agree within 1e-9, and a
+  manifest records which ran as provenance (`kernels`), so a resume on the other warns. `LEARModel.lago(exogenous)` is the paper's
+  model: AIC, `"cd"`, the Invariant scaler, the windows `[49, 77, 1085, 1449]` (the paper's 56 to 1456 days less the first week),
+  `newest_target="published"` and its inputs in the original's order; on the first DE and BE test days it is within 1e-9 EUR/MWh of the
+  original epftoolbox. Two options come with it: `AsinhScaler(standardise=False)` (on every VST scaler) is epftoolbox's Invariant
+  scaler, and `lear_predictors(..., order="lago")` lists the same 247 inputs in the original's order. **Nothing moves for the other
+  models or for the defaults of those two**: no existing manifest, scaler spec, YAML file or golden number changes. See
+  [LEARModel](/epftoolbox2/models/lear/).
 - **`RidgeModel`: ridge regression with a leave-one-out penalty.** `RidgeModel(predictors, training_window=365, alphas=None, *,
   fit_intercept=True)` is scikit-learn's `RidgeCV` with `cv=None`: on every fit it chooses the penalty from a grid by the closed-form
   leave-one-out error of the training rows and fits with it, on the same standardised rows as `OLSModel` and `LassoCVModel`. `alphas=None`

@@ -82,7 +82,7 @@ Row D of the data is the issue day in `ModelPipeline`. The paper forecasts day d
 
 - Use `horizon=1`. The exogenous series are day-ahead forecasts, so `x_d+2` and beyond would be forecasts published after the issue day, i.e. look-ahead.
 - The test period in the table lists delivery days. Issue days start one day earlier: for DE, `test_start="2016-01-03"`, `test_end="2017-12-30"`.
-- The paper's LEAR model uses all 24 hourly prices of each lagged day and averages several calibration windows. `ModelPipeline` fits one model per hour on same-hour inputs, so its numbers are comparable in setup but won't reproduce LEAR exactly.
+- The paper's LEAR model uses all 24 hourly prices of each lagged day and averages four calibration windows. [`LEARModel.lago()`](/epftoolbox2/models/lear/#lago-et-al-2021-exactly) is that model: with the inputs of [`lear_predictors(..., order="lago")`](/epftoolbox2/model-pipeline/presets/#lear) it reproduces the original epftoolbox's forecasts. Give it the exogenous series in the order of the file: NP `load_forecast, wind_forecast`, PJM `load_forecast, zonal_load_forecast`, FR `generation_forecast, load_forecast`, BE `generation_forecast_fr, load_forecast_fr`, DE `load_forecast_amprion, wind_solar_forecast`. (FR's and BE's files have the generation forecast first; the source names columns by meaning, so the order of the table above isn't the file's.)
 
 ## Download and verification
 

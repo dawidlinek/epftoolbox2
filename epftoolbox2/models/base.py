@@ -139,7 +139,7 @@ class BaseModel(ABC):
         first of every k-th month, on a calendar counted from Monday 1970-01-05 (`_calendar.refit_anchor`). A forecast issued on
         D then uses the fit of its anchor a, the refit day on or before D: rows cut as for a forecast issued on a, with the
         newest target as of a's issue time, so nothing after a trains, and each forecast predicted on its own from that fit. Only
-        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV, Ridge) can.
+        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV, Ridge, LEAR) can.
 
         `training_window` is how many days of rows a forecast trains on (`_calendar.training_span`), `"expanding"` every row from
         the frame's first local date, or a list of them, such as `[56, 84, 728, "expanding"]`: each member is fitted on its own

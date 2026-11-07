@@ -1,0 +1,151 @@
+---
+title: LEARModel
+description: LEAR, the Lasso of Lago et al. (2021) with its penalty chosen by AIC or BIC, and LEARModel.lago(), the original exactly
+---
+
+LEAR (Lasso-estimated autoregressive) is the linear benchmark of Lago, Marcjasz, De Schutter & Weron (2021), *Forecasting
+day-ahead electricity prices: A review of state-of-the-art algorithms, best practices and an open-access benchmark*, Applied
+Energy 293, 116983. `LEARModel` fits one Lasso per period of day, horizon and run day, as every model here does, and chooses its
+penalty on every fit by an information criterion on the LARS path. Its own LARS and coordinate-descent kernels follow scikit-learn
+0.24.2, the version the paper ran, rule for rule. [`LEARModel.lago()`](#lago-et-al-2021-exactly) is the paper's model, and
+reproduces the original epftoolbox's forecasts.
+
+## Basic Usage
+
+```python
+from epftoolbox2.models import LEARModel
+from epftoolbox2.presets import lear_predictors
+
+model = LEARModel(lear_predictors(exogenous=["load_forecast", "residual_load"]), name="LEAR")
+```
+
+The defaults are the recommended single model of the forecasting plan: BIC, the exact refit, `AsinhScaler` and the average of four
+training windows, `[56, 84, 728, "expanding"]`. They need no information set: the newest target is D-1, as for every model by default.
+With an issue time, `newest_target="published"` also trains on the issue day's prices once they are published.
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `predictors` | List or function | Required | Predictor specifications (strings, `{horizon}` templates, or callables), or a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/). [`lear_predictors`](/epftoolbox2/model-pipeline/presets/#lear) gives LEAR's 247 |
+| `training_window` | int, `"expanding"` or list | `(56, 84, 728, "expanding")` | Days of training rows, every row from the frame's first date, or a list of windows averaged inside the model with equal weights ([Training Windows](/epftoolbox2/model-pipeline/training-windows/)). A list is stored as a list |
+| `criterion` | str | `"bic"` | How the penalty is chosen on the LARS path: `"bic"` or `"aic"` (the paper's). See [The fit](#the-fit) |
+| `solver` | str | `"lars"` | The Lasso at that penalty: `"lars"` solves it exactly, `"cd"` is the paper's coordinate descent, which stops after at most 2500 sweeps |
+| `scaler` | str, dict or scaler | `"asinh"` | Keyword-only. `"asinh"`, `"standard"` or `"npit"`, or `{"name": ..., "params": {...}}`; `{"name": "asinh", "params": {"standardise": False}}` is the paper's Invariant scaler. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
+| `name` | str | `"LEAR"` | Keyword-only. Display name for reports |
+| `newest_target` | str | `"d-1"` | Keyword-only. `"d-1"`, or `"published"`, every target its rule says is known by the issue time, which needs an information set. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target) |
+| `refit` | str or None | `None` | Keyword-only. `None` fits every forecast on its own, `"kD"` once every k days and `"kMS"` on the first of every k-th month, on a fixed calendar. See [Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) |
+
+A saved pipeline writes `criterion` and `solver` always, and the rest as for the other models.
+
+## The fit
+
+Each fit reads the scaled training rows through their centred sums alone (`X'X`, `X'y`, `y'y` and the means), in two stages:
+
+1. **The penalty α\*.** The LARS-lasso path on centred columns of unit norm, and at every kink of it the criterion of old
+   scikit-learn `LassoLarsIC` (`normalize=True`, up to version 1.1): `n · MSE / var(y) + K · df`, with K = 2 for AIC and log n for BIC,
+   var(y) with ddof 0 and df the number of non-zero coefficients. α\* is the kink with the lowest value, the first if two tie. Since
+   1.2 scikit-learn estimates the noise variance from an OLS fit instead, which raises when there are no more rows than inputs: for
+   every 56- and 84-day window of LEAR's 247 inputs.
+2. **The coefficients.** The Lasso at α\* on the centred columns as they are, not normalised: the paper's refit. A penalty chosen on
+   unit-norm columns penalises columns of norm about √n about √n times less here, so the refit keeps 118 to 133 inputs where the
+   path's own solution at α\* keeps 22 to 25, and it forecasts 4 to 14 % better (the research's measurements on the paper's data). The
+   path's own coefficients are never used.
+
+`solver="lars"` gets the stage-2 Lasso exactly, from a second LARS path run just past α\*. `solver="cd"` is the paper's
+`Lasso(alpha, max_iter=2500)`: cyclic coordinate descent from zero, in the order of the predictors, stopped when the duality gap is
+below 1e-4 of `y'y` or after 2500 sweeps. It often stops before it converges, so its coefficients depend on the order of the
+predictors, which is why [`lear_predictors(..., order="lago")`](/epftoolbox2/model-pipeline/presets/#lear) exists. On 20 days of
+the paper's DE data (BIC) the two differed by up to 0.06 EUR/MWh in single forecasts at 1092 days and 0.16 at 56.
+
+- **An intercept** is always fitted, by the centring: a forecast is `ybar + (x - xbar) @ w` on the scaled row. A column the scaler made
+  constant gets the coefficient 0 in both stages.
+- **Coefficients** in the records are `w`, on the scaled inputs. A model with a list of windows records `member_predictions` and
+  empty `coefficients`, as every model does.
+- **More inputs than rows** (49 rows of 247 inputs in the paper's shortest window): the path runs on `X'X` for every window. Old
+  `LassoLarsIC` ran the path on `X` there; on the paper's data both chose the same α\* in every fit compared.
+- **Collinear inputs.** With the intercept, a complete set of one-hot dummies is collinear (their sum is constant). As in
+  scikit-learn, LARS then meets its degenerate-entrant rule when the last dummy would enter, at the end of the path for LEAR's seven
+  weekdays. A complementary pair (`is_weekend` and `is_weekday`) meets it early, where the two [kernels](#kernels) can take different
+  turns on a tie decided by the last bit: give LEAR one of the pair, as it fits the intercept itself.
+- **`refit=`** works: one class defines the fit and the forecast from it, so a forecast issued on D uses the fit of its refit day.
+
+## Lago et al. (2021) exactly
+
+`LEARModel.lago(exogenous, *, price="price", calendar_prefix="", name="LEAR")` returns a plain `LEARModel` with the paper's settings:
+
+- the 247 inputs of `lear_predictors(exogenous, price, calendar_prefix=..., order="lago")`, in the original's column order;
+- `criterion="aic"`, `solver="cd"` and the Invariant scaler, `{"name": "asinh", "params": {"standardise": False}}`;
+- `training_window=[49, 77, 1085, 1449]`, averaged with equal weights: the paper's calibration windows of 56, 84, 1092 and 1456 days,
+  of which the original drops the first week for its lags, so they hold that many targets;
+- `newest_target="published"`: the newest of those targets is the issue day's price, published at 13:00 on the day before.
+
+Give it the exogenous series in the order of the dataset's file, which coordinate descent stopped early depends on:
+
+| Dataset | `exogenous` |
+|---------|-------------|
+| NP | `["load_forecast", "wind_forecast"]` |
+| PJM | `["load_forecast", "zonal_load_forecast"]` |
+| FR | `["generation_forecast", "load_forecast"]` |
+| BE | `["generation_forecast_fr", "load_forecast_fr"]` |
+| DE | `["load_forecast_amprion", "wind_solar_forecast"]` |
+
+```python
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+from epftoolbox2.data.sources import CalendarSource, EpftoolboxBenchmarkSource
+from epftoolbox2.data.transformers import (
+    DailyProfileTransformer, DSTNormalizeTransformer, LagTransformer, TimezoneTransformer,
+)
+from epftoolbox2.information_set import Availability, InformationSet
+from epftoolbox2.models import LEARModel
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.presets import WEEKDAYS, profile_columns
+
+EXOGENOUS = ["load_forecast_amprion", "wind_solar_forecast"]
+source = EpftoolboxBenchmarkSource("DE")
+data = (
+    DataPipeline(timezone=source.index_timezone)
+    .add_source(source)
+    .add_source(CalendarSource("DE", weekday="onehot", holidays=False))
+    .add_transformer(TimezoneTransformer())
+    .add_transformer(DSTNormalizeTransformer(freq="1h"))
+    .add_transformer(DailyProfileTransformer(columns=["price", *EXOGENOUS]))
+    .add_transformer(LagTransformer(columns=profile_columns("price"), lags=[1, 2, 6], freq="day"))
+    .add_transformer(LagTransformer(columns=[c for x in EXOGENOUS for c in profile_columns(x)], lags=[-1, 6], freq="day"))
+    .add_transformer(LagTransformer(columns=[f"is_{d}" for d in WEEKDAYS], lags=[-1], freq="day"))
+)
+df = data.run("2012-01-09", "2017-12-31")
+
+information_set = InformationSet(
+    "11:45", "Europe/Brussels", rules={"price": Availability.published("13:00", 1, timezone="Etc/GMT-1")}
+).with_source_rules([source])
+report = (
+    ModelPipeline(information_set=information_set, availability="raise")
+    .add_model(LEARModel.lago(EXOGENOUS))
+    .add_evaluator(MAEEvaluator())
+    .run(df, test_start="2016-01-03", test_end="2017-12-30", horizon=1)  # the paper's 728 target days, issued the day before
+)
+```
+
+The data must start on the file's first day: the longest window's first training row is the issue day minus 1449 days, and it reads
+the price six days before that. PJM's frame is on `Etc/GMT+5`, where the rule above would date the evening hours of a day on the
+next one and train them on the day before: give the rule and the issue time on PJM's clock,
+`InformationSet("11:45", "Etc/GMT+5", rules={"price": Availability.published("13:00", 1, timezone="Etc/GMT+5")})`. The paper
+forecasts one day ahead; other horizons run, with the inputs anchored at the issue day and `x_d+{horizon}`, which only a series
+published that far ahead can give.
+
+### What it reproduces
+
+- **The original's forecasts**, against the original epftoolbox (github.com/jeslago/epftoolbox at 47d6e06) run under scikit-learn
+  0.24.2: every hour of every window on the first target day of the DE and BE test periods within 1e-9 EUR/MWh (the test
+  `tests/models/test_lear_lago.py` holds them to 1e-6), and the design row of those days to the bit.
+- **The published forecasts** where they can be: no scikit-learn version reproduces the paper's published 56- and 84-day forecasts
+  (up to 2 to 9 EUR/MWh in single hours), and the 1092- and 1456-day ones within 0.0 to 0.2 % of their MAE.
+
+## Kernels
+
+The fit runs in numpy, or compiled by numba with the [`[fast]` extra](/epftoolbox2/getting-started/installation/#the-fast-extra):
+`pip install 'epftoolbox2[fast]'`. `EPFTOOLBOX2_KERNELS=auto|numpy|numba` chooses (`auto`, the default, takes numba when it imports).
+On one core a fit of the 1449-row window takes about 16 ms (exact refit) and 28 ms (coordinate descent) with numba, and 150 ms and
+1 s in numpy. The two agree within 1e-9 with the same kinks, not to the bit, since they sum in different orders: a run's manifest
+records which ran (`kernels`, with the provenance, never compared), and a resume on the other one warns.
