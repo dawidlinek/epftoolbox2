@@ -856,6 +856,62 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "LEARModel": [
+        {"name": "name", "description": "Model display name", "required": False, "default": "LEAR", "kind": "text"},
+        {
+            "name": "predictors",
+            "description": "Predictor column names (presets.lear_predictors gives LEAR's 247)",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "training_window",
+            "description": "Training window in days, 'expanding', or a list averaged inside the model (e.g. 56,84,728,expanding)",
+            "required": False,
+            "default": "56,84,728,expanding",
+            "kind": "window",
+        },
+        {
+            "name": "criterion",
+            "description": "How the penalty is chosen on the LARS path: bic or aic (Lago et al.'s)",
+            "required": False,
+            "default": "bic",
+            "kind": "select",
+            "choices": ["bic", "aic"],
+        },
+        {
+            "name": "solver",
+            "description": "The Lasso at that penalty: lars (exact) or cd (Lago's coordinate descent, stops after 2500 sweeps)",
+            "required": False,
+            "default": "lars",
+            "kind": "select",
+            "choices": ["lars", "cd"],
+        },
+        {
+            "name": "scaler",
+            "description": "Scaling: asinh (median/MAD asinh, standardised), standard, or npit",
+            "required": False,
+            "default": "asinh",
+            "kind": "select",
+            "choices": ["asinh", "standard", "npit"],
+        },
+        {
+            "name": "newest_target",
+            "description": "Newest training target: d-1, or every target published by the issue time (needs an issue time)",
+            "required": False,
+            "default": "d-1",
+            "kind": "select",
+            "choices": ["d-1", "published"],
+        },
+        {
+            "name": "refit",
+            "description": "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+    ],
     "NaiveModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "Naive", "kind": "text"},
         {
@@ -1280,7 +1336,7 @@ _VALIDATORS = [
     "CoverageValidator",
     "PlausibilityValidator",
 ]
-_MODELS = ["OLSModel", "LassoCVModel", "RidgeModel", "NaiveModel"]
+_MODELS = ["OLSModel", "LassoCVModel", "RidgeModel", "LEARModel", "NaiveModel"]
 _EVALUATORS = [
     "MAEEvaluator",
     "RMSEEvaluator",

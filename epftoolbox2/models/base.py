@@ -222,6 +222,13 @@ class BaseModel(ABC):
         return {}
 
     @property
+    def _kernel_backend(self) -> Optional[str]:
+        """The backend of the LEAR kernels the model fits with (`models._lars._kernels`), None for one that uses none. A run
+        reads it once in the parent, before its pool starts (which also compiles numba's kernels there), and records it with
+        the manifest's provenance."""
+        return None
+
+    @property
     def _known_only(self) -> bool:
         """Whether a forecast whose input its rule puts after the issue time is no forecast (`not_published`), rather than an
         input the information-set check refuses or lists: a benchmark that is a published forecast (`NaiveModel`)."""
@@ -442,6 +449,7 @@ class BaseModel(ABC):
             masks = self._precompute_scalable_masks(horizons)
         stored_windows = None
 
+        kernels = self._kernel_backend  # before any pool forks: numba compiles once, here
         store = ResultStore(save_to, test_start=test_start) if save_to else None
         if store and data.index.tz is not None and zone_name(data.index.tz) is None:
             warnings.warn(
@@ -475,6 +483,7 @@ class BaseModel(ABC):
                 training_cut=self._training_cut(rules, target, freq),
                 issue_days=weekdays,
                 vintages=vintages,
+                kernels=kernels,
             )
 
             def check_stored():
