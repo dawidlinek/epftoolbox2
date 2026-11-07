@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple, Union
 import datetime
 import hashlib
+import math
 import os
 import traceback
 
@@ -10,7 +11,7 @@ from threadpoolctl import ThreadpoolController
 
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
-from ._calendar import FitUnit, refit_anchor, training_span
+from ._calendar import FitUnit, member_window, refit_anchor, training_span
 
 _W_HOUR_ARRAYS: Dict = {}
 _W_EXPANDED_PREDS: Dict = {}
@@ -144,6 +145,11 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     window, the days since the start of that window (which the record's `day_in_test` holds) and its place in the plan
     of a predictor function, which has no days between the windows. Each window has its own binary-column masks. Nothing else
     depends on the day's window, so a forecast is what a plain run over its window alone gives.
+
+    A model with a list of training windows (`config["members"]`) fits each member on its own rows, with its own mask and
+    scaler, and the forecast is their mean in target units (`_combined`), made only if every member's is: else the task is
+    skipped with the first failing member's reason, tagged with its window. Member i's forecast is that of the model with
+    `training_window` its window, to the bit. With one window the body runs once, as it always did.
     """
     arrays = _W_HOUR_ARRAYS[hour]
     cfg = _W_CONFIG
@@ -155,12 +161,7 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     days = arrays["days"]
     # A model with newest_target="published" has the day of its newest target per issue day, read from the target's rule.
     newest_targets = cfg.get("newest")
-    if newest_targets is None:
-        newest = -1
-        train = training_rows(days, day, cfg["training_window"], hz)
-    else:
-        newest = int(newest_targets[hour][position])
-        train = training_rows(days, day, cfg["training_window"], hz, newest)
+    newest = -1 if newest_targets is None else int(newest_targets[hour][position])
     test = issue_row(days, day)
     if test is None:
         return SKIP_MISSING_TEST_ROW
@@ -172,11 +173,77 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     if task_lists is None:
         list_id = None
         predictors = _W_EXPANDED_PREDS[(hour, hz)]
-        scalable_mask = scalable_masks[(hour, hz)]
+        mask_of = (hour, hz)
     else:
         list_id = int(task_lists[(hour, hz)][position])
         predictors = _W_EXPANDED_PREDS[list_id]
-        scalable_mask = scalable_masks[(list_id, hour, hz)]
+        mask_of = (list_id, hour, hz)
+
+    def fit(member, scalable_mask):
+        return _fit_member(arrays, cfg, hour, hz, day, member, newest, test, list_id, predictors, scalable_mask)
+
+    members = cfg.get("members")
+    if members is None:  # one training window: masks keyed as they always were
+        fitted = fit(cfg["training_window"], scalable_masks[mask_of])
+        if isinstance(fitted, str):
+            return fitted
+        prediction, coefs, extra = fitted
+    else:
+        outcomes = []
+        for member in members:
+            fitted = fit(member, scalable_masks[(*mask_of, member)])
+            if isinstance(fitted, str):
+                return _tagged(fitted, member)
+            outcomes.append(fitted)
+        prediction, coefs, extra = None, [], {}
+
+    run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
+    record = {
+        "run_date": run_date.isoformat(),
+        "target_date": (run_date + datetime.timedelta(days=hz)).isoformat(),
+        "run_weekday": run_date.weekday(),
+        "hour": hour,
+        "horizon": hz,
+        "day_in_test": day_in_window,
+        "prediction": prediction,
+        "actual": float(arrays["y"][test, hz - 1]),
+        "coefficients": coefs,
+        "freq": cfg.get("freq", "1h"),
+    }
+    if newest_targets is not None:
+        # The newest target date of the training span, D + min(k, h-1); a row is never dated `day` or later (`training_span`).
+        # Not necessarily a target that trained: it can be a slot the clock skips or a missing value, whose row drops.
+        record["newest_target_day"] = (run_date + datetime.timedelta(days=min(newest, hz - 1))).isoformat()
+    if list_id is not None:
+        record["predictor_list"] = cfg["list_hashes"][list_id]
+    record.update(extra)
+    if window is not None:
+        record["window"] = window
+    if members is not None:
+        return _combined(record, [prediction for prediction, _, _ in outcomes])
+    return record
+
+
+def _fit_member(
+    arrays: Dict,
+    cfg: Dict,
+    hour: int,
+    hz: int,
+    day: int,
+    member,
+    newest: int,
+    test: int,
+    list_id,
+    predictors,
+    scalable_mask,
+) -> Union[Tuple[float, list, Dict], str]:
+    """One training window's forecast of the task (`hour`, `hz`, day id `day`) issued from row `test`: (the prediction in target
+    units, the coefficients, a matching list's record fields), or a skip reason. Its rows are those of `training_span` with the
+    member's window (`member_window`: `"expanding"` from the frame's first date), with the task's newest target."""
+    days = arrays["days"]
+    span = member_window(member, day)
+    # newest_target="d-1" takes today's path, call for call.
+    train = training_rows(days, day, span, hz) if newest == -1 else training_rows(days, day, span, hz, newest)
 
     col_idx = [arrays["col_index"][c] for c in predictors]
     train_x = arrays["x"][train][:, col_idx]
@@ -187,7 +254,6 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
         return SKIP_TOO_FEW_ROWS
 
     test_x = arrays["x"][test : test + 1][:, col_idx]
-    actual = float(arrays["y"][test, hz - 1])
 
     # train_on="matching" filters what the span holds, so the set can't reach past it. The plan evaluated the function on these
     # days, so nothing about it is computed here.
@@ -215,10 +281,6 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     if not np.isfinite(test_x).all():
         return SKIP_MISSING_TEST_PREDICTORS
 
-    run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
-    run_date_str = run_date.isoformat()
-    target_date_str = (run_date + datetime.timedelta(days=hz)).isoformat()
-
     scaler = make_scaler(cfg.get("scaler", "standard"))
     train_x, train_y, test_x = scaler.fit_transform(
         train_x.copy(),
@@ -233,30 +295,36 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
         # scikit-learn raises ValueError on degenerate input (e.g. fewer rows than CV folds); counted, not fatal.
         return f"{SKIP_FIT_ERROR}: {exc}"
 
-    record = {
-        "run_date": run_date_str,
-        "target_date": target_date_str,
-        "run_weekday": run_date.weekday(),
-        "hour": hour,
-        "horizon": hz,
-        "day_in_test": day_in_window,
-        "prediction": scaler.inverse(float(pred)),
-        "actual": actual,
-        "coefficients": coefs,
-        "freq": cfg.get("freq", "1h"),
-    }
-    if newest_targets is not None:
-        # The newest target date of the training span, D + min(k, h-1); a row is never dated `day` or later (`training_span`).
-        # Not necessarily a target that trained: it can be a slot the clock skips or a missing value, whose row drops.
-        record["newest_target_day"] = (run_date + datetime.timedelta(days=min(newest, hz - 1))).isoformat()
-    if list_id is not None:
-        record["predictor_list"] = cfg["list_hashes"][list_id]
+    extra = {}
     if matching_days is not None:
-        record["training_days"] = int(np.unique(train_days[finite_rows]).size)
-        record["matching_days"] = matching_days
-    if window is not None:
-        record["window"] = window
-    return record
+        extra["training_days"] = int(np.unique(train_days[finite_rows]).size)
+        extra["matching_days"] = matching_days
+    return scaler.inverse(float(pred)), coefs, extra
+
+
+def _tagged(reason: str, member) -> str:
+    """A member's skip reason, with its window after the reason (`"no_finite_training_rows: window 56"`), before any detail. A
+    missing issue row is the key's, whatever the window, and stays as it is."""
+    if reason == SKIP_MISSING_TEST_ROW:
+        return reason
+    name, sep, detail = reason.partition(": ")
+    return f"{name}: window {member}" + (f": {detail}" if sep else "")
+
+
+def _combined(record: Dict, predictions: List[float]) -> Dict:
+    """The record of a model with a list of training windows, from its first member's: the prediction is the members' mean in
+    target units, `math.fsum` divided by their number (exactly rounded, so their order can't change a bit), `member_predictions`
+    holds theirs in member order, and the coefficients are empty (decision 11 of the step 4 spec)."""
+    out = {}
+    for key, value in record.items():
+        if key == "prediction":
+            out["prediction"] = math.fsum(predictions) / len(predictions)
+            out["member_predictions"] = [float(prediction) for prediction in predictions]
+        elif key == "coefficients":
+            out["coefficients"] = []
+        else:
+            out[key] = value
+    return out
 
 
 def _row_value(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
@@ -338,14 +406,21 @@ def _place_of(day_in_test: int) -> Tuple[Optional[str], int, int]:
     return (None, day_in_test, day_in_test) if run_days is None else run_days[day_in_test]
 
 
-def _unit_of(task: tuple) -> FitUnit:
-    """The fit a task of a model with `refit` forecasts from: its period and horizon, the anchor of its issue day, its list."""
+def _unit_of(task: tuple, member: int = 0) -> FitUnit:
+    """The fit a task of a model with `refit` forecasts from: its period and horizon, the anchor of its issue day, its list, and
+    the index of its training window among the model's (0 with one window)."""
     hour, hz, day_in_test = task
     cfg = _W_CONFIG
     task_lists = cfg.get("task_lists")
     list_id = None if task_lists is None else int(task_lists[(hour, hz)][_place_of(day_in_test)[2]])
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
-    return FitUnit(hour, hz, refit_anchor(run_date, cfg["refit"]["rule"]), list_id)
+    return FitUnit(hour, hz, refit_anchor(run_date, cfg["refit"]["rule"]), list_id, member)
+
+
+def _units_of(task: tuple) -> List[FitUnit]:
+    """The units a task forecasts from: one, or with a list of training windows one per member, in member order."""
+    members = _W_CONFIG.get("members")
+    return [_unit_of(task)] if members is None else [_unit_of(task, member) for member in range(len(members))]
 
 
 def _fit_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict, str]]]:
@@ -365,14 +440,17 @@ def _fit_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict
     arrays = _W_HOUR_ARRAYS[hour]
     days = arrays["days"]
     anchor = unit.anchor.toordinal() - refit["first_ordinal"]
+    members = cfg.get("members")
+    # The unit's training window: the model's, or with a list of them its member's (`"expanding"` from the frame's first date).
+    span = member_window(cfg["training_window"] if members is None else members[unit.member], anchor)
     newest_targets = refit["newest"]
     if newest_targets is None:
         newest = -1
-        train = training_rows(days, anchor, cfg["training_window"], hz)
+        train = training_rows(days, anchor, span, hz)
     else:
         # Read on the anchor: a target published between the anchor and the issue day doesn't reach the fit.
         newest = int(newest_targets.at(hour, unit.anchor.toordinal()))
-        train = training_rows(days, anchor, cfg["training_window"], hz, newest)
+        train = training_rows(days, anchor, span, hz, newest)
 
     predictors = _W_EXPANDED_PREDS[(hour, hz) if unit.list_id is None else unit.list_id]
     col_idx = [arrays["col_index"][c] for c in predictors]
@@ -470,26 +548,35 @@ def _fit_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict
 
 def _run_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict, str]]]:
     try:
-        return _fit_unit(unit, tasks)
+        return [(task, outcome, unit.member) for task, outcome in _fit_unit(unit, tasks)]
     except Exception as exc:
         raise TaskFailed(
-            f"fit unit (period={unit.period}, horizon={unit.horizon}, anchor={unit.anchor}, list={unit.list_id}) of tasks "
-            f"{[task[2] for task in tasks]} raised {exc!r}\n{traceback.format_exc()}"
+            f"fit unit (period={unit.period}, horizon={unit.horizon}, anchor={unit.anchor}, list={unit.list_id}, "
+            f"member={unit.member}) of tasks {[task[2] for task in tasks]} raised {exc!r}\n{traceback.format_exc()}"
         ) from None
 
 
 def _run_block(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
     """Run the tasks of one refit block, those whose issue days share an anchor: each unit's fit once, then its forecasts.
-    Returns what `_run_day` does. Nothing carries over between units: each fits from scratch on its own rows."""
+    Returns what `_run_day` does. Nothing carries over between units: each fits from scratch on its own rows.
+
+    With a list of training windows a task has a unit per member, all in its block, and its record is made after every one of
+    them ran: the members' mean if each forecast it, else the first failing member's reason (in member order), tagged with its
+    window, as `_fit_one_numpy` does."""
     units: Dict[FitUnit, List[tuple]] = {}
     for task in tasks:
-        units.setdefault(_unit_of(task), []).append(task)
+        for unit in _units_of(task):
+            units.setdefault(unit, []).append(task)
     threads = _W_CONFIG["threads_per_process"]
+    members = _W_CONFIG.get("members")
+    by_task: Dict[tuple, Dict[int, Union[Dict, str]]] = {}
     results, skipped = [], []
 
     def collect(outcomes):
-        for task, outcome in outcomes:
-            if isinstance(outcome, str):
+        for task, outcome, member in outcomes:
+            if members is not None:
+                by_task.setdefault(task, {})[member] = outcome
+            elif isinstance(outcome, str):
                 skipped.append((task, outcome))
             else:
                 results.append(outcome)
@@ -497,10 +584,16 @@ def _run_block(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
     if len(units) <= 1 or threads == 1:
         for unit, unit_tasks in units.items():
             collect(_run_unit(unit, unit_tasks))
-        return results, skipped
-
-    with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
-        futures = [pool.submit(_run_unit, unit, unit_tasks) for unit, unit_tasks in units.items()]
-        for future in as_completed(futures):
-            collect(future.result())
+    else:
+        with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
+            futures = [pool.submit(_run_unit, unit, unit_tasks) for unit, unit_tasks in units.items()]
+            for future in as_completed(futures):
+                collect(future.result())
+    for task, outcomes in by_task.items():
+        ordered = [outcomes[member] for member in range(len(members))]
+        failed = next(((member, outcome) for member, outcome in enumerate(ordered) if isinstance(outcome, str)), None)
+        if failed is not None:
+            skipped.append((task, _tagged(failed[1], members[failed[0]])))
+        else:
+            results.append(_combined(ordered[0], [record["prediction"] for record in ordered]))
     return results, skipped

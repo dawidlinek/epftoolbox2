@@ -96,7 +96,7 @@ import numpy as np
 import pandas as pd
 
 from .._date_utils import zone_name
-from ..models._calendar import issue_day_names, resolve_issue_days
+from ..models._calendar import issue_day_names, mask_members, resolve_issue_days
 from ..logging import get_logger
 from .availability import LISTING_TIMES, merge_listings
 from .vintages import merge_vintages
@@ -172,6 +172,8 @@ class PlannedForecast(NamedTuple):
     window: Optional[str] = None  # None in a plain run: the record says nothing about it
     matching_days: Optional[str] = None  # a matching list's: a hash of the days it trains on
     refit_anchor: Optional[str] = None  # with `refit`: the date of the fit the forecast uses
+    # A model with a list of training windows: (mask key, digest) of each member's mask, in place of `mask_digest`.
+    member_masks: Tuple[Tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -184,7 +186,8 @@ class Manifest:
     target: str
     horizon: int
     freq: str
-    training_window: int
+    # An int, "expanding", or a list of them (`models._calendar.resolve_training_window`), as the model holds it.
+    training_window: Union[int, str, List[Union[int, str]]]
     model_params: Dict[str, Any]
     data_columns_hash: str
     data_timezone: str
@@ -941,6 +944,8 @@ def check_stored_lists(
     compare_actuals = stored_actual is not None and (existing is None or existing.windows is None)
     # With `refit` a unit reads its mask from its own rows, which the data hash covers: its records carry their anchors instead.
     refit = (manifest.training_cut or {}).get("refit") is not None
+    # A list of training windows keeps a mask per member, under the key with the member (`mask_key`).
+    members = mask_members(manifest.training_window)
     other_list, other_mask, other_window, other_actual, past_frame, other_days = [], [], [], [], [], []
     other_anchor = []
     for record in records:
@@ -970,15 +975,17 @@ def check_stored_lists(
         if refit:
             continue
         if windowed:
-            key = mask_key(tag, period, horizon)
-            kept = (fixed_masks if stored is None else stored_masks.get(stored, {})).get(key)
-            new = (new_fixed_masks if stored is None else new_masks.get(stored, {})).get(key)
-            if (kept is not None and new is not None and kept != new) or (
+            keys = [mask_key(tag, period, horizon, member) for member in members]
+            kept = [(fixed_masks if stored is None else stored_masks.get(stored, {})).get(key) for key in keys]
+            new = [(new_fixed_masks if stored is None else new_masks.get(stored, {})).get(key) for key in keys]
+            if any(a is not None and b is not None and a != b for a, b in zip(kept, new)) or (
                 moved_plain and stored is None and tag == TEST
             ):
                 other_mask.append((run_date, period, horizon))
         elif expected is not None:
-            if stored_masks.get(stored, {}).get(expected.mask_key, expected.mask_digest) != expected.mask_digest:
+            masks = stored_masks.get(stored, {})
+            each = expected.member_masks or ((expected.mask_key, expected.mask_digest),)
+            if any(masks.get(key, digest) != digest for key, digest in each):
                 other_mask.append((run_date, period, horizon))
 
     problems = []

@@ -39,6 +39,7 @@ from ..results.vintages import vintage_rows
 from ..logging import get_logger
 from . import _contract
 from ._calendar import (
+    EXPANDING,
     FREQ_STEPS,
     IssueCalendar,
     NewestTargets,
@@ -48,11 +49,14 @@ from ._calendar import (
     check_refit,
     every_horizon,
     listed_days,
+    mask_members,
+    member_window,
     periods_per_day,
     refit_anchor,
     refit_anchors,
     resolve_horizons,
     resolve_issue_days,
+    resolve_training_window,
     training_span,
 )
 from .context import (
@@ -78,7 +82,7 @@ from ._worker import (
     training_rows,
 )
 from .._date_utils import is_utc_index, resolve_date, shift_calendar_days, zone_name
-from ..information_set import _STEP_MINUTES, InformationSetError, TrainingRows, check_level, rule_dict
+from ..information_set import _STEP_MINUTES, InformationSetError, TrainingRows, check_level, frame_first_day, rule_dict
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -120,7 +124,7 @@ class BaseModel(ABC):
     def __init__(
         self,
         predictors: Union[List[Union[str, Callable]], Callable],
-        training_window: int = 365,
+        training_window: Union[int, str, List[Union[int, str]]] = 365,
         name: str = "Model",
         scaler: ScalerSpec = "standard",
         newest_target: str = "d-1",
@@ -135,7 +139,13 @@ class BaseModel(ABC):
         first of every k-th month, on a calendar counted from Monday 1970-01-05 (`_calendar.refit_anchor`). A forecast issued on
         D then uses the fit of its anchor a, the refit day on or before D: rows cut as for a forecast issued on a, with the
         newest target as of a's issue time, so nothing after a trains, and each forecast predicted on its own from that fit. Only
-        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV, Ridge) can."""
+        a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV, Ridge) can.
+
+        `training_window` is how many days of rows a forecast trains on (`_calendar.training_span`), `"expanding"` every row from
+        the frame's first local date, or a list of them, such as `[56, 84, 728, "expanding"]`: each member is fitted on its own
+        rows, with its own scaler and binary-column mask, exactly as a model with that window alone, and the forecast is their
+        mean in target units, made only when every member's is. A list is sorted (ints ascending, then `"expanding"`), and `[W]`
+        is `W` in everything (`_calendar.resolve_training_window`)."""
         # A function of `ctx` is planned per forecast (epftoolbox2.models.context); a `(horizon)` or `(horizon, hour)`
         # function gives one list per (period, horizon).
         self._ctx_fn: Optional[Callable] = predictors if callable(predictors) and takes_ctx(predictors) else None
@@ -174,6 +184,10 @@ class BaseModel(ABC):
         # typo fails here rather than in every worker and a scaler instance can't be dropped by save().
         if key == "scaler":
             value = scaler_spec(value)
+        elif key == "training_window":
+            # The normalised form stays the attribute, what YAML and the manifest write; the members are what a run fits.
+            value, members = resolve_training_window(value)
+            super().__setattr__("_members", members)
         elif key == "newest_target":
             value = check_newest_target(value)
         elif key == "refit":
@@ -645,17 +659,23 @@ class BaseModel(ABC):
                 "so it needs an information set: pass information_set (or issue_time) to the ModelPipeline, or "
                 "information_set to run()."
             )
+        # The window whose targets are checked under a rule over time: the largest a fit reads (`_reach_window`).
+        window = self._reach_window(data, issue_days)
         if issue_days is None:
-            rules.newest_targets(target, freq, data.index, [], horizon, self.training_window)
+            rules.newest_targets(target, freq, data.index, [], horizon, window)
             return None
         days = list(issue_days) if self.refit is None else refit_anchors(issue_days, self.refit)
-        return NewestTargets(days, rules.newest_targets(target, freq, data.index, days, horizon, self.training_window))
+        return NewestTargets(days, rules.newest_targets(target, freq, data.index, days, horizon, window))
 
     def _training_cut(self, rules: Optional["InformationSet"], target: str, freq: str) -> Dict[str, Any]:
-        """What a manifest's `training_cut` says of this run: rows by date, with `refit` the rule and its epoch, and with
-        `newest_target="published"` what the newest target is read from. The information set isn't compared on resume, but
+        """What a manifest's `training_cut` says of this run: rows by date, with an `"expanding"` training window the frame's
+        first local date its rows start on (`expanding_from`; read after `_load_periods`), with `refit` the rule and its epoch, and
+        with `newest_target="published"` what the newest target is read from. The information set isn't compared on resume, but
         these decide numbers."""
         cut = dict(TRAINING_CUT_BY_DATE)
+        if EXPANDING in self._members:
+            # Where an expanding window's rows start: the frame's first local date, day id 0 (the data hash covers it too).
+            cut["expanding_from"] = datetime.date.fromordinal(self._first_ordinal).isoformat()
         if self.refit is not None:
             # Which fit a forecast uses: its anchor depends on the rule and the epoch, and nothing else.
             cut.update(refit=self.refit, refit_epoch=REFIT_EPOCH)
@@ -845,11 +865,12 @@ class BaseModel(ABC):
         return self._mask_digests({TEST: masks})
 
     @staticmethod
-    def _mask_digests(masks: Dict[str, Dict[Tuple[int, int], np.ndarray]]) -> Dict[str, str]:
+    def _mask_digests(masks: Dict[str, Dict[Tuple, np.ndarray]]) -> Dict[str, str]:
+        """Digests by `mask_key`: masks keyed (period, horizon), or (period, horizon, member) for a list of training windows."""
         return {
-            mask_key(window, period, horizon): mask_digest(mask)
+            mask_key(window, period, horizon, *member): mask_digest(mask)
             for window, window_masks in masks.items()
-            for (period, horizon), mask in window_masks.items()
+            for (period, horizon, *member), mask in window_masks.items()
         }
 
     @staticmethod
@@ -900,6 +921,8 @@ class BaseModel(ABC):
             "test_start": test_start,
             "training_window": self.training_window,
             "scalable_masks": scalable_masks,
+            # A list of training windows: each member fitted on its own rows (`_worker._fit_member`), their forecasts averaged.
+            **({"members": self._members} if len(self._members) > 1 else {}),
             # Passed in config rather than _model_kwargs, so subclasses that override _model_kwargs can't drop it.
             "scaler": self.scaler,
             "threads_per_process": threads_per_process,
@@ -1034,13 +1057,14 @@ class BaseModel(ABC):
         horizons = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
         self._availability_listing = []
         self._window_listings = {}
+        issued = self._days_of(test_start, test_end, windows)
         newest = self._newest_targets(
             data,
             target,
             horizon,
             freq,
             self._cut_rules(information_set, cut_rules),
-            self._days_of(test_start, test_end, windows),
+            issued,
         )
         self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest)
         # A model that fits nothing has no training target to check.
@@ -1086,7 +1110,8 @@ class BaseModel(ABC):
         # With `refit` the newest training target is checked on the anchors, where a unit's rows are cut.
         on_anchors = check_target and self.refit is not None
         check_target = check_target and self.refit is None
-        rows = self._training_rows(newest)
+        window = self._reach_window(data, issued)
+        rows = self._training_rows(newest, window, frame_first_day(data.index))
         if information_set is not None:
             check, late_uses = self._issue_time_checks(information_set)
         if information_set is not None and availability == "raise":
@@ -1104,7 +1129,7 @@ class BaseModel(ABC):
             )
             if on_anchors:
                 self._target_on_anchors(
-                    information_set.check, expanded, target, freq, data.index, test_start, test_end, days
+                    information_set.check, expanded, target, freq, data.index, test_start, test_end, days, window
                 )
         elif information_set is not None and availability == "warn":
             uses = late_uses(
@@ -1121,7 +1146,7 @@ class BaseModel(ABC):
             )
             if on_anchors:
                 uses += self._target_on_anchors(
-                    information_set.late_uses, expanded, target, freq, data.index, test_start, test_end, days
+                    information_set.late_uses, expanded, target, freq, data.index, test_start, test_end, days, window
                 )
             self._availability_listing = listing_rows(uses)
             for name, (start, end) in windows.periods if windows is not None else ():
@@ -1140,7 +1165,7 @@ class BaseModel(ABC):
                 )
                 if on_anchors:
                     uses += self._target_on_anchors(
-                        information_set.late_uses, expanded, target, freq, data.index, start, end, listed
+                        information_set.late_uses, expanded, target, freq, data.index, start, end, listed, window
                     )
                 self._window_listings[name] = listing_rows(uses)
         return expanded
@@ -1162,8 +1187,12 @@ class BaseModel(ABC):
         planned anchors, periods and horizons is the day the frame must start on, exactly: a frame starting a day later drops a
         row some unit trains on. A frame sized for `refit=None` (from test_start - W - h) would train that block on fewer days,
         silently: its forecasts move and a comparison keeps identical keys and counts. So that frame is refused, naming the day.
-        A matching list filters the same span, so it needs no more. Without `refit` nothing is checked, as before."""
-        if self.refit is None:
+        A matching list filters the same span, so it needs no more. Without `refit` nothing is checked, as before.
+
+        With a list of training windows each member's units are checked, which the largest int member decides; an `"expanding"`
+        member trains on whatever the frame has from its first date, so it asks for nothing."""
+        widths = [member for member in self._members if member != EXPANDING]
+        if self.refit is None or not widths:
             return
         if windows is not None:
             issued = windows.issue_days(weekdays)
@@ -1179,7 +1208,7 @@ class BaseModel(ABC):
         for period in range(self._periods_per_day) if newest is not None else [None]:
             newest_of = -1 if newest is None else newest.at(period, anchors)
             for horizon in horizons:
-                first_rows, _ = training_span(anchors, int(self.training_window), int(horizon), newest_of)
+                first_rows, _ = training_span(anchors, max(widths), int(horizon), newest_of)
                 earliest.append(int(np.min(first_rows)))
         needed = datetime.date.fromordinal(min(earliest))
         starts = _contract.wall_clock(data.index).min().date()
@@ -1200,28 +1229,52 @@ class BaseModel(ABC):
         test_start: Optional[str],
         test_end: Optional[str],
         issue_days: Optional[Sequence[str]],
+        window: Optional[int] = None,
     ) -> Any:
         """`method` (an information set's `check` or `late_uses`) of the newest training target alone, for a model with `refit`:
         on the anchors of the issue days (`issue_days`, else every day from `test_start` to `test_end`), since a unit's rows are
-        cut as of the issue time on its anchor. Without days to read anchors from, on every day of the frame, as before."""
+        cut as of the issue time on its anchor. Without days to read anchors from, on every day of the frame, as before.
+        `window` is the one a fit reads back (`_reach_window`), the model's int window if not given; no target before the frame's
+        first local date is judged, having no row there."""
         boundary = {pair: [] for pair in expanded}
-        rows = TrainingRows(self.training_window)  # the targets of a unit's rows, back from its anchor
+        # The targets of a unit's rows, back from its anchor.
+        rows = TrainingRows(max(self._members) if window is None else window, first_day=frame_first_day(index))
         if issue_days is None and (test_start is None or test_end is None):
             return method(boundary, target, freq, index, test_start, test_end, model_name=self.name, training_rows=rows)
         issued = issue_days if issue_days is not None else [day.isoformat() for day in _test_days(test_start, test_end)]
         anchors = [day.isoformat() for day in refit_anchors(issued, self.refit)]
         return method(boundary, target, freq, index, model_name=self.name, issue_days=anchors, training_rows=rows)
 
-    def _training_rows(self, newest: Optional[NewestTargets]) -> TrainingRows:
+    def _training_rows(
+        self, newest: Optional[NewestTargets], window: Optional[int] = None, first_day: Optional[str] = None
+    ) -> TrainingRows:
         """The rows a fit of this model reads (`TrainingRows`), for checking a column whose rule changes over time on them too:
         the window, a newest target before D - 1 under `"published"`, and with `refit` the refit day, whose fit a forecast uses:
-        its rows are those of a forecast issued on it (`training_span(a, W, h, k(a))`), as of the issue time on D."""
+        its rows are those of a forecast issued on it (`training_span(a, W, h, k(a))`), as of the issue time on D. `window` is the
+        one a fit reads back (`_reach_window`), the model's int window if not given; `first_day` the frame's first local date
+        (`frame_first_day`), before which no row exists to judge."""
         return TrainingRows(
-            self.training_window,
+            max(self._members) if window is None else window,
             reach=0 if newest is None else newest.reach,
             to_issue=self.newest_target == "published",
             refit=self.refit,
+            first_day=first_day,
         )
+
+    def _reach_window(self, data: pd.DataFrame, issue_days: Optional[Sequence[Any]] = None) -> int:
+        """The window of the rows a fit of this model can read, as one int, for whatever asks which days a fit reads (the checks
+        of rules over time, a predictor function's plan): the model's window, or with a list the largest int member. With an
+        `"expanding"` member at least the days from the frame's first local date to the last of `issue_days` (the frame's last
+        date if not given), plus one, which puts every span's start before the frame. What selects rows takes each member's
+        own (`member_window`)."""
+        widths = [member for member in self._members if member != EXPANDING]
+        if EXPANDING not in self._members:
+            return max(widths)
+        local = _contract.wall_clock(data.index)
+        if not len(local):
+            return max(widths, default=1)
+        days = [pd.Timestamp(day).date() for day in issue_days] if issue_days else [local.max().date()]
+        return max([*widths, (max(days) - local.min().date()).days + 1])
 
     @staticmethod
     def _days_of(
@@ -1247,11 +1300,14 @@ class BaseModel(ABC):
         self, data, target, horizon, freq, test_start=None, test_end=None, windows=None, newest=None
     ) -> None:
         reach = 0 if newest is None else newest.reach
+        # The days a fit can read go back by the largest member; an `"expanding"` one reads the whole frame, which `read_days`
+        # can't bound, so the spacing checks cover it all.
+        window = EXPANDING if EXPANDING in self._members else max(self._members)
         if windows is None:
-            days = _contract.read_days(self._fit_start(test_start), test_end, self.training_window, horizon, reach)
+            days = _contract.read_days(self._fit_start(test_start), test_end, window, horizon, reach)
         else:
             periods = [(self._fit_start(start), end) for _, (start, end) in windows.periods]
-            days = _contract.read_ranges(periods, self.training_window, horizon, reach)
+            days = _contract.read_ranges(periods, window, horizon, reach)
         _contract.check_index(data, freq, days)
         _contract.check_timezone_with_day_lags(data)
         _contract.check_names(data, target, horizon)
@@ -1328,13 +1384,21 @@ class BaseModel(ABC):
             information_set,
             warn_unpublished,
             availability,
-            training_window=self.training_window,
+            # The model's int window, which a matching list plans its training days for; else the reach of every member.
+            training_window=self._reach_window(data, calendar_days),
             newest_target=self.newest_target,
             reach=0 if newest is None else newest.reach,
             horizons=horizons,
             refit=self.refit,
             known_only=self._known_only,
             trains=not self._fits_nothing,
+            matching_refused=None
+            if isinstance(self.training_window, int)
+            else (
+                f"{self.name}: train_on='matching' isn't supported yet with training_window={self.training_window!r}: the "
+                "matching days, their counts and the resume checks are kept for one int window. Use an int training_window "
+                "for this model, or train_on='all'."
+            ),
         )
         if windows is not None and warn_unpublished and len(windows.periods) > 1:
             for name, (start, end) in windows.periods:
@@ -1407,6 +1471,9 @@ class BaseModel(ABC):
         the end of the test period. So a function returning one list on every issue day, or on Fridays alone in a run of
         Fridays, is identical to that fixed list. Issue days are the plan's, by date: with `issue_days` they aren't consecutive.
         A column with no value on the mask day is read again as `_scalable_mask` says.
+
+        A model with a list of training windows has a mask per member, keyed (list id, period, horizon, member), each read with
+        the member's window exactly as the model with that window alone reads it, so a member is that model to the bit.
         """
         offset = self._offset if offset is None else offset
         last = self._last_day if last is None else last
@@ -1419,12 +1486,17 @@ class BaseModel(ABC):
             ids_days = day_ids[days[0] : days[1]][on_clock]
             for list_id in np.unique(ids).tolist():
                 first = offset if ids[0] == list_id else int(ids_days[np.argmax(ids == list_id)])
-                masks[(list_id, hour, hz)] = self._scalable_mask(hour, hz, list(plan.lists[list_id]), first, last)
+                for member in mask_members(self.training_window):
+                    key = (list_id, hour, hz) if member is None else (list_id, hour, hz, member)
+                    masks[key] = self._scalable_mask(hour, hz, list(plan.lists[list_id]), first, last, member)
         return masks
 
-    def _scalable_mask(self, hour: int, hz: int, predictors: List[str], first: int, last: int) -> np.ndarray:
+    def _scalable_mask(
+        self, hour: int, hz: int, predictors: List[str], first: int, last: int, member: Any = None
+    ) -> np.ndarray:
         """Which of `predictors` are scaled at (period `hour`, horizon `hz`), read from the training rows of day id `first`,
-        the mask day, by `StandardScaler.get_scalable_mask`.
+        the mask day, by `StandardScaler.get_scalable_mask`. The rows are those of the training window `member` (the model's one
+        window if None), so a member of a list reads its mask as the model with that window alone does.
 
         A column with no value in those rows can't tell whether it is binary. It is read on the first calendar day d after
         `first`, up to `last`, whose training rows have a value in it, and the scan stops there: for every list, fixed or a
@@ -1434,7 +1506,8 @@ class BaseModel(ABC):
         the days up to d, dated d - 1 - h or earlier (d - 1 at the latest with `newest_target="published"`). A forecast issued
         before d has no value of the column in its rows, so no finite row, and is skipped whatever its mask says.
         """
-        sample = self._training_sample(hour, first, hz, predictors)
+        member = self._members[0] if member is None else member
+        sample = self._training_sample(hour, first, hz, predictors, member)
         mask = StandardScaler.get_scalable_mask(sample)
         without = np.flatnonzero(np.isnan(sample).all(axis=0))
         if not len(without) or last <= first:
@@ -1445,7 +1518,7 @@ class BaseModel(ABC):
         # before (d <= D <= last), and a column found only after `last` belongs to forecasts with no finite row, which are
         # skipped. It keeps the mask of a window from reading another window's days, and from the end of the data.
         for day in range(first + 1, last + 1):
-            rows = values[training_rows(days, day, self.training_window, hz, self._newest_of(hour, day))]
+            rows = values[training_rows(days, day, member_window(member, day), hz, self._newest_of(hour, day))]
             found = ~np.isnan(rows).all(axis=0)
             if found.any():
                 mask[without[found]] = StandardScaler.get_scalable_mask(rows[:, found])
@@ -1565,12 +1638,13 @@ class BaseModel(ABC):
     ) -> Callable[[int, int, str], Optional[PlannedForecast]]:
         """What a fresh run would give a stored forecast's key, or None if it isn't planned, as on a weekday `weekdays` doesn't
         list. `masks` are per window in a run with windows. With `refit` that is its anchor and no mask digest: a unit reads its
-        mask from its own rows."""
+        mask from its own rows. A model with a list of training windows has a digest per member (`member_masks`)."""
         by_window = {TEST: masks} if windows is None else masks
         digests = {
             window: {key: mask_digest(mask) for key, mask in window_masks.items()}
             for window, window_masks in by_window.items()
         }
+        members = mask_members(self.training_window)
 
         def lookup(period: int, horizon: int, run_date: str) -> Optional[PlannedForecast]:
             window = TEST if windows is None else windows.window_of(run_date)
@@ -1578,18 +1652,22 @@ class BaseModel(ABC):
                 return None
             list_id = None if plan is None else plan.list_id_of(period, horizon, run_date)
             key = (period, horizon) if plan is None else (list_id, period, horizon)
-            digest = digests[window].get(key)
+            each = [digests[window].get(key if member is None else (*key, member)) for member in members]
+            digest = each[0]
             anchor = None if self.refit is None else refit_anchor(run_date, self.refit).isoformat()
             if digest is None and (anchor is None or (plan is not None and list_id is None)):
                 return None
             matching = plan is not None and plan.train_on[list_id] == TRAIN_ON_MATCHING
             return PlannedForecast(
                 None if plan is None else plan.hashes[list_id],
-                digest,
+                digest if members == (None,) else None,
                 mask_key(window, period, horizon),
                 None if windows is None else window,
                 self._matching_days_of(plan, period, horizon, run_date, list_id) if matching else None,
                 anchor,
+                ()
+                if members == (None,) or digest is None
+                else tuple((mask_key(window, period, horizon, member), found) for member, found in zip(members, each)),
             )
 
         return lookup
@@ -1670,18 +1748,24 @@ class BaseModel(ABC):
         self, horizons: Sequence[int], offset: Optional[int] = None, last: Optional[int] = None
     ) -> Dict[Tuple[int, int], np.ndarray]:
         """(period, horizon) -> which of a fixed list's columns are scaled, for each horizon planned, read on the window's first
-        calendar day `offset` (a column with no value there as `_scalable_mask` says, up to `last`, the window's last)."""
+        calendar day `offset` (a column with no value there as `_scalable_mask` says, up to `last`, the window's last). With a list
+        of training windows, (period, horizon, member) -> each member's."""
         offset = self._offset if offset is None else offset
         last = self._last_day if last is None else last
         return {
-            (hour, hz): self._scalable_mask(hour, hz, self._expand_predictors(hz, hour=hour), offset, last)
+            (hour, hz) if member is None else (hour, hz, member): self._scalable_mask(
+                hour, hz, self._expand_predictors(hz, hour=hour), offset, last, member
+            )
             for hour in range(self._periods_per_day)
             for hz in horizons
+            for member in mask_members(self.training_window)
         }
 
-    def _training_sample(self, hour: int, day: int, hz: int, predictors: List[str]) -> np.ndarray:
-        """The training rows of the task (hour, hz, day) in these columns, before dropping missing values."""
-        rows = training_rows(self._hour_days[hour], day, self.training_window, hz, self._newest_of(hour, day))
+    def _training_sample(self, hour: int, day: int, hz: int, predictors: List[str], member: Any = None) -> np.ndarray:
+        """The training rows of the task (hour, hz, day) in these columns, before dropping missing values, with the training
+        window `member` (the model's one window if None)."""
+        window = member_window(self._members[0] if member is None else member, day)
+        rows = training_rows(self._hour_days[hour], day, window, hz, self._newest_of(hour, day))
         return self._hour_data[hour].iloc[rows][predictors].to_numpy(dtype=np.float64)
 
     def _precompute_expanded_predictors(self, horizons: Sequence[int]) -> Dict[Tuple[int, int], List[str]]:

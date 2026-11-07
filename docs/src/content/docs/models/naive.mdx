@@ -31,8 +31,8 @@ skipped forecast (`missing_test_predictors`), and so is a missing row (`missing_
 | `name` | str | `"Naive"` | Display name for reports |
 | `known_only` | bool | `True` | Keyword-only. With an information set, a value its rule puts after the issue time is no forecast (`not_published`), at every level. `False` judges the column as any model's input: listed at `"warn"`, refused at `"raise"` |
 
-`training_window`, `scaler`, `newest_target` and `refit` belong to a fit, so they aren't parameters: setting `newest_target` or `refit`
-on a model raises, and so does a function that returns `Use(..., train_on="matching")`.
+`training_window`, `scaler`, `newest_target` and `refit` belong to a fit, so they aren't parameters: setting `training_window`, `newest_target` or
+`refit` on a model raises, and so does a function that returns `Use(..., train_on="matching")`.
 
 ## Only what was published
 

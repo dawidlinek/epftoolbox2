@@ -35,7 +35,7 @@ model = OLSModel(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `predictors` | List or function | Required | Predictor specifications (strings, `{horizon}` templates, or callables), or a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) returning the list for each forecast |
-| `training_window` | int | `365` | Days of training data |
+| `training_window` | int, `"expanding"` or list | `365` | Days of training data (an int from 1), `"expanding"` for every row from the frame's first date, or a list such as `[56, 84, 728, "expanding"]` whose windows are fitted separately and averaged in the model. See [Training Windows](/epftoolbox2/model-pipeline/training-windows/) |
 | `name` | str | `"Model"` | Display name for reports |
 | `scaler` | str, dict or scaler | `"standard"` | `"standard"`, `"asinh"` or `"npit"`, or `{"name": ..., "params": {...}}`. See [Scalers and VSTs](/epftoolbox2/models/scalers/) |
 | `newest_target` | str | `"d-1"` | The newest target a forecast issued on D trains on: `"d-1"`, or `"published"`, every target its rule says is known by the issue time, which needs an information set. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target) |

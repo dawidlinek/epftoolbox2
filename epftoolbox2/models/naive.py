@@ -1,5 +1,7 @@
 from typing import Dict, List, Sequence, Tuple
 
+import numpy as np
+
 from ._calendar import check_newest_target, check_refit
 from .base import BaseModel
 
@@ -19,7 +21,8 @@ class NaiveModel(BaseModel):
             refused nor listed, at every availability level and in `verify`. False judges the column as any model's input
             instead: refused at "raise", listed at "warn". Without an information set every forecast is made either way.
 
-    `newest_target` and `refit` are a fit's: they aren't parameters, and setting either to anything but its default raises.
+    `newest_target`, `refit` and `training_window` are a fit's: they aren't parameters, and setting any of them to anything but
+    its default raises (`training_window` is 0: no history, and a list of windows would average fits that don't exist).
     """
 
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "training_window": 0, "scaler": "standard"}
@@ -41,6 +44,16 @@ class NaiveModel(BaseModel):
         self.known_only = known_only
 
     def __setattr__(self, key, value):
+        if key == "training_window":
+            if isinstance(value, (bool, list, tuple, range, str, np.ndarray)) or value != 0:
+                raise ValueError(
+                    f"NaiveModel fits nothing, so it has no training window: training_window={value!r} has no meaning, and a "
+                    "list of windows would average fits that don't exist. Leave it 0."
+                )
+            # No history: `read_days` and the masks reach no row before the issue day, as they always did.
+            object.__setattr__(self, "_members", (0,))
+            object.__setattr__(self, "training_window", 0)
+            return
         if key == "newest_target" and check_newest_target(value) != "d-1":
             raise ValueError(
                 f"NaiveModel fits nothing, so it has no newest training target: newest_target={value!r} has no meaning. "

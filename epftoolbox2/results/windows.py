@@ -64,9 +64,11 @@ def add_years(day: datetime.date, years: int) -> datetime.date:
         return day.replace(year=day.year + years, day=28)
 
 
-def mask_key(window: str, period: int, horizon: int) -> str:
-    """The key of a binary-column mask's digest in a manifest: a test mask has the key a plain run gives it."""
-    key = f"{period}-{horizon}"
+def mask_key(window: str, period: int, horizon: int, member: Any = None) -> str:
+    """The key of a binary-column mask's digest in a manifest: a test mask has the key a plain run gives it. A model with a list
+    of training windows has a mask per member, under the key with `@` and the member (`@56`, `@expanding`); one with one window
+    passes no member and keeps the key it always had."""
+    key = f"{period}-{horizon}" if member is None else f"{period}-{horizon}@{member}"
     return key if window == TEST else f"{window}/{key}"
 
 

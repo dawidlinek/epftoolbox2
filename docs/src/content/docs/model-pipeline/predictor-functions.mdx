@@ -202,6 +202,7 @@ What that means, for each (period, horizon):
   once per set of days.
 - **A day with a doubled autumn row** counts as one day, whose two rows both follow its date. A day with no row at that period
   isn't asked about. A set can't reach past the dates of the window, so no row of it has a target dated on the issue day.
+- **The window is an int.** A model whose [`training_window`](/epftoolbox2/model-pipeline/training-windows/#not-supported-yet) is `"expanding"` or a list raises before any fit, naming the model, when its function returns `train_on="matching"`; `train_on="all"` is fine.
 
 <Aside type="caution" title="Revised series and the set of days">
 A value the function reads on a past day is the one in the frame, as for a [forecast's own cell](#publishedcolumns), so a revision

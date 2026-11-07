@@ -51,6 +51,7 @@ from ..information_set import (
     TrainingRows,
     Violation,
     _RowsKnown,
+    frame_first_day,
     over_time,
     rule_dict,
 )
@@ -700,14 +701,15 @@ class PredictorPlan:
             "fingerprint": function_fingerprint(self.function, self.information_set),
         }
 
-    def manifest_lists(self, masks: Dict[str, Dict[Tuple[int, int, int], np.ndarray]]) -> List[Dict[str, Any]]:
-        """`describe()` with a digest of the binary-column mask of each (window, period, horizon) that uses the list."""
+    def manifest_lists(self, masks: Dict[str, Dict[Tuple, np.ndarray]]) -> List[Dict[str, Any]]:
+        """`describe()` with a digest of the binary-column mask of each (window, period, horizon) that uses the list, and of
+        each member's with a list of training windows (masks keyed (list id, period, horizon, member))."""
         entries = self.describe()
         for entry in entries:
             entry["binary_masks"] = {}
         for window, window_masks in masks.items():
-            for (list_id, period, horizon), mask in window_masks.items():
-                entries[list_id]["binary_masks"][mask_key(window, period, horizon)] = mask_digest(mask)
+            for (list_id, period, horizon, *member), mask in window_masks.items():
+                entries[list_id]["binary_masks"][mask_key(window, period, horizon, *member)] = mask_digest(mask)
         return entries
 
     def _scan(self, target: str, pairs: Dict[Tuple[int, int], List[str]], days: Tuple[int, Optional[int]] = (0, None)):
@@ -729,7 +731,9 @@ class PredictorPlan:
             issue_days=[day.isoformat() for day in scanned],
             check_target=self.newest_target == "d-1" and self.trains,
             # The target's training rows, back from the anchors with `refit`.
-            training_rows=None if self.fit_window is None else TrainingRows(self.fit_window, self.reach),
+            training_rows=None
+            if self.fit_window is None
+            else TrainingRows(self.fit_window, self.reach, first_day=frame_first_day(self.data.index)),
         )
         late_names: List[str] = []
         no_rule: List[str] = []
@@ -750,7 +754,11 @@ class PredictorPlan:
         if self.fit_window is None:
             return None
         return TrainingRows(
-            self.fit_window, reach=self.reach, to_issue=self.newest_target == "published", refit=self.refit
+            self.fit_window,
+            reach=self.reach,
+            to_issue=self.newest_target == "published",
+            refit=self.refit,
+            first_day=frame_first_day(self.data.index),  # no row before the frame's first date exists to judge
         )
 
     def _horizons_of(self, cells: "_Cells", name: str) -> List[int]:
@@ -1025,6 +1033,7 @@ def build_plan(
     refit: Optional[str] = None,
     known_only: bool = False,
     trains: bool = True,
+    matching_refused: Optional[str] = None,
 ) -> PredictorPlan:
     """Evaluate `fn` for every planned forecast, at each of `horizons` (every one from 1 to `horizon`, the largest, if not
     given). `warn_unpublished` warns for each `published()` argument that was never
@@ -1033,7 +1042,9 @@ def build_plan(
 
     If a forecast gets `Use(list, train_on="matching")`, `fn` is also evaluated on the days it can train on, which needs
     `training_window`. What `fn` answers on a day is then the same whether that day is issued or only trained on.
-    `newest_target`, `reach`, `refit`, `known_only` and `trains` are the model's (see `PredictorPlan`).
+    `newest_target`, `reach`, `refit`, `known_only` and `trains` are the model's (see `PredictorPlan`). `matching_refused` is why
+    the model can't train on matching days (a list of training windows): a ValueError with it as soon as a forecast gets such a
+    list, before its training days are planned.
     """
     started = time.perf_counter()
     days = list(issue_days)
@@ -1083,6 +1094,8 @@ def build_plan(
                 plan.assignment[(period, hz)][position] = list_id
     plan.calls = len(days) * len(horizons) * len(periods)
     plan.queried = cells.queried
+    if matching_refused is not None and plan.uses_matching:
+        raise ValueError(matching_refused)
     only_on_training_days = _plan_training_days(plan, returned, distinct, training_window) if plan.uses_matching else []
     _warn_same_names_in_another_order([*plan.lists, *only_on_training_days], fn)
     if warn_unpublished:

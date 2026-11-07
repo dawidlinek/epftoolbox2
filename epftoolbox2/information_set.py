@@ -75,7 +75,9 @@ _DAY_AGGREGATE = re.compile(r"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:min|max|mea
 
 # The note of a use that is late on a training row, not on the issue day's.
 _TRAINING_ROWS_HINT = (
-    "a training row holds a value known only then: under rules over time an older value can come later than a newer one"
+    "a training row holds a value known only then (under rules over time an older value can come later than a newer one, and "
+    "a value outside every rule's period is never known): shorten the training window, or start the frame where the rule "
+    "begins, since no row before the frame's first date is read; loosen the rule only if the data really was known earlier"
 )
 _LATE_ADVICE = (
     "Use values known by then (e.g. `x_d-1` instead of `x`), or, if a rule is too strict for your data, "
@@ -464,17 +466,23 @@ class TrainingRows:
     refit day A on or before D, whose rows are those of a forecast issued on A: the same, `D - A` days earlier. Either way they
     are judged as of D's issue time, as `leakage_probe` judges them.
 
+    Rows dated before `first_day`, the frame's first local date, don't exist, so no fit reads them and they aren't judged: a
+    window that reaches before the frame (an `"expanding"` one always does, `BaseModel._reach_window`) is judged on the rows the
+    frame has. Without `first_day` every row day of the window is judged.
+
     Args:
         window: The model's `training_window`.
         reach: Days a newest target lies before D - 1 at most (`NewestTargets.reach`, read on the refit days with `refit`).
         to_issue: Rows reach D - 1, as with `newest_target="published"`.
         refit: The model's `refit`, whose refit days move the rows back.
+        first_day: The frame's first local date (ISO), before which nothing is judged; None judges the whole window.
     """
 
     window: int
     reach: int = 0
     to_issue: bool = False
     refit: Optional[str] = None
+    first_day: Optional[str] = None
 
     def predictor_days(self, horizon: int, lag: int = 0) -> range:
         """The row days, relative to D, of the training rows at `horizon`, of a fit made `lag` days before D (its refit day)."""
@@ -489,18 +497,34 @@ class TrainingRows:
         return np.array([(day.date() - refit_anchor(day, self.refit)).days for day in days], dtype=np.int64)
 
     def latest(self, known: "_RowsKnown", horizon: int) -> np.ndarray:
-        """When the training rows at `horizon` of the forecast of each [period, issue day] of `known`'s clock are all known."""
+        """When the training rows at `horizon` of the forecast of each [period, issue day] of `known`'s clock are all known, of
+        the rows dated on or after `first_day`."""
         days = known.days
         lags = self.lags(days)
+        floors = self.floors(days)
         out = np.full((known.size, len(days)), -np.inf)
         for lag in np.unique(lags):
             on = lags == lag
-            out[:, on] = known.latest(self.predictor_days(horizon, int(lag)))[:, on]
+            span = self.predictor_days(horizon, int(lag))
+            out[:, on] = (known.latest(span) if floors is None else known.latest_since(span, floors))[:, on]
         return out
 
     def target_days(self) -> range:
         """The days, relative to D, of the training targets before D - 1, the one the check reads anyway."""
         return range(-(self.window + self.reach), -1)
+
+    def target_latest(self, known: "_RowsKnown") -> np.ndarray:
+        """When the training targets of `target_days` are all known, for each [period, issue day], of those dated on or after
+        `first_day` (a target is a row's: one dated before the frame's first date has no row there)."""
+        floors = self.floors(known.days)
+        return known.latest(self.target_days()) if floors is None else known.latest_since(self.target_days(), floors)
+
+    def floors(self, days: pd.DatetimeIndex) -> Optional[np.ndarray]:
+        """The first row day, relative to each of `days`, that the frame has: `first_day - D`; None without `first_day`."""
+        if self.first_day is None:
+            return None
+        first = datetime.date.fromisoformat(self.first_day)
+        return np.array([(first - day.date()).days for day in days], dtype=np.int64)
 
 
 def is_revised(rule: Optional[Rule]) -> bool:
@@ -1190,7 +1214,7 @@ class InformationSet:
                             late_at[(name, found.period, hz)] = found
                     continue
                 own = avail
-                avail = np.maximum(avail, _RowsKnown(col, rows, clock, step).latest(training_rows.target_days()))
+                avail = np.maximum(avail, training_rows.target_latest(_RowsKnown(col, rows, clock, step)))
             for found in self._late_periods(col, rows, avail, clock, step, uses[role], own=own):
                 late[(name, role, found.period)] = found
 
@@ -1260,6 +1284,8 @@ class InformationSet:
             tuple(days.asi8.tolist()),
             int(horizon),
             training_window,
+            # Under a rule over time the check reads back to the frame's first date, so a frame from another day is another table.
+            frame_first_day(index),
         )
         with _NEWEST_TABLES_LOCK:
             found = _NEWEST_TABLES.get(key)
@@ -1307,8 +1333,9 @@ class InformationSet:
         if training_window is not None and over_time(col.rule):
             # The window's oldest target is D + min(k, 0) - W + 1: a row is never dated D or later, so at a horizon h <= k the
             # newest row is D-1 and its target D-1+h, back W-1 days from there (`models._calendar.training_span`), h=1 the oldest.
-            # Under rules over time a known D-31 says nothing of those before it.
-            oldest = np.minimum(newest, 0) - training_window + 1
+            # Under rules over time a known D-31 says nothing of those before it. A target dated before the frame's first local date
+            # has no row there, so it trains nothing and isn't judged.
+            oldest = np.maximum(np.minimum(newest, 0) - training_window + 1, _frame_floors(index, days)[None, :])
             for k in range(int(oldest.min()), NEWEST_TARGET_FROM):
                 unknown = (oldest <= k) & (clock.available(col, periods, step, row_day=k) > clock.issue)
                 if unknown.any():
@@ -1317,7 +1344,8 @@ class InformationSet:
                         f"newest_target='published' trains on the targets of a window of {training_window} days, and by its "
                         f"rules over time ('{col.rule.describe()}') the training target '{target}' of {-k} days before the "
                         f"issue day isn't known at the issue time, e.g. period {period} for the issue day {days[day].date()}. "
-                        "Shorten the training_window, or start the test later."
+                        "Shorten the training_window, start the frame where the rule begins (no target before the frame's "
+                        "first date is read, and an 'expanding' window reads back to it), or start the test later."
                     )
         return newest
 
@@ -1618,11 +1646,30 @@ class _RowsKnown:
         col, rows, step = self._args
         latest = np.full((len(rows), len(self._clock.days)), -np.inf)
         for row_day in row_days:
-            known = self._by_day.get(row_day)
-            if known is None:
-                known = self._by_day[row_day] = self._clock.available(col, rows, step, row_day)
-            np.maximum(latest, known, out=latest)
+            np.maximum(latest, self._known(row_day), out=latest)
         return latest
+
+    def latest_since(self, row_days: range, floors: np.ndarray) -> np.ndarray:
+        """`latest` of the row days of `row_days` (a range of step 1) from `floors[i]` on, for the issue day i: a running maximum
+        from the last row day back, so each day is read once; -inf where no row day is left."""
+        col, rows, step = self._args
+        latest = np.full((len(rows), len(self._clock.days)), -np.inf)
+        if not len(row_days):
+            return latest
+        start = np.clip(floors, row_days.start, row_days.stop)  # row_days.stop: no row day left
+        running = np.full_like(latest, -np.inf)
+        for row_day in range(row_days.stop - 1, int(start.min()) - 1, -1):
+            np.maximum(running, self._known(row_day), out=running)
+            on = start == row_day
+            latest[:, on] = running[:, on]
+        return latest
+
+    def _known(self, row_day: int) -> np.ndarray:
+        known = self._by_day.get(row_day)
+        if known is None:
+            col, rows, step = self._args
+            known = self._by_day[row_day] = self._clock.available(col, rows, step, row_day)
+        return known
 
 
 class _LatePeriod(NamedTuple):
@@ -1651,6 +1698,23 @@ class _LatePeriod(NamedTuple):
             self.known_label,
             self.issue_label,
         )
+
+
+def _frame_floors(index: pd.DatetimeIndex, days: pd.DatetimeIndex) -> np.ndarray:
+    """The frame's first local date relative to each of `days`, in days (`first - D`): no row day before it exists."""
+    if not len(index):
+        return np.full(len(days), np.iinfo(np.int64).min // 2, dtype=np.int64)
+    wall = index.tz_localize(None) if getattr(index, "tz", None) is not None else index
+    first = wall.min().date()
+    return np.array([(first - day.date()).days for day in days], dtype=np.int64)
+
+
+def frame_first_day(index: pd.DatetimeIndex) -> Optional[str]:
+    """The frame's first local date as ISO, what `TrainingRows(first_day=)` takes; None for an empty frame."""
+    if not len(index):
+        return None
+    wall = index.tz_localize(None) if getattr(index, "tz", None) is not None else index
+    return wall.min().date().isoformat()
 
 
 def _periods_per_day(freq: str) -> int:

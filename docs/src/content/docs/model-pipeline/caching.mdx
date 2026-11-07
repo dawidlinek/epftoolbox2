@@ -68,7 +68,7 @@ An [ensemble](/epftoolbox2/model-pipeline/ensembles/#results-on-disk-and-slurm-a
 of them: whatever the model returns from its `_model_kwargs`), the predictors' per-`(period, horizon)`
 order (not just which names are used: a reordering changes what stored coefficients mean, and a hash of
 the ordered layout tells `["price_d-1", "price_d-2"]` apart from `["price_d-{horizon}"]`), target, horizon,
-freq, training window, a content hash of the data columns used up to `test_end` (rows after `test_end`
+freq, training window (an int, `"expanding"` or a [list](/epftoolbox2/model-pipeline/training-windows/#resuming-and-yaml) as normalised), a content hash of the data columns used up to `test_end` (rows after `test_end`
 don't affect any forecast in this run, so appending them between runs isn't a mismatch), and the data's own
 time zone (converting the same instants to a different zone keeps the same hash, since it's over each
 value's own representation, not the zone label), and how the training rows are chosen (`training_cut`): everything that defines what
@@ -117,6 +117,8 @@ A model with [`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting
 no `binary_masks`, as a fit's mask is read from its own rows, which the data hash covers. Resuming compares each stored forecast's
 `refit_anchor` with the one a fresh run would give it, for fixed lists too. A fit with pending forecasts is made again and only the
 pending forecasts are written: they are bit for bit a fresh run's.
+
+A model with an [`"expanding"` window](/epftoolbox2/model-pipeline/training-windows/#expanding) (alone or in a list) adds `expanding_from`, the frame's first local date, to `training_cut`, so a resume with a frame that starts on another day raises.
 
 **A `.jsonl` file with no `.manifest.json` next to it** is not
 a mismatch: by default it is accepted with a warning, and a manifest is written from then on. Pass
