@@ -506,6 +506,81 @@ def test_a_zero_column_gets_exactly_zero_and_changes_nothing():
             )
 
 
+def _twin_design(kind, seed):
+    """30 Gaussian columns and a daily-like value repeated on 24 slots (`"24 slots"`), or one column that is the exact negative of
+    another (`"negative"`), or a copy of another times 3 (`"scaled copy"`); the target depends on the twin."""
+    rng = np.random.default_rng(seed)
+    x = rng.standard_normal((300, 30))
+    gas = rng.standard_normal(300)
+    if kind == "24 slots":
+        x = np.column_stack([x, np.repeat(gas[:, None], 24, axis=1)])
+    elif kind == "negative":
+        x = np.column_stack([x[:, :10], gas, x[:, 10:], -gas])
+    else:
+        x = np.column_stack([gas, x, 3.0 * gas])
+    y = x[:, :5] @ rng.standard_normal(5) + 0.7 * gas + 0.5 * rng.standard_normal(300)
+    return x, y
+
+
+@pytest.mark.parametrize("kind", ["24 slots", "negative", "scaled copy"])
+def test_exact_twins_are_dropped_but_the_first_and_the_fit_is_the_lasso(kind):
+    """LARS can't take a second exact twin (its entry is 0.24.2's degenerate entrant, decided by a last bit, after which the path
+    carries cancelling coefficients of about 1e14): `lear_fit` keeps the first twin in column order, gives the others exactly 0, and
+    is then the exact lasso at its α* (scikit-learn's `Lasso(tol=1e-14)`, whose split between twins is its own) in the forecast and
+    the objective, on rows where the twins are equal."""
+    for seed in range(6):
+        x, y = _twin_design(kind, seed)
+        stats = _lars.gram_stats(x, y)
+        # kept: the first of equal norms; of a copy times 3 the longer, where the lasso puts the weight (it costs a third in |w|)
+        twins = {"24 slots": list(range(31, 54)), "negative": [31], "scaled copy": [0]}[kind]
+        kept = {"24 slots": 30, "negative": 10, "scaled copy": 31}[kind]
+        G, q, dropped = _lars.without_twins(stats.G, stats.q)
+        assert list(dropped) == twins
+        assert (G[twins] == 0.0).all() and (G[:, twins] == 0.0).all() and (q[twins] == 0.0).all()
+        row = np.random.default_rng(seed + 100).standard_normal(x.shape[1])
+        row[twins] = row[kept] * (x[0, twins] / x[0, kept])  # the twins' relation holds on the test row too
+        for criterion, solver in (("bic", "lars"), ("aic", "lars"), ("aic", "cd")):
+            fit = _lars.lear_fit(stats, criterion, solver)
+            assert (fit.w[twins] == 0.0).all() and np.max(np.abs(fit.w)) < 10.0
+            if solver != "lars":
+                continue
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ConvergenceWarning)
+                lasso = Lasso(alpha=fit.alpha, tol=1e-14, max_iter=10**6).fit(x, y)
+            forecast = fit.ybar + (row - fit.xbar) @ fit.w
+            assert forecast == pytest.approx(lasso.predict(row[None, :])[0], abs=1e-9)
+
+            def objective(w, b):
+                r = y - x @ w - b
+                return r @ r / (2 * len(y)) + fit.alpha * np.abs(w).sum()
+
+            ours = objective(fit.w, fit.ybar - fit.xbar @ fit.w)
+            assert ours <= objective(lasso.coef_, lasso.intercept_) * (1 + 1e-12)
+
+
+def test_without_twins_leaves_a_design_without_them_alone():
+    for kind in ("n>p", "n<p", "weekday dummies", "zero column"):
+        X, y = _design(kind, 1)
+        stats = _lars.gram_stats(X, y)
+        G, q, dropped = _lars.without_twins(stats.G, stats.q)
+        assert dropped == () and G is stats.G and q is stats.q  # the same arrays: lear_fit runs as it did, bit for bit
+    # near but not exact: a column of another plus 1e-3 of noise stays
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((200, 5))
+    x = np.column_stack([x, x[:, 0] + 1e-3 * rng.standard_normal(200)])
+    assert _lars.without_twins(*_lars.gram_stats(x, x[:, 1])[3:5])[2] == ()
+
+
+def test_numba_drops_the_same_twins_and_agrees_with_numpy(numba_kernels):
+    for kind in ("24 slots", "negative", "scaled copy"):
+        for seed in range(6):
+            stats = _lars.gram_stats(*_twin_design(kind, seed))
+            for criterion, solver in (("bic", "lars"), ("aic", "cd")):
+                a, b = _lars.lear_fit(stats, criterion, solver), numba_kernels.lear_fit(stats, criterion, solver)
+                assert (a.kink, a.converged) == (b.kink, b.converged)
+                np.testing.assert_allclose(a.w, b.w, rtol=0, atol=1e-10)
+
+
 def test_a_column_with_a_zero_diagonal_never_enters_even_with_a_stray_correlation():
     """Shared statistics may leave rounding in a zeroed column's cross terms or correlation: the column is cut out whole."""
     X, y = _design("n>p", 0)

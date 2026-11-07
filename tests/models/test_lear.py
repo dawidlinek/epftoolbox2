@@ -29,7 +29,8 @@ from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.models.lear import LAGO_WINDOWS
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY
-from epftoolbox2.presets import lear_predictors
+from epftoolbox2.data.transformers import DailyStatsTransformer
+from epftoolbox2.presets import WEEKDAYS, expert_predictors, lear_predictors
 from epftoolbox2.results.manifest import manifest_path
 from epftoolbox2.scalers import make_scaler
 from tests.models.test_lars_kernels import _lars_old_ic
@@ -394,6 +395,51 @@ def test_a_near_constant_column_gets_coefficient_zero_and_moves_nothing(data):
         for key, record in with_it.items():
             assert record["coefficients"][-1] == 0.0
             assert record["prediction"] == pytest.approx(without[key]["prediction"], abs=1e-12)
+
+
+@pytest.fixture(scope="module")
+def expert_data():
+    """The expert preset's inputs on synthetic data: at hour 23 `price` and `price_day_last` are the same column on every row."""
+    df = make_market_data(start="2023-01-01", days=160, noise=5.0, seed=4, horizon=1)
+    df = DailyStatsTransformer(columns="price", stats=["min", "max", "last"]).transform(df)
+    for k in (1, 6):
+        df[f"price_d-{k}"] = calendar_shift(df["price"], -k)
+    weekday = df.index.dayofweek
+    for i, name in enumerate(WEEKDAYS):
+        df[f"is_{name}"] = (weekday == i).astype(float)
+        df[f"is_{name}_d+1"] = calendar_shift(df[f"is_{name}"], 1)
+    return df
+
+
+def test_twin_inputs_of_the_expert_preset_get_one_coefficient_and_the_exact_lasso(expert_data, monkeypatch):
+    """`expert_predictors` at hour 23: `price` and `price_day_last` are exact twins, which LARS can't take (its second twin is
+    0.24.2's degenerate entrant, and the path then carries coefficients of about 1e14). The fit drops the later twin: its
+    coefficient is exactly 0, the coefficients stay of the data's size, and the forecast is the exact lasso at α*."""
+    names = expert_predictors(["load"])
+    last = names.index("price_day_last")
+    hour23 = expert_data.index.hour == 23
+    assert (expert_data.loc[hour23, "price"] == expert_data.loc[hour23, "price_day_last"]).all()
+    records = by_key(run(lear(names, 100), expert_data, "2023-04-24", "2023-04-28", horizon=1))
+    for (day, period, _), record in records.items():
+        assert max(abs(c) for c in record["coefficients"]) < 100.0, (day, period)
+        if period == 23:
+            assert record["coefficients"][last] == 0.0
+    for day in ("2023-04-24", "2023-04-28"):
+        expected, fit, (sx, sy, st, scale) = hand_forecast(expert_data, 23, 1, day, names=names, window=100)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            lasso = Lasso(alpha=fit.alpha, tol=1e-14, max_iter=10**6).fit(sx, sy)
+        assert records[(day, 23, 1)]["prediction"] == pytest.approx(
+            scale.inverse(float(lasso.predict(st)[0])), abs=1e-6
+        )
+        assert records[(day, 23, 1)]["prediction"] == pytest.approx(expected, abs=HAND)
+    if has_extra("fast"):
+        for backend in ("numpy", "numba"):
+            monkeypatch.setenv("EPFTOOLBOX2_KERNELS", backend)
+            other = by_key(run(lear(names, 100), expert_data, "2023-04-24", "2023-04-28", horizon=1))
+            assert other.keys() == records.keys()
+            for key, record in other.items():
+                assert record["prediction"] == pytest.approx(records[key]["prediction"], abs=1e-9), (backend, key)
 
 
 # ---------------------------------------------------------------------------
