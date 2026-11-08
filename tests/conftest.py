@@ -66,6 +66,46 @@ def no_kept_tables():
     _stats._ESTIMATOR_CHECKS.clear()
 
 
+@pytest.fixture(autouse=True)
+def no_kept_hashes():
+    """Start every test with no weight file hashes kept (`models._weights._HASHES`, kept per process by (path, size, mtime)):
+    a worker reused for another test must hash its files itself."""
+    from epftoolbox2.models import _weights
+
+    _weights._HASHES.clear()
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Fail the test on any attempt to reach a network: a `connect` (or `connect_ex`) of a socket that isn't a Unix one (a
+    process pool's own sockets are), `socket.create_connection`, or a name lookup. Each attempt raises OSError and is recorded,
+    and the test fails at teardown if there was one, also when the code under test caught the error. A forked worker inherits
+    the guard. Yields the list of attempts (a test of the guard empties it)."""
+    import socket
+
+    attempts = []
+    real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+
+    def refuse(what, detail):
+        attempts.append((what, detail))
+        raise OSError(f"network access in a test that forbids it: {what} {detail!r}")
+
+    def connect(self, address):
+        return real_connect(self, address) if self.family == socket.AF_UNIX else refuse("connect", address)
+
+    def connect_ex(self, address):
+        return real_connect_ex(self, address) if self.family == socket.AF_UNIX else refuse("connect_ex", address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(
+        socket, "create_connection", lambda address, *args, **kwargs: refuse("create_connection", address)
+    )
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *args, **kwargs: refuse("getaddrinfo", host))
+    yield attempts
+    assert not attempts, f"the test reached for the network: {attempts}"
+
+
 @pytest.fixture
 def keyless_live_dir(tmp_path, monkeypatch):
     """The directory a live test runs in, for an example whose sources need no key (`examples/lear_lago.py`: the benchmark
