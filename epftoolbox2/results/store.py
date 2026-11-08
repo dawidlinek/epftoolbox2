@@ -4,10 +4,11 @@ import errno
 import json
 import os
 import re
+import zlib
 import queue
 import threading
 import warnings
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 from threading import Lock
 
 # What every record written from record schema 2 on ends with (D4 of the forecasting plan), after the keys it had before, whose
@@ -150,75 +151,115 @@ def read_records(
     `duplicates="first"` reads the first anyway, with a warning: for a tool that repairs such a file, never for a run or a report.
 
     Two passes, so that memory stays what the caller keeps: the first reads each line's key, revision and status alone and keeps
-    the offset of each key's chosen line, the second parses only those lines, in file order."""
+    the offset of each key's chosen line, the second parses only those lines, in file order. Both read one open file, so a file
+    replaced meanwhile (`os.replace`) is read as it was; one written in place meanwhile raises ValueError: each chosen line must be
+    where the first pass found it, with the same bytes (CRC-32) and so the same key, revision and status. A line no key chooses (a lower revision, a skip record under a
+    forecast) isn't parsed, so a damaged one of those isn't reported; a chosen or repeated one raises with its line number."""
     if duplicates not in ("raise", "first"):
         raise ValueError(f"duplicates must be 'raise' or 'first', not {duplicates!r}")
     wanted = None if statuses is None else frozenset(statuses)
-    chosen: Dict[Any, Tuple[int, str, int]] = {}  # key -> (revision, status, offset of its chosen line)
-    repeats: Dict[Any, List[int]] = {}  # key -> offsets of the forecasts repeating its chosen one
-    with open(path, "rb") as f:
-        offset = 0
-        for number, raw in enumerate(f, 1):
-            at, offset = offset, offset + len(raw)
-            line = raw.strip()
-            if not line:
-                continue
-            fields = _key_fields(path, number, raw, line)
-            if fields is None:
-                break  # a half-written last line
-            key, revision, status = fields
-            held = chosen.get(key)
-            if held is not None:
-                if revision < held[0]:
-                    continue
-                if revision == held[0] and held[1] == STATUS_OK:
-                    if status == STATUS_OK:
-                        repeats.setdefault(key, []).append(at)
-                    continue
-                repeats.pop(key, None)
-            chosen[key] = (revision, status, at)
-    if repeats:
-        _check_repeats(path, chosen, repeats, duplicates)
-    keep = sorted(at for _, status, at in chosen.values() if wanted is None or status in wanted)
-    del chosen, repeats
-    if not keep:
-        return
-    with open(path, "rb") as f:
-        offset = 0
+    with open(
+        path, "rb"
+    ) as f:  # once: a file replaced between the passes (an ensemble's, `os.replace`d) stays this one
+        chosen, repeats = _choose(path, f)
+        if repeats:
+            _check_repeats(path, f, chosen, repeats, duplicates)
+        # (offset, CRC-32 of the line, key, revision, status) of each line to parse, in file order
+        keep = sorted(
+            (at, crc, key, revision, status)
+            for key, (revision, status, at, crc) in chosen.items()
+            if wanted is None or status in wanted
+        )
+        del chosen, repeats
+        if not keep:
+            return
+        f.seek(0)
+        offset = number = 0
         following = iter(keep)
-        wanted_at = next(following)
+        expected = next(following)
         for number, raw in enumerate(f, 1):
             at, offset = offset, offset + len(raw)
-            if at == wanted_at:
-                record = _parse(path, number, raw, raw.strip())
-                out = record if transform is None else transform(record)
-                if out is not None:
-                    yield out
-                wanted_at = next(following, None)
-                if wanted_at is None:
-                    return
+            if at < expected[0]:
+                continue
+            if at > expected[0]:
+                raise _changed(path, number, "a line it chose in its first pass is no longer where it was")
+            if zlib.crc32(raw) != expected[1]:
+                raise _changed(path, number, "the line's bytes aren't those its first pass read")
+            record = _parse(path, number, raw, raw.strip())
+            found = None if record is None else _fields_of(record, number)
+            if found != expected[2:]:
+                raise _changed(path, number, f"the line holds {found}, its first pass read {expected[2:]}")
+            out = record if transform is None else transform(record)
+            if out is not None:
+                yield out
+            expected = next(following, None)
+            if expected is None:
+                return
+    raise _changed(path, number, "it ends before the lines its first pass chose")
 
 
-def _check_repeats(path: Path, chosen: Dict[Any, tuple], repeats: Dict[Any, List[int]], duplicates: str) -> None:
+def _choose(path: Path, f: BinaryIO) -> Tuple[Dict[Any, Tuple[int, str, int, int]], Dict[Any, List[int]]]:
+    """The first pass of `read_records`: key -> (revision, status, offset of its chosen line, CRC-32 of that line), and key ->
+    offsets of the forecasts repeating its chosen one."""
+    chosen: Dict[Any, Tuple[int, str, int, int]] = {}
+    repeats: Dict[Any, List[int]] = {}
+    offset = 0
+    for number, raw in enumerate(f, 1):
+        at, offset = offset, offset + len(raw)
+        line = raw.strip()
+        if not line:
+            continue
+        fields = _key_fields(path, number, raw, line)
+        if fields is None:
+            break  # a half-written last line
+        key, revision, status = fields
+        held = chosen.get(key)
+        if held is not None:
+            if revision < held[0]:
+                continue
+            if revision == held[0] and held[1] == STATUS_OK:
+                if status == STATUS_OK:
+                    repeats.setdefault(key, []).append(at)
+                continue
+            repeats.pop(key, None)
+        chosen[key] = (revision, status, at, zlib.crc32(raw))
+    return chosen, repeats
+
+
+def _fields_of(record: Dict, number: int) -> Tuple[Any, int, str]:
+    """(key, revision, status) of a parsed record, as the first pass reads them off its line (`_key_fields`)."""
+    key = (record.get("hour"), record.get("horizon"), record.get("run_date"))
+    return (number if None in key else key), record.get("revision", BACKTEST_REVISION), record.get("status", STATUS_OK)
+
+
+def _changed(path: Path, number: int, what: str) -> ValueError:
+    return ValueError(
+        f"{path} changed while it was read (line {number}: {what}): another process wrote it in place. Read it again once "
+        "nothing writes it."
+    )
+
+
+def _check_repeats(
+    path: Path, f: BinaryIO, chosen: Dict[Any, tuple], repeats: Dict[Any, List[int]], duplicates: str
+) -> None:
     """Compare each repeated forecast with its key's chosen one, without D4's keys: the same warn, another raises (or warns with
     `duplicates="first"`)."""
     same = differ = 0
     example = None
-    with open(path, "rb") as f:
 
-        def forecast(at: int) -> str:
-            f.seek(at)
-            record = json.loads(f.readline().strip().decode("utf-8"))
-            return json.dumps({k: v for k, v in record.items() if k not in _NOT_THE_FORECAST}, sort_keys=True)
+    def forecast(at: int) -> str:
+        f.seek(at)
+        record = json.loads(f.readline().strip().decode("utf-8"))
+        return json.dumps({k: v for k, v in record.items() if k not in _NOT_THE_FORECAST}, sort_keys=True)
 
-        for key, offsets in repeats.items():
-            first = forecast(chosen[key][2])
-            for at in offsets:
-                if forecast(at) == first:
-                    same += 1
-                else:
-                    differ += 1
-                    example = example or key
+    for key, offsets in repeats.items():
+        first = forecast(chosen[key][2])
+        for at in offsets:
+            if forecast(at) == first:
+                same += 1
+            else:
+                differ += 1
+                example = example or key
     if differ and duplicates == "raise":
         hour, horizon, run_date = example if isinstance(example, tuple) else (None, None, example)
         raise ValueError(

@@ -480,6 +480,59 @@ def test_a_repeat_with_another_forecast_raises_naming_the_file_and_a_key(tmp_pat
         assert list(read_records(path, duplicates="first")) == stored  # for a repair tool alone
 
 
+def hand_records(path, prediction, n=10):
+    rows = [
+        {"run_date": DAY, "target_date": "2023-04-13", "hour": hour, "horizon": 1, "prediction": prediction + hour}
+        for hour in range(n)
+    ]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return rows
+
+
+def swap_after_the_first_pass(monkeypatch, path, then):
+    """Call `then()` once the first pass of `read_records` has read the last line of `path`, before the second pass."""
+    from epftoolbox2.results import store
+
+    lines = len(path.read_text().splitlines())
+    real, calls = store._key_fields, []
+
+    def counting(*args):
+        out = real(*args)
+        calls.append(1)
+        if len(calls) == lines:
+            then()
+        return out
+
+    monkeypatch.setattr(store, "_key_fields", counting)
+
+
+def test_a_file_replaced_between_the_passes_is_read_as_it_was(tmp_path, monkeypatch):
+    """An ensemble's file is `os.replace`d on every report: a read that spans it gives the file it opened, never a mix."""
+    path, other = tmp_path / "e.jsonl", tmp_path / "other.jsonl"
+    original = hand_records(path, 1.0)
+    hand_records(other, 1000.25, n=7)  # other numbers, other line lengths
+    swap_after_the_first_pass(monkeypatch, path, lambda: os.replace(other, path))
+    assert list(read_records(path)) == original
+
+
+@pytest.mark.parametrize("kind", ["other lines", "the same lengths, other keys", "the same keys, other numbers"])
+def test_a_file_written_in_place_between_the_passes_raises(tmp_path, monkeypatch, kind):
+    """Written in place, the offsets of the first pass point into other records: every chosen line is checked against what the
+    first pass read off it, so this raises rather than reading the other file's numbers under the first's keys."""
+    path, other = tmp_path / "e.jsonl", tmp_path / "other.jsonl"
+    hand_records(path, 1.0)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    if kind == "other lines":
+        hand_records(other, 1000.25)  # ten records, longer lines: the first pass itself reads past where the file ended
+    elif kind == "the same lengths, other keys":
+        other.write_text("".join(json.dumps({**r, "hour": 9 - r["hour"]}) + "\n" for r in rows))
+    else:
+        other.write_text("".join(json.dumps({**r, "prediction": r["prediction"] + 4.0}) + "\n" for r in rows))
+    swap_after_the_first_pass(monkeypatch, path, lambda: path.write_bytes(other.read_bytes()))
+    with pytest.raises(ValueError, match="changed while it was read|is not a result record"):
+        list(read_records(path))
+
+
 def test_the_highest_revision_wins_wherever_it_stands(tmp_path):
     path = tmp_path / "m.jsonl"
     key = {"run_date": DAY, "target_date": "2023-04-13", "hour": 0, "horizon": 1}
