@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Se
 import numpy as np
 import pandas as pd
 
-from ._date_utils import daily_anchor
+from ._date_utils import daily_anchor, zone_name
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -1122,7 +1122,9 @@ class InformationSet:
 
     Args:
         issue_time: Local time the forecast is issued on day D, "HH:MM".
-        issue_timezone: Zone of `issue_time`.
+        issue_timezone: Zone of `issue_time`, or "data" (`DATA_ZONE`): each frame's own zone, so that every market of a run
+            over several (`ModelPipeline.run(data={zone: frame})`) issues at `issue_time` on its own clock. `ModelPipeline`
+            resolves it for each frame (`in_data_zone`) before anything reads it.
         rules: Overrides and additions, `{column name or glob pattern: Availability or dict}`, or a list of them with
             disjoint validity periods for a lag that changed over time (`Availability.during`, `RuleChain`). They take
             precedence over accepted assumptions, rules derived from data sources, and the built-in defaults.
@@ -1147,7 +1149,8 @@ class InformationSet:
         use_defaults: bool = True,
     ):
         _parse_time(issue_time)
-        _check_zone(issue_timezone)
+        if issue_timezone != DATA_ZONE:
+            _check_zone(issue_timezone)
         if unknown not in _UNKNOWN_POLICIES:
             raise ValueError(f"unknown must be one of {list(_UNKNOWN_POLICIES)}, got '{unknown}'")
         unknown_assumptions = [a for a in (assumptions or []) if a not in ASSUMPTIONS]
@@ -1183,6 +1186,23 @@ class InformationSet:
         )
         out._source_rules = dict(self._source_rules)
         out._source_zones = dict(self._source_zones)
+        return out
+
+    def in_data_zone(self, index: pd.DatetimeIndex) -> "InformationSet":
+        """This information set for a frame with this index: itself, or with `issue_timezone="data"` a copy issued in the
+        index's zone (`zone_name`, as a manifest records it), which a run with the zone written out gives to the bit. A naive
+        index has no zone to issue in, and raises."""
+        if self.issue_timezone != DATA_ZONE:
+            return self
+        tz = getattr(index, "tz", None)
+        if tz is None:
+            raise ValueError(
+                "issue_timezone='data' issues each forecast on the clock of its frame's zone, and this frame's index has none: "
+                "localise it (df.tz_localize('Europe/Warsaw')) or name the issue zone."
+            )
+        out = self.copy()
+        out.issue_timezone = zone_name(tz) or str(tz)
+        _check_zone(out.issue_timezone)
         return out
 
     def to_dict(self) -> Dict[str, Any]:

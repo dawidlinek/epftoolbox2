@@ -2174,3 +2174,19 @@ def test_source_rebuild_catches_a_transformer_leak_that_the_final_column_probe_m
     from_source = leakage_probe(make_model, source, run_day, info, horizon=1, rebuild=rebuild_with_elapsed_shift)
     assert not from_source.ok
     assert (23, 1) in from_source.changed
+
+
+def test_issue_timezone_data_is_each_frame_s_own_zone():
+    """`issue_timezone="data"` (step 7g): the issue zone of each frame is the frame's own, resolved by `in_data_zone`."""
+    info = InformationSet("12:00", "data", rules={"x": Availability.static()})
+    index = pd.date_range("2024-01-01", periods=3, freq="h", tz="Europe/Helsinki")
+    resolved = info.in_data_zone(index)
+    assert resolved.issue_timezone == "Europe/Helsinki" and info.issue_timezone == "data"
+    assert resolved.to_dict() == {**info.to_dict(), "issue_timezone": "Europe/Helsinki"}
+    fixed = InformationSet("12:00", "Europe/Warsaw")
+    assert fixed.in_data_zone(index) is fixed
+    with pytest.raises(ValueError, match="has none"):
+        info.in_data_zone(index.tz_localize(None))
+    assert InformationSet.from_dict(info.to_dict()).issue_timezone == "data"
+    with pytest.raises(ValueError, match="Unknown time zone"):
+        InformationSet("12:00", "Mars/Olympus")
