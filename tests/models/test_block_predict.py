@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import LassoCVModel, LEARModel, NaiveModel, OLSModel, RidgeModel
 from epftoolbox2.models import _worker as worker
 from epftoolbox2.models._calendar import (
@@ -34,6 +35,7 @@ from epftoolbox2.models._calendar import (
 )
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.models.base import BaseModel
+from epftoolbox2.pipelines import ModelPipeline
 from tests.synthetic import PREDICTORS, make_market_data
 
 WINDOW = 28
@@ -489,3 +491,40 @@ def test_a_call_that_returns_another_shape_raises_and_a_refused_fit_is_every_for
         Short(refit="7D").run(market, *WEEK, horizon=1)
     with pytest.raises(RuntimeError, match=r"no forecasts produced \(166 planned\). Skipped: fit_error x166"):
         Refuses(refit="7D").run(market, *WEEK, horizon=1)
+
+
+# ---------------------------------------------------------------------------
+# verify's co-batch check (step 6c)
+# ---------------------------------------------------------------------------
+
+RULES = {
+    "load": Availability.published("10:00", 7),
+    "wind": Availability.published("10:00", 7),
+    "is_weekend": Availability.static(),
+    "is_weekday": Availability.static(),
+}
+# The fakes read the mean of their call's second column: here D-1's price, unknown on the block's rows from D+2 on.
+WITH_PRICE = ["load_d+{horizon}", "price_d-1", "is_weekend_d+{horizon}", "is_weekday_d+{horizon}"]
+
+
+@pytest.mark.parametrize("issue_day", [WEEK[0], "2023-03-22"])
+def test_the_fake_is_ok_under_the_co_batch_check_and_one_that_reads_its_call_a_leak(market, issue_day):
+    """`verify` runs the rerun and co-batch checks on a block-predicting model by default, the co-batch one over the other six
+    days of the block that its `_co_batch_items` names, every cell unknown at the issue time perturbed on every row: the plain
+    fake's forecasts don't move (`ok`), and the one that reads the mean price of its call's rows moves, a `leak`: a row from
+    D+2 on holds a price published after D's issue time (its call's wind would be no leak: the 7-day forecast covers it). The
+    plain probe sees it too, since a call holds the block's days that the frame has, whatever the run holds."""
+    pipeline = ModelPipeline(information_set=InformationSet(rules=RULES))
+    pipeline.add_model(kernel(predictors=WITH_PRICE, name="Kernel"))
+    pipeline.add_model(kernel(predictors=WITH_PRICE, name="Sees", **SEES_CALL))
+    report = pipeline.verify(market, issue_day, issue_day, days=1)
+    table = report.table().set_index("model")
+
+    assert table.loc["Kernel", ["changed", "rerun", "co_batch", "status"]].tolist() == [0, 0, 0, "ok"], (
+        report.problems()
+    )
+    kernel_check, sees_check = report.checks
+    assert kernel_check.co_batch.items == [str(d) for d in block_days(issue_day, "7D") if str(d) != issue_day]
+    assert kernel_check.co_batch.probe.forecasts == 24 and kernel_check.co_batch.control.moved
+    assert table.loc["Sees", ["changed", "rerun", "co_batch", "status"]].tolist() == [24, 0, 24, "leak"]
+    assert sees_check.co_batch.probe.max_abs_change > 1e-9  # the probe's atol
