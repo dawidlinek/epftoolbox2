@@ -96,13 +96,13 @@ class PseSource(DataSource):
     Datasets (``datasets``) and their columns:
 
     - ``kse-load``: ``load_actual`` and ``load_fcst`` (MW), the national load and PSE's day-ahead forecast of it.
-    - ``his-wlk-cal``: ``demand``, ``wi`` (wind), ``pv`` (solar) and ``jg`` (centrally dispatched generation) by
+    - ``his-wlk-cal``: ``demand``, ``wi`` (wind), ``pv`` (solar) and ``jg`` (PSE's generation field) by
       default, and with ``columns`` the other fields of the table under PSE's names (``jga``, ``jgm``, ``jgo``,
       ``jgm1``, ``jgm2``, ``jgw1``, ``jgw2``, ``jgz1``, ``jgz2``, ``jgz3``, ``jnwrb``, ``swm_p``, ``swm_np``).
     - ``csdac-pln``: ``csdac_pln``, the SDAC price of the Polish bidding zone in PLN/MWh (the EUR price times the
       day's EUR/PLN rate).
     - ``rce-pln``: ``rce_pln``, the market energy price (RCE) of the prosumer net-billing scheme in PLN/MWh. It is
-      another series than the SDAC price (correlation 0.98 in 2025, mean absolute difference 43 PLN/MWh): do not use it
+      another series than the SDAC price (correlation 0.98, mean absolute difference 43 PLN/MWh in a comparison): do not use it
       as the day-ahead price.
     - ``pdgsz``: ``usage_fcst``, PSE's recommended-usage code of each hour. The table keeps every version of an hour;
       the source takes the **first** one, by its UTC publication stamp, because a later version may be written on the

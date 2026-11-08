@@ -165,6 +165,13 @@ an issue day it didn't sample.
 
 ### New
 
+- **`PseSource`: the Polish TSO's reports API, no key.** `PseSource(datasets=["kse-load", "csdac-pln"], columns=None, prefix="")` loads
+  `kse-load` (`load_actual`, `load_fcst`), `his-wlk-cal` (`demand`, `wi`, `pv`, `jg` and more on request), `csdac-pln` (the SDAC price in
+  PLN), `rce-pln` (the prosumer net-billing price, another series), `pdgsz` (recommended-usage code, each hour's first version) and
+  `przeplywy-mocy` (`flow_*`) on the 15-minute grid, UTC start of the period (PSE stamps the end). It loads from YAML, is offered in the
+  TUI and has built-in availability rules (`load_fcst` 09:00 and the prices 15:00 on D-1, the actuals 13:00 on D+1) with the classes
+  `last_write_stamp` and, for `pdgsz`, `row_stamp`. A `PseSource` in the pipeline replaces the ENTSO-E default rule of `load_actual`
+  for its own column of that name. Nothing existing moves. See [PseSource](/epftoolbox2/data-sources/pse/).
 - **`MirrorLogScaler` and `PolyScaler`: the mirror-log and polynomial VSTs.** `scaler="mlog"` and `scaler="poly"` are the
   transformations of Uniejewski, Weron & Ziel (2018) on `AsinhScaler`'s median/MAD normalisation, then standardised like every VST:
   `sgn(u) (log(|u| + 1/c) + log c)` with `c=1/3`, and `sgn(u) ((|u| + (c/λ)^(1/(λ-1)))^λ - (c/λ)^(λ/(λ-1)))` with `lam=0.125`,

@@ -41,5 +41,10 @@ paths:
 - `get_cache_config()` has `prefer_15min`, `schema_version` (`SCHEMA_VERSION`), and, only when `"load"` is requested, `daily_zone` (the resolved A31 anchor, see above — a pipeline bound to a different market zone must not share a cache entry with another); bump `SCHEMA_VERSION` whenever parsing output changes.
 - Publication deadlines (Reg. 543/2013) vs 12:00 CET gate closure, i.e. what a forecast issued on D may use, are tabulated on the docs page `docs/src/content/docs/data-sources/entsoe.mdx`. Short version: `load_actual` and `generation_*` actuals only `_d-1` and older; `load_forecast` up to `_d+1`; `load_forecast_daily_*` up to `_d+2` (`_d+3` after 10:00); `generation_*_forecast` only `_d+0` and older.
 
+## PSE specifics
+- `PseSource` (`api.raporty.pse.pl`, keyless): a 15-minute row is stamped with the END of its period (`dtime_utc`), so the index is `dtime_utc - 15 min`; `business_date` is the local date of the period's start. `pdgsz` is hourly with one row per version, stamped at the hour's start; the source keeps the first version by `publication_ts_utc` and repeats it over four quarter-hours.
+- `publication_ts` of every PSE table is a last-write stamp (bulk reloads rewrite it), so it never decides availability; the built-in rules in `information_set._pse_rules` do (class `last_write_stamp`, `pdgsz` `row_stamp`). PSE `load_actual` replaces the ENTSO-E default of the same name when a `PseSource` is in the pipeline. `rce_pln` is a different series from `csdac_pln`, never the day-ahead price.
+- Not offered, on purpose: the balancing tables `sk`, `cor`, `energy-prices` (their lag changed from D+4 to D+1 on 2026-10-08; they need `RuleChain` periods), `poze-redoze` and `unav-pk5l`.
+
 ## Known issues (don't fix as a side effect of other work)
 - Open-Meteo `{prefix}_{col}_d+i` columns are shifted by `24h * i` in UTC (`open_meteo.py`, `_parse_weather_data`), not by local calendar days, so around each DST switch they point one hour off the model's targets (23 rows per switch per i). `shift_calendar_days` is the fix.

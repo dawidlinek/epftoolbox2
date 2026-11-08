@@ -187,6 +187,7 @@ For a predictor function it shows [the distinct lists first](/epftoolbox2/model-
 | `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00 Brussels for the whole following Monday-to-Sunday week of the data's local dates, each market's own (a bound `EntsoeSource` names its market's zone, see below) | `latest_revision` |
 | `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) | `latest_revision` |
 | `generation_*` (A75 actual generation) | 1h after the end of the delivery period | `latest_revision` |
+| `PseSource` columns | `load_fcst` 09:00 and the prices (`csdac_pln`, `rce_pln`) 15:00 Warsaw on D-1, `usage_fcst` 16:00 on D-1; `load_actual`, `his-wlk-cal` and `flow_*` columns 13:00 on D+1 (see [PseSource](/epftoolbox2/data-sources/pse/#availability-rules)) | `last_write_stamp`, `usage_fcst` `row_stamp` |
 | Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static, known in advance | none |
 
 An `OpenMeteoSource` column's rule (below) is a `snapshot`, and so is an `EpftoolboxBenchmarkSource`'s `price`.
@@ -311,11 +312,11 @@ archive of most series keeps only the newest revision, not the value a forecast 
 |---|---|---|
 | `snapshot` | each value as published at a stated time | an auction's price, A69's 18:00 vintage, Open-Meteo's previous runs |
 | `row_stamp` | every value with a trustworthy stamp of its first publication | PSE `pdgsz` |
-| `last_write_stamp` | a stamp of each value's last write: it can tell a leak, but it is no vintage | other PSE tables |
+| `last_write_stamp` | a stamp of each value's last write: it can tell a leak, but it is no vintage | the other PSE tables |
 | `latest_revision` | the newest value only | ENTSO-E A65, A69 `current`, A75, SMARD, Energy-Charts `current` |
 
-The library has no source for PSE, SMARD or Energy-Charts yet: they are here to say what each class means, and a rule of yours for
-such a column can carry its class.
+`PseSource` has these classes on its columns (`pdgsz` is `row_stamp`, the other tables `last_write_stamp`). The library has no source
+for SMARD or Energy-Charts yet: they are here to say what each class means, and a rule of yours for such a column can carry its class.
 
 ```python
 from epftoolbox2.information_set import Availability, InformationSet
