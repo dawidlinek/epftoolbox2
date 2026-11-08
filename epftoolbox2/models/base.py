@@ -184,11 +184,28 @@ class _MemorySink:
         return False
 
 
+def _frozen(value: Any) -> Any:
+    """`value` as nested tuples, compared by `==` to the bit: dicts by their items in key order, lists and tuples, arrays by
+    their type, shape and bytes, sets in order; anything else as it is (callables and classes by identity)."""
+    if isinstance(value, dict):
+        return (
+            "dict",
+            tuple((repr(key), _frozen(item)) for key, item in sorted(value.items(), key=lambda kv: repr(kv[0]))),
+        )
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_frozen(item) for item in value))
+    if isinstance(value, (set, frozenset)):
+        return ("set", tuple(sorted(repr(item) for item in value)))
+    if isinstance(value, np.ndarray):
+        return ("ndarray", value.dtype.str, value.shape, value.tobytes())
+    return value
+
+
 class _Checked(NamedTuple):
     """What `BaseModel._check_inputs` found for one model's inputs (the expanded lists, the columns they read, what
     `availability="warn"` lists for the run and for each window) and the run it checked them for (`run_of`), which
-    `run(checked=...)` uses in place of checking again when its own run is that one: `ModelPipeline` checks every model before
-    any runs (`_checked_inputs`)."""
+    `run(checked=...)` uses in place of checking again when its own run is that one, of the same model in the same settings:
+    `ModelPipeline` checks every model before any runs (`_checked_inputs`)."""
 
     expanded: Dict[Tuple[int, int], List[str]]
     used_predictors: Tuple[str, ...]
@@ -198,6 +215,7 @@ class _Checked(NamedTuple):
 
     @staticmethod
     def run_of(
+        model: "BaseModel",
         data: pd.DataFrame,
         target: str,
         horizon: int,
@@ -212,11 +230,13 @@ class _Checked(NamedTuple):
         cut_rules: Optional["InformationSet"],
         weekdays: Optional[Sequence[int]],
     ) -> Tuple[Tuple[Any, ...], Tuple[Any, ...]]:
-        """(the objects a check read, compared by identity: the frame, the information set, the plan, `cut_rules`; everything
-        else it was given, compared by value), `horizons` as the check reads them."""
+        """(the objects a check read, compared by identity: the model, the frame, the information set, the plan, `cut_rules`;
+        the model's settings (`BaseModel._check_settings`) and everything else it was given, compared by value), `horizons` as
+        the check reads them. So another model's check, or this model's from before a setting changed, is no check of the run."""
         horizons = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
         days = None if weekdays is None else tuple(weekdays)
-        return (data, information_set, plan, cut_rules), (
+        return (model, data, information_set, plan, cut_rules), (
+            model._check_settings(),
             target,
             horizon,
             horizons,
@@ -231,7 +251,11 @@ class _Checked(NamedTuple):
     def is_for(self, run: Tuple[Tuple[Any, ...], Tuple[Any, ...]]) -> bool:
         """Whether this check was of `run` (`run_of`): the same objects and equal values."""
         objects, values = run
-        return all(mine is theirs for mine, theirs in zip(self.run[0], objects)) and self.run[1] == values
+        return (
+            len(objects) == len(self.run[0])
+            and all(mine is theirs for mine, theirs in zip(self.run[0], objects))
+            and self.run[1] == values
+        )
 
 
 class _Periods(NamedTuple):
@@ -676,6 +700,7 @@ class BaseModel(ABC):
                 weekdays,
             )
         run = _Checked.run_of(
+            self,
             data,
             target,
             horizon,
@@ -1660,6 +1685,7 @@ class BaseModel(ABC):
             stacklevel=5,
         )
         run = _Checked.run_of(
+            self,
             data,
             target,
             horizon,
@@ -1675,6 +1701,28 @@ class BaseModel(ABC):
             weekdays,
         )
         return _Checked(expanded, tuple(self._used_predictors), self._availability_listing, self._window_listings, run)
+
+    def _check_settings(self) -> Tuple[Any, ...]:
+        """What of the model its inputs' check reads, or could, frozen for comparing by value (`_Checked.run_of`): its class,
+        name, predictors (the list, a `(horizon)` function, a function of `ctx`), training window, refit rule, newest target,
+        binary-column rule, scaler, whether it fits nothing or forecasts what is known only, and `_model_kwargs`."""
+        return _frozen(
+            (
+                type(self),
+                self.name,
+                self.predictors,
+                self._predictors_fn,
+                self._ctx_fn,
+                self.training_window,
+                self.refit,
+                self.newest_target,
+                self.binary_mask,
+                self.scaler,
+                self._fits_nothing,
+                self._known_only,
+                self._model_kwargs,
+            )
+        )
 
     def _check_reaches_back(
         self,

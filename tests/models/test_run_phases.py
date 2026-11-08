@@ -320,3 +320,67 @@ def test_a_run_s_warnings_point_at_its_caller(market, tmp_path):
             text,
             [(w.filename, str(w.message)[:60]) for w in found],
         )
+
+
+def quarter_after_hourly():
+    """15-minute rows from 1 April 2023, hourly ones before: a run reading back before April at freq "15min" is refused."""
+    quarter = make_market_data(days=300, freq="15min", horizon=1)
+    return quarter[(quarter.index >= pd.Timestamp("2023-04-01", tz=quarter.index.tz)) | (quarter.index.minute == 0)]
+
+
+def test_a_check_from_before_a_setting_changed_is_no_check_of_the_run():
+    """A check is of one model in one state: a window widened after it, back onto rows the 15-minute run can't train on, makes
+    the run check itself and refuse, as a run without the check does."""
+    data, issue = quarter_after_hourly(), "2023-09-01"
+    model = OLSModel(PREDICTORS, training_window=45, name="ols")
+    checked = model._checked_inputs(data, "price", 1, "15min", None, issue, issue)
+    model.training_window = 200
+    with pytest.raises(ValueError, match="coarser"):
+        model.run(data, issue, issue, horizon=1, freq="15min", checked=checked)
+
+
+SETTINGS = {
+    "training_window": lambda m: setattr(m, "training_window", 56),
+    "training_window list": lambda m: setattr(m, "training_window", [28, 56]),
+    "predictors": lambda m: m.predictors.append("price_d-1"),
+    "refit": lambda m: setattr(m, "refit", "7D"),
+    "binary_mask": lambda m: setattr(m, "binary_mask", "fit"),
+    "scaler": lambda m: setattr(m, "scaler", "asinh"),
+    "name": lambda m: setattr(m, "name", "other"),
+    "estimator option": lambda m: setattr(m, "fit_intercept", True),
+}
+
+
+@pytest.mark.parametrize("change", list(SETTINGS))
+def test_a_check_is_of_one_model_in_one_state(market, change):
+    """`_Checked.is_for` holds a check to the model it was made for, as it was then (`_check_settings`)."""
+    model = OLSModel(list(PREDICTORS), 28, name="m")
+    checked = model._checked_inputs(market, "price", 2, "1h", None, *TEST)
+
+    def run(of):
+        return _Checked.run_of(of, market, "price", 2, None, "1h", None, *TEST, None, "raise", None, None, None)
+
+    assert checked.is_for(run(model))
+    assert not checked.is_for(run(OLSModel(list(PREDICTORS), 28, name="m")))  # its twin, another object
+    SETTINGS[change](model)
+    assert not checked.is_for(run(model))
+
+
+def test_another_model_s_check_is_ignored(market, monkeypatch):
+    """A check handed to another model's run is no check of it: the run checks its own inputs, and its own check it uses."""
+    calls = []
+    original = BaseModel._check_inputs
+
+    def counted(self, *args, **kwargs):
+        calls.append(self.name)
+        return original(self, *args, **kwargs)
+
+    first, second = OLSModel(PREDICTORS, 28, name="a"), OLSModel(PREDICTORS, 56, name="b")
+    of_first = first._checked_inputs(market, "price", 2, "1h", None, *TEST)
+    of_second = second._checked_inputs(market, "price", 2, "1h", None, *TEST)
+    monkeypatch.setattr(BaseModel, "_check_inputs", counted)
+    ignored = second.run(market, *TEST, horizon=2, checked=of_first)
+    assert calls == ["b"]
+    used = second.run(market, *TEST, horizon=2, checked=of_second)
+    assert calls == ["b"] and texts(used._results) == texts(ignored._results)
+
