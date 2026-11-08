@@ -147,6 +147,9 @@ _COMPARED_FIELDS += ("save_coefficients",)
 # The numeric path of the fits, "engine-1" for an engine group's fits from shared statistics (`models._engine_worker`), no key
 # for the model path: the two agree within the engine's tolerances, not to the bit, so one file never mixes them.
 _COMPARED_FIELDS += ("fit_path",)
+# A `PooledModel`'s zone (`models._pooled`): the zones of the fit in stack order, `over`, `zone_feature`, `missing` and the other zones'
+# data hashes, since another zone's data moves this zone's forecasts. None (and no key) for a model fitted on one zone's rows.
+_COMPARED_FIELDS += ("pooled",)
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -260,6 +263,9 @@ class Manifest:
     # Provenance of the fits from shared statistics of the last run that made any (`models._engine_worker.EngineCounts`):
     # {"fits", "fallbacks": {reason: count}, "max_issue_z"}; None (and no key) otherwise. Never compared.
     engine: Optional[Dict[str, Any]] = None
+    # A `PooledModel`'s zone: {"zones", "over", "zone_feature", "missing", "data": {other zone: its data_columns_hash}}; None (and
+    # no key) otherwise. Compared on resume.
+    pooled: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -318,6 +324,8 @@ class Manifest:
             del out["fit_path"]
         if out["engine"] is None:  # no fit from shared statistics
             del out["engine"]
+        if out["pooled"] is None:  # fitted on one zone's rows
+            del out["pooled"]
         return out
 
     @classmethod
@@ -555,6 +563,7 @@ def build_manifest(
         kernels=kernels,
         record_schema=RECORD_SCHEMA,
         fit_path=fit_path,
+        pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
     )
 
 

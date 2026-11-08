@@ -1,0 +1,128 @@
+---
+title: Several Zones
+description: One run over the frames of several markets, each zone in its own folder and clock, PooledModel fitted over all of them, and PanelReport
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A study of several markets is one run over a dict of frames, one per zone. Every model runs once per zone, on that zone's frame and
+in its own time zone, into a folder of `save_dir` per zone. A plain model in such a run is exactly that model run on the zone's frame
+alone: the same records, manifest and tables, bit for bit. A [`PooledModel`](/epftoolbox2/models/pooled/) is fitted once over every
+zone and writes each zone's forecasts into that zone's folder. The run returns a `PanelReport`, one report per zone.
+
+## A run over zones
+
+```python
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.models import NaiveModel, OLSModel, PooledModel
+from epftoolbox2.pipelines import ModelPipeline
+
+frames = {"PL": df_pl, "FI": df_fi, "PT": df_pt}  # one frame per zone, each in its market's zone
+inputs = ["load_forecast_d+{horizon}", "is_holiday_d+{horizon}"]
+
+pipeline = (
+    ModelPipeline(issue_time="12:00", issue_timezone="data")  # noon on each zone's own clock
+    .add_model(NaiveModel(predictors=["load_forecast_d+{horizon}"], name="TSO"))
+    .add_model(OLSModel(predictors=inputs, training_window=364, name="ols"))  # one fit per zone
+    .add_model(PooledModel(OLSModel(predictors=inputs, training_window=364), name="pooled"))  # one fit over the zones
+    .add_evaluator(MAEEvaluator())
+)
+panel = pipeline.run(frames, target="load", freq="1h", horizon=2, test=("2024-01-01", "2024-12-31"), save_dir="runs/zones")
+panel.summary()          # one row per (zone, model), `zone` and `target` first
+panel.zones["FI"]        # Finland's EvaluationReport, as a run of its frame alone gives it
+```
+
+- **Zones** are the dict's keys, in its order: letters, digits, `_` and `-` (they name folders), unique whatever their case. Each
+  value is a DataFrame in its market's zone, as one frame would be. The test window, target, horizons, `freq` and `issue_days` are
+  the run's, the same in every zone.
+- **Files.** `save_dir/<zone>/<model>.jsonl` (or `.parquet/`) and its manifest, per zone and model, under the keys `(hour, horizon,
+  run_date)` of a plain run, and `save_dir/zone_run.json`, the zone index: the zones in the order first run, which alone tells
+  `report` that the folders are zones (sub-folders of a run of one frame never are). A `save_dir` that already holds a run of one
+  frame is refused before any fit, and so is a run of one frame into a `save_dir` of zones: a report couldn't tell which to read.
+  A zone whose name differs from an indexed one only in letter case is refused too (one folder on macOS and Windows). The zones
+  whose folders hold results are checked first (a pooled model's resume, their plain models' runs), so a refused resume writes
+  neither the index nor any file of a new zone.
+- **Checks before any fit.** Every model is checked on every zone's frame (the data contract, the predictors, the information set)
+  before any model runs, and one warning lists what each `(model, zone)` reads late at `availability="warn"`.
+- **Ensembles** are computed per zone, from the zone's stored forecasts, as in a run of one frame.
+- **Exporters** export one report, so a run over zones refuses them: export each `panel.zones[zone]`.
+
+## The issue time of each zone
+
+`issue_timezone="data"` issues each zone's forecasts at `issue_time` on its own clock: noon in Warsaw, noon in Helsinki (an hour
+earlier) and noon in Lisbon (an hour later). It is resolved for each frame before anything reads it, so a zone's manifest records its
+own zone, and a run with `"data"` on one frame is the run with that frame's zone written out. A frame with a naive index has no zone
+to issue in and raises. A fixed zone (`issue_timezone="Europe/Brussels"`) issues every zone at the same instant.
+
+## One fit over every zone: `PooledModel`
+
+A pooled model's fit serves every zone, so it is made by the **earliest** issue of the day over the zones: Helsinki's noon, 11:00 in
+Warsaw and 10:00 in Lisbon. Before any fit every zone's training rows (its newest training target, and the training rows of a column
+whose rule changes over time) are judged on the clock of each zone that issues earlier: a value Warsaw publishes at 12:00 for its
+own noon issue is late for the fit it shares with Helsinki, refused at `availability="raise"` and listed with a note at `"warn"`. A
+zone's issue row is judged on its own clock, since it serves that zone's forecast alone (a column whose rule changes over time is
+judged on the earlier clock on its issue row too: stricter than needed, never looser). See
+[PooledModel](/epftoolbox2/models/pooled/) for what a unit is, how each zone's rows are scaled, and what it refuses.
+
+## The panel report
+
+`run` returns, and `ModelPipeline.report(save_dir, ...)` of a run over zones builds, a `PanelReport`, its zones in the run's order. A
+zone the index or a pooled model's manifest names whose folder holds none of the pipeline's results raises `FileNotFoundError`:
+a panel without it would score the other zones as the whole run. `allow_missing=True` leaves it out with a warning.
+
+| | |
+|---|---|
+| `zones` | zone -> its `EvaluationReport`, whose every table and comparison is that zone's alone |
+| `summary()`, `forecast_counts()`, `choices()`, `availability()` | each zone's table, `zone` (and `target`) first; `epf report` prints the counts and choices of a run over zones |
+| `log_gain(benchmark, by=("zone", "target", "horizon"), common=True)` | per model the mean over cells of 100 ln(MAE of the benchmark / MAE of the model), with `cells`, `cells_lost`, `empty`, `forecasts` (scored on), `own_forecasts` (held with the benchmark) and `min_cell_forecasts`; `cells=True` gives one row per cell |
+| `cells_lost(benchmark, by=..., common=True)` | the cells where the benchmark has the lower MAE |
+| `PanelReport.concat([...])` | the panels of several runs, such as a daily minimum and maximum: `log_gain` can then cut by `target` |
+
+A cell of `log_gain` is one value of each key of `by` (`zone`, `target`, `horizon`, `hour`), and each cell weighs the same however
+many forecasts it has. By default (`common=True`) every model is scored on the same forecasts: the keys at which the benchmark and every
+model listed hold a finite prediction and actual, so every model's mean is over the same cells, those with at least one such key, and a
+model whose run failed in a zone takes that zone out for all of them (`empty` counts such cells). Where that scores a model on fewer
+forecasts than it holds with the benchmark (`forecasts` against `own_forecasts`, a gap inside a cell included), it warns, with the
+counts in `attrs["shared"]`. Leaving a model out of `models=` can then give the others more keys. `common=False` scores each model on the keys it shares with the benchmark alone and on its own cells,
+and warns, with the cells each lacks in `attrs["unequal_cells"]`, when those differ: means over different cells don't compare. A cell
+where the model's MAE is zero and the benchmark's isn't is a win, `+inf`; the other way round a loss, `-inf`; both zero a tie, 0; such
+a mean is infinite, with a warning. A week-ahead study of markets reports `by=("zone", "target")`, each market's statistic pooled over
+its horizons:
+
+```python
+from epftoolbox2.results import PanelReport
+
+both = PanelReport.concat([panel_min, panel_max])            # two runs, target "actual_daily_min" and "actual_daily_max"
+gains = both.log_gain("TSO", by=("zone", "target"))         # log_gain, cells, cells_lost, forecasts per model
+lost = both.cells_lost("TSO", by=("zone", "target"))         # the markets and statistics the TSO wins
+```
+
+<Aside type="caution">
+A cell without `zone` pools the errors of markets of very different size: the gain is then mostly the largest market's. Keep `zone` in
+`by` unless the targets are on one scale.
+</Aside>
+
+## Resuming
+
+Each zone's files resume as a run of one frame does. A pooled model's manifest in each zone also records `pooled`: the zones in their
+order, `over`, `zone_feature`, `missing` and the other zones' data hashes. A resume with another set or order of zones, another `over`
+or `zone_feature`, or another zone's data changed raises `ManifestMismatchError`, since each of them moves this zone's forecasts. A
+resume cut short in some zones refits each unit over every zone and writes the missing forecasts alone, equal to a fresh run.
+
+## Verifying
+
+`pipeline.verify(frames, test_start, test_end, ...)` verifies each plain model on each zone's frame and each pooled model over every
+zone at once, each check named `"<model> (<zone>)"`, on issue days sampled from the first zone's frame. The pooled probe perturbs, in
+every zone at once, what is unknown at the zone's own issue time, and on the rows before the issue day what is unknown at the earliest
+issue of the day: a leak in one zone's training rows moves the shared fit and is a `leak` in every zone. Each zone has its own positive
+control, its freshest known values perturbed with the other zones' frames as they are, which must move its own forecasts: a zone whose
+forecasts read nothing of its own frame (predictors it lacks, given as zeros by `missing="zero"`, or no value on its issue rows) is
+`inconclusive`, as it would be alone. One zone's control can't move another's forecasts: its noise is on rows no fit trains on, and each
+zone's issue row is forecast on its own. A sampled day costs two pooled runs of that day plus one per zone. `rebuild=` is for one frame
+and refused over zones.
+
+## Not in this step
+
+Validation windows with a `PooledModel`, `Workflow` and SLURM array jobs over several zones, a zone axis in the store's keys (each
+zone has its own files), and `newest_target="published"`, a predictor function of `ctx` or a list of training windows in a pooled
+model.

@@ -198,6 +198,17 @@ an issue day it didn't sample.
   between `control moved` and `status`, empty for every model of today: **no status or other column moves**. `co_batch_probe`
   joins `leakage_probe` in `epftoolbox2.information_set`, and `leakage_probe` and `positive_control` take `span=`. See
   [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/#rerun-and-co-batch).
+- **Several zones in one run, and `PooledModel`.** `ModelPipeline.run(data={"PL": df_pl, "FI": df_fi, ...})` runs every model once
+  per zone on that zone's frame, in its own time zone, into `save_dir/<zone>/`, and returns a `PanelReport` (one `EvaluationReport`
+  per zone, `summary()`, `forecast_counts()`, `choices()` and `availability()` with a `zone` column, `log_gain(benchmark, by=...)` and
+  `cells_lost(benchmark)` with every model scored on the same cells and keys by default (`common=True`), `PanelReport.concat` for
+  several targets); the run writes `save_dir/zone_run.json`, which alone makes `report(save_dir)` (and `epf report`) one of zones,
+  refusing a zone whose folder is gone, and `verify` takes the dict too, each zone with its own positive control. A plain model in such a run is its run on the zone's frame alone, bit for bit. `issue_timezone="data"`
+  issues each zone at the issue time on its own clock (on one frame, the frame's zone written out). `PooledModel(model, over=("zone",),
+  zone_feature="onehot", missing="raise")` fits one model over every zone, each zone's rows standardised within its own fit, and
+  judges every zone's training rows as of the earliest issue of the day; each zone's manifest records `pooled`, compared on resume.
+  **No existing number moves**: a run of one frame, its records, manifests and tables are as before, and so are the goldens. See
+  [Several Zones](/epftoolbox2/model-pipeline/zones/) and [PooledModel](/epftoolbox2/models/pooled/).
 - **Scoring by period: hourly and block aggregates, the shape within the hour, normalised MAEs, breakdowns by a data column.**
   `report.aggregate("1h", agg="mean")` turns 15-minute results into hourly ones (an hour counts with all four quarter-hours finite;
   dropped hours are `incomplete_hour` in its `forecast_counts()`), and `aggregate("1D", agg="peak")` / `"offpeak"` scores the mean over
