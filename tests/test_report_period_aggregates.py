@@ -858,3 +858,46 @@ def test_csv_extra_columns_need_the_results_time_zone(tmp_path):
     )
     written = pd.read_csv(tmp_path / "out.csv")
     assert (written["local_hour"] == written["hour"]).all()
+
+
+@pytest.mark.parametrize("freq", ["1h", "15min"])
+@pytest.mark.parametrize("stored", ["memory", "jsonl"])
+def test_a_spring_day_numbered_through_is_refused_with_a_zone(tmp_path, freq, stored):
+    """The ids of 2024-03-31 numbered 0-22 (0-91): the reader drops the one the clock skips, so the rest would pass for the
+    clock's day an hour off after 02:00."""
+    import json
+
+    n = 23 if freq == "1h" else 92
+    local = pd.date_range(pd.Timestamp(SPRING).tz_localize(ZONE), periods=n, freq=freq)
+    rows = [
+        {
+            "run_date": "2024-03-30",
+            "target_date": SPRING,
+            "hour": i,
+            "horizon": 1,
+            "prediction": float(t.hour),
+            "actual": float(t.hour),
+            "freq": freq,
+        }
+        for i, t in enumerate(local)
+    ]
+    path = tmp_path / "m.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    ref = ModelResultRef(
+        name="m",
+        path=path if stored == "jsonl" else None,
+        count=len(rows),
+        test_start="",
+        test_end="",
+        horizon=1,
+        freq=freq,
+        _results=rows if stored == "memory" else None,
+        zone=ZONE,
+    )
+    report = EvaluationReport({"m": ref}, [MAEEvaluator()])
+    for agg in ("peak", "offpeak"):
+        with pytest.raises(ValueError, match="off the clock"):
+            report.aggregate("1D", agg=agg)
+    if freq == "15min":
+        with pytest.raises(ValueError, match="off the clock"):
+            report.aggregate("1h")

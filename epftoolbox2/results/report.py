@@ -361,6 +361,8 @@ class EvaluationReport:
         self._require_one_frequency("Aggregating")
         if freq == DAILY:
             self._refuse_hours_dropped_without_a_zone()
+        if block or freq == HOURLY:
+            self._refuse_records_off_the_clock(agg)
 
         frames = self._model_frames()
         starts = [df["run_date"].min() for df in frames.values() if "run_date" in df and len(df)]
@@ -448,6 +450,20 @@ class EvaluationReport:
             )
         evaluators = [e for e in self.evaluators if not any(e is out for out in (*economic, *sourced))]
         return EvaluationReport(results, evaluators, choices=self._choices)
+
+    def _refuse_records_off_the_clock(self, agg: str) -> None:
+        """Results with a zone that hold records of slots the clock doesn't have on their date: the reader leaves those out
+        (`ModelResultRef.off_the_clock`), so a day numbered through (0-22 on a 23-hour day, 0-91 at 15 minutes) would pass for
+        the clock's day with every hour after the switch an hour off, and a block or an hour of it would be read shifted. A run
+        never writes such a record; refused, never scored."""
+        off = {name: n for name, ref in self.refs.items() if ref.zone is not None and (n := ref.off_the_clock())}
+        if off:
+            raise ValueError(
+                f"aggregate({agg!r}) reads period ids as the local clock's, but these results hold records of slots their "
+                f"clock doesn't have, which are off the clock and left out (per model: {off}): their days are numbered "
+                "otherwise, so their hours after a switch would be read an hour off. Number the periods by the clock, as a "
+                "run does, or pass the records without a zone."
+            )
 
     def _refuse_hours_dropped_without_a_zone(self) -> None:
         """Hourly results of `aggregate("1h")` that dropped hours, with no zone to tell what a day has: a day without its
