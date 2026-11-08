@@ -15,7 +15,9 @@ predictor function reading `ctx.published`, `binary_mask="fit"` and NaiveModel, 
 measurements are in `epftoolbox2-research/library_check_step5/plan_once/`.
 """
 
+import gc
 import json
+import tracemalloc
 import warnings
 from concurrent.futures import Future
 from pathlib import Path
@@ -469,3 +471,29 @@ def test_training_rows_given_as_lists_are_judged_with_verdicts_kept(frames, monk
                 information_set("2023-03-10"), data, expanded, issue_days=["2023-03-24"], training_rows=rows
             )
     assert out[0] == out[1] == out[2] and any("settle_d-1" in use for use in out[0])
+
+
+def test_a_kept_verdict_holds_no_copy_of_the_issue_days(monkeypatch):
+    """A kept verdict's key holds the issue days by a digest: checks of one new column each over two years of issue days keep
+    about a kilobyte per verdict (a copy of the 730 days was about 45 kB), whatever the checks are."""
+    index = pd.date_range("2022-01-01", "2024-12-31 23:00", freq="1h", tz="Europe/Warsaw")
+    info = InformationSet(rules={"x*": Availability.published("10:00", 1)}, unknown="warn", use_defaults=False)
+    sharing(monkeypatch, True)
+
+    def check(name):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            info.violations(
+                {(p, 1): [name] for p in range(24)}, "x", "1h", index, "2023-01-01", "2024-12-31", check_target=False
+            )
+
+    check("x0_d-1")
+    gc.collect()
+    tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    for i in range(1, 41):
+        check(f"x{i}_d-1")
+    gc.collect()
+    held = tracemalloc.get_traced_memory()[0] - before
+    tracemalloc.stop()
+    assert len(info_module._VERDICTS) == 41 and held / 40 < 5_000

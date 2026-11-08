@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime
 import fnmatch
+import hashlib
 import math
 import re
 import threading
@@ -1424,6 +1425,7 @@ class InformationSet:
 
         # What a column's verdict is computed from besides the column itself (`_verdict`): the issue clock's inputs (the issue
         # time and its zone, the data's zone, a daily frame's row time, the issue days) and the assumptions, whose hints it says.
+        # The issue days by a digest of their instants: a key holds a few hundred bytes, however many days a check reads.
         clock_key = (
             self.issue_time,
             self.issue_timezone,
@@ -1432,7 +1434,9 @@ class InformationSet:
             freq,
             _row_anchor(index, freq),
             str(days.tz),
-            tuple(days.asi8.tolist()),
+            str(days.dtype),
+            len(days),
+            hashlib.sha256(days.asi8.tobytes()).hexdigest(),
             tuple(self.assumptions),
         )
 
