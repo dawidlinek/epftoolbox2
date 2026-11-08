@@ -12,7 +12,15 @@ from threadpoolctl import ThreadpoolController
 from ..results.store import with_status
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
-from ._calendar import MASK_FIT, FitUnit, member_window, refit_anchor, training_span
+from ._calendar import (
+    MASK_FIT,
+    FitUnit,
+    block_days,
+    member_window,
+    nominal_block_length,
+    refit_anchor,
+    training_span,
+)
 
 # What `_worker_init` loads into a pool's worker: the default `TaskInputs` of every task function (`_pool_inputs`).
 _W_HOUR_ARRAYS: Dict = {}
@@ -655,6 +663,12 @@ def _fit_unit(
     read on the window's first day). The scaler is fitted on the training rows and transforms the test rows of `tasks` together,
     value by value, so a forecast is the same whichever other forecasts of its unit are run with it: one cut short and resumed
     equals a fresh one.
+
+    A model whose class defines `_predict_block`, with `block_predict` True (`block_call`), predicts in one call the issue rows
+    of every day of the unit's block that the period has with finite inputs, the run's tasks or not, padded to the rule's
+    nominal length with copies of the first (`_block_forecasts`), and each task's forecast is its own row's: still the same
+    whichever others are run with it, since the call's rows and shape don't depend on them. Tasks without a row or with a
+    missing input are skipped as one at a time.
     """
     inputs = _inputs_of(inputs)
     cfg = inputs.config
@@ -714,7 +728,14 @@ def _fit_unit(
 
     test_rows = arrays["x"][[test for _, test in forecast]][:, col_idx]
     predicted = None
-    if engine is not None:
+    if block_call(model):
+        # The block's rows in one call, each forecast from its own row (`_block_forecasts`); never the engine's.
+        predicted = _block_forecasts(
+            cfg, unit, arrays, col_idx, predictors, train_x, train_y, scalable_mask, forecast, model
+        )
+        if isinstance(predicted, str):  # the fit refused: every forecast's fit_error, as one at a time
+            return outcomes + [(task, predicted) for task, _ in forecast]
+    elif engine is not None:
         predicted = engine(StatsFit(hour, hz, train, col_idx, finite, train_x, train_y, scalable_mask, test_rows))
     if predicted is None or any(row is None for row in predicted):
         # The whole unit, or the rows the engine left to the model path (each row's forecast is its own: scaled value by
@@ -768,6 +789,73 @@ def _fit_unit(
         )
         outcomes.append((task, record))
     return outcomes
+
+
+def block_call(model) -> bool:
+    """Whether `model`'s refit units predict their blocks in one call: its class defines `_predict_block` (see `BaseModel`)
+    and `block_predict` is True. Every other model predicts one row at a time (`_predict_fitted`)."""
+    return getattr(model, "_predict_block", None) is not None and bool(getattr(model, "block_predict", False))
+
+
+def block_rows(cfg: Dict, unit: FitUnit, days: np.ndarray, x: np.ndarray, col_idx: List[int]) -> List[int]:
+    """The rows of a unit's block call before padding, in a period whose rows are on `days` with values `x`: the issue row
+    (`issue_row`, so the second of a repeated autumn hour) of each day of the unit's block under its member's rule
+    (`block_days`) that the period has a row on with every input of `col_idx` finite, in date order. Every such day, whichever
+    of them the run forecasts: a call holds the same rows alone, in the full block, after a resume and whatever `test_start`
+    or `issue_days`, and only the frame's end or a missing input leaves a day out. Its inputs only: no target of the block's
+    days enters a call."""
+    refit = cfg["refit"]
+    rows = []
+    for day in block_days(unit.anchor, refit["rules"][unit.member]):
+        row = issue_row(days, day.toordinal() - refit["first_ordinal"])
+        if row is not None and np.isfinite(x[row, col_idx]).all():
+            rows.append(row)
+    return rows
+
+
+def _block_forecasts(
+    cfg: Dict,
+    unit: FitUnit,
+    arrays: Dict,
+    col_idx: List[int],
+    predictors: List[str],
+    train_x: np.ndarray,
+    train_y: np.ndarray,
+    scalable_mask: np.ndarray,
+    forecast: List[Tuple[tuple, int]],
+    model,
+) -> Union[List[Tuple[float, list]], str]:
+    """(prediction in target units, coefficients) of each of `forecast`'s (task, issue row), in its order, from one fit of the
+    unit (`_fit_model`) and one call of `model._predict_block` over its block's rows (`block_rows`), padded to the rule's nominal
+    length (`nominal_block_length`) with copies of the first, never another day's row: one shape for every call of the rule,
+    whatever the frame, the run or a resume holds. The scaler is fitted on the training rows and transforms the call's rows
+    together, value by value, as one at a time. A fit that raises ValueError is a `fit_error` reason, returned for every task."""
+    rows = block_rows(cfg, unit, arrays["days"], arrays["x"], col_idx)
+    length = nominal_block_length(cfg["refit"]["rules"][unit.member])
+    if not rows or len(rows) > length:
+        raise RuntimeError(f"a block call of {len(rows)} rows for a nominal length of {length}")
+    call = rows + [rows[0]] * (length - len(rows))
+    place = {row: i for i, row in enumerate(rows)}
+    scaler = make_scaler(cfg.get("scaler", "standard"))
+    train_x, train_y, call_x = scaler.fit_transform(
+        train_x.copy(),
+        train_y.copy(),
+        arrays["x"][call][:, col_idx],
+        scalable_mask=scalable_mask,
+        columns=predictors,
+    )
+    try:
+        fitted = model._fit_model(train_x, train_y)
+    except ValueError as exc:
+        return f"{SKIP_FIT_ERROR}: {exc}"
+    predictions, coefficients = model._predict_block(fitted, call_x)
+    predictions = np.asarray(predictions, dtype=np.float64)
+    if predictions.shape != (length,) or len(coefficients) != length:
+        raise RuntimeError(
+            f"{type(model).__name__}._predict_block returned {predictions.shape} predictions and {len(coefficients)} "
+            f"coefficient lists for a call of {length} rows: one of each per row"
+        )
+    return [(scaler.inverse(float(predictions[place[test]])), coefficients[place[test]]) for _, test in forecast]
 
 
 def _run_unit(

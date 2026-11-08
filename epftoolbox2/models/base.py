@@ -62,6 +62,7 @@ from ._calendar import (
     REFIT_AUTO,
     REFIT_EPOCH,
     anchors_of_rules,
+    block_days,
     block_rule,
     check_binary_mask,
     check_issue_days_in,
@@ -396,6 +397,23 @@ class _RunState:
             self.store.close()
 
 
+def _predicts_blocks(model: "BaseModel") -> bool:
+    """Whether a model whose class defines `_predict_block` predicts each refit unit's block in one call: with `refit` and
+    `block_predict` True. What `verify` reads as `_predicts_together` (`BaseModel.__init_subclass__`)."""
+    return bool(model.block_predict) and model.refit is not None
+
+
+def _block_co_batch_items(model: "BaseModel", run_day: Any) -> List[datetime.date]:
+    """The other issue days of `run_day`'s block, whose rows the call that predicts `run_day`'s forecasts holds whatever the
+    run has (`_worker._fit_unit`), in date order: the block of the coarsest member's rule (`_refit_block`), which holds every
+    member's under `"auto"`. None without a block call (`refit=None`, `block_predict=False`). `verify`'s co-batch check reads
+    it as `_co_batch_items` (`BaseModel.__init_subclass__`)."""
+    if not _predicts_blocks(model):
+        return []
+    day = pd.Timestamp(run_day).date()
+    return [other for other in block_days(day, model._refit_block) if other != day]
+
+
 class BaseModel(ABC):
     # Parameters a saved pipeline writes only when not at these values (`ModelPipeline._serialize_component`), so files saved
     # before they existed don't move. A subclass adds its own.
@@ -403,6 +421,31 @@ class BaseModel(ABC):
     # True for a model that fits nothing and forecasts a column's value on the issue row (`NaiveModel`): its tasks read that row
     # alone (`_worker._row_value`), with no training rows, scaler or fit.
     _fits_nothing: bool = False
+
+    # A class may define `_predict_block(fitted, rows) -> (predictions, coefficients per row)`: from the fit of a refit unit
+    # (`_fit_model`), the forecasts of the standardised rows `rows` (n, columns) in one call, a prediction in target units of the
+    # scaler and a coefficient list for each row, in their order. Then `_worker._fit_unit` hands it the issue rows of every day
+    # of the unit's block that the frame has with finite inputs, not only the run's, padded to the rule's nominal length
+    # (`_calendar.nominal_block_length`) with copies of the first, and takes each forecast from its own row, so a call has one
+    # shape and holds the same rows alone, in the full block, after a resume and whatever `test_start`. An in-context model
+    # (TabPFN) pays for its context once per call, not once per row. Each row's prediction must not depend on the other rows of
+    # its call; `verify`'s co-batch check runs the probe over them. Such a class gets `block_predict = True` (False predicts
+    # one row at a time through `_predict_fitted`, as every other model), `_predicts_together` and `_co_batch_items(run_day)`
+    # (the other days of its block) unless it defines them (`__init_subclass__`). The worker rebuilds the model from
+    # `_model_kwargs`, so a class that takes `block_predict` as a parameter returns it there. BaseModel defines none of them, and
+    # no core model has one.
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if getattr(cls, "_predict_block", None) is None:
+            return
+        for name, default in (
+            ("block_predict", True),
+            ("_predicts_together", property(_predicts_blocks)),
+            ("_co_batch_items", _block_co_batch_items),
+        ):
+            if not hasattr(cls, name):
+                setattr(cls, name, default)
 
     def __init__(
         self,
