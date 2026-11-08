@@ -803,7 +803,9 @@ class TestModelPipelineParameterFidelity:
         def public(obj):
             # A model inside another (`PooledModel.model`) by its own parameters.
             return {
-                k: public(v) if isinstance(v, BaseModel) else str(v) for k, v in vars(obj).items() if not k.startswith("_")
+                k: public(v) if isinstance(v, BaseModel) else str(v)
+                for k, v in vars(obj).items()
+                if not k.startswith("_")
             }
 
         for kind, objs in originals.items():

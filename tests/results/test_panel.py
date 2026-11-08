@@ -120,7 +120,12 @@ def test_panels_of_several_targets_concatenate():
     low = PanelReport({"PL": zone_report(1, 1.0), "FI": zone_report(2, 0.4)}, target="min")
     high = PanelReport({"PL": zone_report(5, 1.2), "FI": zone_report(6, 0.5)}, target="max")
     both = PanelReport.concat([low, high])
-    assert both.targets == ["min", "max"] and set(both.reports) == {("PL", "min"), ("FI", "min"), ("PL", "max"), ("FI", "max")}
+    assert both.targets == ["min", "max"] and set(both.reports) == {
+        ("PL", "min"),
+        ("FI", "min"),
+        ("PL", "max"),
+        ("FI", "max"),
+    }
     cells = both.log_gain("TSO", by=("zone", "target"), cells=True)
     assert len(cells) == 4
     one = low.log_gain("TSO", by=("zone", "target"), cells=True)
