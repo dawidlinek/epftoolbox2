@@ -366,6 +366,17 @@ class CsvSource(DataSource):
                  timezone: str = "UTC"): ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end)
 
+class EnergyChartsSource(DataSource):
+    def __init__(self, country: str = "de",
+                 type: Optional[List[str]] = None,  # "forecast" | "power" | "price" | "cbet" | "cbpf"; None: forecast, power, price
+                 bzn: Optional[str] = None,  # price zone; None: the country's single zone
+                 forecast_types: Optional[List[str]] = None,  # "day-ahead" | "intraday" | "current"; None: ["day-ahead"]
+                 production_types: Optional[List[str]] = None,  # "solar" | "wind_onshore" | "wind_offshore" | "load"; None: all
+                 power: Optional[Union[List[str], str]] = None,  # series of /public_power to keep; None: all
+                 allow_restricted_prices: bool = False,  # zones outside CC BY 4.0 are for private use only
+                 prefix: str = "ec", cache_dir: Optional[str] = None, use_cache: bool = True): ...
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), UTC, no key
+
 class EpftoolboxBenchmarkSource(DataSource):
     def __init__(self, dataset: str, cache_dir: Optional[str] = None, prefix: str = ""): ...
     index_timezone: str   # property: fixed-offset zone of the index

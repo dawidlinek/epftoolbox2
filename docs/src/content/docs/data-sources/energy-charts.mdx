@@ -1,0 +1,145 @@
+---
+title: EnergyChartsSource
+description: Energy-Charts (Fraunhofer ISE) without a key - wind, solar and load forecasts by vintage, actual generation, day-ahead prices and cross-border flows
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Loads data from the [Energy-Charts API](https://api.energy-charts.info) of Fraunhofer ISE. It needs **no API key**. It is the one free place in the library where the TSOs' wind, solar and load forecasts come in more than one **vintage** (day-ahead, intraday, current), and it has the actual generation by type, day-ahead prices and cross-border flows next to them.
+
+<Aside type="caution" title="Attribution and licence">
+  Data: **Energy-Charts.info** (Fraunhofer Institute for Solar Energy Systems ISE), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Using it requires attribution to Energy-Charts.info; say so wherever you publish a result built on it.
+
+  Day-ahead **prices** are CC BY 4.0 *from Bundesnetzagentur | SMARD.de* for AT, BE, CH, CZ, DE-LU, DE-AT-LU, DK1, DK2, FR, HU, IT-North, NL, NO2, PL, SE4 and SI only. The prices of every other zone are for private and internal use: any use of them, raw or derived, for external or commercial purposes is prohibited, and a published paper or a shared dataset is external. The source refuses such a zone unless you pass `allow_restricted_prices=True` ([Licence](#licence)).
+</Aside>
+
+## Basic Usage
+
+```python
+from epftoolbox2.pipelines import DataPipeline
+from epftoolbox2.data.sources import EnergyChartsSource
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer
+
+source = EnergyChartsSource(
+    "de",
+    type=["forecast", "power", "price"],
+    forecast_types=["day-ahead", "intraday"],
+    production_types=["solar", "wind_onshore", "wind_offshore", "load"],
+    power=["load", "solar", "wind_onshore", "fossil_gas"],
+)
+
+pipeline = (
+    DataPipeline(timezone="Europe/Berlin")
+    .add_source(source)
+    .add_transformer(TimezoneTransformer())
+    .add_transformer(ResampleTransformer("1h"))  # the API's grid is 15-minute: average to hours
+)
+df = pipeline.run("2025-03-01", "2025-03-08", cache=True)
+```
+
+`fetch(start, end)` returns the rows in **[start, end)** with a UTC index. Every column carries the prefix `ec_` (the `prefix` default), so the columns of this example are `ec_solar_forecast_day_ahead`, `ec_solar_forecast_intraday`, ..., `ec_load_forecast_day_ahead`, `ec_actual_load`, `ec_actual_solar`, `ec_actual_wind_onshore`, `ec_actual_fossil_gas` and `ec_price_day_ahead`. The names in the tables below are shown without it.
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `country` | str | No | `"de"` | Country code of the forecast, power and cross-border endpoints (`"de"`, `"at"`, `"fr"`, ...) |
+| `type` | List[str] \| None | No | `None` | Any of `"forecast"`, `"power"`, `"price"`, `"cbet"`, `"cbpf"`. `None` = `["forecast", "power", "price"]` |
+| `bzn` | str \| None | No | `None` | Bidding zone of the price (`"DE-LU"`, `"CH"`, `"DK1"`, ...). `None` = the country's single zone (`"de"` is `DE-LU`); Denmark, Italy, Norway and Sweden need it |
+| `forecast_types` | List[str] \| None | No | `None` | `"day-ahead"`, `"intraday"`, `"current"`. `None` = `["day-ahead"]` |
+| `production_types` | List[str] \| None | No | `None` | `"solar"`, `"wind_onshore"`, `"wind_offshore"`, `"load"`. `None` = all four |
+| `power` | List[str] \| str \| None | No | `None` | Series of `/public_power` to keep, named as in the columns without `actual_` (`"solar"`, `"fossil_gas"`), or comma-separated. `None` = every series the API returns for the country (21 for Germany) |
+| `allow_restricted_prices` | bool | No | `False` | Accept a zone whose prices are for private use only |
+| `prefix` | str | No | `"ec"` | Column prefix, `{prefix}_{column}`. The default keeps every column off the built-in rules of other sources ([Vintages and Availability](#vintages-and-availability)) |
+| `cache_dir` | str \| None | No | `None` | Where the downloaded answers are kept. `None` = `$XDG_CACHE_HOME/epftoolbox2/energy-charts` (`~/.cache/...` when unset) |
+| `use_cache` | bool | No | `True` | Keep and reuse the answers on disk |
+
+## Columns
+
+| `type` | Endpoint | Columns | Unit |
+|--------|----------|---------|------|
+| `forecast` | `/public_power_forecast` | `{solar,wind_onshore,wind_offshore}_forecast_{day_ahead,intraday,current}`, `load_forecast_day_ahead` | MW |
+| `power` | `/public_power` | `actual_{series}`: `actual_load`, `actual_residual_load`, `actual_solar`, `actual_wind_onshore`, `actual_wind_offshore`, `actual_fossil_gas`, `actual_fossil_hard_coal`, `actual_hydro_run_of_river`, ... (the shares `actual_renewable_share_of_load` and `_of_generation` are in %) | MW |
+| `price` | `/price` | `price_day_ahead` | EUR/MWh |
+| `cbet` | `/cbet` | `cbet_{neighbour}` and `cbet_sum`: cross-border electricity trading, positive = import | GW |
+| `cbpf` | `/cbpf` | `cbpf_{neighbour}` and `cbpf_sum`: physical flows, positive = import | GW |
+
+The load forecast exists as day-ahead only; `forecast_types=["day-ahead", "intraday"]` asks it for day-ahead and leaves it out of the rest. The column name carries the vintage, and `price_day_ahead` is not called `price`, so that it never collides with `EntsoeSource`'s `price` in one frame. The installed-power endpoint (`/installed_power`, a yearly or monthly stock labelled at the end of its period) is not offered.
+
+The series names of `/public_power` are those the API returns for the country, converted to snake case (`Fossil brown coal / lignite` is `actual_fossil_brown_coal_lignite`). Asking for a series the country does not have raises `ValueError` and lists the ones it has.
+
+## Time Index and Resolution
+
+Every timestamp of the API is unix seconds and marks the **start** of the period, which is how this library stamps its data. DST days are therefore exact: the day the clocks go forward has 92 quarter-hours (23 hours) and the day they go back 100 (25 hours), in the forecasts, the actuals and the prices alike, and hourly series (CH prices) have 23 and 25.
+
+The grid is the API's own and is **not resampled**: 15-minute for forecasts and actual generation; for prices 15-minute for DE-LU, AT and PL and hourly for CH, and the resolution of a series can change over its history (not checked for every zone and year), which the source does not hide. Columns of different resolution share one frame with NaN between the hourly stamps; put a `ResampleTransformer` (after `TimezoneTransformer`) behind the source, as above, to get one grid. Checked live for 2025-03-30 and 2025-10-26 (Germany): 92 and 100 rows at 15 minutes for the forecasts, actuals and the DE-LU price, 25 hourly rows for the CH price on the autumn day.
+
+## Vintages and Availability
+
+The three forecast types are three archived versions of the same TSO forecast:
+
+| `forecast_type` | Column | Rule (Europe/Berlin) | [Class](/epftoolbox2/model-pipeline/information-set/#vintage-classes) |
+|-----------------|--------|----------------------|-------|
+| `day-ahead` | `*_forecast_day_ahead` | published 18:00 on D-1 of the delivery day | `snapshot` |
+| `intraday` | `*_forecast_intraday` | published 08:00 on the delivery day | `snapshot` |
+| `current` | `*_forecast_current` | **never known before its delivery day has ended** (published 00:00 the day after) | `latest_revision` |
+
+The other columns:
+
+| Column | Rule | Class |
+|--------|------|-------|
+| `actual_*`, `cbet_*`, `cbpf_*` | known 1 h after the period (`realised("1h")`) | `latest_revision` |
+| `price_day_ahead` (SDAC zones) | published 13:00 on D-1 | `snapshot` |
+| `price_day_ahead` (CH) | published 12:00 on D-1: Switzerland has its own 11:00 auction, not SDAC. The time the archive first held a value is unmeasured | `snapshot` |
+
+The rules are the source's own (`source_rules`, so every `Workflow` and `with_source_rules` has them). They are **not** in `default_rules()`: the default `ec_` prefix keeps these names off the defaults layer, where a name equal to an ENTSO-E one (`price`, `load_actual`) would silently take ENTSO-E's rule. Outside a source-aware run (a `ModelPipeline(issue_time=...)` or a plain `InformationSet`) an `ec_` column has no rule, and `unknown="raise"` refuses it, `current` included; give it a rule of your own there (`energy_charts_rules(prefix="ec")` from `epftoolbox2.information_set` returns them). An 11:45 issue on D therefore sees D's day-ahead forecast (out 18:00 on D-1) and D's intraday forecast (out 08:00 on D), but not the day-ahead forecast of D+1 (out 18:00 on D), and **never** `current`: with `availability="raise"` a model that reads `ec_solar_forecast_current` is refused, and `InformationSet.late_uses` lists it at `"warn"`. Only a lag that puts it a day behind (`ec_solar_forecast_current_d-1`) is known, the way an actual is.
+
+<Aside type="caution" title="The vintages are matched by name">
+  Energy-Charts documents `day-ahead`, `intraday` and `current` only as names. That they are the TSOs' own vintages (and when each was first out) is an inference from their errors against actual generation, not from documentation: for Germany in 2025 the RMSE against the day-ahead forecast was 13.8 % lower for the solar intraday forecast and 29.1 % lower for `current`, and 22.7 % and 45.1 % lower for wind onshore. For a past date the API returns a separate, stable series per type (checked: three different series for one day, and the same values on every request, with the day-ahead RMSE against actuals above the intraday one above the current one), which is why day-ahead and intraday are `snapshot`; that no value was rewritten after the time of its rule is **not** something the archive proves. `current` is the newest revision and is rewritten as the day goes by, so it is a `latest_revision`, and a model that reads it can look more accurate in a backtest than it would be live. The 18:00 and 08:00 times are the legal and typical publication times, not measured first-seen times, and the load forecast, which the TSOs publish earlier, gets the day-ahead time too (late rather than early).
+</Aside>
+
+The actuals are revised after publication (Energy-Charts keeps the newest value), hence `latest_revision`; the [vintage classes](/epftoolbox2/model-pipeline/information-set/#vintage-classes) section says what that does to a backtest.
+
+## Licence
+
+`type=["price"]` checks the zone when the source is built:
+
+```python
+from epftoolbox2.data.sources import EnergyChartsSource
+
+EnergyChartsSource("de", type=["price"])                  # DE-LU: CC BY 4.0
+EnergyChartsSource("dk", type=["price"], bzn="DK2")       # Denmark has two zones, so bzn is needed
+EnergyChartsSource("ro", type=["price"], allow_restricted_prices=True)  # private and internal use only; warns
+```
+
+Without `allow_restricted_prices=True` a zone outside the CC BY list (for example RO, BG, ES, PT, NO1, SE3) raises `ValueError`. Opting in logs a warning each time the source is built: do not publish or share those prices or anything derived from them. Forecasts, actuals and flows are CC BY 4.0 for every country.
+
+## Rate Limits and Time
+
+The public API allows **2 requests per minute per IP and endpoint**, with a burst of 4 (`/price`: burst of 2), and answers HTTP 429 with `Retry-After` beyond that; under load the limit can be lower. The source:
+
+- throttles itself to that rate with a token bucket per endpoint, shared by every source in the process (the limit is per IP, so a cluster job array behind one IP shares it too: a 429 is the signal, and the source waits the `Retry-After` it is given, up to 15 minutes, before it retries; it raises if asked to wait longer, or if 7 attempts fail);
+- fetches at most 366 days per request;
+- keeps every answer for a period that ended more than two days ago on disk (`cache_dir`), so a second run, or a longer range that reuses a request, asks nothing; `DataPipeline.run(..., cache=True)` adds the library's per-source cache on top;
+- sends a generic `User-Agent` and no key.
+
+How long a download takes follows from this: after the burst of 4, a request costs 30 seconds on its endpoint. The default selection (the four forecast types, power and price) is 4 forecast requests, one power and one price per year of data: about a minute for the first year (a second each) and about two minutes for each further year, dominated by the forecast requests. Every extra forecast vintage adds three more requests per year (a year of all three vintages is 10 forecast requests, about 5 minutes a year). A second run from the cache takes seconds.
+
+Be a good citizen: cache, don't poll, and ask for commercial access (see the API's description) if you need more.
+
+## Using It in a Model
+
+```python
+from epftoolbox2.models import OLSModel
+
+model = OLSModel(
+    predictors=[
+        "price_d-1",
+        "ec_solar_forecast_day_ahead",   # D's forecast, out at 18:00 on D-1: known at 11:45 on D
+        "ec_wind_onshore_forecast_day_ahead",
+        "ec_load_forecast_day_ahead",
+    ],
+)
+```
+
+The forecasts of the target day D+h are not known at 11:45 on D (`ec_solar_forecast_day_ahead_d+1` is out at 18:00 on D), so a model for the next day reads the forecast of the issue day itself, as above. See [Information Set](/epftoolbox2/model-pipeline/information-set/) for the check and [Vintage Classes](/epftoolbox2/model-pipeline/information-set/#vintage-classes).
