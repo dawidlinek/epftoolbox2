@@ -141,6 +141,9 @@ _COMPARED_FIELDS = (
 # False for results written with `save_coefficients=False` (no key otherwise): a resume with the other setting would mix records
 # with and without coefficients, and an empty list can't be told from a training window list's.
 _COMPARED_FIELDS += ("save_coefficients",)
+# A `PooledModel`'s zone (`models._pooled`): the zones of the fit in stack order, `over`, `zone_feature`, `missing` and the other zones'
+# data hashes, since another zone's data moves this zone's forecasts. None (and no key) for a model fitted on one zone's rows.
+_COMPARED_FIELDS += ("pooled",)
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -248,6 +251,9 @@ class Manifest:
     # False for records written with `save_coefficients=False` (`coefficients: []`); None (and no key) with their coefficients.
     # Compared on resume.
     save_coefficients: Optional[bool] = None
+    # A `PooledModel`'s zone: {"zones", "over", "zone_feature", "missing", "data": {other zone: its data_columns_hash}}; None (and
+    # no key) otherwise. Compared on resume.
+    pooled: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -297,6 +303,8 @@ class Manifest:
             del out["save_format"]
         if out["save_coefficients"] is None:  # coefficients written
             del out["save_coefficients"]
+        if out["pooled"] is None:  # fitted on one zone's rows
+            del out["pooled"]
         return out
 
     @classmethod
@@ -531,6 +539,7 @@ def build_manifest(
         vintages=vintages,
         kernels=kernels,
         record_schema=RECORD_SCHEMA,
+        pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
     )
 
 

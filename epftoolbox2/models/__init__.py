@@ -5,6 +5,7 @@ from .lasso import LassoCVModel
 from .ridge import RidgeModel
 from .lear import LEARModel
 from .naive import NaiveModel
+from .pooled import PooledModel
 
 __all__ = [
     "BaseModel",
@@ -13,6 +14,7 @@ __all__ = [
     "RidgeModel",
     "LEARModel",
     "NaiveModel",
+    "PooledModel",
     "PredictorContext",
     "PredictorPlan",
     "Use",
