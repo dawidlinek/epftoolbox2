@@ -447,7 +447,7 @@ class ResultStore:
                 f"{self.path}: the file system refused a lock on {self.lock_path} ({exc}), so a second run writing these "
                 "results at the same time would not be refused. Run one writer per model's results here.",
                 UserWarning,
-                stacklevel=4,
+                stacklevel=5,
             )
             return None
 
@@ -494,7 +494,7 @@ class ResultStore:
             f"{self.path}: cut off its last {size - start} bytes (from byte {start}), a line a run that stopped while writing "
             f"left half-written: {_preview(tail.strip())}. Its key is forecast again.",
             UserWarning,
-            stacklevel=4,
+            stacklevel=5,
         )
 
     def _writer_loop(self) -> None:

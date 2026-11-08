@@ -215,6 +215,7 @@ def warn_about_a_midnight_stamp(
     predictors: Iterable[str],
     information_set: Any = None,
     model_name: str = "Model",
+    stacklevel: int = 4,
 ) -> None:
     """A `UserWarning` when the rows of a daily frame are stamped at midnight, or within the offset of a rule's zone from it, and
     a predictor counts hours from the stamp (an `h`, `min` or `s` shift). Such a frame may hold what is true at another time of
@@ -251,7 +252,7 @@ def warn_about_a_midnight_stamp(
         "hour known after the issue time reads as known, and no check can see it. A frame cut with at_time() at this time is "
         "right as it is. See the docs page Time and Calendars.",
         UserWarning,
-        stacklevel=4,
+        stacklevel=stacklevel,
     )
 
 
