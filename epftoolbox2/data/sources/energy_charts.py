@@ -82,6 +82,13 @@ BURST = {"price": 2}
 DEFAULT_BURST = 4
 
 
+# Usual series of /public_power for Germany, to check prefixes against when `power` is not given.
+_USUAL_POWER = (
+    "load residual_load solar wind_onshore wind_offshore biomass fossil_gas fossil_hard_coal "
+    "fossil_brown_coal_lignite hydro_run_of_river hydro_pumped_storage nuclear waste others"
+).split()
+
+
 class EnergyChartsApiError(RuntimeError):
     """The Energy-Charts API refused a request or kept failing."""
 
@@ -194,9 +201,10 @@ class EnergyChartsSource(DataSource):
 
     The three forecast types are different vintages of one forecast: ``day-ahead`` (``forecast_types=["day-ahead"]``,
     the default) is published on the evening before, ``intraday`` on the morning of the delivery day, and ``current`` is
-    the newest revision, rewritten as the day goes by. Only ``current`` is not safe for a backtest: it is a latest
-    revision, so the built-in availability rule never takes it as known before its delivery day has ended and
-    ``availability="raise"`` refuses it. That the three names are the TSOs' vintages is an inference from their names
+    the newest revision, filled in a batch after the day at a time nobody measured (and possibly recomputed). Only
+    ``current`` is never usable in a backtest: its availability rule holds on no day, so it is never known at any shift
+    and ``availability="raise"`` refuses it. ``day-ahead`` and ``intraday`` are ``latest_revision`` like ENTSO-E's TSO
+    forecasts: the archive does not show that no value was rewritten after its rule's time. That the three names are the TSOs' vintages is an inference from their names
     and their errors against actuals (ordered day-ahead > intraday > current), not from documentation.
 
     Timestamps of the API mark the start of the period and are unix seconds, so both DST switches come out right. The
@@ -321,14 +329,50 @@ class EnergyChartsSource(DataSource):
             raise ValueError(f"prefix must be a string, got {self.prefix!r}")
         if self.bzn is not None and str(self.bzn).upper().replace("_", "-") not in _ZONE_LOOKUP:
             raise ValueError(f"Unknown bidding zone {self.bzn!r}. Zones: {BIDDING_ZONES}")
+        self._validate_prefix()
         if "price" in self._types:
             self._validate_price_zone()
         if "current" in self._forecast_types and "forecast" in self._types:
             self.logger.warning(
-                "EnergyCharts: forecast_type 'current' is the newest revision of the forecast, not a vintage a forecast "
-                "issued earlier could have used; its availability rule refuses it."
+                "EnergyCharts: forecast_type 'current' is filled in after the day, not a vintage a forecast "
+                "issued earlier could have used; its availability rule refuses it at every shift."
             )
         return True
+
+    def _output_names(self) -> List[str]:
+        """Representative output columns of the selected types (the series of /public_power and the neighbours of
+        /cbet, /cbpf are the API's, so a few usual ones stand for them)."""
+        names: List[str] = []
+        for t in self._types:
+            if t == "forecast":
+                for production in self._production_types:
+                    for forecast in self._forecast_types:
+                        if production not in DAY_AHEAD_ONLY or forecast == "day-ahead":
+                            names.append(forecast_column(production, forecast))
+            elif t == "power":
+                series = [snake_case(p).removeprefix("actual_") for p in self.power] if self.power else _USUAL_POWER
+                names += [f"actual_{name}" for name in series]
+            elif t == "price":
+                names.append("price_day_ahead")
+            else:
+                names += [f"{t}_{name}" for name in ("sum", "austria", "france")]
+        return [f"{self.prefix}_{name}" if self.prefix else name for name in names]
+
+    def _validate_prefix(self) -> None:
+        """A prefix that makes a column take a built-in default rule of another source (``holiday_*`` is known in
+        advance, ``generation_*`` is ENTSO-E's) would give it that rule silently outside a source-aware run."""
+        from epftoolbox2.information_set import InformationSet
+
+        info = InformationSet()
+        for name in self._output_names():
+            for form in (name, f"{name}_d-1"):
+                found = info.resolve(form)
+                if found.rule is not None and found.layer == "defaults":
+                    raise ValueError(
+                        f"prefix {self.prefix!r} makes the column {form!r} take the built-in default rule "
+                        f"'{found.key}' ({found.rule.describe()}) instead of an Energy-Charts one. Use another prefix, "
+                        f"such as the default 'ec'."
+                    )
 
     def _validate_price_zone(self) -> None:
         country = self.country.lower()

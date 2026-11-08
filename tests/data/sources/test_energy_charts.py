@@ -663,8 +663,8 @@ def test_vintage_classes():
     rules = source_rules(
         [EC("de", type=["forecast", "power", "price"], forecast_types=["day-ahead", "intraday", "current"])]
     )
-    assert rules["solar_forecast_day_ahead"].vintage == "snapshot"
-    assert rules["solar_forecast_intraday"].vintage == "snapshot"
+    assert rules["solar_forecast_day_ahead"].vintage == "latest_revision"
+    assert rules["solar_forecast_intraday"].vintage == "latest_revision"
     assert rules["solar_forecast_current"].vintage == "latest_revision"
     assert rules["actual_*"].vintage == "latest_revision"
     assert rules["price_day_ahead"].vintage == "snapshot"
@@ -735,6 +735,18 @@ def test_no_default_column_resolves_to_a_built_in_default_rule(tmp_path):
             assert found.rule is None, (column, found.layer, found.key)
 
 
+@pytest.mark.parametrize("prefix", ["holiday", "generation", "is_2"])
+def test_a_prefix_that_makes_a_column_take_a_default_rule_is_refused(prefix):
+    with pytest.raises(ValueError, match=r"built-in default rule .*Use another prefix"):
+        EnergyChartsSource("de", type=["forecast", "power", "price"], prefix=prefix)
+
+
+@pytest.mark.parametrize("prefix", ["ec", "", "de"])
+def test_prefixes_that_hit_no_default_are_accepted(prefix):
+    # "" is accepted: none of the source's unprefixed names equals or matches a built-in default today
+    EnergyChartsSource("de", type=["forecast", "power", "price", "cbet", "cbpf"], prefix=prefix)
+
+
 def test_outside_a_source_aware_run_every_column_is_refused_current_included():
     expanded = {(p, 1): ["ec_solar_forecast_day_ahead", "ec_solar_forecast_current"] for p in range(24)}
     info = InformationSet("11:45", BERLIN)
@@ -772,3 +784,34 @@ def test_current_is_refused_with_the_source_rules_too():
 def test_the_rule_of_current_survives_a_yaml_round_trip():
     rule = source_rules([EC("de", type=["forecast"], forecast_types=["current"])])["solar_forecast_current"]
     assert Availability.from_dict(rule.to_dict()) == rule
+
+
+@pytest.mark.parametrize("shift", ["", "_d-1", "_d-7", "_h-24", "_d+1"])
+@pytest.mark.parametrize("with_source_rules", [True, False])
+def test_current_is_refused_at_every_shift_with_and_without_source_rules(shift, with_source_rules):
+    from epftoolbox2.information_set import InformationSetError
+
+    source = EnergyChartsSource(
+        "de", type=["forecast"], forecast_types=["day-ahead", "current"], production_types=["solar"]
+    )
+    info = InformationSet("11:45", BERLIN)
+    if with_source_rules:
+        info = info.with_source_rules([source])
+    name = f"ec_solar_forecast_current{shift}"
+    expanded = {(p, 1): [name] for p in range(24)}
+    with pytest.raises(InformationSetError, match="ec_solar_forecast_current"):
+        info.check(expanded, "price", "1h", HOURLY_BERLIN, "2025-03-10", "2025-03-12")
+    if with_source_rules:
+        found, _ = info.violations(expanded, "price", "1h", HOURLY_BERLIN, "2025-03-10", "2025-03-12")
+        assert found
+
+
+@pytest.mark.parametrize("issue", ["00:30", "06:00", "11:45"])
+def test_current_lags_are_late_at_every_issue_time(issue):
+    for name in ("wind_onshore_forecast_current_d-1", "wind_onshore_forecast_current_h-24"):
+        assert late([name], forecast_info(issue))[0] == {name}, (issue, name)
+
+
+def test_day_ahead_and_intraday_are_latest_revisions_like_entsoes_tso_forecasts():
+    rules = source_rules([EC(type=["forecast"], forecast_types=["day-ahead", "intraday", "current"])])
+    assert {rules[f"solar_forecast_{v}"].vintage for v in ("day_ahead", "intraday", "current")} == {"latest_revision"}

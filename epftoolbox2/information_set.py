@@ -596,31 +596,35 @@ _A31 = Availability.weekly("friday", "10:00", note=_A31_NOTE, vintage=_REVISED, 
 
 # Energy-Charts (EnergyChartsSource). The vintages are the TSOs' own, matched to ENTSO-E's by name and by their errors against
 # actuals (DE 2025, RMSE against the day-ahead forecast: solar intraday -13.8 %, current -29.1 %; wind onshore -22.7 %, -45.1 %),
-# not from documentation. For a past date the API returns a separate, stable series per forecast type, so day-ahead and intraday
-# are `snapshot`; `current` is the newest revision, rewritten as the day goes by.
+# not from documentation. For a past date the API returns a separate, stable series per forecast type, but a stable answer today
+# does not show that no value was rewritten after the time of its rule, so day-ahead and intraday are `latest_revision`, like
+# ENTSO-E's TSO forecasts (`snapshot` needs a value saved at the rule's time that a refetch weeks later still matches). `current`
+# is filled in a batch after the day, at a time nobody measured (live at 10:42 CET on 2026-11-08 it held no value for any of the
+# day's quarter-hours, delivered ones included), and may be recomputed: no issue time knows it.
 _EC_ZONE = "Europe/Berlin"
 _EC_DAY_AHEAD = Availability.published(
     "18:00",
     1,
     _EC_ZONE,
     note="Energy-Charts day-ahead forecast: the TSOs' evening-before vintage, assumed out by 18:00 on D-1",
-    vintage="snapshot",
+    vintage=_REVISED,
 )
 _EC_INTRADAY = Availability.published(
     "08:00",
     0,
     _EC_ZONE,
     note="Energy-Charts intraday forecast: the morning-of-delivery vintage, assumed out by 08:00 on the delivery day",
-    vintage="snapshot",
+    vintage=_REVISED,
 )
+# A rule that holds on no day: every use of the column, at any shift, is "never (no rule holds then)", so it is refused.
 _EC_CURRENT = Availability.published(
     "00:00",
     -1,
     _EC_ZONE,
-    note="Energy-Charts current forecast: the newest revision, rewritten as the day goes by; no issue time knows the "
-    "value it will have, so it is never known before its delivery day has ended",
+    note="Energy-Charts current forecast: filled in a batch after the day, at an unmeasured time, and possibly recomputed; "
+    "no issue time knows it, so no rule holds",
     vintage=_REVISED,
-)
+).during(valid_until="1900-01-01")
 _EC_ACTUAL = Availability.realised(
     "1h", note="Energy-Charts actuals (public_power, cbet, cbpf): 1 h after the period, later revised", vintage=_REVISED
 )
@@ -650,8 +654,8 @@ def energy_charts_rules(
     zone: Optional[str] = None,
 ) -> Dict[str, Availability]:
     """The rules of the columns an `EnergyChartsSource` emits, under `prefix`: `{x}_forecast_day_ahead` (published 18:00 on
-    D-1), `{x}_forecast_intraday` (08:00 on the delivery day), `{x}_forecast_current` (never known before its delivery day
-    ended: a latest revision), `actual_*`, `cbet_*` and `cbpf_*` (realised, 1 h), and `price_day_ahead` (13:00 on D-1; CH 12:00;
+    D-1, `latest_revision`), `{x}_forecast_intraday` (08:00 on the delivery day), `{x}_forecast_current` (no rule holds on any day: never
+    known, so refused at any shift), `actual_*`, `cbet_*` and `cbpf_*` (realised, 1 h), and `price_day_ahead` (13:00 on D-1; CH 12:00;
     none for a zone outside SDAC other than CH, which has to be given a rule)."""
     stem = f"{prefix}_" if prefix else ""
     rules: Dict[str, Availability] = {}

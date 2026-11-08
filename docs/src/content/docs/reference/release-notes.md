@@ -169,9 +169,9 @@ an issue day it didn't sample.
   reads the TSOs' solar, wind onshore, wind offshore and load forecasts by vintage (`ec_solar_forecast_day_ahead`, `_intraday`, `_current`; every column is prefixed `ec_` by default so none takes another source's built-in rule),
   the actual generation and load by type (`actual_*`), the day-ahead price (`price_day_ahead`) and the cross-border flows (`cbet_*`,
   `cbpf_*`). Timestamps are the API's start-of-period unix seconds, so both DST days come out exact at 15 minutes and 1 hour. Built-in
-  availability rules: `*_forecast_day_ahead` published 18:00 on D-1, `*_forecast_intraday` 08:00 on the delivery day, `actual_*` 1 h
-  after the period, `price_day_ahead` 13:00 on D-1 (CH 12:00), and `*_forecast_current`, a latest revision, never known before its
-  delivery day has ended, so `availability="raise"` refuses it. The vintages are matched to ENTSO-E's by name and error ordering, not
+  availability rules: `*_forecast_day_ahead` published 18:00 on D-1, `*_forecast_intraday` 08:00 on the delivery day (both `latest_revision`), `actual_*` 1 h
+  after the period, `price_day_ahead` 13:00 on D-1 (CH 12:00), and `*_forecast_current`, filled in after the day, has no rule that
+  holds on any day, so `availability="raise"` refuses it at every shift. The vintages are matched to ENTSO-E's by name and error ordering, not
   documentation. Data: Energy-Charts.info, CC BY 4.0, attribution required; the prices of zones outside the CC BY list (AT, BE, CH, CZ,
   DE-LU, DE-AT-LU, DK1, DK2, FR, HU, IT-North, NL, NO2, PL, SE4, SI) are for private use, and the source refuses them unless
   `allow_restricted_prices=True`. The API allows 2 requests a minute per IP and endpoint: the source throttles itself, waits

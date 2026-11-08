@@ -192,9 +192,9 @@ For a predictor function it shows [the distinct lists first](/epftoolbox2/model-
 An `OpenMeteoSource` column's rule (below) is a `snapshot`, and so is an `EpftoolboxBenchmarkSource`'s `price`.
 
 An `EnergyChartsSource`'s columns (prefixed `ec_` by default, so none falls to a default above) have rules from `source_rules` only, in Europe/Berlin: `*_forecast_day_ahead` is published 18:00 on D-1 and
-`*_forecast_intraday` 08:00 on the delivery day (both `snapshot`), `actual_*`, `cbet_*` and `cbpf_*` are known 1h after the period
+`*_forecast_intraday` 08:00 on the delivery day (both `latest_revision`), `actual_*`, `cbet_*` and `cbpf_*` are known 1h after the period
 (`latest_revision`), `price_day_ahead` is published 13:00 on D-1 (`snapshot`; CH, which has its own auction, 12:00), and
-`*_forecast_current` is never known before its delivery day has ended (`latest_revision`), so a model that reads it is refused. See
+`*_forecast_current` has no rule that holds on any day (`latest_revision`), so a model that reads it, at any shift, is refused. See
 [EnergyChartsSource](/epftoolbox2/data-sources/energy-charts/#vintages-and-availability).
 
 A31 holds one value per local date of each market's Monday-to-Sunday week, and every TSO publishes the next week on Friday two hours
