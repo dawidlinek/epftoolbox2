@@ -8,7 +8,9 @@ the `check_*` functions it needs. The module sets one process and one thread for
 - `check_yaml_round_trip`: saved and loaded, the same parameters and the same forecasts.
 - `check_preflight_without_extra`: with the family's extra hidden (`importlib.util.find_spec`), `run` raises
   `MissingExtraError` before any model's run starts.
-- `check_verify`: `verify` is `ok` on each day given, with the positive control, the rerun and the co-batch checks, on the CPU.
+- `check_verify`: `verify` is `ok` on each day given, with the positive control, the rerun and the co-batch checks, on the CPU;
+  for a family that predicts its refit blocks in one call, the issue day's forecasts on the frame cut after its date are the
+  whole frame's, to the bit.
 - `check_loop_and_shards`: each model of a loop equals the same model run alone, as a `models_per_task=1` array task runs it
   (bitwise, records as sorted lines).
 - `check_resume`: a run resumed after 40 % of its records were deleted equals a fresh run (bitwise).
@@ -36,7 +38,7 @@ import pytest
 
 from epftoolbox2._extras import EXTRAS, MissingExtraError
 from epftoolbox2.evaluators import MAEEvaluator
-from epftoolbox2.information_set import InformationSet
+from epftoolbox2.information_set import InformationSet, cuts_at_issue_day
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.pipelines import ModelPipeline
 
@@ -142,8 +144,10 @@ def check_verify(
 ) -> Any:
     """`verify` is `ok` on each of `days` (each verified on its own), with the positive control, the rerun and the co-batch
     checks on, on the CPU for a model with a `device`: no forecast moves under the probe, every one moves under the control,
-    two runs are the same and no forecast moves when the other items of its call are replaced by noise. Give `days` that
-    include the first, a middle and the last day of a block, and the days around a DST switch.
+    two runs are the same and no forecast moves when the other items of its call are replaced by noise. A family that predicts
+    its refit blocks in one call (`_predict_block`) gives the same bits on the frame cut after the issue day's date, the rows a
+    run on that day has, as on the whole frame (`CoBatchResult.cut`, run on every day that names other items). Give `days`
+    that include the first, a middle and the last day of a block, and the days around a DST switch.
 
     A model that predicts together (`_predicts_together`) must name the other items of its calls on some day, so that the
     co-batch check isn't vacuous; with `items`, it names that many on every day (a block's length less one, where the frame has
@@ -165,6 +169,9 @@ def check_verify(
         named.append(len(check.co_batch.items))
         if items is not None:
             assert len(check.co_batch.items) == items, (day, check.co_batch.items)
+        if cuts_at_issue_day(model) and check.co_batch.items:
+            cut = check.co_batch.cut
+            assert cut is not None and cut.forecasts and cut.ok, (day, cut)
     if getattr(model, "_predicts_together", False):
         assert any(named), f"no other item of a call was named on {list(days)}: the co-batch check saw nothing"
     return report
