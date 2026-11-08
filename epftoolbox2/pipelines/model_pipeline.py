@@ -19,6 +19,7 @@ from ..models._calendar import (
     resolve_issue_days,
 )
 from ..models.base import BaseModel, _RunChecks
+from ..models._worker import pool_native_threads
 from ..models._engine import (
     ENGINE_OFF,
     ENGINE_ON,
@@ -372,18 +373,22 @@ class ModelPipeline:
             )
 
         ran: Dict[str, ModelResultRef] = {}
-        if self.engine == ENGINE_ON:
-            # The engine groups first, each in one go (models/_engine.py), then the rest in list order, as with "off".
-            capable = [model for model in self.models if model._engine_capable(plans.get(model.name), forecast_only)]
-            for group in engine_groups(capable):
-                columns = {model.name: checks[model.name].used_predictors for model in group}
-                # `run_group` takes each model's arguments (its check with them) out of this dict when its chunk starts.
-                ran.update(
-                    run_group(group, {model.name: run_arguments(**arguments(model)) for model in group}, columns)
-                )
         refs: dict[str, ModelResultRef] = {}
-        for model in self.models:
-            refs[model.name] = ran[model.name] if model.name in ran else model.run(**arguments(model))
+        # One hold of this process's OpenBLAS thread count for all the run's pools: putting it back restarts its threads.
+        with pool_native_threads():
+            if self.engine == ENGINE_ON:
+                # The engine groups first, each in one go (models/_engine.py), then the rest in list order, as with "off".
+                capable = [
+                    model for model in self.models if model._engine_capable(plans.get(model.name), forecast_only)
+                ]
+                for group in engine_groups(capable):
+                    columns = {model.name: checks[model.name].used_predictors for model in group}
+                    # `run_group` takes each model's arguments (its check with them) out of this dict when its chunk starts.
+                    ran.update(
+                        run_group(group, {model.name: run_arguments(**arguments(model)) for model in group}, columns)
+                    )
+            for model in self.models:
+                refs[model.name] = ran[model.name] if model.name in ran else model.run(**arguments(model))
 
         choices: Dict[str, List[Dict]] = {}
         if self.ensembles:
@@ -960,25 +965,26 @@ class ModelPipeline:
         check_issue_days_in(resolve_date(test_start), resolve_date(test_end), weekdays)
         run_days = sample_issue_days(data.index, test_start, test_end, days, seed, issue_days=weekdays)
         report = VerifyReport(issue_days=run_days)
-        for model in self._select_models(models):
-            report.checks.extend(
-                verify_model(
-                    model,
-                    data,
-                    run_days,
-                    self.information_set,
-                    target=target,
-                    freq=freq,
-                    seed=seed,
-                    control=positive_control,
-                    rebuild=rebuild,
-                    test_period=(test_start, test_end),
-                    availability=self.availability,
-                    **horizon_arguments(horizon, horizons),
-                    **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
-                    **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
+        with pool_native_threads():  # one hold for every probe's pool, as in `run`
+            for model in self._select_models(models):
+                report.checks.extend(
+                    verify_model(
+                        model,
+                        data,
+                        run_days,
+                        self.information_set,
+                        target=target,
+                        freq=freq,
+                        seed=seed,
+                        control=positive_control,
+                        rebuild=rebuild,
+                        test_period=(test_start, test_end),
+                        availability=self.availability,
+                        **horizon_arguments(horizon, horizons),
+                        **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
+                        **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
+                    )
                 )
-            )
         return report
 
     def explain(

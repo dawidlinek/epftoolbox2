@@ -100,6 +100,7 @@ from ._worker import (
     issue_row,
     matching_digest,
     matching_rows,
+    pool_native_threads,
     skip_record,
     training_row_days,
     training_rows,
@@ -1415,18 +1416,21 @@ class BaseModel(ABC):
             n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
 
         mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
-        with ProcessPoolExecutor(
-            max_workers=n_processes,
-            mp_context=mp_context,
-            initializer=_pool_init,
-            initargs=(
-                hour_arrays,
-                expanded_preds,
-                config,
-                type(self),
-                self._model_kwargs,
-            ),
-        ) as pool:
+        with (
+            pool_native_threads(),  # the workers inherit one OpenBLAS thread, so they start none
+            ProcessPoolExecutor(
+                max_workers=n_processes,
+                mp_context=mp_context,
+                initializer=_pool_init,
+                initargs=(
+                    hour_arrays,
+                    expanded_preds,
+                    config,
+                    type(self),
+                    self._model_kwargs,
+                ),
+            ) as pool,
+        ):
             run_job = _run_day if self.refit is None else _run_block
             try:
                 futures = {pool.submit(run_job, day_tasks): day for day, day_tasks in jobs.items()}

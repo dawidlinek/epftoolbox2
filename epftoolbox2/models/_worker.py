@@ -1,9 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+import contextlib
 import datetime
 import hashlib
 import math
 import os
+import sys
+import threading
 import traceback
 
 import numpy as np
@@ -32,6 +35,13 @@ NATIVE_THREAD_ENV_VARS = (
     "VECLIB_MAXIMUM_THREADS",
 )
 _W_THREADPOOLS: Optional[ThreadpoolController] = None  # set by `_limit_native_threads`, in a pool's worker only
+# `pool_native_threads` in the process that starts the pools: how many holds are open, and what to put back after the last.
+_HOLD_LOCK = threading.Lock()
+_HOLDS = 0
+_HELD_COUNTS: List[Tuple[Any, int]] = []  # (threadpoolctl library controller, the thread count it had)
+_HELD_ENV: Dict[str, Optional[str]] = {}  # the thread variables as they were, under spawn
+# Whether the pools spawn their workers rather than fork them (`BaseModel._run_tasks`, `_engine.run_group`).
+_POOLS_SPAWN = sys.platform == "win32"
 
 # Reasons a task produces no forecast without being an error. They are counted per model and reported.
 SKIP_TOO_FEW_ROWS = "too_few_rows"
@@ -56,8 +66,7 @@ class TaskFailed(RuntimeError):
 
 
 def _limit_native_threads() -> None:
-    """Limit BLAS and OpenMP to NATIVE_THREADS_PER_TASK threads in this worker process, at one thread with no OpenBLAS
-    helper threads left running (`_stop_openblas_threads`).
+    """Limit BLAS and OpenMP to NATIVE_THREADS_PER_TASK threads in this worker process.
 
     Only for a pool worker: the limits are never restored, and the caller's process must keep its own.
     """
@@ -65,33 +74,70 @@ def _limit_native_threads() -> None:
     for name in NATIVE_THREAD_ENV_VARS:
         os.environ[name] = str(NATIVE_THREADS_PER_TASK)
     # Libraries already loaded ignore the variables: under fork that is everything the parent imported, under
-    # spawn whatever importing this module loaded (numpy's BLAS at least). threadpoolctl sets them directly, one library at
-    # a time and only where the count differs: setting an OpenBLAS's count in a forked child starts its helper threads, so
-    # each is stopped before the next library's start, and no later call on it starts them again.
+    # spawn whatever importing this module loaded (numpy's BLAS at least). threadpoolctl sets them directly, and only where
+    # the count differs: an OpenBLAS with its own thread pool comes with the count already (`pool_native_threads`), and
+    # setting it again in a forked child would start that pool's threads.
     _W_THREADPOOLS = ThreadpoolController()
     for lib in _W_THREADPOOLS.lib_controllers:
         if lib.num_threads != NATIVE_THREADS_PER_TASK:
             lib.set_num_threads(NATIVE_THREADS_PER_TASK)
-            if NATIVE_THREADS_PER_TASK == 1:
-                _stop_openblas_threads(lib)
 
 
-def _stop_openblas_threads(lib) -> None:
-    """Stop the helper threads of `lib`, a threadpoolctl library controller just set to one thread, if it is an OpenBLAS
-    that runs its own pool of them (threading layer "pthreads").
+def _has_own_thread_pool(lib) -> bool:
+    """Whether a threadpoolctl library controller is an OpenBLAS that runs its own pool of threads (not OpenMP's)."""
+    return lib.internal_api == "openblas" and getattr(lib, "threading_layer", None) not in ("openmp", "disabled")
 
-    OpenBLAS's fork handler stops that pool in the parent before every fork, and setting the thread count in the child
-    starts it again: one thread per CPU the library counted when it loaded (64 on a 128-CPU machine, for numpy's OpenBLAS
-    and as many for scipy's), each spinning for OpenBLAS's thread timeout (about 0.1 s) before it sleeps, in every worker of
-    every pool. At one thread OpenBLAS hands them no work, so stopping them changes no number: `blas_thread_shutdown_` is
-    the function that fork handler runs, which leaves the library as every forked child starts, at the count just set, and
-    OpenBLAS starts the pool again by itself if a later call asks for more threads.
+
+@contextlib.contextmanager
+def pool_native_threads():
+    """Hold this process's OpenBLAS at NATIVE_THREADS_PER_TASK threads while worker pools start from it, and put back the
+    counts it had when the outermost hold closes: nested and concurrent holds share one.
+
+    OpenBLAS stops its thread pool before every fork, and setting its thread count in the child starts the pool again: one
+    thread per CPU it counted when it loaded, each spinning for its thread timeout (about 0.1 s) before it sleeps, in every
+    worker of every pool. A worker that inherits the count needs no set (`_limit_native_threads`), so it starts none. Putting
+    the count back starts this process's own pool again, once per hold: hold it around a whole run, not around each pool.
+    Under spawn the thread variables are set too, for the workers to load their libraries at that count; under fork they
+    would reach only a library this process loads during the hold, which would then keep it. While held, BLAS calls of this
+    process, in any thread, run on NATIVE_THREADS_PER_TASK threads.
     """
-    if lib.internal_api != "openblas" or getattr(lib, "threading_layer", None) != "pthreads":
-        return
-    shutdown = getattr(getattr(lib, "dynlib", None), "blas_thread_shutdown_", None)
-    if shutdown is not None:
-        shutdown()
+    global _HOLDS
+    with _HOLD_LOCK:
+        if _HOLDS == 0:
+            _hold_native_threads()
+        _HOLDS += 1
+    try:
+        yield
+    finally:
+        with _HOLD_LOCK:
+            _HOLDS -= 1
+            if _HOLDS == 0:
+                _release_native_threads()
+
+
+def _hold_native_threads() -> None:
+    for lib in ThreadpoolController().lib_controllers:
+        if _has_own_thread_pool(lib):
+            count = lib.num_threads
+            if count != NATIVE_THREADS_PER_TASK:
+                lib.set_num_threads(NATIVE_THREADS_PER_TASK)
+                _HELD_COUNTS.append((lib, count))
+    if _POOLS_SPAWN:
+        for name in NATIVE_THREAD_ENV_VARS:
+            _HELD_ENV[name] = os.environ.get(name)
+            os.environ[name] = str(NATIVE_THREADS_PER_TASK)
+
+
+def _release_native_threads() -> None:
+    while _HELD_COUNTS:
+        lib, count = _HELD_COUNTS.pop()
+        lib.set_num_threads(count)
+    for name, value in _HELD_ENV.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+    _HELD_ENV.clear()
 
 
 def _limit_openmp_in_task_thread() -> None:
