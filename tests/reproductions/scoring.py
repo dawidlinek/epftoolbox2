@@ -15,6 +15,8 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
+from epftoolbox2.results.ref import ModelResultRef
+
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
@@ -55,6 +57,20 @@ def records(frame: pd.DataFrame, column: str, period: str, freq: str, actual: st
         }
         for r, t, w, h, i, p, a in columns
     ]
+
+
+def as_files(records_of: Dict[str, List[Dict]], directory: Path) -> Dict[str, ModelResultRef]:
+    """The records written as results files (one JSONL a model) and their refs: a report reads a file once and keeps its
+    frame for every later table, where it reads records held in memory again for each."""
+    refs = {}
+    for name, rows in records_of.items():
+        path = directory / f"{name}.jsonl"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        freq = rows[0]["freq"] if rows else "1h"
+        refs[name] = ModelResultRef(
+            name=name, path=path, count=len(rows), test_start="", test_end="", horizon=1, freq=freq
+        )
+    return refs
 
 
 def resolution(zone: str) -> pd.DataFrame:

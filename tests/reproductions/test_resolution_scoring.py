@@ -20,7 +20,7 @@ from scipy import stats as sstats
 
 from epftoolbox2.evaluators import BiasEvaluator, MAEEvaluator, RMSEEvaluator, ShapeMAEEvaluator
 from epftoolbox2.results.report import EvaluationReport
-from tests.reproductions.scoring import printed_equal, resolution, resolution_records, tables
+from tests.reproductions.scoring import as_files, printed_equal, resolution, resolution_records, tables
 
 ZONES = ("de_lu", "at")
 LAG = 6
@@ -79,12 +79,13 @@ R3_AGG = {"base": "mean", "peak": "peak", "min": "min", "max": "max"}
 
 
 @pytest.fixture(scope="module")
-def computed():
-    """Every library table the checks read, built once per zone (a report of plain lists reads its records per table)."""
+def computed(tmp_path_factory):
+    """Every library table the checks read, built once per zone, from the records written as results files."""
     out = {}
     for zone in ZONES:
         records = resolution_records(zone)
-        report = EvaluationReport(records, [MAEEvaluator(), RMSEEvaluator(), ShapeMAEEvaluator(), BiasEvaluator()])
+        refs = as_files(records, tmp_path_factory.mktemp(zone))
+        report = EvaluationReport(refs, [MAEEvaluator(), RMSEEvaluator(), ShapeMAEEvaluator(), BiasEvaluator()])
         tables_of = {
             "summary": report.summary().set_index("model"),
             "hourly": report.aggregate("1h", agg="mean").summary().set_index("model"),
