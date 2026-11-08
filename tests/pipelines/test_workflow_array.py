@@ -167,3 +167,47 @@ def test_array_task_refuses_to_resume_a_model_with_changed_predictors(tmp_path, 
 
     with pytest.raises(ManifestMismatchError, match="predictor_layout_hash"):
         Workflow.load(path).run()
+
+
+def with_scaled_mae(path, column):
+    config = yaml.safe_load(path.read_text())
+    config["model_pipeline"]["evaluators"].append({"class": "ScaledMAEEvaluator", "params": {"column": column}})
+    path.write_text(yaml.safe_dump(config))
+    return path
+
+
+def test_report_runs_the_data_pipeline_for_an_evaluator_that_reads_source_columns(tmp_path, experiment):
+    for index in (0, 1):
+        Workflow.load(with_scaled_mae(experiment(model_index=index), "price")).run()
+    merged = Workflow.load(with_scaled_mae(experiment(), "price")).report()
+
+    summary = merged.summary().set_index("model")
+    assert np.isfinite(summary["MAE/price"]).all() and (summary["MAE/price left out"] == 0).all()
+    wf = Workflow.load(with_scaled_mae(experiment(), "price"))
+    with pytest.raises(ValueError, match=r"pass data=\.\.\. to report\(\)"):
+        wf._build_model_pipeline(all_models=True).report(
+            tmp_path / "results", test_start="2023-03-01", test_end="2023-03-02", horizon=1, data=None
+        )
+
+
+def test_an_evaluator_reading_a_missing_source_column_is_refused_before_any_fit(tmp_path, experiment):
+    with pytest.raises(ValueError, match="'capacty'"):
+        Workflow.load(with_scaled_mae(experiment(model_index=0), "capacty")).run()
+    assert not (tmp_path / "results" / "ols.jsonl").exists()
+
+
+def test_a_plain_run_refuses_a_missing_source_column_before_any_fit(tmp_path):
+    from epftoolbox2.evaluators import MAEEvaluator, ScaledMAEEvaluator
+    from epftoolbox2.models import OLSModel
+    from epftoolbox2.pipelines import ModelPipeline
+    from tests.synthetic import PREDICTORS, make_market_data
+
+    data = make_market_data(start="2023-01-01", days=60, horizon=1, noise=5.0, seed=3)
+    pipeline = (
+        ModelPipeline()
+        .add_model(OLSModel(PREDICTORS, training_window=30, name="a"))
+        .add_evaluator(MAEEvaluator(), ScaledMAEEvaluator("capacty"))
+    )
+    with pytest.raises(ValueError, match="'capacty'.*nothing was fitted"):
+        pipeline.run(data, test=("2023-02-20", "2023-02-22"), horizon=1, save_dir=str(tmp_path / "run"))
+    assert not (tmp_path / "run" / "a.jsonl").exists()

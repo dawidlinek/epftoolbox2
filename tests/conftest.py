@@ -48,6 +48,24 @@ def restore_process_env():
             os.environ[name] = value
 
 
+@pytest.fixture(autouse=True)
+def no_kept_tables():
+    """Start every test with none of the tables the information set keeps for the whole process (the verdicts `violations`
+    reached, `_VERDICTS`, and the newest training targets, `_NEWEST_TABLES`): with pytest-xdist reusing a worker, a test would
+    otherwise read what an earlier test computed, and one that counts what is computed would count less. The same for the
+    estimator checks the engine's fits keep (`models._stats._ESTIMATOR_CHECKS`)."""
+    from epftoolbox2 import information_set
+    from epftoolbox2.models import _stats
+
+    for tables, lock in (
+        (information_set._VERDICTS, information_set._VERDICTS_LOCK),
+        (information_set._NEWEST_TABLES, information_set._NEWEST_TABLES_LOCK),
+    ):
+        with lock:
+            tables.clear()
+    _stats._ESTIMATOR_CHECKS.clear()
+
+
 @pytest.fixture
 def keyless_live_dir(tmp_path, monkeypatch):
     """The directory a live test runs in, for an example whose sources need no key (`examples/lear_lago.py`: the benchmark

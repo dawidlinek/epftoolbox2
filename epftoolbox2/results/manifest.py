@@ -375,6 +375,7 @@ class FrameHashes:
         self._sets: Dict[Tuple[str, Tuple[str, ...]], str] = {}
         self._columns: Dict[Tuple[str, str], str] = {}
         self._frames: Dict[str, Optional[str]] = {}
+        self._provenance: Optional[Tuple[str, Optional[str]]] = None
 
     def rows(self, through: str) -> pd.DataFrame:
         if through not in self._rows:
@@ -400,6 +401,17 @@ class FrameHashes:
         if through not in self._frames:
             self._frames[through] = hash_frame(self.rows(through))
         return self._frames[through]
+
+    def provenance(self) -> Tuple[str, Optional[str]]:
+        """(`_package_version()`, `_git_sha()`), read once for the run's manifests, models' and ensembles' (`_git_sha` starts a
+        process): `ModelPipeline.run` reads it at its start, the code the process runs. A git SHA that couldn't be read (no
+        repository, a timeout) isn't kept: the next manifest tries again."""
+        if self._provenance is not None:
+            return self._provenance
+        read = (_package_version(), _git_sha())
+        if read[1] is not None:
+            self._provenance = read
+        return read
 
 
 def hash_predictor_layout(expanded: Dict[Tuple[int, int], Sequence[str]]) -> str:
@@ -503,6 +515,7 @@ def build_manifest(
     """
     now = datetime.now(timezone.utc).isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
+    package_version, git_sha = hashes.provenance()
     actuals = None
     if windows is not None:
         through = (date.fromisoformat(test_end) + timedelta(days=horizon)).isoformat()
@@ -521,8 +534,8 @@ def build_manifest(
         information_set=information_set.to_dict() if information_set is not None else None,
         test_start=test_start,
         test_end=test_end,
-        package_version=_package_version(),
-        git_sha=_git_sha(),
+        package_version=package_version,
+        git_sha=git_sha,
         created_at=now,
         updated_at=now,
         predictor_function=predictor_function,

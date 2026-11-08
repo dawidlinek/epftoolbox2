@@ -191,13 +191,31 @@ They are cut like `by_year()`: each model's forecasts are split into groups, and
 | `by_quarter()` | The calendar quarter of the **target date**, with its year | `year`, `quarter` |
 | `by_day()` | The target date. All horizons that forecast it are in its group, so a group holds one run date per horizon and the tests have little to run on | `target_date` |
 | `by_price_level(spike=None)` | `negative` (actual price below 0), `spike` (at or above the threshold), `normal` (the rest) | `price_level` |
+| `by_column(column, bins=None)` | The value of a column of the source data at the forecast's target row (a 0/1 flag), or the interval of `bins` it falls in | the column's name |
 
 **Price levels come from the actual price alone.** A prediction never decides which group a forecast is in, so a model that misses a spike is scored on it, not excused. A forecast is in exactly one group; one without a finite actual price is in none. The spike threshold is `min(300, 99th percentile)` of the actual prices (the definition of the evaluation-protocol study, which gives about 88 spike hours a year), taken once from the actuals of all the models together, with each period (target date and hour) counted once however many horizons forecast it. It is the same number for every model, so the groups are the same periods for all of them. `df.attrs` holds `spike_threshold`, `spike_rule` and `spike_quantile` (the 99th percentile, NaN when `spike` is given), and `no_level`: the forecasts per model that are in no group for lack of a finite actual, which are the difference between the groups and `summary()`. `spike` replaces the rule with a price you choose; it must be positive, and a negative price is never a spike.
+
+### By a column of the source data
+
+```python
+daylight = report.by_column("is_night")                           # 0/1 flag: the row of 0 is the daylight MAE
+by_price = report.by_column("price", bins=[-float("inf"), 0, 50, float("inf")])  # [-inf, 0), [0, 50), [50, inf)
+```
+
+`by_column()` groups each forecast by the value of a column of the report's `source_data` (the frame the run read) at its target
+row. The row is found by the forecast's target date and period, the way [`CsvExporter(extra_columns=)`](/epftoolbox2/exporters/csv/)
+joins, so the source must be at the results' frequency, and on the day clocks fall back the repeated hour takes its second row, the
+one a run forecasts from. The value is read from the data, never from a forecast, so the groups are the same rows for every model.
+With `bins` (a list of increasing edges, each interval closed on the left) a numeric column is cut into intervals. A forecast with no
+value there (NaN, no source row, outside the bins) is in no group; `df.attrs["no_value"]` counts them per model, so the groups add up
+to `summary()`. A report from `aggregate()` has no source data, so call it on the report you aggregated. When the results know their time zone (a run's do), the source's index must be in it, the zone of the frame the run read even when it has no name (a fixed offset): a source in UTC would put each forecast on another hour's row, so it raises, as `CsvExporter(extra_columns=)` does.
 
 ## Daily aggregates
 
 ```python
 daily_max = report.aggregate("1D", agg="max")  # "max", "min", "mean" or "spread" (maximum minus minimum)
+peak = report.aggregate("1D", agg="peak")      # mean over 08:00-19:59; "offpeak" over the rest of the day
+peak_7_19 = report.aggregate("1D", agg="peak", peak_hours=(7, 19))
 
 print(daily_max.summary())
 #    model  forecasts      MAE    rMAE
@@ -217,7 +235,39 @@ print(daily_max.forecast_counts())
 - **Without a zone**, for records passed as plain lists, the periods of a target date are every period that any model has a record for, at any horizon. A period that no model has at any horizon is taken at its word, because that is how a clock change looks in the ids: the day after the spring switch, from the switch day alone, is then aggregated over its 23 forecast hours.
 - **Each model on its own days.** A model that lacks a period loses that day for itself and for nobody else. The comparison tables then use the days the models share and print how many.
 - **Dropped days are counted.** They are in `forecast_counts()` of the new report as `missing` and under `incomplete_day`, and a warning names the models. `planned` there is the number of days with any forecast of the model; days without a single forecast are in the `forecast_counts()` of the report you aggregated. As in the example, models can then have different numbers of forecasts, so compare them with `rMAE` or `tests()`, which use the common days, and not with the raw `MAE` column.
-- **What differs from an hourly report.** `tests(by="hour")` raises (a day has no hours), and the `hours_*` columns of `compare()` are NaN. `EconomicEvaluator` is left out with a warning, since a schedule needs the periods of a day. The new report has no `source_data`, and `day_in_test` counts days from the earliest run date. It is a daily report, so it cannot be joined to an hourly one.
+- **Peak and offpeak blocks.** `agg="peak"` is the mean over the periods of `peak_hours` (local hours, the end left out: `(8, 20)`, the default, is 08:00 to 19:59, the window of the resolution and renewables studies), and `"offpeak"` over the rest of the day. A block counts when every period of it the day has (by its clock, or without a zone the periods any model has on that date) is there with a finite prediction and actual. So the peak of both switch days counts, the offpeak of the spring day counts over the hours its clock has, and the offpeak of the autumn day is dropped for its repeated hour; a model that lacks 09:00 loses its peak of that day, not its offpeak. Dropped days are counted as for the other aggregates. A block is read by the local hour of each period id, so a day whose ids aren't the clock's is dropped too: without a zone, a 25-hour day numbered through (0-24) and a Sunday numbered 0-22, where the ids after the switch are an hour off. With a zone, records of slots the clock doesn't have (a 23-hour day numbered 0-22, whose id 2 the reader leaves out) make `agg="peak"`, `"offpeak"` and `aggregate("1h")` raise, as `report.refs[name].off_the_clock()` counts them. Period ids beyond the results' frequency (quarter-hours 0-95 in records without `freq`, read as hours) raise `ValueError`.
+- **What differs from an hourly report.** `tests(by="hour")` raises (a day has no hours), and the `hours_*` columns of `compare()` are NaN. `EconomicEvaluator` is left out with a warning, since a schedule needs the periods of a day, and so is [`ScaledMAEEvaluator`](/epftoolbox2/evaluators/scaled-mae/), which reads the source data. The new report has no `source_data`, and `day_in_test` counts days from the earliest run date. It is a daily report, so it cannot be joined to an hourly one.
+
+## Hourly aggregates, shape and the error split
+
+For 15-minute results, three views say where the error is: in the level of the hours, or in the shape within them.
+
+```python
+hourly = report.aggregate("1h", agg="mean")  # MAE of the hourly means
+print(hourly.summary())
+print(hourly.forecast_counts())              # model, planned, produced, missing, incomplete_hour
+
+print(report.error_split())  # two models of the resolution study, DE_LU, April to October 2026
+#       model  days  forecasts        mse   level    hour  quarter
+# 0   B24_dyn   191      18336  2004.5267  0.3747  0.5582   0.0670
+# 1  B24_flat   191      18336  2130.2448  0.3523  0.5252   0.1225
+```
+
+- **`aggregate("1h", agg=...)`** takes 15-minute results only and reduces the four quarter-hours of each hour by `agg` (`"mean"`, or
+  `"max"`, `"min"`, `"spread"`). An hour counts when all four quarter-hours are there with a finite prediction and actual: the
+  repeated autumn hour, which has no actual, is dropped, and the hour the spring switch skips is no hour of that day. Each model
+  loses only its own hours; dropped hours are in the new report's `forecast_counts()` under `incomplete_hour`, with a warning. The new
+  report has frequency `"1h"`, `hour` the local hour and the time zone of the first, so `aggregate("1D")` of it judges days by the
+  clock again; the evaluators carry over (`EconomicEvaluator` then schedules hours) except `ScaledMAEEvaluator`. Without a zone (plain lists), `aggregate("1D")` of an hourly report that dropped hours raises: an autumn day without its 02:00 would look like a 23-hour spring day. Aggregate the quarter-hours to `"1D"` directly instead.
+- **[`ShapeMAEEvaluator`](/epftoolbox2/evaluators/shape-mae/)** is the error of the shape within the hour: the mean of
+  |(ŷ − ŷ̄) − (y − ȳ)| over the quarter-hours of whole hours, with ŷ̄ and ȳ the hour's means.
+- **`error_split(period="1h")`** divides each model's mean squared error, on its whole non-switch days (finite quarter-hours exactly 0-95,
+  on a date whose clock doesn't change), into three shares that add up to 1: `level`, the day's mean error squared; `hour`, each
+  hour's mean error minus the day's; `quarter`, each quarter-hour's error minus its hour's. `days` and `forecasts` say what each row
+  is on; models with different numbers of whole days warn (`df.attrs["unequal_days"]`).
+
+These are the resolution study's MAEh, shape MAE and squared-error split; `tests/reproductions/test_resolution_scoring.py` recomputes
+its R1 table with them.
 
 ## Joining reports
 

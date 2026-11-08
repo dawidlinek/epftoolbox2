@@ -183,11 +183,25 @@ an issue day it didn't sample.
 
 ### New
 
+- **Scoring by period: hourly and block aggregates, the shape within the hour, normalised MAEs, breakdowns by a data column.**
+  `report.aggregate("1h", agg="mean")` turns 15-minute results into hourly ones (an hour counts with all four quarter-hours finite;
+  dropped hours are `incomplete_hour` in its `forecast_counts()`), and `aggregate("1D", agg="peak")` / `"offpeak"` scores the mean over
+  `peak_hours=(8, 20)` (local, the end left out) or the rest of the day, a block counting when every period of it the day's clock has
+  is finite. `report.error_split()` divides a 15-minute model's squared error into the day's level, the hour profile and the shape
+  within the hour. New evaluators: `ShapeMAEEvaluator()` (the error of the within-hour shape; NaN on hourly and daily results),
+  `NMAEEvaluator()` (MAE over the mean actual on the same forecasts) and `ScaledMAEEvaluator(column)` (mean |error| over a source-data
+  column such as capacity, with a `left out` count), all in YAML and the TUI. `report.by_column(column, bins=None)` groups forecasts by
+  a column of the source data at the target row (a 0/1 flag such as `is_night`, or bins of a price), joined as
+  `CsvExporter(extra_columns=)` joins, from a source in the results' time zone, which `CsvExporter(extra_columns=)` now checks too (a UTC frame under Europe/Berlin results gave every row another hour's value). A column an evaluator reads is checked before any fit, and `Workflow.report()` (`epf report`) loads the data for it. **No existing number moves**: the four daily aggregates, every table and the goldens are bit
+  for bit as before. They reproduce the resolution study's R1 table (MAE15, MAEh, shape MAE, the error split), its DM list and R3's
+  derived daily rows, and the renewables study's price and generation tables, from the studies' stored forecasts
+  (`tests/reproductions/`). See [Working with Results](/epftoolbox2/model-pipeline/results/#hourly-aggregates-shape-and-the-error-split).
 - **`ModelPipeline(engine="on")`: engine groups for studies of many models.** With `engine="on"` (`model_pipeline.engine: on` in a
   workflow) the models the engine takes, OLS, Ridge, LassoCV and LEAR, run in groups, one per refit rule: each group reads the
   data once for all its models, runs one pool of processes whose jobs are one day (or refit block) and period of every model, and
   writes every model's results into its own file as before, through one writer. A model's per-run cost beyond its fits drops (the
-  pool start, the `gc.collect()` and the read of the data are once per group): about 0.23 s per OLS model on its own, 0.03 s in a
+  pool start, the `gc.collect()` and the read of the data are once per group, and the checks of the frame and of the information
+  set and each column's binary mask once for the models that share them): about 0.23 s per OLS model on its own, 0.005 s in a
   group of 1,000 (one test day, 24 periods). **OLS, Ridge and LEAR with `scaler="standard"` are fitted from exact sums shared
   across the group**: the same bits alone and in any group, order or process count, within 1e-8 EUR/MWh of `"off"` for OLS and 1e-9
   for Ridge and LEAR (the same penalty, the same kink), not to the bit, with the same counts of forecasts and skips; a fit the sums

@@ -48,13 +48,20 @@ FULL_TEST_DAYS = 365
 class ModelFrames(dict):
     """`{model: frame}` of one group, as the report hands it to `Evaluator.compute_group`.
 
-    A plain dict to whoever reads it. It remembers which grouping it was cut by, and builds the loss panel at most once,
-    however many evaluators of the group ask for it.
+    A plain dict to whoever reads it. It remembers which grouping it was cut by and the frequency of each model's results
+    (`freqs`, `{model: "1h" | "15min" | "1D"}`, empty when not known), and builds the loss panel at most once, however many
+    evaluators of the group ask for it.
     """
 
-    def __init__(self, frames: Mapping[str, pd.DataFrame], group_keys: Sequence[str] = ()):
+    def __init__(
+        self,
+        frames: Mapping[str, pd.DataFrame],
+        group_keys: Sequence[str] = (),
+        freqs: Optional[Mapping[str, str]] = None,
+    ):
         super().__init__(frames)
         self.group_keys = tuple(group_keys)
+        self.freqs: Dict[str, str] = dict(freqs or {})
         self._panel: Optional["LossPanel"] = None
 
     @property
