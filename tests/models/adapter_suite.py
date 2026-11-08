@@ -7,7 +7,7 @@ the `check_*` functions it needs. The module sets one process and one thread for
 
 - `check_yaml_round_trip`: saved and loaded, the same parameters and the same forecasts.
 - `check_preflight_without_extra`: with the family's extra hidden (`importlib.util.find_spec`), `run` raises
-  `MissingExtraError` before any model's run starts.
+  `MissingExtraError` before any model's run starts (`models._cards.preflight`).
 - `check_verify`: `verify` is `ok` on each day given, with the positive control, the rerun and the co-batch checks, on the CPU.
 - `check_loop_and_shards`: each model of a loop equals the same model run alone, as a `models_per_task=1` array task runs it
   (bitwise, records as sorted lines).
@@ -16,12 +16,10 @@ the `check_*` functions it needs. The module sets one process and one thread for
 - `check_dst_counts`: the calendar's counts over both switches: 23 forecasts for the spring target day, 24 for the autumn
   one, the repeated hour's actual NaN, nothing missing.
 - `check_quarter_hours`: on a 15-minute frame, 96 forecasts a day and nothing missing (for a family that supports it).
-- `check_provenance`: the card is in `report.provenance()`.
+- `check_provenance`: the card is in `report.provenance()`, with the verdict of the test window, in memory and from the files.
 
-Pieces of step 6a are read through the attributes the spec names, with a default, so that 6a slots in without a change here:
-`model._card` (None: a family with no card), `BaseModel._preflight` (absent: `check_preflight_without_extra` skips), and
-`EvaluationReport.provenance` (absent: `check_provenance` skips). A card's `extra`, `family` and `licence` are read as
-`getattr(card, name, None)`.
+A family's card is its `_card` (`models._cards.ModelCard`; None for a family with none, whose pre-flight and provenance checks
+have nothing to check).
 """
 
 import datetime
@@ -37,6 +35,7 @@ import pytest
 from epftoolbox2._extras import EXTRAS, MissingExtraError
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.information_set import InformationSet
+from epftoolbox2.models._cards import contamination_verdict
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.pipelines import ModelPipeline
 
@@ -103,14 +102,13 @@ def check_preflight_without_extra(
     make: Factory, monkeypatch: Any, frame: pd.DataFrame, test: Tuple[str, str], horizon: int = 1
 ) -> None:
     """With the modules of the family's extra hidden, `ModelPipeline.run` raises `MissingExtraError` naming the extra before
-    any model's run starts (no `_prepare_run`), as 6a's pre-flight does. A family with no card, or a card without an extra,
-    has nothing to miss; before 6a (no `BaseModel._preflight`) the check skips."""
+    any model's run starts (no `_prepare_run`), as the pre-flight does (`models._cards.preflight`). A family with no card, or
+    a card without an extra, has nothing to miss."""
     model = make(NAME)
-    extra = getattr(getattr(model, "_card", None), "extra", None)
-    if extra is None:
+    card = model._card
+    if card is None or card.extra is None:
         return
-    if not hasattr(BaseModel, "_preflight"):
-        pytest.skip("the pre-flight arrives with step 6a (`BaseModel._preflight`)")
+    extra = card.extra
     hidden = {module.split(".")[0] for module in EXTRAS[extra]}
     real_find_spec = importlib.util.find_spec
 
@@ -124,10 +122,11 @@ def check_preflight_without_extra(
         started.append(self.name)
         return real_prepare(self, *args, **kwargs)
 
-    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
-    monkeypatch.setattr(BaseModel, "_prepare_run", prepare)
-    with pytest.raises(MissingExtraError, match=extra):
-        _run(_pipeline([model]), frame, test, horizon)
+    with monkeypatch.context() as patch:  # the extra is back for the checks after this one
+        patch.setattr(importlib.util, "find_spec", find_spec)
+        patch.setattr(BaseModel, "_prepare_run", prepare)
+        with pytest.raises(MissingExtraError, match=extra):
+            _run(_pipeline([model]), frame, test, horizon)
     assert started == [], f"a model's run started before the pre-flight refused it: {started}"
 
 
@@ -300,21 +299,21 @@ def check_provenance(
     horizon: int = 1,
     information_set: Optional[InformationSet] = None,
 ) -> None:
-    """A model with a card has a row in `report.provenance()` naming its family and licence, also in a report read back from
-    the save_dir. A model with no card has nothing to show; before 6a (no `report.provenance`) the check skips."""
-    card = getattr(make(NAME), "_card", None)
+    """A model with a card has one row in `report.provenance()` naming its family, licence, commercial use and attribution,
+    with the contamination verdict of the test window from its first issue day, also in a report read back from the save_dir.
+    A model with no card has nothing to show."""
+    card = make(NAME)._card
     if card is None:
         return
     save_dir = tmp_path / "provenance"
     pipeline = _pipeline([make(NAME)], information_set)
     reports = [_run(pipeline, frame, test, horizon, save_dir=save_dir)]
-    if not hasattr(reports[0], "provenance"):
-        pytest.skip("report.provenance() arrives with step 6a")
-    reports.append(pipeline.report(save_dir))
+    reports.append(pipeline.report(save_dir, *test, horizon=horizon, forecast_only=True))  # the run's window
     for report in reports:
         table = report.provenance()
         row = table[table["model"] == NAME]
         assert len(row) == 1, table
-        for field in ("family", "licence"):
-            if getattr(card, field, None) is not None:
-                assert row.iloc[0][field] == getattr(card, field), (field, row.iloc[0].to_dict())
+        shown = row.iloc[0].to_dict()
+        for field in ("family", "licence", "commercial_use", "attribution"):
+            assert shown[field] == getattr(card, field), (field, shown)
+        assert shown["test_verdict"] == contamination_verdict(card, test[0]), shown

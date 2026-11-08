@@ -16,7 +16,7 @@ from typing import Dict, List, Mapping
 
 from epftoolbox2._extras import EXTRAS
 from epftoolbox2.models import OLSModel
-from epftoolbox2.models._cards import ModelCard, WeightsRef, resolve_model_weights
+from epftoolbox2.models._cards import RUN_DATA, ModelCard, WeightsRef, resolve_model_weights
 from epftoolbox2.models._weights import offline
 
 FAKE_EXTRA = "fakefam"
@@ -94,6 +94,25 @@ class CardedModel(OLSModel):
     def _predict_fitted(self, fitted, test_x):
         prediction, coefficients = super()._predict_fitted(fitted, test_x)
         return prediction + self._loaded_offset(), coefficients
+
+
+def run_data_card(family: str, extra=None) -> ModelCard:
+    """The card of a family trained on the run's data only (always `clean`), permissive, with no weights and no runtime pin:
+    what a test needs to make a model carded (the checks `verify` turns on for a card, a provenance row) and nothing more."""
+    return ModelCard(
+        family=family,
+        extra=extra,
+        licence="MIT",
+        licence_url="https://opensource.org/license/mit",
+        commercial_use=True,
+        revenue_cap=None,
+        attribution=None,
+        weights=None,
+        runtime=(),
+        corpus=RUN_DATA,
+        corpus_end=None,
+        released=None,
+    )
 
 
 def fake_extra(monkeypatch, present: bool = True) -> None:
