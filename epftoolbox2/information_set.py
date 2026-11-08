@@ -618,7 +618,7 @@ def _entsoe_price_rules(source: Any, prefix: str) -> Dict[str, Availability]:
     if "price" not in source.type:
         return rules
     if getattr(source, "price_exaa", False):
-        zone = "Europe/Vienna" if source._area_name == "AT" else "Europe/Berlin"
+        zone = "Europe/Vienna" if source._area_name == "AT" else "Europe/Berlin"  # DE_LU, DE_AT_LU
         rules[f"{prefix}price_exaa"] = _exaa_rule(zone)
     if source._area_name == "CH":
         rules[f"{prefix}price"] = Availability.published(
@@ -656,6 +656,8 @@ def _built_in_rules() -> Dict[str, Availability]:
         ),
         # The EXAA auction (EntsoeSource(price_exaa=True), AT and DE_LU): see `_EXAA_RULE`.
         "price_exaa": _EXAA_RULE_VIENNA,
+        # Prefixed, as AT and DE_LU need to be told apart (`de_price_exaa`): a bare InformationSet has no source rules.
+        "*_price_exaa": _EXAA_RULE_VIENNA,
         # ENTSO-E keeps the newest value of these only: A65 was revised after the gate on 22 of 42 days measured.
         "load_actual": Availability.realised(
             "1h", note="A65/A16 actual load: 1 h after the period (Reg. 543/2013 Art. 6(2)(a))", vintage=_REVISED
