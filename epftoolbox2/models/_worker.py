@@ -57,7 +57,8 @@ class TaskFailed(RuntimeError):
 
 
 def _limit_native_threads() -> None:
-    """Limit BLAS and OpenMP to NATIVE_THREADS_PER_TASK threads in this worker process.
+    """Limit BLAS and OpenMP to NATIVE_THREADS_PER_TASK threads in this worker process, at one thread with no OpenBLAS
+    helper threads left running (`_stop_openblas_threads`).
 
     Only for a pool worker: the limits are never restored, and the caller's process must keep its own.
     """
@@ -68,6 +69,26 @@ def _limit_native_threads() -> None:
     # spawn whatever importing this module loaded (numpy's BLAS at least). threadpoolctl sets them directly.
     _W_THREADPOOLS = ThreadpoolController()
     _W_NATIVE_LIMITS = _W_THREADPOOLS.limit(limits=NATIVE_THREADS_PER_TASK)
+    if NATIVE_THREADS_PER_TASK == 1:
+        _stop_openblas_threads(_W_THREADPOOLS)
+
+
+def _stop_openblas_threads(controller: ThreadpoolController) -> None:
+    """Stop the helper threads of every OpenBLAS that runs its own pool of them (threading layer "pthreads").
+
+    OpenBLAS's fork handler stops that pool in the parent before every fork, and setting its thread count in the child, as
+    the limit above does, starts it again: one thread per CPU the library counted when it loaded (2 x 127 on a 128-CPU
+    machine, numpy's OpenBLAS and scipy's), each spinning for OpenBLAS's thread timeout (about 0.1 s) before it sleeps, in
+    every worker of every pool. At one thread OpenBLAS hands them no work, so stopping them changes no number:
+    `blas_thread_shutdown_` is the function that fork handler runs, which leaves the library as every forked child starts,
+    at the thread count just set, and OpenBLAS starts the pool again by itself if a later call asks for more threads.
+    """
+    for lib in controller.lib_controllers:
+        if lib.internal_api != "openblas" or getattr(lib, "threading_layer", None) != "pthreads":
+            continue
+        shutdown = getattr(getattr(lib, "dynlib", None), "blas_thread_shutdown_", None)
+        if shutdown is not None:
+            shutdown()
 
 
 def _limit_openmp_in_task_thread() -> None:
