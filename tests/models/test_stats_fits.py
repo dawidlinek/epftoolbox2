@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import LinearRegression, RidgeCV
 from threadpoolctl import threadpool_limits
 
 from epftoolbox2.models import LEARModel, OLSModel, RidgeModel
@@ -793,3 +793,37 @@ def test_engine_needs_and_the_fits_predict_as_the_model_path_reads_them():
         assert pred == (params.transform(x[:1]) @ fit.coef_ + fit.intercept_)[0]
     A, b, yy = stats.uncentred()
     assert np.array_equal(A, stats.G) and np.array_equal(b, stats.q) and yy == stats.yy  # every column scaled: z̄ = 0
+
+
+class _PositiveOLS(OLSModel):
+    """Overrides only the estimator, with an option the statistics don't honour."""
+
+    def _estimator(self):
+        return LinearRegression(fit_intercept=self.fit_intercept, positive=True)
+
+
+class _EigenRidge(RidgeModel):
+    """Overrides only the estimator, with another `gcv_mode` than scikit-learn's own choice."""
+
+    def _estimator(self):
+        return RidgeCV(**self._model_kwargs, cv=None, gcv_mode="eigen")
+
+
+@pytest.mark.parametrize("cls, subclass", [(OLSModel, _PositiveOLS), (RidgeModel, _EigenRidge)])
+def test_the_fits_read_the_estimators_settings_and_hand_back_what_they_cant_honour(cls, subclass):
+    """`_fit_stats` takes its settings from `_estimator()` and hands back (None) where that isn't exactly the estimator it
+    stands for with valid parameters: the model path raises there (scikit-learn's InvalidParameterError, a `fit_error`
+    skip) or fits other settings."""
+    rng = np.random.default_rng(14)
+    x = rng.normal(size=(120, 4)) * 3 + 10
+    y = 50 + x @ rng.normal(size=4) + rng.normal(size=120)
+    mask = np.ones(4, dtype=bool)
+    stats, _ = stats_of(x, y, np.arange(120), mask)
+    Z, ys = fm_rows(x, y)
+    assert cls([])._fit_stats(stats) is not None
+    for value in (1, "yes", None):
+        model = cls([], fit_intercept=value)
+        assert model._fit_stats(stats) is None, value
+        with pytest.raises(ValueError):
+            model._fit_model(Z, ys)
+    assert subclass([])._fit_stats(stats) is None

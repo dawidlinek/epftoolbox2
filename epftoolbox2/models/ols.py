@@ -22,13 +22,16 @@ class OLSModel(BaseModel):
         # The default is left out, so a manifest made before the option existed stays as it was.
         return {"fit_intercept": True} if self.fit_intercept else {}
 
+    def _estimator(self):
+        return LinearRegression(fit_intercept=self.fit_intercept)
+
     def _fit_predict(self, train_x, train_y, test_x):
-        model = LinearRegression(fit_intercept=self.fit_intercept)
+        model = self._estimator()
         model.fit(train_x, train_y)
         return model.predict(test_x)[0], model.coef_.tolist()
 
     def _fit_model(self, train_x, train_y):
-        model = LinearRegression(fit_intercept=self.fit_intercept)
+        model = self._estimator()
         model.fit(train_x, train_y)
         return model
 
@@ -37,5 +40,9 @@ class OLSModel(BaseModel):
 
     def _fit_stats(self, stats: ScaledStats):
         """The fit from a unit's scaled sums by the normal equations (`_stats.ols_fit`), or None where the model path must fit
-        it: n <= p + 1, a failed Cholesky factorisation or (largest/smallest pivot)² above `_stats.GUARD`."""
-        return _stats.ols_fit(stats, self.fit_intercept)
+        it: n <= p + 1, a failed Cholesky factorisation, either guard (`_stats.GUARD`, `_stats.CONDITION_MAX`), or
+        `_estimator()` not exactly that `LinearRegression` with valid parameters (`_stats.estimator_params`)."""
+        params = _stats.estimator_params(self._estimator(), LinearRegression, ("fit_intercept",))
+        if params is None:
+            return None
+        return _stats.ols_fit(stats, bool(params["fit_intercept"]))

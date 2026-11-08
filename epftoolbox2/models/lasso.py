@@ -1,8 +1,16 @@
+import numbers
+
 from sklearn.linear_model import LassoCV
+
+from . import _cv_stats, _stats
+from ._lars import CV_FOLDS
+from ._stats import ScaledStats
 from .base import BaseModel
 
 
 class LassoCVModel(BaseModel):
+    # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the CV blocks (`_cv_stats.block_stats`).
+    _ENGINE_NEEDS = frozenset({"blocks"})
     # Saved to YAML only when not at these values, so files saved before the option existed don't move.
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "fit_intercept": True}
 
@@ -34,3 +42,18 @@ class LassoCVModel(BaseModel):
 
     def _predict_fitted(self, fitted, test_x):
         return fitted.predict(test_x)[0], fitted.coef_.tolist()
+
+    def _fit_stats(self, stats: ScaledStats):
+        """`LassoCV(cv, max_iter, n_jobs=1, fit_intercept)` from a unit's scaled sums and its KFold blocks
+        (`_cv_stats.lassocv_fit`: scikit-learn's own coordinate descent on each fold's Gram through `enet_path`), or None
+        where the model path must fit it: `_estimator()` not exactly that `LassoCV` with valid parameters
+        (`_stats.estimator_params`), `cv` not a number of folds, no blocks or another number of them, a fold whose training
+        part has no more rows than columns (n <= p among them), or anything that isn't finite. The settings are the
+        estimator's own."""
+        params = _stats.estimator_params(self._estimator(), LassoCV, ("cv", "max_iter", "fit_intercept"), {"n_jobs": 1})
+        if params is None:
+            return None
+        folds = CV_FOLDS if params["cv"] is None else params["cv"]
+        if isinstance(folds, bool) or not isinstance(folds, numbers.Integral):
+            return None  # a splitter object: its folds aren't KFold's blocks
+        return _cv_stats.lassocv_fit(stats, bool(params["fit_intercept"]), int(params["max_iter"]), folds=int(folds))
