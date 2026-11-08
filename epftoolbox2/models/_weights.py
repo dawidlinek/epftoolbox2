@@ -88,12 +88,23 @@ def weights_dir() -> Path:
 
 
 # A Hugging Face repository (`owner/name`) and a revision (a branch, tag or commit): one path component each, never `..`.
-REPO_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
-REVISION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+REPO_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?\Z")
+REVISION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 # `weights="<owner>/<name>@<revision>"`: that entry of the cache, as `fetch` left it (another revision than the card's).
 CACHE_REF = re.compile(
-    r"^(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*)@(?P<revision>[A-Za-z0-9][A-Za-z0-9._-]*)$"
+    r"^(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*)@(?P<revision>[A-Za-z0-9][A-Za-z0-9._-]*)\Z"
 )
+
+
+def check_file_name(name: str) -> str:
+    """`name` if it names a file by its path inside a weights directory (as a repository does): relative, no empty part and no
+    `..`; ValueError otherwise. `WeightsRef.files` and every fetch record's file names follow it."""
+    parts = name.split("/") if isinstance(name, str) else [""]
+    if not name or name.startswith("/") or "\\" in name or ".." in parts or "" in parts or "\n" in name:
+        raise ValueError(
+            f"A weights file is named by its path inside its directory (no '/' first, no '..'), got {name!r}"
+        )
+    return name
 
 
 def check_revision(revision: str) -> str:
@@ -218,6 +229,17 @@ def resolve(
         if named is None or Path(weights).expanduser().exists():
             return _resolve_path(ref, Path(weights).expanduser(), str(weights), what)
         repo, revision = named.group("repo"), named.group("revision")
+        if ref is None:
+            raise MissingWeightsError(
+                f"{what}: weights={str(weights)!r} names a cache entry, but this card has no weights of its own (it trains "
+                "on the run's data); pass a file or directory, or use the model whose card names that repository"
+            )
+        if repo != ref.repo:
+            raise MissingWeightsError(
+                f"{what}: weights={str(weights)!r}: {repo}@{revision} is not this card's repository ({ref.repo}). Another "
+                "repository holds another model, under its own licence: run the model whose card names it, or give a "
+                "card of its own"
+            )
     elif ref is None:
         return None
     else:
@@ -265,12 +287,30 @@ def _resolve_cached(
             f"{what}: no weights for {repo}@{revision} in {directory} (no {SIDECAR} there): {hint}"
         )
     stored = json.loads(sidecar.read_text())
+    if card is not None:
+        # The record says what the weights were fetched as: the repository and this card's family and licence, or another's.
+        expected = {"repo": repo, "family": card.family, "licence": card.licence}
+        for field, value in expected.items():
+            if stored.get(field) != value:
+                raise MissingWeightsError(
+                    f"{what}: the weights in {directory} were fetched as {field} {stored.get(field)!r}, this card's is "
+                    f"{value!r}: they are another card's (or the record was edited). Run `{fetch_command}` to fetch them "
+                    "under this card"
+                )
     if card is not None and licence_flagged(card) and stored.get("accepted") != card.licence:
         raise MissingWeightsError(
             f"{what}: the weights in {directory} were fetched without accepting {card.licence!r}, which this card needs "
             f"({card.licence_url}): run `{fetch_command} --accept '{card.licence}'`"
         )
     on_file = stored.get("files", {})
+    for name in on_file:
+        try:
+            check_file_name(name)
+        except ValueError:
+            raise MissingWeightsError(
+                f"{what}: the record of {directory} ({SIDECAR}) names a file outside its directory, {name!r}: it was "
+                f"edited. Fetch them again with `{fetch_command}`"
+            ) from None
     problems = [f"{name} was never fetched" for name in (ref.files if ref is not None else ()) if name not in on_file]
     files: Dict[str, str] = {}
     for name, entry in on_file.items():
@@ -560,6 +600,11 @@ def verify_cache(root: Optional[Union[str, Path]] = None) -> List[Finding]:
             findings.append(Finding(directory, SIDECAR, "changed", "the sidecar can't be read"))
             continue
         for name, stored in entry.get("files", {}).items():
+            try:
+                check_file_name(name)
+            except ValueError:
+                findings.append(Finding(directory, name, "changed", "names a file outside its directory"))
+                continue
             path = directory / name
             if not path.is_file():
                 findings.append(Finding(directory, name, "missing"))

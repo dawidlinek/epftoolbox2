@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from .._extras import EXTRAS, MissingExtraError, has_extra
-from ._weights import REPO_PATTERN, REVISION_PATTERN, MissingWeightsError, ResolvedWeights, resolve
+from ._weights import REPO_PATTERN, REVISION_PATTERN, MissingWeightsError, ResolvedWeights, check_file_name, resolve
 
 if TYPE_CHECKING:  # pragma: no cover
     import pandas as pd
@@ -66,7 +66,7 @@ PROVENANCE_COLUMNS = [
     "test_verdict",
 ]
 
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 def _as_date(value: Union[date, str, None], what: str) -> Optional[date]:
@@ -96,9 +96,10 @@ class WeightsRef:
             raise ValueError(f"WeightsRef.revision must be a branch, tag or commit, got {self.revision!r}")
         files = dict(self.files)
         for name, digest in files.items():
-            parts = name.split("/")
-            if not name or name.startswith("/") or ".." in parts or "" in parts:
-                raise ValueError(f"WeightsRef.files names a file by its path in the repository, got {name!r}")
+            try:
+                check_file_name(name)  # the rule every fetch record's names follow too
+            except ValueError:
+                raise ValueError(f"WeightsRef.files names a file by its path in the repository, got {name!r}") from None
             if digest is not None and not _SHA256.match(digest):
                 raise ValueError(f"WeightsRef.files[{name!r}] must be a sha256 (64 hex digits) or None, got {digest!r}")
         object.__setattr__(self, "files", files)
@@ -196,7 +197,7 @@ _VERSION_PARTS = r"""
 """
 _VERSION = re.compile(r"^\s*" + _VERSION_PARTS + r"\s*$", re.VERBOSE | re.IGNORECASE)
 # `==`/`!=` with a wildcard: an epoch and a release only, then `.*`.
-_WILDCARD = re.compile(r"^v?(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*\.\*$", re.IGNORECASE)
+_WILDCARD = re.compile(r"^v?(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*\.\*\Z", re.IGNORECASE)
 _PRE_LETTER = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc", "preview": "rc"}
 _PRE_RANK = {"a": 0, "b": 1, "rc": 2}
 _SPLIT_PRE = re.compile(r"^([0-9]+)((?:a|b|c|rc)[0-9]+)$")

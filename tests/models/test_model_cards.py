@@ -1260,3 +1260,84 @@ def test_results_resumed_over_other_weights_say_they_mix_them(data, fetched, tmp
         report = run(data, carded(), save_dir=save_dir)
     assert manifest(save_dir, "carded")["weights_history"] == history
     assert "mixes 2 sets of weights" in report.provenance().iloc[0]["weights"]
+
+
+# --- re-review fixes ----------------------------------------------------------------------------------------------------------
+
+
+class PermissiveModel(CardedModel):
+    """Another family: an MIT card on its own repository."""
+
+    _card = dataclasses.replace(
+        CARD,
+        family="perm-fm",
+        licence="MIT",
+        licence_url="https://opensource.org/license/mit",
+        commercial_use=True,
+        revenue_cap=None,
+        weights=WeightsRef("perm-org/perm-fm", "v1", {WEIGHTS_FILE: REFERENCE_SHA}),
+    )
+
+
+def test_a_cache_entry_of_another_repository_is_another_model_s(fetched, monkeypatch, no_network):
+    """weights='<repo>@<rev>' names a revision of the card's own repository: an entry fetched under another card (here a
+    non-commercial one) would run under this card's licence in the manifest and provenance."""
+    model = PermissiveModel(PREDICTORS, WINDOW, name="perm", weights=f"{REPO}@{REVISION}")
+    with pytest.raises(
+        MissingWeightsError, match=r"fake-org/fake-fm@v1 is not this card's repository \(perm-org/perm-fm\)"
+    ):
+        preflight([model])
+    with pytest.raises(MissingWeightsError, match="has no weights of its own"):
+        resolve(dataclasses.replace(CARD, weights=None, corpus=RUN_DATA), f"{REPO}@{REVISION}")
+    monkeypatch.setattr(_weights, "snapshot_download", fake_download({WEIGHTS_FILE: REFERENCE}, []))
+    _weights.fetch(PermissiveModel._card, "PermissiveModel")
+    with pytest.raises(
+        MissingWeightsError, match=r"perm-org/perm-fm@v1 is not this card's repository \(fake-org/fake-fm\)"
+    ):
+        preflight([carded(weights="perm-org/perm-fm@v1")])
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [("repo", "other-org/other-fm"), ("family", "other-fm"), ("licence", "Other-Licence-2.0")],
+)
+def test_a_sidecar_of_another_card_is_refused(fetched, field, value):
+    """The record of a fetch names the repository, family and licence it was fetched under; a cache entry whose record says
+    otherwise (written by hand, or fetched under another card's terms) is no weights of this card."""
+    sidecar = fetched / REPO / REVISION / SIDECAR
+    stored = json.loads(sidecar.read_text())
+    sidecar.write_text(json.dumps({**stored, field: value}))
+    if field == "licence":  # the acceptance is of the licence on record
+        sidecar.write_text(json.dumps({**stored, field: value, "accepted": value}))
+    with pytest.raises(MissingWeightsError, match=rf"were fetched as {field} {value!r}, this card's is "):
+        resolve(CARD)
+
+
+@pytest.mark.parametrize("name", ["/abs/secret.bin", "../../../../outside/secret.bin", "a/../../b", "", "a//b"])
+def test_a_sidecar_naming_a_file_outside_its_directory_is_refused(fetched, tmp_path, name):
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"x")
+    sidecar = fetched / REPO / REVISION / SIDECAR
+    stored = json.loads(sidecar.read_text())
+    entry = {"sha256": hashlib.sha256(b"x").hexdigest(), "bytes": 1}
+    sidecar.write_text(json.dumps({**stored, "files": {**stored["files"], name or "": entry}}))
+    with pytest.raises(MissingWeightsError, match="names a file outside its directory"):
+        resolve(CARD)
+    findings = [f for f in _weights.verify_cache() if f.name == name]
+    assert [(f.status, f.detail) for f in findings] == [("changed", "names a file outside its directory")]
+
+
+def test_names_end_where_they_end(tmp_path):
+    """A trailing newline is no part of a repository, revision or cache reference."""
+    assert _weights.CACHE_REF.match(f"{REPO}@{REVISION}") and not _weights.CACHE_REF.match(f"{REPO}@{REVISION}\n")
+    for bad in (f"{REVISION}\n",):
+        with pytest.raises(ValueError, match="revision"):
+            _weights.check_revision(bad)
+    with pytest.raises(ValueError, match="repo"):
+        WeightsRef(f"{REPO}\n", REVISION, {})
+    with pytest.raises(ValueError, match="revision"):
+        WeightsRef(REPO, f"{REVISION}\n", {})
+    with pytest.raises(ValueError, match="sha256"):
+        WeightsRef(REPO, REVISION, {WEIGHTS_FILE: REFERENCE_SHA + "\n"})
+    with pytest.raises(ValueError):
+        parse_pin("torch==2.9.*\n,<3")
