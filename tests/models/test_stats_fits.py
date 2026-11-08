@@ -426,6 +426,64 @@ def test_the_issue_row_is_centred_as_the_sums_are():
         assert abs(rounded - pm) > OLS_TOL  # the case is one where the centring matters
 
 
+def test_rows_that_are_not_the_sums_rows_raise():
+    """`values` must be the r rows the sums are over: 500 rows against sums of 461 is a caller's bug, not a fit."""
+    rng = np.random.default_rng(14)
+    x = rng.normal(size=(500, 3)) * 5 + 20
+    y = 50 + x @ [1.0, 0.5, -1.0] + rng.normal(size=500)
+    rows = np.flatnonzero(rng.random(500) < 0.92)
+    raw = SpanSums(x, y).over(rows, np.arange(3))
+    with pytest.raises(ValueError, match="fit's rows"):
+        _stats.standard_stats(raw, (x, y), np.ones(3, dtype=bool))
+    with pytest.raises(ValueError, match="sums are over"):
+        _stats.standard_stats(raw, lambda j: y if j is None else x[:, j], np.ones(3, dtype=bool))
+    stats, _ = _stats.standard_stats(raw, lambda j: y[rows] if j is None else x[rows, j], np.ones(3, dtype=bool))
+    assert stats.n == rows.size
+    # A column is checked when it is read: a candidate here (constant), or every column for Ridge's rows.
+    xc = x.copy()
+    xc[:, 1] = 0.3
+    raw = SpanSums(xc, y).over(rows, np.arange(3))
+    with pytest.raises(ValueError, match="column 1"):
+        _stats.standard_stats(raw, lambda j: y[rows] if j is None else xc[:, j], np.ones(3, dtype=bool))
+
+
+def test_ridge_hands_back_nan_scores_and_an_unknown_target_scale():
+    """A NaN leave-one-out score (rows with a NaN) would lose every comparison and leave the first penalty; a NaN or missing
+    `yscale` would make the rounding budget pass or loosen it. Each hands the fit back."""
+    rng = np.random.default_rng(15)
+    x = rng.normal(size=(200, 4)) * 5 + 20
+    y = 50 + x @ [1.0, 0.5, -1.0, 0.2] + rng.normal(size=200) * 3
+    stats, _ = stats_of(x, y, np.arange(200), np.ones(4, dtype=bool))
+    model = RidgeModel([])
+    assert model._fit_stats(stats) is not None
+    Z, z = stats.rows()
+    Z = Z.copy()
+    Z[7, 2] = np.nan
+    assert model._fit_stats(stats._replace(rows=lambda: (Z, z))) is None
+    assert model._fit_stats(stats._replace(yscale=float("nan"))) is None
+    assert model._fit_stats(stats._replace(yscale=None)) is None
+    assert _stats.ScaledStats(1, np.zeros(0), 0.0, np.zeros((0, 0)), np.zeros(0), 0.0).yscale is None
+
+
+def test_sums_past_float64s_range_hand_every_model_back():
+    """A column of about 1e160: its squares overflow, so the sums are not finite. `standard_stats` raises `StatsFallback`
+    ("overflow") for OLS, Ridge and LEAR alike, so the key is the model path's (which forecasts it) instead of a fit error
+    that exists with the engine on only; a `ScaledStats` that isn't finite is handed back by OLS and Ridge too."""
+    rng = np.random.default_rng(16)
+    x = np.column_stack([rng.normal(size=300) * 5 + 20, 1e160 * (1 + rng.random(300))])
+    y = 50 + x[:, 0] + rng.normal(size=300)
+    with pytest.raises(_stats.StatsFallback) as info:
+        stats_of(x, y, np.arange(300), np.ones(2, dtype=bool))
+    assert info.value.reason == "overflow"
+    with np.errstate(all="ignore"):
+        for model in (OLSModel([]), RidgeModel([]), LEARModel([], scaler="standard")):
+            pm, _, _ = model_path(model, x, y, x[:1], np.ones(2, dtype=bool))
+            assert np.isfinite(pm)
+    stats, _ = stats_of(x[:, :1], y, np.arange(300), np.ones(1, dtype=bool))
+    bad = stats._replace(G=np.array([[np.inf]]))
+    assert OLSModel([])._fit_stats(bad) is None and RidgeModel([])._fit_stats(bad) is None
+
+
 # --- OLS -----------------------------------------------------------------------------------------------------------------
 
 

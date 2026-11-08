@@ -145,7 +145,8 @@ class ScaledStats(NamedTuple):
     `zbar`, `ybar`: means of the scaled columns and target (0 for a scaled column and the target); `G`, `q`, `yy`: centred
     Σ(z - z̄)(z - z̄)', Σ(z - z̄)(y - ȳ), Σ(y - ȳ)²; `blocks`: the five CV blocks (step 5e), else None; `rows`: a callable giving
     the scaled (Z, y) of the fit's rows, for the models that need them (`_ENGINE_NEEDS`), else None; `yscale`: what a scaled
-    target unit is in target units (the scaler's divisor), for a fit that bounds an error in target units (Ridge).
+    target unit is in target units (the scaler's divisor), for a fit that bounds an error in target units: Ridge hands back
+    a fit whose `yscale` is None (a builder that didn't set it), so a forgotten one can't loosen its budget.
     """
 
     n: int
@@ -156,7 +157,7 @@ class ScaledStats(NamedTuple):
     yy: float
     blocks: Optional[Tuple["ScaledStats", ...]] = None
     rows: Optional[Callable[[], Tuple[np.ndarray, np.ndarray]]] = None
-    yscale: float = 1.0
+    yscale: Optional[float] = None
 
     def gram(self) -> GramStats:
         """LEAR's seam (`_lars.GramStats`): the same sums under its names."""
@@ -173,21 +174,30 @@ class ScaledStats(NamedTuple):
 Values = Union[Callable[[Optional[int]], np.ndarray], Tuple[np.ndarray, np.ndarray]]
 
 
-def _reader(values: Values, p: int):
-    """`values` as (column j's values, or the target's for None; the (x, y) rows), the rows built only when asked."""
+def _reader(values: Values, r: int, p: int):
+    """`values` as (column j's values, or the target's for None; the (x, y) rows), the rows built only when asked. Rows that
+    aren't the sums' r rows raise ValueError: a caller's bug, never a fit to hand back."""
     if callable(values):
 
-        def rows():
-            x = np.column_stack([np.asarray(values(j), dtype=np.float64) for j in range(p)]) if p else None
-            return x, np.asarray(values(None), dtype=np.float64)
+        def column(j):
+            col = np.asarray(values(j), dtype=np.float64)
+            if col.shape != (r,):
+                what = "the target" if j is None else f"column {j}"
+                raise ValueError(f"values({j!r}) gives {col.shape} values for {what}; the sums are over {r} rows")
+            return col
 
-        return lambda j: np.asarray(values(j), dtype=np.float64), rows
+        def rows():
+            x = np.column_stack([column(j) for j in range(p)]) if p else np.zeros((r, 0))
+            return x, column(None)
+
+        column(None)  # the target now, the columns as they are read
+        return column, rows
     x, y = values
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
-    if x.ndim != 2 or x.shape[1] != p or y.shape != (x.shape[0],):
+    if x.shape != (r, p) or y.shape != (r,):
         raise ValueError(
-            f"values must be the fit's rows, x of shape (r, {p}) and y of shape (r,); got {x.shape}, {y.shape}"
+            f"values must be the fit's rows, x of shape ({r}, {p}) and y of shape ({r},); got {x.shape}, {y.shape}"
         )
     return (lambda j: y if j is None else np.ascontiguousarray(x[:, j])), (lambda: (x, y))
 
@@ -222,7 +232,7 @@ def standard_stats(
     p = shift.size
     if r < MIN_ROWS:
         raise ValueError(f"standard_stats needs at least {MIN_ROWS} rows, got {r}")
-    column, rows = _reader(values, p)
+    column, rows = _reader(values, r, p)
     if scale_binary:
         scaled = np.ones(p, dtype=bool)
     elif mask is None:
@@ -239,11 +249,14 @@ def standard_stats(
     S = np.asarray(raw.S, dtype=np.float64)
     v = np.asarray(raw.v, dtype=np.float64)
     sy, syy = float(raw.sy), float(raw.syy)
+    if not (np.isfinite(u).all() and np.isfinite(S).all() and np.isfinite(v).all() and np.isfinite([sy, syy]).all()):
+        raise StatsFallback("overflow", "a sum of the fit's rows is not finite (squares past float64's range)")
 
     # Centred sums of d = x - c (shift-invariant) and the means and variances they give.
-    C = S - np.outer(u, u) / r  # exactly symmetric: u_j u_k = u_k u_j in IEEE arithmetic
-    cq = v - u * (sy / r)
-    cyy = syy - sy * sy / r
+    with np.errstate(over="ignore", invalid="ignore"):
+        C = S - np.outer(u, u) / r  # exactly symmetric: u_j u_k = u_k u_j in IEEE arithmetic
+        cq = v - u * (sy / r)
+        cyy = syy - sy * sy / r
     square = np.diag(S).copy()
     centred = np.diag(C).copy()
     offset = u / r
@@ -300,14 +313,25 @@ def standard_stats(
     )
 
     # Scaled space: a scaled column has mean 0 exactly, an unscaled one its mean on ρ (a constant one the value itself).
-    G = C / np.outer(sigma, sigma)
-    q = cq / (sigma * ystd)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        G = C / np.outer(sigma, sigma)
+        q = cq / (sigma * ystd)
+        yy = cyy / (ystd * ystd)
     zbar = np.where(scaled, 0.0, mean)
     if constant.any():
         G[constant, :] = 0.0
         G[:, constant] = 0.0
         q[constant] = 0.0
-    yy = cyy / (ystd * ystd)
+    if not (
+        np.isfinite(G).all()
+        and np.isfinite(q).all()
+        and np.isfinite(zbar).all()
+        and np.isfinite(params.mean).all()
+        and np.isfinite(sigma).all()
+        and np.isfinite([yy, ymean, ystd]).all()
+        and ystd > 0
+    ):
+        raise StatsFallback("overflow", "a scaled sum, mean or scale of the fit is not finite")
 
     def scaled_rows():
         x, y = rows()
@@ -339,6 +363,16 @@ class LinearFit:
 
     def __repr__(self) -> str:
         return f"LinearFit(p={self.coef_.size}, intercept={self.intercept_!r}, alpha={self.alpha_!r})"
+
+
+def _finite(stats: ScaledStats) -> bool:
+    """Whether the sums a fit reads are finite (`standard_stats` raises before; other builders are checked here)."""
+    return bool(
+        np.isfinite(stats.G).all()
+        and np.isfinite(stats.q).all()
+        and np.isfinite(stats.zbar).all()
+        and np.isfinite([stats.yy, stats.ybar]).all()
+    )
 
 
 def _live(M: np.ndarray) -> np.ndarray:
@@ -374,7 +408,7 @@ def ols_fit(stats: ScaledStats, fit_intercept: bool, guard: float = GUARD) -> Op
     """`LinearRegression(fit_intercept)` from scaled sums by the normal equations, or None where the model path must fit it:
     n <= p + 1, a failed factorisation, or the guard."""
     p = np.asarray(stats.q).size
-    if stats.n < MIN_ROWS or stats.n <= p + 1:
+    if stats.n < MIN_ROWS or stats.n <= p + 1 or not _finite(stats):
         return None
     if fit_intercept:
         M, b = stats.G, stats.q
@@ -405,7 +439,7 @@ def ridge_fit(
     `ridgecv_rounding / α` times `stats.yscale` (target units), above `rounding_max`."""
     n = int(stats.n)
     p = np.asarray(stats.q).size
-    if n < MIN_ROWS or n <= p or stats.rows is None:
+    if n < MIN_ROWS or n <= p or stats.rows is None or stats.yscale is None or not _finite(stats):
         return None
     alphas = [float(a) for a in np.atleast_1d(np.asarray(alphas, dtype=np.float64))]
     Z, y = stats.rows()
@@ -435,9 +469,11 @@ def ridge_fit(
             residual = yc
             leverage = np.full(n, base)
         score = float(np.mean((residual / (1.0 - leverage)) ** 2))
+        if not np.isfinite(score):
+            return None  # a NaN would lose every comparison and leave the first penalty chosen
         if best_score is None or score < best_score:
             best_alpha, best_score = alpha, score
-    if ridgecv_rounding(Zc, yc) * stats.yscale / best_alpha > rounding_max:
+    if not ridgecv_rounding(Zc, yc) * stats.yscale / best_alpha <= rounding_max:  # NaN hands back too
         return None
     if live.size:
         w[live] = V @ (Vb / (lam + best_alpha))
