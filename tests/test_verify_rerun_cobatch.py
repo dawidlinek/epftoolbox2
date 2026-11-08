@@ -485,13 +485,55 @@ def test_suite_verify_passes_a_clean_adapter_and_fails_a_leaky_or_noisy_one(data
         )
 
 
-def test_suite_loop_and_shards(data, tmp_path):
+class Sticky(FakeInContext):
+    """Carries state from one fit to the next in its process, as a global flag one model leaves set for the next would."""
+
+    fits = 0
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
+
+    def _fit_model(self, train_x, train_y):
+        type(self).fits += 1
+        return super()._fit_model(train_x, train_y)
+
+    def _predict_fitted(self, fitted, test_x):
+        prediction, coefs = super()._predict_fitted(fitted, test_x)
+        return prediction + 1e-3 * type(self).fits, coefs
+
+
+class Ordinal(FakeInContext):
+    """A forecast that depends on its place among the forecasts of its fit, as one of an unpadded batch may."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
+
+    def _fit_model(self, train_x, train_y):
+        return super()._fit_model(train_x, train_y), [0]
+
+    def _predict_fitted(self, fitted, test_x):
+        model, place = fitted
+        prediction, coefs = super()._predict_fitted(model, test_x)
+        place[0] += 1
+        return prediction + 1e-3 * place[0], coefs
+
+
+def test_suite_loop_and_shards(data, tmp_path, monkeypatch):
     variants = ({}, {"training_window": 30}, {"refit": "1MS"})
     suite.check_loop_and_shards(make, data, tmp_path, TEST, horizon=2, variants=variants)
+
+    monkeypatch.setattr(Sticky, "fits", 0)
+    with pytest.raises(AssertionError, match="in a loop differs"):
+        suite.check_loop_and_shards(
+            lambda name, **p: Sticky(CLEAN, refit="7D", name=name, **p), data, tmp_path / "sticky", TEST
+        )
 
 
 def test_suite_resume(data, tmp_path):
     suite.check_resume(make, data, tmp_path, TEST, horizon=2)
+    # A resumed block forecasts fewer days from its fit than a fresh one.
+    with pytest.raises(AssertionError):
+        suite.check_resume(lambda name, **p: Ordinal(CLEAN, refit="7D", name=name), data, tmp_path / "ordinal", TEST)
 
 
 def test_suite_engine(data):
