@@ -94,7 +94,10 @@ class PanelReport:
             if several:
                 keyed.insert(1, "target", target)
             frames.append(keyed)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        filled = [frame for frame in frames if len(frame)]
+        if not filled:  # every zone's table empty: one empty table with the columns
+            return frames[0].reset_index(drop=True) if frames else pd.DataFrame()
+        return pd.concat(filled, ignore_index=True)
 
     def summary(self) -> pd.DataFrame:
         """Each zone's `summary()`, one row per (zone, model): `zone` (and `target` with one), then its columns."""
@@ -108,6 +111,16 @@ class PanelReport:
         if reasons:
             table[reasons] = table[reasons].fillna(0).astype(int)
         return table
+
+    def choices(self) -> pd.DataFrame:
+        """Each zone's `choices()` (what its ensembles chose on validation), one row per (zone, ensemble, segment), `zone` first
+        (and `target`); empty, with those columns, when nothing chose anything."""
+        return self._with_keys((zone, target, report.choices()) for zone, target, report in self._parts)
+
+    def availability(self) -> pd.DataFrame:
+        """Each zone's `availability()` (the inputs known after the issue time, as the runs listed them), `zone` first (and
+        `target`); a pooled model's training rows judged on an earlier zone's clock are among them, with a note."""
+        return self._with_keys((zone, target, report.availability()) for zone, target, report in self._parts)
 
     def _errors(self, models: Sequence[str]) -> pd.DataFrame:
         """Every forecast of these models in every zone: `zone`, `target`, `model`, the forecast keys, `prediction`, `actual`."""

@@ -70,7 +70,7 @@ a panel without it would score the other zones as the whole run. `allow_missing=
 | | |
 |---|---|
 | `zones` | zone -> its `EvaluationReport`, whose every table and comparison is that zone's alone |
-| `summary()`, `forecast_counts()` | each zone's table, one row per (zone, model), `zone` (and `target`) first |
+| `summary()`, `forecast_counts()`, `choices()`, `availability()` | each zone's table, `zone` (and `target`) first; `epf report` prints the counts and choices of a run over zones |
 | `log_gain(benchmark, by=("zone", "target", "horizon"), common=True)` | per model the mean over cells of 100 ln(MAE of the benchmark / MAE of the model), with `cells`, `cells_lost`, `empty`, `forecasts` and `min_cell_forecasts`; `cells=True` gives one row per cell |
 | `cells_lost(benchmark, by=..., common=True)` | the cells where the benchmark has the lower MAE |
 | `PanelReport.concat([...])` | the panels of several runs, such as a daily minimum and maximum: `log_gain` can then cut by `target` |

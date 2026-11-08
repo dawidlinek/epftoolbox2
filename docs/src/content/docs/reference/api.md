@@ -307,6 +307,8 @@ class PanelReport:                          # What run(data={zone: frame}) retur
 
     def summary(self) -> pd.DataFrame: ...           # one row per (zone, model)
     def forecast_counts(self) -> pd.DataFrame: ...   # one row per (zone, model)
+    def choices(self) -> pd.DataFrame: ...           # each zone's choices(), `zone` first
+    def availability(self) -> pd.DataFrame: ...      # each zone's availability(), `zone` first
     def log_gain(self, benchmark: str, by: Sequence[str] = ("zone", "target", "horizon"),
                  models: Optional[Sequence[str]] = None, cells: bool = False,
                  common: bool = True) -> pd.DataFrame: ...   # common: every model on the same keys and cells

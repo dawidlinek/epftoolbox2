@@ -647,3 +647,43 @@ def test_a_report_refuses_a_zone_of_the_run_whose_folder_is_gone(tmp_path):
         ValueError, match="holds a run over zones"
     ):  # a run of one frame there is refused before any fit
         one_frame.run(frames["PL"], save_dir=str(tmp_path), **run)
+
+
+def test_epf_report_of_a_run_over_zones(tmp_path, capsys):
+    import yaml
+
+    from epftoolbox2 import cli
+
+    frames = {zone: daily(zone, seed=i) for i, zone in enumerate(("PL", "FI"))}
+    pipeline = (
+        ModelPipeline()
+        .add_model(NaiveModel(predictors=["load_d+{horizon}"], name="tso", known_only=False))
+        .add_model(PooledModel(OLSModel(predictors=PREDICTORS, training_window=40, name="m")))
+        .add_evaluator(MAEEvaluator())
+    )
+    pipeline.run(
+        frames, test=FRIDAYS, horizons=[1, 2], freq="1D", issue_days=["friday"], save_dir=str(tmp_path / "results")
+    )
+    pipeline.save(tmp_path / "model_pipeline.yaml")
+    (tmp_path / "prices.csv").write_text("datetime,price\n2023-01-01 00:00:00,1.0\n")
+    config = {
+        "data_pipeline": {  # never run: the report reads the files
+            "start": "2023-01-01",
+            "end": "2023-05-01",
+            "sources": [{"class": "CsvSource", "params": {"file_path": str(tmp_path / "prices.csv")}}],
+        },
+        "model_pipeline": {
+            "path": "model_pipeline.yaml",
+            "test_start": FRIDAYS[0],
+            "test_end": FRIDAYS[1],
+            "horizons": [1, 2],
+            "issue_days": ["friday"],
+            "freq": "1D",
+            "save_dir": "results",
+        },
+    }
+    (tmp_path / "experiment.yaml").write_text(yaml.safe_dump(config))
+    capsys.readouterr()
+    cli.cmd_report(cli.build_parser().parse_args(["report", str(tmp_path / "experiment.yaml")]))
+    shown = capsys.readouterr().out
+    assert "zone" in shown and all(f"{zone} " in shown for zone in frames)
