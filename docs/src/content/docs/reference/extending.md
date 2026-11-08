@@ -143,6 +143,67 @@ per forecast. `_predict_fitted(_fit_model(x, y), test_x)` must equal `_fit_predi
 same class: a subclass of `OLSModel`, `LassoCVModel`, `RidgeModel` or `LEARModel` that overrides one or two of them raises on `refit`, since `refit=None` and
 `refit` would fit different models; one that overrides none keeps its parent's fit and refits.
 
+### Predicting a refit block in one call
+
+A model whose call costs more than its rows, such as an in-context model that reads its whole context on every call, can also
+define `_predict_block(fitted, rows)`: from the fit of `_fit_model`, a prediction (in the scaled target units `_predict_fitted`
+returns) and a coefficient list for each standardised row of `rows`, in their order. With `refit`, each unit is then fitted once and
+predicted in one call holding the issue rows of every day of its block that the frame has with finite inputs, not only the days the
+run forecasts, in date order, padded to the rule's nominal length (7 rows for `"7D"`, 31 for `"1MS"`, 31 k for `"kMS"`) with copies
+of the first row; each forecast is taken from its own row. A call so has one shape and the same rows whether a day runs alone or in
+its block, from any `test_start`, on some weekdays only or after a resume, and its forecasts are the same to the bit in each. The
+block's other days enter as issue rows only, never their targets and never a day after the block, so a row's prediction must not
+depend on the other rows of its call: [`verify`](/epftoolbox2/model-pipeline/verification/#rerun-and-co-batch) checks that with its co-batch check,
+which such a class gets on by default (it gets `_predicts_together` and `_co_batch_items`, the other days of the block).
+
+```python
+import numpy as np
+from epftoolbox2.models.base import BaseModel
+
+
+class KernelModel(BaseModel):
+    """The kernel-weighted mean of the training targets: the fit is the training rows, each forecast row on its own."""
+
+    def __init__(self, predictors, training_window=728, bandwidth=2.0, block_predict=True, **kwargs):
+        super().__init__(predictors, training_window, **kwargs)
+        self.bandwidth = bandwidth
+        self.block_predict = block_predict
+
+    @property
+    def _model_kwargs(self):
+        return {"bandwidth": self.bandwidth, "block_predict": self.block_predict}
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
+
+    def _fit_model(self, train_x, train_y):
+        return train_x.copy(), train_y.copy()
+
+    def _predict_fitted(self, fitted, test_x):
+        predictions, coefficients = self._predict_block(fitted, test_x)
+        return predictions[0], coefficients[0]
+
+    def _predict_block(self, fitted, rows):
+        context_x, context_y = fitted
+        predictions = []
+        for row in rows:
+            distance = ((context_x - row) ** 2).sum(axis=1)
+            weights = np.exp(-(distance - distance.min()) / (2 * self.bandwidth**2))
+            predictions.append(weights @ context_y / weights.sum())
+        return np.array(predictions), [[] for _ in rows]
+
+
+model = KernelModel(["load_d+{horizon}", "wind_d+{horizon}"], refit="7D")
+```
+
+Such a class has `block_predict = True`; `block_predict=False` predicts one row at a time through `_predict_fitted`, as every other
+model does. The model you run decides: the workers get its answer with their configuration, whatever `_model_kwargs` holds, and the
+manifest records it, so a resume with the other setting is refused. `_predict_block` is called only when it is defined in the class
+that defines `_predict_fitted`: a subclass that changes the estimator (`_fit_predict`, `_fit_model`, `_predict_fitted`) but inherits
+`_predict_block`, or one that overrides `_predict_block` alone, predicts one row at a time, so its forecasts are always those of its
+own estimator. With `refit=None` every forecast is fitted on its own, as for any model. Each row's coefficients are a flat list of
+numbers (or a 1-D numeric array, written as its list); anything else raises a `TypeError` naming the model.
+
 `ModelPipeline(engine="on")` runs a model in an [engine group](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine) only
 if one class defines all three and `_fit_stats` (the fit from shared statistics), as the four built-in fitting models do, and keeps
 `BaseModel`'s `run`. A custom model like the one above runs on its own there, with the numbers it has with `engine="off"`; so does a

@@ -18,7 +18,9 @@ with `_co_batch_items`) or has a card (`_card`, a family with an extra or weight
 - `co_batch_probe`: the leakage probe over runs widened to the other items of the issue day's call, as the model names them
   (`_co_batch_items(run_day)`), so that the call holds them: the issue day's forecasts must not depend on anything unknown at
   its issue time, whatever else is predicted with them. The plain probe misses a call made of the run's own days, which holds
-  the issue day alone in its runs.
+  the issue day alone in its runs. For a model that predicts its refit blocks in one call (`_predict_block`), whose call holds
+  the later days the frame has, the issue day's forecasts on the frame cut after its date (what a run on that day has) must
+  also be those of the whole frame, to the bit (`issue_day_cut`), within the rerun's noise margin as any other move.
 
 A model's status is `leak`, `inconclusive` (nothing moved, but that can't be vouched for) or `ok`, and only `ok` passes.
 
@@ -50,7 +52,9 @@ from .information_set import (
     ProbeResult,
     _issue_day_forecasts,
     co_batch_items,
+    cuts_at_issue_day,
     is_revised,
+    issue_day_cut,
     leakage_probe,
     positive_control,
     vintage_of,
@@ -245,8 +249,8 @@ class VerifyReport:
         `forecasts` counts the forecasts compared, `changed` those that moved under the probe (or exist in only one of
         its runs), `max change` is the largest move under the probe, and `control moved` counts the forecasts that moved
         under the control (missing if it did not run). `rerun` counts the forecasts that differ between two unperturbed runs,
-        and `co_batch` those that moved under the probe run over the other items of their call too (each missing if its check
-        did not run).
+        and `co_batch` those that moved under the probe run over the other items of their call too, or, for a model that
+        predicts its refit blocks in one call, on the frame cut after the issue day (each missing if its check did not run).
         """
         rows = []
         for model in self.models:
@@ -266,7 +270,7 @@ class VerifyReport:
                     "max change": max(check.probe.max_abs_change for check in checks),
                     "control moved": sum(len(control.moved) for control in controls) if controls else pd.NA,
                     "rerun": sum(len(rerun.differ) + len(rerun.missing) for rerun in reruns) if reruns else pd.NA,
-                    "co_batch": sum(_moved(batch.probe) for batch in batches) if batches else pd.NA,
+                    "co_batch": sum(len(batch.moved) for batch in batches) if batches else pd.NA,
                     "status": self.status(model),
                 }
             )
@@ -346,6 +350,24 @@ class VerifyReport:
                             f"difference ({noise:.6g}), {line}",
                         )
                     )
+            cut = None if batch is None else batch.cut
+            if cut is not None and not cut.ok:
+                line = (
+                    f"{len(cut.changed)} of {cut.forecasts} forecasts differ when the frame ends on {check.run_day}, as a run "
+                    f"on that day has it (max |change| {cut.max_abs_change:.6g}), e.g. (period, horizon) "
+                    f"{cut.changed[:_EXAMPLES]}; in only one run: {cut.missing[:_EXAMPLES]}: they depend on which later days "
+                    "their call holds, so a backtest and a run on the day differ"
+                )
+                if _beyond_noise(cut.max_abs_change, noise):
+                    found.append((LEAK, f"{model}: leak on {check.run_day}: {line}"))
+                else:
+                    found.append(
+                        (
+                            INCONCLUSIVE,
+                            f"{model}: inconclusive: on {check.run_day}, within {NOISE_MARGIN:g} times its rerun "
+                            f"difference ({noise:.6g}), {line}",
+                        )
+                    )
         late = sorted({name for check in checks for name in check.late_in_period})
         if late:
             found.append(
@@ -358,11 +380,6 @@ class VerifyReport:
             )
         found += [(INCONCLUSIVE, f"{model}: inconclusive: {line}") for line in _blind_spots(checks)]
         return found
-
-
-def _moved(probe: Optional[ProbeResult]) -> int:
-    """Forecasts that moved under a probe, or exist in only one of its runs; 0 for one that didn't run."""
-    return 0 if probe is None else len(probe.changed) + len(probe.missing)
 
 
 def _blind_spots(checks: List[IssueDayCheck]) -> List[str]:
@@ -507,7 +524,9 @@ def verify_model(
     (`models._engine.EngineAlone`): those are its forecasts in any group, so the probe and its control cover that path.
 
     `rerun` runs the unperturbed issue day twice first (`rerun_check`), and `co_batch` runs the probe, and the control if it
-    runs, once more over runs widened to the other items of the issue day's call (`co_batch_probe`); None runs each for a model
+    runs, once more over runs widened to the other items of the issue day's call (`co_batch_probe`), and for a model that predicts
+    its refit blocks in one call compares the issue day's forecasts on the frame cut after its date (`issue_day_cut`); None runs
+    each for a model
     `checked_by_default` says, and True or False for any. A model that names no items (no `_co_batch_items`) predicts each issue
     day on its own, unless it declares `_predicts_together`, which makes it `inconclusive`. `device` is set on every copy of a
     model that has an attribute named `device`, for every run here, and recorded in each check; a model without one (every core
@@ -660,6 +679,17 @@ def verify_model(
                 batch = CoBatchResult(run_day, [])
             else:
                 batch = CoBatchResult(run_day, others, *probe_and_control(run_day, (others[0], others[-1]), columns))
+                if cuts_at_issue_day(model):
+                    # Its call holds the later days the frame has: D's forecasts on the frame a run on D has must be the same.
+                    batch.cut = issue_day_cut(
+                        probed,
+                        unperturbed,
+                        run_day,
+                        label_rules,
+                        label,
+                        runs_in=lambda: seeded_global_generators(2 * seed + 1),
+                        **runs,
+                    )
         checks.append(
             IssueDayCheck(
                 model.name,

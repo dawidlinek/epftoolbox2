@@ -463,6 +463,17 @@ def _package_version() -> str:
             return "unknown"
 
 
+def _block_params(model: Any) -> Dict[str, bool]:
+    """`{"block_predict": ...}` for a model whose class defines `_predict_block`: whether its refit units predict their blocks
+    in one call (`models._worker.block_calls`), so that a resume refuses a switch, since a call of a block and one row at a time
+    needn't agree to the bit. Nothing for any other model, whose manifest stays as it was."""
+    if getattr(type(model), "_predict_block", None) is None:
+        return {}
+    from ..models._worker import block_calls  # the models import this module
+
+    return {"block_predict": block_calls(model)}
+
+
 def build_manifest(
     *,
     model: Any,
@@ -499,7 +510,8 @@ def build_manifest(
     `model_params` includes `scaler` alongside the model's own `_model_kwargs`: it changes the scale a
     model fits and predicts in just as much as a hyperparameter would, but `BaseModel` keeps it out of
     `_model_kwargs` (passed to workers separately, see `base.py`) so a subclass overriding `_model_kwargs`
-    can't accidentally drop it.
+    can't accidentally drop it. For the same reason a model whose class defines `_predict_block` records
+    `block_predict`, whether its units predict their blocks in one call (`_block_params`).
 
     Only rows up to `test_end` are hashed: no forecast in `[test_start, test_end]` ever reads a later row,
     so data appended after `test_end` between runs - e.g. a source's own fetch window catching up a little
@@ -536,7 +548,11 @@ def build_manifest(
         horizon=horizon,
         freq=freq,
         training_window=model.training_window,
-        model_params={"scaler": getattr(model, "scaler", "standard"), **dict(model._model_kwargs)},
+        model_params={
+            "scaler": getattr(model, "scaler", "standard"),
+            **dict(model._model_kwargs),
+            **_block_params(model),
+        },
         data_columns_hash=hashes.of_columns(test_end, used_columns),
         data_timezone=zone_name(data.index.tz) or str(data.index.tz),
         information_set=information_set.to_dict() if information_set is not None else None,
