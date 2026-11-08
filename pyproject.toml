@@ -74,6 +74,10 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+# A parallel fast-suite run leaves about 44k files under the system temp dir; /tmp on a tmpfs runs out of inodes after a
+# few dozen runs. Keep only the directories of failed tests, and of the last run only.
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 markers = [
     "integration: Integration tests that require real API keys and use real connections",
     "examples: Runs examples/*.py and the documentation quick start against the live APIs (also marked integration)",
