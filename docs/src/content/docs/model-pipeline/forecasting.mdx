@@ -142,6 +142,10 @@ for window in range(28, 365, 7):
 - **The same numbers.** In this release a group fits each model on its own rows exactly as `engine="off"` does, so every record,
   manifest and table is identical to the bit, whatever else is in the group, in any order and at any number of processes. Fits from
   statistics the group shares come in a later release.
+- **Checked once.** The pipeline checks the frame's index and names once for the models that read the same days, judges each
+  column against the information set once per rule and issue days, and a group reads each column's binary mask once per period
+  and training rows: every check, listing and mask is what the model finds on its own. In a group of 1,000 OLS models (one test
+  day, 24 periods) a model costs about 5 ms beyond its fits, with or without an information set.
 - **Which models.** OLS, Ridge, LassoCV and LEAR. `NaiveModel`, a predictor function with a `train_on="matching"` list, a subclass
   that overrides the fit (`_fit_predict`, `_fit_model`, `_predict_fitted`) without its own `_fit_stats`, and every
   `forecast_only=True` run go through their own run, as with `"off"`, after the groups.
