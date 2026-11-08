@@ -521,25 +521,28 @@ class _YearBuffer:
     """A (model, year)'s records waiting for their part: converted chunks (`tables`, Arrow, in order) and then the records not yet
     converted (`records`, with their keys in `layouts`)."""
 
-    __slots__ = ("tables", "converted", "records", "layouts", "since")
+    __slots__ = ("tables", "converted", "records", "layouts", "keys", "since")
 
     def __init__(self, since: float):
         self.tables: List[Any] = []
         self.converted = 0  # rows in `tables`
         self.records: List[Dict] = []
         self.layouts: List[Tuple[str, ...]] = []  # each record's keys (`ParquetResultStore._validate`)
+        self.keys: List[Optional[tuple]] = []  # each row's forecast key (None for a skip record), converted rows first
         self.since = since
 
     @property
     def rows(self) -> int:
         return self.converted + len(self.records)
 
-    def take(self, rows: Optional[int] = None) -> Tuple[List[Any], List[Dict], List[Tuple[str, ...]]]:
-        """The first `rows` rows (all of them by default), removed: (tables, records, layouts), in order. A table split at
-        the boundary is sliced, which copies nothing."""
+    def take(
+        self, rows: Optional[int] = None
+    ) -> Tuple[List[Any], List[Dict], List[Tuple[str, ...]], List[Optional[tuple]]]:
+        """The first `rows` rows (all of them by default), removed: (tables, records, layouts, keys), in order. A table split
+        at the boundary is sliced, which copies nothing."""
         if rows is None or rows >= self.rows:
-            taken = (self.tables, self.records, self.layouts)
-            self.tables, self.converted, self.records, self.layouts = [], 0, [], []
+            taken = (self.tables, self.records, self.layouts, self.keys)
+            self.tables, self.converted, self.records, self.layouts, self.keys = [], 0, [], [], []
             return taken
         tables, left = [], rows
         while self.tables and left:
@@ -554,7 +557,8 @@ class _YearBuffer:
         self.converted -= rows - left
         records, self.records = self.records[:left], self.records[left:]
         layouts, self.layouts = self.layouts[:left], self.layouts[left:]
-        return tables, records, layouts
+        keys, self.keys = self.keys[:rows], self.keys[rows:]
+        return tables, records, layouts, keys
 
 
 class ParquetResultStore(_Store):
@@ -631,6 +635,8 @@ class ParquetResultStore(_Store):
             buffer = self._buffers[year] = _YearBuffer(time.monotonic())
         buffer.records.append(record)
         buffer.layouts.append(layout)
+        ok = record.get("status", STATUS_OK) == STATUS_OK
+        buffer.keys.append((record["hour"], record["horizon"], record["run_date"]) if ok else None)
         self._rows += 1
         return buffer.rows >= self._rows_per_part
 
@@ -674,7 +680,11 @@ class ParquetResultStore(_Store):
                     if whole
                 ]
             for buffer, records, layouts in work:
-                table = schema.to_table(records, str(self.path), layouts)
+                try:
+                    table = schema.to_table(records, str(self.path), layouts)
+                except BaseException as exc:  # the store's, raised by its next call, before the I/O lock is let go
+                    self._shared._fail(self, exc, time.monotonic())
+                    return
                 with self._shared._cond:
                     del buffer.records[: len(records)], buffer.layouts[: len(records)]
                     buffer.tables.append(table)
@@ -684,7 +694,7 @@ class ParquetResultStore(_Store):
         import pyarrow as pa
 
         self.path.mkdir(parents=True, exist_ok=True)
-        for year, rows, (tables, records, layouts) in taken:
+        for year, rows, (tables, records, layouts, keys) in taken:
             if records:
                 tables = [*tables, schema.to_table(records, str(self.path), layouts)]
             table = pa.concat_tables(tables).unify_dictionaries() if len(tables) > 1 else tables[0]
@@ -694,6 +704,7 @@ class ParquetResultStore(_Store):
                 with self._shared._handles:
                     entry = _write_table(self.path, year, part, f"part-{self._run_id}-{self._seq:06d}.parquet")
                     _append_entry(self.path, entry)
+                self._written(keys[start : start + self._rows_per_part])  # done once committed
 
 
 # --- convert, compact, verify -----------------------------------------------------------------------------------------------

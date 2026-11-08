@@ -10,9 +10,12 @@ import os
 import shutil
 import subprocess
 import sys
+import errno
 import re
 import textwrap
+import threading
 import time
+import types
 import warnings
 from concurrent.futures import Future
 from pathlib import Path
@@ -1072,18 +1075,97 @@ def test_a_buffer_cuts_a_part_inside_a_converted_chunk():
     buffer = parquet_store._YearBuffer(0.0)
     records = [record(hour=h, run_date=f"2023-04-{d:02d}") for d in range(1, 31) for h in range(24)]  # 720
     layouts = [tuple(r) for r in records]
+    keys = [(r["hour"], r["horizon"], r["run_date"]) for r in records]
     for start in (0, 200, 400):
         buffer.tables.append(
             parquet_store.schema.to_table(records[start : start + 200], "x", layouts[start : start + 200])
         )
         buffer.converted += 200
-    buffer.records, buffer.layouts = records[600:], layouts[600:]
-    tables, rest, _ = buffer.take(450)  # two chunks and 50 rows of the third
-    assert [t.num_rows for t in tables] == [200, 200, 50] and rest == []
+    buffer.records, buffer.layouts, buffer.keys = records[600:], layouts[600:], list(keys)
+    tables, rest, _, first_keys = buffer.take(450)  # two chunks and 50 rows of the third
+    assert [t.num_rows for t in tables] == [200, 200, 50] and rest == [] and first_keys == keys[:450]
     assert (buffer.converted, [t.num_rows for t in buffer.tables], buffer.rows) == (150, [150], 270)
-    tables_after, rest_after, _ = buffer.take()
+    tables_after, rest_after, _, last_keys = buffer.take()
     got = [r for t in [*tables, *tables_after] for r in parquet_store.schema.iter_dicts(t)] + rest_after
-    assert got == records and buffer.rows == 0
+    assert got == records and buffer.rows == 0 and first_keys + last_keys == keys
+
+
+# --- what fails is raised, and a key is done once written ------------------------------------------------------------------
+
+
+def test_a_background_write_that_fails_is_raised_by_close_and_its_keys_stay_pending(tmp_path, monkeypatch):
+    """The review's interleaving (`review5b/race_error2.py`): the writer's thread fails a part (a full disk), and is held up for
+    20 ms where it records the failure; `close()` waits for the store's I/O lock meanwhile. It must raise, and no key whose part
+    wasn't written counts as done."""
+    from epftoolbox2.results import store as store_module
+
+    monkeypatch.setenv("PARQUET_ROWS_PER_PART", "10")
+    failed = []
+    original = parquet_store._write_table
+
+    def failing(directory, year, table, name):
+        if threading.current_thread().name == "store-writer":
+            time.sleep(0.2)
+            failed.append(1)
+            raise OSError(errno.ENOSPC, "No space left on device (injected)")
+        return original(directory, year, table, name)
+
+    class Preempted(threading.Condition):
+        def __enter__(self):
+            if threading.current_thread().name == "store-writer" and failed:
+                failed.clear()
+                time.sleep(0.02)
+            return super().__enter__()
+
+    monkeypatch.setattr(parquet_store, "_write_table", failing)
+    path = tmp_path / "m.parquet"
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "threading", types.SimpleNamespace(**{**vars(threading), "Condition": Preempted}))
+        store = ParquetResultStore(path, test_start="2024-01-01", lock=True)
+    for hour in range(10):  # a full part: the writer's thread takes it at once
+        store.save(record(hour=hour, run_date="2024-01-01"))
+    time.sleep(0.05)
+    with pytest.raises(OSError, match="injected"):
+        store.close()
+    on_disk = sum(1 for _ in read_records(path)) if (path / CATALOG).exists() else 0
+    assert len(store._completed) == on_disk == 0
+    assert store.get_missing([(hour, 1, 0) for hour in range(10)]) == [(hour, 1, 0) for hour in range(10)]
+    ParquetResultStore(path, lock=True).close()  # the lock went with the failed store
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+def test_a_run_whose_last_write_fails_raises_and_resumes_to_a_fresh_run(tmp_path, monkeypatch, fmt):
+    """A run's final flush failing (`BaseModel.run`) raises rather than reporting forecasts it didn't write."""
+
+    def full_disk(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device (injected)")
+
+    target = (parquet_store, "_write_table") if fmt == "parquet" else (ResultStore, "_write_batch")
+    with monkeypatch.context() as patch:
+        patch.setattr(*target, full_disk)
+        with pytest.raises(OSError, match="injected"):
+            run(tmp_path / "failed", save_format=fmt)
+    resumed = run(tmp_path / "failed", save_format=fmt)
+    fresh = run(tmp_path / "fresh", save_format=fmt)
+    assert stored_lines(tmp_path / "failed" / f"ols.{fmt}") == stored_lines(tmp_path / "fresh" / f"ols.{fmt}")
+    assert_same_tables(tables(resumed), tables(fresh))
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_a_jsonl_write_that_fails_is_raised_and_its_keys_stay_pending(tmp_path, monkeypatch, shared):
+    def full_disk(self, items):
+        raise OSError(errno.ENOSPC, "No space left on device (injected)")
+
+    monkeypatch.setattr(ResultStore, "_write_batch", full_disk)
+    writer = StoreWriter() if shared else None
+    path = tmp_path / "m.jsonl"
+    store = writer.open(path, test_start="2023-04-12") if shared else ResultStore(path, test_start="2023-04-12")
+    store.save(record())
+    with pytest.raises(OSError, match="injected"):
+        store.close()
+    assert not store.is_done(3, 1, 0) and not store.has_results()
+    if shared:
+        writer.close()
 
 
 # --- import ------------------------------------------------------------------------------------------------------------------

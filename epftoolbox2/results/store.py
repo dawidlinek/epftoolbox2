@@ -417,7 +417,8 @@ class _Store:
         self.path = Path(path)
         self.test_start = test_start
         self._lock = Lock()
-        self._completed: Set[tuple] = set()
+        self._completed: Set[tuple] = set()  # keys whose forecast is on file (read at open, or written by this store)
+        self._saved: Set[tuple] = set()  # keys of forecasts saved and not yet written
         self._latest: Dict[tuple, str] = {}  # key without a forecast -> the status of its newest skip record
         self._revisions: Dict[tuple, int] = {}  # key -> its highest revision on file, where that isn't 1
         self._save_coefficients = bool(save_coefficients)
@@ -450,10 +451,10 @@ class _Store:
         revision = self._revisions.get(key)  # filled before the first save, read only after
         if revision is not None:
             result["revision"] = revision
-        layout = self._validate(result)  # before the key counts as done
+        layout = self._validate(result)  # before anything of the record is kept
         if result.get("status", STATUS_OK) == STATUS_OK:
             with self._lock:
-                self._completed.add(key)
+                self._saved.add(key)  # done once written (`_written`), not before
         self._enqueue(result, layout)
 
     def save_skip(self, record: Dict) -> bool:
@@ -463,7 +464,7 @@ class _Store:
         key = (record["hour"], record["horizon"], record["run_date"])
         status = record["status"]
         with self._lock:
-            if key in self._completed or self._latest.get(key) == status:
+            if key in self._completed or key in self._saved or self._latest.get(key) == status:
                 return False
             if key in self._revisions:
                 record["revision"] = self._revisions[key]
@@ -472,6 +473,15 @@ class _Store:
             self._latest[key] = status
         self._enqueue(record, layout)
         return True
+
+    def _written(self, keys: Iterable[Optional[tuple]]) -> None:
+        """The forecasts of these keys (None for a skip record) are on file: they count as done from now on. A record whose
+        write failed never gets here, so a key counts as done only once its line or part is written."""
+        with self._lock:
+            for key in keys:
+                if key is not None:
+                    self._saved.discard(key)
+                    self._completed.add(key)
 
     def has_results(self) -> bool:
         """Whether the file holds a forecast: what decides whether a run resumes results, as a file of skip records alone has
@@ -621,6 +631,7 @@ class ResultStore(_Store):
         if self._writer.is_alive():
             self._write_queue.put(self._SENTINEL)
             self._writer.join()
+        self._raise_error()
 
     def close(self) -> None:
         """Write what is queued and release the lock."""
@@ -704,7 +715,7 @@ class ResultStore(_Store):
                 item = self._write_queue.get(timeout=0.1)
             except queue.Empty:
                 if buf:
-                    self._write_batch(buf)
+                    self._write_or_keep_error(buf)
                     buf = []
                 continue
 
@@ -717,7 +728,7 @@ class ResultStore(_Store):
                     except queue.Empty:
                         break
                 if buf:
-                    self._write_batch(buf)
+                    self._write_or_keep_error(buf)
                 return
 
             buf.append(item)
@@ -726,14 +737,14 @@ class ResultStore(_Store):
                 try:
                     nxt = self._write_queue.get_nowait()
                     if nxt is self._SENTINEL:
-                        self._write_batch(buf)
+                        self._write_or_keep_error(buf)
                         return
                     buf.append(nxt)
                 except queue.Empty:
                     break
 
             if len(buf) >= self._batch_size:
-                self._write_batch(buf)
+                self._write_or_keep_error(buf)
                 buf = []
 
     def _write_batch(self, items: List[Dict]) -> None:
@@ -743,6 +754,19 @@ class ResultStore(_Store):
         with open(self.path, "a", encoding="utf-8", buffering=1 << 20) as f:
             for item in items:
                 f.write(json.dumps(item) + "\n")
+        self._written(
+            (item["hour"], item["horizon"], item["run_date"]) if item.get("status", STATUS_OK) == STATUS_OK else None
+            for item in items
+        )
+
+    def _write_or_keep_error(self, items: List[Dict]) -> None:
+        """`_write_batch` on the store's own thread: what fails is kept for `flush()` to raise, and the records are lost (their
+        keys stay pending), so a failed write never passes for a written one."""
+        try:
+            self._write_batch(items)
+        except BaseException as exc:
+            with self._lock:
+                self._error = self._error or exc
 
 
 # How many files a `StoreWriter` has open at once, at most: a JSONL batch or a Parquet part is written with its file open and
@@ -885,6 +909,8 @@ class StoreWriter:
         store._raise_error()
 
     def _write_due(self, store: _Store, now: float, force: bool) -> None:
+        """Write what of `store` is due. What fails is the store's (`_fail`) before its I/O lock is let go, so a `flush()`
+        waiting for the lock finds it and raises."""
         # The store's I/O lock before taking its records, so that what was taken first is written first.
         with store._io_lock:
             with self._cond:
@@ -894,7 +920,20 @@ class StoreWriter:
                 if not store._buffered():
                     self._dirty.pop(id(store), None)
             if taken:
-                store._write(taken)
+                try:
+                    store._write(taken)
+                except BaseException as exc:
+                    self._fail(store, exc, now)
+
+    def _fail(self, store: _Store, exc: BaseException, now: float) -> None:
+        """Keep `exc` for the store's next `save`, `flush` or `close` to raise, and drop what it still buffers: it is not
+        written, its keys stay pending, and it is not retried for ever. Called with the store's I/O lock held."""
+        with self._cond:
+            store._error = store._error or exc
+            dropped = store._take(now, True)
+            if store.save_format == "parquet" and dropped:
+                self._buffered_rows -= sum(item[1] for item in dropped)
+            self._dirty.pop(id(store), None)
 
     def _loop(self) -> None:
         while True:
@@ -909,19 +948,9 @@ class StoreWriter:
             now = time.monotonic()
             for store in stores:
                 force = stopping or (pressed and self._buffered_rows > self._max_buffered // 2)
-                try:
-                    self._write_due(store, now, force)
-                    if not force and store.save_format == "parquet":
-                        store._convert()  # what is waiting, to Arrow, so the part is ready when it is due
-                except (
-                    BaseException
-                ) as exc:  # raised to the store's caller; its records are dropped, not retried for ever
-                    with self._cond:
-                        store._error = store._error or exc
-                        dropped = store._take(now, True)
-                        if store.save_format == "parquet" and dropped:
-                            self._buffered_rows -= sum(item[1] for item in dropped)
-                        self._dirty.pop(id(store), None)
+                self._write_due(store, now, force)  # a failure is the store's, raised by its next call
+                if not force and store.save_format == "parquet":
+                    store._convert()  # what is waiting, to Arrow, so the part is ready when it is due
             if stopping:
                 with self._cond:
                     if not self._dirty:

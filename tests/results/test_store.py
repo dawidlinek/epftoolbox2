@@ -36,6 +36,7 @@ class TestResultStore:
         store = ResultStore(temp_file, test_start=TEST_START)
 
         store.save({"run_date": "2024-01-15", "hour": 12, "horizon": 1, "day_in_test": 1})
+        store.flush()  # a key is done once its record is written, not when it is queued
 
         assert store.is_done(12, 1, 1)
         assert not store.is_done(12, 2, 1)
@@ -46,6 +47,7 @@ class TestResultStore:
 
         store.save({"run_date": "2024-01-15", "hour": 0, "horizon": 1, "day_in_test": 1})
         store.save({"run_date": "2024-01-15", "hour": 1, "horizon": 1, "day_in_test": 1})
+        store.flush()
 
         all_tasks = [
             (0, 1, 1),
