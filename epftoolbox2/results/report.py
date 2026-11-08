@@ -1180,11 +1180,12 @@ class EvaluationReport:
         verdict of each window of the run, `validation_verdict` and `test_verdict` (empty for a window the run hasn't):
         `clean` when the corpus ends before the window's first issue day or the model trains on the run's data, `clean
         (released before)` when the corpus end is undocumented and the weights were released before that day, `possibly
-        contaminated` otherwise, or the card's stated verdict. A report built from `save_dir` reads the manifests. See the docs
-        page Licences and Weights."""
-        windows = self.windows
+        contaminated` otherwise, or the card's stated verdict. Each model is judged by the windows of its own run, also in a
+        report that joins runs over other windows. A report built from `save_dir` reads the manifests. See the docs page
+        Licences and Weights."""
+        # Each model by its own run's windows: a report can join the refs of runs over other windows (`join`, refs passed in).
         starts = {
-            name: window_starts(windows, None) if windows is not None else {TEST: ref.test_start}
+            name: window_starts(ref.windows, None) if ref.windows is not None else {TEST: ref.test_start}
             for name, ref in self.refs.items()
         }
         return provenance_frame({name: ref.provenance for name, ref in self.refs.items()}, starts)

@@ -901,3 +901,24 @@ def test_verify_runs_the_preflight_before_any_probe(data, weights_root, monkeypa
     fetch_into_cache(monkeypatch)
     with pytest.raises(MissingExtraError, match=r"\[fakefam\]"):
         pipeline.verify(data, TEST[0], TEST[1], days=1, horizon=1)
+
+
+# --- review fixes -------------------------------------------------------------------------------------------------------------
+
+
+def test_each_model_is_judged_by_its_own_windows_in_a_joined_report(data, fetched, no_network):
+    """A plain run's carded model in one report with another run's windowed model: its verdict is its own test window's."""
+    from epftoolbox2.results.report import EvaluationReport
+
+    class Inside(CardedModel):
+        _card = dataclasses.replace(CARD, corpus_end=date(2023, 3, 7))
+
+    plain = run(data, Inside(PREDICTORS, WINDOW, name="inside"))
+    windowed = (
+        ModelPipeline()
+        .add_model(OLSModel(PREDICTORS, WINDOW, name="ols"))
+        .run(data, validation=("2023-03-01", "2023-03-03"), test=("2023-03-09", "2023-03-10"), horizon=1)
+    )
+    for refs in ({**windowed.refs, **plain.refs}, {**plain.refs, **windowed.refs}):
+        row = EvaluationReport(refs, [MAEEvaluator()]).provenance().iloc[0]
+        assert (row["model"], row["validation_verdict"], row["test_verdict"]) == ("inside", None, POSSIBLY_CONTAMINATED)
