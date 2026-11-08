@@ -27,6 +27,7 @@ from epftoolbox2.models import _worker as worker
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.pipelines import ModelPipeline, Workflow
 from epftoolbox2.results.store import iter_file_records
+from epftoolbox2.scalers.standard import StandardScaler
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 PROVENANCE = ("package_version", "git_sha", "created_at", "updated_at", "record_schema", "kernels")
@@ -591,6 +592,44 @@ def test_the_union_holds_each_models_rows_and_columns(wide, in_process, monkeypa
             mine = group[period]["x"][:, group[period]["col_index"][name]]
             assert mine.tobytes() == own[period]["x"][:, column].tobytes()
         assert len(group[period]["col_index"]) > len(own[period]["col_index"])
+
+
+def test_masks_read_on_the_union_frames_are_the_models_own(spring, monkeypatch):
+    """A model's masks read from a group's period frames (the union of columns, of several dtypes) equal those of its own
+    frames, its training sample is the rows-then-columns take of before, and a run reads each first-day mask once (the plain
+    run's manifest asks for them again)."""
+    names = [*PREDICTORS, "aux"]
+    frame = spring.assign(flag=(spring["is_weekend"] > 0), count=spring["is_weekend"].astype(int))
+    alone = OLSModel(names, 28)
+    columns = list(dict.fromkeys(name for hz in (1, 2) for name in alone._expand_predictors(hz)))
+    alone._set_freq("1h")
+    alone._load_periods(frame, ["price", *columns], 2, "price")
+    grouped = OLSModel(names, 28)
+    grouped._set_freq("1h")
+    periods = grouped._load_periods(frame, ["price", "flag", "count", "wind_d+3", *columns, "load_d+3"], 2, "price")
+    grouped._use_periods(periods, frame, ["price", *columns], 2, "price")
+    first = (datetime.date(2023, 3, 24) - frame.index[0].date()).days
+    for model in (alone, grouped):
+        model._offset, model._last_day, model._newest = first, first + 3, None
+    for hour in (0, 2, 23):
+        for hz in (1, 2):
+            expanded = alone._expand_predictors(hz, hour=hour)
+            mine = grouped._training_sample(hour, first, hz, expanded)
+            rows = worker.training_rows(grouped._hour_days[hour], first, 28, hz)
+            assert mine.tobytes() == grouped._hour_data[hour].iloc[rows][expanded].to_numpy(dtype=np.float64).tobytes()
+            assert mine.tobytes() == alone._training_sample(hour, first, hz, expanded).tobytes()
+    calls = []
+    real = StandardScaler.get_scalable_mask
+    monkeypatch.setattr(StandardScaler, "get_scalable_mask", staticmethod(lambda x: calls.append(1) or real(x)))
+    masks = grouped._precompute_scalable_masks([1, 2])
+    reads = len(calls)
+    again = grouped._precompute_scalable_masks([1, 2], first, first)
+    assert len(calls) == reads  # the first day's masks again, without a read
+    own = alone._precompute_scalable_masks([1, 2])
+    assert all(np.array_equal(masks[key], own[key]) and np.array_equal(again[key], own[key]) for key in own)
+    assert all(not again[key].all() for key in again)  # the 0/1 columns are left unscaled
+    grouped._release()
+    assert grouped._first_day_masks == {}
 
 
 # --- union isolation --------------------------------------------------------------------------------------------------

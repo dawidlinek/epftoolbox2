@@ -430,6 +430,9 @@ class BaseModel(ABC):
         self._data: Optional[pd.DataFrame] = None
         self._hour_data: Dict[int, pd.DataFrame] = {}
         self._hour_days: Dict[int, np.ndarray] = {}
+        self._first_day_masks: Dict[
+            tuple, Tuple[np.ndarray, np.ndarray]
+        ] = {}  # `_scalable_mask`'s, of one run's frames
         self._offset: int = 0
         self._last_day: int = 0  # the day id of the run's last calendar day, where a mask's re-read stops
         self._first_ordinal: int = 0  # the date of day id 0
@@ -2180,9 +2183,17 @@ class BaseModel(ABC):
         before d has no value of the column in its rows, so no finite row, and is skipped whatever its mask says.
         """
         member = self._members[0] if member is None else member
-        sample = self._training_sample(hour, first, hz, predictors, member)
-        mask = StandardScaler.get_scalable_mask(sample)
-        without = np.flatnonzero(np.isnan(sample).all(axis=0))
+        # The first day's mask and its columns without a value, once per run: a plain run reads them again for its manifest
+        # (`_fixed_mask_digests`). Its frames and newest targets are fixed from `_load_periods` / `_use_periods` on.
+        key = (hour, first, hz, tuple(predictors), member)
+        known = self._first_day_masks.get(key)
+        if known is None:
+            sample = self._training_sample(hour, first, hz, predictors, member)
+            known = self._first_day_masks[key] = (
+                StandardScaler.get_scalable_mask(sample),
+                np.flatnonzero(np.isnan(sample).all(axis=0)),
+            )
+        mask, without = known[0].copy(), known[1]
         if not len(without) or last <= first:
             return mask
         days = self._hour_days[hour]
@@ -2203,6 +2214,7 @@ class BaseModel(ABC):
     def _load_periods(self, data: pd.DataFrame, used_columns: Sequence[str], horizon: int, target: str) -> _Periods:
         """Read `data` into the frames of the periods, whose rows the tasks are cut from, and return them: what
         `_prepare_run(periods=...)` takes for another model of this frame, target, horizon and freq that reads no other column."""
+        self._first_day_masks.clear()
         self._data = self._preprocess(data[list(used_columns)], horizon, target)
         self._first_ordinal = self._data.index[0].date().toordinal()
         for hour in range(self._periods_per_day):
@@ -2244,6 +2256,7 @@ class BaseModel(ABC):
                 if problems
                 else f"{self.name}: these period frames don't hold {missing}"
             )
+        self._first_day_masks.clear()
         self._data = periods.data
         self._first_ordinal = periods.first_ordinal
         self._hour_data.update(periods.hour_data)
@@ -2412,6 +2425,7 @@ class BaseModel(ABC):
         self._newest = None
         self._hour_data.clear()
         self._hour_days.clear()
+        self._first_day_masks.clear()
 
     def _preprocess(self, data: pd.DataFrame, horizon: int, target: str) -> pd.DataFrame:
         # The worker finds a period's rows by their date and takes the last of a date, so rows must be in time order.
@@ -2480,7 +2494,14 @@ class BaseModel(ABC):
         window `member` (the model's one window if None)."""
         window = member_window(self._members[0] if member is None else member, day)
         rows = training_rows(self._hour_days[hour], day, window, hz, self._newest_of(hour, day))
-        return self._hour_data[hour].iloc[rows][predictors].to_numpy(dtype=np.float64)
+        frame = self._hour_data[hour]
+        if frame.columns.is_unique:
+            # Rows and columns in one take: the frame may hold an engine group's union of columns, which a take of the rows
+            # first would copy whole. The same values.
+            at = frame.columns.get_indexer(predictors)
+            if (at >= 0).all():
+                return frame.iloc[rows, at].to_numpy(dtype=np.float64)
+        return frame.iloc[rows][predictors].to_numpy(dtype=np.float64)
 
     def _precompute_expanded_predictors(self, horizons: Sequence[int]) -> Dict[Tuple[int, int], List[str]]:
         """(period, horizon) -> a fixed list's names, `{horizon}` and callables expanded, for each horizon planned."""

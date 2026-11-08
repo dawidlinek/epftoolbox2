@@ -2,9 +2,8 @@
 
 A **group** is the engine-capable models of a run (`BaseModel._engine_capable`) with one refit block rule (`_refit_block`:
 None, a `"kD"`/`"kMS"` rule, or the coarsest of `"auto"`'s) and one way of reading period frames (`_frame_readers`), in list
-order. It is cut into **chunks** of at most
-`ENGINE_MAX_MODELS` models (20,000) and `ENGINE_MAX_COLUMNS` union columns (4,096), environment variables like
-`MAX_PROCESSES`, read when a group runs. Per chunk: one `_load_periods` over the union of the chunk's columns, each model's
+order. It is cut into **chunks** of at most `ENGINE_MAX_MODELS` models (20,000) and `ENGINE_MAX_COLUMNS` union columns (4,096),
+environment variables like `MAX_PROCESSES`, read when a group runs. Per chunk: one `_load_periods` over the union of the chunk's columns, each model's
 `_prepare_run` on those period frames (its masks, store and manifest, pending tasks and parent-side skips, as its own `run`
 has them), one set of period arrays over the union (`base.hour_arrays_of`), and one pool (`_engine_worker._engine_init`, the
 native-thread limit of `_worker._pool_init`). A **job** is (job day, period), the job day the issue day without refit or the
