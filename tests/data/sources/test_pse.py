@@ -412,3 +412,54 @@ def test_the_pipeline_cache_serves_a_second_run_without_a_request(tmp_path, monk
     assert source.session.get.filters()[-1] == "business_date ge '2026-06-05' and business_date le '2026-06-06'"
     pd.testing.assert_frame_equal(second, first)
     pd.testing.assert_frame_equal(wider.iloc[: len(first)], first)
+
+
+# ---------------------------------------------------------------------------
+# The live API (keyless; a few days of settled history)
+# ---------------------------------------------------------------------------
+
+LIVE_DATASETS = ["kse-load", "his-wlk-cal", "csdac-pln", "rce-pln", "pdgsz", "przeplywy-mocy"]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "day, quarters, first_utc",
+    [("2025-10-26", 100, "2025-10-25 22:00"), ("2026-03-29", 92, "2026-03-28 23:00")],
+)
+def test_live_dst_days_have_92_or_100_quarters_of_every_dataset(day, quarters, first_utc):
+    source = PseSource(datasets=LIVE_DATASETS)
+    start = utc(first_utc)
+
+    df = source.fetch(start, start + pd.Timedelta(minutes=15 * quarters))
+
+    assert len(df) == quarters and df.index[0] == start
+    assert (np.diff(df.index.asi8) == pd.Timedelta(minutes=15).value).all()
+    assert list(df.columns) == source.output_columns()
+    assert df.notna().all().all() or set(df.columns[df.isna().all()]) <= {"jga", "jgo", "jgz1", "jgz3"}
+    assert df["csdac_pln"].between(-500, 5000).all() and df["load_actual"].between(5000, 40000).all()
+    assert set(df["usage_fcst"]) <= {0.0, 1.0, 2.0, 3.0}
+    assert df["load_actual"].equals(df["demand"]) or (df["load_actual"] - df["demand"]).abs().max() < 500
+
+
+@pytest.mark.integration
+def test_live_the_index_is_the_start_of_the_period_pse_stamps_with_its_end():
+    source = PseSource(datasets=["csdac-pln"])
+    raw = source._request_table("csdac-pln", pd.Timestamp("2026-03-29"), pd.Timestamp("2026-03-29"))
+    first, last = raw[0], raw[-1]
+
+    df = source.fetch(utc("2026-03-28 23:00"), utc("2026-03-29 22:00"))
+
+    assert first["period_utc"] == "23:00 - 23:15" and df.index[0] == utc("2026-03-28 23:00")
+    assert last["period_utc"] == "21:45 - 22:00" and df.index[-1] == utc("2026-03-29 21:45")
+    assert df["csdac_pln"].iloc[0] == pytest.approx(first["csdac_pln"])
+    assert df["csdac_pln"].iloc[-1] == pytest.approx(last["csdac_pln"])
+    assert len(raw) == len(df) == 92
+
+
+@pytest.mark.integration
+def test_live_a_range_before_the_history_is_empty_and_a_year_pages_through_nextlink():
+    source = PseSource(datasets=["csdac-pln"])
+
+    assert source.fetch(utc("2020-01-01"), utc("2020-01-03")).empty
+    year = source.fetch(utc("2025-01-01"), utc("2026-01-01"))
+    assert len(year) == 35040 and year.index.is_unique and year["csdac_pln"].notna().all()
