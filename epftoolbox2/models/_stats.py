@@ -3,7 +3,7 @@
 `standard_stats(raw, values, mask, scale_binary)` turns `RawSums` over a fit's rows ρ (`_sums.SpanSums.over`: sums about the
 span's shifts) into `ScaledStats`, the centred sums of the rows as `StandardScaler.fit_transform` would scale them, and
 `StandardParams`, the scaler's parameters (to scale the issue row and map a forecast back). `OLSModel`, `RidgeModel` and
-`LEARModel` fit from `ScaledStats` through `_fit_stats`; nothing in the run path calls them yet (step 5i will).
+`LEARModel` fit from `ScaledStats` through `_fit_stats`, as engine groups do (`_engine_worker.EngineFits`, step 5i).
 
 The map, per fit (r rows; c the span's shift of a column, d = x - c, u = Σd, S = Σdd', v = Σd(y - c_y)):
 
@@ -61,6 +61,7 @@ The fits (`LinearFit` for OLS and Ridge; LEAR's `LearFit` from `ScaledStats.gram
 - **LEAR**: `lear_fit` on `ScaledStats.gram()`, for every n.
 """
 
+import math
 from typing import Callable, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -221,6 +222,13 @@ def _candidates(var: np.ndarray, mean: np.ndarray, square: np.ndarray, r: int) -
         return ~(var > 0) | ~np.isfinite(var) | (std <= CANDIDATE_RTOL * np.maximum(np.abs(mean), rms))
 
 
+def _scalar_candidate(var: float, mean: float, square: float, r: int) -> bool:
+    """`_candidates` of one value (the target), in Python floats: the same decision, without arrays of one element."""
+    if not var > 0 or not math.isfinite(var):
+        return True
+    return math.sqrt(var) <= CANDIDATE_RTOL * max(abs(mean), math.sqrt(max(square, 0.0) / r))
+
+
 def _cancellation(square: np.ndarray, centred: np.ndarray) -> np.ndarray:
     """S / (S - u²/r) per column, inf where the centred sum is not positive."""
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -298,16 +306,15 @@ def standard_stats(
     # The target: centred and divided by its standard deviation, or by 1.0 where `mean_std` calls it constant (not zeroed).
     ymean = float(raw.yshift + sy / r)
     yvar = cyy / (r - 1)
-    ysquare = np.array([syy])
-    if _candidates(np.array([yvar]), np.array([ymean]), ysquare, r)[0]:
+    if _scalar_candidate(yvar, ymean, syy, r):
         ymean, ystd, y_constant = mean_std(column(None))
         ymean, ystd = float(ymean), float(ystd)
         if not y_constant and not yvar > 0:
             raise StatsFallback("cancellation", f"target: variance {yvar!r} from the sums, not constant on its rows")
     else:
         y_constant = False
-        ystd = float(np.sqrt(yvar))
-    if not y_constant and _cancellation(ysquare, np.array([cyy]))[0] > CANCELLATION_MAX:
+        ystd = math.sqrt(yvar)
+    if not y_constant and (syy / cyy if cyy > 0 else math.inf) > CANCELLATION_MAX:
         raise StatsFallback("cancellation", f"target: S/(S - u²/r) above {CANCELLATION_MAX:g}")
 
     sigma = np.where(scaled & ~constant, np.sqrt(np.where(var > 0, var, 1.0)), 1.0)
@@ -364,9 +371,57 @@ def estimator_params(estimator, cls, honoured: Sequence[str], fixed: Optional[di
     validation (`_validate_params`, the check `fit` makes first: a float `max_iter` or a `fit_intercept` of 1 fails it), and
     every parameter equals that of `cls(**honoured, **fixed)`, the `honoured` ones (what the fit from statistics reads) taken
     from the estimator itself. So an option the statistics don't honour (a subclass's `eps=1e-5`, another `gcv_mode`) sends
-    the fit back."""
+    the fit back.
+
+    The answer is a function of the estimator's class and attribute values alone, so it is kept per those values when every
+    one is a plain Python scalar, string, None or list of them (`_plain`): an engine asks once per fit, and scikit-learn's
+    validation costs more than a small fit from statistics."""
     if type(estimator) is not cls:
         return None
+    key = _check_key(estimator, cls, honoured, fixed)
+    if key is not None:
+        known = _ESTIMATOR_CHECKS.get(key, _UNKNOWN)
+        if known is not _UNKNOWN:
+            return None if known is None else dict(known)
+    params = _estimator_params(estimator, cls, honoured, fixed)
+    if key is not None:
+        if len(_ESTIMATOR_CHECKS) >= _ESTIMATOR_CHECKS_MAX:
+            _ESTIMATOR_CHECKS.clear()
+        _ESTIMATOR_CHECKS[key] = None if params is None else dict(params)
+    return params
+
+
+# `estimator_params`' answers by (class, honoured, fixed, the estimator's attribute values), each value with its type.
+_ESTIMATOR_CHECKS: dict = {}
+_ESTIMATOR_CHECKS_MAX = 256
+_UNKNOWN = object()
+
+
+def _plain(value):
+    """A hashable key of a value that is None, a bool, int, float or str, or a list or tuple of such values, with the type of
+    each (so 1, 1.0 and True differ, as `_same` has them); None for anything else, which isn't kept."""
+    kind = type(value)
+    if value is None or kind in (bool, int, float, str):
+        return (kind, value)
+    if kind in (list, tuple):
+        parts = tuple(_plain(item) for item in value)
+        return None if any(part is None for part in parts) else (kind, parts)
+    return None
+
+
+def _check_key(estimator, cls, honoured: Sequence[str], fixed: Optional[dict]):
+    """The key `estimator_params` keeps its answer under, or None where a value isn't plain (`_plain`)."""
+    values = []
+    for name, value in sorted({**vars(estimator), **{f"\0fixed:{k}": v for k, v in (fixed or {}).items()}}.items()):
+        plain = _plain(value)
+        if plain is None:
+            return None
+        values.append((name, plain))
+    return (cls, tuple(honoured), tuple(values))
+
+
+def _estimator_params(estimator, cls, honoured: Sequence[str], fixed: Optional[dict] = None) -> Optional[dict]:
+    """`estimator_params` itself, uncached."""
     validate = getattr(estimator, "_validate_params", None)
     if validate is None:
         return None  # a scikit-learn without the check: the model path decides
@@ -440,7 +495,7 @@ def cholesky_solve(
     live = np.flatnonzero(_live(M))
     if live.size == 0:
         return w
-    Ml = np.ascontiguousarray(M[np.ix_(live, live)])
+    Ml = np.ascontiguousarray(M if live.size == p else M[np.ix_(live, live)])
     L, info = dpotrf(Ml, lower=1, clean=1)
     if info != 0:
         return None
@@ -451,7 +506,7 @@ def cholesky_solve(
     rcond, info = dpocon(L, float(np.abs(Ml).sum(axis=0).max()), uplo="L")
     if info != 0 or not rcond * condition_max >= 1.0:
         return None
-    x, info = dpotrs(L, np.ascontiguousarray(b[live]), lower=1)
+    x, info = dpotrs(L, np.ascontiguousarray(b if live.size == p else b[live]), lower=1)
     if info != 0 or not np.isfinite(x).all():
         return None
     w[live] = x
