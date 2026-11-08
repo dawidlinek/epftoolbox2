@@ -35,6 +35,7 @@ import pandas as pd
 import pytest
 
 from epftoolbox2._extras import EXTRAS, MissingExtraError
+from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.information_set import InformationSet
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.pipelines import ModelPipeline
@@ -179,20 +180,34 @@ def check_loop_and_shards(
     information_set: Optional[InformationSet] = None,
 ) -> None:
     """Each model of a loop of `variants` (at least two, each the family's own parameters) writes the records it writes run
-    alone, as a Workflow array task with `models_per_task=1` runs it into the shared save_dir, which `report()` then merges:
-    a forecast doesn't depend on which other models share its pipeline or process."""
+    alone, as a Workflow array task with `models_per_task=1` runs it into the shared save_dir, and `report()` of the merged
+    shards equals the loop's: the same predictions, forecast counts and MAE. A forecast doesn't depend on which other models
+    share its pipeline or process."""
     assert len(variants) >= 2, "a loop needs at least two models"
     names = [f"{NAME}{i}" for i in range(len(variants))]
     loop, shards = tmp_path / "loop", tmp_path / "shards"
-    _run(
-        _pipeline([make(n, **v) for n, v in zip(names, variants)], information_set), frame, test, horizon, save_dir=loop
-    )
-    for name, params in zip(names, variants):
+
+    def every_model():
+        pipeline = _pipeline([make(n, **v) for n, v in zip(names, variants)], information_set)
+        return pipeline.add_evaluator(MAEEvaluator())
+
+    _run(every_model(), frame, test, horizon, save_dir=loop)
+    for name, params in zip(names, variants):  # one array task per model, into the shared save_dir
         _run(_pipeline([make(name, **params)], information_set), frame, test, horizon, save_dir=shards)
     for name in names:
         alone = lines(results(shards, name))
         assert alone, f"{name} wrote no record"
         assert lines(results(loop, name)) == alone, f"{name} in a loop differs from {name} alone"
+    merged, looped = (every_model().report(path, *test, horizon=horizon) for path in (shards, loop))
+    pd.testing.assert_frame_equal(_sorted(merged.predictions()), _sorted(looped.predictions()), check_exact=True)
+    pd.testing.assert_frame_equal(merged.forecast_counts(), looped.forecast_counts(), check_exact=True)
+    pd.testing.assert_frame_equal(merged.summary(), looped.summary(), check_exact=True)
+
+
+def _sorted(predictions: pd.DataFrame) -> pd.DataFrame:
+    """A predictions table in one order, whatever order the files were read in."""
+    keys = [name for name in ("model", "run_date", "horizon", "hour") if name in predictions.columns]
+    return predictions.sort_values(keys).reset_index(drop=True)
 
 
 def check_resume(
