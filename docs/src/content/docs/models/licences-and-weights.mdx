@@ -64,7 +64,10 @@ of a class's sizes.
 A family with weights takes `weights="/path/to/file-or-dir"`: used as given, hashed and recorded, and its licence is yours to
 keep (nothing records an acceptance for files you bring). Files whose hashes differ from the card's are *not the reference
 weights*: the pre-flight warns, and the manifest and `report.provenance()` record what was used. `weights="<owner>/<name>@<rev>"`
-is an entry of the cache instead, as `epf weights fetch --revision <rev>` left it.
+is an entry of the cache instead, as `epf weights fetch --revision <rev>` left it, and only of the card's own repository:
+another repository holds another model, under its own licence, and needs a card of its own. An entry counts only if its fetch
+record names the card's repository, family and licence and lists files inside its directory; anything else is refused as
+another card's or an edited record.
 
 A directory (yours, or an entry of the cache) holding files nobody listed, beyond the card's or beyond its fetch, warns, and
 `epf weights verify` names them (exit code 1): an adapter loads each file it needs by its name, never the whole directory, but a
@@ -91,7 +94,10 @@ repository), and weights that are missing or changed since they were fetched are
 The error is `MissingWeightsError` when weights are among the problems, else `MissingExtraError`; both are `ImportError`s. A
 `Workflow` array task checks its own models only, before its data pipeline runs: a task of core models runs whatever another task
 lacks. Each weight file is hashed once per process (the hash is kept by path, inode, size and the file's times, so a file
-replaced by another is hashed again), and a loop of a thousand variants of one family costs one hash. `epftoolbox2.verify()` prints the extras installed and the weights in the cache.
+replaced by another is hashed again), and a loop of a thousand variants of one family costs one hash. On a shared file system
+the times can hide a change from a running process: Lustre keeps them to the second, so a rewrite in place within the same
+second with the mtime put back is missed, and NFS caches file attributes, so a rewrite from another node can go unseen for its
+attribute-cache timeout. A new process hashes again, and `epf weights verify` always re-hashes every file. `epftoolbox2.verify()` prints the extras installed and the weights in the cache.
 
 ## Contamination verdicts
 
