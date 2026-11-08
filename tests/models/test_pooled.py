@@ -710,3 +710,14 @@ def test_a_zone_holds_its_targets_alone_once_its_arrays_are_built(tmp_path, monk
     skips = [r for r in map(json.loads, lines(tmp_path / "FI" / "m.jsonl")) if r["status"] != "ok"]
     assert len(skips) == 24 and all(r["status"] == "missing_test_predictors" for r in skips)
     assert sorted(r["actual"] for r in skips) == sorted(calendar_shift(frames["FI"]["price"], 1)[issue_day].tolist())
+
+
+def test_a_zone_that_makes_no_forecast_is_named(tmp_path):
+    frames = {"PL": daily("PL"), "FI": daily("FI", seed=1).assign(price=np.nan)}  # FI has no target to train on
+    pooled = ModelPipeline().add_model(PooledModel(OLSModel(predictors=PREDICTORS, training_window=40, name="m")))
+    run = dict(test=FRIDAYS, horizons=[1, 2], freq="1D", issue_days=["friday"])
+    with pytest.raises(RuntimeError, match="zone 'FI': m: no forecasts produced"):
+        pooled.run(frames, **run)
+    plain = ModelPipeline().add_model(OLSModel(predictors=PREDICTORS, training_window=40, name="m"))
+    with pytest.raises(RuntimeError, match="zone 'FI': m: no forecasts produced"):
+        plain.run(frames, **run)

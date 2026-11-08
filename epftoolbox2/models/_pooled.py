@@ -557,7 +557,7 @@ def run_pooled(pooled: PooledModel, zones: Dict[str, Tuple[BaseModel, Dict[str, 
             member, arguments = zones[zone]
             try:
                 prepared[zone] = (member, member._prepare_run(**run_arguments(**arguments)))
-            except (ValueError, TypeError) as exc:
+            except (ValueError, TypeError, RuntimeError) as exc:
                 named = _named(zone, exc)
                 if named is exc:
                     raise
@@ -572,8 +572,8 @@ def run_pooled(pooled: PooledModel, zones: Dict[str, Tuple[BaseModel, Dict[str, 
     for zone, member, state in states:
         try:
             refs[zone] = member._finish_run(state)
-        except Exception as exc:  # every zone's counts and warnings, then the first failure
-            error = error or exc
+        except Exception as exc:  # every zone's counts and warnings, then the first failure, naming its zone
+            error = error or _named(zone, exc)
     _close(states)
     if error is not None:
         raise error

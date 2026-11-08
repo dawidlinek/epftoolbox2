@@ -120,11 +120,11 @@ def write_zone_index(save_dir: Union[str, Path], zones: Sequence[str]) -> None:
 
 @contextmanager
 def _zone_errors(zone: str) -> Iterator[None]:
-    """A ValueError or TypeError raised for one zone of a run over several, with the zone named first ("zone 'FI': ..."),
-    of the same type where it can be built from a message alone."""
+    """A ValueError, TypeError or RuntimeError (a model that made no forecast) raised for one zone of a run over several, with
+    the zone named first ("zone 'FI': ..."), of the same type where it can be built from a message alone."""
     try:
         yield
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, RuntimeError) as exc:
         if f"zone {zone!r}" in str(exc):
             raise
         try:
