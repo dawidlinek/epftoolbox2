@@ -50,6 +50,7 @@ COMPONENT_REGISTRY = {
         "CsvSource": "epftoolbox2.data.sources.csv",
         "CalendarSource": "epftoolbox2.data.sources.calendar",
         "EpftoolboxBenchmarkSource": "epftoolbox2.data.sources.benchmark",
+        "EnergyChartsSource": "epftoolbox2.data.sources.energy_charts",
     },
     "transformers": {
         "TimezoneTransformer": "epftoolbox2.data.transformers.timezone",

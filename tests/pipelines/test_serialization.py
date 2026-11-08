@@ -164,7 +164,7 @@ class TestDataPipelineSerializationFidelity:
         pd.testing.assert_frame_equal(a, b)
 
     def test_every_registered_component_round_trips(self, tmp_path):
-        from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource
+        from epftoolbox2.data.sources import EnergyChartsSource, EntsoeSource, OpenMeteoSource
         from epftoolbox2.data.transformers import TimezoneTransformer
         from epftoolbox2.data.validators import EdaValidator
         from epftoolbox2.pipelines.data_pipeline import COMPONENT_REGISTRY
@@ -181,6 +181,16 @@ class TestDataPipelineSerializationFidelity:
                 columns=["temperature_2m"],
                 prefix="krk",
                 timezone="Europe/Warsaw",
+            ),
+            "EnergyChartsSource": EnergyChartsSource(
+                "de",
+                type=["forecast", "price"],
+                bzn="CH",
+                forecast_types=["day-ahead", "intraday"],
+                production_types=["solar", "load"],
+                prefix="ec",
+                cache_dir=str(tmp_path / "ec"),
+                use_cache=False,
             ),
             "CsvSource": CsvSource(str(csv), datetime_column="ts", columns=["price"], prefix="x", separator=";"),
             "CalendarSource": CalendarSource(

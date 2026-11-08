@@ -594,6 +594,78 @@ _A31_NOTE = "A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6
 _A31 = Availability.weekly("friday", "10:00", note=_A31_NOTE, vintage=_REVISED, week_zone=DATA_ZONE)
 
 
+# Energy-Charts (EnergyChartsSource). The vintages are the TSOs' own, matched to ENTSO-E's by name and by their errors against
+# actuals (DE 2025, RMSE against the day-ahead forecast: solar intraday -13.8 %, current -29.1 %; wind onshore -22.7 %, -45.1 %),
+# not from documentation. For a past date the API returns a separate, stable series per forecast type, so day-ahead and intraday
+# are `snapshot`; `current` is the newest revision, rewritten as the day goes by.
+_EC_ZONE = "Europe/Berlin"
+_EC_DAY_AHEAD = Availability.published(
+    "18:00",
+    1,
+    _EC_ZONE,
+    note="Energy-Charts day-ahead forecast: the TSOs' evening-before vintage, assumed out by 18:00 on D-1",
+    vintage="snapshot",
+)
+_EC_INTRADAY = Availability.published(
+    "08:00",
+    0,
+    _EC_ZONE,
+    note="Energy-Charts intraday forecast: the morning-of-delivery vintage, assumed out by 08:00 on the delivery day",
+    vintage="snapshot",
+)
+_EC_CURRENT = Availability.published(
+    "00:00",
+    -1,
+    _EC_ZONE,
+    note="Energy-Charts current forecast: the newest revision, rewritten as the day goes by; no issue time knows the "
+    "value it will have, so it is never known before its delivery day has ended",
+    vintage=_REVISED,
+)
+_EC_ACTUAL = Availability.realised(
+    "1h", note="Energy-Charts actuals (public_power, cbet, cbpf): 1 h after the period, later revised", vintage=_REVISED
+)
+_EC_PRICE = Availability.published(
+    "13:00",
+    1,
+    _EC_ZONE,
+    note="Energy-Charts day-ahead price: SDAC results within about 1 h after the 12:00 gate closure on D-1",
+    vintage="snapshot",
+)
+_EC_PRICE_CH = Availability.published(
+    "12:00",
+    1,
+    _EC_ZONE,
+    note="Energy-Charts CH price: Switzerland's own day-ahead auction (not SDAC), results around noon on D-1; "
+    "the time the archive first held a value is unmeasured",
+    vintage="snapshot",
+)
+_EC_NOT_SDAC = ("ME", "RS", "UA-IPS", "UA-BEI", "IE(SEM)")  # their own auctions: no rule here (CH has one of its own)
+_EC_FORECASTS = {"day-ahead": _EC_DAY_AHEAD, "intraday": _EC_INTRADAY, "current": _EC_CURRENT}
+
+
+def energy_charts_rules(
+    prefix: str = "",
+    forecast_types: Sequence[str] = tuple(_EC_FORECASTS),
+    production_types: Sequence[str] = ("solar", "wind_onshore", "wind_offshore", "load"),
+    zone: Optional[str] = None,
+) -> Dict[str, Availability]:
+    """The rules of the columns an `EnergyChartsSource` emits, under `prefix`: `{x}_forecast_day_ahead` (published 18:00 on
+    D-1), `{x}_forecast_intraday` (08:00 on the delivery day), `{x}_forecast_current` (never known before its delivery day
+    ended: a latest revision), `actual_*`, `cbet_*` and `cbpf_*` (realised, 1 h), and `price_day_ahead` (13:00 on D-1; CH 12:00;
+    none for a zone outside SDAC other than CH, which has to be given a rule)."""
+    stem = f"{prefix}_" if prefix else ""
+    rules: Dict[str, Availability] = {}
+    for production in production_types:
+        for forecast in forecast_types:
+            if production != "load" or forecast == "day-ahead":
+                rules[f"{stem}{production}_forecast_{forecast.replace('-', '_')}"] = _EC_FORECASTS[forecast]
+    for name in ("actual_*", "cbet_*", "cbpf_*"):
+        rules[f"{stem}{name}"] = _EC_ACTUAL
+    if zone not in _EC_NOT_SDAC:
+        rules[f"{stem}price_day_ahead"] = _EC_PRICE_CH if zone == "CH" else _EC_PRICE
+    return rules
+
+
 def default_rules() -> Dict[str, Availability]:
     """Built-in rules for the columns the library's ENTSO-E and calendar sources emit (unprefixed names).
 
@@ -646,6 +718,8 @@ def _built_in_rules() -> Dict[str, Availability]:
             "1h", note="A75 actual generation per type: 1 h after the period", vintage=_REVISED
         ),
     }
+    # No Energy-Charts names here: an EnergyChartsSource prefixes its columns ("ec_") so that none can take an ENTSO-E
+    # rule, and its rules come from `source_rules` only. Outside a source-aware run its columns have no rule (refused).
     calendar = Availability.static(note="calendar (CalendarSource)")
     for name in ["is_holiday", "holiday_name", "weekday", "weekday_name", "month", "month_name"]:
         rules[name] = calendar
@@ -677,6 +751,7 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     """Rules for the columns a DataPipeline's sources emit, following their prefixes and column choices."""
     from .data.sources.benchmark import DATASETS, EpftoolboxBenchmarkSource
     from .data.sources.calendar import CalendarSource
+    from .data.sources.energy_charts import EnergyChartsSource
     from .data.sources.entsoe import EntsoeSource
     from .data.sources.open_meteo import OpenMeteoSource
 
@@ -703,6 +778,10 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             )
             for name in ("load_forecast_daily_min", "load_forecast_daily_max"):
                 rules[f"{prefix}{name}"] = rule
+        elif isinstance(source, EnergyChartsSource):
+            rules.update(
+                energy_charts_rules(source.prefix, source._forecast_types, source._production_types, source._zone)
+            )
         elif isinstance(source, OpenMeteoSource):
             rule = _weather_availability(source)
             for name in _weather_column_names(source):
