@@ -687,3 +687,26 @@ def test_epf_report_of_a_run_over_zones(tmp_path, capsys):
     cli.cmd_report(cli.build_parser().parse_args(["report", str(tmp_path / "experiment.yaml")]))
     shown = capsys.readouterr().out
     assert "zone" in shown and all(f"{zone} " in shown for zone in frames)
+
+
+def test_a_zone_holds_its_targets_alone_once_its_arrays_are_built(tmp_path, monkeypatch):
+    """During a pooled pool each zone's period frames hold the target columns its skip records read, not the predictors the
+    arrays already hold: the records are those of the whole frames (the one-zone equality above), with half the memory."""
+    held = []
+    collect = OLSModel._collect
+
+    def watched(self, state, results, skipped, sink):
+        held.append(sorted({column for frame in self._hour_data.values() for column in frame.columns}))
+        return collect(self, state, results, skipped, sink)
+
+    monkeypatch.setattr(OLSModel, "_collect", watched)
+    frames = {"PL": hourly("PL"), "FI": hourly("FI", seed=1)}
+    issue_day = frames["FI"].index.tz_localize(None).normalize() == pd.Timestamp("2023-03-27")
+    frames["FI"].loc[issue_day, "load_d+1"] = np.nan  # skipped in the worker: its skip record is built in the parent
+    ModelPipeline().add_model(PooledModel(OLSModel(predictors=PREDICTORS, training_window=30, name="m"))).run(
+        frames, test=HOURLY_TEST, horizon=2, save_dir=str(tmp_path)
+    )
+    assert held and all(columns == ["price_d+1", "price_d+2"] for columns in held)
+    skips = [r for r in map(json.loads, lines(tmp_path / "FI" / "m.jsonl")) if r["status"] != "ok"]
+    assert len(skips) == 24 and all(r["status"] == "missing_test_predictors" for r in skips)
+    assert sorted(r["actual"] for r in skips) == sorted(calendar_shift(frames["FI"]["price"], 1)[issue_day].tolist())

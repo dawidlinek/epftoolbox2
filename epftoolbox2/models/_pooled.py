@@ -596,6 +596,15 @@ def _close(states: List[Tuple[str, BaseModel, _RunState]]) -> None:
         state.close()
 
 
+def _keep_targets_only(member: BaseModel, horizon: int) -> None:
+    """Once a zone's arrays and worker inputs are built, let go of its period frames but the target columns, which are all its
+    skip records read in the parent (`BaseModel._skip_records`: the issue row's target): the arrays hold the rest, so a run
+    over many zones holds each zone's data about once, not twice."""
+    targets = [f"{member._target}_d+{h}" for h in range(1, horizon + 1)]
+    for period, frame in list(member._hour_data.items()):
+        member._hour_data[period] = frame[targets].copy()
+
+
 def _execute(pooled: PooledModel, states: List[Tuple[str, BaseModel, _RunState]]) -> None:
     """The pool of a pooled run: every zone's arrays and worker inputs, jobs of (issue day or anchor, period) holding every
     zone's pending tasks there, each job's records into its zone's store (or in-memory list) as it comes back."""
@@ -610,6 +619,7 @@ def _execute(pooled: PooledModel, states: List[Tuple[str, BaseModel, _RunState]]
             hour_arrays = member._build_hour_arrays(max(state.horizons))
             expanded, config = member._worker_inputs(state, threads)
             zone_inputs.append(ZoneInputs(zone, hour_arrays, expanded, config))
+            _keep_targets_only(member, max(state.horizons))
         settings = PoolSettings(
             zones=tuple(zone for zone, _, _ in states),
             horizons=tuple(states[0][2].horizons),
