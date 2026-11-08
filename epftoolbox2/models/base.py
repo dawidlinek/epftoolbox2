@@ -98,6 +98,7 @@ from ._worker import (
     _pool_init,
     _run_block,
     _run_day,
+    block_calls,
     issue_row,
     matching_digest,
     matching_rows,
@@ -398,9 +399,10 @@ class _RunState:
 
 
 def _predicts_blocks(model: "BaseModel") -> bool:
-    """Whether a model whose class defines `_predict_block` predicts each refit unit's block in one call: with `refit` and
-    `block_predict` True. What `verify` reads as `_predicts_together` (`BaseModel.__init_subclass__`)."""
-    return bool(model.block_predict) and model.refit is not None
+    """Whether a model whose class defines `_predict_block` predicts each refit unit's block in one call (`_worker.block_calls`:
+    with `refit`, `block_predict` True and `_predict_block` defined where `_predict_fitted` is). What `verify` reads as
+    `_predicts_together` (`BaseModel.__init_subclass__`)."""
+    return block_calls(model)
 
 
 def _block_co_batch_items(model: "BaseModel", run_day: Any) -> List[datetime.date]:
@@ -431,9 +433,10 @@ class BaseModel(ABC):
     # (TabPFN) pays for its context once per call, not once per row. Each row's prediction must not depend on the other rows of
     # its call; `verify`'s co-batch check runs the probe over them. Such a class gets `block_predict = True` (False predicts
     # one row at a time through `_predict_fitted`, as every other model), `_predicts_together` and `_co_batch_items(run_day)`
-    # (the other days of its block) unless it defines them (`__init_subclass__`). The worker rebuilds the model from
-    # `_model_kwargs`, so a class that takes `block_predict` as a parameter returns it there. BaseModel defines none of them, and
-    # no core model has one.
+    # (the other days of its block) unless it defines them (`__init_subclass__`). The model in the parent decides
+    # (`_worker.block_calls`, handed to the workers in `config["block_predict"]` and recorded in the manifest's `model_params`),
+    # and only where `_predict_block` is defined in the class that defines `_predict_fitted`: a subclass with another estimator
+    # that inherits `_predict_block` predicts one row at a time. BaseModel defines none of them, and no core model has one.
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -1521,6 +1524,10 @@ class BaseModel(ABC):
             "threads_per_process": threads_per_process,
             "freq": self._freq,
         }
+        if block_calls(self):
+            # This model's units predict their blocks in one call (`_worker._fit_unit`): decided here, on the model itself, since
+            # a worker's model is rebuilt with refit=None from `_model_kwargs`, which may leave `block_predict` out.
+            config["block_predict"] = True
         if plan is not None:
             config["task_lists"] = plan.assignment
             config["list_hashes"] = plan.hashes

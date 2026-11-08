@@ -664,7 +664,8 @@ def _fit_unit(
     value by value, so a forecast is the same whichever other forecasts of its unit are run with it: one cut short and resumed
     equals a fresh one.
 
-    A model whose class defines `_predict_block`, with `block_predict` True (`block_call`), predicts in one call the issue rows
+    A model whose class defines `_predict_block`, with `block_predict` True (`block_calls`, `config["block_predict"]`), predicts
+    in one call the issue rows
     of every day of the unit's block that the period has with finite inputs, the run's tasks or not, padded to the rule's
     nominal length with copies of the first (`_block_forecasts`), and each task's forecast is its own row's: still the same
     whichever others are run with it, since the call's rows and shape don't depend on them. Tasks without a row or with a
@@ -728,8 +729,9 @@ def _fit_unit(
 
     test_rows = arrays["x"][[test for _, test in forecast]][:, col_idx]
     predicted = None
-    if block_call(model):
-        # The block's rows in one call, each forecast from its own row (`_block_forecasts`); never the engine's.
+    if cfg.get("block_predict", False):
+        # The block's rows in one call, each forecast from its own row (`_block_forecasts`); never the engine's. The parent's
+        # model decided (`block_calls`).
         predicted = _block_forecasts(
             cfg, unit, arrays, col_idx, predictors, train_x, train_y, scalable_mask, forecast, model
         )
@@ -760,7 +762,7 @@ def _fit_unit(
                 continue
             # One row at a time (decision 16 of the step 3 spec): a product over several rows can differ in the last bits.
             pred, coefs = model._predict_fitted(fitted, test_x[row : row + 1])
-            predicted.append((scaler.inverse(float(pred)), coefs))
+            predicted.append((scaler.inverse(float(pred)), flat_coefficients(coefs, model, "_predict_fitted")))
 
     extra = None
     if matching_days is not None:
@@ -791,10 +793,21 @@ def _fit_unit(
     return outcomes
 
 
-def block_call(model) -> bool:
-    """Whether `model`'s refit units predict their blocks in one call: its class defines `_predict_block` (see `BaseModel`)
-    and `block_predict` is True. Every other model predicts one row at a time (`_predict_fitted`)."""
-    return getattr(model, "_predict_block", None) is not None and bool(getattr(model, "block_predict", False))
+def block_calls(model) -> bool:
+    """Whether `model`'s refit units predict their blocks in one call (`_fit_unit`, see `BaseModel`): it has `refit`,
+    `block_predict` is True, and its class defines `_predict_block` in the class that defines `_predict_fitted`. A subclass
+    that refits with an estimator of its own (`_fit_predict`, `_fit_model`, `_predict_fitted`) but inherits `_predict_block`
+    would have its parent's block predictions made from its own fit, and one that overrides `_predict_block` alone would
+    forecast otherwise than its `refit=None` run: each predicts one row at a time through `_predict_fitted` instead, as every
+    other model. Read on the parent's model, which hands the answer to the workers in `config["block_predict"]`: a worker's
+    model is rebuilt with refit=None from `_model_kwargs`, which may leave `block_predict` out."""
+    cls = type(model)
+    if getattr(cls, "_predict_block", None) is None or getattr(model, "refit", None) is None:
+        return False
+    owners = {
+        next(klass for klass in cls.__mro__ if name in vars(klass)) for name in ("_predict_block", "_predict_fitted")
+    }
+    return len(owners) == 1 and bool(getattr(model, "block_predict", False))
 
 
 def block_rows(cfg: Dict, unit: FitUnit, days: np.ndarray, x: np.ndarray, col_idx: List[int]) -> List[int]:
@@ -855,7 +868,42 @@ def _block_forecasts(
             f"{type(model).__name__}._predict_block returned {predictions.shape} predictions and {len(coefficients)} "
             f"coefficient lists for a call of {length} rows: one of each per row"
         )
-    return [(scaler.inverse(float(predictions[place[test]])), coefficients[place[test]]) for _, test in forecast]
+    return [
+        (
+            scaler.inverse(float(predictions[place[test]])),
+            flat_coefficients(coefficients[place[test]], model, "_predict_block"),
+        )
+        for _, test in forecast
+    ]
+
+
+_REAL = (int, float, np.integer, np.floating)
+
+
+def flat_coefficients(coefs: Any, model: Any, method: str) -> list:
+    """One forecast's coefficients as its record holds them, from what `model.<method>` returned for its row: a list of numbers,
+    as every core model returns, unchanged; a tuple of them, or a 1-D numeric numpy array, as a list, numpy scalars as Python
+    numbers, so the record writes as JSON. Anything else (a 2-D array, nested lists, None, strings, bools) is a TypeError
+    naming the model, where a results file would otherwise fail later with a bare one."""
+    if type(coefs) is list and all(type(value) is float for value in coefs):
+        return coefs
+    if isinstance(coefs, np.ndarray):
+        if coefs.ndim == 1 and coefs.dtype.kind in "iuf":
+            return coefs.tolist()
+    elif isinstance(coefs, (list, tuple)) and all(
+        isinstance(value, _REAL) and not isinstance(value, (bool, np.bool_)) for value in coefs
+    ):
+        return [value if type(value) in (int, float) else value.item() for value in coefs]
+    raise TypeError(
+        f"{type(model).__name__}.{method} returned coefficients {_described(coefs)} for a forecast: give a flat list of "
+        "numbers (one per column, or [] for none) or a 1-D numeric array"
+    )
+
+
+def _described(coefs: Any) -> str:
+    if isinstance(coefs, np.ndarray):
+        return f"as a {coefs.ndim}-D {coefs.dtype} array of shape {coefs.shape}"
+    return f"of type {type(coefs).__name__}: {coefs!r:.80}"
 
 
 def _run_unit(
