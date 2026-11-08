@@ -138,6 +138,9 @@ _COMPARED_FIELDS = (
     "data_timezone",
     "training_cut",
 )
+# False for results written with `save_coefficients=False` (no key otherwise): a resume with the other setting would mix records
+# with and without coefficients, and an empty list can't be told from a training window list's.
+_COMPARED_FIELDS += ("save_coefficients",)
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -242,6 +245,9 @@ class Manifest:
     record_schema: Optional[int] = None
     # "parquet" for results in `<name>.parquet/`; None (and no key) for JSONL. Provenance, rewritten by `epf results convert`.
     save_format: Optional[str] = None
+    # False for records written with `save_coefficients=False` (`coefficients: []`); None (and no key) with their coefficients.
+    # Compared on resume.
+    save_coefficients: Optional[bool] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -254,6 +260,8 @@ class Manifest:
                 mine, theirs = _cut_rule(mine), _cut_rule(theirs)
             if mine != theirs:
                 note = _OLD_RESULTS_NOTE if name == "training_cut" and theirs is None else ""
+                if name == "save_coefficients":
+                    note = " (None: records with their coefficients; False: written with save_coefficients=False)"
                 out.append(f"{name}: {theirs!r} (existing results) vs {mine!r} (this run){note}")
         return out
 
@@ -287,6 +295,8 @@ class Manifest:
             del out["record_schema"]
         if out["save_format"] is None:  # JSONL
             del out["save_format"]
+        if out["save_coefficients"] is None:  # coefficients written
+            del out["save_coefficients"]
         return out
 
     @classmethod
@@ -675,9 +685,10 @@ def check_and_write(
     frame_hashes: Optional[FrameHashes] = None,
     check_stored: Optional[Callable[[], None]] = None,
     save_format: str = "jsonl",
+    save_coefficients: bool = True,
 ) -> None:
     """Compare `manifest` to the one at `path` (if any), then write it, with `save_format` (the format of the results it
-    describes) recorded.
+    describes, provenance) and `save_coefficients` (compared) recorded.
 
     Raises `ManifestMismatchError` when an existing manifest disagrees on the run's configuration and
     `allow_mismatch` is not set, or when results exist with no manifest and `require_manifest` is set.
@@ -690,6 +701,7 @@ def check_and_write(
     Stored forecasts that this frame can't be told to have made leave `data_unverified` on the manifest (see the module docstring).
     """
     manifest.save_format = None if save_format == "jsonl" else save_format
+    manifest.save_coefficients = None if save_coefficients else False  # compared below, as the configuration is
     if path.exists():
         existing = _read_manifest_of_a_model(path, model_name)
         data_diffs = _compare_data(existing, manifest, frame_hashes)

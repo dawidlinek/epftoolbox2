@@ -576,6 +576,7 @@ class BaseModel(ABC):
                     manifest,
                     has_existing_results=store.has_results(),
                     save_format=store.save_format,
+                    save_coefficients=save_coefficients,
                     allow_mismatch=allow_manifest_mismatch,
                     require_manifest=require_manifest,
                     model_name=self.name,

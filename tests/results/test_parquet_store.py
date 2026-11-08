@@ -32,6 +32,7 @@ from epftoolbox2.models import NaiveModel, OLSModel, Use
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline, Workflow
 from epftoolbox2.results import parquet_store
+from epftoolbox2.results.manifest import ManifestMismatchError
 from epftoolbox2.results.parquet_store import CATALOG, ParquetResultStore, compact, convert, read_catalog, verify
 from epftoolbox2.results.report import EvaluationReport
 from epftoolbox2.results.store import (
@@ -871,7 +872,28 @@ def test_save_coefficients_false_writes_empty_coefficients_and_nothing_else_chan
         for k, v in json.loads((tmp_path / d / "ols.manifest.json").read_text()).items()
         if k not in ("created_at", "updated_at")
     }
-    assert manifest("with") == manifest("without")
+    # The manifest records the setting, and that alone: compared on resume (below), no key with the default.
+    assert manifest("without") == {**manifest("with"), "save_coefficients": False}
+    assert "save_coefficients" not in manifest("with")
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+def test_a_resume_with_another_save_coefficients_raises(tmp_path, monkeypatch, fmt):
+    """A run stopped with `save_coefficients=False` and resumed with the default would mix `[]` and full coefficients, and an
+    empty list can't be told from a training window list's: refused like any compared field, unless told to go on."""
+    monkeypatch.setenv("PARQUET_ROWS_PER_PART", "40")
+    run(tmp_path, save_coefficients=False, save_format=fmt)
+    stored = tmp_path / ("ols.jsonl" if fmt == "jsonl" else f"ols.parquet/{CATALOG}")
+    lines = stored.read_text().splitlines(True)
+    stored.write_text("".join(lines[: len(lines) // 2]))  # a run stopped halfway
+    with pytest.raises(ManifestMismatchError, match="save_coefficients: False .existing results. vs None .this run."):
+        run(tmp_path, save_format=fmt)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        run(tmp_path, save_format=fmt, allow_manifest_mismatch=True)  # told to: resumes, and the manifest says so now
+    records = list(iter_file_records(tmp_path / f"ols.{fmt}"))
+    assert any(r["coefficients"] == [] for r in records) and any(r["coefficients"] for r in records)
+    assert "save_coefficients" not in json.loads((tmp_path / "ols.manifest.json").read_text())
 
 
 def test_the_workflow_yaml_keys_round_trip(tmp_path):
