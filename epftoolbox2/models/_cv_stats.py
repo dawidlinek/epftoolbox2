@@ -1,4 +1,4 @@
-"""Cross-validation blocks for the step-5 engine: KFold's blocks of a fit's rows from exact span sums.
+"""Cross-validation blocks for the step-5 engine, and `LassoCV` fitted from them.
 
 A fit with an inner cross-validation (`LassoCVModel`, `LEARModel(criterion="cv")`) is scored on KFold's blocks of its rows ρ:
 `folds` (5) contiguous blocks in row (date) order, the first n % folds of them one row longer, no shuffling. Its statistics
@@ -10,7 +10,7 @@ are those of `_stats.standard_stats` for the whole of ρ plus the same map for e
   from a block): z = ((x - c) - o)/σ, so a block's mean of a scaled column is (u_b/r_b - o)/σ, of an unscaled one c + u_b/r_b,
   of the target (Σ_b(y - c_y)/r_b - Σ(y - c_y)/r)/σ_y; its centred sums are G_b = (S_b - u_b u_b'/r_b)/(σσ') and so on, as
   `standard_stats` centres ρ's. A column the scaler zeroes (constant on ρ) has zero sums in every block.
-- `cv_stats_of(stats)` reads them as LEAR's `CvStats`.
+- `cv_stats_of(stats)` reads them as LEAR's `CvStats`; `lassocv_fit(stats)` is `LassoCV` from them.
 
 **A column constant on a block.** About the span's shift, S_b - u_b²/r_b of a column constant on the block cancels to noise of
 about eps·r_b·(x - c)², not to 0, while the model path's own centring of those rows gives 0 up to eps². The noise is harmless
@@ -28,23 +28,67 @@ exceeds `CANCELLATION_MAX` (1e4) times G_tr,jj (or A_jj), and likewise for the t
 to the model path's digits: `StatsFallback("cancellation")`. A column constant on a whole part has no noise there. This is
 the rule `standard_stats` applies to ρ, at the level the folds read; it also catches a target constant on ρ, which
 `standard_stats` lets through with the scale 1.0.
+
+`LassoCV(cv=folds, max_iter, n_jobs=1, fit_intercept)` from the statistics (`lassocv_fit`, decision 15 of the step-5 spec), as
+scikit-learn 1.8.0's `LinearModelCV.fit` runs it (`_coordinate_descent.py:1617-1936`):
+
+1. The grid: `_alpha_grid`'s 100 penalties from α_max = max_j |Xy_j| / n down to 1e-3 α_max (`np.geomspace`, lines 96-213),
+   with Xy the window's centred q (or Z'y without an intercept).
+2. Per fold, `_path_residuals` (lines 1399-1538) with its `_pre_fit` Gram (`_base.py:781-877`: precompute "auto" is the Gram
+   when the training part has more rows than columns): scikit-learn's own coordinate descent through the public
+   `enet_path(X, y, l1_ratio=1, alphas=grid, precompute=G_tr, Xy=q_tr, check_input=False)`, the path warm-started from zeros
+   along the grid. Its Gram kernel (`_cd_fast.pyx:959-1142`) reads X only for its shape (`enet_path`, lines 604 and 672:
+   `l1_reg = alpha * n_samples`) and y only for y·y (line 1008: the stopping tolerance tol·y·y and the duality gap), so X is a
+   shape-only array and y the one value √yy_tr whose square is yy_tr (the next float either way where √yy_tr's isn't).
+3. The held-out mean squared error at every penalty, with `_path_residuals`' intercept ȳ_tr - z̄_tr·w (none without an
+   intercept): (w'Aw - 2b'w + c) / r_k from the block's sums about the training part's means. Then the mean over the folds, each
+   fold counted once, and its first argmin (`np.argmin`).
+4. The fit at that penalty on the window's Gram, from zeros; the intercept ȳ - z̄·w.
+
+What differs from the model path: in the folds only rounding (the Gram from exact sums, not BLAS on the scaled rows; the same
+kernel); in the final fit also the kernel's form, since `LassoCV` refits on the rows (`precompute="auto"` becomes False
+there, line 1922). The two forms make the same coordinate updates in exact arithmetic except for their gap-safe screening:
+the row form never takes back a feature it screened out (`_cd_fast.pyx:368-369`), the Gram form tests every feature again
+(`screen_features_enet_gram`, lines 917-956). A penalty or a stopping sweep can therefore differ only where two candidates tie
+to the last bit (the step-5 spec's choice flips; counted by the tests and the research sweeps).
+
+Hand-backs (None: the model path fits it), each a function of the fit's own statistics: no blocks, or another number of them
+than `folds`; a fold whose training part has no more rows than columns (the model path's descent runs on the rows there,
+another rounding and stopping sequence; this includes n <= p); sums, a held-out error or coefficients that aren't finite; a
+yy that isn't positive; and α_max at or below float64's resolution (scikit-learn's degenerate grid).
 """
 
-from typing import Sequence, Tuple
+import math
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
+from sklearn.linear_model import enet_path
 
-from ._lars import CV_FOLDS, CvStats
+from ._lars import CV_FOLDS, CvStats, GramStats, pooled
 from ._stats import (
     CANCELLATION_MAX,
+    LinearFit,
+    MIN_ROWS,
     ScaledStats,
     StandardParams,
     StatsFallback,
     Values,
     _candidates,
+    _finite,
     _reader,
 )
 from ._sums import RawSums
+
+GRID_EPS = 1e-3
+"""`LassoCV`'s `eps`: the grid's smallest penalty over its largest."""
+
+N_ALPHAS = 100
+"""`LassoCV`'s number of penalties (its `alphas=100`, the default)."""
+
+TOL = 1e-4
+"""`LassoCV`'s `tol`: the coordinate descent stops when its duality gap is at most tol·y·y."""
+
+RESOLUTION = float(np.finfo(np.float64).resolution)
 
 
 def fold_sizes(n: int, folds: int = CV_FOLDS) -> np.ndarray:
@@ -207,4 +251,141 @@ def cv_stats_of(stats: ScaledStats) -> CvStats:
     return CvStats(tuple(block.gram() for block in stats.blocks))
 
 
-__all__ = ["block_rows", "block_stats", "cv_stats_of", "fold_sizes"]
+# --- LassoCV ------------------------------------------------------------------------------------------------------------
+
+
+def alpha_grid(Xy, n: int, eps: float = GRID_EPS, n_alphas: int = N_ALPHAS) -> np.ndarray:
+    """scikit-learn's `_alpha_grid` for the lasso from a given Xy (`l1_ratio=1`, no sample weights): `np.geomspace` from
+    α_max = sqrt(max_j Xy_j²) / n down to eps·α_max, or `n_alphas` times float64's resolution where α_max is at most it."""
+    Xyw = np.asarray(Xy, dtype=np.float64).reshape(-1)[:, np.newaxis]
+    alpha_max = np.sqrt(np.max(np.abs(np.sum(Xyw**2, axis=1)))) / (n * 1)
+    if alpha_max <= RESOLUTION:
+        return np.full(n_alphas, RESOLUTION)
+    return np.geomspace(alpha_max, alpha_max * eps, num=n_alphas)
+
+
+def _norm_vector(yy: float) -> Optional[np.ndarray]:
+    """A one-value y with y·y = yy (the coordinate descent reads y only for y·y): √yy, or a neighbour whose square is yy
+    exactly; None where yy isn't positive and finite."""
+    if not (math.isfinite(yy) and yy > 0.0):
+        return None
+    s = math.sqrt(yy)
+    for t in (s, float(np.nextafter(s, 0.0)), float(np.nextafter(s, np.inf))):
+        if t * t == yy:
+            return np.array([t])
+    return np.array([s])
+
+
+def _path(Q: np.ndarray, Xy: np.ndarray, yy: float, n: int, alphas: np.ndarray, max_iter: int, tol: float):
+    """`enet_path`'s lasso coefficients (p, len(alphas)) on the Gram `Q`, `Xy` and y·y = `yy` of `n` rows, or None where yy
+    isn't positive. X is a shape-only array: with `check_input=False` and a Gram the path reads its shape alone."""
+    y = _norm_vector(yy)
+    if y is None:
+        return None
+    Q = np.ascontiguousarray(Q, dtype=np.float64)
+    Xy = np.ascontiguousarray(Xy, dtype=np.float64)
+    X = np.broadcast_to(np.float64(np.nan), (int(n), Q.shape[0]))
+    _, coefs, _ = enet_path(
+        X,
+        y,
+        l1_ratio=1.0,
+        alphas=alphas,
+        precompute=Q,
+        Xy=Xy,
+        copy_X=False,
+        check_input=False,
+        max_iter=int(max_iter),
+        tol=tol,
+        selection="cyclic",
+    )
+    return coefs
+
+
+def _part(part: GramStats, fit_intercept: bool) -> Tuple[np.ndarray, np.ndarray, float]:
+    """The Gram, Xy and y·y a path reads from rows' centred sums: as they are with an intercept (`_pre_fit` centres the
+    rows), uncentred (Z'Z, Z'y, y'y) without."""
+    if fit_intercept:
+        return part.G, part.q, float(part.yy)
+    n = float(part.n)
+    return (
+        part.G + n * np.outer(part.xbar, part.xbar),
+        part.q + (n * part.ybar) * part.xbar,
+        float(part.yy + n * part.ybar * part.ybar),
+    )
+
+
+def cv_mse(stats: ScaledStats, grid: np.ndarray, fit_intercept: bool, max_iter: int, tol: float = TOL):
+    """Each fold's held-out mean squared error at every penalty of `grid`, (folds, len(grid)), as `_path_residuals` computes
+    it, from the blocks' sums; None where a fold's path can't run (a training yy that isn't positive)."""
+    blocks = stats.blocks
+    folds = len(blocks)
+    p = np.asarray(stats.q).size
+    mse = np.empty((folds, grid.size))
+    for k in range(folds):
+        train = pooled([b.gram() for i, b in enumerate(blocks) if i != k])
+        test = blocks[k]
+        Q, Xy, yy = _part(train, fit_intercept)
+        coefs = _path(Q, Xy, yy, train.n, grid, max_iter, tol)
+        if coefs is None:
+            return None
+        xoff, yoff = (train.xbar, train.ybar) if fit_intercept else (np.zeros(p), 0.0)
+        dx = test.zbar - xoff
+        dy = test.ybar - yoff
+        A = test.G + test.n * np.outer(dx, dx)
+        b = test.q + (test.n * dy) * dx
+        c = float(test.yy + test.n * dy * dy)
+        sse = np.einsum("ij,ij->j", coefs, A @ coefs) - 2.0 * (b @ coefs) + c
+        mse[k] = sse / test.n
+    return mse
+
+
+def lassocv_fit(
+    stats: ScaledStats,
+    fit_intercept: bool = True,
+    max_iter: int = 10000,
+    folds: int = CV_FOLDS,
+    tol: float = TOL,
+    eps: float = GRID_EPS,
+    n_alphas: int = N_ALPHAS,
+) -> Optional[LinearFit]:
+    """`LassoCV(cv=folds, max_iter=max_iter, n_jobs=1, fit_intercept=fit_intercept)` from a fit's scaled sums and its CV
+    blocks (see the module), or None where the model path must fit it. `alpha_` of the fit is the chosen penalty."""
+    blocks = stats.blocks
+    n = int(stats.n)
+    p = np.asarray(stats.q).size
+    if blocks is None or len(blocks) != folds or n < max(MIN_ROWS, folds):
+        return None
+    sizes = np.array([int(b.n) for b in blocks])
+    if int(sizes.sum()) != n or n - int(sizes.max()) <= p:
+        return None
+    if not (_finite(stats) and all(_finite(b) for b in blocks)):
+        return None
+    Q, Xy, yy = _part(stats.gram(), fit_intercept)
+    grid = alpha_grid(Xy, n, eps, n_alphas)
+    if grid[0] <= RESOLUTION:
+        return None
+    mse = cv_mse(stats, grid, fit_intercept, max_iter, tol)
+    if mse is None or not np.isfinite(mse).all():
+        return None
+    index = int(np.argmin(mse.mean(axis=0)))
+    alpha = float(grid[index])
+    coefs = _path(Q, Xy, yy, n, np.array([alpha]), max_iter, tol)
+    if coefs is None or not np.isfinite(coefs).all():
+        return None
+    w = np.ascontiguousarray(coefs[:, 0])
+    intercept = float(stats.ybar - stats.zbar @ w) if fit_intercept else 0.0
+    return LinearFit(w, intercept, alpha)
+
+
+__all__ = [
+    "GRID_EPS",
+    "N_ALPHAS",
+    "TOL",
+    "alpha_grid",
+    "block_rows",
+    "block_stats",
+    "cv_mse",
+    "cv_stats_of",
+    "fold_sizes",
+    "lassocv_fit",
+]
