@@ -323,20 +323,21 @@ def test_engine_is_checked_and_saved_only_when_on(tmp_path):
     with pytest.raises(ValueError, match="engine must be one of"):
         ModelPipeline(engine="yes")
     pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, 28, name="ols"))
-    with pytest.raises(ValueError, match="engine must be one of"):
-        pipeline.engine = "check"  # step 5j's
     assert "engine" not in pipeline.to_dict()
-    pipeline.engine = "on"
-    assert pipeline.to_dict()["engine"] == "on"
-    pipeline.save(tmp_path / "pipeline.yaml")
-    assert ModelPipeline.load(tmp_path / "pipeline.yaml").engine == "on"
+    for engine in ("check", "on"):  # "check": step 5j's
+        pipeline.engine = engine
+        assert pipeline.to_dict()["engine"] == engine
+        pipeline.save(tmp_path / "pipeline.yaml")
+        assert ModelPipeline.load(tmp_path / "pipeline.yaml").engine == engine
     off = ModelPipeline().add_model(OLSModel(PREDICTORS, 28, name="ols"))
     off.save(tmp_path / "off.yaml")
     assert "engine" not in yaml.safe_load((tmp_path / "off.yaml").read_text())
     assert ModelPipeline.load(tmp_path / "off.yaml").engine == "off"
 
 
-@pytest.mark.parametrize("word, engine", [("on", "on"), ("off", "off"), ('"on"', "on"), ("'off'", "off")])
+@pytest.mark.parametrize(
+    "word, engine", [("on", "on"), ("off", "off"), ('"on"', "on"), ("'off'", "off"), ("check", "check")]
+)
 def test_engine_written_by_hand_in_yaml(tmp_path, word, engine):
     """`engine: on` unquoted is YAML 1.1's True and `off` its False: both read as the word, in a pipeline file and in a
     workflow's `model_pipeline`, quoted or not; a workflow saves the word back."""
@@ -824,9 +825,9 @@ def test_models_the_engine_does_not_take_run_on_their_own(spring, tmp_path, monk
     grouped = []
     real_group = _engine.run_group
 
-    def group_spy(models, arguments, columns=None):
+    def group_spy(models, arguments, columns=None, **kwargs):
         grouped.append([model.name for model in models])
-        return real_group(models, arguments, columns)
+        return real_group(models, arguments, columns, **kwargs)
 
     monkeypatch.setattr("epftoolbox2.pipelines.model_pipeline.run_group", group_spy)
     pipeline = build(spring_models)("on")

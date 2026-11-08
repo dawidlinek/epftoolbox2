@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import KFold
 from threadpoolctl import threadpool_limits
 
 from epftoolbox2.information_set import Availability, InformationSet
@@ -46,7 +47,7 @@ PROVENANCE = ("package_version", "git_sha", "created_at", "updated_at", "record_
 PUBLISHED = {"price": Availability.published("13:00", 1)}
 STANDARD = {"name": "standard", "params": {"scale_binary": True}}
 # Engine against off, per class, in EUR/MWh (the step 5 spec's tolerance table); coefficients (scaled units) alike.
-TOLERANCE = {"OLSModel": 1e-8, "RidgeModel": 1e-9, "LEARModel": 1e-9}
+TOLERANCE = {"OLSModel": 1e-8, "RidgeModel": 1e-9, "LEARModel": 1e-9, "LassoCVModel": 1e-8}
 NUMBERS = ("prediction", "coefficients", "member_predictions")
 
 
@@ -154,8 +155,9 @@ def lear(*args, **kwargs):
 
 
 def test_which_models_fit_from_statistics():
-    """OLS, Ridge and LEAR with exactly `StandardScaler` (any `scale_binary`); not a VST, not CV blocks (5j), not LEAR's
-    coordinate descent (it stops at a tolerance, so it follows its Gram's last bits), not a model that declares no needs."""
+    """OLS, Ridge, LassoCV and LEAR with exactly `StandardScaler` (any `scale_binary`) or one of the library's VSTs (5j),
+    LEAR's `"cv"` and LassoCV's KFold blocks (5j); not LEAR's coordinate descent (it stops at a tolerance, so it follows its
+    Gram's last bits), not a LassoCV whose folds aren't KFold's, not a model that declares no needs."""
     path = _engine_worker.ENGINE_FIT_PATH
     assert path == "engine-1"
     for model in (
@@ -165,15 +167,20 @@ def test_which_models_fit_from_statistics():
         lear(PREDICTORS),
         lear(PREDICTORS, criterion="aic"),
         EveryOtherBack(PREDICTORS),
+        LEARModel(PREDICTORS),  # asinh
+        lear(PREDICTORS, criterion="cv"),
+        LassoCVModel(PREDICTORS),
+        LassoCVModel(PREDICTORS, cv=None),
+        OLSModel(PREDICTORS, scaler="npit"),
+        RidgeModel(PREDICTORS, scaler="asinh"),
+        OLSModel(PREDICTORS, scaler={"name": "poly", "params": {"apply_to": ["load*"]}}),
+        LassoCVModel(PREDICTORS, scaler="mlog"),
     ):
         assert _engine_worker.fit_path_of(model) == path, model
     for model in (
-        LEARModel(PREDICTORS),  # asinh
-        lear(PREDICTORS, criterion="cv"),
         lear(PREDICTORS, criterion="aic", solver="cd"),
-        LassoCVModel(PREDICTORS),
-        OLSModel(PREDICTORS, scaler="npit"),
-        RidgeModel(PREDICTORS, scaler="asinh"),
+        LEARModel.lago(["load_d+1"]),  # "cd"
+        LassoCVModel(PREDICTORS, cv=KFold(3)),
     ):
         assert _engine_worker.fit_path_of(model) is None, model
 
@@ -1032,7 +1039,7 @@ def keep_first_day(path):
 def test_switching_the_engine_refuses_a_resume(spring, tmp_path):
     """`fit_path` is compared: engine on then off, or off then on, refuses for a model fitted from statistics, and
     `allow_manifest_mismatch=True` overrides (the file then mixes the two paths, as it says); a model the engine keeps on
-    the model path (LassoCV) resumes either way."""
+    the model path (LEAR's coordinate descent) resumes either way."""
     days = ("2023-03-24", "2023-03-25")
 
     def pipeline(engine, model):
@@ -1055,11 +1062,11 @@ def test_switching_the_engine_refuses_a_resume(spring, tmp_path):
             "engine-1" if then == "on" else None
         )
         assert len(lines(save / "ols.jsonl")) == full
-        pipeline(first, LassoCVModel(PREDICTORS, 28, cv=3, name="lasso")).run(
+        pipeline(first, lear(PREDICTORS, 28, criterion="aic", solver="cd", name="lasso")).run(
             spring, *days, horizon=1, save_dir=str(save)
         )
         keep_first_day(save / "lasso.jsonl")
-        pipeline(then, LassoCVModel(PREDICTORS, 28, cv=3, name="lasso")).run(
+        pipeline(then, lear(PREDICTORS, 28, criterion="aic", solver="cd", name="lasso")).run(
             spring, *days, horizon=1, save_dir=str(save)
         )
         assert len(lines(save / "lasso.jsonl")) == full
