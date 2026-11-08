@@ -174,7 +174,9 @@ def shared_fit_uses(
     """Zone `zone`'s training rows judged on the clock of `other`, whose issue is earlier (`information_set` is other's): its
     newest training target (on the refit anchors with `refit`) and, for a column whose rule changes over time, its predictors
     on the rows a fit reads. At `level` "raise" an InformationSetError names both zones; at "warn" the uses are returned, each
-    with a note saying why. Its issue row isn't judged here: it serves `zone`'s own forecast, issued on `zone`'s clock."""
+    with a note saying why. Any other predictor's issue row isn't judged here: it serves `zone`'s own forecast, issued on
+    `zone`'s clock. A column whose rule changes over time is judged as `violations` judges it with training rows, its issue row
+    with them, so on the earlier clock there too: stricter than needed, never looser."""
     step = 15 if freq == "15min" else 60
     names = sorted({name for names in expanded.values() for name in names})
     changing = {name for name in names if over_time(information_set._resolve_for(name, step).rule)}

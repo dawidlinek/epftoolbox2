@@ -197,6 +197,21 @@ def test_a_plain_model_in_a_zone_run_is_its_run_on_the_zone_alone(tmp_path):
     pd.testing.assert_frame_equal(report.zones["FI"].summary(), panel.zones["FI"].summary())
 
 
+def test_a_zone_run_with_the_engine_is_the_run_without_it(tmp_path):
+    frames = {zone: hourly(zone, seed=i) for i, zone in enumerate(ZONES)}
+    for engine in ("off", "on"):
+        pipeline = (
+            ModelPipeline(engine=engine)
+            .add_model(OLSModel(predictors=PREDICTORS, training_window=30, name="ols"))
+            .add_model(RidgeModel(predictors=PREDICTORS, training_window=40, refit="7D", name="ridge"))
+            .add_model(PooledModel(OLSModel(predictors=PREDICTORS, training_window=30), name="pooled"))
+        )
+        pipeline.run(frames, test=HOURLY_TEST, horizon=2, save_dir=str(tmp_path / engine))
+    for zone in ZONES:
+        for name in ("ols", "ridge", "pooled"):
+            assert lines(tmp_path / "off" / zone / f"{name}.jsonl") == lines(tmp_path / "on" / zone / f"{name}.jsonl")
+
+
 def test_issue_timezone_data_on_one_frame_is_its_zone_written_out(tmp_path):
     frame = hourly("FI")
     by_data = pipeline("data").run(frame, test=HOURLY_TEST, horizon=2, save_dir=str(tmp_path / "data"))
@@ -283,11 +298,11 @@ def test_pooled_ols_over_three_zones_is_the_hand_fit(tmp_path, over):
 # -- three clocks ------------------------------------------------------------------------------------------------------------
 
 
-def three_clocks(delay: str, availability: str) -> ModelPipeline:
+def three_clocks(delay: str, availability: str, refit=None) -> ModelPipeline:
     rules = {**RULES, "actual_daily_max": Availability.realised(delay)}
     return ModelPipeline(
         information_set=InformationSet("12:00", "data", rules=rules), availability=availability
-    ).add_model(PooledModel(OLSModel(predictors=PREDICTORS, training_window=40, name="m")))
+    ).add_model(PooledModel(OLSModel(predictors=PREDICTORS, training_window=40, refit=refit, name="m")))
 
 
 def run_three_clocks(pipeline: ModelPipeline, tmp_path, name: str = "run"):
@@ -322,6 +337,10 @@ def test_a_shared_fit_judges_every_zone_s_training_rows_at_the_earliest_issue(tm
     with pytest.raises(InformationSetError, match="zone 'PT' with zone 'FI'"):
         run_three_clocks(three_clocks("11h", "raise"), tmp_path, "eleven")
     run_three_clocks(three_clocks("10h", "raise"), tmp_path, "ten")
+    # With refit a unit's rows are cut as of the issue time on its anchor: judged there, on the earlier clock too.
+    with pytest.raises(InformationSetError, match="zone 'PL' with zone 'FI'"):
+        run_three_clocks(three_clocks("12h", "raise", refit="7D"), tmp_path, "refit")
+    run_three_clocks(three_clocks("10h", "raise", refit="7D"), tmp_path, "refit_ten")
     # Each zone alone issues on its own clock and may train on D-1's maximum at noon.
     for zone in ZONES:
         ModelPipeline(

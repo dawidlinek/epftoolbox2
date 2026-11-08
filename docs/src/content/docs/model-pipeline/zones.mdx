@@ -56,7 +56,8 @@ A pooled model's fit serves every zone, so it is made by the **earliest** issue 
 Warsaw and 10:00 in Lisbon. Before any fit every zone's training rows (its newest training target, and the training rows of a column
 whose rule changes over time) are judged on the clock of each zone that issues earlier: a value Warsaw publishes at 12:00 for its
 own noon issue is late for the fit it shares with Helsinki, refused at `availability="raise"` and listed with a note at `"warn"`. A
-zone's issue row is judged on its own clock, since it serves that zone's forecast alone. See
+zone's issue row is judged on its own clock, since it serves that zone's forecast alone (a column whose rule changes over time is
+judged on the earlier clock on its issue row too: stricter than needed, never looser). See
 [PooledModel](/epftoolbox2/models/pooled/) for what a unit is, how each zone's rows are scaled, and what it refuses.
 
 ## The panel report
