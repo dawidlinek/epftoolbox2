@@ -37,6 +37,7 @@ from ..models.explain import explain_model
 from ..models.pooled import PooledModel, check_pooled_model
 from ..models._pooled import (
     check_horizon_lists,
+    check_resumes,
     member_of,
     needed_columns,
     run_pooled,
@@ -106,9 +107,25 @@ def read_zone_index(save_dir: Union[str, Path]) -> Optional[List[str]]:
     return zones
 
 
+def check_zone_case(save_dir: Union[str, Path], zones: Sequence[str]) -> None:
+    """A ValueError if a zone differs only in letter case from one `save_dir`'s zone index holds: on a file system that folds
+    case (macOS, Windows) both are one folder, and the index would count it twice."""
+    indexed = read_zone_index(save_dir) or []
+    folded = {zone.lower(): zone for zone in indexed}
+    clashes = [(zone, folded[zone.lower()]) for zone in zones if zone not in indexed and zone.lower() in folded]
+    if clashes:
+        shown = ", ".join(f"{zone!r} (the index has {other!r})" for zone, other in clashes)
+        raise ValueError(
+            f"{Path(save_dir)} holds a run over zones whose names differ from these only in case: {shown}. A folder on a file "
+            "system that folds case is one for both: use the name the index has."
+        )
+
+
 def write_zone_index(save_dir: Union[str, Path], zones: Sequence[str]) -> None:
-    """Record `zones` in `save_dir`'s zone index, after those it holds: a later run over fewer keeps the others."""
+    """Record `zones` in `save_dir`'s zone index, after those it holds: a later run over fewer keeps the others. A zone that
+    differs from an indexed one only in case raises (`check_zone_case`)."""
     root = Path(save_dir)
+    check_zone_case(root, zones)
     root.mkdir(parents=True, exist_ok=True)
     merged = list(dict.fromkeys([*(read_zone_index(root) or []), *zones]))
     text = {
@@ -614,6 +631,7 @@ class ModelPipeline:
         self._refuse_top_without_validation(self.ensembles, windows)
         check_save_format(save_format)
         if save_dir:
+            check_zone_case(save_dir, zones)
             beside = [model.name for model in self.models if self.results_path(save_dir, model).exists()]
             if beside:
                 raise ValueError(
@@ -702,7 +720,6 @@ class ModelPipeline:
             return hashes[id(frame)]
 
         if save_dir:
-            write_zone_index(save_dir, zones)  # what tells a report this save_dir's folders are zones
             for model in pooled:
                 # Each zone's manifest records the other zones' data: another zone's frame moves this zone's forecasts.
                 data_of = {
@@ -717,8 +734,9 @@ class ModelPipeline:
                         "data": {other: data_of[other] for other in zones if other != zone},
                     }
 
-        def arguments(zone: str, model: BaseModel, frame: pd.DataFrame) -> Dict[str, Any]:
-            """What the model's (or a pooled model's member's) run in `zone` is called with."""
+        def arguments(zone: str, model: BaseModel, frame: pd.DataFrame, keep: bool = False) -> Dict[str, Any]:
+            """What the model's (or a pooled model's member's) run in `zone` is called with; its check is let go of unless
+            `keep`."""
             key = (zone, model.name)
             save_to = str(self.results_path(dirs[zone], model, save_format)) if save_dir else None
             return dict(
@@ -739,12 +757,13 @@ class ModelPipeline:
                 **horizon_arguments(horizon, horizons),
                 **days_argument,
                 **({"plan": plans[key]} if key in plans else {}),
-                checked=checks.pop(key),  # held no longer than the model's run
+                checked=checks[key] if keep else checks.pop(key),  # held no longer than the model's run
                 **({} if save_coefficients else {"save_coefficients": False}),
             )
 
         refs: Dict[str, Dict[str, ModelResultRef]] = {zone: {} for zone in zones}
-        for zone in zones:
+
+        def run_plain(zone: str) -> None:
             frame = frames[zone]
             with _zone_errors(zone):
                 if self.engine == ENGINE_ON:
@@ -758,6 +777,28 @@ class ModelPipeline:
                 for model in plain:
                     if model.name not in refs[zone]:
                         refs[zone][model.name] = model.run(**arguments(zone, model, frame))
+
+        # What a resume can refuse comes from the zones whose folders hold results already: their pooled models' resumes
+        # are checked, and their plain models run, before the zone index or any file of a zone new to the save_dir is written,
+        # so a refused run leaves the save_dir as it was.
+        on_file = [zone for zone in zones if save_dir and any(dirs[zone].glob("*.manifest.json"))]
+        for model in pooled:
+            check_resumes(
+                {
+                    zone: (
+                        members[model.name][zone],
+                        arguments(zone, members[model.name][zone], member_frames[model.name][zone], keep=True),
+                    )
+                    for zone in on_file
+                }
+            )
+        for zone in on_file:
+            run_plain(zone)
+        if save_dir:
+            write_zone_index(save_dir, zones)  # what tells a report this save_dir's folders are zones
+        for zone in zones:
+            if zone not in on_file:
+                run_plain(zone)
         for model in pooled:
             ran = run_pooled(
                 model,

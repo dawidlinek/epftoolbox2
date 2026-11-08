@@ -603,10 +603,32 @@ def test_every_zone_is_checked_before_any_zone_s_files_are_written(tmp_path):
 
 
 def test_a_refused_resume_writes_no_manifest_in_a_new_zone(tmp_path):
-    run_pooled(tmp_path, {"PL": daily("PL")})
-    with pytest.raises(ManifestMismatchError, match="zone 'PL'"):
-        run_pooled(tmp_path, {"FI": daily("FI", seed=1), "PL": daily("PL")})  # FI first in the stack, PL on file
-    assert not (tmp_path / "FI").exists() or not any((tmp_path / "FI").glob("*.manifest.json"))
+    def pipeline():
+        return (
+            ModelPipeline()
+            .add_model(NaiveModel(predictors=["load_d+{horizon}"], name="tso", known_only=False))
+            .add_model(PooledModel(OLSModel(predictors=PREDICTORS, training_window=40, name="m")))
+        )
+
+    run = dict(test=FRIDAYS, horizons=[1, 2], freq="1D", issue_days=["friday"])
+    pipeline().run({"PL": daily("PL")}, save_dir=str(tmp_path), **run)
+    index = (tmp_path / "zone_run.json").read_text()
+    on_file = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+    with pytest.raises(ManifestMismatchError, match="zone 'PL'"):  # FI first in the stack, PL on file
+        pipeline().run({"FI": daily("FI", seed=1), "PL": daily("PL")}, save_dir=str(tmp_path), **run)
+    assert (tmp_path / "zone_run.json").read_text() == index  # the index unchanged
+    assert not (tmp_path / "FI").exists()  # no folder for the new zone, its plain model's included
+    assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.name != "tso.lock") == [
+        path for path in on_file if path.name != "tso.lock"
+    ]
+    assert list(pipeline().report(tmp_path, **run).zones) == ["PL"]  # the run on file still reports
+
+
+def test_a_zone_differing_only_in_case_from_one_on_file_is_refused(tmp_path):
+    run_pooled(tmp_path, {"FI": daily("FI")})
+    with pytest.raises(ValueError, match=r"'fi' \(the index has 'FI'\)"):
+        run_pooled(tmp_path, {"fi": daily("FI"), "PL": daily("PL")})
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["FI", "zone_run.json"]
 
 
 def test_folders_of_runs_of_one_frame_are_never_zones(tmp_path):

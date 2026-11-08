@@ -39,6 +39,9 @@ panel.zones["FI"]        # Finland's EvaluationReport, as a run of its frame alo
   run_date)` of a plain run, and `save_dir/zone_run.json`, the zone index: the zones in the order first run, which alone tells
   `report` that the folders are zones (sub-folders of a run of one frame never are). A `save_dir` that already holds a run of one
   frame is refused before any fit, and so is a run of one frame into a `save_dir` of zones: a report couldn't tell which to read.
+  A zone whose name differs from an indexed one only in letter case is refused too (one folder on macOS and Windows). The zones
+  whose folders hold results are checked first (a pooled model's resume, their plain models' runs), so a refused resume writes
+  neither the index nor any file of a new zone.
 - **Checks before any fit.** Every model is checked on every zone's frame (the data contract, the predictors, the information set)
   before any model runs, and one warning lists what each `(model, zone)` reads late at `availability="warn"`.
 - **Ensembles** are computed per zone, from the zone's stored forecasts, as in a run of one frame.

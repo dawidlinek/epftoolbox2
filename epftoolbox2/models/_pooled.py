@@ -580,6 +580,22 @@ def run_pooled(pooled: PooledModel, zones: Dict[str, Tuple[BaseModel, Dict[str, 
     return refs
 
 
+def check_resumes(zones: Dict[str, Tuple[BaseModel, Dict[str, Any]]]) -> None:
+    """Prepare each of these zones' members as its run will (`_prepare_run`: its manifest compared with the one on file) and let
+    go of it: what a resume of the pooled model refuses, raised naming the zone, before a run writes any file elsewhere. A
+    preparation that passes writes nothing a run wouldn't (the manifest it compared, the skips decided before any fit)."""
+    for zone, (member, arguments) in zones.items():
+        try:
+            state = member._prepare_run(**run_arguments(**arguments))
+        except (ValueError, TypeError, RuntimeError) as exc:
+            named = _named(zone, exc)
+            if named is exc:
+                raise
+            raise named from exc
+        member._release()
+        state.close()
+
+
 def _named(zone: str, exc: BaseException) -> BaseException:
     """`exc` with its zone named first, of the same type where it can be built from a message alone."""
     if f"zone {zone!r}" in str(exc):
