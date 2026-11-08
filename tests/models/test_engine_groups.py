@@ -6,6 +6,10 @@ cell (tests.md): OLS, LassoCV, Ridge and LEAR; refit None, "7D" and "auto"; one 
 function; `binary_mask` None and "fit"; 1h, 15 min and 1D; the spring and the autumn switch; a plain run, validation + test and
 Fridays; `newest_target` "d-1" and "published"; JSONL and Parquet. The larger grid, the 200-model group and the 1,000-model
 measurement are in `epftoolbox2-research/library_check_step5/engine_groups/`.
+
+These tests check the plumbing, so every fit runs on the model path (`_engine_worker.ENGINE_FIT_PATH = None`, the autouse
+fixture `model_path_fits`): the fits from shared statistics (step 5i) agree with engine off within tolerances, not to the bit,
+and `tests/models/test_engine.py` checks them.
 """
 
 import datetime
@@ -34,6 +38,12 @@ from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 PROVENANCE = ("package_version", "git_sha", "created_at", "updated_at", "record_schema", "kernels")
 PUBLISHED = {"price": Availability.published("13:00", 1)}
+
+
+@pytest.fixture(autouse=True)
+def model_path_fits(monkeypatch):
+    """Every fit of a group on the model path, so engine on equals engine off to the bit."""
+    monkeypatch.setattr(_engine_worker, "ENGINE_FIT_PATH", None)
 
 
 @pytest.fixture(autouse=True)
@@ -864,10 +874,10 @@ def test_a_crash_mid_group_then_resume_equals_fresh(spring, tmp_path, monkeypatc
             raise RuntimeError("planted crash in a member fit")
         return real_member(*args, **kwargs)
 
-    def unit(unit_, tasks, inputs=None):
+    def unit(unit_, tasks, inputs=None, engine=None):
         if isinstance(inputs.model, Crashing) and unit_.period == 3 and unit_.anchor == datetime.date(2023, 3, 27):
             raise RuntimeError("planted crash in a unit fit")
-        return real_unit(unit_, tasks, inputs)
+        return real_unit(unit_, tasks, inputs, engine)
 
     monkeypatch.setattr(
         worker, "_fit_member" if which == "member" else "_fit_unit", member if which == "member" else unit
