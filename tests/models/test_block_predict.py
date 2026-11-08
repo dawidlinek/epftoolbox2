@@ -7,9 +7,10 @@ Fridays only and after a resume, and only the frame's end or a missing input cha
 after the block enters a call.
 
 `KernelModel` stands in for an in-context model (6e): its fit keeps the training rows (the context) and a forecast is the mean of
-the training targets weighted by a Gaussian kernel of the distance to its row, each row on its own. `by_length` and `by_call` make
-it see its call (its length, the mean of a column over its rows) by a tiny amount, so a test can tell whether two calls were the
-same: what a real model's last bits would show.
+the training targets weighted by a Gaussian kernel of the distance to its row, each row on its own, with its row's first two
+standardised values as its coefficients, so a record shows which row it came from. `by_length`, `by_call` and `by_rows` make it
+see its call (its length, the mean of a column over its rows, how many distinct rows it holds) by a tiny amount, so a test can
+tell whether two calls were the same: what a real model's last bits would show.
 """
 
 import datetime
@@ -22,7 +23,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.information_set import Availability, InformationSet
+from epftoolbox2.information_set import Availability, CoBatchResult, CutResult, InformationSet, co_batch_probe
 from epftoolbox2.models import LassoCVModel, LEARModel, NaiveModel, OLSModel, RidgeModel
 from epftoolbox2.models import _worker as worker
 from epftoolbox2.models._calendar import (
@@ -36,6 +37,9 @@ from epftoolbox2.models._calendar import (
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path
+from epftoolbox2.verification import IssueDayCheck, RerunResult, VerifyReport
+from tests.models import adapter_suite as suite
 from tests.synthetic import PREDICTORS, make_market_data
 
 WINDOW = 28
@@ -82,7 +86,8 @@ class KernelModel(BaseModel):
     """A numpy in-context regressor: the fit is the training rows, a forecast the kernel-weighted mean of their targets, each
     row on its own (`_kernel_mean`), so one at a time and in a block give the same bits. Every block call's standardised rows
     are kept in `calls` (this process's runs, in order). `by_length` adds that times the call's row count to each of its
-    predictions and `by_call` that times the mean of its second column (wind)."""
+    predictions, `by_call` that times the mean of its second column and `by_rows` that times the number of distinct rows it
+    holds. A forecast's coefficients are its row's first two standardised values."""
 
     calls: List[np.ndarray] = []
 
@@ -94,6 +99,7 @@ class KernelModel(BaseModel):
         bandwidth=2.0,
         by_length=0.0,
         by_call=0.0,
+        by_rows=0.0,
         block_predict=True,
         **kwargs,
     ):
@@ -101,15 +107,17 @@ class KernelModel(BaseModel):
         self.bandwidth = bandwidth
         self.by_length = by_length
         self.by_call = by_call
+        self.by_rows = by_rows
         self.block_predict = block_predict
 
     @property
     def _model_kwargs(self):
-        # The worker rebuilds the model from these: `block_predict` must be one of them.
+        # `block_predict` reaches the workers through their config (the parent decides); here it is a parameter as any.
         return {
             "bandwidth": self.bandwidth,
             "by_length": self.by_length,
             "by_call": self.by_call,
+            "by_rows": self.by_rows,
             "block_predict": self.block_predict,
         }
 
@@ -126,7 +134,7 @@ class KernelModel(BaseModel):
         return float(weights @ context_y / weights.sum())
 
     def _predict_fitted(self, fitted, test_x):
-        return self._kernel_mean(fitted, test_x[0]), []
+        return self._kernel_mean(fitted, test_x[0]), [float(value) for value in test_x[0, :2]]
 
     def _predict_block(self, fitted, rows):
         type(self).calls.append(rows.copy())
@@ -135,7 +143,10 @@ class KernelModel(BaseModel):
             seen += self.by_length * len(rows)
         if self.by_call:
             seen += self.by_call * float(rows[:, 1].mean())
-        return np.array([self._kernel_mean(fitted, row) + seen for row in rows]), [[] for _ in rows]
+        if self.by_rows:
+            seen += self.by_rows * len(np.unique(rows, axis=0))
+        predictions = np.array([self._kernel_mean(fitted, row) + seen for row in rows])
+        return predictions, [[float(value) for value in row[:2]] for row in rows]
 
 
 def kernel(refit="7D", **kwargs):
@@ -469,21 +480,50 @@ def test_no_row_after_the_block_and_no_target_reaches_a_call(market):
 # ---------------------------------------------------------------------------
 
 
-class Short(KernelModel):
+class OwnFit(KernelModel):
+    """The kernel fit under another class, all four methods its own (`_worker.block_calls` needs `_predict_block` where
+    `_predict_fitted` is), so that the variants below change one of them."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
+
+    def _fit_model(self, train_x, train_y):
+        return super()._fit_model(train_x, train_y)
+
+    def _predict_fitted(self, fitted, test_x):
+        return super()._predict_fitted(fitted, test_x)
+
+    def _predict_block(self, fitted, rows):
+        return super()._predict_block(fitted, rows)
+
+
+class Short(OwnFit):
+    def _fit_predict(self, train_x, train_y, test_x):
+        return super()._fit_predict(train_x, train_y, test_x)
+
+    def _fit_model(self, train_x, train_y):
+        return super()._fit_model(train_x, train_y)
+
+    def _predict_fitted(self, fitted, test_x):
+        return super()._predict_fitted(fitted, test_x)
+
     def _predict_block(self, fitted, rows):
         predicted, coefficients = super()._predict_block(fitted, rows)
         return predicted[:-1], coefficients
 
 
-class Refuses(KernelModel):
-    def _fit_model(self, train_x, train_y):
-        raise ValueError("degenerate")
-
+class Refuses(OwnFit):
     def _fit_predict(self, train_x, train_y, test_x):
         return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
 
+    def _fit_model(self, train_x, train_y):
+        raise ValueError("degenerate")
+
     def _predict_fitted(self, fitted, test_x):
         return super()._predict_fitted(fitted, test_x)
+
+    def _predict_block(self, fitted, rows):
+        return super()._predict_block(fitted, rows)
 
 
 def test_a_call_that_returns_another_shape_raises_and_a_refused_fit_is_every_forecast_s_fit_error(market):
@@ -528,3 +568,216 @@ def test_the_fake_is_ok_under_the_co_batch_check_and_one_that_reads_its_call_a_l
     assert kernel_check.co_batch.probe.forecasts == 24 and kernel_check.co_batch.control.moved
     assert table.loc["Sees", ["changed", "rerun", "co_batch", "status"]].tolist() == [24, 0, 24, "leak"]
     assert sees_check.co_batch.probe.max_abs_change > 1e-9  # the probe's atol
+
+
+def test_a_forecast_that_depends_on_which_days_its_call_holds_is_a_leak_on_the_frame_cut_after_its_day(market):
+    """The co-batch check also runs the issue day on the frame cut after its date, the rows a run on that day has, and compares
+    its forecasts with the whole frame's at atol 0 (review 6d): a call holds the block's later days the frame has, so a model
+    adding 1e-3 times the number of distinct rows of its call moves when they are gone, though no value it reads is unknown at
+    the issue time. The plain kernel, each row on its own, gives the same bits on the cut frame. `co_batch_probe` alone does
+    the same."""
+    pipeline = ModelPipeline(information_set=InformationSet(rules=RULES))
+    pipeline.add_model(kernel(predictors=WITH_PRICE, name="Kernel"))
+    pipeline.add_model(kernel(predictors=WITH_PRICE, by_rows=1e-3, name="Rows"))
+    report = pipeline.verify(market, WEEK[0], WEEK[0], days=1)
+    table = report.table().set_index("model")
+    plain, rows = report.checks
+
+    assert table.loc["Kernel", ["changed", "rerun", "co_batch", "status"]].tolist() == [0, 0, 0, "ok"]
+    assert plain.co_batch.cut.ok and plain.co_batch.cut.forecasts == 24
+    assert table.loc["Rows", ["changed", "rerun", "co_batch", "status"]].tolist() == [0, 0, 24, "leak"]
+    assert rows.co_batch.probe.ok and len(rows.co_batch.cut.changed) == 24
+    assert any(
+        "differ when the frame ends on 2023-03-20, as a run on that day has it" in line for line in report.problems()
+    )
+
+    information = InformationSet(rules=RULES)
+    alone = co_batch_probe(kernel(predictors=WITH_PRICE, by_rows=1e-3), market, WEEK[0], information)
+    assert alone.probe.ok and not alone.cut.ok and not alone.ok
+    assert co_batch_probe(kernel(predictors=WITH_PRICE), market, WEEK[0], information).ok
+    # One row at a time there is no block call, so nothing to cut.
+    single = co_batch_probe(kernel(predictors=WITH_PRICE, block_predict=False), market, WEEK[0], information)
+    assert single.items == [] and single.cut is None
+
+
+def test_the_adapter_suite_s_verify_passes_the_kernel_and_fails_one_that_counts_its_call(market):
+    """`adapter_suite.check_verify`, which 6e's families call: the kernel is ok on the block's first, middle and last (spring)
+    day, naming the six other days each time, and the model that counts its call's rows fails on the cut frame."""
+    information = InformationSet(rules=RULES)
+
+    def make(name, **params):
+        return kernel(predictors=WITH_PRICE, name=name, **params)
+
+    suite.check_verify(make, market, information, [WEEK[0], "2023-03-22", WEEK[1]], items=6)
+    with pytest.raises(AssertionError, match="differ when the frame ends on 2023-03-20"):
+        suite.check_verify(lambda name: make(name, by_rows=1e-3), market, information, [WEEK[0]])
+
+
+def test_a_move_on_the_cut_frame_goes_through_the_rerun_noise_margin():
+    """As every other move: a leak beyond 100 times the day's rerun difference, inconclusive within it."""
+
+    def check(change, noise):
+        cut = CutResult(WEEK[0], 24, [(0, 1)], change)
+        rerun = RerunResult(WEEK[0], 24, [(0, 1)] if noise else [], noise, [], True)
+        probe = co_batch_probe.__globals__["ProbeResult"](WEEK[0], 24, [], 0.0, {}, [])
+        batch = CoBatchResult(WEEK[0], ["2023-03-21"], probe, None, cut)
+        return VerifyReport([WEEK[0]], [IssueDayCheck("M", WEEK[0], 1, probe, rerun=rerun, co_batch=batch)])
+
+    assert check(5e-5, 1e-6).status("M") == "inconclusive"  # 50 times
+    assert check(5e-5, 1e-7).status("M") == "leak"  # 500 times
+    assert check(5e-5, 0.0).status("M") == "leak"
+    assert check(5e-5, 0.0).table().iloc[0]["co_batch"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Who decides, and with whose estimator (review 6d)
+# ---------------------------------------------------------------------------
+
+
+class Nearest(KernelModel):
+    """Another estimator, the target of the nearest training row, that inherits `_predict_block`: a block call would give it
+    the kernel's predictions from its own fit, so it predicts one row at a time."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
+
+    def _fit_model(self, train_x, train_y):
+        return train_x.copy(), train_y.copy()
+
+    def _predict_fitted(self, fitted, test_x):
+        context_x, context_y = fitted
+        nearest = np.argmin(((context_x - test_x[0]) ** 2).sum(axis=1))
+        return float(context_y[nearest]), [float(value) for value in test_x[0, :2]]
+
+
+class BlockOnly(KernelModel):
+    """Overrides `_predict_block` alone, so a block call would forecast otherwise than `_predict_fitted` (and refit=None): it
+    predicts one row at a time, the kernel's forecasts."""
+
+    def _predict_block(self, fitted, rows):
+        predictions, coefficients = super()._predict_block(fitted, rows)
+        return predictions + 1.0, coefficients
+
+
+def test_predict_block_is_used_only_from_the_class_that_defines_predict_fitted(market):
+    """`_worker.block_calls`: a class's `_predict_block` is called only where it is defined in the class that defines
+    `_predict_fitted`; else every forecast is predicted one row at a time, with the class's own estimator, and the class says it
+    doesn't predict together. A class that defines all four (`OwnFit`) block-predicts."""
+    for cls in (Nearest, BlockOnly):
+        model = cls(refit="1D")
+        assert model._predicts_together is False and model._co_batch_items(WEEK[0]) == [], cls.__name__
+        block = predictions(model.run(market, *WEEK, horizon=1)._results)
+        assert not KernelModel.calls, cls.__name__
+        assert block == predictions(cls(refit="1D", block_predict=False).run(market, *WEEK, horizon=1)._results)
+    nearest = predictions(Nearest(refit="1D").run(market, *WEEK, horizon=1)._results)
+    alone = predictions(Nearest(refit=None).run(market, *WEEK, horizon=1)._results)
+    assert {key: value[:2] for key, value in nearest.items()} == {key: value[:2] for key, value in alone.items()}
+    one_row = predictions(kernel(block_predict=False).run(market, *WEEK, horizon=1)._results)
+    assert predictions(BlockOnly(refit="7D").run(market, *WEEK, horizon=1)._results) == one_row
+    assert all(nearest[key][0] != one_row[key][0] for key in nearest)
+
+    own = OwnFit(refit="7D")
+    assert own._predicts_together is True
+    assert predictions(own.run(market, *WEEK, horizon=1)._results) == one_row and KernelModel.calls
+
+
+class Forgets(KernelModel):
+    """Leaves `block_predict` out of `_model_kwargs`, as a subclass with parameters of its own may."""
+
+    @property
+    def _model_kwargs(self):
+        return {"bandwidth": self.bandwidth}
+
+
+def test_the_model_in_the_parent_decides_and_its_manifest_records_it(market, tmp_path):
+    """The workers' models are rebuilt from `_model_kwargs`, with refit=None; whether a unit block-predicts travels in their
+    config, so `block_predict=False` holds whatever `_model_kwargs` holds. The manifest's `model_params` records it, so a
+    resume with the other setting is refused; a core model's has no such key."""
+    Forgets(refit="7D", block_predict=False).run(market, WEEK[0], WEEK[0], horizon=1)
+    assert not KernelModel.calls
+    Forgets(refit="7D").run(market, WEEK[0], WEEK[0], horizon=1)
+    assert KernelModel.calls
+
+    path = tmp_path / "m.jsonl"
+    Forgets(refit="7D").run(market, *WEEK, horizon=1, save_to=str(path))
+    assert json.loads(manifest_path(path).read_text())["model_params"] == {
+        "scaler": "standard",
+        "bandwidth": 2.0,
+        "block_predict": True,
+    }
+    with pytest.raises(ManifestMismatchError, match="model_params"):
+        Forgets(refit="7D", block_predict=False).run(market, *WEEK, horizon=1, save_to=str(path))
+    nearest = tmp_path / "nearest.jsonl"
+    Nearest(refit="7D").run(market, *WEEK, horizon=1, save_to=str(nearest))
+    assert json.loads(manifest_path(nearest).read_text())["model_params"]["block_predict"] is False
+    core = tmp_path / "ols.jsonl"
+    OLSModel(PREDICTORS, WINDOW, refit="7D").run(market, *WEEK, horizon=1, save_to=str(core))
+    assert json.loads(manifest_path(core).read_text())["model_params"] == {"scaler": "standard"}
+
+
+# ---------------------------------------------------------------------------
+# Coefficients (review 6d)
+# ---------------------------------------------------------------------------
+
+
+def test_each_record_carries_its_own_row_s_coefficients(market):
+    """The fake's coefficients are its row's first two standardised values: every forecast of a unit has its own, and they are
+    those of the forecast predicted one row at a time."""
+    records = kernel().run(market, *WEEK, horizon=1)._results
+    by_unit = {}
+    for record in records:
+        by_unit.setdefault((record["hour"], record["horizon"]), []).append(tuple(record["coefficients"]))
+    assert all(len(set(rows)) == len(rows) > 1 for rows in by_unit.values())
+    alone = kernel(block_predict=False).run(market, *WEEK, horizon=1)._results
+    assert {key: value[1] for key, value in predictions(records).items()} == {
+        key: value[1] for key, value in predictions(alone).items()
+    }
+
+
+class Arrays(OwnFit):
+    """Gives each forecast's coefficients as a numpy array: 1-D, or 2-D (one row) with `two_d`."""
+
+    def __init__(self, *args, two_d=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.two_d = two_d
+
+    @property
+    def _model_kwargs(self):
+        return {**super()._model_kwargs, "two_d": self.two_d}
+
+    def _shaped(self, coefficients):
+        values = np.array(coefficients)
+        return values[None, :] if self.two_d else values
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
+
+    def _fit_model(self, train_x, train_y):
+        return super()._fit_model(train_x, train_y)
+
+    def _predict_fitted(self, fitted, test_x):
+        prediction, coefficients = super()._predict_fitted(fitted, test_x)
+        return prediction, self._shaped(coefficients)
+
+    def _predict_block(self, fitted, rows):
+        predicted, coefficients = super()._predict_block(fitted, rows)
+        return predicted, [self._shaped(row) for row in coefficients]
+
+
+@pytest.mark.parametrize("block_predict", [True, False])
+def test_coefficients_are_a_flat_list_of_numbers_or_refused_by_name(market, tmp_path, block_predict):
+    """A 1-D array is written as its list, as a list would be; a 2-D one raises naming the model and the method, where the
+    results file would have failed with a bare TypeError. Both paths of a refit unit: the block call and one row at a time."""
+    flat = Arrays(refit="7D", block_predict=block_predict).run(market, *WEEK, horizon=1)._results
+    assert all(type(record["coefficients"]) is list for record in flat)
+    assert keyed(flat) == keyed(kernel(block_predict=block_predict).run(market, *WEEK, horizon=1)._results)
+    path = tmp_path / "arrays.jsonl"
+    Arrays(refit="7D", block_predict=block_predict).run(market, *WEEK, horizon=1, save_to=str(path))
+    assert sorted(json.dumps(record, sort_keys=True) for record in flat) == sorted(
+        json.dumps(json.loads(line), sort_keys=True) for line in lines(path)
+    )
+    method = "_predict_block" if block_predict else "_predict_fitted"
+    with pytest.raises(
+        RuntimeError, match=rf"Arrays\.{method} returned coefficients as a 2-D float64 array of shape \(1, 2\)"
+    ):
+        Arrays(refit="7D", block_predict=block_predict, two_d=True).run(market, *WEEK, horizon=1)
