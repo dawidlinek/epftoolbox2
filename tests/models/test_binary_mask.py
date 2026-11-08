@@ -748,3 +748,22 @@ def test_scale_binary_ignores_the_rule():
         keyed(ols(scaler=scaler, binary_mask=rule).run(data, S, E, horizon=2)._results) for rule in ("fit", None)
     )
     assert own == plain
+
+
+def resumed_and_fresh(binary_mask, tmp_path):
+    """Records over [S, E] of a run over [S+5, E] resumed over [S, E] into the same file, and of a fresh [S, E] run.
+    `turning` is 0/1 on S's rows and continuous from S+3, so a mask read on S+5's first day differs from one read on S's."""
+    later = shift(S, 5)
+    data = market("1h", "2023-01-20", 85, shift(later, -2))
+    fresh, resumed = tmp_path / "fresh" / "m.jsonl", tmp_path / "resumed" / "m.jsonl"
+    ols(binary_mask=binary_mask).run(data, S, E, horizon=2, save_to=str(fresh))
+    ols(binary_mask=binary_mask).run(data, later, E, horizon=2, save_to=str(resumed))
+    ols(binary_mask=binary_mask).run(data, S, E, horizon=2, save_to=str(resumed))
+    return lines(resumed, "day_in_test"), lines(fresh, "day_in_test")
+
+
+def test_fit_resumed_over_an_earlier_start_equals_the_fresh_run(tmp_path):
+    """The specific half of the xfail in `tests/test_known_issues.py`: with `binary_mask="fit"` no mask depends on the start."""
+    resumed, fresh = resumed_and_fresh("fit", tmp_path)
+    assert len(fresh) > 0
+    assert resumed == fresh

@@ -99,3 +99,26 @@ def test_a_forecast_is_the_same_whatever_day_the_test_starts_on(monkeypatch):
     early, late = run(SOLAR[0]), run("2023-03-18")
     assert late.keys() <= early.keys()
     assert {key: early[key] for key in late} == late
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="a plain run resumed over an earlier test start mixes masks read on two first days in one file, without an error",
+)
+def test_a_plain_run_resumed_over_an_earlier_start_equals_the_fresh_run(monkeypatch, tmp_path):
+    """Default `binary_mask=None`, fixed list, no validation or predictor function: a run over [S+5, E] and then one over [S, E]
+    into the same `save_to` resumes without a word. The stored records read their mask on S+5, the new ones on S, so with
+    `turning` 0/1 on S and continuous from S+3 (`OLSModel(MASKED, 21)`, spring frame) 286 of 812 records over [S, E] differ from
+    a fresh [S, E] run. Correct is the fresh run's records or a refusal. `binary_mask="fit"` gives 0 differences
+    (`tests/models/test_binary_mask.py`)."""
+    from tests.models.test_binary_mask import InProcessPool, resumed_and_fresh
+
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
+
+    resumed, fresh = resumed_and_fresh(None, tmp_path)
+
+    assert len(fresh) > 0
+    assert resumed == fresh, f"{len(set(resumed) ^ set(fresh)) // 2} of {len(fresh)} records differ from the fresh run"
