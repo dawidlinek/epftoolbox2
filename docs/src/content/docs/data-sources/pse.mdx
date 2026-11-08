@@ -23,11 +23,11 @@ pipeline = (
     .add_source(PseSource(datasets=["kse-load", "csdac-pln"]))
     .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
     .add_transformer(ResampleTransformer(freq="1h"))
-    .add_transformer(LagTransformer(columns=["csdac_pln", "load_actual"], lags=[1, 2, 7], freq="day"))
-    .add_transformer(LagTransformer(columns=["load_fcst"], lags=[-1], freq="day"))
+    .add_transformer(LagTransformer(columns=["pse_csdac_pln", "pse_load_actual"], lags=[1, 2, 7], freq="day"))
+    .add_transformer(LagTransformer(columns=["pse_load_fcst"], lags=[-1], freq="day"))
 )
 df = pipeline.run("2025-01-01", "2025-03-01")
-# csdac_pln, load_actual, load_fcst, csdac_pln_d-1, ..., load_actual_d-2, ..., load_fcst_d+1
+# pse_csdac_pln, pse_load_actual, pse_load_fcst, pse_csdac_pln_d-1, ..., pse_load_actual_d-2, ..., pse_load_fcst_d+1
 ```
 
 ## Parameters
@@ -36,7 +36,10 @@ df = pipeline.run("2025-01-01", "2025-03-01")
 |-----------|------|----------|---------|-------------|
 | `datasets` | list[str] \| None | No | `["kse-load", "csdac-pln"]` | Datasets to load, from the table below |
 | `columns` | list[str] \| None | No | `None` | Columns to keep. `None` = every column of the datasets, for `his-wlk-cal` `demand`, `wi`, `pv` and `jg`. A column of a dataset that is not in `datasets` raises |
-| `prefix` | str | No | `""` | Column prefix, `{prefix}_{column}` |
+| `prefix` | str | No | `"pse"` | Column prefix, `{prefix}_{column}`. Every column is prefixed by default, see below |
+| `pdgsz_cutoff` | str | No | `"19:00"` | `"HH:MM"` in Europe/Warsaw on the day before the delivery day: `pdgsz` keeps the latest version of an hour stamped at or before it. Part of the cache key; the rule of `usage_fcst` is published at this time |
+
+**Why a prefix by default.** PSE's `load_actual` has the name of ENTSO-E's column, and the built-in default rules are by name. Only a `Workflow` applies a source's rules (`with_source_rules`); a plain `InformationSet` or `ModelPipeline(issue_time=...)` would read an unprefixed PSE `load_actual` with the ENTSO-E rule (known 1 h after the period), while PSE publishes it at 13:00 on D+1. With the prefix no PSE name falls to a default rule. The tables below name the columns without the prefix; with the default they are `pse_load_actual`, `pse_csdac_pln`, ... Setting `prefix=""` is yours to guard.
 
 `output_columns()` lists the names `fetch` returns. The output follows the dataset order of `datasets`, and within a dataset the order of the table.
 
@@ -66,13 +69,18 @@ PSE's tables not offered yet, because their publication lag changed during the h
 - `business_date` is the local date of the period's start. The source asks for the local days that hold `[start, end)` and clips to the range, so a sub-range gives the values of a larger one.
 - `pdgsz` is hourly and stamps the hour's start. Its value is repeated over the four quarter-hours of the hour, so all datasets share the 15-minute grid. `ResampleTransformer(freq="1h")` turns the frame into an hourly one (mean).
 
-### `pdgsz`: one value, the first version
+### `pdgsz`: the version stamped by the cutoff
 
-The table keeps every version of an hour (`valid_from_ts`, `valid_to_ts`), about 36 per hour on average. The source takes each hour's **first** version, by its UTC publication stamp: a later version can be written on the delivery day itself, after a forecast issued earlier.
+The table keeps every version of an hour (`valid_from_ts`, `valid_to_ts`, a UTC publication stamp). The source keeps, per hour, the **latest version stamped at or before `pdgsz_cutoff`** (Warsaw time) on the day before the delivery day, and an hour with none is NaN. The table has had two regimes:
+
+- **Until about spring 2025** (seen from June 2024 to at least 2025-03-30): one version per hour, written on the delivery day itself, about 22:20 to 23:35. No version exists on D-1, so these hours are **NaN under any cutoff on D-1**: the value was not known the day before, and reading it would be look-ahead.
+- **From June 2025** (seen from 2025-06-02): 35 to 44 versions per hour, the first about 15:51 to 15:58 on D-1. A quarter of the hours get their first version after 16:00, the latest at 18:52 in a year, hence the default cutoff 19:00.
+
+Between those dates check how many hours are NaN (`df["pse_usage_fcst"].isna().mean()`) before you use the column. The kept version is a `snapshot`: the table as it stood at the cutoff.
 
 ### `publication_ts` is not used
 
-Every PSE row has a `publication_ts`, but it is the stamp of the **last write**: rows reloaded in bulk show the reload time (`kse-load` rows were stamped after the end of D+1 on 37.7 % of business days). The source doesn't use it, except to order the versions of `pdgsz`, and the rules below don't read it.
+Every PSE row has a `publication_ts`, but it is the stamp of the **last write**: rows reloaded in bulk show the reload time (`kse-load` rows were stamped after the end of D+1 on 37.7 % of business days). The source doesn't use it, except for the stamps of the `pdgsz` versions, which are written one by one, and the other rules below don't read it.
 
 ## Availability rules
 
@@ -80,12 +88,12 @@ Every PSE row has a `publication_ts`, but it is the stamp of the **last write**:
 
 | Column | Available from | [Class](/epftoolbox2/model-pipeline/information-set/#vintage-classes) |
 |--------|----------------|-------|
-| `load_fcst` | 09:00 on D-1 | `last_write_stamp` |
-| `csdac_pln`, `rce_pln` | 15:00 on D-1 (over 365 days: median 13:47, 99th percentile 14:59, latest 18:00) | `last_write_stamp` |
-| `usage_fcst` | 16:00 on D-1 (a quarter of the hours have their first version later, the latest at 19:00 in a year) | `row_stamp` |
+| `load_fcst` | 10:00 on D-1, the ENTSO-E rule for the same day-ahead forecast. Not measured: the row stamp can't give a first-seen time, since the rows also hold `load_actual` and are rewritten. It is the conservative choice until first-seen times are measured | `last_write_stamp` |
+| `csdac_pln`, `rce_pln` | 15:00 on D-1 (over 365 days: median 13:47, 99th percentile 14:59, latest 18:00 on D-1; sample rows stamped about 13:54 and never rewritten) | `snapshot` |
+| `usage_fcst` | `pdgsz_cutoff` on D-1 (19:00 by default), built from the parameter so the rule and the data can't disagree | `snapshot` |
 | `load_actual`, the `his-wlk-cal` columns, the `flow_*` columns | 13:00 on D+1 | `last_write_stamp` |
 
-So a forecast issued at 11:45 on D sees `load_fcst_d+1`, the prices of D, `csdac_pln_d-1`, and the actuals up to `load_actual_d-2`; it doesn't see `load_actual_d-1` (known at 13:00 on D). `load_actual` of PSE replaces the ENTSO-E default of that name, with a source in the pipeline. Give the sources a `prefix` when you combine PSE and ENTSO-E columns.
+So a forecast issued at 11:45 on D sees `pse_load_fcst_d+1`, the prices of D, `pse_csdac_pln_d-1`, and the actuals up to `pse_load_actual_d-2`; it doesn't see `pse_load_actual_d-1` (known at 13:00 on D).
 
 A backtest reads the last-written value of a `last_write_stamp` column, not what was out at the issue time, so a model that reads one can look better than it would have been live (see [vintage classes](/epftoolbox2/model-pipeline/information-set/#vintage-classes)).
 
@@ -93,7 +101,8 @@ A backtest reads the last-written value of a `last_write_stamp` column, not what
 
 - One request per dataset and 31 local days, with `$filter` on `business_date`, `$first=10000` rows a page and `nextLink` followed from page to page (a year of `csdac-pln`, 35 040 rows, takes about 3 s). A `nextLink` to another host is refused.
 - The generic User-Agent `epftoolbox2` is sent. 429, 5xx and network errors are retried with backoff and `Retry-After`; any other error raises `PseApiError`, so a failed request never becomes a silent gap.
-- `get_cache_config()` holds the datasets, the selected columns, the prefix and a schema version, so the per-source cache of the [data pipeline](/epftoolbox2/data-pipeline/caching/) is used and a change of any of them is a new entry.
+- `get_cache_config()` holds the datasets, the selected columns, the prefix, `pdgsz_cutoff` and a schema version, so the per-source cache of the [data pipeline](/epftoolbox2/data-pipeline/caching/) is used and a change of any of them is a new entry.
+- **Two caches can differ.** The cache never records anything newer than two days, so a PSE bulk reload (which rewrites old rows) after that is not seen by a cache already filled: two machines, or one machine at two times, can hold different values for the same hours. That is a reproducibility gap, not a look-ahead. Clear the source's cache to take the current values.
 
 ## YAML
 
@@ -106,6 +115,7 @@ sources:
     - csdac-pln
     columns: null
     prefix: pse
+    pdgsz_cutoff: '19:00'
 ```
 
 Attribution: source: PSE.

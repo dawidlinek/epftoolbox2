@@ -377,7 +377,8 @@ class PseSource(DataSource):
         self,
         datasets: Optional[List[str]] = None,  # None = ["kse-load", "csdac-pln"]
         columns: Optional[List[str]] = None,  # None = every column of the datasets
-        prefix: str = "",
+        prefix: str = "pse",
+        pdgsz_cutoff: str = "19:00",  # "HH:MM" Warsaw on D-1
     ): ...
     def output_columns(self) -> List[str]: ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), 15-minute grid

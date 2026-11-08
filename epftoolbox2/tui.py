@@ -438,9 +438,16 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "prefix",
-            "description": "Column name prefix (optional)",
+            "description": "Column name prefix (keep one: PSE load_actual shares ENTSO-E's name)",
             "required": False,
-            "default": "",
+            "default": "pse",
+            "kind": "text",
+        },
+        {
+            "name": "pdgsz_cutoff",
+            "description": "pdgsz: keep the version stamped by this time (HH:MM Warsaw) on the day before",
+            "required": False,
+            "default": "19:00",
             "kind": "text",
         },
     ],
