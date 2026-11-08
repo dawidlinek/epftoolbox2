@@ -384,3 +384,31 @@ def test_another_model_s_check_is_ignored(market, monkeypatch):
     used = second.run(market, *TEST, horizon=2, checked=of_second)
     assert calls == ["b"] and texts(used._results) == texts(ignored._results)
 
+
+def test_a_task_never_fits_with_the_process_s_model(market, monkeypatch):
+    """A task runs with its inputs whole, or the pool's whole: inputs without a model raise, whatever model the process's
+    globals hold, and `_fit_member` has no model of its own to fall back on."""
+    import inspect
+
+    plain, plain_jobs = inputs_of(models()[0], market)
+    refit, refit_jobs = inputs_of(models()[2], market)
+    other, _ = inputs_of(models()[1], market)
+    worker._worker_init(other.hour_arrays, other.expanded, other.config, OLSModel, {})  # the process's model
+    day_tasks, block_tasks = next(iter(plain_jobs.values())), next(iter(refit_jobs.values()))
+    for run, tasks, inputs in (
+        (worker._run_day, day_tasks, plain),
+        (worker._run_block, block_tasks, refit),
+        (lambda tasks, inputs: worker._fit_one_numpy(*tasks[0], inputs), day_tasks, plain),
+        (
+            lambda tasks, inputs: worker._fit_unit(worker._units_of(inputs.config, tasks[0])[0], tasks, inputs),
+            block_tasks,
+            refit,
+        ),
+    ):
+        assert run(tasks, inputs)  # whole: its own records
+        with pytest.raises(ValueError, match="no model"):
+            run(tasks, inputs._replace(model=None))
+    assert inspect.signature(worker._fit_member).parameters["model"].default is inspect.Parameter.empty
+    monkeypatch.setattr(worker, "_W_MODEL", None)  # a process no `_worker_init` set up
+    with pytest.raises(ValueError, match="no model"):
+        worker._run_day(day_tasks)

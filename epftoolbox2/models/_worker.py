@@ -115,6 +115,18 @@ def _pool_inputs() -> TaskInputs:
     return TaskInputs(_W_HOUR_ARRAYS, _W_EXPANDED_PREDS, _W_CONFIG, _W_MODEL)
 
 
+def _inputs_of(inputs: Optional[TaskInputs]) -> TaskInputs:
+    """The inputs a task function runs with: `inputs` whole, or without them the pool's, all four of what `_worker_init` loaded,
+    never some of each. A ValueError if they have no model (no `_worker_init` in this process, or inputs built without one):
+    a fit never falls back to another model."""
+    resolved = _pool_inputs() if inputs is None else inputs
+    if resolved.model is None:
+        raise ValueError(
+            "a task's inputs have no model: pass TaskInputs with one (task_inputs), or run it in a process _worker_init set up"
+        )
+    return resolved
+
+
 def training_rows(days: np.ndarray, day: int, training_window: int, hz: int, newest: int = -1) -> slice:
     """The rows the task (`hz`, `day`) may train on, in a period whose rows are on `days`, which are sorted: those whose date is in
     `training_span`, `newest` being the day of the newest target relative to `day`. Rows are chosen by date, since a date can hold
@@ -290,7 +302,7 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskIn
     skipped with the first failing member's reason, tagged with its window. Member i's forecast is that of the model with
     `training_window` its window, to the bit. With one window the body runs once, as it always did.
     """
-    inputs = _pool_inputs() if inputs is None else inputs
+    inputs = _inputs_of(inputs)
     arrays = inputs.hour_arrays[hour]
     cfg = inputs.config
     day = cfg["offset"] + day_in_test
@@ -375,16 +387,15 @@ def _fit_member(
     list_id,
     predictors,
     scalable_mask,
-    model=None,
+    model,
 ) -> Union[Tuple[float, list, Dict], str]:
     """One training window's forecast of the task (`hour`, `hz`, day id `day`) issued from row `test`: (the prediction in target
     units, the coefficients, a matching list's record fields), or a skip reason. Its rows are `member_rows`: those of
     `training_span` with the member's window (`member_window`: `"expanding"` from the frame's first date), with the task's newest
-    target. `model` fits it (`_fit_predict`), the pool's if None.
+    target. `model` fits it (`_fit_predict`): the task's own, from its inputs, never one of the process's.
 
     `scalable_mask` None (`binary_mask="fit"`) is read here from those rows in the list's columns, before the matching and the
     finite filters, as `_fit_unit` reads a refit unit's: which columns are binary is then a function of this fit's span alone."""
-    model = _W_MODEL if model is None else model
     days = arrays["days"]
     train = member_rows(days, day, member, hz, newest)
 
@@ -475,7 +486,7 @@ def _row_value(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskInputs
     """Forecast one task of a model that fits nothing (`NaiveModel`): its one predictor's value on the row the forecast is
     issued from, the last row dated on the issue day, as it stands. No training row, scaler or mask is read, so a task needs
     no history. Returns the record, with no coefficients, or a skip reason, as `_fit_one_numpy` does."""
-    inputs = _pool_inputs() if inputs is None else inputs
+    inputs = _inputs_of(inputs)
     arrays = inputs.hour_arrays[hour]
     cfg = inputs.config
     day = cfg["offset"] + day_in_test
@@ -539,7 +550,7 @@ def skip_record(
 
 
 def _run_task(task: tuple, inputs: Optional[TaskInputs] = None) -> Union[Dict, str]:
-    inputs = _pool_inputs() if inputs is None else inputs
+    inputs = _inputs_of(inputs)
     try:
         # A model that fits nothing has `config["fits"]` False and forecasts from the issue row alone.
         return _fit_one_numpy(*task, inputs) if inputs.config.get("fits", True) else _row_value(*task, inputs)
@@ -553,7 +564,7 @@ def _run_task(task: tuple, inputs: Optional[TaskInputs] = None) -> Union[Dict, s
 def _run_day(tasks: list, inputs: Optional[TaskInputs] = None) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
     """Run one test day's tasks, with `inputs` (the pool's if None). Returns (results, [(task, skip reason)]); unexpected errors
     raise TaskFailed."""
-    inputs = _pool_inputs() if inputs is None else inputs
+    inputs = _inputs_of(inputs)
     threads = inputs.config["threads_per_process"]
     results, skipped = [], []
 
@@ -605,7 +616,7 @@ def _fit_unit(
     value by value, so a forecast is the same whichever other forecasts of its unit are run with it: one cut short and resumed
     equals a fresh one.
     """
-    inputs = _pool_inputs() if inputs is None else inputs
+    inputs = _inputs_of(inputs)
     cfg = inputs.config
     model = inputs.model
     hour, hz = unit.period, unit.horizon
@@ -727,7 +738,7 @@ def _run_block(tasks: list, inputs: Optional[TaskInputs] = None) -> Tuple[List[D
     window, as `_fit_one_numpy` does. With `refit="auto"` the block is one of the coarsest member's rule (`config["refit"]["rule"]`)
     and a finer member has a unit per anchor of its own in it; the record's `refit_anchor` is the block's, the oldest fit the
     forecast uses, and its `newest_target_day` the newest of its members'."""
-    inputs = _pool_inputs() if inputs is None else inputs
+    inputs = _inputs_of(inputs)
     cfg = inputs.config
     units: Dict[FitUnit, List[tuple]] = {}
     for task in tasks:
