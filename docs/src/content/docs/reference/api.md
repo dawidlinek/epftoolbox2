@@ -232,11 +232,18 @@ class EvaluationReport:
     def by_price_level(
         self, spike: Optional[float] = None        # Price from which a period is a spike; default min(300, 99th percentile of the actuals)
     ) -> pd.DataFrame: ...                          # model, price_level (negative / normal / spike), forecasts, metrics; attrs: spike_threshold, spike_rule, spike_quantile
+    def by_column(
+        self,
+        column: str,                               # A column of source_data, joined at each forecast's target date and period
+        bins: Optional[Sequence[float]] = None,    # Increasing edges, intervals closed on the left; None: the values themselves
+    ) -> pd.DataFrame: ...                          # model, <column>, forecasts, metrics; attrs: by_column, bins, no_value
     def aggregate(
         self,
-        freq: str = "1D",                          # The only aggregation so far
-        agg: str = "max",                          # "max", "min", "mean" or "spread" (max - min) of the day
-    ) -> EvaluationReport: ...                      # Whole days only; hour 0, freq "1D"; dropped days in its forecast_counts()
+        freq: str = "1D",                          # "1D": daily series; "1h": hourly ones from 15-minute results
+        agg: str = "max",                          # "max", "min", "mean", "spread" (max - min); at 1D also "peak", "offpeak"
+        peak_hours: Tuple[int, int] = (8, 20),     # Local hours of the peak block, the end left out (08:00-19:59)
+    ) -> EvaluationReport: ...                      # Whole days (hours) only; dropped ones in its forecast_counts() as incomplete_day (incomplete_hour)
+    def error_split(self, period: str = "1h") -> pd.DataFrame: ...  # model, days, forecasts, mse, level, hour, quarter (15-minute results)
     def join(self, other: EvaluationReport) -> EvaluationReport: ...  # Models of both; refs kept, evaluators of this report
 
     def tests(
@@ -616,6 +623,17 @@ class rMAEEvaluator(Evaluator):
 
 class BiasEvaluator(Evaluator):
     name = "Bias"
+
+class ShapeMAEEvaluator(Evaluator):
+    name = "ShapeMAE"  # Mean |(p - hour mean of p) - (y - hour mean of y)| on whole hours; NaN unless 15-minute results
+    def __init__(self, period: str = "1h"): ...  # The only period so far
+
+class NMAEEvaluator(Evaluator):
+    name = "nMAE"  # MAE / mean actual, both on the forecasts with a finite prediction and actual
+
+class ScaledMAEEvaluator(Evaluator):
+    name = "MAE/{column}"  # Columns "MAE/{column}" (mean |e| / c) and "MAE/{column} left out"
+    def __init__(self, column: str): ...  # Source-data column c, joined at each forecast's target date and period
 
 class DMEvaluator(Evaluator):
     name = "DM"  # Columns "DM ratio", "DM ci_low", "DM ci_high", "DM p", "DM p_holm", "DM verdict", "DM n_days", "DM n_forecasts"

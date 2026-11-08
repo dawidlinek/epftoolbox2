@@ -183,6 +183,19 @@ an issue day it didn't sample.
 
 ### New
 
+- **Scoring by period: hourly and block aggregates, the shape within the hour, normalised MAEs, breakdowns by a data column.**
+  `report.aggregate("1h", agg="mean")` turns 15-minute results into hourly ones (an hour counts with all four quarter-hours finite;
+  dropped hours are `incomplete_hour` in its `forecast_counts()`), and `aggregate("1D", agg="peak")` / `"offpeak"` scores the mean over
+  `peak_hours=(8, 20)` (local, the end left out) or the rest of the day, a block counting when every period of it the day's clock has
+  is finite. `report.error_split()` divides a 15-minute model's squared error into the day's level, the hour profile and the shape
+  within the hour. New evaluators: `ShapeMAEEvaluator()` (the error of the within-hour shape; NaN on hourly and daily results),
+  `NMAEEvaluator()` (MAE over the mean actual on the same forecasts) and `ScaledMAEEvaluator(column)` (mean |error| over a source-data
+  column such as capacity, with a `left out` count), all in YAML and the TUI. `report.by_column(column, bins=None)` groups forecasts by
+  a column of the source data at the target row (a 0/1 flag such as `is_night`, or bins of a price), joined as
+  `CsvExporter(extra_columns=)` joins. **No existing number moves**: the four daily aggregates, every table and the goldens are bit
+  for bit as before. They reproduce the resolution study's R1 table (MAE15, MAEh, shape MAE, the error split), its DM list and R3's
+  derived daily rows, and the renewables study's price and generation tables, from the studies' stored forecasts
+  (`tests/reproductions/`). See [Working with Results](/epftoolbox2/model-pipeline/results/#hourly-aggregates-shape-and-the-error-split).
 - **`ModelPipeline(engine="on")`: engine groups for studies of many models.** With `engine="on"` (`model_pipeline.engine: on` in a
   workflow) the models the engine takes, OLS, Ridge, LassoCV and LEAR, run in groups, one per refit rule: each group reads the
   data once for all its models, runs one pool of processes whose jobs are one day (or refit block) and period of every model, and
