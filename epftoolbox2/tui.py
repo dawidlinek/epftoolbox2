@@ -77,7 +77,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "price_exaa",
-            "description": "Add the EXAA auction as price_exaa (AT and DE_LU only; needs type price)?",
+            "description": "Add the EXAA auction as price_exaa (AT, DE_LU and DE_AT_LU only; needs type price)?",
             "required": False,
             "default": False,
             "kind": "confirm",

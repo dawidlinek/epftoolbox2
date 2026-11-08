@@ -241,7 +241,7 @@ _PERIOD_COLUMN_PREFIXES = {
 }
 
 # Bidding zones whose A44 document also carries the EXAA auction (classificationSequence position 2) next to SDAC.
-EXAA_AREAS = ("AT", "DE_LU")
+EXAA_AREAS = ("AT", "DE_LU", "DE_AT_LU")  # DE_AT_LU (before 2018-10-01) is not verified live
 _EXAA_SEQUENCE = "2"
 
 VALID_TYPES = ("load", "generation", "price", "transfer_capacity", "installed_capacity")
@@ -327,7 +327,7 @@ class EntsoeSource(DataSource):
     with ``prefer_15min=True``. Other series keep the resolution ENTSO-E publishes.
 
     ``price`` is the single day-ahead coupling (SDAC) price. For ``CH``, which is not in SDAC, it is the Swiss
-    day-ahead auction (closing 11:00 local time on D-1). ``price_exaa=True`` (AT and DE_LU only, with ``"price"`` in
+    day-ahead auction (closing 11:00 local time on D-1). ``price_exaa=True`` (AT, DE_LU and DE_AT_LU only, with ``"price"`` in
     ``type``) adds a ``price_exaa`` column: the EXAA auction (A44, classificationSequence position 2), cleared at
     10:15 on D-1, before SDAC, on the same grid as ``price``.
 
@@ -455,7 +455,7 @@ class EntsoeSource(DataSource):
                 raise ValueError("price_exaa=True adds a column to the prices, so type must include 'price'")
             if self._area_name not in EXAA_AREAS:
                 raise ValueError(
-                    f"price_exaa=True is available for {' and '.join(EXAA_AREAS)} only (the EXAA auction is "
+                    f"price_exaa=True is available for {', '.join(EXAA_AREAS[:-1])} and {EXAA_AREAS[-1]} only (the EXAA auction is "
                     f"published by ENTSO-E for those zones), not for '{self.country_code}'"
                 )
 
@@ -720,7 +720,7 @@ class EntsoeSource(DataSource):
         """Day-ahead prices for one chunk, by native resolution and not yet put on a grid (see fetch()).
 
         Without ``sequence`` the request is the plain A44 one and SDAC is kept. With ``sequence="2"`` the request asks
-        for classificationSequence position 2, the EXAA auction of AT and DE_LU."""
+        for classificationSequence position 2, the EXAA auction of AT, DE_LU and DE_AT_LU."""
         params = {
             "documentType": "A44",
             "in_Domain": self._area_code,
