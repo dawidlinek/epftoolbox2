@@ -573,6 +573,21 @@ def test_ridge_hands_back_n_at_most_p_and_needs_rows():
     assert RidgeCV(alphas=[10.0, 100.0], cv=None).fit(*fm_rows(x, y)).alpha_ == fm.alpha_
 
 
+def test_ridge_ties_go_to_the_first_penalty_as_in_ridgecv():
+    """Every column constant on the rows: no penalty changes the fit, the leave-one-out errors tie exactly, and `RidgeCV`
+    keeps the first penalty of the grid (a strict improvement is needed to move on); so must the engine."""
+    rng = np.random.default_rng(13)
+    x = np.column_stack([np.full(40, 3.0), np.full(40, 0.25 + 1e-16)])
+    y = 50 + rng.normal(size=40)
+    stats, params = stats_of(x, y, np.arange(40), np.ones(2, dtype=bool))
+    for fit_intercept in (True, False):
+        model = RidgeModel([], alphas=[100.0, 10.0, 1000.0], fit_intercept=fit_intercept)
+        pm, fm, _ = model_path(model, x, y, x[:1], np.ones(2, dtype=bool))
+        pe, fe = engine_path(model, stats, params, x[:1])
+        assert fm.alpha_ == fe.alpha_ == 100.0
+        assert abs(pe - pm) <= RIDGE_TOL
+
+
 def fm_rows(x, y):
     scaler = StandardScaler()
     Z, ys, _ = scaler.fit_transform(x.copy(), y.copy(), x[:1].copy(), scalable_mask=np.ones(x.shape[1], dtype=bool))
