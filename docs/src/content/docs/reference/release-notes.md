@@ -183,6 +183,18 @@ an issue day it didn't sample.
 
 ### New
 
+- **`ModelPipeline(engine="on")`: engine groups for studies of many models.** With `engine="on"` (`model_pipeline.engine: on` in a
+  workflow) the models the engine takes, OLS, Ridge, LassoCV and LEAR, run in groups, one per refit rule: each group reads the
+  data once for all its models, runs one pool of processes whose jobs are one day (or refit block) and period of every model, and
+  writes every model's results into its own file as before, through one writer. A model's per-run cost beyond its fits drops (the
+  pool start, the `gc.collect()` and the read of the data are once per group): about 0.23 s per OLS model on its own, 0.03 s in a
+  group of 1,000 (one test day, 24 periods). **Every number is the same**: in this release a group fits each model on its own rows exactly as `"off"` does, so
+  records, manifests and tables are identical to the bit, alone, in any group, in any order and at any process count; fits from
+  statistics shared across the group come later. `NaiveModel`, a `train_on="matching"` list, a subclass with its own fit and a
+  `forecast_only` run go through their own run as with `"off"`, the default, which runs nothing new. `ENGINE_MAX_MODELS` (20,000)
+  and `ENGINE_MAX_COLUMNS` (4,096) bound how many models and columns a group reads at once; `verify` runs each model through the
+  engine too. YAML writes `engine` only when it is `"on"`. See
+  [Many Models: the Engine](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine).
 - **`PseSource`: the Polish TSO's reports API, no key.** `PseSource(datasets=["kse-load", "csdac-pln"], columns=None, prefix="pse")` loads
   `kse-load` (`load_actual`, `load_fcst`), `his-wlk-cal` (`demand`, `wi`, `pv`, `jg` and more on request), `csdac-pln` (the SDAC price in
   PLN), `rce-pln` (the prosumer net-billing price, another series), `pdgsz` (recommended-usage code, the version stamped by

@@ -121,6 +121,35 @@ report = Workflow.load("forecast_workflow.yaml").run()
 forecast = report.predictions()
 ```
 
+---
+
+## Many Models: the Engine
+
+A backtest of thousands of model variants spends much of its time on what each model's run costs before and after its fits:
+starting a pool of processes, reading the data into its periods, freeing it. `ModelPipeline(engine="on")` runs the models it can
+in **engine groups** instead, one per refit rule: a group reads the data once for all its models, runs one pool whose jobs are one
+issue day (or refit block) and period of every model, and writes each model's results into its own file, as before.
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline(engine="on")
+for window in range(28, 365, 7):
+    pipeline.add_model(OLSModel(["price_d-1", "load_d+{horizon}"], training_window=window, name=f"ols_{window}"))
+```
+
+- **The same numbers.** In this release a group fits each model on its own rows exactly as `engine="off"` does, so every record,
+  manifest and table is identical to the bit, whatever else is in the group, in any order and at any number of processes. Fits from
+  statistics the group shares come in a later release.
+- **Which models.** OLS, Ridge, LassoCV and LEAR. `NaiveModel`, a predictor function with a `train_on="matching"` list, a subclass
+  that overrides the fit (`_fit_predict`, `_fit_model`, `_predict_fitted`) without its own `_fit_stats`, and every
+  `forecast_only=True` run go through their own run, as with `"off"`, after the groups.
+- **Memory.** A group holds its models' columns, rows × columns × 8 bytes per period. `ENGINE_MAX_MODELS` (default 20,000) and
+  `ENGINE_MAX_COLUMNS` (default 4,096) bound a part of a group read at once, environment variables like `MAX_PROCESSES`; where the
+  cuts fall changes no number.
+- **Saved and checked.** `engine` goes to the pipeline's YAML only when it is `"on"`, and `model_pipeline.engine` in a workflow
+  overrides it; in array mode each task groups the models of its block. `pipeline.verify(...)` runs each model through the engine too.
 
 ## See Also
 
