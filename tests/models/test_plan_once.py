@@ -411,9 +411,18 @@ def test_mask_verdicts_are_kept_per_rows_and_frames(frames):
 # --- availability verdicts --------------------------------------------------------------------------------------------
 
 
-def late_uses(info, data, expanded, **kwargs):
+def late_uses(info, data, expanded, freq="1h", **kwargs):
     """`late_uses` as text: a column without a rule has NaN times, which no two uses compare equal on."""
-    return [repr(use) for use in info.late_uses(expanded, "price", "1h", data.index, model_name="m", **kwargs)]
+    return [repr(use) for use in info.late_uses(expanded, "price", freq, data.index, model_name="m", **kwargs)]
+
+
+def daily_rows(at, tz="Europe/Warsaw"):
+    """A daily frame's index, every row at `at` on the wall clock."""
+    return pd.DataFrame(index=(pd.date_range("2023-01-01", "2023-04-30", freq="D") + pd.Timedelta(at)).tz_localize(tz))
+
+
+def hourly_rows(tz):
+    return pd.DataFrame(index=pd.date_range("2023-03-01", "2023-04-30", freq="h", tz=tz, inclusive="left"))
 
 
 def test_verdicts_are_kept_by_what_they_are_computed_from(frames, monkeypatch):
@@ -435,12 +444,20 @@ def test_verdicts_are_kept_by_what_they_are_computed_from(frames, monkeypatch):
         return InformationSet(issue_time, zone, rules={**base.rules, **rules}, unknown="warn", use_defaults=False)
 
     entsoe = InformationSet(unknown="warn")
+    realised = like(act=Availability.realised("1h"))
+    stamped = {(0, 1): ["act_h-1", "load_d+2"]}
+    switch = {(p, 1): ["load_d+2"] for p in range(24)}
     # Each check differs from "base" in one thing a verdict is computed from, and comes before it: were that thing left out of
     # what a verdict is kept by, "base" would read the other's verdicts. The check of fewer periods comes first, as it keeps
     # fewer late periods than one of every period would read.
     checks = {
         "periods": (base, data, some, dict(issue_days=days, training_rows=rows)),
-        "other days": (base, data, full, dict(issue_days=["2023-03-25", "2023-03-26"], training_rows=rows)),
+        "other days": (
+            base,
+            data,
+            full,
+            dict(issue_days=["2023-03-25", "2023-03-26", "2023-03-27", "2023-03-28"], training_rows=rows),
+        ),
         "short window": (base, data, full, dict(issue_days=days, training_rows=TrainingRows(7, first_day=first))),
         "utc index": (base, utc, full, dict(issue_days=days, training_rows=rows)),
         "issue time": (like("09:30"), data, full, dict(issue_days=days, training_rows=rows)),
@@ -455,6 +472,12 @@ def test_verdicts_are_kept_by_what_they_are_computed_from(frames, monkeypatch):
             dict(issue_days=days),
         ),
         "defaults": (entsoe, data, solar, dict(issue_days=days)),
+        # A daily frame's row time (`x_h-1` is the hour before it), and an index without a zone against one in the issue
+        # time's zone (the same zone name, and on the spring switch day the zone's clock skips 02:00).
+        "rows at 11:00": (realised, daily_rows("11:00:00"), stamped, dict(issue_days=days, freq="1D")),
+        "rows at 12:00": (realised, daily_rows("12:00:00"), stamped, dict(issue_days=days, freq="1D")),
+        "naive index": (base, hourly_rows(None), switch, dict(issue_days=["2023-03-26"])),
+        "brussels index": (base, hourly_rows("Europe/Brussels"), switch, dict(issue_days=["2023-03-26"])),
     }
 
     def outcomes():
@@ -470,6 +493,7 @@ def test_verdicts_are_kept_by_what_they_are_computed_from(frames, monkeypatch):
     for other in ("other days", "short window", "periods", "utc index", "issue time", "issue zone", "rule"):
         assert own["base"] != own[other], other
     assert own["defaults"] != own["assumption"]
+    assert own["rows at 12:00"] != own["rows at 11:00"] and own["brussels index"] != own["naive index"]
     sharing(monkeypatch, True)
     computed = []
     real = InformationSet._late_of
@@ -560,3 +584,8 @@ def test_a_run_reads_its_provenance_once_for_its_models_and_ensembles(frames, mo
     pipeline.run(frames[("1h", "spring")], test=("2023-03-27", "2023-03-27"), horizon=1, save_dir=str(tmp_path))
     recorded = {path.name: json.loads(path.read_text())["git_sha"] for path in tmp_path.glob("*.manifest.json")}
     assert len(recorded) == 4 and set(recorded.values()) == {"sha2"} and len(reads) == 2
+
+
+def test_no_table_is_kept_from_an_earlier_test():
+    """Every test starts with no verdict or newest-target table kept (`tests/conftest.py`), though the tests above keep both."""
+    assert info_module._VERDICTS == {} and info_module._NEWEST_TABLES == {}
