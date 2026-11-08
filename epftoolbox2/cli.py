@@ -233,6 +233,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
             seed=args.seed,
             models=args.models,
             positive_control=args.positive_control,
+            device=args.device,
         )
     except (ValueError, RuntimeError) as exc:  # ValueError includes InformationSetError
         console.print(f"[red]Verification failed:[/red] {escape(str(exc))}")
@@ -562,6 +563,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="positive_control",
         action="store_false",
         help="Skip the check that perturbing what is known moves the forecasts; a pass then only says nothing moved",
+    )
+    verify_p.add_argument(
+        "--device",
+        metavar="DEVICE",
+        help="Run every model that has a device on this one (e.g. cpu, to verify a GPU model where it is deterministic); "
+        "models without one run as they are",
     )
 
     # -- results --
