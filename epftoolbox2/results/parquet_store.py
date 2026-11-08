@@ -512,13 +512,49 @@ def read_frame(
 # --- the store --------------------------------------------------------------------------------------------------------------
 
 
+# How many records of a buffer the writer's thread converts to Arrow at a time while a run goes on (`ParquetResultStore._convert`),
+# so that a part is mostly converted by the time it is written, and a buffer holds compact columns, not dicts.
+_CONVERT_ROWS = 4096
+
+
 class _YearBuffer:
-    __slots__ = ("records", "layouts", "since")
+    """A (model, year)'s records waiting for their part: converted chunks (`tables`, Arrow, in order) and then the records not yet
+    converted (`records`, with their keys in `layouts`)."""
+
+    __slots__ = ("tables", "converted", "records", "layouts", "since")
 
     def __init__(self, since: float):
+        self.tables: List[Any] = []
+        self.converted = 0  # rows in `tables`
         self.records: List[Dict] = []
         self.layouts: List[Tuple[str, ...]] = []  # each record's keys (`ParquetResultStore._validate`)
         self.since = since
+
+    @property
+    def rows(self) -> int:
+        return self.converted + len(self.records)
+
+    def take(self, rows: Optional[int] = None) -> Tuple[List[Any], List[Dict], List[Tuple[str, ...]]]:
+        """The first `rows` rows (all of them by default), removed: (tables, records, layouts), in order. A table split at
+        the boundary is sliced, which copies nothing."""
+        if rows is None or rows >= self.rows:
+            taken = (self.tables, self.records, self.layouts)
+            self.tables, self.converted, self.records, self.layouts = [], 0, [], []
+            return taken
+        tables, left = [], rows
+        while self.tables and left:
+            table = self.tables[0]
+            if table.num_rows <= left:
+                tables.append(self.tables.pop(0))
+                left -= table.num_rows
+            else:
+                tables.append(table.slice(0, left))
+                self.tables[0] = table.slice(left)
+                left = 0
+        self.converted -= rows - left
+        records, self.records = self.records[:left], self.records[left:]
+        layouts, self.layouts = self.layouts[:left], self.layouts[left:]
+        return tables, records, layouts
 
 
 class ParquetResultStore(_Store):
@@ -596,41 +632,67 @@ class ParquetResultStore(_Store):
         buffer.records.append(record)
         buffer.layouts.append(layout)
         self._rows += 1
-        return len(buffer.records) >= self._rows_per_part
+        return buffer.rows >= self._rows_per_part
 
     def _buffered(self) -> int:
         return self._rows
 
-    def _take(self, now: float, force: bool) -> List[Tuple[str, List[Dict], List[Tuple[str, ...]]]]:
-        """The buffers due: all of them with `force`, a buffer as old as `PARQUET_FLUSH_SECONDS` whole, and of a fuller one its
-        whole parts (the rest waits, so a part has `PARQUET_ROWS_PER_PART` rows whatever the moment it is taken)."""
+    def _take(
+        self, now: float, force: bool
+    ) -> List[Tuple[str, int, Tuple[List[Any], List[Dict], List[Tuple[str, ...]]]]]:
+        """The buffers due, as (year, rows, (tables, records, layouts)): all of them with `force`, a buffer as old as
+        `PARQUET_FLUSH_SECONDS` whole, and of a fuller one its whole parts (the rest waits, so a part has
+        `PARQUET_ROWS_PER_PART` rows whatever the moment it is taken)."""
         taken = []
         for year in list(self._buffers):
             buffer = self._buffers[year]
+            rows = buffer.rows
             if force or now - buffer.since >= self._flush_seconds:
                 del self._buffers[year]
-                records, layouts = buffer.records, buffer.layouts
-            elif len(buffer.records) >= self._rows_per_part:
-                whole = len(buffer.records) - len(buffer.records) % self._rows_per_part
-                records, buffer.records = buffer.records[:whole], buffer.records[whole:]
-                layouts, buffer.layouts = buffer.layouts[:whole], buffer.layouts[whole:]
-                if not buffer.records:
+                held = buffer.take()
+            elif rows >= self._rows_per_part:
+                rows -= rows % self._rows_per_part
+                held = buffer.take(rows)
+                if not buffer.rows:
                     del self._buffers[year]
             else:
                 continue
-            self._rows -= len(records)
-            taken.append((year, records, layouts))
+            self._rows -= rows
+            taken.append((year, rows, held))
         return taken
 
-    def _write(self, taken: List[Tuple[str, List[Dict], List[Tuple[str, ...]]]]) -> None:
+    def _convert(self) -> None:
+        """Convert each buffer's waiting records to Arrow, `_CONVERT_ROWS` at a time, in place: what the writer's thread does
+        between parts, so a part is mostly converted when it is written. Under the store's I/O lock, so nothing takes the buffer
+        meanwhile; records saved during the conversion go after it."""
+        with self._io_lock:
+            with self._shared._cond:
+                work = [
+                    (buffer, buffer.records[:whole], buffer.layouts[:whole])
+                    for buffer in self._buffers.values()
+                    for whole in [len(buffer.records) - len(buffer.records) % _CONVERT_ROWS]
+                    if whole
+                ]
+            for buffer, records, layouts in work:
+                table = schema.to_table(records, str(self.path), layouts)
+                with self._shared._cond:
+                    del buffer.records[: len(records)], buffer.layouts[: len(records)]
+                    buffer.tables.append(table)
+                    buffer.converted += table.num_rows
+
+    def _write(self, taken: List[Tuple[str, int, Tuple[List[Any], List[Dict], List[Tuple[str, ...]]]]]) -> None:
+        import pyarrow as pa
+
         self.path.mkdir(parents=True, exist_ok=True)
-        for year, records, layouts in taken:
-            for start in range(0, len(records), self._rows_per_part):
+        for year, rows, (tables, records, layouts) in taken:
+            if records:
+                tables = [*tables, schema.to_table(records, str(self.path), layouts)]
+            table = pa.concat_tables(tables).unify_dictionaries() if len(tables) > 1 else tables[0]
+            for start in range(0, rows, self._rows_per_part):
                 self._seq += 1
-                end = start + self._rows_per_part
+                part = table.slice(start, self._rows_per_part).combine_chunks()
                 with self._shared._handles:
-                    table = schema.to_table(records[start:end], str(self.path), layouts[start:end])
-                    entry = _write_table(self.path, year, table, f"part-{self._run_id}-{self._seq:06d}.parquet")
+                    entry = _write_table(self.path, year, part, f"part-{self._run_id}-{self._seq:06d}.parquet")
                     _append_entry(self.path, entry)
 
 

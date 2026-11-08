@@ -890,7 +890,7 @@ class StoreWriter:
             with self._cond:
                 taken = store._take(now, force)
                 if store.save_format == "parquet" and taken:
-                    self._buffered_rows -= sum(len(item[1]) for item in taken)
+                    self._buffered_rows -= sum(item[1] for item in taken)
                 if not store._buffered():
                     self._dirty.pop(id(store), None)
             if taken:
@@ -911,6 +911,8 @@ class StoreWriter:
                 force = stopping or (pressed and self._buffered_rows > self._max_buffered // 2)
                 try:
                     self._write_due(store, now, force)
+                    if not force and store.save_format == "parquet":
+                        store._convert()  # what is waiting, to Arrow, so the part is ready when it is due
                 except (
                     BaseException
                 ) as exc:  # raised to the store's caller; its records are dropped, not retried for ever
@@ -918,7 +920,7 @@ class StoreWriter:
                         store._error = store._error or exc
                         dropped = store._take(now, True)
                         if store.save_format == "parquet" and dropped:
-                            self._buffered_rows -= sum(len(item[1]) for item in dropped)
+                            self._buffered_rows -= sum(item[1] for item in dropped)
                         self._dirty.pop(id(store), None)
             if stopping:
                 with self._cond:

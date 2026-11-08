@@ -1019,6 +1019,73 @@ def test_a_parquet_buffer_becomes_a_part_at_its_row_limit_and_its_age(tmp_path, 
     assert wait_for_parts(directory, 3, 0) == [10, 3, 1]
 
 
+def test_records_converted_while_a_run_goes_on_make_the_parts_records_saved_at_the_end_make(tmp_path, monkeypatch):
+    """The writer's thread converts a buffer's waiting records to Arrow in chunks while a run goes on (`_convert`); a part is
+    then cut from converted chunks and records not yet converted, at whole-part boundaries that fall inside a chunk. The
+    records read back are those saved, in their order, and the JSONL store writes the same."""
+    monkeypatch.setenv("PARQUET_ROWS_PER_PART", "3000")
+    monkeypatch.setattr(parquet_store, "_CONVERT_ROWS", 1300)  # chunk edges off the parts' (3000, 6000)
+    days = pd.date_range("2023-09-01", periods=300)  # two years, so two buffers
+    records = [
+        record(hour=h, run_date=d.date().isoformat(), prediction=h + i / 7, revision=1 + (i % 3 == 0))
+        for i, (d, h) in enumerate((d, h) for d in days for h in range(24))
+        for _ in range(
+            3 if i % 97 == 0 else 1
+        )  # a few keys three times (same forecast): one key's records in two chunks
+    ]
+    store = ParquetResultStore(tmp_path / "m.parquet", test_start="2023-09-01")
+    jsonl = ResultStore(tmp_path / "m.jsonl", test_start="2023-09-01")
+    sliced = []
+    take = parquet_store._YearBuffer.take
+
+    def spy(buffer, rows=None):
+        held = take(buffer, rows)
+        sliced.append((rows, [t.num_rows for t in held[0]], len(held[1])))
+        return held
+
+    monkeypatch.setattr(parquet_store._YearBuffer, "take", spy)
+    for i, r in enumerate(records):
+        store.save(dict(r))
+        jsonl.save(dict(r))
+        if i % 500 == 499:
+            store._convert()  # as the writer's thread does on a tick
+    store.close()
+    jsonl.close()
+    # Parts were cut from converted chunks and records not yet converted, together.
+    assert any(tables and n for _, tables, n in sliced)
+    assert stored_lines(tmp_path / "m.parquet") == lines(tmp_path / "m.jsonl")
+    entries = read_catalog(tmp_path / "m.parquet").entries
+    for year in ("2023", "2024"):
+        sizes = [e["rows"] for e in entries if e["file"].startswith(f"year={year}/")]
+        assert sizes[:-1] == [3000] * (len(sizes) - 1) and 0 < sizes[-1] <= 3000
+    assert sum(e["rows"] for e in entries) == len(records)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the repeats
+        assert list(read_records(tmp_path / "m.parquet", statuses=None)) == list(
+            read_records(tmp_path / "m.jsonl", statuses=None)
+        ) or sorted(map(json.dumps, read_records(tmp_path / "m.parquet", statuses=None))) == sorted(
+            map(json.dumps, read_records(tmp_path / "m.jsonl", statuses=None))
+        )
+
+
+def test_a_buffer_cuts_a_part_inside_a_converted_chunk():
+    buffer = parquet_store._YearBuffer(0.0)
+    records = [record(hour=h, run_date=f"2023-04-{d:02d}") for d in range(1, 31) for h in range(24)]  # 720
+    layouts = [tuple(r) for r in records]
+    for start in (0, 200, 400):
+        buffer.tables.append(
+            parquet_store.schema.to_table(records[start : start + 200], "x", layouts[start : start + 200])
+        )
+        buffer.converted += 200
+    buffer.records, buffer.layouts = records[600:], layouts[600:]
+    tables, rest, _ = buffer.take(450)  # two chunks and 50 rows of the third
+    assert [t.num_rows for t in tables] == [200, 200, 50] and rest == []
+    assert (buffer.converted, [t.num_rows for t in buffer.tables], buffer.rows) == (150, [150], 270)
+    tables_after, rest_after, _ = buffer.take()
+    got = [r for t in [*tables, *tables_after] for r in parquet_store.schema.iter_dicts(t)] + rest_after
+    assert got == records and buffer.rows == 0
+
+
 # --- import ------------------------------------------------------------------------------------------------------------------
 
 
