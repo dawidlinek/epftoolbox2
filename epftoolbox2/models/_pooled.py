@@ -624,3 +624,145 @@ def _execute(pooled: PooledModel, states: List[Tuple[str, BaseModel, _RunState]]
             if state.store:
                 state.store.flush()
             member._cleanup()
+
+
+# -- verify -----------------------------------------------------------------------------------------------------------------
+
+
+def _day_forecasts(
+    pooled: PooledModel,
+    frames: Dict[str, pd.DataFrame],
+    run_day: str,
+    target: str,
+    freq: str,
+    horizons: Dict[str, Any],
+) -> Dict[str, Dict[Tuple[int, int], float]]:
+    """The pooled model's forecasts issued on `run_day` from these frames, per zone by (period, horizon): a run in memory with
+    no information set, as a probe runs a model (`information_set._issue_day_forecasts`), to the end of the refit block with
+    `refit` (a fit serves every issue day of its block), of which `run_day`'s are kept."""
+    from ..information_set import _last_day_of_block  # the probes' own rule for how far a run of one day reaches
+
+    last_day = min(_last_day_of_block(pooled.model, frame, run_day) for frame in frames.values())
+    runs = {
+        zone: (
+            member_of(pooled, None),
+            dict(
+                data=frame,
+                test_start=run_day,
+                test_end=last_day,
+                target=target,
+                freq=freq,
+                availability="none",
+                warn_listing=False,
+                **horizons,
+            ),
+        )
+        for zone, frame in frames.items()
+    }
+    refs = run_pooled(pooled, runs)
+    return {
+        zone: {(r["hour"], r["horizon"]): r["prediction"] for r in ref._results if r["run_date"] == run_day}
+        for zone, ref in refs.items()
+    }
+
+
+def verify_pooled(
+    pooled: PooledModel,
+    frames: Dict[str, pd.DataFrame],
+    infos: Dict[str, InformationSet],
+    run_days: Sequence[str],
+    target: str,
+    freq: str,
+    horizons: Dict[str, Any],
+    columns: Dict[str, List[str]],
+    seed: int = 0,
+    control: bool = True,
+    atol: float = 1e-9,
+) -> List[Any]:
+    """`ModelPipeline.verify` of a pooled model: per zone and issue day an `IssueDayCheck`, named "<name> (<zone>)".
+
+    The probe perturbs every zone's frame at once: each value not known at the zone's own issue time on D (its issue row's
+    inputs), and on the rows dated before D each value not known at the earliest issue instant of D over the zones, by which
+    the shared fit is made (what `shared_fit_checks` judges), the target from D on in every zone (the "d-1" boundary, as
+    `check_target_boundary` perturbs it). No zone's forecast may move: a leak in one zone's training rows moves the shared fit,
+    and so every zone's forecasts. The positive control perturbs the freshest known values of the first zone alone
+    (`perturb_recent`, rows dated D-1 and later, which no fit trains on) and must move that zone's forecasts; it is every zone's
+    control, since the zones share the model and its inputs. It can't move another zone's forecasts: the noise is on rows no
+    fit reads, and each zone's issue row is scaled and forecast on its own. `columns[zone]` are the columns probed there.
+    """
+    from ..information_set import ControlResult, ProbeResult, _compare_forecasts, perturb_recent, perturb_unknown
+    from ..verification import IssueDayCheck
+
+    zones = list(frames)
+    first = zones[0]
+    largest = horizons.get("horizon") or max(horizons["horizons"])
+    planned = horizons.get("horizons")
+    checks = []
+    for i, run_day in enumerate(run_days):
+        day_seed = seed + i
+        original = _day_forecasts(pooled, frames, run_day, target, freq, horizons)
+        instants = {zone: int(issue_instants(infos[zone], [run_day])[0]) for zone in zones}
+        earliest = min(zones, key=lambda zone: instants[zone])
+        perturbed: Dict[str, pd.DataFrame] = {}
+        counts: Dict[str, Dict[str, int]] = {}
+        unchecked: Dict[str, List[str]] = {}
+        for zone in zones:
+            frame = frames[zone]
+            own, counts[zone], unchecked[zone] = perturb_unknown(
+                frame, run_day, infos[zone], freq, columns[zone], day_seed, target_from_issue=target
+            )
+            if instants[earliest] < instants[zone]:
+                early, more, _ = perturb_unknown(
+                    frame,
+                    run_day,
+                    _on_clock_of(infos[zone], infos[earliest]),
+                    freq,
+                    columns[zone],
+                    day_seed + 1,
+                    target_from_issue=target,
+                )
+                before = np.asarray(frame.index.tz_localize(None).normalize() < pd.Timestamp(run_day))
+                own.loc[before, columns[zone]] = early.loc[before, columns[zone]]
+                counts[zone] = {name: max(counts[zone].get(name, 0), n) for name, n in {**more, **counts[zone]}.items()}
+            perturbed[zone] = own
+        probed = _day_forecasts(pooled, perturbed, run_day, target, freq, horizons)
+
+        moved = None
+        if control:
+            names = [name for name in columns[first] if name != target]
+            recent, recent_counts, recent_unchecked = perturb_recent(
+                frames[first], run_day, infos[first], freq, names, day_seed
+            )
+            other = _day_forecasts(pooled, {**frames, first: recent}, run_day, target, freq, horizons)
+            changed, largest_move, _ = _compare_forecasts(original[first], other[first], atol)
+            moved = ControlResult(
+                run_day=run_day,
+                forecasts=len(original[first]),
+                moved=changed,
+                max_abs_change=largest_move,
+                perturbed=recent_counts,
+                unchecked=recent_unchecked,
+                unmoved=sorted((original[first].keys() & other[first].keys()) - set(changed)),
+            )
+        for zone in zones:
+            changed, largest_change, missing = _compare_forecasts(original[zone], probed[zone], atol)
+            probe = ProbeResult(
+                run_day=run_day,
+                forecasts=len(original[zone]),
+                changed=changed,
+                max_abs_change=largest_change,
+                perturbed=counts[zone],
+                unchecked=unchecked[zone],
+                missing=missing,
+            )
+            checks.append(
+                IssueDayCheck(
+                    model=f"{pooled.name} ({zone})",
+                    run_day=run_day,
+                    horizon=largest,
+                    probe=probe,
+                    control=moved,
+                    horizons=None if planned is None else tuple(planned),
+                )
+            )
+    return checks

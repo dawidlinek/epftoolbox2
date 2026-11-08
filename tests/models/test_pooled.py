@@ -468,3 +468,43 @@ def test_a_pooled_model_saves_and_loads(tmp_path):
         "pooled_ridge",
     )
     assert model.model.refit == "7D" and loaded.information_set.issue_timezone == "data"
+
+
+# -- verify ------------------------------------------------------------------------------------------------------------------
+
+
+def verify_pooled_model(predictors, rules, frames, missing="raise"):
+    model = PooledModel(OLSModel(predictors=predictors, training_window=40, name="m"), missing=missing)
+    pipeline = ModelPipeline(information_set=InformationSet("12:00", "data", rules=rules)).add_model(model)
+    return pipeline.verify(frames, *FRIDAYS, target="actual_daily_max", horizon=2, freq="1D", days=3, seed=1)
+
+
+def test_verify_of_a_pooled_model_is_ok_with_its_control():
+    frames = {zone: daily(zone, seed=i) for i, zone in enumerate(ZONES)}
+    report = verify_pooled_model(PREDICTORS, {**RULES, "actual_daily_max": Availability.realised("10h")}, frames)
+    assert report.models == [f"m ({zone})" for zone in ZONES]
+    assert report.ok, report.problems()
+    controls = {check.control.run_day: check.control for check in report.checks}
+    assert all(control.moved for control in controls.values())  # the first zone's, every zone's control
+
+
+def test_a_leak_in_one_zone_s_frame_is_a_leak_for_every_zone():
+    # Known 60 hours after its day ends: a training row of D-2 holds a value no forecast issued on D has. Only Finland's frame has
+    # it (the others a column of zeros, which the probe leaves alone), and its rows move the fit every zone shares.
+    frames = {zone: daily(zone, seed=i) for i, zone in enumerate(ZONES)}
+    frames["FI"] = frames["FI"].assign(late=frames["FI"]["actual_daily_max_d-1"].shift(-1))
+    rules = {**RULES, "actual_daily_max": Availability.realised("10h"), "late": Availability.realised("60h")}
+    report = verify_pooled_model([*PREDICTORS, "late"], rules, {**frames, "PL": frames["PL"]}, missing="zero")
+    assert {model: report.status(model) for model in report.models} == {f"m ({zone})": "leak" for zone in ZONES}
+
+
+def test_verify_judges_the_shared_fit_at_the_earliest_issue():
+    # As the check before a run: D-1's maximum known at noon in each zone is unknown at Helsinki's noon in Warsaw and Lisbon.
+    frames = {zone: daily(zone, seed=i) for i, zone in enumerate(ZONES)}
+    late = verify_pooled_model(PREDICTORS, {**RULES, "actual_daily_max": Availability.realised("12h")}, frames)
+    assert {model: late.status(model) for model in late.models} == {f"m ({zone})": "leak" for zone in ZONES}
+    for zone in ZONES:  # each zone alone is ok: its own clock
+        alone = verify_pooled_model(
+            PREDICTORS, {**RULES, "actual_daily_max": Availability.realised("12h")}, {zone: frames[zone]}
+        )
+        assert alone.ok, alone.problems()

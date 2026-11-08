@@ -39,6 +39,7 @@ from ..models._pooled import (
     needed_columns,
     run_pooled,
     shared_fit_checks,
+    verify_pooled,
     with_missing_columns,
 )
 from ..ensembles._compute import compute
@@ -1257,7 +1258,7 @@ class ModelPipeline:
 
     def verify(
         self,
-        data: pd.DataFrame,
+        data: Union[pd.DataFrame, Mapping[str, pd.DataFrame]],
         test_start: str,
         test_end: str,
         target: str = "price",
@@ -1339,12 +1340,23 @@ class ModelPipeline:
             raise ValueError("At least one model is required")
         self._check_model_names()
         chosen = self._select_models(models)
-        pooled = [model.name for model in chosen if isinstance(model, PooledModel)]
-        if pooled:
-            raise ValueError(
-                f"verify() of {pooled}: a PooledModel is fitted over zones, and verify probes one frame. Verify its inner model "
-                "on each zone's frame (the fit's inputs), and see the docs page Several Zones."
+        if isinstance(data, Mapping):
+            return self._verify_zones(
+                data,
+                chosen,
+                test_start,
+                test_end,
+                target,
+                horizon,
+                horizons,
+                freq,
+                days,
+                seed,
+                positive_control,
+                rebuild,
+                weekdays,
             )
+        self._refuse_pooled("verify")
         # With `rebuild` the frame the models read is the rebuilt one, whose zone is the market's (a source can be in UTC).
         info = self.information_set
         if info.issue_timezone == DATA_ZONE:
@@ -1371,6 +1383,83 @@ class ModelPipeline:
                     **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
                 )
             )
+        return report
+
+    def _verify_zones(
+        self,
+        frames: Mapping[str, pd.DataFrame],
+        chosen: List[Any],
+        test_start: str,
+        test_end: str,
+        target: str,
+        horizon: Optional[int],
+        horizons: Optional[Sequence[int]],
+        freq: str,
+        days: int,
+        seed: int,
+        positive_control: bool,
+        rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]],
+        weekdays: Optional[Tuple[int, ...]],
+    ) -> VerifyReport:
+        """`verify` of a run over zones: each plain model on each zone's frame (`verify_model`), each `PooledModel` over all
+        of them at once (`models._pooled.verify_pooled`); every check named "<model> (<zone>)". The issue days are sampled from
+        the first zone's frame, the same for every model and zone."""
+        if rebuild is not None:
+            raise ValueError(
+                "verify() over zones takes the frames the models read: rebuild= is for one frame's source data"
+            )
+        zones = self._check_zones(frames)
+        infos = {zone: self.information_set.in_data_zone(frames[zone].index) for zone in zones}
+        check_issue_days_in(resolve_date(test_start), resolve_date(test_end), weekdays)
+        run_days = sample_issue_days(frames[zones[0]].index, test_start, test_end, days, seed, issue_days=weekdays)
+        report = VerifyReport(issue_days=run_days)
+        horizon_args = horizon_arguments(horizon, horizons)  # resolved by `verify`
+        planned = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
+        for model in chosen:
+            if isinstance(model, PooledModel):
+                if weekdays is not None:
+                    raise ValueError(
+                        f"verify() of PooledModel {model.name!r} probes every day of a refit block; issue_days= is for "
+                        "plain models in this step"
+                    )
+                check_pooled_model(model.model)
+                member = member_of(model, None)
+                needed = needed_columns(member, freq, planned)
+                zone_frames = {zone: with_missing_columns(model, zone, frames[zone], needed) for zone in zones}
+                # What the probe perturbs in each zone: every column with a rule, and those the model reads, but not a column
+                # of zeros `missing="zero"` added, which holds nothing a forecast could know late.
+                columns = {
+                    zone: [
+                        name
+                        for name in frames[zone].columns
+                        if name in {target, *needed}
+                        or (isinstance(name, str) and infos[zone].resolve(name).rule is not None)
+                    ]
+                    for zone in zones
+                }
+                report.checks.extend(
+                    verify_pooled(
+                        model, zone_frames, infos, run_days, target, freq, horizon_args, columns, seed, positive_control
+                    )
+                )
+                continue
+            for zone in zones:
+                checks = verify_model(
+                    model,
+                    frames[zone],
+                    run_days,
+                    infos[zone],
+                    target=target,
+                    freq=freq,
+                    seed=seed,
+                    control=positive_control,
+                    test_period=(test_start, test_end),
+                    availability=self.availability,
+                    **horizon_args,
+                    **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
+                    **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
+                )
+                report.checks.extend(replace(check, model=f"{check.model} ({zone})") for check in checks)
         return report
 
     def explain(
