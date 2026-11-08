@@ -162,8 +162,9 @@ for window in range(28, 365, 7):
   measured along the eigenvectors of the fit's own Gram (so a row out along the difference of two near-collinear inputs counts,
   however close each is to its training values), for Ridge where scikit-learn's own rounding at that row exceeds the budget it
   has at the training rows, and with a variance-stabilising scaler where its inverse is more than three times as steep at the
-  forecast as at the median training target (a forecast past the training prices, which an asinh scaler maps back through a
-  sinh). Within these bounds the largest gaps measured were 6.3e-9 (OLS), 5.4e-9 (LassoCV), 6.1e-10 (Ridge) and 7.6e-10 (LEAR)
+  forecast as at the median training target (a forecast far from the median price, which an asinh scaler maps back through a
+  sinh: on the Lago DE benchmark's first day, a holiday Sunday of 1-9 EUR/MWh night prices, 5 of LEAR's 96 forecasts).
+  Within these bounds the largest gaps measured were 6.3e-9 (OLS), 5.4e-9 (LassoCV), 6.1e-10 (Ridge) and 7.6e-10 (LEAR)
   EUR/MWh; past them gaps grow with the distance, to 1e-7 at 20,000 and 1e-4 for an asinh OLS forecast far past its prices. A
   refit's other forecasts of the same fit still come from the sums, so a refit block with a row far out writes two coefficient
   vectors, the model path's for that row and the engine's for the others, a few last bits apart, where engine off writes one.
