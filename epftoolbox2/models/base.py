@@ -406,7 +406,7 @@ def _predicts_blocks(model: "BaseModel") -> bool:
 def _block_co_batch_items(model: "BaseModel", run_day: Any) -> List[datetime.date]:
     """The other issue days of `run_day`'s block, whose rows the call that predicts `run_day`'s forecasts holds whatever the
     run has (`_worker._fit_unit`), in date order: the block of the coarsest member's rule (`_refit_block`), which holds every
-    member's under `"auto"`. None without a block call (`refit=None`, `block_predict=False`). `verify`'s co-batch check reads
+    member's under `"auto"`. Empty without a block call (`refit=None`, `block_predict=False`). `verify`'s co-batch check reads
     it as `_co_batch_items` (`BaseModel.__init_subclass__`)."""
     if not _predicts_blocks(model):
         return []
