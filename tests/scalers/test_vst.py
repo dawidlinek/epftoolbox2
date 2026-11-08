@@ -474,10 +474,11 @@ def test_asinh_without_standardising_is_epftoolbox_s_invariant_scaler(spiky_pric
     x, y, test = scaler.fit_transform(train_x, train_y, test_x)
     hand_x, hand_y, hand_test, (centre, mad) = invariant_by_hand(train_x, train_y, test_x)
 
-    # statsmodels divides each deviation by its constant before the median, this library after: equal or one ulp apart
-    np.testing.assert_allclose(x, hand_x, rtol=4e-16, atol=0)
-    np.testing.assert_allclose(y, hand_y, rtol=4e-16, atol=0)
-    np.testing.assert_allclose(test, hand_test, rtol=4e-16, atol=0)
+    # statsmodels divides each deviation by its constant before the median, this library after, so the scale can be one ulp
+    # apart, and arcsinh's last bits differ between libm and SIMD builds (4 ulp on an AVX-512 machine): a few ulp
+    np.testing.assert_allclose(x, hand_x, rtol=1e-15, atol=0)
+    np.testing.assert_allclose(y, hand_y, rtol=1e-15, atol=0)
+    np.testing.assert_allclose(test, hand_test, rtol=1e-15, atol=0)
     np.testing.assert_array_equal(x[:, 2], train_x[:, 2])  # the dummy as it is
     assert (scaler._target_mean, scaler._target_std) == (0.0, 1.0)
     assert scaler._target_params[0] == centre and scaler._target_params[1] == pytest.approx(mad, rel=2.3e-16)
