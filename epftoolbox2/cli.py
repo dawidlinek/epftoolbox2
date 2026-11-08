@@ -365,11 +365,18 @@ def cmd_weights(args: argparse.Namespace) -> None:
         for finding in findings:
             detail = f": {finding.detail}" if finding.detail else ""
             console.print(f"{finding.status:8} {finding.directory / finding.name}{detail}", **plain)
-        bad = [f for f in findings if f.status != "ok"]
+        bad = [f for f in findings if f.status in ("changed", "missing")]
+        unlisted = [f for f in findings if f.status == "unlisted"]
         if bad:
             console.print(
                 f"[red]{len(bad)} file(s) changed or missing.[/red] Fetch them again with `epf weights fetch`."
             )
+        if unlisted:
+            console.print(
+                f"[red]{len(unlisted)} file(s) no fetch recorded[/red] next to the weights: see where they came from, and "
+                "remove them if they are not yours."
+            )
+        if bad or unlisted:
             sys.exit(1)
         console.print(f"[green]{len(findings)} file(s) verified[/green] in {escape(str(root))}.")
         return
@@ -385,7 +392,12 @@ def cmd_weights(args: argparse.Namespace) -> None:
         if card is None or card.weights is None:
             console.print(f"{what} has no weights to fetch: it trains on the run's data.", **plain)
             continue
-        plan = _weights.fetch_plan(card, what, args.revision)
+        try:
+            plan = _weights.fetch_plan(card, what, args.revision)
+        except ValueError as exc:  # a revision that isn't a branch, tag or commit
+            console.print(f"[red]{escape(str(exc))}[/red]")
+            failed += 1
+            continue
         console.print(
             f"\n{what}: {plan.repo}@{plan.revision} ({len(plan.files) or 'all'} file(s), {_weights.size_text(plan.bytes)})",
             **plain,
@@ -401,19 +413,29 @@ def cmd_weights(args: argparse.Namespace) -> None:
         accept = card.licence if card.licence in accepted else (accepted[0] if len(accepted) == 1 else None)
         try:
             sidecar = _weights.fetch(card, what, revision=args.revision, accept=accept)
-        except (_weights.LicenceNotAcceptedError, _weights.WeightsMismatchError, ValueError) as exc:
+        except (_weights.LicenceNotAcceptedError, _weights.WeightsMismatchError, _weights.WeightsDownloadError) as exc:
+            console.print(f"[red]{escape(str(exc))}[/red]")  # and on to the next class of `all`
+            failed += 1
+            continue
+        except ValueError as exc:  # a card that can't be fetched as it is (a restricted licence with no id)
             console.print(f"[red]{escape(str(exc))}[/red]")
             failed += 1
             continue
-        except ImportError as exc:  # huggingface_hub not installed
+        except ImportError as exc:  # huggingface_hub not installed: no other class can be fetched either
             console.print(f"[red]{escape(str(exc))}[/red]")
             sys.exit(1)
-        note = "" if sidecar.get("reference") is not False else " (new hashes recorded: not the reference weights)"
+        hashes = {
+            True: "sha256 verified against the card",
+            False: "sha256 differs from the card's, recorded (runs warn: not the reference weights)",
+            None: "sha256 recorded (the card pins none to verify)",
+        }[sidecar.get("reference")]
         console.print(
-            f"  fetched {len(sidecar['files'])} file(s), {_weights.size_text(sidecar['bytes'])}, sha256 verified{note}",
-            **plain,
+            f"  fetched {len(sidecar['files'])} file(s), {_weights.size_text(sidecar['bytes'])}, {hashes}", **plain
         )
+        if plan.revision != card.weights.revision:
+            console.print(f"  a model runs on them with weights='{plan.repo}@{plan.revision}'", **plain)
     if failed:
+        console.print(f"[red]{failed} fetch(es) failed.[/red]")
         sys.exit(1)
 
 
@@ -748,7 +770,8 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_p.add_argument(
         "--revision",
         metavar="REV",
-        help="Another revision than the card's; files whose sha256 differs from the card's are then recorded, not refused",
+        help="A revision given explicitly (the card's, or another one, which a model then uses with "
+        "weights='<repo>@<rev>'): files whose sha256 differs from the card's are recorded, not refused",
     )
     fetch_p.add_argument(
         "--accept",
