@@ -710,7 +710,7 @@ def test_rules_follow_the_prefix_and_the_selection():
     assert "de_wind_onshore_forecast_day_ahead" not in rules and "solar_forecast_day_ahead" not in rules
 
 
-def test_no_default_column_resolves_to_a_built_in_default_rule():
+def test_no_default_column_resolves_to_a_built_in_default_rule(tmp_path):
     """The default prefix keeps every output column off the defaults layer, for any endpoint selection."""
     from itertools import product
 
@@ -722,7 +722,7 @@ def test_no_default_column_resolves_to_a_built_in_default_rule():
         dict(type=["forecast", "power", "price", "cbet", "cbpf"], forecast_types=["day-ahead", "intraday", "current"]),
     ]
     for kwargs, shift in product(selections, ["", "_d-1", "_d+1", "_h-24"]):
-        source = EnergyChartsSource("de", cache_dir="unused", **kwargs)
+        source = EnergyChartsSource("de", use_cache=False, **kwargs)
         api = FakeApi()
         source.session = api
         source._clock = Clock()
