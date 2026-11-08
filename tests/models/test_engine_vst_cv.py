@@ -331,7 +331,7 @@ def test_engine_within_tolerance_of_off(cell, request, tmp_path, every_fit_check
 
 
 def test_two_fits_on_other_rows_get_their_own_transform(spring, tmp_path, in_process, monkeypatch):
-    """Two asinh LEARs in one span, one reading a column with missing values there: their fits have other rows ρ, so other
+    """Asinh LEARs in one span, two reading a column with missing values there: their fits have other rows ρ, so other
     row sets (each built once per span, ρ and spec, holding the columns of every fit of its rows), and each model's records
     are those it has alone."""
     built = []
@@ -344,9 +344,11 @@ def test_two_fits_on_other_rows_get_their_own_transform(spring, tmp_path, in_pro
     monkeypatch.setattr(_engine_worker._RowSet, "__init__", spy)
 
     def models():
+        # A fit of other rows between two fits of the same rows: the first set is alive while the other is asked for.
         return [
             LEARModel([*PREDICTORS, "price_d-1"], 28, name="reads_load"),
             LEARModel(["wind_d+1", "is_weekend_d+1", "price_d-1"], 28, name="no_load"),
+            LEARModel([*PREDICTORS, "price_d-1"], 28, criterion="aic", name="reads_load_aic"),
             LEARModel(["wind_d+1", "price_d-1"], 28, name="no_load_fewer"),
         ]
 
@@ -367,7 +369,7 @@ def test_two_fits_on_other_rows_get_their_own_transform(spring, tmp_path, in_pro
     for key, held in built:
         if key[:4] in split and "load_d+1" not in held:  # the two "no_load" lists' columns: one transform
             assert held == {"wind_d+1", "is_weekend_d+1", "price_d-1"}, held
-    for name in ("reads_load", "no_load", "no_load_fewer"):
+    for name in ("reads_load", "no_load", "reads_load_aic", "no_load_fewer"):
         run(tmp_path / name, name)
         assert same_files(tmp_path / name, tmp_path / "group", [name]) == 1
 
