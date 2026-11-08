@@ -25,20 +25,24 @@ that isn't the one the statistics reproduce) or raises a ValueError on is **hand
 same values, to the bit. Each hand-back is decided from the fit's own rows and span, so it is the same in any group.
 
 Every element of the sums is a function of the two columns' values in ρ and of the span (exact integer slices, `_sums`), and
-everything after them is the fit's own, so a model's records are the same bits alone, in any group, order or chunking, at any
-process, thread or BLAS thread count, and whatever τ. Nothing stored names the engine but the manifest's `fit_path` (compared on
+everything after them is the fit's own, run on one BLAS thread (`_one_blas_thread`: LAPACK's own blocking moves bits with the
+thread count), so a model's records are the same bits alone, in any group, order or chunking, at any process, task thread or
+BLAS thread count, and whatever τ. Nothing stored names the engine but the manifest's `fit_path` (compared on
 resume) and its provenance counts (`EngineCounts`, never compared).
 """
 
+import contextlib
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
+from threadpoolctl import threadpool_limits
 
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
 from ._stats import MIN_ROWS, StatsFallback, standard_stats
+from . import _worker as worker
 from ._sums import SpanSums
 from ._worker import (
     StatsFit,
@@ -307,6 +311,17 @@ class EngineFits:
         return out
 
 
+def _one_blas_thread(fits_from_statistics: bool):
+    """The BLAS thread count a job with fits from statistics runs at: one, whatever the process's. The sums are exact at any
+    count, but a fit's own solve isn't: LAPACK's `eigh` (Ridge) and Cholesky, and a threaded GEMM on the fit's rows, change their
+    last bits with the thread count once a fit has about a hundred columns (n 400, p 120: Ridge's eigenvectors and `Zc @ V`;
+    p 247: `dpotrf` too). A pool's worker runs at `NATIVE_THREADS_PER_TASK` = 1 already, so nothing changes there; set once per
+    job, before its task threads start, since a BLAS library's thread count is the process's."""
+    if not fits_from_statistics or (worker._W_THREADPOOLS is not None and worker.NATIVE_THREADS_PER_TASK == 1):
+        return contextlib.nullcontext()
+    return threadpool_limits(limits=1, user_api="blas")
+
+
 def _job_spans(
     items: Sequence[Tuple[int, tuple, Optional[List[tuple]]]], models: Sequence[ModelInputs]
 ) -> Tuple[List[List[SpanKey]], Dict[SpanKey, np.ndarray]]:
@@ -390,12 +405,13 @@ def run_job(job: Sequence[Tuple[int, List[tuple]]], models: Optional[Sequence[Mo
             out.append((i, outcome))
         return out, counts
 
-    if len(items) <= 1 or threads == 1:
-        parts = [run(list(range(len(items))))]
-    else:
-        with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
-            futures = [pool.submit(run, batch) for batch in _batches(keys, threads)]
-            parts = [future.result() for future in as_completed(futures)]
+    with _one_blas_thread(bool(columns)):
+        if len(items) <= 1 or threads == 1:
+            parts = [run(list(range(len(items))))]
+        else:
+            with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
+                futures = [pool.submit(run, batch) for batch in _batches(keys, threads)]
+                parts = [future.result() for future in as_completed(futures)]
     ran = sorted(((i, outcome) for part, _ in parts for i, outcome in part), key=lambda done: done[0])
     totals: Dict[int, EngineCounts] = {}
     for _, counts in parts:

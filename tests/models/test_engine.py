@@ -585,6 +585,28 @@ def test_one_and_four_blas_threads(wide, tmp_path, monkeypatch, in_process):
     assert same_files(tmp_path / "one", tmp_path / "four") == 40
 
 
+def test_large_designs_at_one_and_eight_blas_threads(in_process):
+    """A fit of 121 columns over 400 rows: LAPACK's eigh and Cholesky and a threaded GEMM on the fit's rows change their
+    last bits with the BLAS thread count at this size (Ridge's records moved at 8 threads), so a job with fits from
+    statistics runs on one BLAS thread whatever the process's (`_engine_worker._one_blas_thread`)."""
+    base = make_market_data(start="2021-06-01", days=520, noise=5.0, seed=5, horizon=1).at_time("12:00").copy()
+    rng = np.random.default_rng(6)
+    extra = {f"c{i:03d}": rng.normal(0, 1, len(base)) + 0.002 * i * base["load"].to_numpy() for i in range(120)}
+    data = pd.concat([base, pd.DataFrame(extra, index=base.index)], axis=1)
+    names = ["load_d+1", *extra]
+
+    def run(threads):
+        with threadpool_limits(limits=threads):
+            pipeline = ModelPipeline(engine="on")
+            pipeline.add_model(OLSModel(names, 400, name="ols")).add_model(RidgeModel(names, 400, name="ridge"))
+            pipeline.add_model(lear(names, 400, name="lear"))
+            report = pipeline.run(data, "2022-10-20", "2022-10-24", horizon=1, freq="1D")
+        return {name: sorted(map(text, ref._results)) for name, ref in report.refs.items()}
+
+    one, eight = run(1), run(8)
+    assert one == eight and all(len(records) == 5 for records in one.values())
+
+
 def test_one_and_three_processes_and_two_task_threads(wide, tmp_path, monkeypatch):
     """Real pools: 1 and 3 processes, and 2 task threads per process, give the same files; with threads, each thread has its
     own spans and the items reading a span run on one thread."""
