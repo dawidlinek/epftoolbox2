@@ -61,7 +61,7 @@ def limited(stop: bool):
     """In a forked process: the pool worker's thread limit (with the stop, or without it as before the fix); then its threads,
     its libraries' limits, the bits of `blas_work` and its threads after that work."""
     if not stop:
-        _worker._stop_openblas_threads = lambda controller: None
+        _worker._stop_openblas_threads = lambda lib: None
     _worker._limit_native_threads()
     threads = os_threads()
     limits = {lib["num_threads"] for lib in threadpool_info()}

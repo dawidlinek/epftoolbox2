@@ -31,8 +31,7 @@ NATIVE_THREAD_ENV_VARS = (
     "BLIS_NUM_THREADS",
     "VECLIB_MAXIMUM_THREADS",
 )
-_W_THREADPOOLS: Optional[ThreadpoolController] = None
-_W_NATIVE_LIMITS = None  # held for the worker's lifetime
+_W_THREADPOOLS: Optional[ThreadpoolController] = None  # set by `_limit_native_threads`, in a pool's worker only
 
 # Reasons a task produces no forecast without being an error. They are counted per model and reported.
 SKIP_TOO_FEW_ROWS = "too_few_rows"
@@ -62,33 +61,37 @@ def _limit_native_threads() -> None:
 
     Only for a pool worker: the limits are never restored, and the caller's process must keep its own.
     """
-    global _W_THREADPOOLS, _W_NATIVE_LIMITS
+    global _W_THREADPOOLS
     for name in NATIVE_THREAD_ENV_VARS:
         os.environ[name] = str(NATIVE_THREADS_PER_TASK)
     # Libraries already loaded ignore the variables: under fork that is everything the parent imported, under
-    # spawn whatever importing this module loaded (numpy's BLAS at least). threadpoolctl sets them directly.
+    # spawn whatever importing this module loaded (numpy's BLAS at least). threadpoolctl sets them directly, one library at
+    # a time and only where the count differs: setting an OpenBLAS's count in a forked child starts its helper threads, so
+    # each is stopped before the next library's start, and no later call on it starts them again.
     _W_THREADPOOLS = ThreadpoolController()
-    _W_NATIVE_LIMITS = _W_THREADPOOLS.limit(limits=NATIVE_THREADS_PER_TASK)
-    if NATIVE_THREADS_PER_TASK == 1:
-        _stop_openblas_threads(_W_THREADPOOLS)
+    for lib in _W_THREADPOOLS.lib_controllers:
+        if lib.num_threads != NATIVE_THREADS_PER_TASK:
+            lib.set_num_threads(NATIVE_THREADS_PER_TASK)
+            if NATIVE_THREADS_PER_TASK == 1:
+                _stop_openblas_threads(lib)
 
 
-def _stop_openblas_threads(controller: ThreadpoolController) -> None:
-    """Stop the helper threads of every OpenBLAS that runs its own pool of them (threading layer "pthreads").
+def _stop_openblas_threads(lib) -> None:
+    """Stop the helper threads of `lib`, a threadpoolctl library controller just set to one thread, if it is an OpenBLAS
+    that runs its own pool of them (threading layer "pthreads").
 
-    OpenBLAS's fork handler stops that pool in the parent before every fork, and setting its thread count in the child, as
-    the limit above does, starts it again: one thread per CPU the library counted when it loaded (2 x 127 on a 128-CPU
-    machine, numpy's OpenBLAS and scipy's), each spinning for OpenBLAS's thread timeout (about 0.1 s) before it sleeps, in
-    every worker of every pool. At one thread OpenBLAS hands them no work, so stopping them changes no number:
-    `blas_thread_shutdown_` is the function that fork handler runs, which leaves the library as every forked child starts,
-    at the thread count just set, and OpenBLAS starts the pool again by itself if a later call asks for more threads.
+    OpenBLAS's fork handler stops that pool in the parent before every fork, and setting the thread count in the child
+    starts it again: one thread per CPU the library counted when it loaded (64 on a 128-CPU machine, for numpy's OpenBLAS
+    and as many for scipy's), each spinning for OpenBLAS's thread timeout (about 0.1 s) before it sleeps, in every worker of
+    every pool. At one thread OpenBLAS hands them no work, so stopping them changes no number: `blas_thread_shutdown_` is
+    the function that fork handler runs, which leaves the library as every forked child starts, at the count just set, and
+    OpenBLAS starts the pool again by itself if a later call asks for more threads.
     """
-    for lib in controller.lib_controllers:
-        if lib.internal_api != "openblas" or getattr(lib, "threading_layer", None) != "pthreads":
-            continue
-        shutdown = getattr(getattr(lib, "dynlib", None), "blas_thread_shutdown_", None)
-        if shutdown is not None:
-            shutdown()
+    if lib.internal_api != "openblas" or getattr(lib, "threading_layer", None) != "pthreads":
+        return
+    shutdown = getattr(getattr(lib, "dynlib", None), "blas_thread_shutdown_", None)
+    if shutdown is not None:
+        shutdown()
 
 
 def _limit_openmp_in_task_thread() -> None:
