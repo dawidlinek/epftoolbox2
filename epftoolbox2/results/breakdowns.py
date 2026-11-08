@@ -6,11 +6,12 @@ judged by `evaluators._days`, the same rule that decides which days `EconomicEva
 Source-data columns are joined to forecasts by target date and period, as `CsvExporter(extra_columns=)` joins them.
 """
 
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
+from .._date_utils import zone_name
 from ..evaluators._days import QUARTERS, day_codes, hour_codes, hour_of_code, whole_days, whole_hours
 from ..evaluators.base import FORECAST_KEYS
 from ..models._contract import check_index, period_index
@@ -416,6 +417,30 @@ def switch_dates(dates: Sequence[Any], zone: Any) -> set:
     )
     lengths = ends.as_unit("ns").asi8 - starts.as_unit("ns").asi8
     return set(days[lengths != pd.Timedelta(days=1).value])
+
+
+def zone_key(tz: Any) -> Optional[str]:
+    """How a time zone is compared: its name, or `str` of a zone without one that reads back (a `pytz.FixedOffset(60)`), as
+    a manifest's `data_timezone` is written; None for no zone."""
+    return zone_name(tz) or (None if tz is None else str(tz))
+
+
+def check_source_zone(source_data: pd.DataFrame, zones: Iterable[Any], what: str) -> None:
+    """Raise unless the source's index is in the results' time zone, when the results have one (`zones`, the refs').
+
+    A join by target date and period reads the source's wall clock, so a source indexed in another zone, or in none, would
+    give each forecast another hour's row without a word: Europe/Berlin results read from a UTC frame were all an hour or
+    two off. Results without a zone (plain lists) read the wall clock as given, as before."""
+    keys = {zone_key(zone) for zone in zones if zone is not None}
+    if not keys:
+        return
+    source = zone_key(getattr(source_data.index, "tz", None))
+    if keys != {source}:
+        raise ValueError(
+            f"{what}: the source data's index is in the time zone {source}, the results in {sorted(keys)}, and the join "
+            "reads its wall clock, which would put each forecast on another hour's row. Convert the source to the results' "
+            "zone (source.tz_convert(...)), as the frame of the run is."
+        )
 
 
 def source_table(source_data: pd.DataFrame, columns: Sequence[str], freq: str, days: Any = None) -> pd.DataFrame:

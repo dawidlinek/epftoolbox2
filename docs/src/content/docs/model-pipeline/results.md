@@ -208,7 +208,7 @@ joins, so the source must be at the results' frequency, and on the day clocks fa
 one a run forecasts from. The value is read from the data, never from a forecast, so the groups are the same rows for every model.
 With `bins` (a list of increasing edges, each interval closed on the left) a numeric column is cut into intervals. A forecast with no
 value there (NaN, no source row, outside the bins) is in no group; `df.attrs["no_value"]` counts them per model, so the groups add up
-to `summary()`. A report from `aggregate()` has no source data, so call it on the report you aggregated. When the results know their time zone (a run's do), the source's index must be in it: a source in UTC would put each forecast on another hour's row, so it raises.
+to `summary()`. A report from `aggregate()` has no source data, so call it on the report you aggregated. When the results know their time zone (a run's do), the source's index must be in it, the zone of the frame the run read even when it has no name (a fixed offset): a source in UTC would put each forecast on another hour's row, so it raises, as `CsvExporter(extra_columns=)` does.
 
 ## Daily aggregates
 

@@ -815,3 +815,46 @@ def test_nmae_of_a_zero_mean_is_nan():
     zeros = pd.DataFrame({"prediction": [0.0, 0.0], "actual": [0.0, 0.0]})
     assert np.isnan(NMAEEvaluator().compute(zeros))
     assert np.isnan(NMAEEvaluator().compute(zeros.assign(prediction=[1.0, 2.0])))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Re-review of step 7b
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def test_a_run_on_a_frame_in_an_unnamed_fixed_offset_joins_its_own_columns(monkeypatch):
+    import pytz
+
+    from epftoolbox2.models import OLSModel
+    from epftoolbox2.pipelines import ModelPipeline
+    from tests.synthetic import make_market_data
+
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    df = make_market_data(start="2023-01-01", days=60, tz="UTC", horizon=1)
+    df.index = df.index.tz_convert(pytz.FixedOffset(60))  # a zone without a name that reads back
+    df["cap"] = 1000.0
+    pipeline = (
+        ModelPipeline()
+        .add_model(OLSModel(["load_d+{horizon}", "wind_d+{horizon}", "price_d-1"], 20, name="ols"))
+        .add_evaluator(MAEEvaluator(), ScaledMAEEvaluator("cap"))
+    )
+    report = pipeline.run(df, test_start="2023-02-15", test_end="2023-02-17", horizon=1)
+    row = report.summary().iloc[0]
+    assert row["MAE/cap"] == pytest.approx(row["MAE"] / 1000.0) and row["MAE/cap left out"] == 0
+    assert report.by_column("is_weekend")["forecasts"].sum() == row["forecasts"]
+
+
+def test_csv_extra_columns_need_the_results_time_zone(tmp_path):
+    from epftoolbox2.exporters import CsvExporter
+
+    local = hourly_source({"local_hour": lambda idx: idx.hour.to_numpy().astype(float)})
+    for source in (local.tz_convert("UTC"), local.tz_localize(None)):
+        report = report_of({"m": records("1h")}, freq="1h", source_data=source)
+        with pytest.raises(ValueError, match="time zone"):
+            CsvExporter(str(tmp_path / "out.csv"), extra_columns=["local_hour"]).export(report)
+    CsvExporter(str(tmp_path / "out.csv"), extra_columns=["local_hour"]).export(
+        report_of({"m": records("1h")}, freq="1h", source_data=local)
+    )
+    written = pd.read_csv(tmp_path / "out.csv")
+    assert (written["local_hour"] == written["hour"]).all()

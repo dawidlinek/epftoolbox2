@@ -73,6 +73,8 @@ Use `extra_columns` to include columns from the source dataset (e.g., calendar f
 
 The source dataset must have the resolution of the results, one row per local date and period. For `freq="1D"` results that is a daily source, one row per local date at one time of day (`df.at_time("12:00")`; see [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames)), else every hour of a date would join period 0. A source of another resolution raises a `ValueError` (`extra_columns need source data at the resolution of the 1h results`) instead of writing a forecast once per source row (a finer source) or leaving most cells empty (a coarser one). Resample or aggregate it first, for example with [ResampleTransformer](/epftoolbox2/transformers/resample/). Only the source rows on the target dates of the file are checked for their spacing.
 
+The join reads the source's local wall clock, so when the results know their time zone (a report of a run, or from files whose manifests record it), the source's index must be in that zone: a frame indexed in UTC, or with no zone, under Europe/Berlin results raises a `ValueError` instead of giving every forecast another hour's value. Results passed as plain lists have no zone, and the source's wall clock is read as given.
+
 When the clocks go back, a source in local time holds the repeated hour twice, once per UTC offset. A forecast for that hour takes the values of the second occurrence, the row a run forecasts from, and stays one row in the file. A source with a naive index cannot tell the two apart and raises.
 
 ```python

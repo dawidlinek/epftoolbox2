@@ -23,7 +23,6 @@ from ..evaluators._compare import (
     too_few_distinct_models,
     verdict,
 )
-from .._date_utils import zone_name
 from ..evaluators._days import check_period_ids, periods_per_hour
 from ..evaluators.base import FORECAST_KEYS, Evaluator, SetEvaluator
 from ..evaluators.dm import DMEvaluator, check_test_settings
@@ -38,6 +37,7 @@ from .breakdowns import (
     PEAK_HOURS,
     block_aggregate,
     check_peak_hours,
+    check_source_zone,
     numbered_by_the_clock,
     daily_aggregate,
     hourly_aggregate,
@@ -567,15 +567,7 @@ class EvaluationReport:
 
         The join reads the source's wall clock, so a source in another time zone than the results' would give each forecast
         another hour's value: with results that know their zone, the source's index must be in it."""
-        zones = {zone_name(ref.zone) or str(ref.zone) for ref in self.refs.values() if ref.zone is not None}
-        if zones:
-            source_zone = zone_name(getattr(self.source_data.index, "tz", None))
-            if zones != {source_zone}:
-                raise ValueError(
-                    f"The source data's index is in the time zone {source_zone}, the results in {sorted(zones)}: its "
-                    "wall clock would put each forecast on another hour's row. Convert the source to the results' zone "
-                    "(source.tz_convert(...)), as the frame of the run is."
-                )
+        check_source_zone(self.source_data, [ref.zone for ref in self.refs.values()], "Joining source-data columns")
         dates = [df["target_date"] for df in frames.values() if len(df) and "target_date" in df]
         days = None
         if dates:
