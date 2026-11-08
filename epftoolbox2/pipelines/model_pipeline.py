@@ -87,6 +87,35 @@ logger = get_logger(__name__)
 
 # A zone of `run(data={zone: frame})` names a folder of `save_dir`.
 _ZONE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+# The zone index a run over zones writes into its save_dir: the zones in the order first run. It alone makes a save_dir one of
+# zones for `report`; no folder layout does.
+ZONE_INDEX = "zone_run.json"
+
+
+def read_zone_index(save_dir: Union[str, Path]) -> Optional[List[str]]:
+    """The zones a run over zones recorded in `save_dir`, in order, or None if it holds no zone index."""
+    path = Path(save_dir) / ZONE_INDEX
+    if not path.is_file():
+        return None
+    try:
+        zones = json.loads(path.read_text()).get("zones")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise ValueError(f"{path} is no zone index of a run over zones: {exc}") from exc
+    if not isinstance(zones, list) or not all(isinstance(zone, str) and _ZONE_NAME.fullmatch(zone) for zone in zones):
+        raise ValueError(f"{path} is no zone index of a run over zones: its 'zones' must be a list of zone names")
+    return zones
+
+
+def write_zone_index(save_dir: Union[str, Path], zones: Sequence[str]) -> None:
+    """Record `zones` in `save_dir`'s zone index, after those it holds: a later run over fewer keeps the others."""
+    root = Path(save_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    merged = list(dict.fromkeys([*(read_zone_index(root) or []), *zones]))
+    text = {
+        "zones": merged,
+        "about": "epftoolbox2: a run over zones, one folder per zone (ModelPipeline.run(data={zone: frame}))",
+    }
+    (root / ZONE_INDEX).write_text(json.dumps(text, indent=1) + "\n")
 
 
 @contextmanager
@@ -357,6 +386,11 @@ class ModelPipeline:
         if not self.models:
             raise ValueError("At least one model is required")
         self._refuse_pooled("run")
+        if save_dir and read_zone_index(save_dir) is not None:
+            raise ValueError(
+                f"{save_dir} holds a run over zones ({Path(save_dir) / ZONE_INDEX}); a run of one frame there would leave a "
+                "report not knowing which to read. Use another save_dir, or run the frame as a zone, data={zone: frame}."
+            )
         horizon, horizons = resolve_horizons(horizon, horizons, 7)
         weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
@@ -668,6 +702,7 @@ class ModelPipeline:
             return hashes[id(frame)]
 
         if save_dir:
+            write_zone_index(save_dir, zones)  # what tells a report this save_dir's folders are zones
             for model in pooled:
                 # Each zone's manifest records the other zones' data: another zone's frame moves this zone's forecasts.
                 data_of = {
@@ -921,14 +956,17 @@ class ModelPipeline:
         windows raise `ValueError`, as they would be compared on different forecasts. The report is what `run` returns: on
         the test window, with `report.validation`, or the validation report if there is no test window.
 
-        A `save_dir` of a run over zones (`run(data={zone: frame})`) holds a folder per zone: the report is then a
-        `PanelReport`, each zone's folder reported as above (`data` a dict of the zones' frames, if a zone's evaluators need
-        it), the zones in the order of their names. Exporters export one report, so they raise there.
+        A `save_dir` of a run over zones (`run(data={zone: frame})`) holds a folder per zone and the run's zone index,
+        `zone_run.json`, which alone makes it one: the report is then a `PanelReport`, each zone's folder reported as above
+        (`data` a dict of the zones' frames, if a zone's evaluators need it), in the run's order. A zone the index or a pooled
+        model's manifest names whose folder holds none of the pipeline's results raises `FileNotFoundError` (`allow_missing`
+        leaves it out with a warning). Exporters export one report, so they raise there. Any other layout reads as before:
+        sub-folders of a `save_dir` are never zones by their names alone.
         """
         if not self.models:
             raise ValueError("At least one model is required")
-        zones = self._zone_folders(save_dir)
-        if zones:
+        zones = read_zone_index(save_dir)
+        if zones is not None:
             return self._report_zones(
                 save_dir,
                 zones,
@@ -1093,37 +1131,11 @@ class ModelPipeline:
                 exporter.export(report)
         return report
 
-    def _zone_folders(self, save_dir: Union[str, Path]) -> List[str]:
-        """The zones of a run over several whose results are in `save_dir`: its sub-folders that hold results of one of the
-        pipeline's models, by name. None (an empty list) when `save_dir` holds a run of one frame; both raise."""
-        root = Path(save_dir)
-        if not root.is_dir():
-            return []
-        named = [*self.models, *self.ensembles]
-        zones = sorted(
-            folder.name
-            for folder in root.iterdir()
-            if folder.is_dir()
-            and _ZONE_NAME.fullmatch(folder.name)
-            and any(
-                self.results_path(folder, model, fmt).exists()
-                or manifest_path(self.results_path(folder, model, fmt)).exists()
-                for model in named
-                for fmt in SAVE_FORMATS
-            )
-        )
-        here = [
-            model.name for model in named if any(self.results_path(root, model, fmt).exists() for fmt in SAVE_FORMATS)
-        ]
-        if zones and here:
-            raise ValueError(
-                f"{root} holds both the results of one frame ({here}) and the folders of a run over zones ({zones}): a report "
-                "can't tell which to read. Move one of them to its own save_dir."
-            )
-        return zones
-
     def _report_zones(self, save_dir: Union[str, Path], zones: List[str], data: Any = None, **told: Any) -> PanelReport:
-        """`report` of a save_dir of zone folders: one report per zone (`data[zone]`, if given), in a `PanelReport`."""
+        """`report` of the save_dir of a run over zones (its zone index, `ZONE_INDEX`): one report per zone (`data[zone]`, if
+        given), in the run's order, in a `PanelReport`. A zone the index or a pooled model's manifest names whose folder holds
+        none of the pipeline's results raises, unless `allow_missing`, which leaves it out with a warning: a panel without it
+        would score every other zone as the whole run."""
         if self.exporters and not told.get("forecast_only"):
             raise ValueError(
                 "A report of a run over zones is one report per zone, and an exporter exports one: remove the exporters and "
@@ -1133,13 +1145,53 @@ class ModelPipeline:
             raise ValueError(
                 f"{save_dir} holds a run over the zones {zones}: pass data as a dict of their frames, {{zone: frame}}"
             )
+        root = Path(save_dir)
+        named = [*self.models, *self.ensembles]
+        expected = list(dict.fromkeys([*zones, *self._pooled_zones(root, zones)]))
+
+        def has_results(zone: str) -> bool:
+            folder = root / zone
+            return folder.is_dir() and any(
+                self.results_path(folder, model, fmt).exists() for model in named for fmt in SAVE_FORMATS
+            )
+
+        missing = [zone for zone in expected if not has_results(zone)]
+        if missing and not told.get("allow_missing"):
+            raise FileNotFoundError(
+                f"{root} is a run over the zones {expected}, and {missing} hold none of this pipeline's results (a folder lost, "
+                "or a run stopped before them): a panel without them would score the others as the whole run. Run them "
+                "again, or pass allow_missing=True to leave them out."
+            )
+        if missing:
+            warnings.warn(f"Report: zone(s) {missing} of {root} have no results; they are left out", stacklevel=3)
         reports = {}
         target = None
-        for zone in zones:
-            folder = Path(save_dir) / zone
+        for zone in expected:
+            if zone in missing:
+                continue
+            folder = root / zone
             reports[zone] = self.report(folder, data=None if data is None else data.get(zone), **told)
             target = target or self._stored_target(folder)
+        if not reports:
+            raise FileNotFoundError(
+                f"{root} is a run over the zones {expected}, and none holds this pipeline's results"
+            )
         return PanelReport(reports, target=target)
+
+    def _pooled_zones(self, root: Path, zones: Sequence[str]) -> List[str]:
+        """Every zone a pooled model's manifest in these zones' folders records (`pooled["zones"]`), each once, in order."""
+        found: List[str] = []
+        for zone in zones:
+            for model in self.models:
+                if not isinstance(model, PooledModel):
+                    continue
+                path = manifest_path(self.results_path(root / zone, model))
+                if path.exists():
+                    try:
+                        found += (json.loads(path.read_text()).get("pooled") or {}).get("zones") or []
+                    except (OSError, ValueError, AttributeError):
+                        continue
+        return list(dict.fromkeys(found))
 
     def _stored_target(self, folder: Path) -> Optional[str]:
         """The target a model's manifest in `folder` records, or None if none does."""

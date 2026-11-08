@@ -92,7 +92,7 @@ class ModelPipeline:
         test: Optional[Tuple[Any, Any]] = None,  # None of the windows: every window the manifests record
         horizons: Optional[Sequence[int]] = None,  # As in run; only records of these horizons are read
         issue_days: Optional[Sequence[str]] = None,  # As in run; None reads them from the manifests
-    ) -> EvaluationReport: ...            # A PanelReport for a save_dir of zone folders
+    ) -> EvaluationReport: ...            # A PanelReport for the save_dir of a run over zones (zone_run.json)
 
     def verify(                           # Leakage probe and positive control on sampled issue days
         self,

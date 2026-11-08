@@ -36,8 +36,9 @@ panel.zones["FI"]        # Finland's EvaluationReport, as a run of its frame alo
   value is a DataFrame in its market's zone, as one frame would be. The test window, target, horizons, `freq` and `issue_days` are
   the run's, the same in every zone.
 - **Files.** `save_dir/<zone>/<model>.jsonl` (or `.parquet/`) and its manifest, per zone and model, under the keys `(hour, horizon,
-  run_date)` of a plain run. A `save_dir` that already holds a run of one frame is refused before any fit: a report couldn't tell
-  which to read.
+  run_date)` of a plain run, and `save_dir/zone_run.json`, the zone index: the zones in the order first run, which alone tells
+  `report` that the folders are zones (sub-folders of a run of one frame never are). A `save_dir` that already holds a run of one
+  frame is refused before any fit, and so is a run of one frame into a `save_dir` of zones: a report couldn't tell which to read.
 - **Checks before any fit.** Every model is checked on every zone's frame (the data contract, the predictors, the information set)
   before any model runs, and one warning lists what each `(model, zone)` reads late at `availability="warn"`.
 - **Ensembles** are computed per zone, from the zone's stored forecasts, as in a run of one frame.
@@ -62,7 +63,9 @@ judged on the earlier clock on its issue row too: stricter than needed, never lo
 
 ## The panel report
 
-`run` returns, and `ModelPipeline.report(save_dir, ...)` of a `save_dir` of zone folders builds, a `PanelReport`:
+`run` returns, and `ModelPipeline.report(save_dir, ...)` of a run over zones builds, a `PanelReport`, its zones in the run's order. A
+zone the index or a pooled model's manifest names whose folder holds none of the pipeline's results raises `FileNotFoundError`:
+a panel without it would score the other zones as the whole run. `allow_missing=True` leaves it out with a warning.
 
 | | |
 |---|---|

@@ -607,3 +607,43 @@ def test_a_refused_resume_writes_no_manifest_in_a_new_zone(tmp_path):
     with pytest.raises(ManifestMismatchError, match="zone 'PL'"):
         run_pooled(tmp_path, {"FI": daily("FI", seed=1), "PL": daily("PL")})  # FI first in the stack, PL on file
     assert not (tmp_path / "FI").exists() or not any((tmp_path / "FI").glob("*.manifest.json"))
+
+
+def test_folders_of_runs_of_one_frame_are_never_zones(tmp_path):
+    def pipeline():
+        return ModelPipeline().add_model(OLSModel(predictors=PREDICTORS, training_window=40, name="m"))
+
+    run = dict(test=FRIDAYS, horizons=[1, 2], freq="1D", issue_days=["friday"])
+    pipeline().run(daily("PL"), save_dir=str(tmp_path / "runs"), **run)
+    pipeline().run(daily("PL", seed=3), save_dir=str(tmp_path / "runs" / "old"), **run)  # an older run kept inside
+    report = pipeline().report(tmp_path / "runs", **run)
+    assert not isinstance(report, PanelReport)
+    assert report.forecast_counts()["produced"].tolist() == [len(lines(tmp_path / "runs" / "m.jsonl"))]
+    pipeline().run(daily("PL"), save_dir=str(tmp_path / "exp" / "v2"), **run)
+    with pytest.raises(FileNotFoundError, match="No results"):  # a parent of runs is no run, as before
+        pipeline().report(tmp_path / "exp", **run)
+
+
+def test_a_report_refuses_a_zone_of_the_run_whose_folder_is_gone(tmp_path):
+    import shutil
+
+    frames = {zone: daily(zone, seed=i) for i, zone in enumerate(ZONES)}
+    pipeline = (
+        ModelPipeline()
+        .add_model(NaiveModel(predictors=["load_d+{horizon}"], name="tso", known_only=False))
+        .add_model(PooledModel(OLSModel(predictors=PREDICTORS, training_window=40, name="m")))
+    )
+    run = dict(test=FRIDAYS, horizons=[1, 2], freq="1D", issue_days=["friday"])
+    pipeline.run(frames, save_dir=str(tmp_path), **run)
+    assert json.loads((tmp_path / "zone_run.json").read_text())["zones"] == list(ZONES)
+    assert list(pipeline.report(tmp_path, **run).zones) == list(ZONES)  # in the run's order
+    shutil.rmtree(tmp_path / "PT")
+    with pytest.raises(FileNotFoundError, match=r"\['PT'\] hold none"):
+        pipeline.report(tmp_path, **run)
+    with pytest.warns(UserWarning, match="PT"):
+        assert list(pipeline.report(tmp_path, allow_missing=True, **run).zones) == ["PL", "FI"]
+    one_frame = ModelPipeline().add_model(OLSModel(predictors=PREDICTORS, training_window=40, name="x"))
+    with pytest.raises(
+        ValueError, match="holds a run over zones"
+    ):  # a run of one frame there is refused before any fit
+        one_frame.run(frames["PL"], save_dir=str(tmp_path), **run)
