@@ -209,8 +209,10 @@ given a batch of issue days, can break either. Two checks test that:
 
 Both run by default for the models that need them: those that predict several items in one call (`_predicts_together`), name
 the other items (`_co_batch_items`) or have a card (a family with an extra or weights). For every other model, which predicts
-each forecast on its own and is deterministic, both are off by default and their columns are empty. `rerun=` and `co_batch=`
-turn them on or off for every model verified:
+each forecast on its own and is deterministic, both are off by default and their columns are empty. A model with a card is
+also checked first as `run` checks it: a missing extra, runtime package or weight file raises before any probe (see
+[Licences and Weights](/epftoolbox2/models/licences-and-weights/)). `rerun=` and `co_batch=` turn them on or off for every model
+verified:
 
 ```python
 from epftoolbox2.models import RidgeModel

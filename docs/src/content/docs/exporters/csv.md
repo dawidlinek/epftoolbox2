@@ -86,6 +86,13 @@ exporter = CsvExporter(
 
 If a requested column does not exist in the source dataset, it is silently skipped.
 
+## Model Provenance
+
+A report with a model that has a card (a family with an extra or pretrained weights, see
+[Licences and Weights](/epftoolbox2/models/licences-and-weights/)) also gets `report.provenance()` written to
+`<stem>.provenance.csv` next to the file (`results.csv` -> `results.provenance.csv`): each such model's licence, attribution,
+weights and contamination verdicts. Without one nothing more is written.
+
 ## In Pipeline
 
 ```python

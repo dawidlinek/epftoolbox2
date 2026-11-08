@@ -251,6 +251,29 @@ epf results verify results                 # catalogs, part checksums, orphans, 
 
 ---
 
+## `epf weights`: Fetch, list and verify model weights
+
+The pretrained weights of a family with a model card (see [Licences and Weights](/epftoolbox2/models/licences-and-weights/)). A
+run never downloads: this command is the one that does, into the cache `EPFTOOLBOX2_WEIGHTS_DIR` (default
+`~/.cache/epftoolbox2/weights`), which every run then reads offline.
+
+```bash
+epf weights fetch mypackage.models:MyFamilyModel --accept 'CC-BY-NC-4.0'
+epf weights list
+epf weights verify
+```
+
+| Action | What it does |
+|--------|--------------|
+| `fetch MODEL` | Shows the licence, size, repository, revision and destination, downloads the card's files from Hugging Face and checks each sha256 against the card (says "recorded" where the card pins none). `MODEL` is a registered model class, `module:Class` for one of your own, or `all` (every registered class whose card has weights; a failure doesn't stop the others). A failed download (a gated or missing repository, no network) records nothing. Exits with code 1 when any fetch failed or was refused |
+| `fetch ... --size SIZE` | One of the class's sizes (`_card_variants`) |
+| `fetch ... --accept LICENCE` | Accepts the licence the card names: needed for a non-commercial or revenue-capped one, refused without it before anything downloads. Repeat it for `all` |
+| `fetch ... --revision REV` | The card's revision given explicitly, or another one (a branch, tag or commit name; a path is refused): files whose sha256 differs from the card's are then recorded (runs warn: not the reference weights) instead of refused. Another revision is in its own directory, and a model runs on it with `weights='<repo>@<rev>'` |
+| `list` | What the cache holds: repository and revision, family, files, size, licence (and whether it was accepted), fetch time |
+| `verify` | Re-hashes every file the cache recorded and compares it with its fetch, and names files in its directories that no fetch recorded (`unlisted`); exits with code 1 when a file changed, is missing or is unlisted |
+
+---
+
 ## `epf validate`: Validate any pipeline YAML
 
 Load and parse a YAML file, instantiate all components, and report errors. Without running anything.

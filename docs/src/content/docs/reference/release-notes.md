@@ -232,6 +232,21 @@ an issue day it didn't sample.
   and that check also runs the issue day on the frame cut after its date and requires the same forecasts to the bit
   (`issue_day_cut`, `CutResult` in `epftoolbox2.information_set`): a forecast that depends on which later days its call holds
   is a `leak`. **No model of today defines it, and none of their numbers moves.** See [Extending](/epftoolbox2/reference/extending/#predicting-a-refit-block-in-one-call).
+- **Model cards, weights and the pre-flight, for the families that need an extra or pretrained weights.** A family declares a
+  `ModelCard` (licence, commercial use, revenue cap, attribution, corpus and its end, release, runtime packages with their pins, weight
+  files with their sha256). `ModelPipeline.run`, each `Workflow` array task (before its data pipeline), `epf run` and `verify` (each
+  model verified, before any probe) check every model first and raise one error naming every missing extra, runtime package outside its pin and missing or changed weight file
+  (`MissingWeightsError` or `MissingExtraError`; `MissingExtraError` takes an optional message and pickles with it). Weights never
+  download during a run: `epf weights fetch` downloads a card's files into `EPFTOOLBOX2_WEIGHTS_DIR` (default
+  `~/.cache/epftoolbox2/weights`), verifies their sha256 and needs `--accept <licence>` for a non-commercial or revenue-capped
+  licence; `epf weights list` and `epf weights verify` show and re-hash the cache. A carded model's manifest adds `card` (provenance)
+  and `runtime` and `weights` (compared: another runtime version, commit, device type, thread count or weight hash refuses a resume).
+  `report.provenance()` lists each carded model's licence, weights, runtime and the contamination verdict of each window (`clean`,
+  `clean (released before)`, `possibly contaminated`, or the card's own), and the terminal, CSV (`<stem>.provenance.csv` next to its file) and Excel
+  ("Provenance" sheet) exporters print it. `epftoolbox2.verify()` adds a table of extras and of the weights in the cache.
+  `BaseModel._engine_ok = False` keeps a family out of the engine whatever it defines. **Nothing of the core models moves**: no
+  shipped model has a card, so their records, manifests, tables and exporter files are as before. See
+  [Licences and Weights](/epftoolbox2/models/licences-and-weights/).
 - **Scoring by period: hourly and block aggregates, the shape within the hour, normalised MAEs, breakdowns by a data column.**
   `report.aggregate("1h", agg="mean")` turns 15-minute results into hourly ones (an hour counts with all four quarter-hours finite;
   dropped hours are `incomplete_hour` in its `forecast_counts()`), and `aggregate("1D", agg="peak")` / `"offpeak"` scores the mean over

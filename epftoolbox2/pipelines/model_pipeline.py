@@ -46,6 +46,7 @@ from ..models._pooled import (
     verify_pooled,
     with_missing_columns,
 )
+from ..models._cards import preflight, read_provenance
 from ..ensembles._compute import compute
 from ..ensembles.base import Ensemble
 from ..evaluators.base import Evaluator
@@ -207,6 +208,11 @@ COMPONENT_REGISTRY = {
         "TerminalExporter": "epftoolbox2.exporters.terminal",
     },
 }
+
+
+def _carded(models: Sequence[Any]) -> List[Any]:
+    """The models `models._cards.preflight` checks: a `PooledModel`'s wrapped model in its place."""
+    return [model.model if isinstance(model, PooledModel) else model for model in models]
 
 
 class ModelPipeline:
@@ -412,6 +418,9 @@ class ModelPipeline:
         horizon, horizons = resolve_horizons(horizon, horizons, 7)
         weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
+        # Every model's extra, runtime packages and weights before anything else, so a missing one fails in seconds and names
+        # every other problem with it (`models._cards.preflight`); a core model costs a lookup.
+        preflight(self.models)
         self._check_availability()
         self._check_evaluators_for(freq)
         if not forecast_only:
@@ -611,6 +620,7 @@ class ModelPipeline:
         horizon, horizons = resolve_horizons(horizon, horizons, 7)
         weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
+        preflight(_carded(self.models))  # as in a run of one frame: every model's extra and weights first
         self._check_availability()
         self._check_evaluators_for(freq)
         if self.exporters and not forecast_only:
@@ -1099,6 +1109,7 @@ class ModelPipeline:
                 ),
                 availability_listing=read_listing(manifest_path(path)),
                 vintages=read_vintages(manifest_path(path)),
+                provenance=read_provenance(manifest_path(path)),
                 windows=windows,
                 matching_lists=read_matching_lists(manifest_path(path)),
                 zone=zone,
@@ -1489,6 +1500,8 @@ class ModelPipeline:
         Raises:
             InformationSetError: The pipeline has no information set, or a checked column has no rule and the
                 information set's `unknown` is "raise".
+            MissingExtraError, MissingWeightsError: A model verified lacks its extra, a runtime package within its card's
+                pins or its weights (the pre-flight of `run`, before any probe; `models._cards.preflight`).
         """
         horizon, horizons = resolve_horizons(horizon, horizons, 1)
         weekdays = resolve_issue_days(issue_days)
@@ -1500,6 +1513,7 @@ class ModelPipeline:
             raise ValueError("At least one model is required")
         self._check_model_names()
         chosen = self._select_models(models)
+        preflight(_carded(chosen))  # the extras, runtime packages and weights of the models verified, first
         if isinstance(data, Mapping):
             return self._verify_zones(
                 data,

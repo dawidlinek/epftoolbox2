@@ -1,4 +1,5 @@
 from .base import BaseModel
+from ._cards import ModelCard, WeightsRef
 from .context import PredictorContext, PredictorPlan, Use
 from .ols import OLSModel
 from .lasso import LassoCVModel
@@ -18,4 +19,6 @@ __all__ = [
     "PredictorContext",
     "PredictorPlan",
     "Use",
+    "ModelCard",
+    "WeightsRef",
 ]
