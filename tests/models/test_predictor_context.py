@@ -540,6 +540,7 @@ def test_availability_is_computed_once_per_distinct_name_however_many_lists(df, 
         return real(self, col, periods, step, row_day)
 
     monkeypatch.setattr(module._IssueClock, "available", counted)
+    monkeypatch.setattr(module, "_VERDICTS", {})  # none kept from an earlier test: the check judges each column itself
     model = OLSModel(many_lists, training_window=45)
     plan = model._plan_predictors(df, "price", 1, "1h", INFO, *TEST)
     assert len(plan.lists) == 2
