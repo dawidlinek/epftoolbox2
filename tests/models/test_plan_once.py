@@ -391,23 +391,26 @@ def test_verdicts_are_kept_by_what_they_are_computed_from(frames, monkeypatch):
         return InformationSet(issue_time, zone, rules={**base.rules, **rules}, unknown="warn", use_defaults=False)
 
     entsoe = InformationSet(unknown="warn")
+    # Each check differs from "base" in one thing a verdict is computed from, and comes before it: were that thing left out of
+    # what a verdict is kept by, "base" would read the other's verdicts. The check of fewer periods comes first, as it keeps
+    # fewer late periods than one of every period would read.
     checks = {
-        "base": (base, data, full, dict(issue_days=days, training_rows=rows)),
-        "fewer days": (base, data, full, dict(issue_days=days[:2], training_rows=rows)),
-        "short window": (base, data, full, dict(issue_days=days, training_rows=TrainingRows(7, first_day=first))),
-        "no target": (base, data, full, dict(issue_days=days, training_rows=rows, check_target=False)),
         "periods": (base, data, some, dict(issue_days=days, training_rows=rows)),
+        "other days": (base, data, full, dict(issue_days=["2023-03-25", "2023-03-26"], training_rows=rows)),
+        "short window": (base, data, full, dict(issue_days=days, training_rows=TrainingRows(7, first_day=first))),
         "utc index": (base, utc, full, dict(issue_days=days, training_rows=rows)),
         "issue time": (like("09:30"), data, full, dict(issue_days=days, training_rows=rows)),
         "issue zone": (like(zone="Europe/London"), data, full, dict(issue_days=days, training_rows=rows)),
         "rule": (like(load=Availability.published("12:00", 1)), data, full, dict(issue_days=days, training_rows=rows)),
-        "defaults": (entsoe, data, solar, dict(issue_days=days)),
+        "no target": (base, data, full, dict(issue_days=days, training_rows=rows, check_target=False)),
+        "base": (base, data, full, dict(issue_days=days, training_rows=rows)),
         "assumption": (
             InformationSet(assumptions=["entsoe_a69_by_10"], unknown="warn"),
             data,
             solar,
             dict(issue_days=days),
         ),
+        "defaults": (entsoe, data, solar, dict(issue_days=days)),
     }
 
     def outcomes():
@@ -420,10 +423,8 @@ def test_verdicts_are_kept_by_what_they_are_computed_from(frames, monkeypatch):
 
     sharing(monkeypatch, False)
     own = outcomes()
-    for one, other in [
-        ("base", n) for n in ("short window", "periods", "utc index", "issue time", "issue zone", "rule")
-    ]:
-        assert own[one] != own[other], other  # so a verdict kept for the one would be wrong for the other
+    for other in ("other days", "short window", "periods", "utc index", "issue time", "issue zone", "rule"):
+        assert own["base"] != own[other], other
     assert own["defaults"] != own["assumption"]
     sharing(monkeypatch, True)
     computed = []
