@@ -24,9 +24,9 @@ verified.assert_ok()  # raises AssertionError naming what is wrong
 ```
 
 ```text
-   model  days  forecasts  changed  max change  control moved       status
-     OLS     5        120        0         0.0            120           ok
-Calendar     5        120        0         0.0              0 inconclusive
+   model  days  forecasts  changed  max change  control moved  rerun  co_batch       status
+     OLS     5        120        0         0.0            120   <NA>      <NA>           ok
+Calendar     5        120        0         0.0              0   <NA>      <NA> inconclusive
 ```
 
 `verify` probes the period you give it, not the windows of a run. After a run with
@@ -59,12 +59,15 @@ A column without a rule can't be perturbed at any level: it follows `unknown` of
 
 For each model, `days` issue days are sampled with `seed` from the test period (from its days of the weekdays in `issue_days`, if you pass them).
 Every model gets the same days, so they don't depend on which models you verify or in what order, and the same seed gives the same
-table. On each day two experiments run:
+table. On each day two experiments run, and two more for the models that need them (see
+[Rerun and co-batch](#rerun-and-co-batch)):
 
 | Experiment | What is perturbed | Forecasts must | Otherwise |
 |---|---|---|---|
 | Leakage probe | Every value not known at the issue time, and what the model trains on from the issue day on | not move | `leak` |
 | Positive control | The freshest values that are known | move | `inconclusive` |
+| Rerun | Nothing: the issue day runs twice | be the same, bit for bit | `inconclusive` |
+| Co-batch | Every other item of the call that predicts the issue day's forecasts | not move | `leak` |
 
 | Column | Meaning |
 |---|---|
@@ -74,13 +77,17 @@ table. On each day two experiments run:
 | `changed` | Forecasts that moved under the probe, or exist in only one of its runs, or whose [predictor function](/epftoolbox2/model-pipeline/predictor-functions/#the-issue-time-check) read a cell the probe moved |
 | `max change` | Largest move under the probe |
 | `control moved` | Forecasts that moved under the control (missing with `positive_control=False`) |
+| `rerun` | Forecasts that differ between two unperturbed runs (missing when the rerun didn't run) |
+| `co_batch` | Forecasts that moved when the other items of their call were replaced by noise (missing when the check didn't run) |
 | `status` | `ok`, `leak` or `inconclusive` |
 
 `verified.ok` is true only if every model is `ok`, so an `inconclusive` model doesn't pass. `verified.problems()` gives
-one line per thing that is wrong, and `verified.checks` holds each day's `leakage_probe` and `positive_control` result.
+one line per thing that is wrong, and `verified.checks` holds each day's `leakage_probe` and `positive_control` result, and
+its `rerun` and `co_batch` results where those ran.
 
 Only copies of the models run, in memory, so `verify` has no effect on a later `run()`. Each issue day costs four one-day
-runs per model, six with `rebuild` or with the target among a model's predictors.
+runs per model, six with `rebuild` or with the target among a model's predictors, two more with the rerun and two more
+with the co-batch check.
 
 A model with [`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) fits once for every issue day of
 its block, so a leak can need several days of a block in one run to show (a fit that read the block's last day, say). Its runs
@@ -162,6 +169,54 @@ sampled day reads is `inconclusive`, until `days` covers it. These are `inconclu
 
 `positive_control=False` skips the control, and then `ok` only says that no forecast moved.
 
+### Rerun and co-batch
+
+The probe compares two runs, so it trusts a model to give the same forecast twice, and it runs a model on the issue day (or its
+refit block), so it trusts a forecast not to depend on what else is predicted with it. Models that predict several items in
+one call, such as an in-context model given every issue row of its refit block at once, or a zero-shot model given a batch of
+issue days, can break either. Two checks test that:
+
+- **Rerun.** The unperturbed issue day runs twice first. If any forecast differs at all (atol 0, not the probe's 1e-9), the
+  model is `inconclusive` with the line `nondeterministic`, never `ok`: a forecast that moves under the probe or the co-batch
+  check could be its own noise, so those moves are reported as `inconclusive` too. A late value a
+  [predictor function](/epftoolbox2/model-pipeline/predictor-functions/#the-issue-time-check) reads is still a `leak`: seeing it
+  needs no comparison of forecasts. Verify such a model on the CPU or with its deterministic settings.
+- **Co-batch.** The model names the other items of the call that predicts the issue day's forecasts (the other days of its
+  refit block, the other days of its batch), and every numeric value on their rows is replaced by noise, except the target it
+  trains on and missing values. The issue day's forecasts must not move: one that does depends on what else is in its call, a
+  `leak`. The plain probe misses such a model wherever the other items hold only values known at the issue time, as the days of
+  a block before the issue day do. The runs cover the issue day's block and every named day, and only the issue day's forecasts
+  are compared.
+
+Both run by default for the models that need them, those that predict several items in one call or have a card (a family with
+an extra or weights). For every other model, which predicts each forecast on its own and is deterministic, both are off by
+default and their columns are empty. `rerun=` and `co_batch=` turn them on or off for every model verified:
+
+```python
+from epftoolbox2.models import RidgeModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
+pipeline.add_model(RidgeModel(predictors=["load_forecast_d+1", "price_d-1"], refit="7D", name="Ridge"))
+
+verified = pipeline.verify(df, test_start="2024-01-01", test_end="2024-12-31", days=5, rerun=True, co_batch=True)
+```
+
+A model that predicts each issue day on its own has no other item to replace, so its co-batch check runs nothing and counts 0.
+`device="cpu"` sets the device of every model that has one, for every run of the check, so a GPU model is verified where it is
+deterministic; the models themselves keep their device. Models without a device, every model of the core, run as they are.
+
+`leakage_probe`'s companion for one model and day is `co_batch_probe(model, data, run_day, information_set)` in
+`epftoolbox2.information_set`, and `perturb_items(data, days, keep)` is its noise.
+
+<Aside type="note" title="For a model family">
+  A class that predicts several items in one call sets `_predicts_together = True` and names them with
+  `_co_batch_items(run_day)`, which returns the other issue days whose rows are items of `run_day`'s call. Name only days whose
+  rows are no input of `run_day`'s own forecast: the other days of a refit block qualify, since a unit trains on rows before its
+  anchor. A class that predicts together but names nothing is `inconclusive`. The shared checks every family passes are in
+  `tests/models/adapter_suite.py`.
+</Aside>
+
 ---
 
 ## Leaks in the data: `rebuild`
@@ -203,7 +258,8 @@ model is `inconclusive`. If it really is known in advance, for example a column 
 - **It samples.** A leak that exists only on some days shows up only if one of them is sampled. Run it on the days around
   a DST switch on their own: `pipeline.verify(df, "2024-10-26", "2024-10-29", days=4)`. See
   [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#checking-it).
-- **A model must be deterministic.** Two runs of a model with no fixed `random_state` differ, which shows up as a leak.
+- **A model must be deterministic.** Two runs of a model with no fixed `random_state` differ, which shows up as a leak, or as
+  `inconclusive` (`nondeterministic`) with the rerun check, the default for the models that need it.
 - **It trusts your rules.** A rule that says a value is known earlier than it really is keeps that value out of the probe.
 - **It can't see revisions.** A value in the frame revised after the issue day is known by its rule, so nothing perturbs it. A
   predictor function reading it can move its list or its [set of days](/epftoolbox2/model-pipeline/predictor-functions/#training-only-on-the-days-with-the-same-list) without a word.
@@ -229,4 +285,5 @@ model is `inconclusive`. If it really is known in advance, for example a column 
 epf verify model_pipeline.yaml --data data.csv --test-start 2024-01-01 --test-end 2024-12-31
 ```
 
-See the [CLI reference](/epftoolbox2/getting-started/cli/#epf-verify-check-for-leaks) for its flags.
+`--device cpu` runs every model that has a device on the CPU. See the
+[CLI reference](/epftoolbox2/getting-started/cli/#epf-verify-check-for-leaks) for its flags.

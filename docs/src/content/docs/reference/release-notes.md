@@ -183,6 +183,16 @@ an issue day it didn't sample.
 
 ### New
 
+- **`verify` checks determinism and what else is in a forecast's call.** `ModelPipeline.verify(..., rerun=None, co_batch=None,
+  device=None)`: the rerun runs each sampled issue day twice first, and a forecast that differs at all makes the model
+  `inconclusive` (`nondeterministic`), never `ok`; the co-batch check replaces every other item of the call that predicts the
+  issue day's forecasts (the other days of a refit block a model predicts in one call, or of a batch) by noise, and a forecast
+  that moves is a `leak`, which the probe alone misses where those items hold only known values. Both are on by default for the
+  models that predict several items in one call (`_predicts_together`, naming them with `_co_batch_items(run_day)`) or have a
+  card, the model families to come, and off for every other. `device` sets the device of every model that has one (`epf verify
+  --device cpu`). `VerifyReport.table()` gains the columns `rerun` and `co_batch`, between `control moved` and `status`, empty
+  for every model of today: **no status or other column moves**. `co_batch_probe` and `perturb_items` join `leakage_probe` in
+  `epftoolbox2.information_set`. See [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/#rerun-and-co-batch).
 - **Scoring by period: hourly and block aggregates, the shape within the hour, normalised MAEs, breakdowns by a data column.**
   `report.aggregate("1h", agg="mean")` turns 15-minute results into hourly ones (an hour counts with all four quarter-hours finite;
   dropped hours are `incomplete_hour` in its `forecast_counts()`), and `aggregate("1D", agg="peak")` / `"offpeak"` scores the mean over
