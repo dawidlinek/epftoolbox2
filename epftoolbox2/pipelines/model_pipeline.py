@@ -20,8 +20,8 @@ from ..models._calendar import (
 )
 from ..models.base import BaseModel, _RunChecks
 from ..models._engine import (
+    ENGINE_CHECK,
     ENGINE_OFF,
-    ENGINE_ON,
     check_engine,
     engine_from_yaml,
     engine_groups,
@@ -127,10 +127,12 @@ class ModelPipeline:
             fitted from shared statistics (OLS, Ridge, LassoCV and LEAR, `BaseModel._engine_capable`) in engine groups: the
             models of one refit rule share one read of the data and one pool of processes, which cuts the fixed cost of each
             model in a study of thousands. NaiveModel, a `train_on="matching"` list, a subclass that fits without its own
-            `_fit_stats` and a `forecast_only` run go through their own run as with "off". Every forecast, file and table is
-            the same as with "off", to the bit (this release fits each model on its own rows in the group; see the docs page
-            on forecasting). `ENGINE_MAX_MODELS` (20,000) and `ENGINE_MAX_COLUMNS` (4,096) bound how many models and
-            columns a group reads at once. `verify` runs each model through the engine as well.
+            `_fit_stats` and a `forecast_only` run go through their own run as with "off". The fits of OLS, Ridge, LassoCV
+            and LEAR (`solver="lars"`) with `StandardScaler` or a VST come from exact sums shared in the group: the same bits
+            in any group, within the engine's tolerances of "off" (see the docs page on forecasting). "check" is "on" with
+            one fit in about 50 also run as "off" runs it, its gaps in the manifest (`engine_check`) and a warning about a
+            model over its class's tolerance. `ENGINE_MAX_MODELS` (20,000) and `ENGINE_MAX_COLUMNS` (4,096) bound how many
+            models and columns a group reads at once. `verify` runs each model through the engine as well.
     """
 
     def __init__(
@@ -155,7 +157,7 @@ class ModelPipeline:
 
     @property
     def engine(self) -> str:
-        """ "off" or "on": whether engine-capable models run in engine groups (see the class docstring)."""
+        """ "off", "on" or "check": whether engine-capable models run in engine groups (see the class docstring)."""
         return self._engine
 
     @engine.setter
@@ -372,14 +374,19 @@ class ModelPipeline:
             )
 
         ran: Dict[str, ModelResultRef] = {}
-        if self.engine == ENGINE_ON:
+        if self.engine != ENGINE_OFF:
             # The engine groups first, each in one go (models/_engine.py), then the rest in list order, as with "off".
             capable = [model for model in self.models if model._engine_capable(plans.get(model.name), forecast_only)]
             for group in engine_groups(capable):
                 columns = {model.name: checks[model.name].used_predictors for model in group}
                 # `run_group` takes each model's arguments (its check with them) out of this dict when its chunk starts.
                 ran.update(
-                    run_group(group, {model.name: run_arguments(**arguments(model)) for model in group}, columns)
+                    run_group(
+                        group,
+                        {model.name: run_arguments(**arguments(model)) for model in group},
+                        columns,
+                        check=self.engine == ENGINE_CHECK,
+                    )
                 )
         refs: dict[str, ModelResultRef] = {}
         for model in self.models:

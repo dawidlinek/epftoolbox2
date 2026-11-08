@@ -15,10 +15,12 @@ warning, its ref) and its store's close once its chunk has run.
 
 Nothing a model stores depends on its group, chunk, the union or the job: every task runs on its model's own inputs through the
 model path's functions (`_engine_worker.run_job`), and a fit reads its own columns by name, the same rows (dates) whatever else
-the union holds. A model whose fits come from shared statistics (`_engine_worker.fit_path_of`: OLS, Ridge and LEAR with
-`scaler="standard"`) has each fit made from its span's exact sums, which no other model can move by a bit; its manifest records
-`fit_path` (compared on resume) and, after its chunk, what those fits did (`results.manifest.record_engine`, provenance). Every
-other model's records are engine off's to the bit.
+the union holds. A model whose fits come from shared statistics (`_engine_worker.fit_path_of`: OLS, Ridge, LassoCV and LEAR
+with `StandardScaler` or a VST, LEAR with `solver="lars"`) has each fit made from its span's or row set's exact sums, which no
+other model can move by a bit; its manifest records `fit_path` (compared on resume) and, after its chunk, what those fits did
+(`results.manifest.record_engine`, provenance). Every other model's records are engine off's to the bit. `engine="check"`
+(`run_group(check=True)`) is "on" with a sample of the fits run on the model path as well, the gaps recorded as the manifest's
+`engine_check` and a warning naming a model whose largest gap is above its class's tolerance.
 """
 
 import datetime
@@ -27,6 +29,7 @@ import inspect
 import multiprocessing
 import os
 import sys
+import warnings
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -38,7 +41,7 @@ from ..results.manifest import manifest_path, record_engine
 from ..results.ref import ModelResultRef
 from ..results.store import StoreWriter
 from ._calendar import resolve_horizons
-from ._engine_worker import EngineCounts, EngineTaskFailed, _engine_init, fit_path_of, run_job
+from ._engine_worker import EngineCounts, EngineTaskFailed, _engine_init, fit_path_of, run_job, tolerance_of
 from .base import (
     _FRAME_READERS,
     _MASK_READERS,
@@ -51,7 +54,9 @@ from .base import (
 
 ENGINE_OFF = "off"
 ENGINE_ON = "on"
-ENGINE_MODES = (ENGINE_OFF, ENGINE_ON)
+# "on" with a sample of the fits from shared statistics run on the model path as well (`_engine_worker.CHECK_EVERY`).
+ENGINE_CHECK = "check"
+ENGINE_MODES = (ENGINE_OFF, ENGINE_ON, ENGINE_CHECK)
 # YAML 1.1 (PyYAML) reads an unquoted `on` / `off` as a bool: what each means (`engine_from_yaml`).
 _YAML_BOOLS = {True: ENGINE_ON, False: ENGINE_OFF}
 
@@ -150,6 +155,7 @@ def run_group(
     models: Sequence[BaseModel],
     arguments: Dict[str, Dict[str, Any]],
     columns: Optional[Dict[str, Sequence[str]]] = None,
+    check: bool = False,
 ) -> Dict[str, ModelResultRef]:
     """Run one engine group: `models` (one refit block rule, engine-capable), each with its `run` arguments (`arguments[name]`,
     from `run_arguments`; one frame, target, horizons and freq for all), and return each model's ref by name. A model's
@@ -165,7 +171,11 @@ def run_group(
     came back is in the stores, and a RuntimeError names the model, the day or block and the period; anything else that stops
     the loop (a store's failed write, an interrupt) stops it the same way, and a later run resumes. The
     first error a chunk's `_finish_run` raises (no forecast at all) is raised once the chunk's other models finished, and the
-    later chunks don't run, as later models don't with engine off."""
+    later chunks don't run, as later models don't with engine off.
+
+    `check` (`engine="check"`) also fits a sample of each model's fits from statistics on the model path, records the gaps
+    in its manifest (`engine_check`) and warns about a model whose largest gap is above its class's tolerance
+    (`_engine_worker.tolerance_of`)."""
     if not models:
         return {}
     if columns is None and len(models) > 1:
@@ -196,7 +206,7 @@ def run_group(
                         )
                         prepared.append((model, state))
                     periods = None  # the models hold the frames until `_release`
-                    counts = _run_chunk(prepared, bar)
+                    counts = _run_chunk(prepared, bar, check)
                 except BaseException:
                     _release(prepared, writer, chunk, raising=False)
                     _close(prepared, raising=False)
@@ -205,8 +215,16 @@ def run_group(
                 error: Optional[BaseException] = None
                 for model, state in prepared:
                     try:
-                        if state.store and counts.get(model.name):
-                            record_engine(manifest_path(state.store.path), state.manifest, counts[model.name].to_dict())
+                        fitted = counts.get(model.name)
+                        if state.store and fitted:
+                            record_engine(
+                                manifest_path(state.store.path),
+                                state.manifest,
+                                fitted.to_dict(),
+                                check=fitted.check_dict(),
+                            )
+                        if fitted:
+                            _warn_over_tolerance(model, fitted.check_dict())
                         refs[model.name] = model._finish_run(state)
                     except Exception as exc:  # every model's counts and warnings, then the first failure
                         error = error or exc
@@ -220,6 +238,19 @@ def run_group(
         raise
     _close_writer(writer)
     return refs
+
+
+def _warn_over_tolerance(model: BaseModel, check: Optional[Dict[str, Any]]) -> None:
+    """`engine="check"`'s warning: the model's largest gap between the engine and the model path above its class's tolerance."""
+    tolerance = tolerance_of(model)
+    if check is None or tolerance is None or not check["fits"] or check["max_abs"] <= tolerance:
+        return
+    warnings.warn(
+        f"{model.name}: engine check: forecasts from shared statistics are up to {check['max_abs']:.3g} from the model "
+        f"path's in {check['fits']} fits checked, above the {tolerance:g} of its class "
+        f"({check['other_choice']} chose another kink or penalty); its results use the engine's",
+        stacklevel=3,
+    )
 
 
 def mask_readers(models: Sequence[BaseModel], columns: Dict[str, Sequence[str]]) -> set:
@@ -262,9 +293,10 @@ class _Bar:
             self.progress.advance(self.task, n)
 
 
-def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> Dict[str, EngineCounts]:
+def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar, check: bool = False) -> Dict[str, EngineCounts]:
     """One chunk's pool: the union arrays, each model's worker inputs (`_worker_inputs`, explicit config, with its fit path
-    `config["fit_path"]` where its fits come from shared statistics, `_engine_worker.fit_path_of`), the jobs, and each job's
+    `config["fit_path"]` where its fits come from shared statistics, `_engine_worker.fit_path_of`, and
+    `config["engine_check"]` with `check`), the jobs, and each job's
     records into each model's sink as it comes back (`_collect`). Returns, by model name, what its fits from shared statistics
     did (`EngineCounts`), for the manifest's provenance."""
     pending = [(model, state) for model, state in prepared if state.tasks]
@@ -287,7 +319,7 @@ def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> Dict[s
         expanded, config = model._worker_inputs(state, threads)
         fit_path = fit_path_of(model)
         if fit_path is not None:
-            config = {**config, "fit_path": fit_path}
+            config = {**config, "fit_path": fit_path, **({"engine_check": True} if check else {})}
         inputs.append((model.name, expanded, config, type(model), model._model_kwargs))
         for job, tasks in model._jobs(state.tasks, state.first_day).items():
             for task in tasks:

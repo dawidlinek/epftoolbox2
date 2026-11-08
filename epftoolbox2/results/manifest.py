@@ -124,6 +124,9 @@ _PROVENANCE_FIELDS += ("save_format",)
 # `engine`: what an engine group's fits from shared statistics did in the last run that fitted any (`record_engine`): how many,
 # how many went back to the model path and why, and how far out the issue rows were. Says nothing about the configuration.
 _PROVENANCE_FIELDS += ("engine",)
+# `engine_check`: with `engine="check"`, how a sample of those fits compared with the model path on the same values (fits,
+# the largest absolute and relative gaps of their forecasts, how many chose another kink or penalty), in the same last run.
+_PROVENANCE_FIELDS += ("engine_check",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -260,6 +263,9 @@ class Manifest:
     # Provenance of the fits from shared statistics of the last run that made any (`models._engine_worker.EngineCounts`):
     # {"fits", "fallbacks": {reason: count}, "max_issue_z"}; None (and no key) otherwise. Never compared.
     engine: Optional[Dict[str, Any]] = None
+    # With `engine="check"`, that run's sample of fits also run on the model path (`EngineCounts.check_dict`): {"fits",
+    # "max_abs", "max_rel", "other_choice"}; None (and no key) otherwise. Never compared.
+    engine_check: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -318,6 +324,8 @@ class Manifest:
             del out["fit_path"]
         if out["engine"] is None:  # no fit from shared statistics
             del out["engine"]
+        if out["engine_check"] is None:  # no engine="check"
+            del out["engine_check"]
         return out
 
     @classmethod
@@ -645,13 +653,18 @@ def record_skips(path: Path, manifest: Manifest, skipped: Mapping[str, Mapping[s
         manifest.write(path)
 
 
-def record_engine(path: Path, manifest: Manifest, counts: Dict[str, Any]) -> None:
+def record_engine(
+    path: Path, manifest: Manifest, counts: Dict[str, Any], check: Optional[Dict[str, Any]] = None
+) -> None:
     """Write what a run's fits from shared statistics did (`models._engine_worker.EngineCounts.to_dict`) into its manifest's
-    provenance, replacing an earlier run's; a run that fitted nothing from statistics leaves what is on file."""
+    provenance, replacing an earlier run's, with `engine_check` (`EngineCounts.check_dict`, None without `engine="check"`)
+    the same run's; a run that fitted nothing from statistics leaves what is on file."""
     if not (counts.get("fits") or counts.get("fallbacks")):
         return
-    if counts != manifest.engine:
+    check = None if check is None else dict(check)
+    if counts != manifest.engine or check != manifest.engine_check:
         manifest.engine = dict(counts)
+        manifest.engine_check = check
         manifest.write(path)
 
 
@@ -775,6 +788,7 @@ def check_and_write(
         manifest.created_at = existing.created_at  # keep the first run's provenance
         manifest.skipped = existing.skipped  # until this run finishes and says otherwise: it may not
         manifest.engine = existing.engine  # the same: until this run's fits from shared statistics are counted
+        manifest.engine_check = existing.engine_check
         if existing.data_unverified or (
             has_existing_results and _accepted_other_data(existing, manifest, data_diffs, frame_hashes)
         ):
