@@ -107,9 +107,12 @@ resume cut short in some zones refits each unit over every zone and writes the m
 `pipeline.verify(frames, test_start, test_end, ...)` verifies each plain model on each zone's frame and each pooled model over every
 zone at once, each check named `"<model> (<zone>)"`, on issue days sampled from the first zone's frame. The pooled probe perturbs, in
 every zone at once, what is unknown at the zone's own issue time, and on the rows before the issue day what is unknown at the earliest
-issue of the day: a leak in one zone's training rows moves the shared fit and is a `leak` in every zone. The positive control perturbs
-the first zone's freshest known values and serves every zone; it moves that zone's forecasts only, since its noise is on rows no fit
-trains on and each zone's issue row is forecast on its own. `rebuild=` is for one frame and refused over zones.
+issue of the day: a leak in one zone's training rows moves the shared fit and is a `leak` in every zone. Each zone has its own positive
+control, its freshest known values perturbed with the other zones' frames as they are, which must move its own forecasts: a zone whose
+forecasts read nothing of its own frame (predictors it lacks, given as zeros by `missing="zero"`, or no value on its issue rows) is
+`inconclusive`, as it would be alone. One zone's control can't move another's forecasts: its noise is on rows no fit trains on, and each
+zone's issue row is forecast on its own. A sampled day costs two pooled runs of that day plus one per zone. `rebuild=` is for one frame
+and refused over zones.
 
 ## Not in this step
 

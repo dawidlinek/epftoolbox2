@@ -693,16 +693,17 @@ def verify_pooled(
     inputs), and on the rows dated before D each value not known at the earliest issue instant of D over the zones, by which
     the shared fit is made (what `shared_fit_checks` judges), the target from D on in every zone (the "d-1" boundary, as
     `check_target_boundary` perturbs it). No zone's forecast may move: a leak in one zone's training rows moves the shared fit,
-    and so every zone's forecasts. The positive control perturbs the freshest known values of the first zone alone
-    (`perturb_recent`, rows dated D-1 and later, which no fit trains on) and must move that zone's forecasts; it is every zone's
-    control, since the zones share the model and its inputs. It can't move another zone's forecasts: the noise is on rows no
-    fit reads, and each zone's issue row is scaled and forecast on its own. `columns[zone]` are the columns probed there.
+    and so every zone's forecasts. Each zone has its own positive control: its freshest known values perturbed
+    (`perturb_recent`, rows dated D-1 and later, which no fit trains on), the other zones' frames as they are, must move its own
+    forecasts, so a zone whose forecasts read nothing of its own frame (a predictor it lacks, given as zeros by `missing="zero"`;
+    an issue row with no value) is `inconclusive`, as it is alone. One zone's control can't move another's forecasts: the noise
+    is on rows no fit reads, and each zone's issue row is scaled and forecast on its own. `columns[zone]` are the columns probed
+    there. A day costs 2 + (number of zones) pooled runs of one day.
     """
     from ..information_set import ControlResult, ProbeResult, _compare_forecasts, perturb_recent, perturb_unknown
     from ..verification import IssueDayCheck
 
     zones = list(frames)
-    first = zones[0]
     largest = horizons.get("horizon") or max(horizons["horizons"])
     planned = horizons.get("horizons")
     checks = []
@@ -735,22 +736,23 @@ def verify_pooled(
             perturbed[zone] = own
         probed = _day_forecasts(pooled, perturbed, run_day, target, freq, horizons)
 
-        moved = None
-        if control:
-            names = [name for name in columns[first] if name != target]
+        controls: Dict[str, Any] = {}
+        for zone in zones if control else ():
+            # Each zone's own control, the others' frames as they are: what it moves is that zone's forecasts alone.
+            names = [name for name in columns[zone] if name != target]
             recent, recent_counts, recent_unchecked = perturb_recent(
-                frames[first], run_day, infos[first], freq, names, day_seed
+                frames[zone], run_day, infos[zone], freq, names, day_seed
             )
-            other = _day_forecasts(pooled, {**frames, first: recent}, run_day, target, freq, horizons)
-            changed, largest_move, _ = _compare_forecasts(original[first], other[first], atol)
-            moved = ControlResult(
+            other = _day_forecasts(pooled, {**frames, zone: recent}, run_day, target, freq, horizons)
+            changed, largest_move, _ = _compare_forecasts(original[zone], other[zone], atol)
+            controls[zone] = ControlResult(
                 run_day=run_day,
-                forecasts=len(original[first]),
+                forecasts=len(original[zone]),
                 moved=changed,
                 max_abs_change=largest_move,
                 perturbed=recent_counts,
                 unchecked=recent_unchecked,
-                unmoved=sorted((original[first].keys() & other[first].keys()) - set(changed)),
+                unmoved=sorted((original[zone].keys() & other[zone].keys()) - set(changed)),
             )
         for zone in zones:
             changed, largest_change, missing = _compare_forecasts(original[zone], probed[zone], atol)
@@ -769,7 +771,7 @@ def verify_pooled(
                     run_day=run_day,
                     horizon=largest,
                     probe=probe,
-                    control=moved,
+                    control=controls.get(zone),
                     horizons=None if planned is None else tuple(planned),
                 )
             )

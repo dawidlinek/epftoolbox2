@@ -521,8 +521,29 @@ def test_verify_of_a_pooled_model_is_ok_with_its_control():
     report = verify_pooled_model(PREDICTORS, {**RULES, "actual_daily_max": Availability.realised("10h")}, frames)
     assert report.models == [f"m ({zone})" for zone in ZONES]
     assert report.ok, report.problems()
-    controls = {check.control.run_day: check.control for check in report.checks}
-    assert all(control.moved for control in controls.values())  # the first zone's, every zone's control
+    # Each zone's own control, which moves its own forecasts.
+    assert all(check.control.moved for check in report.checks)
+    by_day = {}
+    for check in report.checks:
+        by_day.setdefault(check.run_day, []).append(check.control)
+    assert all(len({id(control) for control in controls}) == len(ZONES) for controls in by_day.values())
+
+
+def test_a_zone_whose_own_control_moves_nothing_is_inconclusive():
+    # Finland has none of the predictors (zeros by missing="zero"): its forecasts read nothing of its own frame, as alone.
+    frames = {zone: daily(zone, seed=i) for i, zone in enumerate(("PL", "FI"))}
+    frames["FI"] = frames["FI"].drop(columns=[c for c in frames["FI"].columns if c.startswith(("load_d+", "wind_d+"))])
+    rules = {**RULES, "actual_daily_max": Availability.realised("10h")}
+    pooled = PooledModel(OLSModel(predictors=PREDICTORS[:2], training_window=40, name="m"), missing="zero")
+    pipeline = ModelPipeline(information_set=InformationSet("12:00", "data", rules=rules, unknown="ignore")).add_model(
+        pooled
+    )
+    report = pipeline.verify(frames, *FRIDAYS, target="actual_daily_max", horizon=2, freq="1D", days=2, seed=1)
+    assert {model: report.status(model) for model in report.models} == {"m (PL)": "ok", "m (FI)": "inconclusive"}
+    alone = pipeline.verify(
+        {"FI": frames["FI"]}, *FRIDAYS, target="actual_daily_max", horizon=2, freq="1D", days=2, seed=1
+    )
+    assert alone.status("m (FI)") == "inconclusive"
 
 
 def test_a_leak_in_one_zone_s_frame_is_a_leak_for_every_zone():
