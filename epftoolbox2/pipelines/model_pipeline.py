@@ -30,6 +30,7 @@ from ..models._engine import (
 )
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model
+from ..models._cards import preflight, read_provenance
 from ..ensembles._compute import compute
 from ..ensembles.base import Ensemble
 from ..evaluators.base import Evaluator
@@ -275,6 +276,9 @@ class ModelPipeline:
         horizon, horizons = resolve_horizons(horizon, horizons, 7)
         weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
+        # Every model's extra, runtime packages and weights before anything else, so a missing one fails in seconds and names
+        # every other problem with it (`models._cards.preflight`); a core model costs a lookup.
+        preflight(self.models)
         self._check_availability()
         self._check_evaluators_for(freq)
         if not forecast_only:
@@ -643,6 +647,7 @@ class ModelPipeline:
                 ),
                 availability_listing=read_listing(manifest_path(path)),
                 vintages=read_vintages(manifest_path(path)),
+                provenance=read_provenance(manifest_path(path)),
                 windows=windows,
                 matching_lists=read_matching_lists(manifest_path(path)),
                 zone=zone,

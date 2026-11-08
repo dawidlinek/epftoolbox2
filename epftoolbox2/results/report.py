@@ -30,6 +30,7 @@ from ..evaluators.economic import EconomicEvaluator
 from ..evaluators.mcs import check_mcs_settings
 from ..logging import get_logger
 from ..models._calendar import clock_periods_on
+from ..models._cards import provenance_frame, window_starts
 from .availability import listing_frame
 from .breakdowns import (
     AGGREGATES,
@@ -414,6 +415,7 @@ class EvaluationReport:
                 skipped={_INCOMPLETE[freq]: missing},
                 availability_listing=ref.availability_listing,
                 vintages=ref.vintages,
+                provenance=ref.provenance,
                 window=ref.window,
                 target_before=ref.target_before,
                 windows=ref.windows,
@@ -1166,6 +1168,26 @@ class EvaluationReport:
         models that read one series with different classes warn (`df.attrs["vintages"]`).
         """
         return vintage_frame({name: ref.vintages for name, ref in self.refs.items()})
+
+    def provenance(self) -> pd.DataFrame:
+        """What each model with a card is under and was trained on (`models._cards.ModelCard`): one row per such model, empty
+        with the same columns when none has one (every core model).
+
+        Columns: `model`, `family`, `licence`, `licence_url`, `commercial_use`, `revenue_cap` (a licence that loses its rights
+        above a revenue), `attribution` (what a publication must credit), `weights` (`repo@revision` of the cache, or the path
+        given as `weights=`), `sha256` (the first 12 hex digits of each weight file's hash), `runtime` (the version, and commit,
+        of each runtime package, and the settings a resume compares), `corpus`, `corpus_end`, `released`, and the contamination
+        verdict of each window of the run, `validation_verdict` and `test_verdict` (empty for a window the run hasn't):
+        `clean` when the corpus ends before the window's first issue day or the model trains on the run's data, `clean
+        (released before)` when the corpus end is undocumented and the weights were released before that day, `possibly
+        contaminated` otherwise, or the card's stated verdict. A report built from `save_dir` reads the manifests. See the docs
+        page Licences and Weights."""
+        windows = self.windows
+        starts = {
+            name: window_starts(windows, None) if windows is not None else {TEST: ref.test_start}
+            for name, ref in self.refs.items()
+        }
+        return provenance_frame({name: ref.provenance for name, ref in self.refs.items()}, starts)
 
     def _flag_vintages(self, table: pd.DataFrame, groups: Sequence[Sequence[str]], stacklevel: int = 2) -> None:
         """Say so when models compared in `table` (each group compared together) read one series with different classes."""

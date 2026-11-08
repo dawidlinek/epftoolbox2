@@ -114,6 +114,7 @@ from ..information_set import (
     parse_predictor,
     rule_dict,
 )
+from ._cards import ModelCard, Problem, card_problems, run_provenance
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -403,6 +404,30 @@ class BaseModel(ABC):
     # True for a model that fits nothing and forecasts a column's value on the issue row (`NaiveModel`): its tasks read that row
     # alone (`_worker._row_value`), with no training rows, scaler or fit.
     _fits_nothing: bool = False
+    # The card of a family whose fit needs an extra or weights (`models._cards.ModelCard`: licence, corpus, runtime packages,
+    # weights): the pre-flight checks it before any model of a run fits, and the manifest and `report.provenance()` record it.
+    # None for every core model, whose manifests don't change. A class with sizes lists each one's in `_card_variants`.
+    _card: Optional[ModelCard] = None
+    # False on a family the engine must never take, whatever methods it defines: `_engine_capable` reads it first.
+    _engine_ok: bool = True
+
+    @property
+    def card(self) -> Optional[ModelCard]:
+        """The model's card (read only): licence, corpus, runtime packages and weights; None for a core model."""
+        return self._card
+
+    def _preflight(self, seen: Optional[Dict] = None) -> List[Problem]:
+        """What this model lacks to run, checked before any model of a run fits (`models._cards.preflight`, which raises one
+        error naming every problem of every model): its card's extra, the runtime packages within the card's pins, and its
+        weights, resolved from the cache or its `weights` path and hashed. Empty for a model without a card. `seen` keeps what
+        one pre-flight found for the models before this one (an extra, a version, a weights file)."""
+        return card_problems(self, seen) if self._card is not None else []
+
+    def _runtime_fields(self) -> Dict[str, Any]:
+        """The settings of a carded family that change its numbers, recorded in the manifest's `runtime` next to the card's
+        package versions and compared on resume: device type, dtype, `tf32`, `threads_per_fit`, `stack`, `pad_to`, as the
+        family has them. Empty here; a core model has no `runtime` at all."""
+        return {}
 
     def __init__(
         self,
@@ -525,12 +550,14 @@ class BaseModel(ABC):
         with its parent's estimator), it fits something (not `NaiveModel`), its plan (`plan`, of a predictor function) has no
         `train_on="matching"` list, the run isn't `forecast_only`, and its class keeps BaseModel's `run`, `_execute`,
         `_run_tasks` and `_build_hour_arrays`, which a group does in their place, and the instance sets none of them itself.
-        OLS, Ridge, LassoCV and LEAR are."""
+        OLS, Ridge, LassoCV and LEAR are. A class with `_engine_ok = False` (every carded family) never is, read first, so a
+        `_fit_stats` it gains later can't make it capable by accident."""
         owners = {
             next((klass for klass in type(self).__mro__ if name in vars(klass)), None) for name in _ENGINE_METHODS
         }
         return (
-            len(owners) == 1
+            self._engine_ok
+            and len(owners) == 1
             and None not in owners
             and BaseModel not in owners
             and all(self._owner_of(name) is BaseModel and name not in vars(self) for name in _ENGINE_REPLACES)
@@ -1112,6 +1139,7 @@ class BaseModel(ABC):
             horizons=None if every_horizon(state.horizon, state.horizons) else state.horizons,
             issue_days=state.weekdays,
             vintages=state.vintages,
+            provenance=run_provenance(self, state.manifest, windows, state.test_start),
         )
         if store:
             warn_off_the_clock({self.name: ref}, stacklevel=3)
