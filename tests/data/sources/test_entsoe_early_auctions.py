@@ -166,13 +166,13 @@ class TestExaaColumn:
 
 
 class TestExaaConfiguration:
-    @pytest.mark.parametrize("country", ["AT", "DE_LU", "de_lu"])
+    @pytest.mark.parametrize("country", ["AT", "DE_LU", "de_lu", "DE_AT_LU"])
     def test_available_for_austria_and_germany_luxembourg(self, country):
         assert EntsoeSource(country, KEY, type=["price"], price_exaa=True).price_exaa is True
 
-    @pytest.mark.parametrize("country", ["PL", "CH", "FR", "DE_AT_LU", "CZ", "HU"])
+    @pytest.mark.parametrize("country", ["PL", "CH", "FR", "CZ", "HU"])
     def test_other_zones_raise(self, country):
-        with pytest.raises(ValueError, match="AT and DE_LU only"):
+        with pytest.raises(ValueError, match="AT, DE_LU and DE_AT_LU only"):
             EntsoeSource(country, KEY, type=["price"], price_exaa=True)
 
     def test_needs_price_in_type(self):
@@ -349,6 +349,26 @@ class TestPlainInformationSet:
         assert _unknown_to_the_issue(InformationSet("11:45", zone), "price_exaa_d+1", zone) == set()
         assert len(_unknown_to_the_issue(InformationSet("10:30", zone), "price_exaa_d+1", zone)) == 24
 
+    @pytest.mark.parametrize("name", ["de_price_exaa_d+1", "at_price_exaa_d+1", "de_price_exaa_h05_d+1"])
+    def test_prefixed_price_exaa_resolves_to_the_11_15_rule(self, name):
+        rule = InformationSet().resolve(name).rule
+        assert (rule.time, rule.days_before, rule.timezone, rule.vintage) == ("11:15", 1, "Europe/Vienna", "snapshot")
+
+    def test_the_serve_time_pattern_uses_prefixed_exaa_on_none_of_the_days_at_10_30(self):
+        # The docs' pattern adds the columns only where they are published: horizon 1 at 10:30 and horizon 2 at 11:45 are not.
+        index = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="Europe/Berlin")
+        for time, horizon in (("10:30", 1), ("10:30", 2), ("11:45", 2)):
+            info = InformationSet(time, "Europe/Berlin")
+            predictors = {(p, horizon): [f"de_price_exaa_h{h:02d}_d+{horizon}" for h in range(24)] for p in range(24)}
+            found, unknown = info.violations(predictors, "price", "1h", index, "2024-01-10", "2024-01-14")
+            assert not unknown and {v.predictor for v in found} == set(predictors[(0, horizon)]), (time, horizon)
+        info = InformationSet("11:45", "Europe/Berlin")
+        predictors = {(p, 1): [f"de_price_exaa_h{h:02d}_d+1" for h in range(24)] for p in range(24)}
+        assert info.violations(predictors, "price", "1h", index, "2024-01-10", "2024-01-14")[0] == []
+
+    def test_a_prefixed_swiss_price_has_no_built_in_rule(self):
+        assert InformationSet().resolve("ch_price_d+1").rule is None
+
     def test_price_exaa_profile_columns_follow_the_same_rule(self):
         assert InformationSet().resolve("price_exaa_h05_d+1").rule.time == "11:15"
 
@@ -386,6 +406,12 @@ class TestEarlyAuctionsIntegration:
         ):
             df = source.fetch(_utc(start), _utc(end))
             assert len(df) == rows and df.notna().all().all()
+
+    def test_exaa_of_germany_before_the_split_of_the_zone(self, entsoe_api_key):
+        # Unverified until run with a key: DE_AT_LU is the German zone before 2018-10-01.
+        source = EntsoeSource("DE_AT_LU", entsoe_api_key, type=["price"], price_exaa=True)
+        df = source.fetch(_utc("2018-06-01 22:00"), _utc("2018-06-03 22:00"))
+        assert list(df.columns) == ["price", "price_exaa"] and len(df) == 48 and df.notna().all().all()
 
     def test_swiss_auction_price(self, entsoe_api_key):
         df = EntsoeSource("CH", entsoe_api_key, type=["price"]).fetch(
