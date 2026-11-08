@@ -30,7 +30,7 @@ benchmark data: resume where a file was started if it must be one machine's. A r
 
 ## Cache Directory Structure
 
-Each model gets a results file and a manifest next to it, and a lock file that a run holds while it writes them:
+Each model gets a results file (a directory with [Parquet results](#parquet-results)) and a manifest next to it, and a lock file that a run holds while it writes them:
 
 <FileTree>
 
@@ -114,6 +114,77 @@ so a worker outliving a killed run doesn't keep the next run out.
 <Aside type="tip">
   For long training runs, use `save_dir` to avoid losing progress if the script crashes or is interrupted.
 </Aside>
+
+## Parquet Results
+
+For studies of thousands of models, `save_format="parquet"` writes each model's results as a directory of Parquet files in place
+of `<model>.jsonl`. The records are the JSONL records, read by the same rules, so every table and count is the same to the last
+bit; JSONL stays the default and defines the record.
+
+```python
+report = pipeline.run(
+    data=df,
+    test_start="2024-01-01",
+    test_end="2024-12-31",
+    save_dir="results",
+    save_format="parquet",      # results/<model>.parquet/
+    save_coefficients=False,    # optional: coefficients written as [], everything else as it is
+)
+```
+
+<FileTree>
+
+- results/
+    - ols.manifest.json
+    - ols.lock
+    - ols.parquet/
+        - _catalog.jsonl
+        - year=2024/
+            - part-20241231T101500-3f2a9c1d-000001.parquet
+
+</FileTree>
+
+- **Parts.** Records are buffered per year of their `run_date` and written as a part (zstd, rows sorted by `run_date`, `hour`,
+  `horizon`) when a buffer reaches 200,000 rows, is 5 minutes old, and when the run ends; the environment variables
+  `PARQUET_ROWS_PER_PART`, `PARQUET_FLUSH_SECONDS` and `PARQUET_MAX_BUFFERED_ROWS` (1,000,000, all of a writer's buffers together)
+  change those.
+- **The catalog.** A part is written under a temporary name, synced and renamed, and only then gets its line in `_catalog.jsonl`
+  (file, rows, bytes, first and last run date, its sha256, and a CRC-32 of the line). Readers read the parts the catalog lists and
+  nothing else, so a crash leaves at most an orphan file that no reader sees: the next run forecasts its keys again, `epf results
+  verify` reports it and `epf results compact` removes it. A catalog line a crash left half-written is skipped with a warning and
+  cut off by the next writer, as a JSONL line is.
+- **The same records.** One column per record key (dates as dates, `hour`, `horizon`, `revision` as small integers, `prediction`
+  and `actual` as float64, `coefficients` and `member_predictions` as lists of float64, `freq`, `window`, `status` as dictionary
+  strings), and a column `_keys` with each record's keys in their order, so that a record converts both ways exactly: its keys in
+  its order, a `null` where it had one and no key where it had none, floats bit for bit. A record with a key the schema has no
+  column for raises when it is saved, rather than losing it.
+- **The same rules.** One record per key `(hour, horizon, run_date)`, the highest `revision`, a forecast over skip records, the first
+  forecast in catalog order; forecasts alone by default; a repeat with the same forecast warns, one with another raises. Resuming,
+  the lock (`<model>.lock`, the same file for both formats), skip records and the manifest work as for JSONL. The manifest records
+  `save_format: "parquet"`, as provenance.
+- **One format per model.** A run with `save_format="jsonl"` into a `save_dir` where a model has Parquet results raises before any
+  fit, and the other way round, naming the command that converts them. [Array tasks](/epftoolbox2/workflow/overview/#slurm-arrays-one-model-or-a-block-per-task)
+  write Parquet with `model_pipeline.save_format: parquet`, and `report()` / `epf report` read either format.
+- **Coefficients.** `save_coefficients=False` writes `coefficients` as `[]`, as a training window list's records have them, and
+  changes nothing else: no table reads them. A study of 10,000 models over a year of hourly forecasts with 140 coefficients a record
+  is 271 GB of JSONL.
+
+Three commands work on a `save_dir` (`--model NAME` for one model):
+
+```bash
+epf results convert results --to parquet   # or --to jsonl: every record, compared before the old results are removed
+epf results compact results                # each (model, year)'s parts into one; orphans and superseded parts removed
+epf results verify results                 # catalog CRCs, part checksums, orphans, repeated keys; exit 1 on an error
+```
+
+`convert` takes each model's lock, writes the new results beside the old ones, reads them back and compares them record for record
+with the old ones before removing those and recording the format in the manifest, so JSONL converted to Parquet and back gives the
+same lines byte for byte. `compact` keeps every record, in its order, and compacting twice changes nothing. An ensemble's file is
+always JSONL: every run and report computes it again.
+
+Reading the parts with another tool (pyarrow, DuckDB, polars) gives every record of the committed parts: keep the files the
+catalog lists and no later line supersedes, and apply the rule above (the highest `revision` per key, `status` `"ok"`), or skip
+records and superseded revisions come in.
 
 ---
 

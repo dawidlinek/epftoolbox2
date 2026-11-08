@@ -183,6 +183,17 @@ an issue day it didn't sample.
 
 ### New
 
+- **Parquet results: `run(save_format="parquet")`, `save_coefficients=False` and `epf results`.** With `save_format="parquet"`
+  (`model_pipeline.save_format: parquet` in a workflow) each model's results are a directory of zstd Parquet parts,
+  `save_dir/<model>.parquet/`, with a catalog of the committed parts, in place of `<model>.jsonl`: the same records (a record
+  converts both ways exactly, keys, their order, nulls and float bits), read by the same rules, so every table and count is the same
+  to the last bit, and resuming, skip records, the lock and array tasks work as with JSONL. A crash leaves at most an orphan part that
+  no reader sees. `save_coefficients=False` writes `coefficients` as `[]` and changes nothing else. `epf results convert SAVE_DIR
+  --to parquet|jsonl` converts a save_dir record for record (JSONL to Parquet and back gives the same lines), `epf results compact`
+  merges each (model, year)'s parts, and `epf results verify` checks catalogs, part checksums, orphans and repeated keys. **Nothing
+  moves without it**: JSONL stays the default and every file is as before; a run in the other format than a model's results on disk
+  raises before any fit, naming `epf results convert`. The manifest of Parquet results records `save_format: "parquet"`
+  (provenance). See [Parquet Results](/epftoolbox2/model-pipeline/caching/#parquet-results).
 - **`MirrorLogScaler` and `PolyScaler`: the mirror-log and polynomial VSTs.** `scaler="mlog"` and `scaler="poly"` are the
   transformations of Uniejewski, Weron & Ziel (2018) on `AsinhScaler`'s median/MAD normalisation, then standardised like every VST:
   `sgn(u) (log(|u| + 1/c) + log c)` with `c=1/3`, and `sgn(u) ((|u| + (c/λ)^(1/(λ-1)))^λ - (c/λ)^(λ/(λ-1)))` with `lam=0.125`,

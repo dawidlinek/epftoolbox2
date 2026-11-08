@@ -113,6 +113,8 @@ model_pipeline:
 | `models_per_task` | int | `None` | Models per array task: task `i` runs models `[i*k, (i+1)*k)` (YAML: `environment.models_per_task`). See [SLURM arrays](#slurm-arrays-one-model-or-a-block-per-task) |
 | `model_forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted |
 | `model_save_dir` | str | `None` | Directory for one resumable JSONL per model (YAML: `model_pipeline.save_dir`), resolved from the YAML's directory |
+| `model_save_format` | str | `"jsonl"` | `"parquet"` writes each model's results as a [Parquet directory](/epftoolbox2/model-pipeline/caching/#parquet-results) (YAML: `model_pipeline.save_format`, written only when set) |
+| `model_save_coefficients` | bool | `True` | `False` writes each record's `coefficients` as `[]` and nothing else differs (YAML: `model_pipeline.save_coefficients`, written only when `false`) |
 | `model_allow_manifest_mismatch` | bool | `False` | Resume into `model_save_dir` even if its [manifest](/epftoolbox2/model-pipeline/caching/) disagrees with this run's configuration (overwrites it) (YAML: `model_pipeline.allow_manifest_mismatch`) |
 | `model_require_manifest` | bool | `False` | Refuse to resume from a `model_save_dir` that has results but no manifest, instead of warning (YAML: `model_pipeline.require_manifest`) |
 | `model_validation` | list \| str | `None` | Validation period `[start, end]` or `"previous_year"` (YAML: `model_pipeline.validation`). See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/) |
@@ -354,6 +356,20 @@ The same file serves all three commands. `$SLURM_ARRAY_TASK_ID` need not be set 
 **The block size is no part of a result.** It only says which task runs a model, and no record or manifest holds it. Results of an array at one `models_per_task` resume at another, and the merge is what one run gives, bit for bit. So if blocks prove too big for the time limit, lower `models_per_task` and submit again: what was stored is kept.
 
 **The blocks follow the model list.** A list changed while an array runs moves them, so finish the array first. Nothing goes wrong silently: a model no task ran has no results file, and a changed model raises `ManifestMismatchError` when it resumes.
+
+**Parquet in arrays.** A grid of thousands of models writes far less with `save_format: parquet` (and `save_coefficients: false`
+when no one reads the coefficients) in `model_pipeline`: each task writes a [Parquet directory](/epftoolbox2/model-pipeline/caching/#parquet-results)
+per model, its own, so no two tasks append to one file (safe on Lustre and NFS), and `epf report` reads them as it reads JSONL, to
+the same tables bit for bit. A task resumed in the other format raises before any fit; `epf results convert` turns one into the
+other.
+
+```yaml
+model_pipeline:
+  path: model_pipeline.yaml
+  save_dir: results
+  save_format: parquet        # results/<model>.parquet/
+  save_coefficients: false    # optional
+```
 
 `report()` raises if a model has no results file, naming each model of a missing block. `report(allow_missing=True)` (`epf report --allow-missing`) reports the models that have one, and leaves out an ensemble with a missing member, with a warning. A task that stopped in the middle of a model leaves a shorter file, and `report()` warns with its counts. Check `report.forecast_counts()` before comparing models.
 
