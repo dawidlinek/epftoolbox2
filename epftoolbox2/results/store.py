@@ -855,9 +855,13 @@ class StoreWriter:
 
     def flush(self) -> None:
         """Write every store's buffered records now, `threads` stores at a time (a part's encoding and compression run outside
-        the GIL, so they overlap the next store's conversion). Raises the first store's failure once every store was written."""
+        the GIL, so they overlap the next store's conversion). Raises the first store's failure once every store was written.
+
+        Every open store, not only those with records buffered: one whose records the writer's thread took a moment ago is
+        still being written, and its I/O lock (`_write_now`) waits for that, so on return every record saved before is on file
+        and counts as done (`is_done`, `get_missing`)."""
         with self._cond:
-            stores = list(self._dirty.values())
+            stores = list({id(store): store for store in (*self._dirty.values(), *self._open.values())}.values())
         if self.threads == 1 or len(stores) < 2:
             for store in stores:
                 self._write_now(store)

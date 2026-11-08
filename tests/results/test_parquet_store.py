@@ -990,6 +990,34 @@ def test_ten_thousand_stores_on_one_writer_keep_at_most_64_files_open(tmp_path):
     ParquetResultStore(tmp_path / "m00001.parquet", lock=True).close()
 
 
+@pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+def test_a_writer_flush_waits_for_a_write_its_thread_has_taken(tmp_path, monkeypatch, fmt):
+    """`StoreWriter.flush()` returns once every record saved before is written, also those the writer's thread took a moment
+    before and is still writing: a run reads its done keys right after (`get_missing`), and an engine group flushes the writer
+    for all its models' stores at once. Before, a store whose buffer the thread had emptied wasn't flushed: its keys read as
+    missing until the write ended (a model of a group with every forecast written reported none)."""
+    taken, release = threading.Event(), threading.Event()
+    with StoreWriter() as writer:
+        store = writer.open(tmp_path / f"m.{fmt}", test_start="2023-04-12", lock=True)
+        real = store._write
+
+        def slow_write(batch):
+            taken.set()  # the writer's thread holds the batch and the store's I/O lock
+            release.wait(5)
+            real(batch)
+
+        monkeypatch.setattr(store, "_write", slow_write)
+        store.save(record(hour=5))
+        if fmt == "parquet":
+            threading.Thread(target=writer._write_due, args=(store, time.monotonic(), True), daemon=True).start()
+        assert taken.wait(5)  # JSONL: the thread's own tick; Parquet: a forced write, as its buffer pressure would
+        timer = threading.Timer(0.3, release.set)
+        timer.start()
+        writer.flush()
+        assert store.get_missing([(5, 1, 0)]) == []
+        timer.join()
+
+
 PROBE_LOCK = """
 import sys
 sys.path.insert(0, sys.argv[2])
