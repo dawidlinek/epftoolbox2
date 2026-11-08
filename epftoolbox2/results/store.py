@@ -7,8 +7,10 @@ import re
 import zlib
 import queue
 import threading
+import time
+import uuid
 import warnings
-from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 from threading import Lock
 
 # What every record written from record schema 2 on ends with (D4 of the forecasting plan), after the keys it had before, whose
@@ -136,9 +138,12 @@ def read_records(
     statuses: Optional[Iterable[str]] = OK_ONLY,
     transform: Optional[Callable[[Dict], Any]] = None,
     duplicates: str = "raise",
+    columns: Optional[Sequence[str]] = None,
 ) -> Iterator[Any]:
     """One record per forecast key `(hour, horizon, run_date)` of a JSONL results file, in file order, `transform(record)` of
-    each if given (None drops it).
+    each if given (None drops it). A Parquet results directory (`<name>.parquet`) is read by the same rules, in the order its
+    catalog commits its parts (`results.parquet_store.read_records`); `columns`, if given, are the keys `transform` reads, which
+    a Parquet directory reads alone (a JSONL line is parsed whole).
 
     Per key the highest `revision` wins; within it a record with `status` "ok" wins over skip records (a key a later run forecast)
     and is the first ok one in the file. Of skip records alone the last is the key's. `statuses` keeps the keys whose chosen
@@ -157,6 +162,11 @@ def read_records(
     forecast) isn't parsed, so a damaged one of those isn't reported; a chosen or repeated one raises with its line number."""
     if duplicates not in ("raise", "first"):
         raise ValueError(f"duplicates must be 'raise' or 'first', not {duplicates!r}")
+    if is_parquet_path(path):
+        from .parquet_store import read_records as read_parquet
+
+        yield from read_parquet(Path(path), statuses, transform, duplicates, columns)
+        return
     wanted = None if statuses is None else frozenset(statuses)
     with open(
         path, "rb"
@@ -249,8 +259,7 @@ def _check_repeats(
 
     def forecast(at: int) -> str:
         f.seek(at)
-        record = json.loads(f.readline().strip().decode("utf-8"))
-        return json.dumps({k: v for k, v in record.items() if k not in _NOT_THE_FORECAST}, sort_keys=True)
+        return forecast_text(json.loads(f.readline().strip().decode("utf-8")))
 
     for key, offsets in repeats.items():
         first = forecast(chosen[key][2])
@@ -260,6 +269,18 @@ def _check_repeats(
             else:
                 differ += 1
                 example = example or key
+    repeat_verdict(path, same, differ, example, duplicates, stacklevel=5)
+
+
+def forecast_text(record: Dict) -> str:
+    """What two records of one key are compared on: the record without D4's keys, as sorted JSON (so an old-format line and a
+    5a line of the same numbers are one forecast)."""
+    return json.dumps({k: v for k, v in record.items() if k not in _NOT_THE_FORECAST}, sort_keys=True)
+
+
+def repeat_verdict(path: Path, same: int, differ: int, example: Any, duplicates: str, stacklevel: int = 4) -> None:
+    """Raise for forecasts repeating their key with another forecast (unless `duplicates="first"`), and warn once for the
+    repeats read once."""
     if differ and duplicates == "raise":
         hour, horizon, run_date = example if isinstance(example, tuple) else (None, None, example)
         raise ValueError(
@@ -273,13 +294,19 @@ def _check_repeats(
         + (f" ({differ} with another forecast, the first read)" if differ else ", with the same forecast")
         + ": each key is read once. Two runs writing one file at once, or files joined by hand, leave such lines.",
         UserWarning,
-        stacklevel=4,
+        stacklevel=stacklevel,
     )
 
 
 def iter_file_records(path: Path) -> Iterator[Dict]:
     """Every record of a JSONL results file in file order, as it stands (no per-key rule), for a reader that stops early, such
-    as one that needs what every record of a file shares (`freq`). A half-written last line is skipped with a warning."""
+    as one that needs what every record of a file shares (`freq`). A half-written last line is skipped with a warning. A
+    Parquet results directory gives its committed records in catalog order."""
+    if is_parquet_path(path):
+        from .parquet_store import iter_file_records as iter_parquet
+
+        yield from iter_parquet(Path(path))
+        return
     for _, _, _, record in _parse_lines(path):
         yield record
 
@@ -288,8 +315,67 @@ class ResultsLockedError(RuntimeError):
     """Another run holds the lock of a results file: two writers would put two forecasts on its keys."""
 
 
-class ResultStore:
-    """Resumable JSONL storage for one model's results, keyed by `(hour, horizon, run_date)`.
+class ResultsFormatError(ValueError):
+    """A run would write one format of results (`save_format`) beside the other format's results of the same model."""
+
+
+# The formats a model's results can be written in (`ModelPipeline.run(save_format=...)`) and the suffix of each: `<name>.jsonl`
+# (a file) or `<name>.parquet` (a directory, `results.parquet_store`). JSONL is the default and defines the record.
+SAVE_FORMATS = {"jsonl": ".jsonl", "parquet": ".parquet"}
+DEFAULT_SAVE_FORMAT = "jsonl"
+
+
+def is_parquet_path(path: Any) -> bool:
+    """Whether `path` names Parquet results (`<name>.parquet`), by its suffix."""
+    return Path(path).suffix == SAVE_FORMATS["parquet"]
+
+
+def format_of(path: Any) -> str:
+    """The save format a results path names: "parquet" for `<name>.parquet`, else "jsonl"."""
+    return "parquet" if is_parquet_path(path) else "jsonl"
+
+
+def check_save_format(save_format: str) -> str:
+    if save_format not in SAVE_FORMATS:
+        raise ValueError(f"save_format must be one of {sorted(SAVE_FORMATS)}, got {save_format!r}")
+    return save_format
+
+
+def other_format_path(path: Any) -> Path:
+    """The path the same model's results have in the other format: `ols.jsonl` <-> `ols.parquet`."""
+    path = Path(path)
+    other = "jsonl" if is_parquet_path(path) else "parquet"
+    return path.with_name(path.stem + SAVE_FORMATS[other])
+
+
+def check_no_other_format(path: Any) -> None:
+    """Raise `ResultsFormatError` if the model of `path` has results in the other format beside it: a run writes one format
+    per model, and `epf results convert` turns one into the other exactly."""
+    path = Path(path)
+    other = other_format_path(path)
+    if other.exists():
+        raise ResultsFormatError(
+            f"{other} holds this model's results as {format_of(other)}, and this run writes {format_of(path)} "
+            f"({path.name}). Convert them first, `epf results convert {path.parent} --to {format_of(path)}` (exact both "
+            f"ways), or run with save_format={format_of(other)!r}."
+        )
+
+
+def fingerprint_path(path: Any) -> Path:
+    """What says a model's results changed: the JSONL file, or a Parquet directory's catalog (every committed part and every
+    compaction appends a line to it). The directory itself while it has no catalog."""
+    path = Path(path)
+    if is_parquet_path(path):
+        catalog = path / "_catalog.jsonl"
+        return catalog if catalog.exists() else path
+    return path
+
+
+class _Store:
+    """What a model's results store does whatever its format: resume state (done keys, skip statuses, revisions), `save` and
+    `save_skip` under the readers' rule, the lock, and reading through `read_records`. `ResultStore` writes JSONL lines,
+    `parquet_store.ParquetResultStore` Parquet parts; either writes on its own thread or through a `StoreWriter` shared by many
+    stores.
 
     `run_date` (not `day_in_test`) identifies the forecast day: `day_in_test` is an offset from
     `test_start`, so the same offset means a different calendar day if `test_start` changes between
@@ -310,84 +396,88 @@ class ResultStore:
     What is written for a key whose records reach a higher revision than 1 gets that revision, so a reader takes it. `iter_lines`
     gives the forecasts alone unless told other statuses.
 
-    With `lock=True` (what `BaseModel.run` opens) the store holds `<name>.lock` next to the file (an `fcntl.flock`) until
-    `close()`, and a second writer raises `ResultsLockedError` naming it; a file system that refuses locks warns and the run goes
-    on. A last line a crash
-    left half-written is cut off, with a warning naming its bytes, when the store opens with the lock, and otherwise before its
-    first write, never under another writer's hands. Files are read and written as UTF-8.
+    With `lock=True` (what `BaseModel.run` opens) the store holds `<name>.lock` next to the results (an `fcntl.flock`; one lock for
+    a model's JSONL file and its Parquet directory alike) until `close()`, and a second writer raises `ResultsLockedError` naming
+    it; a file system that refuses locks warns and the run goes on. Opened with the lock, a store refuses (`ResultsFormatError`)
+    results of the model in the other format beside it.
+
+    `save_coefficients=False` writes `coefficients` as `[]` (as a window-list record has them) and every other key as it is.
     """
 
-    _SENTINEL = object()
+    save_format = DEFAULT_SAVE_FORMAT
 
-    def __init__(self, path: str, test_start: Optional[str] = None, batch_size: int = 500, lock: bool = False):
+    def __init__(
+        self,
+        path: Any,
+        test_start: Optional[str],
+        lock: bool,
+        save_coefficients: bool,
+        writer: Optional["StoreWriter"],
+    ):
         self.path = Path(path)
         self.test_start = test_start
         self._lock = Lock()
         self._completed: Set[tuple] = set()
         self._latest: Dict[tuple, str] = {}  # key without a forecast -> the status of its newest skip record
         self._revisions: Dict[tuple, int] = {}  # key -> its highest revision on file, where that isn't 1
-        self._batch_size = batch_size
-        self._tail_checked = False
+        self._save_coefficients = bool(save_coefficients)
+        self._shared = writer
+        self._error: Optional[BaseException] = None
 
+        if lock:
+            check_no_other_format(self.path)
         self._file_lock = self._acquire_file_lock() if lock else None
         try:
             if lock:
-                self._cut_tail()
+                self._repair_tail()
             self._load_existing()
         except BaseException:
             self._release_file_lock()
             raise
 
-        self._write_queue: queue.Queue = queue.Queue()
-        self._writer = threading.Thread(target=self._writer_loop, daemon=True, name="store-writer")
-        self._writer.start()
-
     @property
     def lock_path(self) -> Path:
-        """`<name>.lock` next to the results file (`ols.jsonl` -> `ols.lock`)."""
+        """`<name>.lock` next to the results (`ols.jsonl` -> `ols.lock`, `ols.parquet` -> `ols.lock`)."""
         return self.path.with_name(f"{self.path.stem}.lock")
 
     def save(self, result: Dict) -> None:
         """Queue a record for writing. A key with a record of a higher revision than 1 on file gets that revision, so that what is
         written is what a reader takes (`read_records`: the highest revision wins)."""
+        self._raise_error()
+        if not self._save_coefficients and result.get("coefficients"):
+            result = {**result, "coefficients": []}  # the key keeps its place
         key = (result["hour"], result["horizon"], result["run_date"])
         with self._lock:
-            if key in self._revisions:
-                result["revision"] = self._revisions[key]
-            if result.get("status", STATUS_OK) == STATUS_OK:
+            revision = self._revisions.get(key)
+        if revision is not None:
+            result["revision"] = revision
+        layout = self._validate(result)  # before the key counts as done
+        if result.get("status", STATUS_OK) == STATUS_OK:
+            with self._lock:
                 self._completed.add(key)
-        self._write_queue.put(result)
+        self._enqueue(result, layout)
 
     def save_skip(self, record: Dict) -> bool:
         """Write a skip record (`with_status` with a skip reason as `status`) unless its key has a forecast or its newest skip
         record has the same status. Returns whether it was written. The key stays pending: the next run retries it."""
+        self._raise_error()
         key = (record["hour"], record["horizon"], record["run_date"])
         status = record["status"]
         with self._lock:
             if key in self._completed or self._latest.get(key) == status:
                 return False
-            self._latest[key] = status
             if key in self._revisions:
                 record["revision"] = self._revisions[key]
-        self._write_queue.put(record)
+        layout = self._validate(record)
+        with self._lock:
+            self._latest[key] = status
+        self._enqueue(record, layout)
         return True
 
     def has_results(self) -> bool:
         """Whether the file holds a forecast: what decides whether a run resumes results, as a file of skip records alone has
         none to resume."""
         return bool(self._completed)
-
-    def flush(self) -> None:
-        if self._writer.is_alive():
-            self._write_queue.put(self._SENTINEL)
-            self._writer.join()
-
-    def close(self) -> None:
-        """Write what is queued and release the lock."""
-        try:
-            self.flush()
-        finally:
-            self._release_file_lock()
 
     def _run_date(self, day_in_test: int) -> str:
         if self.test_start is None:
@@ -412,7 +502,7 @@ class ResultStore:
         if not self.path.exists():
             return iter(())
         transform = None if not cols else (lambda r: {k: r[k] for k in cols if k in r})
-        return read_records(self.path, statuses, transform)
+        return read_records(self.path, statuses, transform, columns=cols or None)
 
     def _load_existing(self) -> None:
         """Each key's chosen record under the readers' rule (`read_records`): done if it is a forecast, else its status, and its
@@ -431,11 +521,13 @@ class ResultStore:
                 self._revisions[key] = revision
 
     def _acquire_file_lock(self) -> Optional[Callable[[], None]]:
-        """Hold the lock of this results file and return what releases it; None, with a warning, where the file system refuses
-        locks. The errors are read here (`_hold_lock`), so they mean the same whatever filelock's version."""
+        """Hold the lock of these results and return what releases it; None, with a warning, where the file system refuses
+        locks. The errors are read here (`_hold_lock`), so they mean the same whatever filelock's version. A store of a shared
+        `StoreWriter` holds it through the writer's one lock (`_GroupLock`), so many stores keep no descriptor each."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        hold = _hold_lock if self._shared is None or self._shared._private else self._shared._hold
         try:
-            return _hold_lock(self.lock_path)
+            return hold(self.lock_path)
         except _LockHeld:
             raise ResultsLockedError(
                 f"{self.path} is being written by another run, which holds its lock {self.lock_path}. Two runs writing one "
@@ -447,7 +539,7 @@ class ResultStore:
                 f"{self.path}: the file system refused a lock on {self.lock_path} ({exc}), so a second run writing these "
                 "results at the same time would not be refused. Run one writer per model's results here.",
                 UserWarning,
-                stacklevel=4,
+                stacklevel=5,
             )
             return None
 
@@ -455,6 +547,114 @@ class ResultStore:
         release, self._file_lock = self._file_lock, None
         if release is not None:
             release()
+
+    def _raise_error(self) -> None:
+        """Raise what failed while this store's records were written in the background, once."""
+        error, self._error = self._error, None
+        if error is not None:
+            raise error
+
+    # What a format defines.
+    def _repair_tail(self) -> None:  # pragma: no cover (abstract)
+        raise NotImplementedError
+
+    def _validate(self, record: Dict) -> Any:
+        """Raise ValueError for a record this format can't hold, before anything of it is kept; what `_enqueue` takes with
+        it (a Parquet record's keys, so that they are read once)."""
+        return None
+
+    def _enqueue(self, record: Dict, layout: Any = None) -> None:  # pragma: no cover (abstract)
+        raise NotImplementedError
+
+    # What a shared `StoreWriter` calls, under its condition (`_buffer`, `_take`, `_buffered`, `_due`) or the store's I/O lock.
+    def _buffer(self, record: Dict, layout: Any) -> bool:  # pragma: no cover (abstract)
+        """Hold a record until it is written; True if it should be written now (a full batch)."""
+        raise NotImplementedError
+
+    def _buffered(self) -> int:  # pragma: no cover (abstract)
+        raise NotImplementedError
+
+    def _take(self, now: float, force: bool) -> Any:  # pragma: no cover (abstract)
+        """What is due to be written (all of it with `force`), removed from the buffers; falsy for nothing."""
+        raise NotImplementedError
+
+    def _write(self, taken: Any) -> None:  # pragma: no cover (abstract)
+        raise NotImplementedError
+
+
+class ResultStore(_Store):
+    """Resumable JSONL storage for one model's results, keyed by `(hour, horizon, run_date)` (see `_Store`).
+
+    A last line a crash left half-written is cut off, with a warning naming its bytes, when the store opens with the lock, and
+    otherwise before its first write, never under another writer's hands. Files are read and written as UTF-8. Records are
+    written by the store's own thread, in batches of `batch_size`, or by `writer`, a `StoreWriter` shared with other stores.
+    """
+
+    _SENTINEL = object()
+    save_format = "jsonl"
+
+    def __init__(
+        self,
+        path: str,
+        test_start: Optional[str] = None,
+        batch_size: int = 500,
+        lock: bool = False,
+        save_coefficients: bool = True,
+        writer: Optional["StoreWriter"] = None,
+    ):
+        self._batch_size = batch_size
+        self._tail_checked = False
+        super().__init__(path, test_start, lock, save_coefficients, writer)
+
+        if writer is None:
+            self._write_queue: queue.Queue = queue.Queue()
+            self._writer = threading.Thread(target=self._writer_loop, daemon=True, name="store-writer")
+            self._writer.start()
+        else:
+            self._pending: List[Dict] = []
+            self._io_lock = Lock()
+            writer._register(self)
+
+    def flush(self) -> None:
+        if self._shared is not None:
+            self._shared._write_now(self)
+            return
+        if self._writer.is_alive():
+            self._write_queue.put(self._SENTINEL)
+            self._writer.join()
+
+    def close(self) -> None:
+        """Write what is queued and release the lock."""
+        try:
+            self.flush()
+        finally:
+            self._release_file_lock()
+            if self._shared is not None:
+                self._shared._forget(self)
+
+    def _repair_tail(self) -> None:
+        self._cut_tail()
+
+    def _enqueue(self, record: Dict, layout: Any = None) -> None:
+        if self._shared is None:
+            self._write_queue.put(record)
+        else:
+            self._shared._submit(self, record, layout)
+
+    def _buffer(self, record: Dict, layout: Any) -> bool:
+        self._pending.append(record)
+        return len(self._pending) >= self._batch_size
+
+    def _buffered(self) -> int:
+        return len(self._pending)
+
+    def _take(self, now: float, force: bool) -> List[Dict]:
+        taken, self._pending = self._pending, []
+        return taken
+
+    def _write(self, taken: List[Dict]) -> None:
+        with self._shared._handles:
+            self._write_batch(taken)
 
     def _cut_tail(self) -> None:
         """Cut off a last line a crash left half-written, before anything is appended after it, with a warning naming its
@@ -546,6 +746,186 @@ class ResultStore:
                 f.write(json.dumps(item) + "\n")
 
 
+# How many files a `StoreWriter` has open at once, at most: a JSONL batch or a Parquet part is written with its file open and
+# closed after it, so 10,000 stores need no 10,000 descriptors (the soft limit is often 1,024).
+MAX_OPEN_HANDLES = 64
+# How often the writer's thread looks at its stores: a JSONL store's records are written within this of being saved, as the
+# store's own thread does.
+_TICK_SECONDS = 0.1
+
+
+class StoreWriter:
+    """One background thread that writes the records of many models' stores, each into its own file or directory: per-store
+    buffers, at most `max_open` files open at once, and one lock for all of them (`_GroupLock`), so 10,000 stores need neither
+    10,000 threads (as a `ResultStore` of its own would start) nor 10,000 descriptors.
+
+    `open(path, ...)` opens a model's store (`open_store`, by suffix) on this writer. A JSONL store's records are written within
+    0.1 s of being saved, or when 500 are waiting; a Parquet store's when a (model, year) buffer reaches
+    `PARQUET_ROWS_PER_PART` rows, is `PARQUET_FLUSH_SECONDS` old, or the writer holds more than `PARQUET_MAX_BUFFERED_ROWS` rows
+    (the largest buffers first). `store.flush()` writes that store's records now, `store.close()` also releases its lock, and
+    `close()` writes everything and stops the thread. What fails in the background is raised by the store's next `save`,
+    `flush` or `close`. What a store writes is what it writes on its own thread: the same records, lines and parts.
+    """
+
+    def __init__(self, max_open: int = MAX_OPEN_HANDLES, _private: bool = False):
+        if max_open < 1:
+            raise ValueError(f"max_open must be at least 1, got {max_open!r}")
+        self.max_open = max_open
+        self._private = _private  # one store's own writer: it holds that store's lock itself
+        self._handles = threading.BoundedSemaphore(max_open)
+        self._cond = threading.Condition()
+        self._dirty: Dict[int, _Store] = {}  # id -> store with buffered records, in the order they first had one
+        self._open: Dict[str, _Store] = {}  # resolved path -> store
+        self._group: Optional[_GroupLock] = None
+        self._stopping = False
+        self._buffered_rows = 0  # of the Parquet stores, for `PARQUET_MAX_BUFFERED_ROWS`
+        from .parquet_store import limits
+
+        self._rows_per_part, self._flush_seconds, self._max_buffered = limits()
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="store-writer")
+        self._thread.start()
+
+    def open(
+        self, path: Any, test_start: Optional[str] = None, lock: bool = False, save_coefficients: bool = True
+    ) -> _Store:
+        """A model's store on this writer: `ResultStore` for `<name>.jsonl`, `ParquetResultStore` for `<name>.parquet`. One
+        writer opens a path once at a time."""
+        if self._stopping:
+            raise ValueError("this StoreWriter is closed")
+        key = str(Path(path).resolve())
+        with self._cond:
+            if key in self._open:
+                raise ValueError(f"{path} is already open on this StoreWriter")
+        store = open_store(path, test_start=test_start, lock=lock, save_coefficients=save_coefficients, writer=self)
+        return store
+
+    def flush(self) -> None:
+        """Write every store's buffered records now."""
+        with self._cond:
+            stores = list(self._dirty.values())
+        for store in stores:
+            self._write_now(store)
+
+    def close(self) -> None:
+        """Write everything, stop the thread, and release the stores' locks."""
+        self._stopping = True
+        with self._cond:
+            self._cond.notify()
+        self._thread.join()
+        with self._cond:
+            stores = list(self._open.values())
+        error = None
+        for store in stores:
+            try:
+                store.close()
+            except BaseException as exc:  # close every store, then raise the first failure
+                error = error or exc
+        if self._group is not None:
+            self._group.release()
+            self._group = None
+        if error is not None:
+            raise error
+
+    def __enter__(self) -> "StoreWriter":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    # --- what the stores call -----------------------------------------------------------------------------------------------
+
+    def _hold(self, lock_path: Path) -> Callable[[], None]:
+        with self._cond:
+            if self._group is None:
+                self._group = _GroupLock()
+            group = self._group
+        return group.hold(lock_path)
+
+    def _register(self, store: _Store) -> None:
+        with self._cond:
+            self._open[str(store.path.resolve())] = store
+
+    def _forget(self, store: _Store) -> None:
+        with self._cond:
+            self._open.pop(str(store.path.resolve()), None)
+            self._dirty.pop(id(store), None)
+
+    def _submit(self, store: _Store, record: Dict, layout: Any = None) -> None:
+        with self._cond:
+            urgent = store._buffer(record, layout)
+            self._dirty[id(store)] = store
+            if store.save_format == "parquet":
+                self._buffered_rows += 1
+                urgent = urgent or self._buffered_rows > self._max_buffered
+            if urgent:
+                self._cond.notify()
+
+    def _write_now(self, store: _Store) -> None:
+        """Write all of `store`'s buffered records in this thread, and raise what failed in the background."""
+        self._write_due(store, time.monotonic(), force=True)
+        store._raise_error()
+
+    def _write_due(self, store: _Store, now: float, force: bool) -> None:
+        # The store's I/O lock before taking its records, so that what was taken first is written first.
+        with store._io_lock:
+            with self._cond:
+                taken = store._take(now, force)
+                if store.save_format == "parquet" and taken:
+                    self._buffered_rows -= sum(len(item[1]) for item in taken)
+                if not store._buffered():
+                    self._dirty.pop(id(store), None)
+            if taken:
+                store._write(taken)
+
+    def _loop(self) -> None:
+        while True:
+            with self._cond:
+                if not self._stopping:
+                    self._cond.wait(_TICK_SECONDS)
+                stopping = self._stopping
+                stores = list(self._dirty.values())
+                pressed = self._buffered_rows > self._max_buffered
+            if pressed:  # the largest buffers first, until half the cap is left
+                stores.sort(key=lambda s: s._buffered(), reverse=True)
+            now = time.monotonic()
+            for store in stores:
+                force = stopping or (pressed and self._buffered_rows > self._max_buffered // 2)
+                try:
+                    self._write_due(store, now, force)
+                except (
+                    BaseException
+                ) as exc:  # raised to the store's caller; its records are dropped, not retried for ever
+                    with self._cond:
+                        store._error = store._error or exc
+                        dropped = store._take(now, True)
+                        if store.save_format == "parquet" and dropped:
+                            self._buffered_rows -= sum(len(item[1]) for item in dropped)
+                        self._dirty.pop(id(store), None)
+            if stopping:
+                with self._cond:
+                    if not self._dirty:
+                        return
+
+
+def open_store(
+    path: Any,
+    test_start: Optional[str] = None,
+    lock: bool = False,
+    save_coefficients: bool = True,
+    writer: Optional[StoreWriter] = None,
+) -> _Store:
+    """A model's results store, by the path's suffix: `ParquetResultStore` for `<name>.parquet` (a directory of parts and a
+    catalog, `results.parquet_store`), `ResultStore` for anything else (`<name>.jsonl`). `writer` shares one `StoreWriter` among
+    many stores; without it each writes on its own thread."""
+    if is_parquet_path(path):
+        from .parquet_store import ParquetResultStore
+
+        return ParquetResultStore(
+            path, test_start=test_start, lock=lock, save_coefficients=save_coefficients, writer=writer
+        )
+    return ResultStore(path, test_start=test_start, lock=lock, save_coefficients=save_coefficients, writer=writer)
+
+
 class _LockHeld(Exception):
     """Another process (or another open file in this one) holds the lock."""
 
@@ -580,6 +960,12 @@ def _hold_lock(path: Path) -> Callable[[], None]:
         if exc.errno in _HELD_ERRNOS:
             raise _LockHeld() from None
         raise
+    if _held_by_a_group(path, fd):  # a `StoreWriter` holds it through its own lock (`_GroupLock`)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+        raise _LockHeld()
     _HELD_FDS.add(fd)
 
     def release() -> None:
@@ -609,6 +995,132 @@ def _close_held_in_child() -> None:
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_close_held_in_child)
+
+
+# The name a `_GroupLock` writes into each lock file it holds: `.writer-<pid>-<random>.lock`, a file next to it.
+_GROUP_PREFIX = ".writer-"
+
+
+def _held_by_a_group(lock_path: Path, fd: int, ours: Optional[str] = None) -> bool:
+    """Whether the lock file open as `fd` names a `_GroupLock` (other than `ours`) whose own file another holds the flock of."""
+    try:
+        name = os.pread(fd, 256, 0).strip().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not name.startswith(_GROUP_PREFIX) or name == ours or "/" in name or "\\" in name:
+        return False
+    return _group_file_held(lock_path.parent / name)
+
+
+def _group_file_held(path: Path) -> bool:
+    """Whether a `_GroupLock`'s file is held: a shared flock on it is refused. One nobody holds belongs to a writer that is gone
+    (a killed one's flock went with it), and is removed."""
+    import fcntl
+
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            return exc.errno in _HELD_ERRNOS
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return False
+
+
+class _GroupLock:
+    """One `StoreWriter`'s lock for every model whose results it writes, so that its stores keep no descriptor each.
+
+    The writer holds an exclusive flock on a file of its own in each directory (`.writer-<pid>-<random>.lock`) and writes that
+    name into the lock file of each model it takes (`<name>.lock`, the file a model's own lock is a flock of). It takes a model
+    under the model's flock, refused if another holds that flock or the name of another group whose flock is held; anyone who
+    then takes the model's flock reads the name and is refused while the group holds its own (`_hold_lock` checks it). So a
+    model has one writer whether its lock is held by itself or by a group, in another process or in this one (a flock is per
+    open file). A store's close clears the name; a killed writer's flock goes with its process, which leaves a name nobody
+    holds: stale, and taken over. Where there is no flock, each store holds its own lock."""
+
+    def __init__(self):
+        self.name = f"{_GROUP_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:12]}.lock"
+        self._held: Dict[Path, Callable[[], None]] = {}
+        self._mutex = Lock()
+
+    def hold(self, lock_path: Path) -> Callable[[], None]:
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover (Windows)
+            return _hold_lock(lock_path)
+        directory = lock_path.parent
+        with self._mutex:
+            if directory not in self._held:
+                self._held[directory] = _hold_lock(directory / self.name)
+        try:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        except PermissionError:  # can't write the name into it: the model's own lock, a descriptor of its own
+            return _hold_lock(lock_path)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in _HELD_ERRNOS:
+                    raise _LockHeld() from None
+                raise
+            try:
+                if _held_by_a_group(lock_path, fd, ours=self.name):
+                    raise _LockHeld()
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, self.name.encode("utf-8"), 0)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+        return lambda: self._clear(lock_path)
+
+    def _clear(self, lock_path: Path) -> None:
+        """Clear this group's name from a model's lock file: its store closed. Another takes the file's flock only for a moment
+        (to read the name), so this waits a little for it and otherwise leaves the name, which goes stale with the group."""
+        import fcntl
+
+        try:
+            fd = os.open(lock_path, os.O_RDWR)
+        except OSError:
+            return
+        try:
+            for _ in range(100):
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno not in _HELD_ERRNOS:
+                        return
+                    time.sleep(0.01)
+            else:
+                return
+            try:
+                if os.pread(fd, 256, 0).strip() == self.name.encode("utf-8"):
+                    os.ftruncate(fd, 0)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    def release(self) -> None:
+        """Release the group's own flocks and remove their files: every model it held is free."""
+        with self._mutex:
+            held, self._held = self._held, {}
+        for directory, release in held.items():
+            release()
+            try:
+                (directory / self.name).unlink()
+            except OSError:
+                pass
 
 
 def _hold_filelock(path: Path) -> Callable[[], None]:  # pragma: no cover (Windows)
