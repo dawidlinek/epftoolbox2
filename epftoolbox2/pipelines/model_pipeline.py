@@ -23,6 +23,7 @@ from ..models._calendar import (
     resolve_issue_days,
 )
 from ..models.base import BaseModel, _RunChecks
+from ..models._worker import pool_native_threads
 from ..models._engine import (
     ENGINE_OFF,
     ENGINE_ON,
@@ -508,18 +509,22 @@ class ModelPipeline:
             )
 
         ran: Dict[str, ModelResultRef] = {}
-        if self.engine == ENGINE_ON:
-            # The engine groups first, each in one go (models/_engine.py), then the rest in list order, as with "off".
-            capable = [model for model in self.models if model._engine_capable(plans.get(model.name), forecast_only)]
-            for group in engine_groups(capable):
-                columns = {model.name: checks[model.name].used_predictors for model in group}
-                # `run_group` takes each model's arguments (its check with them) out of this dict when its chunk starts.
-                ran.update(
-                    run_group(group, {model.name: run_arguments(**arguments(model)) for model in group}, columns)
-                )
         refs: dict[str, ModelResultRef] = {}
-        for model in self.models:
-            refs[model.name] = ran[model.name] if model.name in ran else model.run(**arguments(model))
+        # One hold of this process's OpenBLAS thread count for all the run's pools: putting it back restarts its threads.
+        with pool_native_threads():
+            if self.engine == ENGINE_ON:
+                # The engine groups first, each in one go (models/_engine.py), then the rest in list order, as with "off".
+                capable = [
+                    model for model in self.models if model._engine_capable(plans.get(model.name), forecast_only)
+                ]
+                for group in engine_groups(capable):
+                    columns = {model.name: checks[model.name].used_predictors for model in group}
+                    # `run_group` takes each model's arguments (its check with them) out of this dict when its chunk starts.
+                    ran.update(
+                        run_group(group, {model.name: run_arguments(**arguments(model)) for model in group}, columns)
+                    )
+            for model in self.models:
+                refs[model.name] = ran[model.name] if model.name in ran else model.run(**arguments(model))
 
         choices: Dict[str, List[Dict]] = {}
         if self.ensembles:
@@ -781,34 +786,36 @@ class ModelPipeline:
         # What a resume can refuse comes from the zones whose folders hold results already: their pooled models' resumes
         # are checked, and their plain models run, before the zone index or any file of a zone new to the save_dir is written,
         # so a refused run leaves the save_dir as it was.
-        on_file = [zone for zone in zones if save_dir and any(dirs[zone].glob("*.manifest.json"))]
-        for model in pooled:
-            check_resumes(
-                {
-                    zone: (
-                        members[model.name][zone],
-                        arguments(zone, members[model.name][zone], member_frames[model.name][zone], keep=True),
-                    )
-                    for zone in on_file
-                }
-            )
-        for zone in on_file:
-            run_plain(zone)
-        if save_dir:
-            write_zone_index(save_dir, zones)  # what tells a report this save_dir's folders are zones
-        for zone in zones:
-            if zone not in on_file:
+        # One hold of this process's OpenBLAS thread count for every zone's pools and the pooled models' (as in `run`).
+        with pool_native_threads():
+            on_file = [zone for zone in zones if save_dir and any(dirs[zone].glob("*.manifest.json"))]
+            for model in pooled:
+                check_resumes(
+                    {
+                        zone: (
+                            members[model.name][zone],
+                            arguments(zone, members[model.name][zone], member_frames[model.name][zone], keep=True),
+                        )
+                        for zone in on_file
+                    }
+                )
+            for zone in on_file:
                 run_plain(zone)
-        for model in pooled:
-            ran = run_pooled(
-                model,
-                {
-                    zone: (member, arguments(zone, member, member_frames[model.name][zone]))
-                    for zone, member in members[model.name].items()
-                },
-            )
+            if save_dir:
+                write_zone_index(save_dir, zones)  # what tells a report this save_dir's folders are zones
             for zone in zones:
-                refs[zone][model.name] = ran[zone]
+                if zone not in on_file:
+                    run_plain(zone)
+            for model in pooled:
+                ran = run_pooled(
+                    model,
+                    {
+                        zone: (member, arguments(zone, member, member_frames[model.name][zone]))
+                        for zone, member in members[model.name].items()
+                    },
+                )
+                for zone in zones:
+                    refs[zone][model.name] = ran[zone]
 
         reports: Dict[str, EvaluationReport] = {}
         evaluators = [] if forecast_only else self.evaluators
@@ -1517,28 +1524,29 @@ class ModelPipeline:
         check_issue_days_in(resolve_date(test_start), resolve_date(test_end), weekdays)
         run_days = sample_issue_days(data.index, test_start, test_end, days, seed, issue_days=weekdays)
         report = VerifyReport(issue_days=run_days)
-        for model in chosen:
-            report.checks.extend(
-                verify_model(
-                    model,
-                    data,
-                    run_days,
-                    info,
-                    target=target,
-                    freq=freq,
-                    seed=seed,
-                    control=positive_control,
-                    rebuild=rebuild,
-                    test_period=(test_start, test_end),
-                    availability=self.availability,
-                    **horizon_arguments(horizon, horizons),
-                    **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
-                    **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
-                    device=device,
-                    co_batch=co_batch,
-                    rerun=rerun,
+        with pool_native_threads():  # one hold for every probe's pool, as in `run`
+            for model in chosen:
+                report.checks.extend(
+                    verify_model(
+                        model,
+                        data,
+                        run_days,
+                        info,
+                        target=target,
+                        freq=freq,
+                        seed=seed,
+                        control=positive_control,
+                        rebuild=rebuild,
+                        test_period=(test_start, test_end),
+                        availability=self.availability,
+                        **horizon_arguments(horizon, horizons),
+                        **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
+                        **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
+                        device=device,
+                        co_batch=co_batch,
+                        rerun=rerun,
+                    )
                 )
-            )
         if device is not None and not report.devices:
             warnings.warn(
                 f"verify(device={device!r}): no model verified has a `device`, so it changed nothing", stacklevel=2
@@ -1575,51 +1583,61 @@ class ModelPipeline:
         report = VerifyReport(issue_days=run_days)
         horizon_args = horizon_arguments(horizon, horizons)  # resolved by `verify`
         planned = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
-        for model in chosen:
-            if isinstance(model, PooledModel):
-                if weekdays is not None:
-                    raise ValueError(
-                        f"verify() of PooledModel {model.name!r} probes every day of a refit block; issue_days= is for "
-                        "plain models in this step"
+        with pool_native_threads():  # one hold for every probe's pool, as in `run`
+            for model in chosen:
+                if isinstance(model, PooledModel):
+                    if weekdays is not None:
+                        raise ValueError(
+                            f"verify() of PooledModel {model.name!r} probes every day of a refit block; issue_days= is for "
+                            "plain models in this step"
+                        )
+                    check_pooled_model(model.model)
+                    member = member_of(model, None)
+                    needed = needed_columns(member, freq, planned)
+                    zone_frames = {zone: with_missing_columns(model, zone, frames[zone], needed) for zone in zones}
+                    # What the probe perturbs in each zone: every column with a rule, and those the model reads, but not a column
+                    # of zeros `missing="zero"` added, which holds nothing a forecast could know late.
+                    columns = {
+                        zone: [
+                            name
+                            for name in frames[zone].columns
+                            if name in {target, *needed}
+                            or (isinstance(name, str) and infos[zone].resolve(name).rule is not None)
+                        ]
+                        for zone in zones
+                    }
+                    report.checks.extend(
+                        verify_pooled(
+                            model,
+                            zone_frames,
+                            infos,
+                            run_days,
+                            target,
+                            freq,
+                            horizon_args,
+                            columns,
+                            seed,
+                            positive_control,
+                        )
                     )
-                check_pooled_model(model.model)
-                member = member_of(model, None)
-                needed = needed_columns(member, freq, planned)
-                zone_frames = {zone: with_missing_columns(model, zone, frames[zone], needed) for zone in zones}
-                # What the probe perturbs in each zone: every column with a rule, and those the model reads, but not a column
-                # of zeros `missing="zero"` added, which holds nothing a forecast could know late.
-                columns = {
-                    zone: [
-                        name
-                        for name in frames[zone].columns
-                        if name in {target, *needed}
-                        or (isinstance(name, str) and infos[zone].resolve(name).rule is not None)
-                    ]
-                    for zone in zones
-                }
-                report.checks.extend(
-                    verify_pooled(
-                        model, zone_frames, infos, run_days, target, freq, horizon_args, columns, seed, positive_control
+                    continue
+                for zone in zones:
+                    checks = verify_model(
+                        model,
+                        frames[zone],
+                        run_days,
+                        infos[zone],
+                        target=target,
+                        freq=freq,
+                        seed=seed,
+                        control=positive_control,
+                        test_period=(test_start, test_end),
+                        availability=self.availability,
+                        **horizon_args,
+                        **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
+                        **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
                     )
-                )
-                continue
-            for zone in zones:
-                checks = verify_model(
-                    model,
-                    frames[zone],
-                    run_days,
-                    infos[zone],
-                    target=target,
-                    freq=freq,
-                    seed=seed,
-                    control=positive_control,
-                    test_period=(test_start, test_end),
-                    availability=self.availability,
-                    **horizon_args,
-                    **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
-                    **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
-                )
-                report.checks.extend(replace(check, model=f"{check.model} ({zone})") for check in checks)
+                    report.checks.extend(replace(check, model=f"{check.model} ({zone})") for check in checks)
         return report
 
     def explain(

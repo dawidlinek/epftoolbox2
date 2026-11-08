@@ -39,6 +39,7 @@ from ..results.ref import ModelResultRef
 from ..results.store import StoreWriter
 from ._calendar import resolve_horizons
 from ._engine_worker import EngineCounts, EngineTaskFailed, _engine_init, fit_path_of, run_job
+from ._worker import pool_native_threads
 from .base import (
     _FRAME_READERS,
     _MASK_READERS,
@@ -299,9 +300,12 @@ def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> Dict[s
     refit = first._refit_block is not None
 
     mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
-    with ProcessPoolExecutor(
-        max_workers=n_processes, mp_context=mp_context, initializer=_engine_init, initargs=(hour_arrays, inputs)
-    ) as pool:
+    with (
+        pool_native_threads(),  # the workers inherit one OpenBLAS thread, so they start none
+        ProcessPoolExecutor(
+            max_workers=n_processes, mp_context=mp_context, initializer=_engine_init, initargs=(hour_arrays, inputs)
+        ) as pool,
+    ):
         try:
             futures = {pool.submit(run_job, list(job.items())): key for key, job in jobs.items()}
             for future in as_completed(futures):
