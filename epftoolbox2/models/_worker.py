@@ -231,6 +231,29 @@ def unit_rows(cfg: Dict, days: np.ndarray, unit: FitUnit) -> Tuple[slice, int]:
     return training_rows(days, anchor, span, unit.horizon, newest), newest
 
 
+class StatsFit(NamedTuple):
+    """One fit as the model path has selected it, for a fit from shared statistics (`engine` of `_fit_member` and `_fit_unit`,
+    which the engine's worker passes, `_engine_worker.EngineFits`): its span, the period's rows `rows` of `training_span` (a
+    slice, before any filter) at `horizon`, read by every fit of that span; `columns`, the fit's columns' places in the period's
+    arrays, in the list's order; `finite`, which of the span's rows the fit keeps (ρ: target and every column finite); `x` and
+    `y`, ρ's values; the scaler's `mask`; `test`, the raw issue rows it forecasts (k rows of its columns, all finite)."""
+
+    period: int
+    horizon: int
+    rows: slice
+    columns: List[int]
+    finite: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    mask: np.ndarray
+    test: np.ndarray
+
+
+# A fit from shared statistics: (prediction in target units, coefficients) per issue row of `StatsFit.test`, or None where the
+# model path must fit it (a hand-back), which it then does on the same rows.
+StatsFitter = Any
+
+
 def finite_rows(train_x: np.ndarray, train_y: np.ndarray) -> np.ndarray:
     """Which training rows a fit keeps: those whose target and every predictor are finite (NaN or inf would fail the fit)."""
     rows = np.isfinite(train_y)
@@ -285,8 +308,11 @@ def forecast_record(
     return with_status(record, list_hash=list_hash, refit_anchor=record["run_date"])
 
 
-def _fit_one_numpy(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskInputs] = None) -> Union[Dict, str]:
-    """Fit and forecast one task, with `inputs` (the pool's if None).
+def _fit_one_numpy(
+    hour: int, hz: int, day_in_test: int, inputs: Optional[TaskInputs] = None, engine: Optional[StatsFitter] = None
+) -> Union[Dict, str]:
+    """Fit and forecast one task, with `inputs` (the pool's if None). `engine` fits each member from shared statistics where it
+    can (`_fit_member`); None is the model path.
 
     Returns the result record, or a skip reason (one of the SKIP_* names, optionally followed by ": detail")
     when no forecast is possible.
@@ -318,7 +344,7 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskIn
 
     def fit(member, scalable_mask):
         return _fit_member(
-            arrays, cfg, hour, hz, day, member, newest, test, list_id, predictors, scalable_mask, inputs.model
+            arrays, cfg, hour, hz, day, member, newest, test, list_id, predictors, scalable_mask, inputs.model, engine
         )
 
     members = cfg.get("members")
@@ -388,6 +414,7 @@ def _fit_member(
     predictors,
     scalable_mask,
     model,
+    engine: Optional[StatsFitter] = None,
 ) -> Union[Tuple[float, list, Dict], str]:
     """One training window's forecast of the task (`hour`, `hz`, day id `day`) issued from row `test`: (the prediction in target
     units, the coefficients, a matching list's record fields), or a skip reason. Its rows are `member_rows`: those of
@@ -395,7 +422,11 @@ def _fit_member(
     target. `model` fits it (`_fit_predict`): the task's own, from its inputs, never one of the process's.
 
     `scalable_mask` None (`binary_mask="fit"`) is read here from those rows in the list's columns, before the matching and the
-    finite filters, as `_fit_unit` reads a refit unit's: which columns are binary is then a function of this fit's span alone."""
+    finite filters, as `_fit_unit` reads a refit unit's: which columns are binary is then a function of this fit's span alone.
+
+    `engine` (the engine's, `_engine_worker.EngineFits`) is handed the fit as selected here (`StatsFit`: the rows, filters, mask
+    and skips are this function's) and fits it from shared statistics; where it hands the fit back (None), the scaler and
+    `_fit_predict` below fit it, on the same values, as without it."""
     days = arrays["days"]
     train = member_rows(days, day, member, hz, newest)
 
@@ -436,6 +467,16 @@ def _fit_member(
     if not np.isfinite(test_x).all():
         return SKIP_MISSING_TEST_PREDICTORS
 
+    extra = {}
+    if matching_days is not None:
+        extra["training_days"] = int(np.unique(train_days[finite]).size)
+        extra["matching_days"] = matching_days
+    if engine is not None:
+        fitted = engine(StatsFit(hour, hz, train, col_idx, finite, train_x, train_y, scalable_mask, test_x))
+        if fitted is not None:
+            ((prediction, coefs),) = fitted
+            return prediction, coefs, extra
+
     scaler = make_scaler(cfg.get("scaler", "standard"))
     train_x, train_y, test_x = scaler.fit_transform(
         train_x.copy(),
@@ -449,11 +490,6 @@ def _fit_member(
     except ValueError as exc:
         # scikit-learn raises ValueError on degenerate input (e.g. fewer rows than CV folds); counted, not fatal.
         return f"{SKIP_FIT_ERROR}: {exc}"
-
-    extra = {}
-    if matching_days is not None:
-        extra["training_days"] = int(np.unique(train_days[finite]).size)
-        extra["matching_days"] = matching_days
     return scaler.inverse(float(pred)), coefs, extra
 
 
@@ -549,11 +585,13 @@ def skip_record(
     return with_status(record, status, list_hash, refit_anchor, detail or None)
 
 
-def _run_task(task: tuple, inputs: Optional[TaskInputs] = None) -> Union[Dict, str]:
+def _run_task(
+    task: tuple, inputs: Optional[TaskInputs] = None, engine: Optional[StatsFitter] = None
+) -> Union[Dict, str]:
     inputs = _inputs_of(inputs)
     try:
         # A model that fits nothing has `config["fits"]` False and forecasts from the issue row alone.
-        return _fit_one_numpy(*task, inputs) if inputs.config.get("fits", True) else _row_value(*task, inputs)
+        return _fit_one_numpy(*task, inputs, engine) if inputs.config.get("fits", True) else _row_value(*task, inputs)
     except Exception as exc:
         hour, hz, day_in_test = task
         raise TaskFailed(
@@ -604,10 +642,11 @@ def _units_of(cfg: Dict, task: tuple) -> List[FitUnit]:
 
 
 def _fit_unit(
-    unit: FitUnit, tasks: List[tuple], inputs: Optional[TaskInputs] = None
+    unit: FitUnit, tasks: List[tuple], inputs: Optional[TaskInputs] = None, engine: Optional[StatsFitter] = None
 ) -> List[Tuple[tuple, Union[Dict, str]]]:
     """Fit one unit of a model with `refit` and forecast each of `tasks` from it, one row at a time, with `inputs` (the pool's
-    if None). Returns (task, record or skip reason) of each.
+    if None). Returns (task, record or skip reason) of each. `engine` fits the unit from shared statistics where it can, as in
+    `_fit_member`: the rows, mask and skips are this function's, and a fit it hands back is fitted here as without it.
 
     The rows are those of a forecast issued on the anchor: `training_span(anchor, W, h, newest)` with the anchor's newest target,
     filtered as `_fit_one_numpy` filters a task's. Which columns are binary is read from these rows, before any filter, so a
@@ -672,25 +711,33 @@ def _fit_unit(
     if not forecast:
         return outcomes
 
-    scaler = make_scaler(cfg.get("scaler", "standard"))
-    train_x, train_y, test_x = scaler.fit_transform(
-        train_x.copy(),
-        train_y.copy(),
-        arrays["x"][[test for _, test in forecast]][:, col_idx],
-        scalable_mask=scalable_mask,
-        columns=predictors,
-    )
-    try:
-        fitted = model._fit_model(train_x, train_y)
-    except ValueError as exc:
-        return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]
+    test_rows = arrays["x"][[test for _, test in forecast]][:, col_idx]
+    predicted = None
+    if engine is not None:
+        predicted = engine(StatsFit(hour, hz, train, col_idx, finite, train_x, train_y, scalable_mask, test_rows))
+    if predicted is None:
+        scaler = make_scaler(cfg.get("scaler", "standard"))
+        train_x, train_y, test_x = scaler.fit_transform(
+            train_x.copy(),
+            train_y.copy(),
+            test_rows,
+            scalable_mask=scalable_mask,
+            columns=predictors,
+        )
+        try:
+            fitted = model._fit_model(train_x, train_y)
+        except ValueError as exc:
+            return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]
+        predicted = []
+        for row in range(len(forecast)):
+            # One row at a time (decision 16 of the step 3 spec): a product over several rows can differ in the last bits.
+            pred, coefs = model._predict_fitted(fitted, test_x[row : row + 1])
+            predicted.append((scaler.inverse(float(pred)), coefs))
 
     extra = None
     if matching_days is not None:
         extra = {"training_days": int(np.unique(train_days[finite]).size), "matching_days": matching_days}
-    for row, (task, test) in enumerate(forecast):
-        # One row at a time (decision 16 of the step 3 spec): a product over several rows can differ in the last bits.
-        pred, coefs = model._predict_fitted(fitted, test_x[row : row + 1])
+    for (task, test), (prediction, coefs) in zip(forecast, predicted):
         window, day_in_window, _ = task_place(cfg, task[2])
         run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=task[2])
         record = forecast_record(
@@ -698,7 +745,7 @@ def _fit_unit(
             hour,
             hz,
             day_in_window,
-            scaler.inverse(float(pred)),
+            prediction,
             float(arrays["y"][test, hz - 1]),
             coefs,
             cfg.get("freq", "1h"),
@@ -717,10 +764,10 @@ def _fit_unit(
 
 
 def _run_unit(
-    unit: FitUnit, tasks: List[tuple], inputs: Optional[TaskInputs] = None
+    unit: FitUnit, tasks: List[tuple], inputs: Optional[TaskInputs] = None, engine: Optional[StatsFitter] = None
 ) -> List[Tuple[tuple, Union[Dict, str]]]:
     try:
-        return [(task, outcome, unit.member) for task, outcome in _fit_unit(unit, tasks, inputs)]
+        return [(task, outcome, unit.member) for task, outcome in _fit_unit(unit, tasks, inputs, engine)]
     except Exception as exc:
         raise TaskFailed(
             f"fit unit (period={unit.period}, horizon={unit.horizon}, anchor={unit.anchor}, list={unit.list_id}, "
