@@ -129,7 +129,7 @@ _REFIT_METHODS = ("_fit_predict", "_fit_model", "_predict_fitted")
 _ENGINE_METHODS = (*_REFIT_METHODS, "_fit_stats")
 # What an engine group does in a model's place: a model whose class overrides any of them runs on its own (`_engine_capable`).
 _ENGINE_REPLACES = ("run", "_execute", "_run_tasks", "_build_hour_arrays")
-# What reads a model's period frames: a chunk reads them once for the models whose readers these are (`_frame_readers`).
+# What reads a model's period frames: a chunk reads them once for models that read them as BaseModel does (`_frame_readers`).
 _FRAME_READERS = ("_load_periods", "_preprocess", "_shift_index_by_calendar_days", "_compute_period_index")
 
 # ProcessPoolExecutor refuses more workers than this on Windows.
@@ -508,8 +508,9 @@ class BaseModel(ABC):
 
     def _frame_readers(self) -> Tuple[type, ...]:
         """The classes whose `_load_periods`, `_preprocess`, `_shift_index_by_calendar_days` and `_compute_period_index` read
-        this model's period frames: an engine chunk reads the frames once for models that share them (`_engine.engine_groups`),
-        so a subclass that builds its frames otherwise gets frames of its own."""
+        this model's period frames: an engine chunk reads the frames once for the models whose readers are all BaseModel's
+        (`_engine.engine_groups`); a model of a class that reads them otherwise is a group of its own, whose frames it reads
+        itself, since such a method can depend on the instance (two instances of one class with different lags)."""
         return tuple(self._owner_of(name) for name in _FRAME_READERS)
 
     @property

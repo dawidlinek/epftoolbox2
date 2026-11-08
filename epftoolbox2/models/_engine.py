@@ -1,8 +1,8 @@
 """Engine groups (step 5h): `ModelPipeline(engine="on")` runs the models that can be fitted from shared statistics together.
 
 A **group** is the engine-capable models of a run (`BaseModel._engine_capable`) with one refit block rule (`_refit_block`:
-None, a `"kD"`/`"kMS"` rule, or the coarsest of `"auto"`'s) and one way of reading period frames (`_frame_readers`), in list
-order. It is cut into **chunks** of at most `ENGINE_MAX_MODELS` models (20,000) and `ENGINE_MAX_COLUMNS` union columns (4,096),
+None, a `"kD"`/`"kMS"` rule, or the coarsest of `"auto"`'s) that read their period frames as BaseModel does, in list order;
+a model whose class reads them otherwise (`_frame_readers`) is a group of its own. It is cut into **chunks** of at most `ENGINE_MAX_MODELS` models (20,000) and `ENGINE_MAX_COLUMNS` union columns (4,096),
 environment variables like `MAX_PROCESSES`, read when a group runs. Per chunk: one `_load_periods` over the union of the chunk's columns, each model's
 `_prepare_run` on those period frames (its masks, store and manifest, pending tasks and parent-side skips, as its own `run`
 has them), one set of period arrays over the union (`base.hour_arrays_of`), and one pool (`_engine_worker._engine_init`, the
@@ -33,11 +33,14 @@ from ..results.ref import ModelResultRef
 from ..results.store import StoreWriter
 from ._calendar import resolve_horizons
 from ._engine_worker import EngineTaskFailed, _engine_init, run_job
-from .base import _WINDOWS_MAX_WORKERS, BaseModel, _MemorySink, _RunState, hour_arrays_of
+from .base import _FRAME_READERS, _WINDOWS_MAX_WORKERS, BaseModel, _MemorySink, _RunState, hour_arrays_of
 
 ENGINE_OFF = "off"
 ENGINE_ON = "on"
 ENGINE_MODES = (ENGINE_OFF, ENGINE_ON)
+
+# The frame readers of a model that reads its period frames as BaseModel does (`BaseModel._frame_readers`).
+_BASE_READERS = tuple(BaseModel for _ in _FRAME_READERS)
 
 # A chunk's limits, and the environment variables that set them (read when a group runs).
 ENGINE_MAX_MODELS = 20_000
@@ -77,12 +80,15 @@ def engine_limits() -> Tuple[int, int]:
 
 
 def engine_groups(models: Sequence[BaseModel]) -> List[List[BaseModel]]:
-    """The engine groups of these (engine-capable) models: one per refit block rule (`_refit_block`) and way of reading the
-    period frames (`_frame_readers`: BaseModel's, unless a subclass builds its frames otherwise), in the order of each group's
-    first model, its models in list order."""
-    groups: Dict[Tuple[Optional[str], Tuple[type, ...]], List[BaseModel]] = {}
+    """The engine groups of these (engine-capable) models: one per refit block rule (`_refit_block`) of the models that read
+    their period frames as BaseModel does, and one group of its own for each model whose class reads them otherwise
+    (`_frame_readers`: a `_preprocess` of its own, say), which reads its own frames as its own run does: such a method can
+    depend on the instance (a lag it is given), so two instances of one class can't share frames. In the order of each
+    group's first model, its models in list order."""
+    groups: Dict[Tuple[Optional[str], Optional[int]], List[BaseModel]] = {}
     for model in models:
-        groups.setdefault((model._refit_block, model._frame_readers()), []).append(model)
+        own = None if model._frame_readers() == _BASE_READERS else id(model)
+        groups.setdefault((model._refit_block, own), []).append(model)
     return list(groups.values())
 
 
@@ -137,6 +143,8 @@ def run_group(
         return {}
     if columns is None and len(models) > 1:
         raise ValueError("an engine group of more than one model needs each model's columns")
+    if len(models) > 1 and any(model._frame_readers() != _BASE_READERS for model in models):
+        raise ValueError("a model that reads its own period frames is an engine group of its own (`engine_groups`)")
     first = arguments[models[0].name]
     data, target, freq = first["data"], first["target"], first["freq"]
     horizon, _ = resolve_horizons(first["horizon"], first["horizons"], 7)

@@ -273,8 +273,11 @@ def test_groups_are_refit_rules_and_chunks_are_cut_in_list_order(monkeypatch):
         def _preprocess(self, data, horizon, target):
             return super()._preprocess(data, horizon, target)
 
-    mixed = [models[0], OwnFrames(["a"], 28, name="own"), models[3]]
-    assert [[m.name for m in group] for group in _engine.engine_groups(mixed)] == [["m0", "m3"], ["own"]]
+    mixed = [models[0], OwnFrames(["a"], 28, name="own"), models[3], OwnFrames(["b"], 28, name="own2")]
+    groups = _engine.engine_groups(mixed)
+    assert [[m.name for m in group] for group in groups] == [["m0", "m3"], ["own"], ["own2"]]  # each instance its own
+    with pytest.raises(ValueError, match="reads its own period frames"):
+        _engine.run_group(mixed[1::2], {}, {"own": ["a"], "own2": ["b"]})
 
     columns = {"m0": ["a", "b"], "m1": ["a"], "m2": ["c"], "m3": ["a", "d"], "m4": ["b"]}
     assert [[m.name for m in c] for c in _engine.engine_chunks(models, columns, 2, 100)] == [
@@ -342,6 +345,39 @@ def test_a_workflow_overrides_the_pipeline_engine(tmp_path):
 
 
 # --- engine on equals engine off --------------------------------------------------------------------------------------
+
+
+class Lagged(OLSModel):
+    """Builds a column of its frames from a setting of the instance: two instances can't share frames."""
+
+    def __init__(self, *args, lag=1, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lag = lag
+
+    def _preprocess(self, data, horizon, target):
+        out = super()._preprocess(data, horizon, target)
+        out["load_d+1"] = out["load_d+1"].shift(24 * self.lag)
+        return out
+
+
+def test_instances_that_read_their_own_frames_each_read_theirs(spring, tmp_path):
+    """Two instances of a class with its own `_preprocess`, different only in what it reads (a lag), with a plain OLS
+    between them: each is a group of its own, so engine on equals engine off for both (with one group they shared the first
+    instance's frames, and the second forecast from the first's lag)."""
+
+    def models():
+        return [
+            Lagged(PREDICTORS, 28, lag=1, name="lag1"),
+            OLSModel(PREDICTORS, 28, name="ols"),
+            Lagged(PREDICTORS, 28, lag=5, name="lag5"),
+        ]
+
+    assert all(model._engine_capable() for model in models())
+    assert [[m.name for m in g] for g in _engine.engine_groups(models())] == [["lag1"], ["ols"], ["lag5"]]
+    off, on = run_both(build(models), spring, tmp_path, test=("2023-03-24", "2023-03-25"), horizon=1)
+    assert same_results(tmp_path / "off", tmp_path / "on") == 6
+    same_tables(off, on)
+    assert lines(tmp_path / "on" / "lag1.jsonl") != lines(tmp_path / "on" / "lag5.jsonl")
 
 
 def spring_models():
