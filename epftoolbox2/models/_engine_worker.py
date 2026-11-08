@@ -88,12 +88,13 @@ _E_MODELS: List["ModelInputs"] = []
 
 def fit_path_of(model) -> Optional[str]:
     """The numeric path of a model's fits in an engine group (`ENGINE_FIT_PATH`), or None where they are the model path's: a
-    model whose `_ENGINE_NEEDS` asks for CV blocks (LassoCV, LEAR `"cv"`; or that declares none) or whose scaler isn't exactly
-    `StandardScaler` (a VST) keeps the model path in this release."""
+    model whose `_ENGINE_NEEDS` asks for CV blocks (LassoCV, LEAR `"cv"`; or that declares none), one that says its fits can't
+    come from statistics to the model path's digits (`_ENGINE_FROM_STATS` False: LEAR with `solver="cd"`), or one whose scaler
+    isn't exactly `StandardScaler` (a VST) keeps the model path in this release."""
     if ENGINE_FIT_PATH is None:
         return None
     needs = getattr(model, "_ENGINE_NEEDS", None)
-    if needs is None or set(needs) - {"rows"}:
+    if needs is None or set(needs) - {"rows"} or not getattr(model, "_ENGINE_FROM_STATS", True):
         return None
     try:
         scaler = make_scaler(getattr(model, "scaler", "standard"))

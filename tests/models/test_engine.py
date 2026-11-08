@@ -154,8 +154,8 @@ def lear(*args, **kwargs):
 
 
 def test_which_models_fit_from_statistics():
-    """OLS, Ridge and LEAR with exactly `StandardScaler` (any `scale_binary`); not a VST, not CV blocks (5j), not a model that
-    declares no needs."""
+    """OLS, Ridge and LEAR with exactly `StandardScaler` (any `scale_binary`); not a VST, not CV blocks (5j), not LEAR's
+    coordinate descent (it stops at a tolerance, so it follows its Gram's last bits), not a model that declares no needs."""
     path = _engine_worker.ENGINE_FIT_PATH
     assert path == "engine-1"
     for model in (
@@ -163,13 +163,14 @@ def test_which_models_fit_from_statistics():
         OLSModel(PREDICTORS, scaler=STANDARD),
         RidgeModel(PREDICTORS),
         lear(PREDICTORS),
-        lear(PREDICTORS, criterion="aic", solver="cd"),
+        lear(PREDICTORS, criterion="aic"),
         EveryOtherBack(PREDICTORS),
     ):
         assert _engine_worker.fit_path_of(model) == path, model
     for model in (
         LEARModel(PREDICTORS),  # asinh
         lear(PREDICTORS, criterion="cv"),
+        lear(PREDICTORS, criterion="aic", solver="cd"),
         LassoCVModel(PREDICTORS),
         OLSModel(PREDICTORS, scaler="npit"),
         RidgeModel(PREDICTORS, scaler="asinh"),

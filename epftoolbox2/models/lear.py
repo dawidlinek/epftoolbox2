@@ -23,6 +23,17 @@ class LEARModel(BaseModel):
     # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the sums alone for an information criterion.
     # A `criterion="cv"` instance needs the CV blocks too (`_cv_stats.block_stats`): `__setattr__` sets its own.
     _ENGINE_NEEDS = frozenset()
+    # The farthest an issue row may be from its training rows for the engine to forecast it, in training standard deviations
+    # (`_stats.issue_distance`; `OLSModel._ENGINE_ISSUE_Z`): up to 9.2e-11 at 10 (2.7e-10 at 30, 8.8e-10 at 100) on the harshest
+    # designs of `engine_stats/far_sweep.py`, against the engine's 1e-9.
+    _ENGINE_ISSUE_Z = 10.0
+
+    @property
+    def _ENGINE_FROM_STATS(self) -> bool:
+        """Whether an engine group fits this model from shared statistics: not with `solver="cd"`, whose coordinate descent stops
+        at a tolerance and so follows the last bits of its Gram (5.5e-9 apart from the model path at ordinary issue rows of
+        near-collinear columns in `engine_stats/far_sweep.py`), only with the exact `"lars"`."""
+        return self.solver != "cd"
 
     def __init__(
         self,
