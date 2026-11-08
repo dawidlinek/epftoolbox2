@@ -2,15 +2,16 @@
 
 A **group** is the engine-capable models of a run (`BaseModel._engine_capable`) with one refit block rule (`_refit_block`:
 None, a `"kD"`/`"kMS"` rule, or the coarsest of `"auto"`'s) that read their period frames as BaseModel does, in list order;
-a model whose class reads them otherwise (`_frame_readers`) is a group of its own. It is cut into **chunks** of at most `ENGINE_MAX_MODELS` models (20,000) and `ENGINE_MAX_COLUMNS` union columns (4,096),
-environment variables like `MAX_PROCESSES`, read when a group runs. Per chunk: one `_load_periods` over the union of the chunk's columns, each model's
+a model whose class or instance reads them otherwise (`_frame_readers`) is a group of its own. A group is cut into **chunks**
+of at most `ENGINE_MAX_MODELS` models (20,000) and `ENGINE_MAX_COLUMNS` union columns (4,096), environment variables like
+`MAX_PROCESSES`, read when a group runs. Per chunk: one `_load_periods` over the union of the chunk's columns, each model's
 `_prepare_run` on those period frames (its masks, store and manifest, pending tasks and parent-side skips, as its own `run`
 has them), one set of period arrays over the union (`base.hour_arrays_of`), and one pool (`_engine_worker._engine_init`, the
 native-thread limit of `_worker._pool_init`). A **job** is (job day, period), the job day the issue day without refit or the
 block's anchor with it, and holds every pending task of that day or block and period of every model of the chunk, so a task's
 window-list members and a unit's tasks are in one job. Each model's records go to its own store through one `StoreWriter` for
 the group (or to its in-memory list), one progress bar per group, and each model's `_finish_run` (skip counts, the shortfall
-warning, its ref) once every chunk has run.
+warning, its ref) and its store's close once its chunk has run.
 
 Nothing a model stores depends on its group, chunk, the union or the job: every task runs on its model's own inputs through the
 model path's functions (`_engine_worker.run_job`), and a fit reads its own columns by name, the same rows (dates) whatever else
@@ -89,10 +90,10 @@ def engine_limits() -> Tuple[int, int]:
 
 def engine_groups(models: Sequence[BaseModel]) -> List[List[BaseModel]]:
     """The engine groups of these (engine-capable) models: one per refit block rule (`_refit_block`) of the models that read
-    their period frames as BaseModel does, and one group of its own for each model whose class reads them otherwise
-    (`_frame_readers`: a `_preprocess` of its own, say), which reads its own frames as its own run does: such a method can
-    depend on the instance (a lag it is given), so two instances of one class can't share frames. In the order of each
-    group's first model, its models in list order."""
+    their period frames as BaseModel does, and one group of its own for each model whose class or instance reads them
+    otherwise (`_frame_readers`: a `_preprocess` of its own, say), which reads its own frames as its own run does: such a
+    method can depend on the instance (a lag it is given), so two instances of one class can't share frames. In the order of
+    each group's first model, its models in list order."""
     groups: Dict[Tuple[Optional[str], Optional[int]], List[BaseModel]] = {}
     for model in models:
         own = None if model._frame_readers() == _BASE_READERS else id(model)
@@ -374,8 +375,13 @@ class EngineAlone:
 
 def run_alone(model: BaseModel, data: pd.DataFrame, *args: Any, **kwargs: Any) -> ModelResultRef:
     """`model.run(data, ...)` through the engine as a group of one: its ref, records and files are what a group would give it.
-    A run the model can't take there (`_engine_capable` with the run's plan and `forecast_only`) is its own `run`."""
+    A run the model can't take there (`_engine_capable` with the run's plan and `forecast_only`) is its own `run`, and so is
+    a predictor function's run given no plan: the plan its run would make is what decides (a `train_on="matching"` list), and
+    it isn't made until then (the probes always pass theirs)."""
     given = {**dict(zip(_RUN_PARAMETERS[1:], args)), **kwargs}  # positional ones after `data`
-    if not model._engine_capable(given.get("plan"), given.get("forecast_only", False)):
+    plan = given.get("plan")
+    if (model._ctx_fn is not None and plan is None) or not model._engine_capable(
+        plan, given.get("forecast_only", False)
+    ):
         return model.run(data, *args, **kwargs)
     return run_group([model], {model.name: run_arguments(data=data, **given)})[model.name]

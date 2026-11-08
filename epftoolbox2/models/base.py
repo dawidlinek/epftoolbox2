@@ -492,7 +492,8 @@ class BaseModel(ABC):
         (`_can_refit`'s rule with the fit from statistics, so a subclass that overrides the fit without `_fit_stats` isn't fitted
         with its parent's estimator), it fits something (not `NaiveModel`), its plan (`plan`, of a predictor function) has no
         `train_on="matching"` list, the run isn't `forecast_only`, and its class keeps BaseModel's `run`, `_execute`,
-        `_run_tasks` and `_build_hour_arrays`, which a group does in their place. OLS, Ridge, LassoCV and LEAR are."""
+        `_run_tasks` and `_build_hour_arrays`, which a group does in their place, and the instance sets none of them itself.
+        OLS, Ridge, LassoCV and LEAR are."""
         owners = {
             next((klass for klass in type(self).__mro__ if name in vars(klass)), None) for name in _ENGINE_METHODS
         }
@@ -500,18 +501,19 @@ class BaseModel(ABC):
             len(owners) == 1
             and None not in owners
             and BaseModel not in owners
-            and all(self._owner_of(name) is BaseModel for name in _ENGINE_REPLACES)
+            and all(self._owner_of(name) is BaseModel and name not in vars(self) for name in _ENGINE_REPLACES)
             and not self._fits_nothing
             and not forecast_only
             and not (plan is not None and plan.uses_matching)
         )
 
-    def _frame_readers(self) -> Tuple[type, ...]:
+    def _frame_readers(self) -> Tuple[Any, ...]:
         """The classes whose `_load_periods`, `_preprocess`, `_shift_index_by_calendar_days` and `_compute_period_index` read
         this model's period frames: an engine chunk reads the frames once for the models whose readers are all BaseModel's
         (`_engine.engine_groups`); a model of a class that reads them otherwise is a group of its own, whose frames it reads
-        itself, since such a method can depend on the instance (two instances of one class with different lags)."""
-        return tuple(self._owner_of(name) for name in _FRAME_READERS)
+        itself, since such a method can depend on the instance (two instances of one class with different lags). A reader set
+        on the instance itself (`model._preprocess = ...`) is the instance's: the model itself in its place."""
+        return tuple(self if name in vars(self) else self._owner_of(name) for name in _FRAME_READERS)
 
     @property
     def _masks_from_fits(self) -> bool:

@@ -12,6 +12,7 @@ import datetime
 import gc
 import json
 import random
+import types
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -364,6 +365,57 @@ def test_a_workflow_overrides_the_pipeline_engine(tmp_path):
     workflow["model_pipeline"].pop("engine")
     (tmp_path / "experiment.yaml").write_text(yaml.safe_dump(workflow))
     assert Workflow.load(tmp_path / "experiment.yaml")._build_model_pipeline().engine == "off"
+
+
+def squared_load(self, frame, horizon, target):
+    """A `_preprocess` set on one instance: `load_d+1` squared."""
+    frame = frame.copy()
+    frame["load_d+1"] = frame["load_d+1"] ** 2
+    return BaseModel._preprocess(self, frame, horizon, target)
+
+
+def test_a_method_set_on_an_instance_is_the_instances(spring, tmp_path):
+    """A frame reader set on an instance (`model._preprocess = ...`) makes it a group of its own, which reads its frames
+    with it; a method the group does in a model's place set on an instance (`_run_tasks`, `_build_hour_arrays`) keeps the
+    model out of the engine. Either way engine on equals engine off (before, the patched `_preprocess` was grouped with the
+    plain model and read through BaseModel's)."""
+
+    def models():
+        plain, patched = OLSModel(PREDICTORS, 28, name="plain"), OLSModel(PREDICTORS, 28, name="patched")
+        patched._preprocess = types.MethodType(squared_load, patched)
+        arrays = OLSModel(PREDICTORS, 28, name="arrays")
+        arrays._build_hour_arrays = types.MethodType(BaseModel._build_hour_arrays, arrays)
+        return [plain, patched, arrays]
+
+    plain, patched, arrays = models()
+    assert plain._engine_capable() and patched._engine_capable() and not arrays._engine_capable()
+    assert patched._frame_readers()[1] is patched
+    assert [[m.name for m in g] for g in _engine.engine_groups([plain, patched])] == [["plain"], ["patched"]]
+    off, on = run_both(build(models), spring, tmp_path, test=("2023-03-24", "2023-03-25"), horizon=1)
+    assert same_results(tmp_path / "off", tmp_path / "on") == 6
+    same_tables(off, on)
+    assert lines(tmp_path / "on" / "plain.jsonl") != lines(tmp_path / "on" / "patched.jsonl")
+
+
+def test_run_alone_classifies_on_the_plan_the_run_uses(spring, monkeypatch):
+    """`run_alone` of a predictor function without a plan is the model's own run: its plan (which decides a matching list)
+    isn't made until the run; with the plan, as the probes pass it, a matching one is the model's own run too."""
+    grouped = []
+    real_group = _engine.run_group
+    monkeypatch.setattr(_engine, "run_group", lambda *a, **k: grouped.append(1) or real_group(*a, **k))
+    days = ("2023-03-24", "2023-03-24")
+    for model in (OLSModel(matching_list, 28, name="m"), OLSModel(by_weekday, 28, name="f")):
+        mine = _engine.run_alone(model, spring, *days, horizon=1)
+        theirs = type(model)(model._ctx_fn, 28, name=model.name).run(spring, *days, horizon=1)
+        assert sorted(map(json.dumps, mine._results)) == sorted(map(json.dumps, theirs._results))
+    assert grouped == []
+    planned = OLSModel(matching_list, 28, name="m")
+    plan = planned._plan_predictors(spring, "price", 1, "1h", None, *days)
+    _engine.run_alone(planned, spring, *days, horizon=1, plan=plan)
+    assert grouped == []
+    fixed = OLSModel(PREDICTORS, 28, name="ols")
+    _engine.run_alone(fixed, spring, *days, horizon=1)
+    assert grouped == [1]
 
 
 # --- engine on equals engine off --------------------------------------------------------------------------------------
