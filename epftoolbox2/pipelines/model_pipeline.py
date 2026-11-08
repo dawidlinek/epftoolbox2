@@ -19,6 +19,15 @@ from ..models._calendar import (
     resolve_issue_days,
 )
 from ..models.base import BaseModel
+from ..models._engine import (
+    ENGINE_OFF,
+    ENGINE_ON,
+    check_engine,
+    engine_from_yaml,
+    engine_groups,
+    run_arguments,
+    run_group,
+)
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model
 from ..ensembles._compute import compute
@@ -111,6 +120,14 @@ class ModelPipeline:
             information set. "warn" and "raise" need an issue time. The level doesn't change a forecast, unless a
             predictor function catches the error a late `ctx.value()` raises at "raise" and chooses another list, which it
             must not do. Changing the level alone resumes a run.
+        engine: "off" (the default) runs each model on its own, one after another. "on" runs the models that can be
+            fitted from shared statistics (OLS, Ridge, LassoCV and LEAR, `BaseModel._engine_capable`) in engine groups: the
+            models of one refit rule share one read of the data and one pool of processes, which cuts the fixed cost of each
+            model in a study of thousands. NaiveModel, a `train_on="matching"` list, a subclass that fits without its own
+            `_fit_stats` and a `forecast_only` run go through their own run as with "off". Every forecast, file and table is
+            the same as with "off", to the bit (this release fits each model on its own rows in the group; see the docs page
+            on forecasting). `ENGINE_MAX_MODELS` (20,000) and `ENGINE_MAX_COLUMNS` (4,096) bound how many models and
+            columns a group reads at once. `verify` runs each model through the engine as well.
     """
 
     def __init__(
@@ -119,6 +136,7 @@ class ModelPipeline:
         issue_time: Optional[str] = None,
         issue_timezone: str = "Europe/Brussels",
         availability: Optional[str] = None,
+        engine: str = ENGINE_OFF,
     ):
         if issue_time is not None:
             if information_set is not None:
@@ -130,6 +148,16 @@ class ModelPipeline:
         self.exporters: List[Exporter] = []
         self.information_set: Optional[InformationSet] = information_set
         self.availability = availability
+        self.engine = engine
+
+    @property
+    def engine(self) -> str:
+        """ "off" or "on": whether engine-capable models run in engine groups (see the class docstring)."""
+        return self._engine
+
+    @engine.setter
+    def engine(self, engine: str) -> None:
+        self._engine = check_engine(engine)
 
     @property
     def availability(self) -> str:
@@ -303,13 +331,14 @@ class ModelPipeline:
                 plans[model.name] = plan
         warn_about(listings, stacklevel=3)  # once, for every model, and before the hours a run can take
 
-        refs: dict[str, ModelResultRef] = {}
         # Of this call alone: a frame changed before the next one must be hashed again.
         frame_hashes = FrameHashes(data) if save_dir else None
-        for model in self.models:
+
+        def arguments(model: BaseModel) -> Dict[str, Any]:
+            """What the model's run is called with."""
             save_to = str(self.results_path(save_dir, model, save_format)) if save_dir else None
             planned = {"plan": plans[model.name]} if model.name in plans else {}
-            ref = model.run(
+            return dict(
                 data=data,
                 test_start=test_start,
                 test_end=test_end,
@@ -327,10 +356,23 @@ class ModelPipeline:
                 **horizon_arguments(horizon, horizons),
                 **days_argument,
                 **planned,
-                checked=checks.pop(model.name),
+                checked=checks.pop(model.name),  # held no longer than the model's run
                 **({} if save_coefficients else {"save_coefficients": False}),
             )
-            refs[model.name] = ref
+
+        ran: Dict[str, ModelResultRef] = {}
+        if self.engine == ENGINE_ON:
+            # The engine groups first, each in one go (models/_engine.py), then the rest in list order, as with "off".
+            capable = [model for model in self.models if model._engine_capable(plans.get(model.name), forecast_only)]
+            for group in engine_groups(capable):
+                columns = {model.name: checks[model.name].used_predictors for model in group}
+                # `run_group` takes each model's arguments (its check with them) out of this dict when its chunk starts.
+                ran.update(
+                    run_group(group, {model.name: run_arguments(**arguments(model)) for model in group}, columns)
+                )
+        refs: dict[str, ModelResultRef] = {}
+        for model in self.models:
+            refs[model.name] = ran[model.name] if model.name in ran else model.run(**arguments(model))
 
         choices: Dict[str, List[Dict]] = {}
         if self.ensembles:
@@ -851,7 +893,8 @@ class ModelPipeline:
 
         Only copies of the models run, in memory, so a later `run()` is unaffected. Each issue day costs four one-day
         runs per model, six with `rebuild` or a target among the predictors. A model that isn't deterministic shows up
-        as a leak.
+        as a leak. With `engine="on"` each run of a model the engine takes goes through it, as a group of one: its
+        forecasts are those of any group, so the check covers the engine's way in too.
 
         `verify` probes the period you give it, not the windows of a run: to check a validation period as well as a test
         period, call it on each.
@@ -911,6 +954,7 @@ class ModelPipeline:
                     availability=self.availability,
                     **horizon_arguments(horizon, horizons),
                     **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
+                    **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
                 )
             )
         return report
@@ -1077,6 +1121,8 @@ class ModelPipeline:
             out["information_set"] = self.information_set.to_dict()
         if self._availability is not None:  # what was asked for; left out, a load takes the default again
             out["availability"] = self._availability
+        if self.engine != ENGINE_OFF:  # written only when set, so files saved before it existed don't move
+            out["engine"] = self.engine
         return out
 
     def save(self, path: Union[str, Path]) -> None:
@@ -1112,7 +1158,9 @@ class ModelPipeline:
             config = yaml.safe_load(f)
         info = config.get("information_set")
         pipeline = cls(
-            information_set=InformationSet.from_dict(info) if info else None, availability=config.get("availability")
+            information_set=InformationSet.from_dict(info) if info else None,
+            availability=config.get("availability"),
+            engine=engine_from_yaml(config.get("engine", ENGINE_OFF)),  # `engine: on` unquoted reads as True
         )
         for c in config.get("models", []):
             pipeline.add_model(cls._load_component("models", c))

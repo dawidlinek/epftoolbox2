@@ -11,6 +11,7 @@ from .data_pipeline import DataPipeline
 from .model_pipeline import ModelPipeline
 from ..information_set import InformationSet
 from ..models._calendar import every_horizon, issue_day_names, resolve_horizons, resolve_issue_days
+from ..models._engine import engine_from_yaml
 from ..results.report import EvaluationReport
 from ..results.store import DEFAULT_SAVE_FORMAT, check_save_format
 from ..logging import get_logger
@@ -20,7 +21,7 @@ logger = get_logger(__name__)
 
 _DP_SECTIONS = ("sources", "transformers", "validators")
 _MP_SECTIONS = ("models", "ensembles", "evaluators", "exporters")
-_MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set", "availability")
+_MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set", "availability", "engine")
 
 
 def _plain(value: Any) -> Any:
@@ -110,6 +111,9 @@ class Workflow:
     `model_pipeline.save_format: parquet` (`model_save_format`) writes each model's results as a Parquet directory, and
     `save_coefficients: false` (`model_save_coefficients`) writes `coefficients` as `[]`, as `ModelPipeline.run` does; each is
     written only when it isn't the default. `report()` reads either format.
+
+    `model_pipeline.engine: on` runs the models the engine takes in engine groups (`ModelPipeline(engine=...)`), over what the
+    pipeline YAML says; in array mode each task groups the models of its block, and nothing stored depends on the block.
 
     Example:
         >>> workflow = Workflow(
@@ -268,6 +272,8 @@ class Workflow:
             mp.information_set = InformationSet.from_dict(info) if info else None
         if "availability" in self._mp_inline:
             mp.availability = self._mp_inline["availability"]
+        if "engine" in self._mp_inline:
+            mp.engine = engine_from_yaml(self._mp_inline["engine"])  # `engine: on` unquoted reads as True
         if isinstance(self.model_index, int) and not all_models:
             mp.models = self._block_of(mp.models)
         return mp
@@ -477,5 +483,7 @@ class Workflow:
         workflow._yaml_dir = path.parent
         workflow._dp_inline = {k: dp[k] for k in _DP_SECTIONS if k in dp}
         workflow._mp_inline = {k: mp[k] for k in _MP_INLINE_KEYS if k in mp}
+        if "engine" in workflow._mp_inline:  # as written: "on" or "off", so that a save writes the word back
+            workflow._mp_inline["engine"] = engine_from_yaml(workflow._mp_inline["engine"])
         logger.info(f"Workflow: Loaded configuration from {path}")
         return workflow
