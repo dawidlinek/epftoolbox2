@@ -197,3 +197,93 @@ def test_set_level_tables_do_not_depend_on_the_order_of_the_records(set_level_re
 
     pd.testing.assert_frame_equal(other.summary(), set_level_report.summary(), check_exact=True)
     pd.testing.assert_frame_equal(other.by_horizon(), set_level_report.by_horizon(), check_exact=True)
+
+
+def quarter_results(seed: int, skip_every: int = 0) -> list[dict]:
+    """15-minute records over a few winter days (no clock change), two horizons."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for day_in_test, run_date in enumerate(pd.date_range("2024-01-08", "2024-01-12", freq="D")):
+        for horizon in (1, 2):
+            for period in range(96):
+                if skip_every and (day_in_test * 192 + horizon * 96 + period) % skip_every == 0:
+                    continue
+                actual = 50 + 10 * np.sin(period / 96 * 2 * np.pi) + (period % 4)
+                rows.append(
+                    {
+                        "run_date": run_date.date().isoformat(),
+                        "target_date": (run_date + pd.Timedelta(days=horizon)).date().isoformat(),
+                        "run_weekday": run_date.dayofweek,
+                        "hour": period,
+                        "horizon": horizon,
+                        "day_in_test": day_in_test,
+                        "prediction": float(actual + rng.normal(0, 3)),
+                        "actual": float(actual),
+                        "freq": "15min",
+                    }
+                )
+    return rows
+
+
+@pytest.fixture(scope="module")
+def period_report():
+    from epftoolbox2.evaluators import NMAEEvaluator, ScaledMAEEvaluator, ShapeMAEEvaluator
+
+    index = pd.date_range("2024-01-08", "2024-01-16", freq="15min", inclusive="left", tz="Europe/Warsaw")
+    source = pd.DataFrame({"cap": 100.0 + np.arange(len(index)) % 7}, index=index)
+    evaluators = [
+        MAEEvaluator(),
+        ShapeMAEEvaluator(),
+        NMAEEvaluator(),
+        ScaledMAEEvaluator("cap"),
+        rMAEEvaluator("base"),
+    ]
+    results = {"base": quarter_results(1), "model": quarter_results(2, skip_every=11)}
+    return EvaluationReport(results, evaluators, source_data=source)
+
+
+def test_the_period_evaluators_agree_on_every_path(period_report):
+    tables = period_report.compute_all()
+    pd.testing.assert_frame_equal(tables["summary"], period_report.summary(), check_exact=True)
+    assert {"ShapeMAE", "nMAE", "MAE/cap", "MAE/cap left out"} <= set(tables["summary"].columns)
+    for grouping, method in GROUPINGS.items():
+        pd.testing.assert_frame_equal(tables[grouping], getattr(period_report, method)(), check_exact=True)
+    assert tables["year"]["ShapeMAE"].notna().all() and tables["hour"]["ShapeMAE"].isna().all()
+
+
+def test_the_period_evaluators_do_not_depend_on_the_order_of_the_records(period_report):
+    results = {name: ref._results for name, ref in period_report.refs.items()}
+    shuffled = {
+        name: [records[i] for i in np.random.default_rng(4).permutation(len(records))]
+        for name, records in results.items()
+    }
+    other = EvaluationReport(shuffled, period_report.evaluators, source_data=period_report.source_data)
+    pd.testing.assert_frame_equal(other.summary(), period_report.summary(), check_exact=True)
+    pd.testing.assert_frame_equal(other.by_year(), period_report.by_year(), check_exact=True)
+    pd.testing.assert_frame_equal(other.error_split(), period_report.error_split(), check_exact=True)
+    pd.testing.assert_frame_equal(other.by_column("cap"), period_report.by_column("cap"), check_exact=True)
+    for agg in ("mean", "max"):
+        pd.testing.assert_frame_equal(
+            other.aggregate("1h", agg=agg).summary(), period_report.aggregate("1h", agg=agg).summary(), check_exact=True
+        )
+    for agg in ("peak", "offpeak"):
+        pd.testing.assert_frame_equal(
+            other.aggregate("1D", agg=agg).summary(), period_report.aggregate("1D", agg=agg).summary(), check_exact=True
+        )
+
+
+def test_a_source_reading_evaluator_gets_its_column_next_to_the_keys(period_report):
+    class Reads(Recorder):
+        source_columns = ("cap",)
+
+    recorder = Reads()
+    report = EvaluationReport(
+        {name: ref._results for name, ref in period_report.refs.items()},
+        [recorder],
+        source_data=period_report.source_data,
+    )
+    report.by_horizon()
+    for df, model_dfs in recorder.calls:
+        for frame in (df, *model_dfs.values()):
+            assert list(frame.columns) == [*FORECAST_KEYS, "prediction", "actual", "cap"]
+            assert frame["cap"].notna().all()
