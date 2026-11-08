@@ -584,6 +584,7 @@ class ParquetResultStore(_Store):
         writer = StoreWriter(_private=True) if writer is None else writer
         self._buffers: Dict[str, _YearBuffer] = {}
         self._layouts: Dict[Tuple[str, ...], Tuple[str, ...]] = {}  # each layout validated, once
+        self._tail_checked = False  # a torn last catalog line cut: at a locked open, else before the first part
         self._rows = 0
         self._io_lock = threading.Lock()
         self._run_id = f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
@@ -612,6 +613,7 @@ class ParquetResultStore(_Store):
                 self._shared.close()
 
     def _repair_tail(self) -> None:
+        self._tail_checked = True
         _repair_catalog(self.path)
 
     def _validate(self, record: Dict) -> Tuple[str, ...]:
@@ -694,6 +696,8 @@ class ParquetResultStore(_Store):
         import pyarrow as pa
 
         self.path.mkdir(parents=True, exist_ok=True)
+        if not self._tail_checked:  # as a JSONL store does: never append after a line a crash left half-written
+            self._repair_tail()
         for year, rows, (tables, records, layouts, keys) in taken:
             if records:
                 tables = [*tables, schema.to_table(records, str(self.path), layouts)]

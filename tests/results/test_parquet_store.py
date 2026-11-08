@@ -1168,6 +1168,30 @@ def test_a_jsonl_write_that_fails_is_raised_and_its_keys_stay_pending(tmp_path, 
         writer.close()
 
 
+def test_a_torn_catalog_line_is_cut_before_the_first_part_without_the_lock(tmp_path):
+    """The review's `torn_nolock.py`: a writer opened without the lock (the default of `ParquetResultStore`, `open_store` and
+    `StoreWriter.open`) cuts a catalog line a crash left half-written before it appends, as a JSONL store does, instead of
+    leaving a damaged line in the middle that every later read raises on."""
+    for how in ("store", "writer"):
+        path = tmp_path / how / "m.parquet"
+        first = ParquetResultStore(path, lock=True)
+        first.save(record(hour=0))
+        first.close()
+        with open(path / CATALOG, "ab") as f:
+            f.write(b'{"file":"year=2023/part-crashed-000001.parquet","rows":5')  # a crash while committing a part
+        with pytest.warns(UserWarning, match="cut off its last"):
+            if how == "store":
+                store = ParquetResultStore(path)
+                store.save(record(hour=1))
+                store.close()
+            else:
+                writer = StoreWriter()
+                writer.open(path).save(record(hour=1))
+                writer.close()
+        assert sorted(r["hour"] for r in read_records(path)) == [0, 1]
+        assert (path / CATALOG).read_bytes().count(b"\n") == 2 and verify(tmp_path / how) == []
+
+
 # --- import ------------------------------------------------------------------------------------------------------------------
 
 
