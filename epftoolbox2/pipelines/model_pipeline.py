@@ -90,6 +90,9 @@ COMPONENT_REGISTRY = {
         "DMEvaluator": "epftoolbox2.evaluators.dm",
         "MCSEvaluator": "epftoolbox2.evaluators.mcs",
         "EconomicEvaluator": "epftoolbox2.evaluators.economic",
+        "ShapeMAEEvaluator": "epftoolbox2.evaluators.shape",
+        "NMAEEvaluator": "epftoolbox2.evaluators.normalised",
+        "ScaledMAEEvaluator": "epftoolbox2.evaluators.normalised",
     },
     # What `EconomicEvaluator(strategy=...)` runs; saved inside the evaluator as `{class: ..., params: ...}`.
     "strategies": {

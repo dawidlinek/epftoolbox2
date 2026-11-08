@@ -1,15 +1,78 @@
-"""Which days of a frame of forecasts hold all their periods.
+"""Which days of a frame of forecasts hold all their periods, and which hours all their quarter-hours.
 
 A schedule (`EconomicEvaluator`) and a daily aggregate (`EvaluationReport.aggregate`) both need a whole day, and both
-judge it here: by the period ids of the day, not by their number.
+judge it here: by the period ids of the day, not by their number. An hourly aggregate of quarter-hours
+(`aggregate("1h")`), the within-hour shape (`ShapeMAEEvaluator`) and the split of the squared error
+(`EvaluationReport.error_split`) need whole hours, judged here too (`whole_hours`).
 """
 
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
+
+from .base import FORECAST_KEYS
 
 # The local hours a clock change can fall in: the only periods a whole day may lack.
 _SWITCH_HOURS = (1, 2, 3)
+
+# Quarter-hours in an hour, and the hour codes a day key leaves room for (a day numbered through has 25 hours).
+QUARTERS = 4
+_HOURS_PER_KEY = 25
+
+
+def day_codes(frame: pd.DataFrame, what: str = "This metric") -> np.ndarray:
+    """A dense integer code per row for its (run_date, target_date, horizon): one forecast day of one model.
+
+    Raises ValueError when the frame lacks one of `FORECAST_KEYS` or has a row without one.
+    """
+    missing = [k for k in FORECAST_KEYS if k not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"{what} needs the forecast keys {list(FORECAST_KEYS)}, but the frame lacks {missing}. Result records need "
+            "run_date, target_date, hour and horizon."
+        )
+    code = np.zeros(len(frame), dtype=np.int64)
+    for column in ("run_date", "target_date", "horizon"):
+        labels, uniques = pd.factorize(frame[column].to_numpy(), sort=True)
+        if (labels < 0).any():
+            raise ValueError(f"{what}: a frame has rows with a missing forecast key ({column}).")
+        code = code * len(uniques) + labels
+    if frame["hour"].isna().any():
+        raise ValueError(f"{what}: a frame has rows with a missing forecast key (hour).")
+    return pd.factorize(code, sort=True)[0].astype(np.int64)
+
+
+def hour_codes(day: np.ndarray, period: np.ndarray) -> np.ndarray:
+    """A code per row for its hour of its forecast day: `day * 25 + period // 4` (see `whole_hours`)."""
+    return np.asarray(day, dtype=np.int64) * _HOURS_PER_KEY + np.asarray(period, dtype=np.int64) // QUARTERS
+
+
+def whole_hours(day: np.ndarray, period: np.ndarray, finite: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """The rows of the hours that hold all four quarter-hours with finite values: `(rows, hour_codes)`.
+
+    `day` is a code per row for its forecast day (`day_codes`), `period` the quarter-hour of the day (0-95, or 0-99 for a
+    day numbered through) and `finite` whether the row's prediction and actual are both finite. An hour is `period // 4`
+    of its day, and it is whole when its four quarter-hours are there and finite: the repeated autumn hour, which has no
+    actual, and an hour with a quarter-hour missing are not. `rows` are positions in the frame, ordered by (day, period),
+    four per whole hour, so `values[rows].reshape(-1, 4)` holds one hour per row; `hour_codes` is `day * 25 + hour` of
+    each, in the same order. Raises ValueError when a quarter-hour of a day appears twice.
+    """
+    period = np.asarray(period, dtype=np.int64)
+    hour_key = hour_codes(day, period)
+    order = np.lexsort((period, hour_key))
+    if ((hour_key[order][1:] == hour_key[order][:-1]) & (period[order][1:] == period[order][:-1])).any():
+        raise ValueError("Whole hours need each forecast key once; the frame has duplicated keys.")
+    kept = order[np.asarray(finite, dtype=bool)[order]]
+    codes, counts = np.unique(hour_key[kept], return_counts=True)
+    whole = codes[counts == QUARTERS]
+    rows = kept[np.isin(hour_key[kept], whole)]
+    return rows, whole
+
+
+def hour_of_code(codes: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """`(day code, hour of the day)` of each code `whole_hours` returns."""
+    return codes // _HOURS_PER_KEY, codes % _HOURS_PER_KEY
 
 
 def periods_per_hour(hour: Sequence[int]) -> int:

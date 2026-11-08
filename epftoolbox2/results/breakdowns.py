@@ -1,18 +1,27 @@
 """The parts of the breakdown tables and of `EvaluationReport.aggregate()` that do not need the report itself.
 
 Price levels are read from the actual price alone. Daily aggregates are made only of whole days, and a whole day is
-judged by `evaluators._days`, the same rule that decides which days `EconomicEvaluator` can schedule.
+judged by `evaluators._days`, the same rule that decides which days `EconomicEvaluator` can schedule. A block of the day
+(`peak`, `offpeak`) is whole when every slot of it the day has is there, and an hour of quarter-hours when all four are.
+Source-data columns are joined to forecasts by target date and period, as `CsvExporter(extra_columns=)` joins them.
 """
 
-from typing import Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
-from ..evaluators._days import whole_days
+from ..evaluators._days import QUARTERS, day_codes, hour_codes, hour_of_code, whole_days, whole_hours
 from ..evaluators.base import FORECAST_KEYS
+from ..models._contract import check_index, period_index
 
-AGGREGATES = ("max", "min", "mean", "spread")
+# Reductions over the whole day, and means over a block of its hours (`peak_hours` and the rest of the day).
+DAY_AGGREGATES = ("max", "min", "mean", "spread")
+BLOCK_AGGREGATES = ("peak", "offpeak")
+AGGREGATES = (*DAY_AGGREGATES, *BLOCK_AGGREGATES)
+
+# The block of `agg="peak"`: 08:00 to 19:59 local time, the window of the resolution and renewables studies.
+PEAK_HOURS = (8, 20)
 
 # A spike is a price at or above the lower of these two: evalproto's definition (its Q4), 88 hours a year per market.
 SPIKE_CAP = 300.0
@@ -117,7 +126,7 @@ def daily_aggregate(
     skips midnight, 22:00 or half an hour has its short day too.
     """
     if agg not in _REDUCE:
-        raise ValueError(f"agg must be one of {list(AGGREGATES)}, got {agg!r}")
+        raise ValueError(f"agg must be one of {list(DAY_AGGREGATES)}, got {agg!r}")
     empty = pd.DataFrame({c: [] for c in (*FORECAST_KEYS, "prediction", "actual")})
     if frame.empty:
         return empty, 0, 0
@@ -178,3 +187,251 @@ def daily_aggregate(
         }
     )[[*FORECAST_KEYS, "prediction", "actual"]]
     return days, n_seen, n_seen - int(whole.sum())
+
+
+def check_peak_hours(peak_hours: Any) -> Tuple[int, int]:
+    """`(first, end)` of the peak block in local hours, checked: whole hours with `0 <= first < end <= 24`."""
+    try:
+        first, end = peak_hours
+    except (TypeError, ValueError):
+        raise ValueError(f"peak_hours must be (first hour, end hour), such as (8, 20), got {peak_hours!r}") from None
+    whole = all(isinstance(h, (int, np.integer)) and not isinstance(h, (bool, np.bool_)) for h in (first, end))
+    if not whole or not 0 <= first < end <= 24:
+        raise ValueError(
+            f"peak_hours must be two whole local hours with 0 <= first < end <= 24 (the block is first:00 to end:00, end "
+            f"left out), got {peak_hours!r}"
+        )
+    return int(first), int(end)
+
+
+def in_block(period: np.ndarray, per_hour: int, agg: str, peak_hours: Tuple[int, int]) -> np.ndarray:
+    """Whether each period id is in the block of `agg`: the peak hours, or the rest of the day for `"offpeak"`.
+
+    A period id is the clock's (`hour * per_hour + quarter`), as a run writes it, so its local hour is `id // per_hour`.
+    """
+    hour = np.asarray(period, dtype=np.int64) // per_hour
+    peak = (hour >= peak_hours[0]) & (hour < peak_hours[1])
+    return peak if agg == "peak" else ~peak
+
+
+def _keyed_days(frame: pd.DataFrame) -> Tuple[np.ndarray, ...]:
+    """`(run, runs, target, targets, horizon, horizons, day_key, hour, order)` of a frame of forecasts, as `daily_aggregate`
+    reads them: factorized keys, one code per (run_date, target_date, horizon), rows ordered by (day, period)."""
+    missing = [k for k in FORECAST_KEYS if k not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"Aggregating needs the forecast keys {list(FORECAST_KEYS)}, but the frame lacks {missing}. "
+            "Result records need run_date, target_date, hour and horizon."
+        )
+    run, runs = pd.factorize(frame["run_date"].to_numpy(), sort=True)
+    target, targets = pd.factorize(frame["target_date"].to_numpy(), sort=True)
+    horizon, horizons = pd.factorize(frame["horizon"].to_numpy(), sort=True)
+    if (run < 0).any() or (target < 0).any() or (horizon < 0).any() or frame["hour"].isna().any():
+        raise ValueError("Aggregating: a frame has rows with a missing forecast key.")
+    day_key = (run.astype(np.int64) * len(targets) + target) * len(horizons) + horizon
+    hour = frame["hour"].to_numpy(dtype=np.int64)
+    order = np.lexsort((hour, day_key))
+    if ((day_key[order][1:] == day_key[order][:-1]) & (hour[order][1:] == hour[order][:-1])).any():
+        raise ValueError("Aggregating needs each forecast key once; the frame has duplicated keys.")
+    return run, runs, target, targets, horizon, horizons, day_key, hour, order
+
+
+def block_aggregate(
+    frame: pd.DataFrame,
+    agg: str,
+    per_hour: int,
+    peak_hours: Tuple[int, int],
+    day_periods: Mapping[pd.Timestamp, Sequence[int]],
+) -> Tuple[pd.DataFrame, int, int]:
+    """One model's forecasts as one forecast per (run_date, target_date, horizon): the mean over a block of the day.
+
+    The block is the peak hours (`agg="peak"`) or the rest of the day (`"offpeak"`), by the local hour of each period id.
+    `day_periods` maps each target date to the period ids the date has: the clock's (`clock_periods_on`) when the zone is
+    known, else every period that any model has a record for on that date. A day counts when the model has every one of
+    them that is in the block, each with a finite prediction and actual, so the peak of a switch day counts and its offpeak
+    counts only when the day has no repeated hour (whose actual is missing). Returns `(days, n_seen, n_dropped)` as
+    `daily_aggregate` does.
+    """
+    if agg not in BLOCK_AGGREGATES:
+        raise ValueError(f"agg must be one of {list(BLOCK_AGGREGATES)}, got {agg!r}")
+    empty = pd.DataFrame({c: [] for c in (*FORECAST_KEYS, "prediction", "actual")})
+    if frame.empty:
+        return empty, 0, 0
+    run, runs, target, targets, horizon, horizons, day_key, hour, order = _keyed_days(frame)
+    n_seen = len(np.unique(day_key))
+
+    stamps = pd.DatetimeIndex(targets)
+    expected = [np.asarray(day_periods.get(date, ()), dtype=np.int64) for date in stamps]
+    size = max([int(hour.max()), *(int(ids.max()) for ids in expected if len(ids))]) + 1
+    wanted = np.zeros((len(targets), size), dtype=bool)  # the block's slots of each target date
+    for code, ids in enumerate(expected):
+        wanted[code, ids[in_block(ids, per_hour, agg, peak_hours)]] = True
+
+    prediction = frame["prediction"].to_numpy(dtype=float)
+    actual = frame["actual"].to_numpy(dtype=float)
+    rows = order[np.isfinite(prediction[order]) & np.isfinite(actual[order])]
+    rows = rows[wanted[target[rows], hour[rows]]]
+    codes, first, counts = np.unique(day_key[rows], return_index=True, return_counts=True)
+    whole = counts == wanted.sum(axis=1)[target[rows[first]]]
+
+    reduced_prediction, reduced_actual = np.full(len(codes), np.nan), np.full(len(codes), np.nan)
+    for length in np.unique(counts[whole]).tolist():
+        days = np.flatnonzero(whole & (counts == length))
+        block = rows[np.isin(day_key[rows], codes[days])]
+        reduced_prediction[days] = prediction[block].reshape(-1, length).mean(axis=1)
+        reduced_actual[days] = actual[block].reshape(-1, length).mean(axis=1)
+
+    kept = rows[first[whole]]
+    days = pd.DataFrame(
+        {
+            "run_date": runs[run[kept]],
+            "target_date": targets[target[kept]],
+            "hour": np.zeros(len(kept), dtype=np.int64),
+            "horizon": horizons[horizon[kept]],
+            "prediction": reduced_prediction[whole],
+            "actual": reduced_actual[whole],
+        }
+    )[[*FORECAST_KEYS, "prediction", "actual"]]
+    return days, n_seen, n_seen - int(whole.sum())
+
+
+def hourly_aggregate(frame: pd.DataFrame, agg: str) -> Tuple[pd.DataFrame, int, int]:
+    """One model's quarter-hour forecasts as one forecast per (run_date, target_date, hour, horizon): `(hours, n_seen,
+    n_dropped)`.
+
+    The prediction and the actual of an hour are each reduced by `agg` over its four quarter-hours. An hour counts when all
+    four are there with a finite prediction and actual (`evaluators._days.whole_hours`): the repeated autumn hour, whose
+    actual is missing, and an hour that lacks a quarter-hour are dropped; the hour the spring switch skips has no
+    quarter-hour at all, so it is no hour of that day. `n_seen` is the number of hours with any forecast in `frame` and
+    `n_dropped` how many of them were not whole. `hours` has `FORECAST_KEYS` (`hour` the local hour), `prediction` and
+    `actual`, ordered by (run_date, target_date, horizon, hour).
+    """
+    if agg not in _REDUCE:
+        raise ValueError(f"agg must be one of {list(DAY_AGGREGATES)}, got {agg!r}")
+    empty = pd.DataFrame({c: [] for c in (*FORECAST_KEYS, "prediction", "actual")})
+    if frame.empty:
+        return empty, 0, 0
+    day = day_codes(frame, "Aggregating")
+    period = frame["hour"].to_numpy(dtype=np.int64)
+    prediction = frame["prediction"].to_numpy(dtype=float)
+    actual = frame["actual"].to_numpy(dtype=float)
+    rows, codes = whole_hours(day, period, np.isfinite(prediction) & np.isfinite(actual))
+    n_seen = len(np.unique(hour_codes(day, period)))
+
+    reduce = _REDUCE[agg]
+    first = rows[::QUARTERS]
+    hours = pd.DataFrame(
+        {
+            "run_date": frame["run_date"].to_numpy()[first],
+            "target_date": frame["target_date"].to_numpy()[first],
+            "hour": hour_of_code(codes)[1].astype(np.int64),
+            "horizon": frame["horizon"].to_numpy()[first],
+            "prediction": reduce(prediction[rows].reshape(-1, QUARTERS)),
+            "actual": reduce(actual[rows].reshape(-1, QUARTERS)),
+        }
+    )[[*FORECAST_KEYS, "prediction", "actual"]]
+    return (hours if len(hours) else empty), n_seen, n_seen - len(hours)
+
+
+# The quarter-hours of a day that has neither a skipped nor a repeated hour.
+_DAY_QUARTERS = 24 * QUARTERS
+
+
+def error_split(frame: pd.DataFrame, switch_dates: Optional[set] = None) -> Dict[str, Any]:
+    """How one model's squared error divides into the level of the day, the profile of its hours and the shape within them.
+
+    On the whole non-switch days of the frame: forecast days (run date, target date, horizon) with all 96 quarter-hours
+    0-95 finite, whose target date is not in `switch_dates` (the dates a known zone's clocks change on; without a zone, a
+    switch day lacks quarter-hours or its repeated hour has no actual, so it is not whole). With `e` the errors of a day,
+    `level` the day's mean error and `hour_mean` each hour's, the mean squared error is exactly
+    `mean(level²) + mean((hour_mean - level)²) + mean((e - hour_mean)²)`, averaged over the days, hours and quarter-hours,
+    as the resolution study computes it (`evaluate.py`). Returns `days`, `forecasts` (quarter-hours used), `mse` and the
+    three shares `level`, `hour` and `quarter` (NaN without a whole day).
+    """
+    out: Dict[str, Any] = {"days": 0, "forecasts": 0, "mse": np.nan, "level": np.nan, "hour": np.nan, "quarter": np.nan}
+    if frame.empty:
+        return out
+    day = day_codes(frame, "error_split()")
+    period = frame["hour"].to_numpy(dtype=np.int64)
+    error = frame["prediction"].to_numpy(dtype=float) - frame["actual"].to_numpy(dtype=float)
+    order = np.lexsort((period, day))
+    if ((day[order][1:] == day[order][:-1]) & (period[order][1:] == period[order][:-1])).any():
+        raise ValueError("error_split() needs each forecast key once; the frame has duplicated keys.")
+    kept = order[np.isfinite(error[order]) & (period[order] < _DAY_QUARTERS)]
+    codes, first, counts = np.unique(day[kept], return_index=True, return_counts=True)
+    whole = counts == _DAY_QUARTERS
+    if switch_dates:
+        dates = pd.DatetimeIndex(frame["target_date"].to_numpy()[kept[first]])
+        whole &= ~dates.isin(pd.DatetimeIndex(sorted(switch_dates)))
+    rows = kept[np.isin(day[kept], codes[whole])]
+    if not len(rows):
+        return out
+    days = error[rows].reshape(-1, _DAY_QUARTERS)
+    level = days.mean(1, keepdims=True)
+    hour_mean = days.reshape(-1, 24, QUARTERS).mean(2)
+    total = (days**2).mean()
+    out.update(
+        days=len(days),
+        forecasts=days.size,
+        mse=float(total),
+        level=float((level**2).mean() / total),
+        hour=float(((hour_mean - level) ** 2).mean() / total),
+        quarter=float(((days.reshape(-1, 24, QUARTERS) - hour_mean[:, :, None]) ** 2).mean() / total),
+    )
+    return out
+
+
+def switch_dates(dates: Sequence[Any], zone: Any) -> set:
+    """The local dates among `dates` that are not 24 hours long in `zone`: the days its clocks change on."""
+    days = pd.DatetimeIndex(pd.to_datetime(list(dates))).unique().sort_values()
+    if zone is None or not len(days):
+        return set()
+    starts = days.tz_localize(zone, nonexistent="shift_forward", ambiguous=np.ones(len(days), dtype=bool))
+    ends = (days + pd.Timedelta(days=1)).tz_localize(
+        zone, nonexistent="shift_forward", ambiguous=np.ones(len(days), dtype=bool)
+    )
+    lengths = ends.as_unit("ns").asi8 - starts.as_unit("ns").asi8
+    return set(days[lengths != pd.Timedelta(days=1).value])
+
+
+def source_table(source_data: pd.DataFrame, columns: Sequence[str], freq: str, days: Any = None) -> pd.DataFrame:
+    """The values of `columns` of the source data by (target date, period of the day), the key a forecast is joined by.
+
+    The join of `CsvExporter(extra_columns=)`: the source must have one row per local date and period at the results' `freq`
+    (`check_index`, over `days`, the first and last target date), its local wall clock gives the date and the period, and
+    the hour that occurs twice when clocks fall back keeps its second occurrence (the later row, the one a run forecasts
+    from). The index has two levels, `target_date` (naive midnight) and `hour`.
+    """
+    missing = [c for c in columns if c not in source_data.columns]
+    if missing:
+        raise ValueError(f"The source data has no column {missing}; it has {list(source_data.columns)}.")
+    try:
+        check_index(source_data, freq, days)
+    except ValueError as exc:
+        raise ValueError(
+            f"Joining source columns to {freq} forecasts needs source data at that resolution: {exc} Each forecast takes "
+            f"the source row of its target date and period, so resample the source to {freq} first."
+        ) from exc
+    src = source_data[list(columns)]
+    src = src.iloc[np.argsort(src.index.asi8, kind="stable")]  # in time order, so "last" is the second occurrence
+    index = src.index
+    if index.tz is not None:
+        index = index.tz_localize(None)
+    keys = pd.MultiIndex.from_arrays(
+        [index.normalize().as_unit("ns"), period_index(index, freq).astype(np.int64)], names=["target_date", "hour"]
+    )
+    table = src.copy()
+    table.index = keys
+    return table[~keys.duplicated(keep="last")]
+
+
+def source_values(table: pd.DataFrame, frame: pd.DataFrame) -> pd.DataFrame:
+    """The rows of `source_table` at each forecast of `frame` (its target date and period), aligned to `frame`'s index; NaN
+    where the source has no row."""
+    keys = pd.MultiIndex.from_arrays(
+        [pd.DatetimeIndex(frame["target_date"]).as_unit("ns"), frame["hour"].to_numpy(dtype=np.int64)],
+        names=["target_date", "hour"],
+    )
+    values = table.reindex(keys)
+    values.index = frame.index
+    return values
