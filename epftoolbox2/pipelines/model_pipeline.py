@@ -18,7 +18,7 @@ from ..models._calendar import (
     resolve_horizons,
     resolve_issue_days,
 )
-from ..models.base import BaseModel
+from ..models.base import BaseModel, _RunChecks
 from ..models._engine import (
     ENGINE_OFF,
     ENGINE_ON,
@@ -297,8 +297,10 @@ class ModelPipeline:
         days_argument = {} if weekdays is None else {"issue_days": issue_day_names(weekdays)}
         level = self.availability
         # Check every model's inputs before running any, so a bad predictor in the last model fails in seconds. A
-        # predictor function is planned here, once, and the run uses that plan; each run uses its check, too.
+        # predictor function is planned here, once, and the run uses that plan; each run uses its check, too. The frame
+        # contract is checked once for the models that read the same days (`_RunChecks`, of this call alone).
         info = self.information_set
+        shared = _RunChecks(data)
         plans: Dict[str, PredictorPlan] = {}
         checks: Dict[str, Any] = {}
         listings: Dict[str, List[Dict]] = {}
@@ -315,6 +317,7 @@ class ModelPipeline:
                 windows=windows,
                 horizons=horizons,
                 weekdays=weekdays,
+                shared=shared,
             )
             checks[model.name] = model._checked_inputs(
                 data,
@@ -329,14 +332,18 @@ class ModelPipeline:
                 windows=windows,
                 horizons=horizons,
                 weekdays=weekdays,
+                shared=shared,
             )
             listings[model.name] = checks[model.name].listing
             if plan is not None:
                 plans[model.name] = plan
         warn_about(listings, stacklevel=3)  # once, for every model, and before the hours a run can take
+        shared = None
 
         # Of this call alone: a frame changed before the next one must be hashed again.
         frame_hashes = FrameHashes(data) if save_dir else None
+        if frame_hashes is not None:
+            frame_hashes.provenance()  # the package version and git SHA every manifest of the run records, read before any model
 
         def arguments(model: BaseModel) -> Dict[str, Any]:
             """What the model's run is called with."""
@@ -382,7 +389,13 @@ class ModelPipeline:
         if self.ensembles:
             paths = {model.name: self.results_path(save_dir, model) for model in self.models} if save_dir else {}
             on_file = self._stored_windows(paths)
-            computed, choices = self._compute_ensembles(self._ordered_ensembles(), refs, on_file or windows, save_dir)
+            computed, choices = self._compute_ensembles(
+                self._ordered_ensembles(),
+                refs,
+                on_file or windows,
+                save_dir,
+                provenance=None if frame_hashes is None else frame_hashes.provenance,
+            )
             refs.update(computed)
 
         evaluators = [] if forecast_only else self.evaluators
@@ -803,8 +816,10 @@ class ModelPipeline:
         refs: Dict[str, ModelResultRef],
         stored: Optional[RunWindows],
         save_dir: Union[str, Path, None],
+        provenance: Optional[Callable[[], Tuple[str, Optional[str]]]] = None,
     ) -> Tuple[Dict[str, ModelResultRef], Dict[str, List[Dict]]]:
-        """`({name: ref} of what a report shows, {name: rows of report.choices()})`, in the order they were added."""
+        """`({name: ref} of what a report shows, {name: rows of report.choices()})`, in the order they were added. `provenance`
+        is a run's (`FrameHashes.provenance`), which its ensembles' manifests record as its models' do."""
         like = next(iter(refs.values()))
         held = dict(refs)
         leaves: Dict[str, List[str]] = {}
@@ -819,7 +834,7 @@ class ModelPipeline:
             leaves[ensemble.name] = list(
                 dict.fromkeys(leaf for member in ensemble.members for leaf in leaves.get(member, [member]))
             )
-            result = compute(ensemble, held, stored, like, path, test_only, leaves[ensemble.name])
+            result = compute(ensemble, held, stored, like, path, test_only, leaves[ensemble.name], provenance)
             held[ensemble.name] = result.ref
             # A ref with no window to show, as a `top` ensemble has in a validation report, is not a row of its tables.
             if result.ref.by_window is None or result.ref.by_window:

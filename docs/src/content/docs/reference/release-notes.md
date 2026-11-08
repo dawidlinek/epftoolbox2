@@ -200,7 +200,8 @@ an issue day it didn't sample.
   workflow) the models the engine takes, OLS, Ridge, LassoCV and LEAR, run in groups, one per refit rule: each group reads the
   data once for all its models, runs one pool of processes whose jobs are one day (or refit block) and period of every model, and
   writes every model's results into its own file as before, through one writer. A model's per-run cost beyond its fits drops (the
-  pool start, the `gc.collect()` and the read of the data are once per group): about 0.23 s per OLS model on its own, 0.03 s in a
+  pool start, the `gc.collect()` and the read of the data are once per group, and the checks of the frame and of the information
+  set and each column's binary mask once for the models that share them): about 0.23 s per OLS model on its own, 0.005 s in a
   group of 1,000 (one test day, 24 periods). **Every number is the same**: in this release a group fits each model on its own rows exactly as `"off"` does, so
   records, manifests and tables are identical to the bit, alone, in any group, in any order and at any process count; fits from
   statistics shared across the group come later. `NaiveModel`, a `train_on="matching"` list, a subclass with its own fit and a

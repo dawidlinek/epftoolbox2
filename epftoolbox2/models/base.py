@@ -135,6 +135,15 @@ _FRAME_READERS = ("_load_periods", "_preprocess", "_shift_index_by_calendar_days
 # ProcessPoolExecutor refuses more workers than this on Windows.
 _WINDOWS_MAX_WORKERS = 61
 
+# Whether the models of one run share what they would each compute alike (step 5k): the frame contract of each (freq, read days,
+# target, horizon) once per `ModelPipeline.run` (`_RunChecks`), and on one set of period frames each column's binary-mask
+# verdict per (period, training rows) and the test days' missing rows (`_Periods.memo`). The same computations, kept: False
+# computes each again for every model, as before, which the tests compare to the bit.
+_SHARED = True
+# The `_Periods.memo` key of the (window, newest-target rule, column) whose binary-mask verdicts more than one model of an engine
+# chunk reads (`_engine.mask_readers`): only those are kept. Frames without it (a model alone) keep none.
+_MASK_READERS = ("mask readers",)
+
 
 def _test_days(test_start: str, test_end: str) -> List[datetime.date]:
     first, last = datetime.date.fromisoformat(test_start), datetime.date.fromisoformat(test_end)
@@ -306,6 +315,28 @@ class _Periods(NamedTuple):
     first_ordinal: int
     hour_data: Dict[int, pd.DataFrame]
     hour_days: Dict[int, np.ndarray]
+    # What every model reading these frames computes alike, computed once for all of them (`BaseModel._column_verdicts`,
+    # `_missing_test_rows`): a function of the frames and of its key alone.
+    memo: Dict[tuple, Any]
+
+
+class _RunChecks:
+    """What the checks of one `ModelPipeline.run` find alike for its models, found once: the frame contract (`check_index`, the
+    day-lag time zone, the reserved names) of each (freq, read days, target, largest horizon) its models' checks ask for
+    (`BaseModel._check_frame`), which reads the whole index. Of one frame and that call alone, as `FrameHashes`: a frame changed
+    in place before the next call is checked again. A check that raises is kept as nothing, so each model reaching it raises."""
+
+    def __init__(self, data: pd.DataFrame):
+        self.data = data
+        self._passed: set = set()
+
+    def once(self, data: pd.DataFrame, key: tuple, check: Callable[[], None]) -> None:
+        """`check()`, unless one under `key` passed on this frame already."""
+        if not _SHARED or data is not self.data:
+            check()
+        elif key not in self._passed:
+            check()
+            self._passed.add(key)
 
 
 @dataclass
@@ -433,6 +464,7 @@ class BaseModel(ABC):
         self._first_day_masks: Dict[
             tuple, Tuple[np.ndarray, np.ndarray]
         ] = {}  # `_scalable_mask`'s, of one run's frames
+        self._memo: Dict[tuple, Any] = {}  # `_Periods.memo` of the run's frames
         self._offset: int = 0
         self._last_day: int = 0  # the day id of the run's last calendar day, where a mask's re-read stops
         self._first_ordinal: int = 0  # the date of day id 0
@@ -852,7 +884,7 @@ class BaseModel(ABC):
         )
         absent_slots = {
             (period, (day.date() - first_day).days)
-            for period, day in _contract.missing_test_rows(self._data.index, freq, test_days.values())
+            for period, day in self._missing_test_rows(freq, list(test_days.values()))
         }
         self._data = None
 
@@ -1573,6 +1605,7 @@ class BaseModel(ABC):
         horizons: Optional[Sequence[int]] = None,
         weekdays: Optional[Sequence[int]] = None,
         stacklevel: int = 4,
+        shared: Optional[_RunChecks] = None,
     ) -> Dict[Tuple[int, int], List[str]]:
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
 
@@ -1600,7 +1633,8 @@ class BaseModel(ABC):
         forecast of another weekday would read late is no use of this run's.
 
         `stacklevel` is that of the warning about a midnight stamp (`_contract.warn_about_a_midnight_stamp`): 4 attributes it to
-        the caller of the method that calls this one.
+        the caller of the method that calls this one. `shared` is the `_RunChecks` of a pipeline run, which checks the frame
+        contract once for all its models.
         """
         self._set_freq(freq)
         horizons = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
@@ -1636,6 +1670,7 @@ class BaseModel(ABC):
                     horizons=horizons,
                     weekdays=weekdays,
                     stacklevel=stacklevel,
+                    shared=shared,
                 )
             expanded = plan.names_by_pair()
             self._check_reaches_back(
@@ -1658,7 +1693,7 @@ class BaseModel(ABC):
                     self._window_listings = self._plan_window_listings(plan, target, windows)
             plan.release()
             return expanded
-        self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
+        self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest, shared)
         expanded = fixed
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
         _contract.warn_about_a_midnight_stamp(
@@ -1750,10 +1785,11 @@ class BaseModel(ABC):
         cut_rules: Optional["InformationSet"] = None,
         horizons: Optional[Sequence[int]] = None,
         weekdays: Optional[Sequence[int]] = None,
+        shared: Optional[_RunChecks] = None,
     ) -> _Checked:
         """`_check_inputs`, with what it found and the run it checked, for `run(checked=...)`: `ModelPipeline` checks every
-        model before any runs, and each run then uses its check. Its warnings are attributed as `_check_inputs`' own, to the
-        caller of the method that calls this one."""
+        model before any runs, and each run then uses its check, and checks the frame contract once for all of them (`shared`).
+        Its warnings are attributed as `_check_inputs`' own, to the caller of the method that calls this one."""
         expanded = self._check_inputs(
             data,
             target,
@@ -1769,6 +1805,7 @@ class BaseModel(ABC):
             horizons=horizons,
             weekdays=weekdays,
             stacklevel=5,
+            shared=shared,
         )
         run = _Checked.run_of(
             self,
@@ -1970,8 +2007,11 @@ class BaseModel(ABC):
         }
 
     def _check_frame(
-        self, data, target, horizon, freq, test_start=None, test_end=None, windows=None, newest=None
+        self, data, target, horizon, freq, test_start=None, test_end=None, windows=None, newest=None, shared=None
     ) -> None:
+        """The frame contract of a run of this model (`_contract.check_index` on the days it can read, the day-lag time zone, the
+        reserved names), once per (freq, read days, target, horizon) for the models of one pipeline run (`shared`, its
+        `_RunChecks`)."""
         reach = 0 if newest is None else newest.reach
         # The days a fit can read go back by the largest member; an `"expanding"` one reads the whole frame, which `read_days`
         # can't bound, so the spacing checks cover it all.
@@ -1981,9 +2021,17 @@ class BaseModel(ABC):
         else:
             periods = [(self._fit_start(start), end) for _, (start, end) in windows.periods]
             days = _contract.read_ranges(periods, window, horizon, reach)
-        _contract.check_index(data, freq, days)
-        _contract.check_timezone_with_day_lags(data)
-        _contract.check_names(data, target, horizon)
+
+        def check() -> None:
+            _contract.check_index(data, freq, days)
+            _contract.check_timezone_with_day_lags(data)
+            _contract.check_names(data, target, horizon)
+
+        if shared is None:
+            check()
+        else:
+            ranges = None if days is None else tuple(days) if isinstance(days, list) else (days,)
+            shared.once(data, ("frame", freq, ranges, target, horizon), check)
 
     def _fit_start(self, start: Optional[str]) -> Optional[str]:
         """The first day a forecast issued from `start` on is fitted on: `start`, or with `refit` its anchor (the coarsest
@@ -2026,6 +2074,7 @@ class BaseModel(ABC):
         horizons: Optional[Sequence[int]] = None,
         weekdays: Optional[Sequence[int]] = None,
         stacklevel: int = 4,
+        shared: Optional[_RunChecks] = None,
     ) -> Optional[PredictorPlan]:
         """The plan of a predictor function of `ctx` for this data and test period, or None for a model with fixed lists.
 
@@ -2053,7 +2102,7 @@ class BaseModel(ABC):
         # Of every calendar day, as `run` reads them, so that the reach of a matching list's training days is that run's.
         rules = self._cut_rules(information_set, cut_rules)
         newest = self._newest_targets(data, target, horizon, freq, rules, calendar_days)
-        self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest)
+        self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest, shared)
         plan = build_plan(
             self._ctx_fn,
             data,
@@ -2195,11 +2244,7 @@ class BaseModel(ABC):
         key = (hour, first, hz, tuple(predictors), member)
         known = self._first_day_masks.get(key)
         if known is None:
-            sample = self._training_sample(hour, first, hz, predictors, member)
-            known = self._first_day_masks[key] = (
-                StandardScaler.get_scalable_mask(sample),
-                np.flatnonzero(np.isnan(sample).all(axis=0)),
-            )
+            known = self._first_day_masks[key] = self._first_day_mask(hour, first, hz, predictors, member)
         mask, without = known[0].copy(), known[1]
         if not len(without) or last <= first:
             return mask
@@ -2218,10 +2263,64 @@ class BaseModel(ABC):
                     break
         return mask
 
+    def _first_day_mask(
+        self, hour: int, day: int, hz: int, predictors: List[str], member: Any
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """(which of `predictors` are scaled, the places of those without a value) on the training rows of day id `day` at
+        (period `hour`, horizon `hz`) with the window `member`: `StandardScaler.get_scalable_mask` of the rows and whether each
+        column has no value there. Both judge each column on its own values alone, so in an engine chunk the verdict of a column
+        that more than one of its models reads with this window and newest-target rule (`_MASK_READERS`) is kept per (period, rows)
+        in the frames' memo (`_column_verdicts`) and read once: the verdicts of one read of the whole sample, to the bit."""
+        readers = self._memo.get(_MASK_READERS) if _SHARED else None
+        if readers is None:
+            sample = self._training_sample(hour, day, hz, predictors, member)
+            return StandardScaler.get_scalable_mask(sample), np.flatnonzero(np.isnan(sample).all(axis=0))
+        verdicts = self._column_verdicts(hour, day, hz, predictors, member, readers)
+        return (
+            np.array([scaled for scaled, _ in verdicts], dtype=bool),
+            np.flatnonzero(np.array([empty for _, empty in verdicts], dtype=bool)),
+        )
+
+    def _column_verdicts(
+        self, hour: int, day: int, hz: int, predictors: List[str], member: Any, readers: set
+    ) -> List[Tuple[bool, bool]]:
+        """(scaled, without a value) of each of `predictors` on the training rows of the task (hour, hz, day) with the window
+        `member`: from the frames' memo, keyed by the period, the rows and the column, for a column `readers` says another model
+        reads too, else read. What is read is read in one take (`_training_sample`) and judged by
+        `StandardScaler.get_scalable_mask`, and only the shared columns' verdicts are kept."""
+        rows = training_rows(self._hour_days[hour], day, member_window(member, day), hz, self._newest_of(hour, day))
+        at = (hour, rows.start, rows.stop)
+        memo = self._memo
+        names = list(dict.fromkeys(predictors))
+        shared = {name for name in names if (member, self.newest_target, name) in readers}
+        found = {name: memo[("mask", *at, name)] for name in shared if ("mask", *at, name) in memo}
+        read = [name for name in names if name not in found]
+        if read:
+            sample = self._training_sample(hour, day, hz, read, member)
+            scaled = StandardScaler.get_scalable_mask(sample)
+            empty = np.isnan(sample).all(axis=0)
+            for i, name in enumerate(read):
+                found[name] = (bool(scaled[i]), bool(empty[i]))
+                if name in shared:
+                    memo[("mask", *at, name)] = found[name]
+        return [found[name] for name in predictors]
+
+    def _missing_test_rows(self, freq: str, days: Sequence[datetime.date]) -> List[Tuple[int, pd.Timestamp]]:
+        """`_contract.missing_test_rows` of the run's frame on these days, once per (freq, days) for the models reading one set of
+        period frames (the frames' memo): it reads the frame's whole index."""
+        if not _SHARED:
+            return _contract.missing_test_rows(self._data.index, freq, days)
+        key = ("missing_test_rows", freq, tuple(days))
+        found = self._memo.get(key)
+        if found is None:
+            found = self._memo[key] = _contract.missing_test_rows(self._data.index, freq, days)
+        return list(found)
+
     def _load_periods(self, data: pd.DataFrame, used_columns: Sequence[str], horizon: int, target: str) -> _Periods:
         """Read `data` into the frames of the periods, whose rows the tasks are cut from, and return them: what
         `_prepare_run(periods=...)` takes for another model of this frame, target, horizon and freq that reads no other column."""
         self._first_day_masks.clear()
+        self._memo = {}
         self._data = self._preprocess(data[list(used_columns)], horizon, target)
         self._first_ordinal = self._data.index[0].date().toordinal()
         for hour in range(self._periods_per_day):
@@ -2238,6 +2337,7 @@ class BaseModel(ABC):
             first_ordinal=self._first_ordinal,
             hour_data={hour: self._hour_data[hour] for hour in range(self._periods_per_day)},
             hour_days={hour: self._hour_days[hour] for hour in range(self._periods_per_day)},
+            memo=self._memo,
         )
 
     def _use_periods(
@@ -2264,6 +2364,7 @@ class BaseModel(ABC):
                 else f"{self.name}: these period frames don't hold {missing}"
             )
         self._first_day_masks.clear()
+        self._memo = periods.memo
         self._data = periods.data
         self._first_ordinal = periods.first_ordinal
         self._hour_data.update(periods.hour_data)
@@ -2433,6 +2534,7 @@ class BaseModel(ABC):
         self._hour_data.clear()
         self._hour_days.clear()
         self._first_day_masks.clear()
+        self._memo = {}
 
     def _preprocess(self, data: pd.DataFrame, horizon: int, target: str) -> pd.DataFrame:
         # The worker finds a period's rows by their date and takes the last of a date, so rows must be in time order.

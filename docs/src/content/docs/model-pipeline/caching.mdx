@@ -218,8 +218,9 @@ don't affect any forecast in this run, so appending them between runs isn't a mi
 time zone (converting the same instants to a different zone keeps the same hash, since it's over each
 value's own representation, not the zone label), and how the training rows are chosen (`training_cut`): everything that defines what
 a forecast in the file actually *is*. A manifest without `training_cut` was [made with counted rows](/epftoolbox2/model-pipeline/time-and-calendars/#results-made-with-counted-rows)
-and is refused; results accepted anyway are marked unverified, for good. It also records provenance (package version, git SHA if available, when it was first and
-last written, and for [`LEARModel`](/epftoolbox2/models/lear/#kernels) the backend of its kernels, `kernels`, a list once a resume
+and is refused; results accepted anyway are marked unverified, for good. It also records provenance (package version and git SHA if available, read once at the start of a pipeline
+run so that its model and ensemble manifests name the code the process runs, a SHA that can't be read being tried again at the
+next manifest; when it was first and last written, and for [`LEARModel`](/epftoolbox2/models/lear/#kernels) the backend of its kernels, `kernels`, a list once a resume
 used the other, whose two agree within 1e-9 and not to the bit, so a resume warns while a file mixes them) and the
 [information set](/epftoolbox2/model-pipeline/information-set/) settings, but neither is compared: a
 version bump or a new commit does not by itself invalidate a results directory, and the information set
