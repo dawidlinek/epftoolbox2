@@ -25,7 +25,7 @@ from threadpoolctl import threadpool_limits
 
 from epftoolbox2 import cli
 from epftoolbox2._extras import EXTRAS, MissingExtraError
-from epftoolbox2.information_set import Availability, InformationSet, ProbeResult, co_batch_probe
+from epftoolbox2.information_set import Availability, ControlResult, InformationSet, ProbeResult, co_batch_probe
 from epftoolbox2.models import LassoCVModel, NaiveModel, OLSModel, RidgeModel
 from epftoolbox2.models._calendar import refit_anchor, refit_block_end
 from epftoolbox2.models._worker import _worker_init
@@ -577,6 +577,22 @@ def test_noise_is_judged_per_day_with_a_margin():
     batch = VerifyReport([MIDDLE], [_check(MIDDLE, 0.0, noise=1e-6, batch_change=5e-5)])
     assert batch.status("M") == "inconclusive" and batch.table().iloc[0]["co_batch"] == 1
     assert VerifyReport([MIDDLE], [_check(MIDDLE, 0.0, noise=1e-6, batch_change=1.0)]).status("M") == "leak"
+
+
+def test_a_widened_control_that_moves_nothing_is_a_blind_spot():
+    """The co-batch probe is evidence only if its perturbation reaches the forecasts in the widened runs too."""
+    keys = [(period, 1) for period in range(24)]
+    moved = ControlResult(MIDDLE, 24, keys, 1.0, {"price_d-1": 24}, [])
+    still = ControlResult(MIDDLE, 24, [], 0.0, {"price_d-1": 24}, [], keys)
+    batch = CoBatchResult(MIDDLE, ["2023-04-13"], _probe(MIDDLE, 0.0), still)
+    report = VerifyReport([MIDDLE], [IssueDayCheck("M", MIDDLE, 1, _probe(MIDDLE, 0.0), moved, co_batch=batch)])
+    assert report.status("M") == "inconclusive"
+    assert (
+        "positive control over the runs widened to the other items of the call moved no forecast"
+        in report.problems()[0]
+    )
+    reached = CoBatchResult(MIDDLE, ["2023-04-13"], _probe(MIDDLE, 0.0), moved)
+    assert VerifyReport([MIDDLE], [IssueDayCheck("M", MIDDLE, 1, _probe(MIDDLE, 0.0), moved, co_batch=reached)]).ok
 
 
 # ---------------------------------------------------------------------------
