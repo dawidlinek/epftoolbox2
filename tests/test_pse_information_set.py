@@ -24,15 +24,16 @@ from tests.pse_fake import WARSAW, local_day_starts, make_source, table
 
 EVERY_DATASET = ["kse-load", "his-wlk-cal", "csdac-pln", "rce-pln", "pdgsz", "przeplywy-mocy"]
 EXPECTED = {  # column: (time, days_before, class)
-    "load_fcst": ("09:00", 1, "last_write_stamp"),
+    "load_fcst": ("10:00", 1, "last_write_stamp"),
     "load_actual": ("13:00", -1, "last_write_stamp"),
-    "csdac_pln": ("15:00", 1, "last_write_stamp"),
-    "rce_pln": ("15:00", 1, "last_write_stamp"),
-    "usage_fcst": ("16:00", 1, "row_stamp"),
+    "csdac_pln": ("15:00", 1, "snapshot"),
+    "rce_pln": ("15:00", 1, "snapshot"),
+    "usage_fcst": ("19:00", 1, "snapshot"),  # the source's pdgsz_cutoff
 }
 
 
 def every_column_source(**kwargs):
+    kwargs.setdefault("prefix", "")  # PSE's own names; the default prefix has its tests below
     columns = [c for d in EVERY_DATASET for c in DATASET_COLUMNS[d]]
     return PseSource(datasets=EVERY_DATASET, columns=columns, **kwargs)
 
@@ -54,7 +55,7 @@ def test_every_column_has_the_rule_of_its_table():
         "flow_pl_de",
     }
     assert all(vintage_of(rules[name]) == "last_write_stamp" for name in ("load_actual", "demand", "flow_pl_cz"))
-    assert vintage_of(rules["usage_fcst"]) == "row_stamp"
+    assert vintage_of(rules["usage_fcst"]) == "snapshot" and vintage_of(rules["csdac_pln"]) == "snapshot"
 
 
 def test_a_prefix_and_a_column_choice_follow_the_source():
@@ -66,15 +67,51 @@ def test_a_prefix_and_a_column_choice_follow_the_source():
     assert rules["pse_csdac_pln"].days_before == 1 and rules["pse_load_actual"].days_before == -1
 
 
-def test_the_source_s_rules_replace_the_entsoe_defaults_of_the_same_names():
-    """`load_actual` is the name of ENTSO-E's column too: with a PseSource in the pipeline it is PSE's, known a day later."""
+def test_without_a_prefix_pse_load_actual_takes_the_source_rule_only_where_source_rules_are_applied():
+    """Why the prefix defaults to `pse`: `load_actual` is the name of ENTSO-E's column too, and outside a `Workflow` (a plain
+    `InformationSet`, `ModelPipeline(issue_time=...)`) no source rules are applied, so the default `realised 1h` would read."""
     plain = InformationSet().resolve("load_actual_d-1")
-    info = InformationSet("11:45", WARSAW).with_source_rules([PseSource(datasets=["kse-load"])])
+    info = InformationSet("11:45", WARSAW).with_source_rules([PseSource(datasets=["kse-load"], prefix="")])
     column = info.resolve("load_actual_d-1")
 
     assert (plain.layer, plain.rule.kind) == ("defaults", "realised")
     assert (column.layer, column.rule.kind, column.rule.days_before) == ("sources", "published", -1)
-    assert info.resolve("load_fcst_d+1").layer == "sources"
+
+
+@pytest.mark.parametrize("dataset", list(DATASET_COLUMNS))
+def test_no_default_column_name_resolves_to_a_built_in_default_rule(dataset):
+    """On a plain `InformationSet`, with no source rules applied, none of PSE's names (every column of the dataset, and the
+    shifted names a predictor uses) falls to the `defaults` layer, which would be an ENTSO-E rule."""
+    source = PseSource(datasets=[dataset], columns=list(DATASET_COLUMNS[dataset]))
+    info = InformationSet("11:45", WARSAW)
+    for name in source.output_columns():
+        for predictor in (name, f"{name}_d-1", f"{name}_d+1", f"{name}_h-3"):
+            assert info.resolve(predictor).layer != "defaults", predictor
+    # and the rules the source gives are for exactly these names
+    assert set(source_rules([source])) == set(source.output_columns())
+
+
+def test_the_rule_of_pdgsz_follows_the_source_s_cutoff():
+    for cutoff in ("17:30", "19:00", "22:15"):
+        rule = source_rules([PseSource(datasets=["pdgsz"], pdgsz_cutoff=cutoff)])["pse_usage_fcst"]
+        assert (rule.kind, rule.time, rule.days_before, rule.timezone, rule.vintage) == (
+            "published",
+            cutoff,
+            1,
+            WARSAW,
+            "snapshot",
+        )
+
+
+def test_the_load_forecast_is_known_from_10_00_on_the_day_before():
+    index = pd.date_range("2026-03-10", "2026-04-10", freq="1h", tz=WARSAW, inclusive="left")
+    source = PseSource(datasets=["kse-load", "csdac-pln"], prefix="")
+
+    def issue(clock):
+        info = InformationSet(clock, WARSAW).with_source_rules([source])
+        return late(info, ["load_fcst_d+1"], "1h", index, "2026-03-16", "2026-04-05")
+
+    assert issue("10:15") == {} and issue("09:45") == {"load_fcst_d+1": set(range(24))}
 
 
 def late(info, names, freq, index, start, end):
@@ -98,7 +135,7 @@ def test_a_forecast_issued_at_1145_sees_the_next_day_s_load_forecast_and_not_the
         "csdac_pln",  # D's prices, 15:00 on D-1
         "csdac_pln_d-1",
         "rce_pln",
-        "usage_fcst",  # D's, 16:00 on D-1
+        "usage_fcst",  # D's, 19:00 on D-1
         "load_actual_d-2",  # 13:00 on D-1
         "demand_d-2",
         "wi_d-2",
@@ -124,8 +161,12 @@ def test_a_forecast_issued_at_1145_sees_the_next_day_s_load_forecast_and_not_the
 def test_the_next_days_actual_is_known_at_13_00_on_the_day_after_not_before():
     """The rule in elapsed time: an issue at 13:15 sees D-1's actual, one at 12:45 does not."""
     index = pd.date_range("2026-03-10", "2026-04-10", freq="1h", tz=WARSAW, inclusive="left")
-    after = InformationSet("13:15", WARSAW).with_source_rules([PseSource(datasets=["kse-load", "csdac-pln"])])
-    before = InformationSet("12:45", WARSAW).with_source_rules([PseSource(datasets=["kse-load", "csdac-pln"])])
+    after = InformationSet("13:15", WARSAW).with_source_rules(
+        [PseSource(datasets=["kse-load", "csdac-pln"], prefix="")]
+    )
+    before = InformationSet("12:45", WARSAW).with_source_rules(
+        [PseSource(datasets=["kse-load", "csdac-pln"], prefix="")]
+    )
 
     assert late(after, ["load_actual_d-1"], "1h", index, "2026-03-16", "2026-04-05") == {}
     assert late(before, ["load_actual_d-1"], "1h", index, "2026-03-16", "2026-04-05") == {
@@ -141,7 +182,7 @@ def test_a_user_rule_chain_for_a_pse_column_still_wins():
         )
     )
     info = InformationSet("11:45", WARSAW, rules={"load_actual": chain}).with_source_rules(
-        [PseSource(datasets=["kse-load"])]
+        [PseSource(datasets=["kse-load"], prefix="")]
     )
 
     assert info.resolve("load_actual_d-1").layer == "rules"

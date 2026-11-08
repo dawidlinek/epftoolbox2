@@ -739,19 +739,21 @@ _PSE_STAMP = (
 def _pse_rules(source: Any) -> Dict[str, Availability]:
     """The rules of a PseSource's columns, in Warsaw time (the local day of a PSE business date).
 
-    A delivery day D is known: `kse-load` forecast at 09:00 on D-1; the day-ahead prices (`csdac-pln`, `rce-pln`) at 15:00 on
-    D-1 (365 days measured: median 13:47, 99th percentile 14:59, latest 18:00); `pdgsz` at 16:00 on D-1; the actuals (`kse-load`,
-    `his-wlk-cal`, `przeplywy-mocy`) at 13:00 on D+1. Every table but `pdgsz` is stamped by its last write (rows reloaded in
-    bulk carry the reload time), so none has a vintage: `last_write_stamp`. `pdgsz` keeps every version with the time it was
-    written, and the source reads each hour's first: `row_stamp`."""
-    published_d1 = {
-        "kse-load": ("load_fcst", "09:00", "PSE kse-load day-ahead load forecast: published about 09:00 on D-1"),
-        "csdac-pln": (
-            "csdac_pln",
+    A delivery day D is known: the `kse-load` forecast at 10:00 on D-1, like ENTSO-E's day-ahead load forecast (not measured:
+    the conservative choice until first-seen times are); the day-ahead prices (`csdac-pln`, `rce-pln`) at 15:00 on D-1 (365
+    days measured: median 13:47, 99th percentile 14:59, latest 18:00; never rewritten); `pdgsz` at the source's
+    `pdgsz_cutoff` on D-1 (the source keeps the version stamped by then, so the rule is built from the parameter); the actuals
+    (`kse-load`, `his-wlk-cal`, `przeplywy-mocy`) at 13:00 on D+1. Those tables are stamped by their last write (rows reloaded in
+    bulk carry the reload time), so none has a vintage: `last_write_stamp`."""
+    snapshots = {
+        "csdac_pln": (
             "15:00",
-            "PSE csdac-pln SDAC price in PLN: published on D-1 (latest 18:00 in a year)",
+            "PSE csdac-pln SDAC price in PLN: published on D-1 (latest 18:00 in a year), never rewritten",
         ),
-        "rce-pln": ("rce_pln", "15:00", "PSE rce-pln prosumer net-billing price, not the SDAC price: published on D-1"),
+        "rce_pln": (
+            "15:00",
+            "PSE rce-pln prosumer net-billing price, not the SDAC price: published on D-1, never rewritten",
+        ),
     }
     rules: Dict[str, Availability] = {}
     for dataset in source.datasets:
@@ -759,17 +761,23 @@ def _pse_rules(source: Any) -> Dict[str, Availability]:
             name = source._named(column)
             if dataset == "pdgsz":
                 rules[name] = Availability.published(
-                    "16:00",
+                    source.pdgsz_cutoff,
                     1,
                     _PSE_ZONE,
-                    note="PSE pdgsz: the first version of an hour is out by about 16:00 on D-1 (a quarter of the hours "
-                    "later, the latest 19:00 in a year); the table keeps every version with its UTC stamp",
-                    vintage="row_stamp",
+                    note=f"PSE pdgsz: the version of an hour stamped by {source.pdgsz_cutoff} on D-1, as of that time; "
+                    "an hour with none is NaN",
+                    vintage="snapshot",
                 )
-            elif dataset in published_d1 and column == published_d1[dataset][0]:
-                _, time, note = published_d1[dataset]
+            elif column in snapshots:
+                time, note = snapshots[column]
+                rules[name] = Availability.published(time, 1, _PSE_ZONE, note=note, vintage="snapshot")
+            elif column == "load_fcst":
                 rules[name] = Availability.published(
-                    time, 1, _PSE_ZONE, note=f"{note}. {_PSE_STAMP}", vintage="last_write_stamp"
+                    "10:00",
+                    1,
+                    _PSE_ZONE,
+                    note=f"PSE kse-load day-ahead load forecast: assumed 10:00 on D-1 like ENTSO-E's (not measured). {_PSE_STAMP}",
+                    vintage="last_write_stamp",
                 )
             else:
                 # The actuals, `his-wlk-cal` and the flows: known on D+1 at 13:00.
