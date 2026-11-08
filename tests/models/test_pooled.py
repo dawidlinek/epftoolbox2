@@ -20,7 +20,7 @@ from epftoolbox2.ensembles import AverageEnsemble
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.exporters import TerminalExporter
 from epftoolbox2.information_set import Availability, InformationSet, InformationSetError
-from epftoolbox2.models import LEARModel, NaiveModel, OLSModel, RidgeModel, Use
+from epftoolbox2.models import LEARModel, NaiveModel, OLSModel, RidgeModel, Use, _engine_worker
 from epftoolbox2.models._pooled import _pooled_init, _pooled_worker_init
 from epftoolbox2.models._worker import _pool_init, _worker_init
 from epftoolbox2.models.pooled import PooledModel
@@ -197,7 +197,10 @@ def test_a_plain_model_in_a_zone_run_is_its_run_on_the_zone_alone(tmp_path):
     pd.testing.assert_frame_equal(report.zones["FI"].summary(), panel.zones["FI"].summary())
 
 
-def test_a_zone_run_with_the_engine_is_the_run_without_it(tmp_path):
+def test_a_zone_run_with_the_engine_is_the_run_without_it(tmp_path, monkeypatch):
+    """The zone plumbing through engine groups, bit for bit: every fit on the model path (`ENGINE_FIT_PATH = None`, as in
+    `test_engine_groups.py`), since fits from shared statistics agree with the model path within tolerance, not to the bit."""
+    monkeypatch.setattr(_engine_worker, "ENGINE_FIT_PATH", None)
     frames = {zone: hourly(zone, seed=i) for i, zone in enumerate(ZONES)}
     for engine in ("off", "on"):
         pipeline = (
