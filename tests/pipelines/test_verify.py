@@ -35,7 +35,7 @@ CALENDAR = ["is_weekend_d+{horizon}", "is_weekday_d+{horizon}"]
 CLEAN = PREDICTORS + ["price_d-1"]
 ISSUE_DAY = "2023-04-12"
 TEST_PERIOD = ("2023-04-03", "2023-04-28")
-COLUMNS = ["model", "days", "forecasts", "changed", "max change", "control moved", "status"]
+COLUMNS = ["model", "days", "forecasts", "changed", "max change", "control moved", "rerun", "co_batch", "status"]
 
 
 class InProcessPool:

@@ -894,6 +894,9 @@ class ModelPipeline:
         rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
         horizons: Optional[Sequence[int]] = None,
         issue_days: Optional[Sequence[str]] = None,
+        device: Optional[str] = None,
+        co_batch: Optional[bool] = None,
+        rerun: Optional[bool] = None,
     ) -> VerifyReport:
         """Check on a sample of issue days that no forecast depends on anything unknown when it is issued.
 
@@ -919,9 +922,12 @@ class ModelPipeline:
         with a non-static rule that `rebuild` doesn't build from its argument is `inconclusive` too.
 
         Only copies of the models run, in memory, so a later `run()` is unaffected. Each issue day costs four one-day
-        runs per model, six with `rebuild` or a target among the predictors. A model that isn't deterministic shows up
-        as a leak. With `engine="on"` each run of a model the engine takes goes through it, as a group of one: its
-        forecasts are those of any group, so the check covers the engine's way in too.
+        runs per model (two for the probe, two for the control), six with `rebuild` or a target among the predictors; the
+        rerun adds two, and the co-batch check as many as the probe and control take again, over the issue day's block and
+        the other days of its call. A model that isn't deterministic shows up as a leak, or with `rerun` as `inconclusive`
+        where a move is within `verification.NOISE_MARGIN` times the day's rerun difference. With `engine="on"` each run
+        of a model the engine takes goes through it, as a group of one: its forecasts are those of any group, so the check
+        covers the engine's way in too.
 
         `verify` probes the period you give it, not the windows of a run: to check a validation period as well as a test
         period, call it on each.
@@ -948,6 +954,13 @@ class ModelPipeline:
             issue_days: The weekdays a run issues on (`run(issue_days=["friday"])`): only days of these are sampled, and a
                 predictor function is planned on them alone, so what it would read late on another weekday is no leak of
                 this run's. None (or all seven) samples every day.
+            device: Set on every copy of a model with an attribute named `device` ("cpu" to verify a GPU model on the
+                CPU); `report.devices` names them, and a warning says so when no model has one.
+            co_batch: The probe once more over runs widened to the other items of the issue day's call
+                (`information_set.co_batch_probe`). None: for models that predict together, name their items or have a
+                card (`verification.checked_by_default`).
+            rerun: Run the issue day twice first, from other seeds of the global generators; any difference makes the model
+                `inconclusive`. None: as `co_batch`.
 
         Raises:
             InformationSetError: The pipeline has no information set, or a checked column has no rule and the
@@ -982,7 +995,14 @@ class ModelPipeline:
                     **horizon_arguments(horizon, horizons),
                     **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
                     **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
+                    device=device,
+                    co_batch=co_batch,
+                    rerun=rerun,
                 )
+            )
+        if device is not None and not report.devices:
+            warnings.warn(
+                f"verify(device={device!r}): no model verified has a `device`, so it changed nothing", stacklevel=2
             )
         return report
 

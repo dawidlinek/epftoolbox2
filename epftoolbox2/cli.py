@@ -233,6 +233,9 @@ def cmd_verify(args: argparse.Namespace) -> None:
             seed=args.seed,
             models=args.models,
             positive_control=args.positive_control,
+            device=args.device,
+            co_batch=args.co_batch,
+            rerun=args.rerun,
         )
     except (ValueError, RuntimeError) as exc:  # ValueError includes InformationSetError
         console.print(f"[red]Verification failed:[/red] {escape(str(exc))}")
@@ -240,6 +243,8 @@ def cmd_verify(args: argparse.Namespace) -> None:
 
     plain = {"markup": False, "highlight": False, "soft_wrap": True}
     console.print(f"Issue days: {', '.join(report.issue_days)}", **plain)
+    if report.devices:
+        console.print(f"On device {args.device}: {', '.join(report.devices)}", **plain)
     console.print(report.table().to_string(index=False), **plain)
     for problem in report.problems():
         console.print(problem, **plain)
@@ -682,6 +687,26 @@ def build_parser() -> argparse.ArgumentParser:
         dest="positive_control",
         action="store_false",
         help="Skip the check that perturbing what is known moves the forecasts; a pass then only says nothing moved",
+    )
+    verify_p.add_argument(
+        "--device",
+        metavar="DEVICE",
+        help="Run every model with an attribute named device on this one (e.g. cpu, to verify a GPU model where it is "
+        "deterministic) and name them; models without one run as they are",
+    )
+    verify_p.add_argument(
+        "--rerun",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Run each issue day twice first and call a model whose forecasts differ inconclusive (default: for models "
+        "that predict together, name their items or have a card)",
+    )
+    verify_p.add_argument(
+        "--co-batch",
+        dest="co_batch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Probe again over runs widened to the other items of each issue day's call (default: as --rerun)",
     )
 
     # -- results --
