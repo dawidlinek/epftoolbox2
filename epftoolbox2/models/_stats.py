@@ -98,6 +98,10 @@ the model path, however exact the engine (see the module)."""
 MIN_ROWS = 3
 """Fewer rows in ρ go to the model path for every model (the engine's fallback table)."""
 
+NULL_ROUNDING = 1e3
+"""`issue_distance`: a row's coordinate along a direction the training rows don't spread along counts as rounding up to this
+many eps of the row's and its centre's size on the active columns (about 2e-13 of it)."""
+
 
 class StatsFallback(Exception):
     """The fit's statistics can't be formed from the sums to the model path's digits; `reason` names why (for the counts)."""
@@ -587,18 +591,25 @@ def issue_distance(metric: IssueMetric, z: np.ndarray) -> float:
     λ_k). The first is each column's own distance (an eigenvector of nearly equal eigenvalues can spread a column over
     several); the second finds a row out along the difference of two near-collinear columns, by that difference's own
     spread, however close to their training values each column is. A function of the fit and the row alone; 0.0 with no
-    active column."""
+    active column.
+
+    Along a direction the training rows don't spread along (`IssueMetric.scale` inf: an exact linear dependence, such as a
+    one-hot pair both active in a lasso's coordinate descent, where any split of their coefficients fits the same) the row
+    is infinitely far where its coordinate is above rounding, `NULL_ROUNDING` eps times the size of the row and its centre
+    on the active columns, and not out at all below it: there it is the rounding of a row that lies in the rows' span, which
+    the forecast multiplies by that split's difference alone."""
     if metric.columns.size == 0:
         return 0.0
-    row = np.asarray(z, dtype=np.float64).reshape(-1)[metric.columns] - metric.centre
+    active = np.asarray(z, dtype=np.float64).reshape(-1)[metric.columns]
+    row = active - metric.centre
     along = np.abs(metric.vectors.T @ row)
     own = np.abs(row)
-    return float(
-        max(
-            np.where(own > 0.0, own * metric.column_scale, 0.0).max(),
-            np.where(along > 0.0, along * metric.scale, 0.0).max(),
-        )
-    )
+    spread = np.isfinite(metric.scale)
+    rounding = NULL_ROUNDING * EPS * float(np.abs(active).sum() + np.abs(metric.centre).sum())
+    eigen = np.where(spread, along * np.where(spread, metric.scale, 0.0), np.where(along > rounding, np.inf, 0.0))
+    varies = np.isfinite(metric.column_scale)
+    column = np.where(varies, own * np.where(varies, metric.column_scale, 0.0), np.where(own > 0.0, np.inf, 0.0))
+    return float(max(column.max(), eigen.max()))
 
 
 def issue_rounding_ok(fitted, stats: ScaledStats, z: np.ndarray, rounding_max: float = RIDGE_ROUNDING_MAX) -> bool:
