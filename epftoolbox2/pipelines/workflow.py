@@ -11,6 +11,7 @@ from .data_pipeline import DataPipeline
 from .model_pipeline import ModelPipeline
 from ..information_set import InformationSet
 from ..models._calendar import every_horizon, issue_day_names, resolve_horizons, resolve_issue_days
+from ..models._engine import engine_from_yaml
 from ..results.report import EvaluationReport
 from ..results.store import DEFAULT_SAVE_FORMAT, check_save_format
 from ..logging import get_logger
@@ -272,7 +273,7 @@ class Workflow:
         if "availability" in self._mp_inline:
             mp.availability = self._mp_inline["availability"]
         if "engine" in self._mp_inline:
-            mp.engine = self._mp_inline["engine"]
+            mp.engine = engine_from_yaml(self._mp_inline["engine"])  # `engine: on` unquoted reads as True
         if isinstance(self.model_index, int) and not all_models:
             mp.models = self._block_of(mp.models)
         return mp
@@ -482,5 +483,7 @@ class Workflow:
         workflow._yaml_dir = path.parent
         workflow._dp_inline = {k: dp[k] for k in _DP_SECTIONS if k in dp}
         workflow._mp_inline = {k: mp[k] for k in _MP_INLINE_KEYS if k in mp}
+        if "engine" in workflow._mp_inline:  # as written: "on" or "off", so that a save writes the word back
+            workflow._mp_inline["engine"] = engine_from_yaml(workflow._mp_inline["engine"])
         logger.info(f"Workflow: Loaded configuration from {path}")
         return workflow

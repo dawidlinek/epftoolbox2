@@ -19,7 +19,15 @@ from ..models._calendar import (
     resolve_issue_days,
 )
 from ..models.base import BaseModel
-from ..models._engine import ENGINE_OFF, ENGINE_ON, check_engine, engine_groups, run_arguments, run_group
+from ..models._engine import (
+    ENGINE_OFF,
+    ENGINE_ON,
+    check_engine,
+    engine_from_yaml,
+    engine_groups,
+    run_arguments,
+    run_group,
+)
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model
 from ..ensembles._compute import compute
@@ -1154,7 +1162,7 @@ class ModelPipeline:
         pipeline = cls(
             information_set=InformationSet.from_dict(info) if info else None,
             availability=config.get("availability"),
-            engine=config.get("engine", ENGINE_OFF),
+            engine=engine_from_yaml(config.get("engine", ENGINE_OFF)),  # `engine: on` unquoted reads as True
         )
         for c in config.get("models", []):
             pipeline.add_model(cls._load_component("models", c))

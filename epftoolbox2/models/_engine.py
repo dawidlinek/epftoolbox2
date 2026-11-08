@@ -38,6 +38,8 @@ from .base import _FRAME_READERS, _WINDOWS_MAX_WORKERS, BaseModel, _MemorySink, 
 ENGINE_OFF = "off"
 ENGINE_ON = "on"
 ENGINE_MODES = (ENGINE_OFF, ENGINE_ON)
+# YAML 1.1 (PyYAML) reads an unquoted `on` / `off` as a bool: what each means (`engine_from_yaml`).
+_YAML_BOOLS = {True: ENGINE_ON, False: ENGINE_OFF}
 
 # The frame readers of a model that reads its period frames as BaseModel does (`BaseModel._frame_readers`).
 _BASE_READERS = tuple(BaseModel for _ in _FRAME_READERS)
@@ -55,6 +57,12 @@ _RUN_DEFAULTS = {
     for name, parameter in inspect.signature(BaseModel.run).parameters.items()
     if parameter.default is not inspect.Parameter.empty
 }
+
+
+def engine_from_yaml(engine: Any) -> Any:
+    """`engine` as a YAML file gives it: `engine: on` unquoted is read as True and `off` as False (YAML 1.1), which mean "on"
+    and "off"; anything else as it is, for `check_engine`."""
+    return _YAML_BOOLS[engine] if isinstance(engine, bool) else engine
 
 
 def check_engine(engine: Any) -> str:

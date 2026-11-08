@@ -324,6 +324,27 @@ def test_engine_is_checked_and_saved_only_when_on(tmp_path):
     assert ModelPipeline.load(tmp_path / "off.yaml").engine == "off"
 
 
+@pytest.mark.parametrize("word, engine", [("on", "on"), ("off", "off"), ('"on"', "on"), ("'off'", "off")])
+def test_engine_written_by_hand_in_yaml(tmp_path, word, engine):
+    """`engine: on` unquoted is YAML 1.1's True and `off` its False: both read as the word, in a pipeline file and in a
+    workflow's `model_pipeline`, quoted or not; a workflow saves the word back."""
+    ModelPipeline().add_model(OLSModel(PREDICTORS, 28, name="ols")).save(tmp_path / "pipeline.yaml")
+    text = (tmp_path / "pipeline.yaml").read_text()
+    (tmp_path / "hand.yaml").write_text(f"engine: {word}\n{text}")
+    assert ModelPipeline.load(tmp_path / "hand.yaml").engine == engine
+    (tmp_path / "experiment.yaml").write_text(
+        "data_pipeline:\n  start: '2023-01-01'\n  end: '2023-02-01'\n"
+        f"model_pipeline:\n  path: pipeline.yaml\n  test: ['2023-01-20', '2023-01-21']\n  engine: {word}\n"
+    )
+    workflow = Workflow.load(tmp_path / "experiment.yaml")
+    assert workflow._build_model_pipeline().engine == engine
+    workflow.save(tmp_path / "again.yaml")
+    assert yaml.safe_load((tmp_path / "again.yaml").read_text())["model_pipeline"]["engine"] == engine
+    assert Workflow.load(tmp_path / "again.yaml")._build_model_pipeline().engine == engine
+    with pytest.raises(ValueError, match="engine must be one of"):
+        ModelPipeline(engine=True)  # the Python API takes the words alone
+
+
 def test_a_workflow_overrides_the_pipeline_engine(tmp_path):
     pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, 28, name="ols"))
     pipeline.save(tmp_path / "pipeline.yaml")
