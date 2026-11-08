@@ -226,6 +226,9 @@ Exits with code 0 only if every model is `ok`, and with code 1 on a `leak`, an `
 | `--seed N` | Picks the days and the noise (default: `0`) |
 | `--models NAME [NAME ...]` | Names of the models to verify (default: all) |
 | `--no-positive-control` | Skip the check that perturbing what is known moves the forecasts; a pass then only says nothing moved |
+| `--device DEVICE` | Run every model with an attribute named `device` on this one, e.g. `cpu` to verify a GPU model where it is deterministic, and name them; models without one run as they are |
+| `--rerun`, `--no-rerun` | Run each issue day twice first, from other seeds, and call a model whose forecasts differ `inconclusive` (default: for models that predict together, name their items or have a card) |
+| `--co-batch`, `--no-co-batch` | Probe again over runs widened to the other items of each issue day's call (default: as `--rerun`) |
 
 ---
 

@@ -153,7 +153,7 @@ run forecasts, in date order, padded to the rule's nominal length (7 rows for `"
 of the first row; each forecast is taken from its own row. A call so has one shape and the same rows whether a day runs alone or in
 its block, from any `test_start`, on some weekdays only or after a resume, and its forecasts are the same to the bit in each. The
 block's other days enter as issue rows only, never their targets and never a day after the block, so a row's prediction must not
-depend on the other rows of its call: [`verify`](/epftoolbox2/model-pipeline/verification/) checks that with its co-batch check,
+depend on the other rows of its call: [`verify`](/epftoolbox2/model-pipeline/verification/#rerun-and-co-batch) checks that with its co-batch check,
 which such a class gets on by default (it gets `_predicts_together` and `_co_batch_items`, the other days of the block).
 
 ```python
