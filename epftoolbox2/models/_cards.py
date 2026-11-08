@@ -430,7 +430,12 @@ def card_problems(model: Any, seen: Optional[Dict] = None) -> List[Problem]:
     except MissingWeightsError as error:
         problems.append(Problem(who, "weights", error.message.removeprefix(f"{who}: ")))
     else:
-        if resolved is not None and resolved.reference is False:
+        warned = (
+            "not the reference",
+            None if resolved is None else (resolved.ref, tuple(sorted(resolved.files.items()))),
+        )
+        if resolved is not None and resolved.reference is False and warned not in seen:
+            seen[warned] = True  # once per weights in a pre-flight, not once per variant of a loop
             warnings.warn(
                 f"{who}: the weights {resolved.ref} are not the reference weights (their sha256 differs from the card's "
                 f"{card.weights.repo}@{card.weights.revision}); the manifest records the hashes used.",

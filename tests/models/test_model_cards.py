@@ -596,6 +596,10 @@ def test_a_run_reads_its_weights_offline_and_records_its_card(data, fetched, tmp
         moved = run(data, carded(weights=str(mine)))
     assert all(a[3] != b[3] for a, b in zip(forecasts(moved, "carded"), forecasts(report, "ols")))
     assert moved.provenance().iloc[0]["weights"] == str(mine)
+    # A loop of variants on the same weights warns once.
+    with pytest.warns(UserWarning, match="not the reference weights") as caught:
+        preflight([carded(f"v{i}", weights=str(mine)) for i in range(5)])
+    assert sum("not the reference weights" in str(w.message) for w in caught) == 1
 
 
 def test_verify_and_report_reach_no_network(data, fetched, tmp_path, no_network):
