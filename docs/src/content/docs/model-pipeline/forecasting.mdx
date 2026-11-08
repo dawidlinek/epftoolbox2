@@ -147,8 +147,9 @@ for window in range(28, 365, 7):
   every other field of a record is the same. A fit the statistics can't give to those digits is fitted as with `"off"`, to the bit:
   fewer than three training rows, an OLS whose design is too ill-conditioned for the normal equations or not of full rank, Ridge
   at the smallest penalties of its grid, a column whose sums cancel. `LassoCVModel` and the models with a variance-stabilising
-  scaler (LEAR's default `asinh`) are fitted as with `"off"` in this release, to the bit. Ridge's leverages need its rows, so it
-  saves the scaling and the eigendecomposition's Gram; LEAR's path dominates its fit, so it gains less than OLS.
+  scaler (LEAR's default `asinh`) are fitted as with `"off"` in this release, to the bit. Ridge still reads its scaled rows for the
+  leave-one-out leverages, so it saves the scaler and the SVD of its rows, not the work on them; LEAR's path dominates its fit,
+  so it gains less than OLS.
 - **Which models.** OLS, Ridge, LassoCV and LEAR. `NaiveModel`, a predictor function with a `train_on="matching"` list, a subclass
   that overrides the fit (`_fit_predict`, `_fit_model`, `_predict_fitted`) without its own `_fit_stats`, and every
   `forecast_only=True` run go through their own run, as with `"off"`, after the groups.
