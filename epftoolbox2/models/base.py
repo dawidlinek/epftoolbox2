@@ -1392,28 +1392,32 @@ class BaseModel(ABC):
             ),
         ) as pool:
             run_job = _run_day if self.refit is None else _run_block
-            futures = {pool.submit(run_job, day_tasks): day for day, day_tasks in jobs.items()}
-            with Progress() as progress:
-                task_id = progress.add_task(
-                    f"[cyan]{self.name}",
-                    total=state.n_days,
-                    completed=state.n_days - days_with_tasks,
-                )
-                for future in as_completed(futures):
-                    job = futures.pop(future)  # its records leave with it: the parent holds one job's at a time
-                    try:
-                        day_results, day_skipped = future.result()
-                    except Exception as exc:
-                        # Results already saved stay in the store, so a fixed rerun resumes from here.
-                        pool.shutdown(wait=True, cancel_futures=True)
-                        what = (
-                            f"run date {state.first_day + datetime.timedelta(days=job)}"
-                            if self.refit is None
-                            else f"the refit block from {job}"
-                        )
-                        raise RuntimeError(f"{self.name}: forecasting failed for {what}: {exc}") from exc
-                    self._collect(state, day_results, day_skipped, sink)
-                    progress.advance(task_id, len({t[2] for t in jobs[job]}))
+            try:
+                futures = {pool.submit(run_job, day_tasks): day for day, day_tasks in jobs.items()}
+                with Progress() as progress:
+                    task_id = progress.add_task(
+                        f"[cyan]{self.name}",
+                        total=state.n_days,
+                        completed=state.n_days - days_with_tasks,
+                    )
+                    for future in as_completed(futures):
+                        job = futures.pop(future)  # its records leave with it: the parent holds one job's at a time
+                        try:
+                            day_results, day_skipped = future.result()
+                        except Exception as exc:
+                            what = (
+                                f"run date {state.first_day + datetime.timedelta(days=job)}"
+                                if self.refit is None
+                                else f"the refit block from {job}"
+                            )
+                            raise RuntimeError(f"{self.name}: forecasting failed for {what}: {exc}") from exc
+                        self._collect(state, day_results, day_skipped, sink)
+                        progress.advance(task_id, len({t[2] for t in jobs[job]}))
+            except BaseException:
+                # Whatever stops the loop (a task, a failed write the store raises in `_collect`, an interrupt): no job not
+                # yet started runs. Results already saved stay in the store, so a fixed rerun resumes from here.
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
 
     def _worker_inputs(self, state: "_RunState", threads_per_process: int) -> Tuple[Dict, Dict]:
         """(the expanded lists, the config) a worker runs the run's tasks with (`_worker.TaskInputs`, with the period arrays of

@@ -832,6 +832,49 @@ def test_a_crash_mid_group_then_resume_equals_fresh(spring, tmp_path, monkeypatc
     same_results(tmp_path / "fresh", tmp_path / "crashed")
 
 
+JOB_LOG = None  # where `counted_job` appends a line per job a worker runs (set before the pool forks)
+
+
+def counted_job(*args, **kwargs):
+    with open(JOB_LOG, "a") as f:
+        f.write("job\n")
+    return _engine_worker.run_job(*args, **kwargs)
+
+
+def test_a_failed_write_stops_the_group_early_and_a_resume_equals_fresh(spring, tmp_path, monkeypatch):
+    """A store that fails while the parent saves (here the third save of one model) stops the group at once: no job not yet
+    started runs (before, leaving the pool's `with` waited for all 120), the error is the store's, and a resume equals the
+    fresh run."""
+    global JOB_LOG
+
+    def run(save_dir):
+        p = ModelPipeline(engine="on")
+        for model in (OLSModel(PREDICTORS, 28, name=f"ols{i}") for i in range(3)):
+            p.add_model(model)
+        return p.run(spring, "2023-03-24", "2023-03-28", horizon=1, save_dir=str(save_dir))
+
+    run(tmp_path / "fresh")
+    JOB_LOG = tmp_path / "jobs.txt"
+    monkeypatch.setattr(_engine, "run_job", counted_job)
+    real_save, saves = ResultStore.save, []
+
+    def failing(self, result):
+        if self.path.name == "ols1.jsonl":
+            saves.append(1)
+            if len(saves) == 3:
+                raise OSError("disk full (planted)")
+        return real_save(self, result)
+
+    monkeypatch.setattr(ResultStore, "save", failing)
+    with pytest.raises(OSError, match="disk full"):
+        run(tmp_path / "crashed")
+    ran = len(JOB_LOG.read_text().split())
+    assert ran <= 8, ran  # the three collected, the queued and the one running, of 5 days x 24 periods
+    monkeypatch.setattr(ResultStore, "save", real_save)
+    run(tmp_path / "crashed")
+    same_results(tmp_path / "fresh", tmp_path / "crashed")
+
+
 def write_workflow(directory, frame, k=None, index=None):
     csv = frame[["price", *[c for c in frame.columns if c.endswith("_d+1")], "price_d-1"]].tz_convert("UTC")
     csv = csv.reset_index(names="datetime")

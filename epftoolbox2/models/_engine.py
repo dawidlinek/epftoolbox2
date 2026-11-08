@@ -147,8 +147,9 @@ def run_group(
 
     Each chunk is finished before the next starts: its pool, its stores flushed, each model's `_finish_run` (skip counts, the
     shortfall warning, its ref) and its stores closed, so what a model holds for its run (its tasks, its store's done keys)
-    lives as long as its chunk. A task that raises stops the group as a model's `run` stops: the pool is shut down, what came
-    back is in the stores, and a RuntimeError names the model, the day or block and the period; a later run resumes. The
+    lives as long as its chunk. A task that raises stops the group as a model's `run` stops: no job not yet started runs, what
+    came back is in the stores, and a RuntimeError names the model, the day or block and the period; anything else that stops
+    the loop (a store's failed write, an interrupt) stops it the same way, and a later run resumes. The
     first error a chunk's `_finish_run` raises (no forecast at all) is raised once the chunk's other models finished, and the
     later chunks don't run, as later models don't with engine off."""
     if not models:
@@ -261,22 +262,27 @@ def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> None:
     with ProcessPoolExecutor(
         max_workers=n_processes, mp_context=mp_context, initializer=_engine_init, initargs=(hour_arrays, inputs)
     ) as pool:
-        futures = {pool.submit(run_job, list(job.items())): key for key, job in jobs.items()}
-        for future in as_completed(futures):
-            # A job's records leave with its future (`as_completed` keeps none it has given), so the parent holds one job's
-            # records at a time, not the chunk's.
-            key = futures.pop(future)
-            job = jobs.pop(key)
-            try:
-                outcomes = future.result()
-            except Exception as exc:
-                # Results already saved stay in the stores, so a fixed rerun resumes from here.
-                pool.shutdown(wait=True, cancel_futures=True)
-                raise _job_failed(exc, key, job, pending, refit) from exc
-            for place, results, skipped in outcomes:
-                model, state = pending[place]
-                model._collect(state, results, skipped, sinks[place])
-            bar.advance(sum(len(tasks) for tasks in job.values()))
+        try:
+            futures = {pool.submit(run_job, list(job.items())): key for key, job in jobs.items()}
+            for future in as_completed(futures):
+                # A job's records leave with its future (`as_completed` keeps none it has given), so the parent holds one
+                # job's records at a time, not the chunk's.
+                key = futures.pop(future)
+                job = jobs.pop(key)
+                try:
+                    outcomes = future.result()
+                except Exception as exc:
+                    raise _job_failed(exc, key, job, pending, refit) from exc
+                for place, results, skipped in outcomes:
+                    model, state = pending[place]
+                    model._collect(state, results, skipped, sinks[place])
+                bar.advance(sum(len(tasks) for tasks in job.values()))
+        except BaseException:
+            # Whatever stops the loop, a task, a store's failed write that `_collect` raises or an interrupt: no job not yet
+            # started runs (leaving the `with` would wait for all of them). Results already saved stay in the stores, so a
+            # fixed rerun resumes from here.
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
 
 
 def _job_failed(
