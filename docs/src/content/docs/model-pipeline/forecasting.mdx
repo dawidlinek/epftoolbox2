@@ -143,13 +143,14 @@ for window in range(28, 365, 7):
   manifest and table is identical to the bit, whatever else is in the group, in any order and at any number of processes. Fits from
   statistics the group shares come in a later release.
 - **Checked once.** The pipeline checks the frame's index and names once for the models that read the same days, judges each
-  column against the information set once per rule and issue days, and a group reads each column's binary mask once per period
-  and training rows: every check, listing and mask is what the model finds on its own. In a group of 1,000 OLS models (one test
+  column against the information set once per rule and issue days, and a group reads the binary mask of a column several of its
+  models read with one training window once per period: every check, listing and mask is what the model finds on its own. In a group of 1,000 OLS models (one test
   day, 24 periods) a model costs about 5 ms beyond its fits, with or without an information set.
 - **Which models.** OLS, Ridge, LassoCV and LEAR. `NaiveModel`, a predictor function with a `train_on="matching"` list, a subclass
   that overrides the fit (`_fit_predict`, `_fit_model`, `_predict_fitted`) without its own `_fit_stats`, and every
   `forecast_only=True` run go through their own run, as with `"off"`, after the groups.
-- **Memory.** A group holds its models' columns, rows × columns × 8 bytes per period. `ENGINE_MAX_MODELS` (default 20,000) and
+- **Memory.** A group holds its models' columns, rows × columns × 8 bytes per period, and the mask verdicts its models share (none
+  for one model per training window, which read other rows). `ENGINE_MAX_MODELS` (default 20,000) and
   `ENGINE_MAX_COLUMNS` (default 4,096) bound a part of a group read at once, environment variables like `MAX_PROCESSES`; where the
   cuts fall changes no number.
 - **Saved and checked.** `engine` goes to the pipeline's YAML only when it is `"on"`, and `model_pipeline.engine` in a workflow

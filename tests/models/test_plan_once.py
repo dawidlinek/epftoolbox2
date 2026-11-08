@@ -334,9 +334,45 @@ def test_a_group_reads_each_column_s_mask_and_the_missing_rows_once(frames, monk
     assert out[True] == out[False]
 
 
+def test_a_chunk_keeps_only_the_mask_verdicts_more_than_one_model_reads(frames, monkeypatch, tmp_path):
+    """A chunk keeps a column's mask verdicts only where more than one of its models reads the column with the same window and
+    newest-target rule (`_engine.mask_readers`): one model per training window keeps none, so the chunk holds no more than its
+    models do; three models of one window share the columns two of them read. The files are those of sharing off."""
+    data = frames[("1h", "spring")]
+    lists = [["load_d+1", "aux"], ["aux", "wind_d+1"], ["wind_d+1", "settle_d-1"]]
+
+    def models():
+        sweep = [OLSModel(["load_d+1", "price_d-1"], window, name=f"w{window}") for window in (21, 28, 35, 42)]
+        return sweep + [OLSModel(names, 56, name=f"a{i}") for i, names in enumerate(lists)]
+
+    held = []
+    real = _engine._run_chunk
+
+    def capture(prepared, bar):
+        held.append({key for key in prepared[0][0]._memo if key[0] == "mask"})
+        return real(prepared, bar)
+
+    monkeypatch.setattr(_engine, "_run_chunk", capture)
+    for on in (True, False):
+        sharing(monkeypatch, on)
+        pipeline = ModelPipeline(engine="on")
+        for model in models():
+            pipeline.add_model(model)
+        pipeline.run(data, test=("2023-03-27", "2023-03-27"), horizon=1, save_dir=str(tmp_path / str(on)))
+    shared, unshared = held
+    assert {key[-1] for key in shared} == {"aux", "wind_d+1"} and len(shared) == 2 * 24
+    assert unshared == set()
+    assert files(tmp_path / "True") == files(tmp_path / "False")
+    readers = _engine.mask_readers(
+        models(), {f"a{i}": names for i, names in enumerate(lists)} | {f"w{w}": [] for w in (21, 28, 35, 42)}
+    )
+    assert readers == {(56, "d-1", "aux"), (56, "d-1", "wind_d+1")}
+
+
 def test_mask_verdicts_are_kept_per_rows_and_frames(frames):
-    """A column's verdict is kept per (period, rows) of one set of period frames: another window reads other rows, a model
-    alone reads its own frames, and every mask equals one read of the whole sample."""
+    """A column's verdict is kept per (period, rows) of one set of period frames, where the chunk's readers say another model
+    reads it: another window reads other rows, a model alone reads its own frames and keeps none, and every mask equals one
+    read of the whole sample."""
     data = frames[("1h", "autumn")]
     alone, grouped = OLSModel(["aux", "load_d+1", "week_load_d+1"], 28), OLSModel(["load_d+1", "aux"], 56)
     for model in (alone, grouped):
@@ -344,6 +380,8 @@ def test_mask_verdicts_are_kept_per_rows_and_frames(frames):
     periods = alone._load_periods(data, ["price", "aux", "load_d+1", "week_load_d+1"], 2, "price")
     grouped._use_periods(periods, data, ["price", "load_d+1", "aux"], 2, "price")
     assert grouped._memo is alone._memo
+    names = ["aux", "load_d+1", "week_load_d+1"]
+    periods.memo[base_module._MASK_READERS] = {(window, "d-1", name) for window in (28, 56) for name in names}
     first = (pd.Timestamp("2023-09-28").date() - data.index[0].date()).days
     for model in (alone, grouped):
         model._offset, model._last_day, model._newest = first, first + 5, None
@@ -361,7 +399,8 @@ def test_mask_verdicts_are_kept_per_rows_and_frames(frames):
     other = OLSModel(["aux"], 28)
     other._set_freq("1h")
     other._load_periods(data, ["price", "aux"], 2, "price")
-    assert other._memo is not alone._memo and other._memo == {}
+    other._offset, other._last_day, other._newest = first, first + 5, None
+    assert other._precompute_scalable_masks([1, 2]) and other._memo is not alone._memo and other._memo == {}
     alone._release()
     assert alone._memo == {} and grouped._memo is periods.memo
 

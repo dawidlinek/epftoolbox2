@@ -24,6 +24,7 @@ import inspect
 import multiprocessing
 import os
 import sys
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -34,7 +35,15 @@ from ..results.ref import ModelResultRef
 from ..results.store import StoreWriter
 from ._calendar import resolve_horizons
 from ._engine_worker import EngineTaskFailed, _engine_init, run_job
-from .base import _FRAME_READERS, _WINDOWS_MAX_WORKERS, BaseModel, _MemorySink, _RunState, hour_arrays_of
+from .base import (
+    _FRAME_READERS,
+    _MASK_READERS,
+    _WINDOWS_MAX_WORKERS,
+    BaseModel,
+    _MemorySink,
+    _RunState,
+    hour_arrays_of,
+)
 
 ENGINE_OFF = "off"
 ENGINE_ON = "on"
@@ -176,6 +185,7 @@ def run_group(
                         union = dict.fromkeys(name for model in chunk for name in columns[model.name])
                         chunk[0]._set_freq(freq)
                         periods = chunk[0]._load_periods(data, list(dict.fromkeys([target, *union])), horizon, target)
+                        periods.memo[_MASK_READERS] = mask_readers(chunk, columns)
                     for model in chunk:
                         state = model._prepare_run(**arguments.pop(model.name), periods=periods, writer=writer)
                         prepared.append((model, state))
@@ -202,6 +212,21 @@ def run_group(
         raise
     _close_writer(writer)
     return refs
+
+
+def mask_readers(models: Sequence[BaseModel], columns: Dict[str, Sequence[str]]) -> set:
+    """The (training window, newest-target rule, column) that more than one of these models reads its binary-column masks from
+    in the parent (a model whose fits read their own, `_masks_from_fits`, reads none there): a column read with the same window
+    and rule is read on the same rows, so `BaseModel._column_verdicts` keeps its verdicts for the others, and only those. A chunk
+    of models that each read other rows (one model per training window) keeps none, so it holds no more than its models do."""
+    counts: Counter = Counter()
+    for model in models:
+        if model._masks_from_fits:
+            continue
+        for member in dict.fromkeys(model._members):
+            for name in dict.fromkeys(columns[model.name]):
+                counts[(member, model.newest_target, name)] += 1
+    return {key for key, n in counts.items() if n > 1}
 
 
 def _label(models: Sequence[BaseModel]) -> str:

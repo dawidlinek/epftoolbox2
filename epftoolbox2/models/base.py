@@ -140,6 +140,9 @@ _WINDOWS_MAX_WORKERS = 61
 # verdict per (period, training rows) and the test days' missing rows (`_Periods.memo`). The same computations, kept: False
 # computes each again for every model, as before, which the tests compare to the bit.
 _SHARED = True
+# The `_Periods.memo` key of the (window, newest-target rule, column) whose binary-mask verdicts more than one model of an engine
+# chunk reads (`_engine.mask_readers`): only those are kept. Frames without it (a model alone) keep none.
+_MASK_READERS = ("mask readers",)
 
 
 def _test_days(test_start: str, test_end: str) -> List[datetime.date]:
@@ -2265,36 +2268,42 @@ class BaseModel(ABC):
     ) -> Tuple[np.ndarray, np.ndarray]:
         """(which of `predictors` are scaled, the places of those without a value) on the training rows of day id `day` at
         (period `hour`, horizon `hz`) with the window `member`: `StandardScaler.get_scalable_mask` of the rows and whether each
-        column has no value there. Both judge each column on its own values alone, so each column's verdict is kept per
-        (period, rows) in the frames' memo (`_column_verdicts`), which the models reading one set of period frames share (an
-        engine chunk), and a column is read once there whatever the lists: the verdicts of one read of the whole sample, to the
-        bit."""
-        if not _SHARED:
+        column has no value there. Both judge each column on its own values alone, so in an engine chunk the verdict of a column
+        that more than one of its models reads with this window and newest-target rule (`_MASK_READERS`) is kept per (period, rows)
+        in the frames' memo (`_column_verdicts`) and read once: the verdicts of one read of the whole sample, to the bit."""
+        readers = self._memo.get(_MASK_READERS) if _SHARED else None
+        if readers is None:
             sample = self._training_sample(hour, day, hz, predictors, member)
             return StandardScaler.get_scalable_mask(sample), np.flatnonzero(np.isnan(sample).all(axis=0))
-        verdicts = self._column_verdicts(hour, day, hz, predictors, member)
+        verdicts = self._column_verdicts(hour, day, hz, predictors, member, readers)
         return (
             np.array([scaled for scaled, _ in verdicts], dtype=bool),
             np.flatnonzero(np.array([empty for _, empty in verdicts], dtype=bool)),
         )
 
     def _column_verdicts(
-        self, hour: int, day: int, hz: int, predictors: List[str], member: Any
+        self, hour: int, day: int, hz: int, predictors: List[str], member: Any, readers: set
     ) -> List[Tuple[bool, bool]]:
         """(scaled, without a value) of each of `predictors` on the training rows of the task (hour, hz, day) with the window
-        `member`, from the frames' memo, keyed by the period, the rows and the column; the columns not yet there are read in one
-        take (`_training_sample`) and judged by `StandardScaler.get_scalable_mask`."""
+        `member`: from the frames' memo, keyed by the period, the rows and the column, for a column `readers` says another model
+        reads too, else read. What is read is read in one take (`_training_sample`) and judged by
+        `StandardScaler.get_scalable_mask`, and only the shared columns' verdicts are kept."""
         rows = training_rows(self._hour_days[hour], day, member_window(member, day), hz, self._newest_of(hour, day))
         at = (hour, rows.start, rows.stop)
         memo = self._memo
-        missing = [name for name in dict.fromkeys(predictors) if ("mask", *at, name) not in memo]
-        if missing:
-            sample = self._training_sample(hour, day, hz, missing, member)
+        names = list(dict.fromkeys(predictors))
+        shared = {name for name in names if (member, self.newest_target, name) in readers}
+        found = {name: memo[("mask", *at, name)] for name in shared if ("mask", *at, name) in memo}
+        read = [name for name in names if name not in found]
+        if read:
+            sample = self._training_sample(hour, day, hz, read, member)
             scaled = StandardScaler.get_scalable_mask(sample)
             empty = np.isnan(sample).all(axis=0)
-            for i, name in enumerate(missing):
-                memo[("mask", *at, name)] = (bool(scaled[i]), bool(empty[i]))
-        return [memo[("mask", *at, name)] for name in predictors]
+            for i, name in enumerate(read):
+                found[name] = (bool(scaled[i]), bool(empty[i]))
+                if name in shared:
+                    memo[("mask", *at, name)] = found[name]
+        return [found[name] for name in predictors]
 
     def _missing_test_rows(self, freq: str, days: Sequence[datetime.date]) -> List[Tuple[int, pd.Timestamp]]:
         """`_contract.missing_test_rows` of the run's frame on these days, once per (freq, days) for the models reading one set of
