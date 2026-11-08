@@ -249,6 +249,49 @@ def cmd_verify(args: argparse.Namespace) -> None:
     console.print("[green]Verification passed.[/green]")
 
 
+def cmd_results(args: argparse.Namespace) -> None:
+    """`epf results convert|compact|verify SAVE_DIR`: what is on disk in a save_dir, in either results format."""
+    from .results import parquet_store
+    from .results.store import ResultsLockedError
+
+    plain = {"markup": False, "highlight": False, "soft_wrap": True}
+    save_dir = Path(args.save_dir)
+    if not save_dir.is_dir():
+        console.print(f"[red]Not a directory: {escape(str(save_dir))}[/red]")
+        sys.exit(1)
+    try:
+        if args.results_cmd == "convert":
+            done = parquet_store.convert(save_dir, args.to, model=args.model)
+            for stem, n in done:
+                console.print(f"{stem}: {n} records converted to {args.to}", **plain)
+            if not done:
+                console.print(
+                    f"Nothing to convert: every model's results in {save_dir} are {args.to} already.", **plain
+                )
+        elif args.results_cmd == "compact":
+            summary = parquet_store.compact(save_dir, model=args.model)
+            for stem, counts in summary.items():
+                console.print(
+                    f"{stem}: {counts['parts_merged']} parts merged into {counts['parts_written']}, "
+                    f"{counts['files_removed']} files removed",
+                    **plain,
+                )
+            if not summary:
+                console.print(f"No Parquet results in {save_dir}.", **plain)
+        else:
+            findings = parquet_store.verify(save_dir, model=args.model)
+            for finding in findings:
+                console.print(str(finding), **plain)
+            errors = [f for f in findings if f.level == "error"]
+            if errors:
+                console.print(f"[red]{len(errors)} error(s).[/red]")
+                sys.exit(1)
+            console.print(f"[green]Results verified[/green] ({len(findings)} note(s)).")
+    except (ValueError, FileNotFoundError, ResultsLockedError, RuntimeError) as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        sys.exit(1)
+
+
 def cmd_validate(args: argparse.Namespace) -> None:
     import yaml as _yaml
 
@@ -521,6 +564,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the check that perturbing what is known moves the forecasts; a pass then only says nothing moved",
     )
 
+    # -- results --
+    results_p = sub.add_parser(
+        "results", help="Convert results between JSONL and Parquet, compact Parquet results, or verify a save_dir"
+    )
+    results_sub = results_p.add_subparsers(dest="results_cmd", required=True, metavar="<action>")
+    convert_p = results_sub.add_parser(
+        "convert", help="Convert every model's results in SAVE_DIR to one format, record for record"
+    )
+    convert_p.add_argument("save_dir", metavar="SAVE_DIR", help="A model pipeline's save_dir")
+    convert_p.add_argument("--to", required=True, choices=["parquet", "jsonl"], help="The format to convert to")
+    convert_p.add_argument("--model", metavar="NAME", help="Convert this model's results only")
+    compact_p = results_sub.add_parser(
+        "compact", help="Merge each Parquet model's parts of a year into one and remove files no catalog lists"
+    )
+    compact_p.add_argument("save_dir", metavar="SAVE_DIR", help="A model pipeline's save_dir")
+    compact_p.add_argument("--model", metavar="NAME", help="Compact this model's results only")
+    verify_results_p = results_sub.add_parser(
+        "verify", help="Check catalogs, part checksums, orphan files and repeated forecast keys (exit 1 on an error)"
+    )
+    verify_results_p.add_argument("save_dir", metavar="SAVE_DIR", help="A model pipeline's save_dir")
+    verify_results_p.add_argument("--model", metavar="NAME", help="Verify this model's results only")
+
     # -- validate --
     val_p = sub.add_parser("validate", help="Validate a pipeline or workflow YAML")
     val_p.add_argument("yaml", metavar="pipeline.yaml", help="Path to YAML file to validate")
@@ -547,6 +612,7 @@ def main() -> None:
         "data": cmd_data,
         "model": cmd_model,
         "verify": cmd_verify,
+        "results": cmd_results,
         "validate": cmd_validate,
         "init": cmd_init,
     }
