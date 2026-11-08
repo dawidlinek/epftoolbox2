@@ -142,7 +142,7 @@ def kernel(refit="7D", **kwargs):
 
 @pytest.fixture(scope="module")
 def market():
-    """January to 19 April 2023 in Warsaw, over the spring switch."""
+    """1 January to 20 April 2023 00:00 in Warsaw (109 days of elapsed time), over the spring switch."""
     return make_market_data(start="2023-01-01", days=109, horizon=2, noise=5.0, seed=3)
 
 
@@ -306,8 +306,9 @@ def test_a_class_with_predict_block_gets_the_hooks_and_no_core_model_has_them():
 def test_a_call_holds_every_day_of_the_block_the_frame_has_padded_with_its_first_row(market, block_spy):
     """One call per unit, of the nominal length: the issue rows of the block's days with a row and finite inputs, in date
     order, whatever days the run forecasts (here Wednesday alone), then copies of the first. A day with a missing input (period
-    5 on Wednesday, horizon 1) is left out and its forecast skipped; the spring day has no 02:00, so period 2's call has six
-    days. A frame that ends on Friday leaves the weekend out, and the call keeps its length."""
+    5 on Wednesday, horizon 1) is left out and its forecast skipped; the spring day has no 02:00, and the day h before it
+    reads `load_d+{h}` there, so period 2's call has five days. A frame that ends on Friday leaves the weekend out, and the
+    call keeps its length."""
     data = market.copy()
     wednesday = np.asarray((data.index.tz_localize(None).normalize() == "2023-03-22") & (data.index.hour == 5))
     data.loc[wednesday, "wind_d+1"] = np.nan
@@ -340,8 +341,9 @@ def test_a_call_holds_every_day_of_the_block_the_frame_has_padded_with_its_first
 
 
 def test_a_monthly_unit_calls_31_rows_and_each_member_of_auto_its_own_rule(market, block_spy):
-    """`"1MS"`: the month's days the frame has with finite inputs (1 to 18 April, at 00:00 to 19 April), padded to 31. `"auto"` with windows [28, 91]: the 28-day member
-    refits daily, a call of its issue day alone (length 1), and the 91-day member weekly, a call of the week's days (7)."""
+    """`"1MS"`: the month's days the frame has with finite inputs (1 to 18 April, at 00:00 to 19 April: `load_d+1` reads 20
+    April), padded to 31. `"auto"` with windows [28, 91]: the 28-day member refits daily, a call of its issue day alone
+    (length 1), and the 91-day member weekly, a call of the week's days (7)."""
     kernel("1MS").run(market, "2023-04-12", "2023-04-12", horizon=1)
     april = block_days("2023-04-12", "1MS")
     for unit, dates, _, _ in block_spy:
