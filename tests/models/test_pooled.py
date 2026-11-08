@@ -222,6 +222,17 @@ def test_issue_timezone_data_on_one_frame_is_its_zone_written_out(tmp_path):
             tmp_path / "named" / f"{name}.manifest.json"
         )
     pd.testing.assert_frame_equal(by_data.availability(), named.availability())
+    checked = [
+        pipeline(zone).verify(frame, *HOURLY_TEST, horizon=2, days=2, models=["ols"]).table()
+        for zone in ("data", "Europe/Helsinki")
+    ]
+    pd.testing.assert_frame_equal(*checked)
+    shown = ModelPipeline(issue_time="12:00", issue_timezone="data").add_model(
+        PooledModel(OLSModel(predictors=PREDICTORS, training_window=30), name="pooled")
+    )
+    assert list(shown.explain(frame, model="pooled", horizon=2, echo=False)["predictors"]["predictor"]) == [
+        name.replace("{horizon}", "2") for name in PREDICTORS
+    ]
     with pytest.raises(ValueError, match="has none"):
         InformationSet("12:00", "data").in_data_zone(frame.index.tz_localize(None))
 
@@ -246,8 +257,11 @@ def hand_member(frame: pd.DataFrame, day: pd.Timestamp, window: int, horizon: in
     return (x - mean) / std, (y - y.mean()) / y.std(ddof=1), (issue - mean) / std, (y.mean(), y.std(ddof=1))
 
 
-@pytest.mark.parametrize("over", [("zone",), ("zone", "horizon")])
-def test_pooled_ols_over_three_zones_is_the_hand_fit(tmp_path, over):
+@pytest.mark.parametrize(
+    "over, zone_feature",
+    [(("zone",), "onehot"), (("zone", "horizon"), "onehot"), (("zone",), "code"), (("zone",), None)],
+)
+def test_pooled_ols_over_three_zones_is_the_hand_fit(tmp_path, over, zone_feature):
     # Other first dates, so a day id is another date in each frame, and other scales, so each zone's scaler differs.
     frames = {
         "PL": daily("PL"),
@@ -255,7 +269,9 @@ def test_pooled_ols_over_three_zones_is_the_hand_fit(tmp_path, over):
         "PT": daily("PT", seed=2, scale=0.3),
     }
     window, horizons = 40, [1, 3]
-    model = PooledModel(OLSModel(predictors=PREDICTORS, training_window=window, name="m"), over=over)
+    model = PooledModel(
+        OLSModel(predictors=PREDICTORS, training_window=window, name="m"), over=over, zone_feature=zone_feature
+    )
     panel = (
         ModelPipeline()
         .add_model(model)
@@ -271,7 +287,9 @@ def test_pooled_ols_over_three_zones_is_the_hand_fit(tmp_path, over):
                 for hz in unit:
                     columns = [name.replace("{horizon}", str(hz)) for name in PREDICTORS]
                     x, y, issue, params = hand_member(frames[zone], day, window, hz, columns)
-                    extra = np.eye(len(zones))[z]
+                    extra = {"onehot": np.eye(len(zones))[z], "code": np.array([float(z)]), None: np.empty(0)}[
+                        zone_feature
+                    ]
                     if len(unit) > 1:
                         extra = np.concatenate([extra, np.eye(len(unit))[unit.index(hz)]])
                     parts[(zone, hz)] = (
