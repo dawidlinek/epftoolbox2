@@ -476,24 +476,26 @@ def results_to_frame(results) -> pd.DataFrame: ...  # list, (name, result) pairs
 class OLSModel(BaseModel):
     def __init__(self, predictors: Union[List, Callable], training_window: int = 365, *,
                  fit_intercept: bool = False, name: str = "Model", scaler: ScalerSpec = "standard",
-                 newest_target: str = "d-1", refit: Optional[str] = None): ...
+                 newest_target: str = "d-1", refit: Optional[str] = None,
+                 binary_mask: Optional[str] = None): ...
 
 class LassoCVModel(BaseModel):
     def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
                  cv: int = 5, max_iter: int = 10000, *, fit_intercept: bool = True,
                  name: str = "Model", scaler: ScalerSpec = "standard", newest_target: str = "d-1",
-                 refit: Optional[str] = None): ...
+                 refit: Optional[str] = None, binary_mask: Optional[str] = None): ...
 
 class RidgeModel(BaseModel):                # penalty chosen by leave-one-out (RidgeCV, cv=None)
     def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
                  alphas: Optional[Sequence[float]] = None, *, fit_intercept: bool = True,
                  name: str = "Model", scaler: ScalerSpec = "standard", newest_target: str = "d-1",
-                 refit: Optional[str] = None): ...
+                 refit: Optional[str] = None, binary_mask: Optional[str] = None): ...
 
 class LEARModel(BaseModel):                 # Lasso, penalty by AIC/BIC on the LARS path + Lago's refit, or blocked CV
     def __init__(self, predictors: Union[List, Callable], training_window=(56, 84, 728, "expanding"),
                  criterion: str = "bic", solver: str = "lars", *, scaler: ScalerSpec = "asinh",
-                 name: str = "LEAR", newest_target: str = "d-1", refit: Optional[str] = None): ...
+                 name: str = "LEAR", newest_target: str = "d-1", refit: Optional[str] = None,
+                 binary_mask: Optional[str] = None): ...
 
     @classmethod
     def lago(cls, exogenous: Sequence[str], *, price: str = "price", calendar_prefix: str = "",
@@ -504,7 +506,7 @@ class NaiveModel(BaseModel):                # one column's value on the issue ro
                  known_only: bool = True): ...
 ```
 
-`training_window` of `OLSModel`, `LassoCVModel`, `RidgeModel` and `LEARModel` is days from 1 (an int, default `365`; `LEARModel`'s `[56, 84, 728, "expanding"]`), `"expanding"`, or a list of them such as `[56, 84, 728, "expanding"]` whose windows are fitted separately and averaged inside the model; anything else raises (see [Training Windows](/epftoolbox2/model-pipeline/training-windows/)). `ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance. `fit_intercept` is keyword-only and scikit-learn's; a set value is saved and compared on resume, the default isn't written, so results and files made before it keep their manifests. `RidgeModel`'s `alphas` is the grid of penalties (`None`: `np.logspace(-3, 4, 36)`); its manifest holds the resolved grid, its YAML writes `alphas` only when set, a penalty below 1e-6 raises, and a fit needs at least 3 training rows. `LEARModel`'s `criterion` is `"bic"`, `"aic"` or `"cv"` (old `LassoLarsCV`, five blocked folds, the path's coefficients with no refit) and its `solver` `"lars"` (the exact Lasso at the chosen penalty) or `"cd"` (Lago's coordinate descent, at most 2500 sweeps), `"cv"` with `"lars"` only; both are always written to YAML and the manifest, which also records the kernels' backend as provenance (`kernels`); `LEARModel.lago(exogenous)` takes the exogenous series in the order of the dataset's file (see [LEARModel](/epftoolbox2/models/lear/)). `NaiveModel` takes a list of one name (or a function of `ctx` returning one), forecasts its value on the row of the issue day and has no coefficients; with `known_only` and an information set a value its rule puts after the issue time is no forecast, counted as `not_published` (see [Week-ahead forecasting](/epftoolbox2/model-pipeline/week-ahead/)). It has no `training_window`, `scaler`, `newest_target` or `refit`: setting `training_window`, `newest_target` or `refit` raises.
+`training_window` of `OLSModel`, `LassoCVModel`, `RidgeModel` and `LEARModel` is days from 1 (an int, default `365`; `LEARModel`'s `[56, 84, 728, "expanding"]`), `"expanding"`, or a list of them such as `[56, 84, 728, "expanding"]` whose windows are fitted separately and averaged inside the model; anything else raises (see [Training Windows](/epftoolbox2/model-pipeline/training-windows/)). `ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance. `fit_intercept` is keyword-only and scikit-learn's; a set value is saved and compared on resume, the default isn't written, so results and files made before it keep their manifests. `RidgeModel`'s `alphas` is the grid of penalties (`None`: `np.logspace(-3, 4, 36)`); its manifest holds the resolved grid, its YAML writes `alphas` only when set, a penalty below 1e-6 raises, and a fit needs at least 3 training rows. `LEARModel`'s `criterion` is `"bic"`, `"aic"` or `"cv"` (old `LassoLarsCV`, five blocked folds, the path's coefficients with no refit) and its `solver` `"lars"` (the exact Lasso at the chosen penalty) or `"cd"` (Lago's coordinate descent, at most 2500 sweeps), `"cv"` with `"lars"` only; both are always written to YAML and the manifest, which also records the kernels' backend as provenance (`kernels`); `LEARModel.lago(exogenous)` takes the exogenous series in the order of the dataset's file (see [LEARModel](/epftoolbox2/models/lear/)). `NaiveModel` takes a list of one name (or a function of `ctx` returning one), forecasts its value on the row of the issue day and has no coefficients; with `known_only` and an information set a value its rule puts after the issue time is no forecast, counted as `not_published` (see [Week-ahead forecasting](/epftoolbox2/model-pipeline/week-ahead/)). It has no `training_window`, `scaler`, `newest_target`, `refit` or `binary_mask`: setting `training_window`, `newest_target`, `refit` or `binary_mask` raises. `binary_mask` of the other four says which training rows decide the binary 0/1 columns a scaler leaves unscaled: `None` (the default) the window's first day without `refit` and each unit's rows with it, `"first_day"` the first by name (it raises with `refit`), `"fit"` each fit's own rows, so that no forecast depends on `test_start`; `"fit"` without `refit` is recorded in the manifest's `training_cut`, and YAML writes it only when set (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start)).
 
 ### Predictor functions
 

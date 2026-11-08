@@ -159,7 +159,8 @@ A forecast issued on D uses the fit of its **anchor** a, the refit day on or bef
   `"7D"` gives each Friday its own anchor, the Monday of its week, so no fit is shared and only the rows move.
 - **The scaler comes from the unit's rows.** It is fitted on the unit's training rows, and the binary columns it leaves alone are
   found on those same rows (see [Binary columns](/epftoolbox2/models/scalers/#binary-columns)), not on the first test day. So a
-  forecast doesn't depend on where the run starts, as a plain model's binary columns do.
+  forecast doesn't depend on where the run starts, as a plain model's binary columns do, unless that model has
+  [`binary_mask="fit"`](#binary-columns-and-test_start).
 - **The frame must go back from the anchor.** The rows a run reads, and so the days the [data checks](/epftoolbox2/model-pipeline/overview/#data-checks)
   look at, reach W+h days back from the anchor of the first issue day, which can be before `test_start`: by up to 6 days under `"7D"`,
   and by almost a year under `"12MS"`. A frame that starts after the earliest row a fit of the run trains on raises `ValueError`
@@ -232,6 +233,48 @@ lose 0.39 and 0.24 % of their MAE, and the average moves from 3.6224 to 3.6252 E
 `None` is better). It makes 57 % of the fits, exactly (2 + 2/7) / 4 since two windows of four still refit daily, at about 40 % of
 the compute (one run of each on a shared machine; the short windows are about a third of a fit's cost here, not the fifth they were in
 the study). Forecasts issued on a Monday are those of `refit=None`, bit for bit.
+
+## Binary columns and `test_start`
+
+A scaler leaves a binary 0/1 predictor as it is (see [Binary columns](/epftoolbox2/models/scalers/#binary-columns)). Which of a
+list's predictors those are is read on some training rows, and `binary_mask`, on every model that fits, says which:
+
+```python
+from epftoolbox2.models import OLSModel
+
+model = OLSModel(["load_forecast_d+{horizon}", "solar_forecast_d+{horizon}", "is_weekend_d+{horizon}"], binary_mask="fit")
+```
+
+| `binary_mask` | Without `refit` | With `refit` |
+|---|---|---|
+| `None`, the default | the rows of the window's first calendar day, for every forecast of the window | each unit's own rows |
+| `"first_day"` | the same as `None` | raises `ValueError` |
+| `"fit"` | each forecast's own rows | each unit's own rows, the same as `None` |
+
+- **The default depends on where the test starts.** Read on the first day, a list's mask holds for every forecast of the test, or of
+  the window in a run with [validation](/epftoolbox2/model-pipeline/validation-and-test/). A column that is 0/1 in the first day's
+  rows and not in later ones stays unscaled: night-time solar at 06:00 is 0 in every training row of a test that starts on 1 March,
+  so it stays unscaled until the test ends, while a test that starts on 18 March, whose rows have values, scales it. The forecasts
+  at 06:00 (and 18:00) from 18 March then differ between the two runs, by up to 6 EUR/MWh on the frame of
+  `tests/test_known_issues.py`, which pins it.
+- **`"fit"` reads each fit's own rows.** Those of the forecast's span, D-W-h to D-1-h (or as [`newest_target`](#the-newest-target)
+  cuts it), in its list's columns, before the rows with a missing value and, for a `train_on="matching"` list, those of other days
+  are dropped: what a `refit="1D"` unit reads, so a record of `"fit"` is the record of `refit="1D"`. Each window of a
+  [list of windows](/epftoolbox2/model-pipeline/training-windows/) reads its own. A forecast then depends on its key and the data
+  alone: runs that start or end on other days, run with a validation window, or issue on Fridays only give every forecast they share
+  the same numbers, bit for bit.
+- **What moves.** Only forecasts whose own rows say otherwise about a column than the first day's: a column that turns from 0/1
+  to other values inside the test or back, which a short window over the seasons can give (night-time solar, cooling degree days).
+  On Lago's DE data (`lear_predictors`, W = 364, h = 1 and 2, the 61 days from 30 October 2016) OLS, LassoCV and LEAR move none
+  of their 2,928 forecasts: every input there is continuous, or 0/1, in every window. On the Polish week-ahead study's Fridays of
+  2024 (h = 3 to 9) its models at W = 1092 move none either. With a 91-day window a LassoCV moves 78 and 101 of the 301 forecasts of
+  the daily minimum and maximum load, from June on, by up to 213 and 297 MW: cooling degree days are 0 in every row of a window that
+  starts in January, so the default feeds them to the Lasso raw all summer.
+- **Resuming and YAML.** The manifest's `training_cut` gains `"binary_mask": "fit"` without `refit`, so resuming results made with
+  the other rule refuses with `ManifestMismatchError`. `"first_day"` is the default's rule and resumes it, and with `refit` `"fit"`
+  is the refit's own rule and writes nothing. Such a manifest has no `binary_masks`, as a fit's mask follows from its rows, which the
+  data hash covers, so results of `"fit"` resume across test starts where the default's refuse. YAML writes `binary_mask` only
+  when it is set.
 
 ## What a clock change does
 
@@ -368,7 +411,8 @@ report = pipeline.report("fridays", test=("2023-01-01", "2024-12-31"), horizons=
     March, which has no 02:00.
 
   They differ only where a column is 0 or 1 in the rows one of those days reads and not in the other's. Both days are the forecast's
-  issue day or earlier, so neither run reads a row dated after D-1-h. Fixed lists and lists used on every day don't differ.
+  issue day or earlier, so neither run reads a row dated after D-1-h. Fixed lists and lists used on every day don't differ, and
+  with [`binary_mask="fit"`](#binary-columns-and-test_start), which reads no mask day, no list does.
 - **Only listed days are planned.** Another weekday is no issue day: its keys are neither planned, nor missing, nor skipped.
   `planned` in `forecast_counts()` counts the listed days alone, with the clock's rule above.
 - **The information set sees the listed days alone.** The check before any fit, the `availability="warn"` listing and
