@@ -32,7 +32,7 @@ epf weights fetch mypackage.models:MyFamilyModel        # the card's repository,
 epf weights fetch mypackage.models:MyFamilyModel --size small --accept 'CC-BY-NC-4.0'
 epf weights fetch all                                    # every registered family with weights
 epf weights list                                         # what is in the cache: files, size, licence, fetch time
-epf weights verify                                       # re-hash every file against its fetch record
+epf weights verify                                       # re-hash every file against its fetch record, name files it lacks
 ```
 
 `fetch` shows the licence, the size, the repository, the revision and the destination, downloads the card's files from Hugging
@@ -40,11 +40,17 @@ Face (`huggingface_hub`, installed by the family's extra) and checks each file's
 
 - **A licence with restrictions needs `--accept`.** Weights that may not be used commercially, or whose licence loses its rights
   above a revenue, are fetched only with `--accept <licence>` naming the card's licence exactly: fetching
-  is the act of accepting it, and only you can do that. The library never accepts a gated repository's terms either: log in with
-  your own Hugging Face account and accept them on the website first.
+  is the act of accepting it, and only you can do that. The fetch record keeps the licence accepted, and a run of a card that needs
+  it refuses weights fetched without it (under another card that shares the repository, or a record written by hand): fetch
+  them again with `--accept`. The library never accepts a gated repository's terms either: log in with your own Hugging Face
+  account and accept them on the website first. A download that fails (a gated or missing repository, no network) records
+  nothing; `fetch all` goes on with the next class and exits with code 1 at the end.
 - **Files upstream replaced are refused.** A file whose sha256 differs from the card's means the repository changed (a history
   squash, new weights under the old name). Nothing is recorded and no run uses the files. Fetch again with `--revision <rev>`
   given explicitly to accept them: the new hashes are recorded, and every run warns that they are not the reference weights.
+- **Another revision** than the card's (`--revision v2`) lands in its own directory, and a model runs on it only when told,
+  with `weights="<owner>/<name>@v2"`: not the reference weights, warned and recorded. A revision is a branch, tag or commit
+  name; anything else (a path, `..`) is refused.
 - **The cache** is `EPFTOOLBOX2_WEIGHTS_DIR`, or `~/.cache/epftoolbox2/weights` without it, one directory per repository and
   revision (`<cache>/<owner>/<name>/<revision>/`) holding the files and `epftoolbox2-weights.json`, the record of the fetch:
   each file's sha256 and size, the licence and the one accepted, the time. On a cluster, fetch on the login node into a cache on
@@ -55,9 +61,14 @@ of a class's sizes.
 
 ### Your own weights
 
-A family with weights takes `weights="/path/to/file-or-dir"`: used as given, hashed and recorded. Files whose hashes differ from
-the card's are *not the reference weights*: the pre-flight warns, and the manifest and `report.provenance()` record what was
-used.
+A family with weights takes `weights="/path/to/file-or-dir"`: used as given, hashed and recorded, and its licence is yours to
+keep (nothing records an acceptance for files you bring). Files whose hashes differ from the card's are *not the reference
+weights*: the pre-flight warns, and the manifest and `report.provenance()` record what was used. `weights="<owner>/<name>@<rev>"`
+is an entry of the cache instead, as `epf weights fetch --revision <rev>` left it.
+
+A directory (yours, or an entry of the cache) holding files nobody listed, beyond the card's or beyond its fetch, warns, and
+`epf weights verify` names them (exit code 1): an adapter loads each file it needs by its name, never the whole directory, but a
+stray `pytorch_model.bin` next to the weights is worth knowing about.
 
 <Aside type="caution">
 A run, `verify()` and `report()` never download anything. A family's adapter loads its weights with `HF_HUB_OFFLINE=1` and
@@ -138,8 +149,10 @@ A change of any compared entry raises `ManifestMismatchError` naming it (`runtim
 
 ## Declaring a card
 
-A family of your own declares its card as the class attribute `_card`; one with several sizes lists them in `_card_variants`
-(size -> card), which `epf weights fetch ... --size` picks from. A carded family sets `_engine_ok = False` too, so the
+A family of your own declares its card as the class attribute `_card`; its adapter gets the weights from
+`epftoolbox2.models._cards.resolve_model_weights(model)` inside `epftoolbox2.models._weights.offline()` and opens each file by
+name (`resolved.path("model.safetensors")`), never the directory as a whole. A family with several sizes lists them in
+`_card_variants` (size -> card), which `epf weights fetch ... --size` picks from. A carded family sets `_engine_ok = False` too, so the
 [engine](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine) never takes it, and returns the settings that change its
 numbers from `_runtime_fields()`.
 

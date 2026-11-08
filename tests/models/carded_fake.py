@@ -9,6 +9,7 @@ a module that is there (`json`) or one that isn't. `fake_download` stands in for
 Import it as `tests.models.carded_fake`, the name `COMPONENT_REGISTRY` and `epf weights` use for it.
 """
 
+import dataclasses
 import hashlib
 from datetime import date
 from pathlib import Path
@@ -94,6 +95,12 @@ class CardedModel(OLSModel):
     def _predict_fitted(self, fitted, test_x):
         prediction, coefficients = super()._predict_fitted(fitted, test_x)
         return prediction + self._loaded_offset(), coefficients
+
+
+class OtherCardedModel(CardedModel):
+    """A second family, its weights in another repository with no hash on its card (the first fetch records it)."""
+
+    _card = dataclasses.replace(CARD, weights=WeightsRef("fake-org/other-fm", "v1", {WEIGHTS_FILE: None}))
 
 
 def run_data_card(family: str, extra=None) -> ModelCard:

@@ -937,3 +937,124 @@ def test_a_file_replaced_with_the_same_size_and_mtime_is_hashed_again(tmp_path):
     os.replace(new, path)
     assert path.stat().st_mtime_ns == stat.st_mtime_ns and path.stat().st_size == stat.st_size
     assert sha256_of(path) == hashlib.sha256(b"B" * 1024).hexdigest() != first
+
+
+def test_a_revision_fetched_besides_the_card_s_is_used_by_naming_it(
+    data, weights_root, monkeypatch, tmp_path, no_network
+):
+    """`fetch --revision v2` lands in `<repo>/v2/`; a model runs on it with `weights="<repo>@v2"` (not the reference weights,
+    warned and recorded), and the card's own revision stays what a model without `weights` needs."""
+    fetch_into_cache(monkeypatch, weights_bytes(0.0, note=" v2"), revision="v2")
+    assert (weights_root / REPO / "v2" / SIDECAR).is_file()
+    with pytest.raises(MissingWeightsError, match=f"no weights for {REPO}@{REVISION}"):
+        preflight([carded()])
+    with pytest.warns(UserWarning, match="not the reference weights"):
+        report = run(data, carded(weights=f"{REPO}@v2"), save_dir=tmp_path / "out")
+    assert manifest(tmp_path / "out", "carded")["weights"]["ref"] == f"{REPO}@v2"
+    assert report.provenance().iloc[0]["weights"] == f"{REPO}@v2"
+    with pytest.raises(MissingWeightsError, match=rf"no weights for {REPO}@v3 .*--revision v3"):
+        preflight([carded(weights=f"{REPO}@v3")])
+
+
+@pytest.mark.parametrize("revision", ["../../../escaped", "/an/absolute/path", "v1/../../x", "", "a b"])
+def test_a_revision_must_name_a_branch_tag_or_commit(weights_root, monkeypatch, tmp_path, revision):
+    calls = []
+    monkeypatch.setattr(_weights, "snapshot_download", fake_download({WEIGHTS_FILE: REFERENCE}, calls))
+    with pytest.raises(ValueError, match="revision"):
+        _weights.fetch(CARD, "CardedModel", revision=revision, accept=LICENCE)
+    assert calls == [] and not any(tmp_path.rglob(SIDECAR))
+    with pytest.raises(ValueError, match="revision"):
+        _weights.cache_dir(CARD.weights, weights_root, revision)
+
+
+def test_weights_fetched_without_accepting_a_restricted_licence_are_refused(weights_root, monkeypatch, no_network):
+    """The same repo@revision fetched under a permissive card, or a sidecar written by hand, doesn't carry the acceptance a
+    non-commercial or revenue-capped card needs: the pre-flight refuses it and names `--accept`."""
+    permissive = dataclasses.replace(CARD, commercial_use=True, revenue_cap=None)
+    monkeypatch.setattr(_weights, "snapshot_download", fake_download({WEIGHTS_FILE: REFERENCE}, []))
+    assert _weights.fetch(permissive, "CardedModel")["accepted"] is None
+    assert resolve(permissive).reference is True  # fine for the permissive card
+    with pytest.raises(MissingWeightsError, match=r"without accepting 'Fake-NC-1.0'.*--accept 'Fake-NC-1.0'"):
+        preflight([carded()])
+    sidecar = weights_root / REPO / REVISION / SIDECAR
+    stored = json.loads(sidecar.read_text())
+    sidecar.write_text(json.dumps({**stored, "accepted": "Another-Licence"}))
+    with pytest.raises(MissingWeightsError, match="without accepting"):
+        resolve(CARD)
+    _weights.fetch(CARD, "CardedModel", accept=LICENCE)
+    assert resolve(CARD).reference is True and json.loads(sidecar.read_text())["accepted"] == LICENCE
+    # A card that needs acceptance but names no licence id can't be accepted at all.
+    with pytest.raises(ValueError, match="names no licence"):
+        _weights.fetch(dataclasses.replace(CARD, licence=""), "CardedModel", accept="")
+
+
+def test_files_besides_the_listed_ones_are_reported(weights_root, monkeypatch, tmp_path, no_network):
+    """A loader of a whole directory could pick up a file nobody listed: `verify` reports it and `resolve` warns."""
+    whole = dataclasses.replace(
+        CARD, weights=WeightsRef("org/whole-repo", "v1", {}), commercial_use=True, revenue_cap=None
+    )
+    monkeypatch.setattr(
+        _weights, "snapshot_download", fake_download({"config.json": b"{}", "model.safetensors": b"w" * 100}, [])
+    )
+    _weights.fetch(whole, "M")
+    directory = _weights.cache_dir(whole.weights)
+    assert {f.status for f in _weights.verify_cache()} == {"ok"}
+    (directory / "pytorch_model.bin").write_bytes(b"other weights")
+    findings = {f.name: f.status for f in _weights.verify_cache()}
+    assert findings == {"config.json": "ok", "model.safetensors": "ok", "pytorch_model.bin": "unlisted"}
+    with pytest.warns(UserWarning, match=r"pytorch_model\.bin.*not listed"):
+        resolved = resolve(whole)
+    assert sorted(resolved.files) == ["config.json", "model.safetensors"] and resolved.unlisted == (
+        "pytorch_model.bin",
+    )
+    # A directory given as weights= with files beyond the card's.
+    given = tmp_path / "given"
+    given.mkdir()
+    (given / WEIGHTS_FILE).write_bytes(REFERENCE)
+    (given / "extra.bin").write_bytes(b"x")
+    with pytest.warns(UserWarning, match=r"extra\.bin.*not listed"):
+        assert resolve(CARD, given).unlisted == ("extra.bin",)
+
+
+class GatedRepoError(OSError):
+    """huggingface_hub's HTTP errors (a gated repository, a 404, no network) are OSErrors."""
+
+
+def test_epf_weights_fetch_reports_a_failed_download_and_goes_on(weights_root, monkeypatch, capsys, no_network):
+    def download(repo_id, revision, allow_patterns=None, local_dir=None, **kwargs):
+        if repo_id == REPO:
+            raise GatedRepoError(f"401 Client Error: access to model {repo_id} is restricted")
+        return fake_download({WEIGHTS_FILE: REFERENCE}, [])(repo_id, revision, allow_patterns, local_dir)
+
+    monkeypatch.setattr(_weights, "snapshot_download", download)
+    assert epf(monkeypatch, "weights", "fetch", CLASS_PATH, "--accept", LICENCE) == 1
+    out = said(capsys)
+    assert "the download of fake-org/fake-fm@v1 failed (GatedRepoError: 401 Client Error" in out
+    assert "huggingface-cli login" in out and "Traceback" not in out
+    assert not (weights_root / REPO / REVISION / SIDECAR).exists()
+    monkeypatch.setitem(COMPONENT_REGISTRY["models"], "CardedModel", "tests.models.carded_fake")
+    monkeypatch.setitem(COMPONENT_REGISTRY["models"], "OtherCardedModel", "tests.models.carded_fake")
+    assert (
+        epf(monkeypatch, "weights", "fetch", "all", "--accept", LICENCE) == 1
+    )  # the gated one fails, the other is fetched
+    out = said(capsys)
+    assert "OtherCardedModel: fake-org/other-fm@v1" in out and "sha256 recorded (the card pins none to verify)" in out
+    assert "sha256 verified" not in out and "1 fetch(es) failed" in out
+    assert (weights_root / "fake-org/other-fm/v1" / SIDECAR).is_file()
+    # A revision that isn't one is refused before anything downloads.
+    assert epf(monkeypatch, "weights", "fetch", "OtherCardedModel", "--revision", "../../x", "--accept", LICENCE) == 1
+    assert "must be a branch, tag or commit" in said(capsys)
+
+
+def test_epf_weights_fetch_of_another_revision_says_how_to_use_it(weights_root, monkeypatch, capsys, no_network):
+    monkeypatch.setattr(_weights, "snapshot_download", fake_download({WEIGHTS_FILE: REFERENCE}, []))
+    assert epf(monkeypatch, "weights", "fetch", CLASS_PATH, "--revision", "v2", "--accept", LICENCE) == 0
+    assert f"a model runs on them with weights='{REPO}@v2'" in said(capsys)
+
+
+def test_epf_weights_verify_fails_on_an_unlisted_file(fetched, monkeypatch, capsys):
+    assert epf(monkeypatch, "weights", "verify") == 0
+    (fetched / REPO / REVISION / "pytorch_model.bin").write_bytes(b"other weights")
+    assert epf(monkeypatch, "weights", "verify") == 1
+    out = said(capsys)
+    assert "unlisted" in out and "pytorch_model.bin" in out and "1 file(s) no fetch recorded" in out

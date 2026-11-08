@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from .._extras import EXTRAS, MissingExtraError, has_extra
-from ._weights import MissingWeightsError, ResolvedWeights, resolve
+from ._weights import REPO_PATTERN, REVISION_PATTERN, MissingWeightsError, ResolvedWeights, resolve
 
 if TYPE_CHECKING:  # pragma: no cover
     import pandas as pd
@@ -64,8 +64,6 @@ PROVENANCE_COLUMNS = [
     "test_verdict",
 ]
 
-_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
-_REVISION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -90,9 +88,9 @@ class WeightsRef:
     bytes: Optional[int] = None
 
     def __post_init__(self):
-        if not _REPO.match(self.repo or ""):
+        if not REPO_PATTERN.match(self.repo or "") or ".." in self.repo:
             raise ValueError(f"WeightsRef.repo must be 'owner/name', got {self.repo!r}")
-        if not _REVISION.match(self.revision or ""):
+        if not REVISION_PATTERN.match(self.revision or "") or ".." in self.revision:
             raise ValueError(f"WeightsRef.revision must be a branch, tag or commit, got {self.revision!r}")
         files = dict(self.files)
         for name, digest in files.items():
@@ -357,28 +355,25 @@ def fetch_command(model: Any) -> str:
 
 def resolve_model_weights(model: Any, seen: Optional[Dict] = None) -> Optional[ResolvedWeights]:
     """`_weights.resolve` for a model: its card and its `weights` parameter, if it has one. `seen` keeps one answer (or the
-    error) per card weights and path for one pre-flight, so a loop of a thousand variants hashes once."""
+    error) per card, path and fetch command for one pre-flight, so a loop of a thousand variants hashes once (and warns once,
+    naming the first of them)."""
     card = model._card
     weights = getattr(model, "weights", None)
-    ref = None if card is None else card.weights
     command = fetch_command(model)
-    key = (
-        "weights",
-        None if ref is None else (ref.repo, ref.revision, tuple(ref.files.items())),
-        str(weights),
-        command,
-    )
+    who = describe(model)
+    key = ("weights", id(card), str(weights), command)
     if seen is not None and key in seen:
-        found = seen[key]
+        first, found = seen[key]
     else:
+        first = who
         try:
-            found = resolve(card, weights, what="{model}", fetch_command=command)
+            found = resolve(card, weights, what=who, fetch_command=command)
         except MissingWeightsError as error:
             found = error
         if seen is not None:
-            seen[key] = found
+            seen[key] = (first, found)
     if isinstance(found, MissingWeightsError):
-        raise MissingWeightsError(found.message.replace("{model}", describe(model)))
+        raise MissingWeightsError(found.message.replace(first, who, 1))
     return found
 
 

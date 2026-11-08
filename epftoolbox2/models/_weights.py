@@ -31,8 +31,10 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
@@ -71,6 +73,10 @@ class WeightsMismatchError(ValueError):
     """`fetch` downloaded files whose sha256 is not the card's: upstream replaced them. Nothing was recorded."""
 
 
+class WeightsDownloadError(RuntimeError):
+    """`fetch` couldn't download: a gated or missing repository, a revision that doesn't exist, no network. Nothing recorded."""
+
+
 class LicenceNotAcceptedError(ValueError):
     """`fetch` of weights with a non-commercial or revenue-capped licence without `accept` naming that licence."""
 
@@ -81,9 +87,30 @@ def weights_dir() -> Path:
     return Path(raw if raw else DEFAULT_WEIGHTS_DIR).expanduser()
 
 
+# A Hugging Face repository (`owner/name`) and a revision (a branch, tag or commit): one path component each, never `..`.
+REPO_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
+REVISION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# `weights="<owner>/<name>@<revision>"`: that entry of the cache, as `fetch` left it (another revision than the card's).
+CACHE_REF = re.compile(
+    r"^(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*)@(?P<revision>[A-Za-z0-9][A-Za-z0-9._-]*)$"
+)
+
+
+def check_revision(revision: str) -> str:
+    """`revision` if it names a branch, tag or commit (letters, digits, `.`, `_`, `-`, not starting with `.`); ValueError
+    otherwise, so that no revision reaches a path outside the cache."""
+    if not isinstance(revision, str) or not REVISION_PATTERN.match(revision) or ".." in revision:
+        raise ValueError(
+            f"A weights revision must be a branch, tag or commit (letters, digits, '.', '_', '-'), got {revision!r}"
+        )
+    return revision
+
+
 def cache_dir(ref: "WeightsRef", root: Optional[Union[str, Path]] = None, revision: Optional[str] = None) -> Path:
-    """Where the files of `ref` (at `revision`, the card's by default) live: `<root>/<repo>/<revision>/`."""
-    return (Path(root).expanduser() if root is not None else weights_dir()) / ref.repo / (revision or ref.revision)
+    """Where the files of `ref` (at `revision`, the card's by default) live: `<root>/<repo>/<revision>/`. A revision that isn't
+    a branch, tag or commit raises ValueError (`check_revision`)."""
+    base = Path(root).expanduser() if root is not None else weights_dir()
+    return base / ref.repo / (ref.revision if revision is None else check_revision(revision))
 
 
 def sha256_of(path: Union[str, Path], cached: bool = True) -> str:
@@ -106,13 +133,17 @@ def sha256_of(path: Union[str, Path], cached: bool = True) -> str:
 
 class ResolvedWeights(NamedTuple):
     """Weights a run found: `ref` is `repo@revision` for the cache and the path as given for `weights=`, `root` the directory
-    holding the files (a single file's own directory), `files` each file's name under `root` -> sha256, and `reference`
-    whether those are the card's hashes (True), not all of them (False), or the card records none to compare with (None)."""
+    holding the files (a single file's own directory), `files` each file's name under `root` -> sha256, `reference` whether
+    those are the card's hashes (True), not all of them (False), or the card records none to compare with (None), and
+    `unlisted` the other files of `root`. An adapter loads `path(name)` for each file it needs, never `root` as a whole."""
 
     ref: str
     root: Path
     files: Dict[str, str]
     reference: Optional[bool]
+    # Files in `root` that nothing listed (a cache entry's beyond its fetch, a `weights=` directory's beyond the card's): an
+    # adapter loads the files it names (`path(name)`), never the whole directory, and `resolve` warns about these.
+    unlisted: Tuple[str, ...] = ()
 
     def path(self, name: Optional[str] = None) -> Path:
         """The path of the file `name`, or of the only file when there is one."""
@@ -146,9 +177,23 @@ def _listed_files(directory: Path) -> List[str]:
     names = []
     for path in sorted(directory.rglob("*")):
         relative = path.relative_to(directory)
-        if path.is_file() and relative.name != SIDECAR and not any(part.startswith(".") for part in relative.parts):
+        if (
+            path.is_file()
+            and relative.name not in (SIDECAR, SIDECAR + ".partial")
+            and not any(part.startswith(".") for part in relative.parts)
+        ):
             names.append(relative.as_posix())
     return names
+
+
+def _warn_unlisted(what: str, directory: Path, unlisted: Sequence[str], listed_by: str) -> None:
+    if unlisted:
+        warnings.warn(
+            f"{what}: {directory} holds {', '.join(unlisted)}, not listed by {listed_by}. The adapter loads the files it names, "
+            "never the whole directory, but check where they came from (`epf weights verify` lists them).",
+            UserWarning,
+            stacklevel=4,
+        )
 
 
 def resolve(
@@ -161,37 +206,72 @@ def resolve(
 ) -> Optional[ResolvedWeights]:
     """The weights a model runs with, hashed, or None for a card without weights (trained on the run's data) and no `weights`.
 
-    `weights` (the model's parameter) is a file or a directory used as given: a directory must hold the card's files, or every
-    file in it for a card that names none. Without it the card's files come from the cache (`cache_dir`), as `fetch` left them:
-    the sidecar must be there and each file must still have the sha256 it was fetched with. Anything else raises
-    `MissingWeightsError` naming `fetch_command`. Never downloads anything."""
+    `weights` (the model's parameter) is a file or a directory used as given (a directory must hold the card's files, or every
+    file in it for a card that names none), or `"<owner>/<name>@<revision>"`, the entry of the cache that `fetch` left for that
+    revision (`epf weights fetch ... --revision <revision>`). Without it the card's files come from the cache at the card's
+    revision (`cache_dir`). A cache entry counts only as `fetch` left it: its sidecar there, each file with the sha256 it was
+    fetched with, and, for a card whose licence needs accepting (`licence_flagged`), that licence accepted when it was fetched.
+    Anything else raises `MissingWeightsError` naming `fetch_command`. Files nobody listed warn. Never downloads anything."""
+    ref = None if card is None else card.weights
+    if weights is not None:
+        named = CACHE_REF.match(str(weights))
+        if named is None or Path(weights).expanduser().exists():
+            return _resolve_path(ref, Path(weights).expanduser(), str(weights), what)
+        repo, revision = named.group("repo"), named.group("revision")
+    elif ref is None:
+        return None
+    else:
+        repo, revision = ref.repo, ref.revision
+    if ref is not None and revision != ref.revision:
+        fetch_command += f" --revision {revision}"
+    return _resolve_cached(card, repo, revision, root, what, fetch_command)
+
+
+def _resolve_path(ref: Optional["WeightsRef"], given: Path, label: str, what: str) -> ResolvedWeights:
+    """`resolve` of a `weights=` file or directory, used as given."""
+    if given.is_file():
+        files = {given.name: sha256_of(given)}
+        return ResolvedWeights(label, given.parent, files, _reference(ref, files, by_name=False))
+    if not given.is_dir():
+        raise MissingWeightsError(f"{what}: weights={label!r} is neither a file nor a directory")
+    present = _listed_files(given)
+    names = list(ref.files) if ref is not None and ref.files else present
+    missing = [name for name in names if not (given / name).is_file()]
+    if missing or not names:
+        lacks = ", ".join(missing) if missing else "any file"
+        raise MissingWeightsError(f"{what}: weights={label!r} lacks {lacks}")
+    files = {name: sha256_of(given / name) for name in names}
+    unlisted = tuple(name for name in present if name not in files)
+    _warn_unlisted(what, given, unlisted, "its card has")
+    return ResolvedWeights(label, given, files, _reference(ref, files), unlisted)
+
+
+def _resolve_cached(
+    card: Optional["ModelCard"],
+    repo: str,
+    revision: str,
+    root: Optional[Union[str, Path]],
+    what: str,
+    fetch_command: str,
+) -> ResolvedWeights:
+    """`resolve` of the cache entry of `repo@revision`."""
     ref = None if card is None else card.weights
     hint = f"run `{fetch_command}` on a machine with network, or pass weights='/path/to/file-or-dir'"
-    if weights is not None:
-        given = Path(weights).expanduser()
-        if given.is_file():
-            files = {given.name: sha256_of(given)}
-            return ResolvedWeights(str(weights), given.parent, files, _reference(ref, files, by_name=False))
-        if not given.is_dir():
-            raise MissingWeightsError(f"{what}: weights={str(weights)!r} is neither a file nor a directory")
-        names = list(ref.files) if ref is not None and ref.files else _listed_files(given)
-        missing = [name for name in names if not (given / name).is_file()]
-        if missing or not names:
-            lacks = ", ".join(missing) if missing else "any file"
-            raise MissingWeightsError(f"{what}: weights={str(weights)!r} lacks {lacks}")
-        files = {name: sha256_of(given / name) for name in names}
-        return ResolvedWeights(str(weights), given, files, _reference(ref, files))
-    if ref is None:
-        return None
-    directory = cache_dir(ref, root)
+    base = Path(root).expanduser() if root is not None else weights_dir()
+    directory = base / repo / check_revision(revision)
     sidecar = directory / SIDECAR
     if not sidecar.is_file():
         raise MissingWeightsError(
-            f"{what}: no weights for {ref.repo}@{ref.revision} in {directory} (no {SIDECAR} there): {hint}"
+            f"{what}: no weights for {repo}@{revision} in {directory} (no {SIDECAR} there): {hint}"
         )
     stored = json.loads(sidecar.read_text())
+    if card is not None and licence_flagged(card) and stored.get("accepted") != card.licence:
+        raise MissingWeightsError(
+            f"{what}: the weights in {directory} were fetched without accepting {card.licence!r}, which this card needs "
+            f"({card.licence_url}): run `{fetch_command} --accept '{card.licence}'`"
+        )
     on_file = stored.get("files", {})
-    problems = [f"{name} was never fetched" for name in ref.files if name not in on_file]
+    problems = [f"{name} was never fetched" for name in (ref.files if ref is not None else ()) if name not in on_file]
     files: Dict[str, str] = {}
     for name, entry in on_file.items():
         path = directory / name
@@ -209,7 +289,9 @@ def resolve(
             f"{what}: the weights in {directory} are not the files fetched: {'; '.join(problems)}. Check them with `epf "
             f"weights verify`, or {hint}"
         )
-    return ResolvedWeights(f"{ref.repo}@{ref.revision}", directory, files, _reference(ref, files))
+    unlisted = tuple(name for name in _listed_files(directory) if name not in on_file)
+    _warn_unlisted(what, directory, unlisted, "its fetch")
+    return ResolvedWeights(f"{repo}@{revision}", directory, files, _reference(ref, files), unlisted)
 
 
 _OFFLINE_LOCK = threading.Lock()
@@ -285,14 +367,15 @@ class FetchPlan(NamedTuple):
 def fetch_plan(
     card: "ModelCard", what: str, revision: Optional[str] = None, root: Optional[Union[str, Path]] = None
 ) -> FetchPlan:
-    """The plan of `fetch(card, ...)`. A card without weights raises ValueError: there is nothing to fetch."""
+    """The plan of `fetch(card, ...)`. A card without weights raises ValueError (there is nothing to fetch), and so does a
+    `revision` that isn't a branch, tag or commit (`check_revision`)."""
     ref = card.weights
     if ref is None:
         raise ValueError(f"{what} has no weights to fetch: it trains on the run's data")
     return FetchPlan(
         what=what,
         repo=ref.repo,
-        revision=revision or ref.revision,
+        revision=ref.revision if revision is None else check_revision(revision),
         explicit_revision=revision is not None,
         files=tuple(ref.files),
         bytes=ref.bytes,
@@ -316,10 +399,16 @@ def fetch(
     """Download the card's weights into the cache and record them; returns the sidecar written.
 
     A licence that `licence_flagged` names needs `accept` equal to the card's `licence` (`LicenceNotAcceptedError` before any
-    download). Each file's sha256 must be the card's (`WeightsMismatchError`, nothing recorded) unless `revision` was given, which
+    download; a card that names no licence id is refused), and the sidecar records it (`accepted`), which `resolve` requires
+    of a card that needs it. A failed download raises `WeightsDownloadError`. Each file's sha256 must be the card's (`WeightsMismatchError`, nothing recorded) unless `revision` was given, which
     records the new hashes. A card that records no hash for a file gets the one downloaded. The library never accepts a gated
     repository's terms: that needs the user's own Hugging Face login and click-through."""
     plan = fetch_plan(card, what, revision, root)
+    if plan.flagged and not card.licence.strip():
+        raise ValueError(
+            f"{what}'s card needs its licence accepted (non-commercial or revenue-capped) but names no licence id to accept: "
+            "the card must name it before its weights can be fetched."
+        )
     if plan.flagged and (accept or "").strip() != card.licence:
         reason = "non-commercial" if not card.commercial_use else f"revenue cap: {card.revenue_cap}"
         raise LicenceNotAcceptedError(
@@ -342,7 +431,14 @@ def fetch(
         raise MissingExtraError(
             f"epf weights fetch {what}", card.extra or "", f"epf weights fetch {what} needs huggingface_hub: {install}"
         ) from error
-    directory = Path(downloaded) if downloaded else plan.destination
+    except OSError as error:  # huggingface_hub's HTTP errors (a gated or missing repository, no network) are OSErrors
+        raise WeightsDownloadError(
+            f"{what}: the download of {plan.repo}@{plan.revision} failed ({type(error).__name__}: {error}). A gated repository "
+            "needs your own Hugging Face login (`huggingface-cli login`) and its terms accepted on its page first; with "
+            "HF_HUB_OFFLINE set nothing downloads. Nothing was recorded."
+        ) from error
+    del downloaded  # the files are where `local_dir` put them, whatever the call answers
+    directory = plan.destination
     names = list(plan.files) or _listed_files(directory)
     missing = [name for name in names if not (directory / name).is_file()]
     if missing or not names:
@@ -437,7 +533,7 @@ def cache_rows(root: Optional[Union[str, Path]] = None) -> List[Tuple[str, str, 
 
 
 class Finding(NamedTuple):
-    """One file of `verify_cache`: `status` "ok", "changed" or "missing"."""
+    """One file of `verify_cache`: `status` "ok", "changed", "missing" or "unlisted" (in the directory, not in its fetch)."""
 
     directory: Path
     name: str
@@ -446,7 +542,8 @@ class Finding(NamedTuple):
 
 
 def verify_cache(root: Optional[Union[str, Path]] = None) -> List[Finding]:
-    """Re-hash every file the cache's sidecars record (whatever `sha256_of` kept) and compare with the hash fetched."""
+    """Re-hash every file the cache's sidecars record (whatever `sha256_of` kept) and compare with the hash fetched, and name
+    every other file of their directories ("unlisted"): a loader of a whole directory could pick one up."""
     findings = []
     for entry in cached(root):
         directory = entry["directory"]
@@ -463,4 +560,8 @@ def verify_cache(root: Optional[Union[str, Path]] = None) -> List[Finding]:
                 findings.append(Finding(directory, name, "ok"))
             else:
                 findings.append(Finding(directory, name, "changed", f"sha256 {digest}, fetched {stored.get('sha256')}"))
+        recorded = set(entry.get("files", {}))
+        for name in _listed_files(directory):
+            if name not in recorded:
+                findings.append(Finding(directory, name, "unlisted", "not in its fetch record"))
     return findings
