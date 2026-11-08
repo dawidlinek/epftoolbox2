@@ -17,9 +17,10 @@ each file's sha256 and bytes, the total, licence and its URL, the licence id acc
 time). `resolve` reads only that: a directory without a sidecar is not fetched, and a file whose hash is not the sidecar's has
 changed since (`epf weights verify` re-hashes everything).
 
-A file is hashed once per process: `sha256_of` keeps each hash under (path, size, mtime in ns), so a file rewritten in place
-hashes again. Inside an adapter's load, `offline()` holds `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` (and huggingface_hub's
-own constant, which it reads at import) and puts them back afterwards, so a package that would fetch on its own fails instead.
+A file is hashed once per process: `sha256_of` keeps each hash under its path, device, inode, size, mtime and ctime, so a file
+rewritten in place or replaced by another (even with its size and mtime) hashes again. Inside an adapter's load, `offline()`
+holds `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` (and huggingface_hub's own constant, which it reads at import) and puts
+them back afterwards, so a package that would fetch on its own fails instead.
 
 Nothing here imports an extra: `snapshot_download` imports huggingface_hub when it is called.
 """
@@ -49,8 +50,8 @@ SIDECAR = "epftoolbox2-weights.json"
 # What `offline()` sets to "1" while an adapter loads.
 OFFLINE_VARIABLES = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
 
-# (resolved path, size, mtime in ns) -> sha256: see `sha256_of`.
-_HASHES: Dict[Tuple[str, int, int], str] = {}
+# (resolved path, device, inode, size, mtime and ctime in ns) -> sha256: see `sha256_of`.
+_HASHES: Dict[Tuple[str, int, int, int, int, int], str] = {}
 
 
 class MissingWeightsError(ImportError):
@@ -86,11 +87,13 @@ def cache_dir(ref: "WeightsRef", root: Optional[Union[str, Path]] = None, revisi
 
 
 def sha256_of(path: Union[str, Path], cached: bool = True) -> str:
-    """The sha256 of a file, read once per process for each (path, size, mtime in ns): a file rewritten in place changes its
-    size or its mtime and is hashed again. `cached=False` reads it again whatever is kept (`epf weights verify`)."""
+    """The sha256 of a file, read once per process for each (path, device, inode, size, mtime and ctime in ns). A file rewritten
+    in place changes its size or its times, and one replaced (`cp -p`, `rsync -a` and tar restore the old mtime, and a file
+    system may keep it to the second) has another inode and a new ctime, which no copy can set: either is hashed again.
+    `cached=False` reads it again whatever is kept (`epf weights verify`)."""
     path = Path(path)
     stat = path.stat()
-    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    key = (str(path.resolve()), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
     if cached:
         found = _HASHES.get(key)
         if found is not None:

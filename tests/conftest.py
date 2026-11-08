@@ -68,7 +68,7 @@ def no_kept_tables():
 
 @pytest.fixture(autouse=True)
 def no_kept_hashes():
-    """Start every test with no weight file hashes kept (`models._weights._HASHES`, kept per process by (path, size, mtime)):
+    """Start every test with no weight file hashes kept (`models._weights._HASHES`, kept per process by path, inode, size and times):
     a worker reused for another test must hash its files itself."""
     from epftoolbox2.models import _weights
 

@@ -79,8 +79,8 @@ repository), and weights that are missing or changed since they were fetched are
 
 The error is `MissingWeightsError` when weights are among the problems, else `MissingExtraError`; both are `ImportError`s. A
 `Workflow` array task checks its own models only, before its data pipeline runs: a task of core models runs whatever another task
-lacks. Each weight file is hashed once per process (the hash is kept by path, size and modification time), so a loop of a
-thousand variants of one family costs one hash. `epftoolbox2.verify()` prints the extras installed and the weights in the cache.
+lacks. Each weight file is hashed once per process (the hash is kept by path, inode, size and the file's times, so a file
+replaced by another is hashed again), and a loop of a thousand variants of one family costs one hash. `epftoolbox2.verify()` prints the extras installed and the weights in the cache.
 
 ## Contamination verdicts
 

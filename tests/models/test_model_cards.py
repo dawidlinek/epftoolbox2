@@ -922,3 +922,18 @@ def test_each_model_is_judged_by_its_own_windows_in_a_joined_report(data, fetche
     for refs in ({**windowed.refs, **plain.refs}, {**plain.refs, **windowed.refs}):
         row = EvaluationReport(refs, [MAEEvaluator()]).provenance().iloc[0]
         assert (row["model"], row["validation_verdict"], row["test_verdict"]) == ("inside", None, POSSIBLY_CONTAMINATED)
+
+
+def test_a_file_replaced_with_the_same_size_and_mtime_is_hashed_again(tmp_path):
+    """`cp -p`, `rsync -a` or tar replace a file with one of the same size and the old mtime: a new inode and a new ctime, so
+    the kept hash is not used."""
+    path = tmp_path / "model.bin"
+    path.write_bytes(b"A" * 1024)
+    first = sha256_of(path)
+    stat = path.stat()
+    new = tmp_path / "model.bin.new"
+    new.write_bytes(b"B" * 1024)
+    os.utime(new, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    os.replace(new, path)
+    assert path.stat().st_mtime_ns == stat.st_mtime_ns and path.stat().st_size == stat.st_size
+    assert sha256_of(path) == hashlib.sha256(b"B" * 1024).hexdigest() != first
