@@ -249,8 +249,9 @@ class StatsFit(NamedTuple):
     test: np.ndarray
 
 
-# A fit from shared statistics: (prediction in target units, coefficients) per issue row of `StatsFit.test`, or None where the
-# model path must fit it (a hand-back), which it then does on the same rows.
+# A fit from shared statistics: (prediction in target units, coefficients) per issue row of `StatsFit.test`, None for a row the
+# model path must forecast, or None where the model path must fit the whole fit (a hand-back), which it then does on the same
+# rows.
 StatsFitter = Any
 
 
@@ -473,7 +474,7 @@ def _fit_member(
         extra["matching_days"] = matching_days
     if engine is not None:
         fitted = engine(StatsFit(hour, hz, train, col_idx, finite, train_x, train_y, scalable_mask, test_x))
-        if fitted is not None:
+        if fitted is not None and fitted[0] is not None:
             ((prediction, coefs),) = fitted
             return prediction, coefs, extra
 
@@ -715,7 +716,10 @@ def _fit_unit(
     predicted = None
     if engine is not None:
         predicted = engine(StatsFit(hour, hz, train, col_idx, finite, train_x, train_y, scalable_mask, test_rows))
-    if predicted is None:
+    if predicted is None or any(row is None for row in predicted):
+        # The whole unit, or the rows the engine left to the model path (each row's forecast is its own: scaled value by
+        # value, one row at a time), on the model path; a fit it refuses is every row's fit_error, as without the engine.
+        from_engine = predicted
         scaler = make_scaler(cfg.get("scaler", "standard"))
         train_x, train_y, test_x = scaler.fit_transform(
             train_x.copy(),
@@ -730,6 +734,9 @@ def _fit_unit(
             return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]
         predicted = []
         for row in range(len(forecast)):
+            if from_engine is not None and from_engine[row] is not None:
+                predicted.append(from_engine[row])
+                continue
             # One row at a time (decision 16 of the step 3 spec): a product over several rows can differ in the last bits.
             pred, coefs = model._predict_fitted(fitted, test_x[row : row + 1])
             predicted.append((scaler.inverse(float(pred)), coefs))

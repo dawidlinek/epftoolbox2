@@ -84,6 +84,9 @@ def _check_alphas(value):
 class RidgeModel(BaseModel):
     # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the scaled rows too, for the leverages.
     _ENGINE_NEEDS = frozenset({"rows"})
+    # No bound in standard deviations: an issue row goes to the model path where RidgeCV's own rounding at it exceeds the budget
+    # it has at the training rows (`_stats.issue_rounding_ok`, `RIDGE_ROUNDING_MAX`), which is how far out a row may be.
+    _ENGINE_ISSUE_Z = float("inf")
     # Saved to YAML only when not at these values: `alphas=None` is the default grid, which a manifest records in full.
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "alphas": None, "fit_intercept": True}
 

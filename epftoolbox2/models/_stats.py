@@ -451,14 +451,22 @@ def _same(a, b) -> bool:
 class LinearFit:
     """A linear fit from statistics: `predict(X) = X @ coef_ + intercept_`, as the scikit-learn estimators it stands for.
 
-    `alpha_` is the chosen penalty of a Ridge fit (None for OLS)."""
+    `alpha_` is the chosen penalty of a Ridge fit (None for OLS). `rounding` (Ridge) holds per column the scale of the model
+    path's own rounding at α* in target units per unit of |z - z̄| of a row (`issue_rounding_ok`), None for OLS."""
 
-    __slots__ = ("coef_", "intercept_", "alpha_")
+    __slots__ = ("coef_", "intercept_", "alpha_", "rounding")
 
-    def __init__(self, coef: np.ndarray, intercept: float = 0.0, alpha: Optional[float] = None):
+    def __init__(
+        self,
+        coef: np.ndarray,
+        intercept: float = 0.0,
+        alpha: Optional[float] = None,
+        rounding: Optional[np.ndarray] = None,
+    ):
         self.coef_ = np.asarray(coef, dtype=np.float64)
         self.intercept_ = float(intercept)
         self.alpha_ = alpha
+        self.rounding = rounding
 
     def predict(self, X) -> np.ndarray:
         X = np.asarray(X, dtype=np.float64)
@@ -519,8 +527,8 @@ def ols_fit(
     """`LinearRegression(fit_intercept)` from scaled sums by the normal equations, or None where the model path must fit it:
     n <= p + 1, a failed factorisation, or either guard."""
     p = np.asarray(stats.q).size
-    if stats.n < MIN_ROWS or stats.n <= p + 1 or not _finite(stats):
-        return None
+    if p == 0 or stats.n < MIN_ROWS or stats.n <= p + 1 or not _finite(stats):
+        return None  # p 0: scikit-learn refuses a fit of no feature, which the model path counts as a fit_error
     if fit_intercept:
         M, b = stats.G, stats.q
     else:
@@ -530,6 +538,30 @@ def ols_fit(
         return None
     intercept = float(stats.ybar - stats.zbar @ w) if fit_intercept else 0.0
     return LinearFit(w, intercept)
+
+
+def issue_distance(stats: ScaledStats, z: np.ndarray) -> float:
+    """How far an issue row (`z`, scaled as the fit's rows, one row) is from the fit's training rows: the largest
+    |z_j - z̄_j| / sd_j over the columns that vary on them (sd_j = sqrt(G_jj / (n - 1)), 1 on a scaled column), in training
+    standard deviations; 0.0 with none. A function of the fit and the row alone."""
+    spread = np.diag(stats.G)
+    live = spread > 0.0
+    if not live.any():
+        return 0.0
+    row = np.asarray(z, dtype=np.float64).reshape(-1)
+    distance = np.abs(row[live] - stats.zbar[live]) / np.sqrt(spread[live] / (stats.n - 1))
+    return float(distance.max())
+
+
+def issue_rounding_ok(fitted, stats: ScaledStats, z: np.ndarray, rounding_max: float = RIDGE_ROUNDING_MAX) -> bool:
+    """Whether the model path's own rounding at an issue row stays within the budget it has at the training rows: a fit
+    that carries `rounding` (Ridge's `LinearFit`) keeps `rounding @ |z - z̄|` at most `rounding_max` (target units); any
+    other fit, True."""
+    rounding = getattr(fitted, "rounding", None)
+    if rounding is None:
+        return True
+    row = np.asarray(z, dtype=np.float64).reshape(-1)
+    return bool(float(rounding @ np.abs(row - stats.zbar)) <= rounding_max)
 
 
 def ridgecv_rounding(Zc: np.ndarray, yc: np.ndarray) -> float:
@@ -550,8 +582,8 @@ def ridge_fit(
     `ridgecv_rounding / α` times `stats.yscale` (target units), above `rounding_max`."""
     n = int(stats.n)
     p = np.asarray(stats.q).size
-    if n < MIN_ROWS or n <= p or stats.rows is None or stats.yscale is None or not _finite(stats):
-        return None
+    if p == 0 or n < MIN_ROWS or n <= p or stats.rows is None or stats.yscale is None or not _finite(stats):
+        return None  # p 0: the model path's RidgeCV refuses it (a fit_error)
     alphas = [float(a) for a in np.atleast_1d(np.asarray(alphas, dtype=np.float64))]
     Z, y = stats.rows()
     if fit_intercept:
@@ -589,7 +621,10 @@ def ridge_fit(
     if live.size:
         w[live] = V @ (Vb / (lam + best_alpha))
     intercept = float(stats.ybar - stats.zbar @ w) if fit_intercept else 0.0
-    return LinearFit(w, intercept, best_alpha)
+    # The same measure at any row x: eps · Σ_j |x_j - z̄_j| Σ_k |Zc_kj| |yc_k| · yscale / α* (at a training row, its own term of
+    # `ridgecv_rounding`), for an issue row far outside the training rows (`issue_rounding_ok`).
+    rounding = EPS * (np.abs(Zc).T @ np.abs(yc)) * (stats.yscale / best_alpha)
+    return LinearFit(w, intercept, best_alpha, rounding)
 
 
 __all__ = [
@@ -603,6 +638,8 @@ __all__ = [
     "StatsFallback",
     "cholesky_solve",
     "estimator_params",
+    "issue_distance",
+    "issue_rounding_ok",
     "ols_fit",
     "ridge_fit",
     "ridgecv_rounding",

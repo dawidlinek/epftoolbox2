@@ -8,6 +8,12 @@ from .base import BaseModel
 class OLSModel(BaseModel):
     # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the sums alone.
     _ENGINE_NEEDS = frozenset()
+    # The farthest an issue row may be from its training rows for the engine to forecast it, in training standard deviations
+    # (`_stats.issue_distance`); a row beyond it is forecast on the model path. The normal equations and the model path's SVD
+    # differ in the last bits of a coefficient, which a row far out multiplies: up to 9.9e-10 at 30 (3.3e-9 at 100, 3.3e-8 at
+    # 1,000) on the harshest designs of `epftoolbox2-research/library_check_step5/engine_stats/far_sweep.py`, against the
+    # engine's 1e-8.
+    _ENGINE_ISSUE_Z = 30.0
     # Saved to YAML only when not at these values, so files saved before the option existed don't move.
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "fit_intercept": False}
 

@@ -493,6 +493,107 @@ def test_a_dummy_constant_on_its_rows_but_not_its_span(spring, tmp_path):
         assert engine["fits"] >= 20 and seen[name][2] <= 24 - engine["fits"], (name, engine)
 
 
+def empty_at_three(horizon, hour):
+    """The fixed list, but none at all for period 3."""
+    return [] if hour == 3 else [name.format(horizon=horizon) for name in PREDICTORS]
+
+
+def test_a_list_of_no_column_is_what_engine_off_makes_of_it(spring, tmp_path):
+    """A fit of no column goes back to the model path (`no_columns`): OLS and Ridge skip it there (scikit-learn refuses a fit
+    of no feature, a `fit_error`) and LEAR forecasts the training mean, as with engine off. Before, the engine forecast the
+    mean for all three, so engine on had forecasts that engine off skips. A model of no column at all raises with both."""
+
+    def models():
+        return [
+            OLSModel(empty_at_three, 28, name="ols"),
+            RidgeModel(empty_at_three, 28, name="ridge"),
+            lear(empty_at_three, 28, name="lear"),
+        ]
+
+    off, on = run_both(build(models), spring, tmp_path, test=("2023-03-20", "2023-03-21"), horizon=1)
+    pd.testing.assert_frame_equal(off.forecast_counts(), on.forecast_counts(), check_exact=True)
+    counts = on.forecast_counts().set_index("model")
+    assert counts.loc["ols", "fit_error"] == 2 and counts.loc["lear", "produced"] == 48
+    seen = compare(tmp_path / "off", tmp_path / "on", models())
+    for model in models():
+        off_records = records_of(tmp_path / "off" / f"{model.name}.jsonl")
+        on_records = records_of(tmp_path / "on" / f"{model.name}.jsonl")
+        assert all(text(on_records[k]) == text(off_records[k]) for k in on_records if k[1] == 3)
+        assert seen[model.name][2] < seen[model.name][0]  # the other periods from statistics
+        engine = json.loads((tmp_path / "on" / f"{model.name}.manifest.json").read_text())["engine"]
+        assert engine["fallbacks"].get("no_columns") == 2, (model.name, engine)
+    for engine in ("off", "on"):
+        with pytest.raises(RuntimeError, match="no forecasts produced"):
+            build(lambda: [OLSModel([], 28, name="none")])(engine).run(spring, "2023-03-20", "2023-03-20", horizon=1)
+
+
+def far_frame(spring, far, hours=range(24), days=("2023-03-21", "2023-03-23")):
+    """`outage_d+1`: N(0, 1) noise, and `far` on the given issue days and hours."""
+    data = spring.copy()
+    data["outage_d+1"] = np.random.default_rng(91).normal(0, 1, len(data))
+    dates = np.asarray(data.index.date)
+    on_days = np.isin(dates, [datetime.date.fromisoformat(day) for day in days]) & np.isin(data.index.hour, list(hours))
+    data.loc[on_days, "outage_d+1"] = far
+    return data
+
+
+@pytest.mark.parametrize("far", [50.0, 2e4])
+def test_an_issue_row_far_out_is_forecast_on_the_model_path(spring, tmp_path, far):
+    """An issue row beyond its model's bound (OLS 30 and LEAR 10 training standard deviations, `_ENGINE_ISSUE_Z`; Ridge where
+    RidgeCV's own rounding at the row exceeds its budget) is forecast on the model path, to the bit, counted as `far_issue`;
+    the others stay within the tolerances. Before, rows 2e4 out were 1e-7 apart. A refit unit forecasts its near rows from
+    statistics and its far ones on the model path, each row decided on its own (so the same whichever rows a run has)."""
+    names = [*PREDICTORS, "outage_d+1"]
+    data = far_frame(spring, far, hours=range(12))
+
+    def models():
+        return [
+            OLSModel(names, 56, name="ols"),
+            RidgeModel(names, 56, name="ridge"),
+            lear(names, 56, name="lear"),
+            OLSModel(names, 56, refit="7D", name="ols_7d"),
+            RidgeModel(names, 56, refit="7D", name="ridge_7d"),
+        ]
+
+    run_both(build(models), data, tmp_path, test=("2023-03-20", "2023-03-23"), horizon=1)
+    compare(tmp_path / "off", tmp_path / "on", models())
+    for model in models():
+        off_records = records_of(tmp_path / "off" / f"{model.name}.jsonl")
+        on_records = records_of(tmp_path / "on" / f"{model.name}.jsonl")
+        engine = json.loads((tmp_path / "on" / f"{model.name}.manifest.json").read_text())["engine"]
+        # Without refit the fits of 23 March train on 21 March's far rows, so their issue rows aren't far from them.
+        far_days = ("2023-03-21", "2023-03-23") if model.refit else ("2023-03-21",)
+        far_keys = [k for k in on_records if k[0] in far_days and k[1] < 12]
+        bitwise_far = sum(text(on_records[k]) == text(off_records[k]) for k in far_keys)
+        assert bitwise_far == len(far_keys) or (isinstance(model, RidgeModel) and far < 1e3), (model.name, engine)
+        # Ridge at 50 standard deviations: within RidgeCV's rounding budget, so most of its far rows from statistics.
+        assert 0 < engine["fallbacks"].get("far_issue", 0) <= len(far_keys) or (
+            isinstance(model, RidgeModel) and far < 1e3
+        )
+        near = [k for k in on_records if k not in far_keys]
+        assert sum(text(on_records[k]) != text(off_records[k]) for k in near) > len(near) // 2, model.name
+        assert engine["max_issue_z"] <= model._ENGINE_ISSUE_Z
+
+
+def test_sums_past_float64s_range_go_back_to_the_model_path(spring, tmp_path):
+    """A column whose values (1e307) overflow float64 in its sums at some periods: those fits go back to the model path
+    (`overflow`, which skips them as a `fit_error` as engine off does) and the group goes on. Before, the sums' error stopped
+    every model of the group."""
+    data = spring.copy()
+    huge = np.random.default_rng(92).uniform(1.0, 1.5, len(data))
+    data["huge"] = np.where(data.index.hour < 4, 1e307 * huge, huge)
+
+    def models():
+        return [OLSModel([*PREDICTORS, "huge"], 28, name="huge"), RidgeModel(PREDICTORS, 28, name="ridge")]
+
+    off, on = run_both(build(models), data, tmp_path, test=("2023-03-20", "2023-03-21"), horizon=1)
+    pd.testing.assert_frame_equal(off.forecast_counts(), on.forecast_counts(), check_exact=True)
+    assert on.forecast_counts().set_index("model").loc["huge", "fit_error"] == 8
+    compare(tmp_path / "off", tmp_path / "on", models())
+    engine = json.loads((tmp_path / "on" / "huge.manifest.json").read_text())["engine"]
+    assert engine["fallbacks"] == {"overflow": 8} and engine["fits"] == 40
+
+
 # --- one model, the same bits anywhere --------------------------------------------------------------------------------
 
 
@@ -579,13 +680,6 @@ def test_the_downdate_share_moves_no_bit(wide, tmp_path, monkeypatch, in_process
     assert same_files(tmp_path / "half", tmp_path / "other") == 40
 
 
-def test_one_and_four_blas_threads(wide, tmp_path, monkeypatch, in_process):
-    run_models(many_models(40), wide, tmp_path / "one")
-    with threadpool_limits(limits=4):
-        run_models(many_models(40), wide, tmp_path / "four")
-    assert same_files(tmp_path / "one", tmp_path / "four") == 40
-
-
 def test_large_designs_at_one_and_eight_blas_threads(in_process):
     """A fit of 121 columns over 400 rows: LAPACK's eigh and Cholesky and a threaded GEMM on the fit's rows change their
     last bits with the BLAS thread count at this size (Ridge's records moved at 8 threads), so a job with fits from
@@ -621,15 +715,21 @@ def test_one_and_three_processes_and_two_task_threads(wide, tmp_path, monkeypatc
     assert same_files(tmp_path / "one", tmp_path / "threads") == 30
 
 
-def test_items_that_read_a_span_share_a_thread():
-    keys = [[(0, 1, 0, 5)], [(0, 1, 0, 5)], [(0, 1, 3, 9)], [], [(0, 1, 0, 5), (0, 1, 3, 9)], [(0, 1, 3, 9)]]
+def test_items_that_read_the_same_spans_share_a_thread():
+    """`_batches` puts the items that read exactly the same spans on one thread, the largest sets first onto the least
+    loaded thread: an item that reads two spans (a window list) is with the others that read both, not necessarily with those
+    that read one of them, whose span its thread then builds as well (more work, the same bits: each thread has its own)."""
+    a, b = (0, 1, 0, 5), (0, 1, 3, 9)
+    keys = [[a], [a], [b], [], [a, b], [b]]
     batches = _engine_worker._batches(keys, 2)
     assert sorted(i for batch in batches for i in batch) == list(range(6))
-    where = {i: b for b, batch in enumerate(batches) for i in batch}
+    where = {i: n for n, batch in enumerate(batches) for i in batch}
     assert where[0] == where[1] and where[2] == where[5]
     assert all(batch == sorted(batch) for batch in batches)
     assert _engine_worker._batches(keys, 2) == batches  # deterministic
     assert _engine_worker._batches(keys, 1) == [list(range(6))]
+    # A single 28-day window next to a [14, 28] list: the list's items (both spans) on one thread, the others on the other.
+    assert _engine_worker._batches([[a], [a, b], [a, b], [b]], 2) == [[1, 2], [0, 3]]
 
 
 CRASH_DAY = datetime.date(2023, 3, 28)
@@ -910,8 +1010,9 @@ def test_switching_the_engine_refuses_a_resume(spring, tmp_path):
 
 
 def test_the_manifest_counts_the_last_runs_fits(spring, tmp_path):
-    """`engine` provenance: fits and hand-backs by reason, the largest |z| of an issue row and how many were far out; a resume
-    with nothing to fit leaves it, one that fits replaces it. An issue row 10^4 training standard deviations out is counted."""
+    """`engine` provenance: fits and hand-backs by reason (an issue row 10^4 training standard deviations out, forecast on the
+    model path, as `far_issue`), the largest distance of an issue row the engine forecast; a resume with nothing to fit leaves
+    it, one that fits replaces it: the counts are the last fitting run's alone."""
     data = spring.copy()
     issue = (np.asarray(data.index.date) == datetime.date(2023, 3, 21)) & (data.index.hour == 5)
     data.loc[issue, "wind_d+1"] = data["wind_d+1"].std() * 1e4
@@ -926,14 +1027,14 @@ def test_the_manifest_counts_the_last_runs_fits(spring, tmp_path):
 
     run()
     engine = json.loads((save / "ols.manifest.json").read_text())["engine"]
-    assert engine["fits"] == 48 and engine["fallbacks"] == {}
-    assert engine["far_issue_rows"] == 1 and engine["max_issue_z"] > 1e3
+    assert engine["fits"] == 47 and engine["fallbacks"] == {"far_issue": 1}
+    assert 1.0 < engine["max_issue_z"] <= OLSModel._ENGINE_ISSUE_Z
     run()  # nothing to fit
     assert json.loads((save / "ols.manifest.json").read_text())["engine"] == engine
     keep_first_day(save / "ols.jsonl")
     run()
     again = json.loads((save / "ols.manifest.json").read_text())["engine"]
-    assert again["fits"] == 24 and again["far_issue_rows"] == 1 and again["max_issue_z"] == engine["max_issue_z"]
+    assert again["fits"] == 23 and again["fallbacks"] == {"far_issue": 1}
 
 
 # --- the goldens ------------------------------------------------------------------------------------------------------

@@ -19,10 +19,15 @@ scaler and `_fit_predict` / `_fit_model`:
   `scale_binary`, `model._fit_stats`, and each issue row through `params.transform`, `model._predict_fitted` (one row at a time)
   and `params.inverse`.
 
-A fit with fewer than `_stats.MIN_ROWS` rows in ρ, one whose sums `standard_stats` can't scale (`StatsFallback`: cancellation,
-overflow), one `_fit_stats` declines (None: OLS's rank and conditioning guards, Ridge's n <= p and rounding budget, an estimator
-that isn't the one the statistics reproduce) or raises a ValueError on is **handed back**: the model path fits it there, on the
-same values, to the bit. Each hand-back is decided from the fit's own rows and span, so it is the same in any group.
+A fit of no column, one with fewer than `_stats.MIN_ROWS` rows in ρ, one whose sums overflow float64 (`_sums.SumsOverflow`) or
+that `standard_stats` can't scale (`StatsFallback`: cancellation, overflow), one `_fit_stats` declines (None: OLS's rank and
+conditioning guards, Ridge's n <= p and rounding budget, an estimator that isn't the one the statistics reproduce) or raises a
+ValueError on is **handed back**: the model path fits it there, on the same values, to the bit. So is the forecast of an issue
+row too far from the fit's training rows (`far_issue`): beyond its model's `_ENGINE_ISSUE_Z` training standard deviations
+(`_stats.issue_distance`: OLS 30, LEAR 10), or where RidgeCV's own rounding at that row exceeds its budget
+(`_stats.issue_rounding_ok`), since an extrapolation multiplies the last bits in which the two paths' coefficients differ; a
+refit unit forecasts its other rows from statistics. Each hand-back is decided from the fit's own rows and span, and the issue
+row's alone, so it is the same in any group and whichever rows a unit forecasts.
 
 Every element of the sums is a function of the two columns' values in ρ and of the span (exact integer slices, `_sums`), and
 everything after them is the fit's own, run on one BLAS thread (`_one_blas_thread`: LAPACK's own blocking moves bits with the
@@ -41,9 +46,9 @@ from threadpoolctl import threadpool_limits
 
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
-from ._stats import MIN_ROWS, StatsFallback, standard_stats
 from . import _worker as worker
-from ._sums import SpanSums
+from ._stats import MIN_ROWS, StatsFallback, issue_distance, issue_rounding_ok, standard_stats
+from ._sums import SpanSums, SumsOverflow
 from ._worker import (
     StatsFit,
     TaskFailed,
@@ -72,15 +77,21 @@ ENGINE_FIT_PATH: Optional[str] = "engine-1"
 # summed over ρ directly. Both give the same bits (`_sums`); τ decides speed alone.
 DOWNDATE_SHARE = 0.5
 
-# An issue row with a scaled column more than this many training standard deviations from its training mean is counted
-# (`EngineCounts.far_issue_rows`): an extrapolation multiplies a coefficient's last bits, which no fit-time guard can see.
-FAR_ISSUE_Z = 100.0
+# How far out of its training values an issue row may be for the engine to forecast it, in training standard deviations
+# (`_stats.issue_distance`), where a model class sets none (`_ENGINE_ISSUE_Z`): an extrapolation multiplies the last bits of
+# a coefficient, in which the engine and the model path differ, so a row beyond its model's bound is forecast on the model path.
+ISSUE_Z_MAX = 10.0
 
-# Why a fit went back to the model path (`EngineCounts.fallbacks`): fewer than `MIN_ROWS` rows in ρ; `StatsFallback`'s reasons
-# ("cancellation", "overflow"); `_fit_stats` returned None; `_fit_stats` raised a ValueError.
+# Why a fit went back to the model path (`EngineCounts.fallbacks`): no column (the model path then skips, or forecasts as it
+# does); fewer than `MIN_ROWS` rows in ρ; sums past float64's range ("overflow", also `StatsFallback`'s) or `StatsFallback`'s
+# other reason ("cancellation"); `_fit_stats` returned None; `_fit_stats` raised a ValueError. And per issue row: one beyond its
+# model's bound (`FAR_ISSUE`, counted per row; the fit forecasts its other rows).
+NO_COLUMNS = "no_columns"
 FEW_ROWS = "few_rows"
+OVERFLOW = "overflow"
 DECLINED = "declined"
 ERROR = "error"
+FAR_ISSUE = "far_issue"
 
 # What `_engine_init` loaded into a pool's worker: the chunk's models' inputs, by their place in the chunk.
 _E_MODELS: List["ModelInputs"] = []
@@ -127,17 +138,16 @@ class EngineTaskFailed(TaskFailed):
 
 class EngineCounts:
     """What one model's fits from shared statistics did, for the manifest's provenance (never compared): `fits` made from the
-    statistics, `fallbacks` handed back to the model path by reason, and of the issue rows they forecast the largest |z| of a
-    scaled column (`max_issue_z`, training standard deviations from the training mean) and how many had one above `FAR_ISSUE_Z`
-    (`far_issue_rows`)."""
+    statistics (that forecast at least one row), `fallbacks` handed back to the model path by reason (fits, and issue rows for
+    `FAR_ISSUE`), and the largest distance of an issue row the engine forecast from its training values (`max_issue_z`, in
+    training standard deviations, `_stats.issue_distance`)."""
 
-    __slots__ = ("fits", "fallbacks", "max_issue_z", "far_issue_rows")
+    __slots__ = ("fits", "fallbacks", "max_issue_z")
 
     def __init__(self):
         self.fits = 0
         self.fallbacks: Counter = Counter()
         self.max_issue_z = 0.0
-        self.far_issue_rows = 0
 
     def __bool__(self) -> bool:
         return bool(self.fits or self.fallbacks)
@@ -146,19 +156,15 @@ class EngineCounts:
         self.fits += other.fits
         self.fallbacks.update(other.fallbacks)
         self.max_issue_z = max(self.max_issue_z, other.max_issue_z)
-        self.far_issue_rows += other.far_issue_rows
 
     def issue(self, z: float) -> None:
         self.max_issue_z = max(self.max_issue_z, z)
-        if z > FAR_ISSUE_Z:
-            self.far_issue_rows += 1
 
     def to_dict(self) -> Dict:
         return {
             "fits": int(self.fits),
             "fallbacks": {reason: int(self.fallbacks[reason]) for reason in sorted(self.fallbacks)},
             "max_issue_z": float(self.max_issue_z),
-            "far_issue_rows": int(self.far_issue_rows),
         }
 
 
@@ -282,14 +288,21 @@ class EngineFits:
         self.counts.fallbacks[reason] += 1
         return None
 
-    def __call__(self, fit: StatsFit) -> Optional[List[Tuple[float, list]]]:
+    def __call__(self, fit: StatsFit) -> Optional[List[Optional[Tuple[float, list]]]]:
+        """The fit's forecast of each issue row (prediction in target units, coefficients) or None for a row the model path
+        forecasts (`FAR_ISSUE`); None for the whole fit (a hand-back)."""
+        if fit.x.shape[1] == 0:
+            return self._back(NO_COLUMNS)  # the model path's own outcome: a fit_error, or LEAR's mean
         r = fit.x.shape[0]
         if r < MIN_ROWS:
             return self._back(FEW_ROWS)
         span = self.spans.get(fit.period, fit.horizon, fit.rows)
         columns = span.local(fit.columns)
         method = "downdate" if span.n - r <= DOWNDATE_SHARE * span.n else "direct"
-        raw = span.sums.over(fit.finite, columns, method=method)
+        try:
+            raw = span.sums.over(fit.finite, columns, method=method)
+        except SumsOverflow:
+            return self._back(OVERFLOW)
         try:
             stats, params = standard_stats(raw, (fit.x, fit.y), fit.mask, self.scale_binary)
         except StatsFallback as exc:
@@ -300,14 +313,22 @@ class EngineFits:
             return self._back(ERROR)
         if fitted is None:
             return self._back(DECLINED)
-        varying = params.scaled & ~params.constant
-        out = []
+        bound = getattr(self.model, "_ENGINE_ISSUE_Z", ISSUE_Z_MAX)
+        out: List[Optional[Tuple[float, list]]] = []
         for row in range(fit.test.shape[0]):
-            # One row at a time, as the model path forecasts (decision 16 of the step 3 spec).
+            # One row at a time, as the model path forecasts (decision 16 of the step 3 spec). Whether a row is too far out is
+            # decided from the fit and that row alone, so the same whichever other rows a unit forecasts.
             z = params.transform(fit.test[row : row + 1])
-            self.counts.issue(float(np.abs(z[0, varying]).max()) if varying.any() else 0.0)
+            distance = issue_distance(stats, z)
+            if not (distance <= bound and issue_rounding_ok(fitted, stats, z)):
+                self.counts.fallbacks[FAR_ISSUE] += 1
+                out.append(None)
+                continue
+            self.counts.issue(distance)
             prediction, coefs = self.model._predict_fitted(fitted, z)
             out.append((params.inverse(float(prediction)), coefs))
+        if all(row is None for row in out):
+            return None
         self.counts.fits += 1
         return out
 
@@ -362,7 +383,8 @@ def run_job(job: Sequence[Tuple[int, List[tuple]]], models: Optional[Sequence[Mo
     some, on `models` (the pool's if None). Returns (place, records, [(task, skip reason)], its `EngineCounts` or None) per
     model, as `_run_day` or `_run_block` returns them for that model's tasks, its tasks or units in their order in the job.
     With `THREADS_PER_PROCESS` above 1 the job's tasks (refit=None) or units (refit) of every model run on that many threads,
-    those that read the same spans on one (`_batches`), each thread with its own spans. A task that raises raises
+    those that read exactly the same spans on one (`_batches`), each thread with its own spans: a span that items of two
+    threads read (a window list's and a single window's) is built on both. A task that raises raises
     `EngineTaskFailed` naming its model."""
     models = _E_MODELS if models is None else models
     items: List[Tuple[int, tuple, Optional[List[tuple]]]] = []  # (place, task or unit, the unit's tasks or None)

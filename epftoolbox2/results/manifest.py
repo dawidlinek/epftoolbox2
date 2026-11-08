@@ -258,7 +258,7 @@ class Manifest:
     # model path. Compared on resume: switching refuses (`allow_manifest_mismatch=True` overrides).
     fit_path: Optional[str] = None
     # Provenance of the fits from shared statistics of the last run that made any (`models._engine_worker.EngineCounts`):
-    # {"fits", "fallbacks": {reason: count}, "max_issue_z", "far_issue_rows"}; None (and no key) otherwise. Never compared.
+    # {"fits", "fallbacks": {reason: count}, "max_issue_z"}; None (and no key) otherwise. Never compared.
     engine: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:

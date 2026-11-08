@@ -99,6 +99,11 @@ _SAFE_EXPONENT = 400
 """Column exponents within ±this of β scale a Gram by two multiplications, every intermediate a normal float."""
 
 
+class SumsOverflow(ValueError):
+    """A requested column (or y) has values too large for exact sums: their sum or x - shift overflows float64. The engine
+    hands such a fit back to the model path (`_engine_worker.EngineFits`)."""
+
+
 class RawSums(NamedTuple):
     """Sums over a subset of a span's rows, about the span's shifts (`SpanSums.over`).
 
@@ -619,12 +624,12 @@ class SpanSums:
     def _check_finite(self, rows: np.ndarray, cols: np.ndarray) -> None:
         unusable = self._unusable[cols]
         if unusable.any():
-            raise ValueError(
+            raise SumsOverflow(
                 f"column(s) {np.unique(cols[unusable]).tolist()} of x have values too large for exact sums (their sum or "
                 "x - shift overflows float64)"
             )
         if self._y_unusable:
-            raise ValueError("y has values too large for exact sums (its sum or y - shift overflows float64)")
+            raise SumsOverflow("y has values too large for exact sums (its sum or y - shift overflows float64)")
         if self._ybad[rows].any():
             raise ValueError("y has a NaN or inf in the requested rows")
         gappy = self._n_bad[cols] > 0
