@@ -101,7 +101,15 @@ higher `revision` gets that revision, so that it is the record read.
 
 **A crash while writing** can leave the last line half-written. Reading skips it with a warning, and the next run into the file cuts
 it off, with a warning naming its bytes, before it appends: its key is forecast again, and the file ends as a fresh run's would. A line
-that isn't a record anywhere else raises `ValueError` with its line number.
+that isn't a record anywhere else raises `ValueError` with its line number, if it is read: a damaged line that a later record replaces
+(a lower `revision`, or a skip record under a forecast) isn't parsed, so it isn't reported, while the line read for a key, and a line
+repeating it, raise with their line numbers. A file replaced while it is read (an ensemble's, rewritten by every `report()`) is read as
+it was when opened; one written in place meanwhile raises.
+
+**The lock** is taken on a lock file the run can't write as well (another user's, in a shared directory), since `flock` needs no
+write access; only a lock file that can't be opened at all counts as a file system that refuses locks (on NFS, where `flock` is
+emulated by an `fcntl` lock that needs write access, such a run warns). Pool workers don't inherit it,
+so a worker outliving a killed run doesn't keep the next run out.
 
 <Aside type="tip">
   For long training runs, use `save_dir` to avoid losing progress if the script crashes or is interrupted.
