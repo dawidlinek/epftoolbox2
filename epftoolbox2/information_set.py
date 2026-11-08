@@ -2619,10 +2619,11 @@ def co_batch_probe(
     the rows it is asked about, a batch statistic. The plain probe runs `run_day` alone (or to the end of its refit block), so a
     call made of the run's own days holds `run_day` alone there and such a read can't show. Here the model names the other items
     (`_co_batch_items(run_day)`, or `items`), the runs are widened to cover them (`leakage_probe(span=...)`) and the perturbation
-    is the probe's: every cell the information set calls unknown at `run_day`'s issue time, on every row, the other items'
-    targets and late inputs among them, and with `check_target_boundary` the target from `run_day` on. What is known by then
-    stays: a known-ahead covariate on another item's row, a block's earlier days, training rows. Only `run_day`'s forecasts are
-    compared. `control` runs the positive control over the same widened runs as well.
+    is the probe's: every cell the information set calls unknown at `run_day`'s issue time, each row read as of its own issue
+    day where that is later (`perturb_unknown`), so the other items' targets, their late inputs and a later row's value from its
+    own weather run (`weather_cutoff`, `as_of`) change, and with `check_target_boundary` the target from `run_day` on. What
+    the information set calls known at D's issue time for that row stays: a forecast published days ahead on another item's
+    row, a block's earlier days, training rows. Only `run_day`'s forecasts are compared. `control` runs the positive control over the same widened runs as well.
 
     A model without the hook gives `items=None` and runs nothing; one that names no other day the frame has gives `items=[]`
     and runs nothing either. The other arguments are `leakage_probe`'s.
@@ -2684,6 +2685,10 @@ def perturb_unknown(
 ) -> Tuple[pd.DataFrame, Dict[str, int], List[str]]:
     """Copy of `data` where every numeric value not known at issue time on `run_day` is replaced by noise.
 
+    Each row is read as of its own issue day where that is later than `run_day`: an `as_of` or `weather_cutoff` value on a row
+    after D comes from that row's own run, so it is unknown at D's issue time (rows up to D are read on D). Every other kind
+    gives the same verdict either way.
+
     `target_from_issue`, when given a column name, additionally perturbs every row of that column dated
     `run_day` or later, regardless of its own Availability rule: the model's own boundary (training targets
     end at D-1) is a deliberate, conservative choice, and can be stricter than the column's factual
@@ -2694,6 +2699,10 @@ def perturb_unknown(
     daily = _daily_rows(index, freq)
     ctx, day, minute, first = _rows_around_issue(index, run_day, information_set)
     rng = np.random.default_rng(seed)
+    # A row after D holds what was out at its own issue day: an `as_of` or `weather_cutoff` value comes from that day's
+    # run, so a later row's is unknown on D though the same value read on D's row through a shift would be known. Rows up
+    # to D are read on D, as they always were.
+    own_day = np.maximum(day, 0)
 
     out = data.copy()
     counts: Dict[str, int] = {}
@@ -2706,7 +2715,7 @@ def perturb_unknown(
             unchecked.append(name)
             continue
         information_set._check_source_zone(col, index)
-        available = _available_array(col, col.rule, day, minute, step, ctx, first, daily=daily)
+        available = _available_array(col, col.rule, day, minute, step, ctx, first, own_day, daily=daily)
         mask = available > ctx.issue_minute
         if target_from_issue is not None and name == target_from_issue:
             mask = mask | (day >= 0)
@@ -2764,7 +2773,9 @@ def perturb_recent(
         if col.rule.kind == "static":
             continue
         information_set._check_source_zone(col, index)
-        known = _available_array(col, col.rule, day, minute, step, ctx, first, daily=daily) <= ctx.issue_minute
+        # Known at the issue time on D, a row after D read at its own issue day, as in `perturb_unknown`.
+        known = _available_array(col, col.rule, day, minute, step, ctx, first, np.maximum(day, 0), daily=daily)
+        known = known <= ctx.issue_minute
         # `issue_day=day` reads an `as_of` or `weather_cutoff` value at its own row's run, not at D's, which is all
         # `perturb_unknown` needs to know whether a run is out yet: here it tells yesterday's run from older ones.
         published = _available_array(col, col.rule, day, minute, step, ctx, first, issue_day=day, daily=daily)

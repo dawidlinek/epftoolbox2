@@ -187,13 +187,15 @@ given a batch of issue days, can break either. Two checks test that:
   a rerun with a forecast missing from one run, or finite in one and not the other, bounds nothing: every move on that day is
   `inconclusive`. A late value a [predictor function](/epftoolbox2/model-pipeline/predictor-functions/#the-issue-time-check)
   reads is a `leak` whatever the noise: seeing it needs no comparison of forecasts. Verify a nondeterministic model on the CPU or
-  with its deterministic settings.
+  with its deterministic settings. One draw the rerun can't see: a model that first imports torch inside a worker starts from
+  torch's fixed default seed in both runs, so its draws agree; seed it from `random_state` (step 6's torch families do).
 - **Co-batch.** The model names the other items of the call that predicts the issue day's forecasts (the other days of its
   refit block, the other days of its batch). The probe and the control run once more, over runs widened to cover those days, so
   that the call holds them, and only the issue day's forecasts are compared. The perturbation is the probe's: every value not
-  known at the issue time on D, on every row, so the other items' prices (the issue day's own future targets) and their late
-  inputs change, and what is known by then stays, such as a known-ahead covariate on another item's row, a block's earlier
-  days and every training row. A forecast that moves reads, through another item of its call, something it can't know: a
+  known at the issue time on D, each row read as of its own issue day where that is later than D. So the other items' prices
+  (the issue day's own future targets), their late inputs and a later row's weather forecast, which comes from that row's own
+  run (`weather_cutoff`, `as_of`), change. What the information set calls known at D's issue time for that row stays, such as a
+  forecast published days ahead on another item's row, a block's earlier days and every training row. A forecast that moves reads, through another item of its call, something it can't know: a
   `leak`. The plain probe misses it where the call is made of the run's own days, which holds the issue day alone in its runs. A
   model that reads known values of other items, a block's earlier days say, is no leak by this definition.
 

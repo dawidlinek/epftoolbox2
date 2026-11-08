@@ -346,12 +346,40 @@ def test_the_defaults_follow_predicts_together_the_hook_and_the_card():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("reads", [["price"], ["price_d-1"]], ids=["their prices", "their price lags"])
-def test_a_batch_reading_what_its_other_items_can_t_know_is_a_leak_the_probe_alone_misses(data, reads):
-    """The call of D holds D+1 to D+3 when the run has them. Their prices (the issue day's own future targets) and the lag of
-    D+2 and D+3 are unknown at D's issue. The plain probe runs D alone, a batch of one, and passes (methodology review
-    `batch_label.py`); the co-batch probe runs D to D+3 and the forecasts move by about 1e-3 x 1e6."""
-    report = on(data, MIDDLE, FakeBatch(CLEAN, leak=1e-3, reads=reads, name="Batch"))
+def with_weather(data, rule):
+    """`data` with a weather forecast `wx_d+h` (h = 1 to 3) on every row under `rule`, and the information set with it."""
+    rng = np.random.default_rng(1)
+    columns = {f"wx_d+{h}": rng.normal(10.0, 3.0, len(data)) for h in (1, 2, 3)}
+    return data.assign(**columns), InformationSet(rules={**RULES, "wx": rule})
+
+
+WEATHER = {
+    "cutoff": Availability.weather_cutoff("00", "6h"),
+    "as_of": Availability.as_of("06:00"),
+}
+
+
+@pytest.mark.parametrize(
+    "reads, weather",
+    [
+        pytest.param(["price"], None, id="their prices"),
+        pytest.param(["price_d-1"], None, id="their price lags"),
+        pytest.param(["wx_d+{horizon}"], "cutoff", id="their weather_cutoff forecasts"),
+        pytest.param(["wx_d+{horizon}"], "as_of", id="their as_of forecasts"),
+    ],
+)
+def test_a_batch_reading_what_its_other_items_can_t_know_is_a_leak_the_probe_alone_misses(data, reads, weather):
+    """The call of D holds D+1 to D+3 when the run has them. Their prices (the issue day's own future targets), the lag of
+    D+2 and D+3, and their weather forecasts, each from its own day's run (`weather_cutoff`, `as_of`), are unknown at D's issue
+    (the same forecast read on D's row as `wx_d+1_d+1` is too). The plain probe runs D alone, a batch of one, and passes
+    (methodology review `batch_label.py`, re-review `weather_rows.py`); the co-batch probe runs D to D+3 and the forecasts
+    move by about 1e-3 x 1e6."""
+    info = INFO
+    if weather is not None:
+        data, info = with_weather(data, WEATHER[weather])
+    report = pipeline(FakeBatch(CLEAN, leak=1e-3, reads=reads, name="Batch"), information_set=info).verify(
+        data, MIDDLE, MIDDLE, days=1
+    )
 
     assert row(report)["changed"] == 0
     assert row(report)["co_batch"] == 24
@@ -365,7 +393,10 @@ def test_a_batch_reading_what_its_other_items_can_t_know_is_a_leak_the_probe_alo
     )
     assert "run over the other items of their call too, 3 issue day(s)" in line
 
-    assert on(data, MIDDLE, FakeBatch(CLEAN, leak=1e-3, reads=reads, name="Batch"), co_batch=False).ok
+    alone = pipeline(FakeBatch(CLEAN, leak=1e-3, reads=reads, name="Batch"), information_set=info)
+    assert alone.verify(data, MIDDLE, MIDDLE, days=1, co_batch=False).ok
+    if weather is not None:  # the same model without the leak, under the same rule
+        assert pipeline(FakeBatch(CLEAN, name="Batch"), information_set=info).verify(data, MIDDLE, MIDDLE, days=1).ok
 
 
 @pytest.mark.parametrize(
@@ -398,6 +429,12 @@ def test_an_in_context_model_reading_its_block_s_later_rows_is_a_leak(data):
         assert len(report.checks[0].co_batch.items) == 6
     last = on(data, LAST, in_context("Leaky", leak=1e-3))
     assert (row(last)["changed"], row(last)["co_batch"], row(last)["status"]) == (0, 0, "ok")
+    # A later day's weather forecast comes from that day's run (re-review `weather_incontext.py`).
+    frame, info = with_weather(data, WEATHER["cutoff"])
+    for day in (FIRST, MIDDLE):
+        model = in_context("Weather", leak=1e-3, reads=["wx_d+{horizon}"])
+        report = pipeline(model, information_set=info).verify(frame, day, day, days=1)
+        assert (row(report)["co_batch"], row(report)["status"]) == (24, "leak"), day
 
 
 def test_a_clean_in_context_model_passes_on_every_day_of_the_block(data):

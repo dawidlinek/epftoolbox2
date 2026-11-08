@@ -188,7 +188,8 @@ an issue day it didn't sample.
   forecast that differs at all makes the model `inconclusive` (`nondeterministic`), never `ok`; on such a day a move under the
   probe is a `leak` only beyond 100 times the day's rerun difference (`NOISE_MARGIN`). The co-batch check runs the probe once more
   over runs widened to the other items of the call that predicts the issue day's forecasts (the other days of a refit block a
-  model predicts in one call, or of a batch), with the probe's perturbation, so a forecast that reads what it can't know through
+  model predicts in one call, or of a batch), with the probe's perturbation (a row after D read as of its own issue day, so a
+  later row's `weather_cutoff` or `as_of` forecast is unknown), so a forecast that reads what it can't know through
   another item of its call is a `leak`, which the probe alone misses where the call is made of the run's own days. Both are on
   by default for the models that predict several items in one call (`_predicts_together`, or naming them with
   `_co_batch_items(run_day)`) or have a card, the model families to come, and off for every other. `device` sets an attribute
