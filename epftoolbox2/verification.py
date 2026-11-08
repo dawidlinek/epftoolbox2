@@ -8,6 +8,15 @@ For each model and a sample of issue days it runs two experiments on top of `epf
 - `positive_control`: perturb the freshest values that are known. Forecasts must move. If they don't, the probe's
   silence is no evidence: its perturbation isn't reaching the model.
 
+Two more, on by default for a model that predicts several items in one call (`_predicts_together = True`) or has a card
+(`_card`, a family with an extra or weights), and on request for any other:
+
+- the rerun check: the unperturbed issue day is run twice. Forecasts that differ at all (atol 0) make the model `inconclusive:
+  nondeterministic`, since a move under the probe can't then be told from noise.
+- `co_batch_probe`: every other item of the call that predicts the issue day's forecasts, as the model names them
+  (`_co_batch_items(run_day)`), is replaced by noise. Forecasts must not move: one that does depends on what else is predicted
+  with it, a `leak` the probe alone misses when the other items hold only known values.
+
 A model's status is `leak`, `inconclusive` (nothing moved, but that can't be vouched for) or `ok`, and only `ok` passes.
 
 One blind spot no perturbation can reach: a predictor function with a `train_on="matching"` list that reads, on a day it trains
@@ -29,9 +38,12 @@ from .information_set import (
     _STEP_MINUTES,
     ROLE_TARGET,
     Availability,
+    CoBatchResult,
     ControlResult,
     InformationSet,
     ProbeResult,
+    _issue_day_forecasts,
+    co_batch_probe,
     is_revised,
     leakage_probe,
     positive_control,
@@ -47,6 +59,50 @@ INCONCLUSIVE = "inconclusive"
 OK = "ok"
 
 _EXAMPLES = 10
+
+
+@dataclass
+class RerunResult:
+    """Two runs of one issue day on the same, unperturbed frame, compared bit for bit."""
+
+    run_day: str
+    forecasts: int
+    differ: List[Tuple[int, int]]  # (period, horizon) of the forecasts that are not the same in both runs
+    max_abs_difference: float  # the largest |difference| between two finite forecasts
+    missing: List[Tuple[int, int]] = field(default_factory=list)  # forecasts present in only one of the runs
+
+    @property
+    def ok(self) -> bool:
+        return not self.differ and not self.missing
+
+
+def rerun_check(
+    model: Any,
+    data: pd.DataFrame,
+    run_day: str,
+    information_set: InformationSet,
+    target: str = "price",
+    horizon: Optional[int] = None,
+    freq: str = "1h",
+    availability: str = "raise",
+    horizons: Optional[Sequence[int]] = None,
+) -> RerunResult:
+    """Run `model` twice on `data` for `run_day`, as the probe runs it (to the end of a refit block), and compare the forecasts
+    at atol 0: equal, or both missing. `model` is a model instance or a zero-argument factory, a fresh copy for each run."""
+    run_day = str(pd.Timestamp(run_day).date())
+    common = (run_day, target, horizon_arguments(*resolve_horizons(horizon, horizons, 1)), freq, information_set)
+    first, *_ = _issue_day_forecasts(model, data, *common, availability)
+    second, *_ = _issue_day_forecasts(model, data, *common, availability)
+    keys = sorted(first.keys() & second.keys())
+    differ = [key for key in keys if not (first[key] == second[key] or (pd.isna(first[key]) and pd.isna(second[key])))]
+    finite = [abs(first[key] - second[key]) for key in differ if np.isfinite(first[key]) and np.isfinite(second[key])]
+    return RerunResult(run_day, len(first), differ, max(finite, default=0.0), sorted(first.keys() ^ second.keys()))
+
+
+def checked_by_default(model: Any) -> bool:
+    """Whether `verify` runs the rerun and co-batch checks on `model` unless told otherwise: it predicts several items in one
+    call (`_predicts_together = True`), or it has a card (`_card`, a family with an extra or weights)."""
+    return bool(getattr(model, "_predicts_together", False)) or getattr(model, "_card", None) is not None
 
 
 @dataclass
@@ -66,6 +122,10 @@ class IssueDayCheck:
     horizons: Optional[Tuple[int, ...]] = None  # the horizons verified; None is every one from 1 to `horizon`
     # Columns of a revised class (with it) a predictor function reads on a training day of a `train_on="matching"` list.
     revised_reads: Dict[str, str] = field(default_factory=dict)
+    rerun: Optional[RerunResult] = None  # None when the rerun check didn't run
+    # None when the co-batch check didn't run. Its `items` are None for a model that predicts several items in one call
+    # (`_predicts_together`) but names none (`_co_batch_items`), and empty for one that predicts each issue day on its own.
+    co_batch: Optional[CoBatchResult] = None
 
     @property
     def planned_horizons(self) -> Tuple[int, ...]:
@@ -108,12 +168,19 @@ class VerifyReport:
 
         `forecasts` counts the forecasts compared, `changed` those that moved under the probe (or exist in only one of
         its runs), `max change` is the largest move under the probe, and `control moved` counts the forecasts that moved
-        under the control (missing if it did not run).
+        under the control (missing if it did not run). `rerun` counts the forecasts that differ between two unperturbed runs,
+        and `co_batch` those that moved when the other items of their call were replaced by noise (each missing if its check
+        did not run).
         """
         rows = []
         for model in self.models:
             checks = self._of(model)
             controls = [check.control for check in checks if check.control is not None]
+            reruns = [check.rerun for check in checks if check.rerun is not None]
+            # A model that names no items (`items` None) had nothing replaced: no count, and `_blind_spots` says so.
+            batches = [
+                check.co_batch for check in checks if check.co_batch is not None and check.co_batch.items is not None
+            ]
             rows.append(
                 {
                     "model": model,
@@ -122,12 +189,25 @@ class VerifyReport:
                     "changed": sum(len(check.probe.changed) + len(check.probe.missing) for check in checks),
                     "max change": max(check.probe.max_abs_change for check in checks),
                     "control moved": sum(len(control.moved) for control in controls) if controls else pd.NA,
+                    "rerun": sum(len(rerun.differ) + len(rerun.missing) for rerun in reruns) if reruns else pd.NA,
+                    "co_batch": sum(len(batch.moved) + len(batch.missing) for batch in batches) if batches else pd.NA,
                     "status": self.status(model),
                 }
             )
-        columns = ["model", "days", "forecasts", "changed", "max change", "control moved", "status"]
+        columns = [
+            "model",
+            "days",
+            "forecasts",
+            "changed",
+            "max change",
+            "control moved",
+            "rerun",
+            "co_batch",
+            "status",
+        ]
         table = pd.DataFrame(rows, columns=columns)
-        table["control moved"] = table["control moved"].astype("Int64")
+        for name in ("control moved", "rerun", "co_batch"):
+            table[name] = table[name].astype("Int64")
         return table
 
     def problems(self) -> List[str]:
@@ -149,19 +229,51 @@ class VerifyReport:
         """(status, line) for each thing that keeps a model from `ok`."""
         checks = self._of(model)
         found = []
+        noisy = [check.rerun for check in checks if check.rerun is not None and not check.rerun.ok]
+        if noisy:
+            differ = sorted({key for rerun in noisy for key in [*rerun.differ, *rerun.missing]})
+            found.append(
+                (
+                    INCONCLUSIVE,
+                    f"{model}: inconclusive: nondeterministic: two unperturbed runs differ on "
+                    f"{', '.join(rerun.run_day for rerun in noisy)} in {sum(len(r.differ) for r in noisy)} of "
+                    f"{sum(r.forecasts for r in noisy)} forecasts (max |difference| "
+                    f"{max(r.max_abs_difference for r in noisy):.6g}), e.g. (period, horizon) {differ[:_EXAMPLES]}, so a "
+                    "forecast that moves under the probe or the co-batch check can't be told from noise. Verify it on the "
+                    "CPU (verify(..., device='cpu')) or with the model's deterministic settings.",
+                )
+            )
         for check in checks:
             probe = check.probe
             if not probe.ok:
-                found.append(
-                    (
-                        LEAK,
-                        f"{model}: leak on {check.run_day}: {len(probe.changed)} of {probe.forecasts} forecasts depend "
-                        f"on values not known at issue time (max |change| {probe.max_abs_change:.6g}), e.g. (period, "
-                        f"horizon) {probe.changed[:_EXAMPLES]}; in only one run: {probe.missing[:_EXAMPLES]}"
-                        + (f"; read through ctx and moved: {probe.moved_reads}" if probe.moved_reads else "")
-                        + (f"; read through ctx though known later: {probe.late_reads}" if probe.late_reads else ""),
-                    )
+                line = (
+                    f"{len(probe.changed)} of {probe.forecasts} forecasts depend on values not known at issue time "
+                    f"(max |change| {probe.max_abs_change:.6g}), e.g. (period, horizon) {probe.changed[:_EXAMPLES]}; in "
+                    f"only one run: {probe.missing[:_EXAMPLES]}"
+                    + (f"; read through ctx and moved: {probe.moved_reads}" if probe.moved_reads else "")
+                    + (f"; read through ctx though known later: {probe.late_reads}" if probe.late_reads else "")
                 )
+                # A cell a predictor function read differently, or read late, is no forecast moving: noise doesn't explain it.
+                if noisy and not (probe.moved_reads or probe.late_reads):
+                    found.append(
+                        (INCONCLUSIVE, f"{model}: inconclusive: on {check.run_day}, perhaps by its noise, {line}")
+                    )
+                else:
+                    found.append((LEAK, f"{model}: leak on {check.run_day}: {line}"))
+            batch = check.co_batch
+            if batch is not None and not batch.ok:
+                line = (
+                    f"{len(batch.moved)} of {batch.forecasts} forecasts moved when the other items of their call, on "
+                    f"{len(batch.items)} issue day(s) {batch.items[:_EXAMPLES]}, were replaced by noise (max |change| "
+                    f"{batch.max_abs_change:.6g}), e.g. (period, horizon) {batch.moved[:_EXAMPLES]}; in only one run: "
+                    f"{batch.missing[:_EXAMPLES]}. A forecast depends on what else is predicted with it."
+                )
+                if noisy:
+                    found.append(
+                        (INCONCLUSIVE, f"{model}: inconclusive: on {check.run_day}, perhaps by its noise, {line}")
+                    )
+                else:
+                    found.append((LEAK, f"{model}: leak on {check.run_day}: {line}"))
         late = sorted({name for check in checks for name in check.late_in_period})
         if late:
             found.append(
@@ -203,6 +315,12 @@ def _blind_spots(checks: List[IssueDayCheck]) -> List[str]:
                 "known at issue time and delivered or published on the day before the issue day or later; a sparse "
                 "model may need more days."
             )
+    unnamed = [check.run_day for check in checks if check.co_batch is not None and check.co_batch.items is None]
+    if unnamed:
+        lines.append(
+            "it predicts several items in one call (_predicts_together) but doesn't name them (_co_batch_items), so the "
+            "co-batch check can't replace them, and a forecast that depends on what else is in its call can't be seen."
+        )
     unchecked = sorted({name for check in checks for name in check.probe.unchecked})
     if unchecked:
         lines.append(
@@ -273,6 +391,9 @@ def verify_model(
     horizons: Optional[Sequence[int]] = None,
     issue_days: Optional[Sequence[str]] = None,
     engine: str = "off",
+    device: Optional[str] = None,
+    co_batch: Optional[bool] = None,
+    rerun: Optional[bool] = None,
 ) -> List[IssueDayCheck]:
     """Probe (and control) one model on each of `run_days`. The model itself is never run, only copies of it.
 
@@ -293,13 +414,24 @@ def verify_model(
 
     `engine="on"` (`ModelPipeline(engine="on")`) runs each probe of a model the engine takes through it, as a group of one
     (`models._engine.EngineAlone`): those are its forecasts in any group, so the probe and its control cover that path.
+
+    `rerun` runs the unperturbed issue day twice first (`rerun_check`), and `co_batch` replaces the other items of the issue day's
+    call by noise (`co_batch_probe`); None runs each for a model `checked_by_default` says, and True or False for any. A model
+    that names no items (no `_co_batch_items`) predicts each issue day on its own, unless it declares `_predicts_together`, which
+    makes it `inconclusive`. `device` is set on every copy of a model that has a `device` attribute, for every run here: a
+    model without one (every core model) runs as it is.
     """
     horizon, horizons = resolve_horizons(horizon, horizons, 1)
     weekdays = resolve_issue_days(issue_days)
     check_engine(engine)
+    run_rerun = checked_by_default(model) if rerun is None else bool(rerun)
+    run_co_batch = checked_by_default(model) if co_batch is None else bool(co_batch)
 
     def make_model():
-        return copy.deepcopy(model)
+        copied = copy.deepcopy(model)
+        if device is not None and hasattr(copied, "device"):
+            copied.device = device
+        return copied
 
     def probed():
         copied = make_model()
@@ -373,10 +505,15 @@ def verify_model(
         return frame if label == target else frame.assign(**{label: frame[target]})
 
     labelled = None if features is None else (lambda frame: with_label(features(frame)))
-    common = dict(**horizon_arguments(horizon, horizons), freq=freq, seed=seed, availability=availability)
+    runs = dict(**horizon_arguments(horizon, horizons), freq=freq, availability=availability)
+    common = dict(**runs, seed=seed)
+    # The rerun and the co-batch check run on the frame the model runs on, built, with the label in place of the target where
+    # the target is also an input, so that the co-batch noise reaches that input and never what the model trains on.
+    unperturbed = with_label(built)
 
     checks = []
     for run_day in run_days:
+        reran = rerun_check(probed, unperturbed, run_day, label_rules, label, **runs) if run_rerun else None
         if features is None and label == target:
             probe = leakage_probe(
                 probed,
@@ -411,6 +548,11 @@ def verify_model(
             result = positive_control(
                 probed, frame, run_day, label_rules, label, columns=columns, rebuild=labelled, **common
             )
+        batch = None
+        if run_co_batch:
+            batch = co_batch_probe(probed, unperturbed, run_day, label_rules, label, seed=seed, **runs)
+            if batch.items is None and not getattr(model, "_predicts_together", False):
+                batch = replace(batch, items=[])  # no hook and no claim to predict together: each issue day on its own
         checks.append(
             IssueDayCheck(
                 model.name,
@@ -423,6 +565,8 @@ def verify_model(
                 late_in_period,
                 None if every_horizon(horizon, horizons) else horizons,
                 revised_reads,
+                reran,
+                batch,
             )
         )
     return checks

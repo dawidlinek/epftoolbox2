@@ -889,6 +889,9 @@ class ModelPipeline:
         rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
         horizons: Optional[Sequence[int]] = None,
         issue_days: Optional[Sequence[str]] = None,
+        device: Optional[str] = None,
+        co_batch: Optional[bool] = None,
+        rerun: Optional[bool] = None,
     ) -> VerifyReport:
         """Check on a sample of issue days that no forecast depends on anything unknown when it is issued.
 
@@ -915,7 +918,7 @@ class ModelPipeline:
 
         Only copies of the models run, in memory, so a later `run()` is unaffected. Each issue day costs four one-day
         runs per model, six with `rebuild` or a target among the predictors. A model that isn't deterministic shows up
-        as a leak. With `engine="on"` each run of a model the engine takes goes through it, as a group of one: its
+        as a leak, or with `rerun` as `inconclusive`. With `engine="on"` each run of a model the engine takes goes through it, as a group of one: its
         forecasts are those of any group, so the check covers the engine's way in too.
 
         `verify` probes the period you give it, not the windows of a run: to check a validation period as well as a test
@@ -943,6 +946,10 @@ class ModelPipeline:
             issue_days: The weekdays a run issues on (`run(issue_days=["friday"])`): only days of these are sampled, and a
                 predictor function is planned on them alone, so what it would read late on another weekday is no leak of
                 this run's. None (or all seven) samples every day.
+            device: Set on every copy of a model that has a `device` ("cpu" to verify a GPU model on the CPU).
+            co_batch: Replace the other items of the issue day's call by noise (`information_set.co_batch_probe`); forecasts
+                must not move. None: for models with `_predicts_together` or a card (`verification.checked_by_default`).
+            rerun: Run the issue day twice first; any difference makes the model `inconclusive`. None: as `co_batch`.
 
         Raises:
             InformationSetError: The pipeline has no information set, or a checked column has no rule and the
@@ -977,6 +984,9 @@ class ModelPipeline:
                     **horizon_arguments(horizon, horizons),
                     **({} if weekdays is None else {"issue_days": issue_day_names(weekdays)}),
                     **({} if self.engine == ENGINE_OFF else {"engine": self.engine}),
+                    device=device,
+                    co_batch=co_batch,
+                    rerun=rerun,
                 )
             )
         return report
