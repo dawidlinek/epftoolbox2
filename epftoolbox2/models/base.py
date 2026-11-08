@@ -43,11 +43,13 @@ from ._calendar import (
     EXPANDING,
     FREQ_STEPS,
     IssueCalendar,
+    MASK_FIT,
     NewestTargets,
     REFIT_AUTO,
     REFIT_EPOCH,
     anchors_of_rules,
     block_rule,
+    check_binary_mask,
     check_issue_days_in,
     check_newest_target,
     check_refit,
@@ -149,7 +151,7 @@ def _usable_cpu_count() -> int:
 class BaseModel(ABC):
     # Parameters a saved pipeline writes only when not at these values (`ModelPipeline._serialize_component`), so files saved
     # before they existed don't move. A subclass adds its own.
-    _WRITTEN_WHEN_SET: Dict[str, Any] = {"newest_target": "d-1", "refit": None}
+    _WRITTEN_WHEN_SET: Dict[str, Any] = {"newest_target": "d-1", "refit": None, "binary_mask": None}
     # True for a model that fits nothing and forecasts a column's value on the issue row (`NaiveModel`): its tasks read that row
     # alone (`_worker._row_value`), with no training rows, scaler or fit.
     _fits_nothing: bool = False
@@ -162,6 +164,7 @@ class BaseModel(ABC):
         scaler: ScalerSpec = "standard",
         newest_target: str = "d-1",
         refit: Optional[str] = None,
+        binary_mask: Optional[str] = None,
     ):
         """`newest_target` is the newest target a forecast issued on D trains on: `"d-1"` the target of D-1, whatever the
         information set says, and `"published"` every target its rule says is known by the issue time on D, per period
@@ -179,7 +182,15 @@ class BaseModel(ABC):
         the frame's first local date, or a list of them, such as `[56, 84, 728, "expanding"]`: each member is fitted on its own
         rows, with its own scaler and binary-column mask, exactly as a model with that window alone, and the forecast is their
         mean in target units, made only when every member's is. A list is sorted (ints ascending, then `"expanding"`), and `[W]`
-        is `W` in everything (`_calendar.resolve_training_window`)."""
+        is `W` in everything (`_calendar.resolve_training_window`).
+
+        `binary_mask` says which training rows decide that a column is binary 0/1, which the scaler leaves as it is: None (the
+        default) reads it, without `refit`, on the first calendar day of the test (or of each window of a run with validation;
+        a predictor function's list on its first planned issue day)
+        and keeps it for every forecast of the window, so a forecast can depend on where the test starts; with `refit` each unit
+        reads it from its own rows. `"first_day"` is the first rule by name (it raises with `refit`). `"fit"` reads it from the
+        rows of each fit's own span, before any filter, as a refit unit does, so no forecast depends on `test_start`; it moves
+        the forecasts whose own rows say otherwise than the first day's. See the docs page Time and Calendars."""
         # A function of `ctx` is planned per forecast (epftoolbox2.models.context); a `(horizon)` or `(horizon, hour)`
         # function gives one list per (period, horizon).
         self._ctx_fn: Optional[Callable] = predictors if callable(predictors) and takes_ctx(predictors) else None
@@ -197,6 +208,7 @@ class BaseModel(ABC):
         self.scaler = scaler  # validated and normalised in __setattr__
         self.newest_target = newest_target  # validated in __setattr__
         self.refit = refit  # validated in __setattr__
+        self.binary_mask = binary_mask  # validated in __setattr__, with refit
 
         self._data: Optional[pd.DataFrame] = None
         self._hour_data: Dict[int, pd.DataFrame] = {}
@@ -224,8 +236,11 @@ class BaseModel(ABC):
             super().__setattr__("_members", members)
         elif key == "newest_target":
             value = check_newest_target(value)
+        elif key == "binary_mask":
+            value = check_binary_mask(value, getattr(self, "refit", None))
         elif key == "refit":
             value = check_refit(value)
+            check_binary_mask(getattr(self, "binary_mask", None), value)  # whichever of the two is set second raises
             if value is not None and not self._can_refit():
                 owners = {name: self._owner_of(name).__name__ for name in _REFIT_METHODS}
                 raise ValueError(
@@ -250,6 +265,13 @@ class BaseModel(ABC):
         overrides the other two alone would refit with its own estimator while `refit=None` fits OLS."""
         owners = {cls._owner_of(name) for name in _REFIT_METHODS}
         return len(owners) == 1 and BaseModel not in owners
+
+    @property
+    def _masks_from_fits(self) -> bool:
+        """Whether each fit reads its binary-column mask from its own span's rows, in the worker (`_worker._fit_member`, and
+        `_fit_unit` for a refit unit), so the parent computes none and no mask depends on a window's first day: with `refit`, or
+        `binary_mask="fit"`."""
+        return self.refit is not None or self.binary_mask == MASK_FIT
 
     @property
     def _refit_rules(self) -> Tuple[Optional[str], ...]:
@@ -490,8 +512,9 @@ class BaseModel(ABC):
         run_positions = window_days
         if windows is None and weekdays is not None:
             run_positions = {day: (None, day, position) for position, day in enumerate(run_days)}
-        if self.refit is not None:
-            # A unit reads its mask from its own rows, in the worker (`_worker._fit_unit`): no window or first day decides it.
+        if self._masks_from_fits:
+            # A fit reads its mask from its own rows, in the worker (`_worker._fit_member`, `_fit_unit`): no window or first day
+            # decides it.
             masks = {} if windows is None else {name: {} for name, _ in windows.periods}
         elif windows is not None:
             masks = self._window_masks(plan, windows, horizons, first_day)
@@ -749,8 +772,10 @@ class BaseModel(ABC):
     def _training_cut(self, rules: Optional["InformationSet"], target: str, freq: str) -> Dict[str, Any]:
         """What a manifest's `training_cut` says of this run: rows by date, with an `"expanding"` training window the frame's
         first local date its rows start on (`expanding_from`; read after `_load_periods`), with `refit` the rule and its epoch (and
-        with `"auto"` each member's resolved rule, `refit_rules`), and with `newest_target="published"` what the newest target is
-        read from. The information set isn't compared on resume, but these decide numbers."""
+        with `"auto"` each member's resolved rule, `refit_rules`), with `binary_mask="fit"` and no `refit` that rule
+        (`binary_mask`: with `refit` it is the refit's own, and `"first_day"` is the default's, so neither is written), and with
+        `newest_target="published"` what the newest target is read from. The information set isn't compared on resume, but these
+        decide numbers."""
         cut = dict(TRAINING_CUT_BY_DATE)
         if EXPANDING in self._members:
             # Where an expanding window's rows start: the frame's first local date, day id 0 (the data hash covers it too).
@@ -761,6 +786,9 @@ class BaseModel(ABC):
             if self.refit == REFIT_AUTO:
                 # The rule each member resolved to, in member order: what the code made of "auto", which decides numbers.
                 cut["refit_rules"] = list(self._refit_rules)
+        elif self.binary_mask == MASK_FIT:
+            # Which rows decide a fit's binary columns: its own, not the window's first day's.
+            cut["binary_mask"] = MASK_FIT
         if self._known_only and rules is not None:
             # Which forecasts exist: the information set isn't compared, but its rules and issue time decide these.
             cut["known_only"] = self._published_by(rules, freq)
@@ -935,9 +963,9 @@ class BaseModel(ABC):
         none (they stay with each list). A plain run of fixed lists records its digests, under the test window's key, only where
         a column with no value on the first day was read again on a later day and that changed a mask: results scaled before
         that re-read existed have none, and `check_and_write` refuses to resume them (`unrecorded_masks`). Every other plain
-        manifest is as it was. A model with `refit` has none: a unit's mask is a function of its rows, which the data hash
-        covers, and its records carry their anchors."""
-        if plan is not None or self.refit is not None:
+        manifest is as it was. A model with `refit` or `binary_mask="fit"` has none: a fit's mask is a function of its rows, which
+        the data hash covers (and a refit's records carry their anchors)."""
+        if plan is not None or self._masks_from_fits:
             return None
         if windows is not None:
             return self._mask_digests(masks)
@@ -1030,6 +1058,10 @@ class BaseModel(ABC):
             config["run_days"] = run_positions
         if self._fits_nothing:
             config["fits"] = False  # each task reads its issue row alone (`_worker._row_value`)
+        if self.binary_mask == MASK_FIT and self.refit is None:
+            # Each fit reads its mask from its own span's rows (`_worker._fit_member`); `scalable_masks` is empty. A refit unit
+            # always does (`_worker._fit_unit`).
+            config["binary_mask"] = MASK_FIT
         if self.refit is not None:
             # The newest targets were read on the anchors (`_newest_targets`), and a unit looks its own up by date. `rule` is the
             # block's, `rules` each member's (`member_rules`): a unit is anchored on its member's.
@@ -1820,7 +1852,8 @@ class BaseModel(ABC):
     ) -> Callable[[int, int, str], Optional[PlannedForecast]]:
         """What a fresh run would give a stored forecast's key, or None if it isn't planned, as on a weekday `weekdays` doesn't
         list. `masks` are per window in a run with windows. With `refit` that is its anchor and no mask digest: a unit reads its
-        mask from its own rows. A model with a list of training windows has a digest per member (`member_masks`)."""
+        mask from its own rows, as each fit does with `binary_mask="fit"`, which has neither. A model with a list of training
+        windows has a digest per member (`member_masks`)."""
         by_window = {TEST: masks} if windows is None else masks
         digests = {
             window: {key: mask_digest(mask) for key, mask in window_masks.items()}
@@ -1838,7 +1871,11 @@ class BaseModel(ABC):
             digest = each[0]
             # The coarsest member's anchor with "auto": what a record holds (`_worker._run_block`).
             anchor = None if self.refit is None else refit_anchor(run_date, self._refit_block).isoformat()
-            if digest is None and (anchor is None or (plan is not None and list_id is None)):
+            # No digest is an unplanned key, unless every fit reads its mask from its own rows: then a list the plan has no id for
+            # on this day is.
+            if digest is None and (
+                (anchor is None and not self._masks_from_fits) or (plan is not None and list_id is None)
+            ):
                 return None
             matching = plan is not None and plan.train_on[list_id] == TRAIN_ON_MATCHING
             return PlannedForecast(

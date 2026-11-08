@@ -197,6 +197,7 @@ def test_the_registry_the_package_and_the_tui_know_it():
         "scaler",
         "newest_target",
         "refit",
+        "binary_mask",
     }
     assert fields["criterion"]["choices"] == ["bic", "aic", "cv"] and fields["solver"]["choices"] == ["lars", "cd"]
     made = tui._instantiate("LEARModel", {"predictors": ["load"], "criterion": "aic", "solver": "cd"})

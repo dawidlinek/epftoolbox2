@@ -106,6 +106,15 @@ training row with that column and is skipped. Nothing after a forecast's issue d
 A model with [`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) finds them on each fit's own training
 rows (those of its period, horizon, refit day and list), not on the first test day, so a forecast doesn't depend on where the run starts.
 
+`binary_mask` on any model that fits chooses the rule, and the default, `None`, keeps the two above. Read on the first day, a
+forecast can depend on where the test starts: night-time solar at 06:00 is 0 in every row of a test that starts in winter, so it
+stays unscaled for the whole test, while a test that starts after it had values scales it, and the forecasts the two share
+differ. `binary_mask="fit"` finds the binary columns on each fit's own training rows without `refit` too, as a refit does: the
+rows of its span, before those with a missing value (or, for a [`train_on="matching"`](/epftoolbox2/model-pipeline/predictor-functions/)
+list, on other days) are dropped, and per window of a [list of windows](/epftoolbox2/model-pipeline/training-windows/). No
+forecast then depends on `test_start`. `"first_day"` is the default's rule by name, and raises with `refit`. See
+[Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start).
+
 ## Constant columns
 
 A column whose standard deviation is zero can't be divided by it, so its scale is 1.0. The same goes for a column that is constant apart from rounding noise: one whose standard deviation is at or below 1e-12 of its largest absolute value is treated as constant. Floating-point arithmetic gives a standard deviation of about 1e-16, not 0, for such a column, for example 0.3 with rounding error, or `0.3` repeated 30 times, and dividing by it would turn the noise into a regressor: a test row that differs a little from the constant would reach the model as a value of 1e13 or more.

@@ -957,7 +957,8 @@ def check_stored_lists(
 
     A model with `refit` (`training_cut` names it) has no mask digests: a unit reads its mask from its own rows, a function of
     data the hash covers. Its records carry `refit_anchor` instead, the date of the fit they used, and a stored forecast differs if
-    a fresh run would fit it on another anchor; that is checked for fixed lists too.
+    a fresh run would fit it on another anchor; that is checked for fixed lists too. A model with `binary_mask="fit"` (also in
+    `training_cut`) has none either, for the same reason, and nothing in their place: its masks are no function of the run.
 
     A run with windows keeps one mask per (window, list, period, horizon) in a file, whichever days its records are on: a
     digest says nothing about which records used it, so a run that overwrote one would let older records pass for what they
@@ -986,7 +987,9 @@ def check_stored_lists(
     )
     compare_actuals = stored_actual is not None and (existing is None or existing.windows is None)
     # With `refit` a unit reads its mask from its own rows, which the data hash covers: its records carry their anchors instead.
-    refit = (manifest.training_cut or {}).get("refit") is not None
+    # With binary_mask="fit" every fit does.
+    cut = manifest.training_cut or {}
+    refit = cut.get("refit") is not None or cut.get("binary_mask") == "fit"
     # A list of training windows keeps a mask per member, under the key with the member (`mask_key`).
     members = mask_members(manifest.training_window)
     other_list, other_mask, other_window, other_actual, past_frame, other_days = [], [], [], [], [], []

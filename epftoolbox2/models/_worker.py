@@ -12,7 +12,7 @@ from threadpoolctl import ThreadpoolController
 from ..results.store import with_status
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
-from ._calendar import FitUnit, member_window, refit_anchor, training_span
+from ._calendar import MASK_FIT, FitUnit, member_window, refit_anchor, training_span
 
 _W_HOUR_ARRAYS: Dict = {}
 _W_EXPANDED_PREDS: Dict = {}
@@ -145,7 +145,8 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     `day_in_test` counts days from the run's first day. In a run with validation `run_days` says what that day is: its
     window, the days since the start of that window (which the record's `day_in_test` holds) and its place in the plan
     of a predictor function, which has no days between the windows. Each window has its own binary-column masks. Nothing else
-    depends on the day's window, so a forecast is what a plain run over its window alone gives.
+    depends on the day's window, so a forecast is what a plain run over its window alone gives. With `binary_mask="fit"`
+    (`config["binary_mask"]`) there are none: each member's fit reads its mask from its own span's rows (`_fit_member`).
 
     A model with a list of training windows (`config["members"]`) fits each member on its own rows, with its own mask and
     scaler, and the forecast is their mean in target units (`_combined`), made only if every member's is: else the task is
@@ -157,6 +158,8 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     day = cfg["offset"] + day_in_test
     run_days = cfg.get("run_days")
     window, day_in_window, position = (None, day_in_test, day_in_test) if run_days is None else run_days[day_in_test]
+    # binary_mask="fit": no mask from the parent, each fit reads its own (`_fit_member`, mask None).
+    own_masks = cfg.get("binary_mask") == MASK_FIT
     scalable_masks = cfg["scalable_masks"] if window is None else cfg["scalable_masks"][window]
 
     days = arrays["days"]
@@ -185,14 +188,14 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
 
     members = cfg.get("members")
     if members is None:  # one training window: masks keyed as they always were
-        fitted = fit(cfg["training_window"], scalable_masks[mask_of])
+        fitted = fit(cfg["training_window"], None if own_masks else scalable_masks[mask_of])
         if isinstance(fitted, str):
             return fitted
         prediction, coefs, extra = fitted
     else:
         outcomes = []
         for member in members:
-            fitted = fit(member, scalable_masks[(*mask_of, member)])
+            fitted = fit(member, None if own_masks else scalable_masks[(*mask_of, member)])
             if isinstance(fitted, str):
                 return _tagged(fitted, member)
             outcomes.append(fitted)
@@ -256,7 +259,10 @@ def _fit_member(
 ) -> Union[Tuple[float, list, Dict], str]:
     """One training window's forecast of the task (`hour`, `hz`, day id `day`) issued from row `test`: (the prediction in target
     units, the coefficients, a matching list's record fields), or a skip reason. Its rows are those of `training_span` with the
-    member's window (`member_window`: `"expanding"` from the frame's first date), with the task's newest target."""
+    member's window (`member_window`: `"expanding"` from the frame's first date), with the task's newest target.
+
+    `scalable_mask` None (`binary_mask="fit"`) is read here from those rows in the list's columns, before the matching and the
+    finite filters, as `_fit_unit` reads a refit unit's: which columns are binary is then a function of this fit's span alone."""
     days = arrays["days"]
     span = member_window(member, day)
     # newest_target="d-1" takes today's path, call for call.
@@ -269,6 +275,9 @@ def _fit_member(
     # No row dated inside the span, so nothing to train on for this (hour, horizon, day).
     if train_x.shape[0] == 0:
         return SKIP_TOO_FEW_ROWS
+    if scalable_mask is None:
+        # Before any filter: a filter only drops rows, and the mask is the span's, as a refit unit's is (`_fit_unit`).
+        scalable_mask = StandardScaler.get_scalable_mask(train_x)
 
     test_x = arrays["x"][test : test + 1][:, col_idx]
 

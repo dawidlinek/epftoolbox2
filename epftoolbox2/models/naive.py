@@ -2,7 +2,7 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from ._calendar import check_newest_target, check_refit
+from ._calendar import check_binary_mask, check_newest_target, check_refit
 from .base import BaseModel
 
 
@@ -21,8 +21,9 @@ class NaiveModel(BaseModel):
             refused nor listed, at every availability level and in `verify`. False judges the column as any model's input
             instead: refused at "raise", listed at "warn". Without an information set every forecast is made either way.
 
-    `newest_target`, `refit` and `training_window` are a fit's: they aren't parameters, and setting any of them to anything but
-    its default raises (`training_window` is 0: no history, and a list of windows would average fits that don't exist).
+    `newest_target`, `refit`, `binary_mask` and `training_window` are a fit's: they aren't parameters, and setting any of them to
+    anything but its default raises (`training_window` is 0: no history, and a list of windows would average fits that don't
+    exist).
     """
 
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "training_window": 0, "scaler": "standard"}
@@ -61,6 +62,10 @@ class NaiveModel(BaseModel):
             )
         if key == "refit" and check_refit(value) is not None:
             raise ValueError(f"NaiveModel fits nothing, so it has nothing to refit: refit={value!r}. Leave it None.")
+        if key == "binary_mask" and check_binary_mask(value) is not None:
+            raise ValueError(
+                f"NaiveModel fits nothing, so it scales no column and has no binary-column mask: binary_mask={value!r}. Leave it None."
+            )
         super().__setattr__(key, value)
 
     @property

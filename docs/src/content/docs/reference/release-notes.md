@@ -207,6 +207,17 @@ an issue day it didn't sample.
   DE-LU, DE-AT-LU, DK1, DK2, FR, HU, IT-North, NL, NO2, PL, SE4, SI) are for private use, and the source refuses them unless
   `allow_restricted_prices=True`. The API allows 2 requests a minute per IP and endpoint: the source throttles itself, waits
   `Retry-After` and caches on disk. See [EnergyChartsSource](/epftoolbox2/data-sources/energy-charts/).
+- **`binary_mask=`: binary columns read on each fit's own rows, so no forecast depends on `test_start`.** Every model that fits takes
+  `binary_mask=None | "first_day" | "fit"`. `None`, the default, is today's rule: without `refit` a list's binary 0/1 columns (left
+  unscaled) are read on the window's first day and kept for the window, so a column that is 0/1 there and not later (night-time
+  solar at 06:00 from a winter start) makes a forecast depend on where the test starts; with `refit` each unit reads its own rows.
+  `"first_day"` names the first and raises with `refit`. `"fit"` reads each fit's own training rows, before any row is dropped, as a
+  refit unit does: its records are `refit="1D"`'s, and runs from any start share their forecasts bit for bit. It moves only forecasts
+  whose own rows disagree with the first day's (none of 2,928 on Lago's DE data with OLS, LassoCV or LEAR; on the Polish week-ahead
+  Fridays none at the study's W = 1092, and 78 and 101 of 301 of a 91-day LassoCV, whose cooling degree days are 0 in January's
+  rows). The manifest's `training_cut` records `"binary_mask": "fit"` without
+  `refit`, so a resume under the other rule refuses; YAML writes it only when set. **Nothing moves without it.** See
+  [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start).
 - **`MirrorLogScaler` and `PolyScaler`: the mirror-log and polynomial VSTs.** `scaler="mlog"` and `scaler="poly"` are the
   transformations of Uniejewski, Weron & Ziel (2018) on `AsinhScaler`'s median/MAD normalisation, then standardised like every VST:
   `sgn(u) (log(|u| + 1/c) + log c)` with `c=1/3`, and `sgn(u) ((|u| + (c/λ)^(1/(λ-1)))^λ - (c/λ)^(λ/(λ-1)))` with `lam=0.125`,

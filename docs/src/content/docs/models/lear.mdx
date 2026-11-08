@@ -94,6 +94,7 @@ against `lago()` all the same.
 | `name` | str | `"LEAR"` | Keyword-only. Display name for reports |
 | `newest_target` | str | `"d-1"` | Keyword-only. `"d-1"`, or `"published"`, every target its rule says is known by the issue time, which needs an information set. See [The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target) |
 | `refit` | str or None | `None` | Keyword-only. `None` fits every forecast on its own, `"kD"` once every k days and `"kMS"` on the first of every k-th month, on a fixed calendar; `"auto"` fits the windows of up to 84 days daily and the longer ones on Mondays. See [Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) |
+| `binary_mask` | str or None | `None` | Keyword-only. Which training rows decide the binary 0/1 columns the scaler leaves unscaled: `None` the window's first day (each unit's rows with `refit`), `"first_day"` the same by name (raises with `refit`), `"fit"` each fit's own rows, so that no forecast depends on `test_start`. See [Binary columns and `test_start`](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start) |
 
 A saved pipeline writes `criterion` and `solver` always, and the rest as for the other models.
 
