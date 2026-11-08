@@ -849,3 +849,55 @@ def test_the_socket_guard_refuses_and_records(no_network):
         socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("192.0.2.1", 80))
     assert [what for what, _ in no_network] == ["create_connection", "connect"]
     no_network.clear()  # caught here on purpose
+
+
+def test_the_carded_family_passes_the_adapter_suite(data, fetched, tmp_path, monkeypatch, no_network):
+    """The checks of `tests/models/adapter_suite.py` that cards turn on (the pre-flight with the extra hidden, the provenance
+    row), and the others a carded family runs through, on the fake family with its weights from the cache."""
+    from epftoolbox2.information_set import Availability, InformationSet
+    from tests.models import adapter_suite as suite
+
+    rules = {
+        "load": Availability.published("10:00", 7),
+        "wind": Availability.published("10:00", 7),
+        "is_weekend": Availability.static(),
+        "is_weekday": Availability.static(),
+    }
+    information_set = InformationSet(rules=rules)
+    monkeypatch.setitem(COMPONENT_REGISTRY["models"], "CardedModel", "tests.models.carded_fake")
+
+    def make(name, **params):
+        return CardedModel([*PREDICTORS, "price_d-1"], WINDOW, name=name, **params)
+
+    suite.check_preflight_without_extra(make, monkeypatch, data, TEST)
+    suite.check_provenance(make, data, tmp_path / "provenance", TEST, information_set=information_set)
+    (tmp_path / "yaml").mkdir()
+    suite.check_yaml_round_trip(make, data, tmp_path / "yaml", TEST, information_set=information_set)
+    suite.check_engine(make, data, TEST, information_set=information_set)
+    suite.check_resume(make, data, tmp_path / "resume", TEST, information_set=information_set)
+    suite.check_verify(make, data, information_set, [TEST[0]])
+
+
+def test_verify_runs_the_preflight_before_any_probe(data, weights_root, monkeypatch, no_network):
+    from epftoolbox2.information_set import Availability, InformationSet
+    from epftoolbox2.verification import verify_model
+
+    rules = {"load": Availability.published("10:00", 7), "wind": Availability.published("10:00", 7)}
+    information_set = InformationSet(
+        rules={**rules, "is_weekend": Availability.static(), "is_weekday": Availability.static()}
+    )
+    started = record_starts(monkeypatch)
+    pipeline = ModelPipeline(information_set=information_set)
+    pipeline.add_model(OLSModel(PREDICTORS, WINDOW, name="ols")).add_model(carded())
+    with pytest.raises(MissingWeightsError, match="CardedModel 'carded': no weights"):
+        pipeline.verify(data, TEST[0], TEST[1], days=1, horizon=1)
+    assert started == []  # not even the core model's probe ran
+    pipeline.verify(data, TEST[0], TEST[1], days=1, horizon=1, models=["ols"])  # a selection checks its own models
+    started.clear()
+    with pytest.raises(MissingWeightsError):
+        verify_model(carded(), data, [TEST[0]], information_set)
+    assert started == []
+    fake_extra(monkeypatch, present=False)
+    fetch_into_cache(monkeypatch)
+    with pytest.raises(MissingExtraError, match=r"\[fakefam\]"):
+        pipeline.verify(data, TEST[0], TEST[1], days=1, horizon=1)

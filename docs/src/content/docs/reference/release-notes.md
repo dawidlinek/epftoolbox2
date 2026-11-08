@@ -200,8 +200,8 @@ an issue day it didn't sample.
   [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/#rerun-and-co-batch).
 - **Model cards, weights and the pre-flight, for the families that need an extra or pretrained weights.** A family declares a
   `ModelCard` (licence, commercial use, revenue cap, attribution, corpus and its end, release, runtime packages with their pins, weight
-  files with their sha256). `ModelPipeline.run`, each `Workflow` array task (before its data pipeline) and `epf run` check every model
-  first and raise one error naming every missing extra, runtime package outside its pin and missing or changed weight file
+  files with their sha256). `ModelPipeline.run`, each `Workflow` array task (before its data pipeline), `epf run` and `verify` (each
+  model verified, before any probe) check every model first and raise one error naming every missing extra, runtime package outside its pin and missing or changed weight file
   (`MissingWeightsError` or `MissingExtraError`; `MissingExtraError` takes an optional message and pickles with it). Weights never
   download during a run: `epf weights fetch` downloads a card's files into `EPFTOOLBOX2_WEIGHTS_DIR` (default
   `~/.cache/epftoolbox2/weights`), verifies their sha256 and needs `--accept <licence>` for a non-commercial or revenue-capped

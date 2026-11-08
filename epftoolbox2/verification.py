@@ -56,6 +56,7 @@ from .information_set import (
     vintage_of,
 )
 from .models._calendar import every_horizon, horizon_arguments, resolve_horizons, resolve_issue_days
+from .models._cards import preflight
 from .models._engine import ENGINE_OFF, EngineAlone, check_engine
 from .models._contract import wall_clock
 from .results.availability import LATE
@@ -512,10 +513,16 @@ def verify_model(
     day on its own, unless it declares `_predicts_together`, which makes it `inconclusive`. `device` is set on every copy of a
     model that has an attribute named `device`, for every run here, and recorded in each check; a model without one (every core
     model) runs as it is.
+
+    A model with a card is checked first as `run` checks it (`models._cards.preflight`): a missing extra, a runtime package outside
+    the card's pins or missing weights raise `MissingExtraError` or `MissingWeightsError` before any probe runs, and nothing is
+    downloaded.
     """
     horizon, horizons = resolve_horizons(horizon, horizons, 1)
     weekdays = resolve_issue_days(issue_days)
     check_engine(engine)
+    # Its extra, runtime packages and weights before any probe (`ModelPipeline.verify` checked every model verified already).
+    preflight([model])
     run_rerun = checked_by_default(model) if rerun is None else bool(rerun)
     run_co_batch = checked_by_default(model) if co_batch is None else bool(co_batch)
 

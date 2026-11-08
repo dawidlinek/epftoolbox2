@@ -965,6 +965,8 @@ class ModelPipeline:
         Raises:
             InformationSetError: The pipeline has no information set, or a checked column has no rule and the
                 information set's `unknown` is "raise".
+            MissingExtraError, MissingWeightsError: A model verified lacks its extra, a runtime package within its card's
+                pins or its weights (the pre-flight of `run`, before any probe; `models._cards.preflight`).
         """
         horizon, horizons = resolve_horizons(horizon, horizons, 1)
         weekdays = resolve_issue_days(issue_days)
@@ -975,6 +977,7 @@ class ModelPipeline:
         if not self.models:
             raise ValueError("At least one model is required")
         self._check_model_names()
+        preflight(self._select_models(models))  # the extras, runtime packages and weights of the models verified, first
         check_issue_days_in(resolve_date(test_start), resolve_date(test_end), weekdays)
         run_days = sample_issue_days(data.index, test_start, test_end, days, seed, issue_days=weekdays)
         report = VerifyReport(issue_days=run_days)

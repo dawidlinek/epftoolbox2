@@ -10,7 +10,8 @@ that needs an optional dependency (an *extra*, such as `epftoolbox2[tabpfn]`) or
 licence, whether commercial use is allowed, a revenue cap, the attribution a publication owes, what its weights were trained on and
 until when, the runtime packages its numbers depend on, and the weight files with their sha256. The card does four things:
 
-- **The pre-flight.** `ModelPipeline.run`, each `Workflow` array task and `epf run` check every model before the first one runs:
+- **The pre-flight.** `ModelPipeline.run`, each `Workflow` array task, `epf run`, `ModelPipeline.verify` and `epf verify` check
+  every model before the first one runs:
   the extra installed, the runtime packages within the card's pins, the weights found and hashed. Every problem of every model
   comes back in one error, before any data is fetched in a workflow or any model fits, so a long run never stops halfway.
 - **Weights never download during a run.** `epf weights fetch` downloads them once, on a machine with network, into a cache
