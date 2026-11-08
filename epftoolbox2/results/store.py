@@ -996,13 +996,37 @@ def _hold_lock(path: Path) -> Callable[[], None]:
     lock file that can't be opened at all is a file system that refuses locks. A process forked while the lock is held closes
     its copy of the descriptor (`_close_held_in_child`), so a pool worker outliving a killed run doesn't keep the lock."""
     try:
-        import fcntl
+        import fcntl  # noqa: F401  (a flock to take)
     except ImportError:  # pragma: no cover (Windows)
         return _hold_filelock(path)
+    here = _here(path)
+    with _HELD_HERE_LOCK:
+        if here in _HELD_HERE:  # this process holds it: refused without touching the file (`_HELD_HERE`)
+            raise _LockHeld()
+        _HELD_HERE[here] = ""
     try:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fd = _open_lock_file(path)
+    except BaseException:
+        _forget_here(here)
+        raise
+    try:
+        return _flock_held(path, fd, here)
+    except BaseException:
+        _forget_here(here)
+        raise
+
+
+def _open_lock_file(path: Path) -> int:
+    try:
+        return os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     except PermissionError:
-        fd = os.open(path, os.O_RDONLY)  # raises PermissionError if it can't be read either
+        return os.open(path, os.O_RDONLY)  # raises PermissionError if it can't be read either
+
+
+def _flock_held(path: Path, fd: int, here: str) -> Callable[[], None]:
+    """The exclusive flock of `_hold_lock` on the open lock file `fd`, and what releases it."""
+    import fcntl
+
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
@@ -1024,8 +1048,26 @@ def _hold_lock(path: Path) -> Callable[[], None]:
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+            _forget_here(here)
 
     return release
+
+
+# The lock files this process holds (resolved path -> "" for a lock of its own, a group's name for a model a `_GroupLock` holds).
+# A second writer in this process is refused from here without opening the file: where flock is emulated by POSIX locks (NFS),
+# a process's locks don't conflict with each other and closing any descriptor of the file drops all of them, so probing a lock
+# file this process holds could release it.
+_HELD_HERE: Dict[str, str] = {}
+_HELD_HERE_LOCK = Lock()
+
+
+def _here(path: Any) -> str:
+    return os.path.realpath(path)
+
+
+def _forget_here(here: str) -> None:
+    with _HELD_HERE_LOCK:
+        _HELD_HERE.pop(here, None)
 
 
 # The descriptors of the locks this process holds. A forked child (a pool worker of `BaseModel.run`) shares their open file
@@ -1041,6 +1083,7 @@ def _close_held_in_child() -> None:
         except OSError:
             pass
     _HELD_FDS.clear()
+    _HELD_HERE.clear()  # the child holds none of them
 
 
 if hasattr(os, "register_at_fork"):
@@ -1063,10 +1106,14 @@ def _held_by_a_group(lock_path: Path, fd: int, ours: Optional[str] = None) -> bo
 
 
 def _group_file_held(path: Path) -> bool:
-    """Whether a `_GroupLock`'s file is held: a shared flock on it is refused. One nobody holds belongs to a writer that is gone
-    (a killed one's flock went with it), and is removed."""
+    """Whether a `_GroupLock`'s file is held: by this process (`_HELD_HERE`, never probed), or by another, whose flock refuses a
+    shared one. One nobody holds belongs to a writer that is gone (a killed one's flock went with it). It is left on disk: only
+    the writer that made it removes it."""
     import fcntl
 
+    with _HELD_HERE_LOCK:
+        if _here(path) in _HELD_HERE:
+            return True
     try:
         fd = os.open(path, os.O_RDONLY)
     except OSError:
@@ -1079,10 +1126,6 @@ def _group_file_held(path: Path) -> bool:
         fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
-    try:
-        path.unlink()
-    except OSError:
-        pass
     return False
 
 
@@ -1111,6 +1154,10 @@ class _GroupLock:
         with self._mutex:
             if directory not in self._held:
                 self._held[directory] = _hold_lock(directory / self.name)
+        here = _here(lock_path)
+        with _HELD_HERE_LOCK:
+            if here in _HELD_HERE:  # held in this process, alone or by a group: refused without touching the file
+                raise _LockHeld()
         try:
             fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
         except PermissionError:  # can't write the name into it: the model's own lock, a descriptor of its own
@@ -1125,8 +1172,17 @@ class _GroupLock:
             try:
                 if _held_by_a_group(lock_path, fd, ours=self.name):
                     raise _LockHeld()
+                with _HELD_HERE_LOCK:
+                    if here in _HELD_HERE:
+                        raise _LockHeld()
+                    _HELD_HERE[here] = self.name
                 os.ftruncate(fd, 0)
                 os.pwrite(fd, self.name.encode("utf-8"), 0)
+            except BaseException:
+                with _HELD_HERE_LOCK:
+                    if _HELD_HERE.get(here) == self.name:
+                        del _HELD_HERE[here]
+                raise
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
@@ -1138,6 +1194,10 @@ class _GroupLock:
         (to read the name), so this waits a little for it and otherwise leaves the name, which goes stale with the group."""
         import fcntl
 
+        here = _here(lock_path)
+        with _HELD_HERE_LOCK:
+            if _HELD_HERE.get(here) == self.name:
+                del _HELD_HERE[here]
         try:
             fd = os.open(lock_path, os.O_RDWR)
         except OSError:

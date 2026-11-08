@@ -1214,6 +1214,35 @@ def test_a_torn_catalog_line_is_cut_before_the_first_part_without_the_lock(tmp_p
         assert (path / CATALOG).read_bytes().count(b"\n") == 2 and verify(tmp_path / how) == []
 
 
+def test_a_group_file_this_process_holds_is_never_probed_nor_removed(tmp_path, monkeypatch):
+    """Where flock is emulated by POSIX locks (NFS), a process's own locks don't conflict, and dropping one drops them all: a
+    probe of this process's group file would get the shared lock, release the group's own and remove its file, freeing every
+    model it holds. The store answers from what this process holds and never opens the file; a stale file it didn't make
+    is left where it is."""
+    import fcntl
+
+    from epftoolbox2.results import store as store_module
+
+    real = fcntl.flock
+
+    def posix_like(fd, operation):  # this process's locks never conflict with each other
+        return None if operation & fcntl.LOCK_SH else real(fd, operation)
+
+    with StoreWriter() as writer:
+        writer.open(tmp_path / "m.parquet", test_start="2023-04-12", lock=True)
+        (group,) = tmp_path.glob(".writer-*.lock")
+        monkeypatch.setattr(fcntl, "flock", posix_like)
+        assert store_module._group_file_held(group) and group.exists()
+        with pytest.raises(ResultsLockedError):
+            ParquetResultStore(tmp_path / "m.parquet", lock=True)
+        monkeypatch.setattr(fcntl, "flock", real)
+    stale = tmp_path / ".writer-0-dead.lock"  # a killed writer's: nobody holds it
+    stale.write_text("")
+    (tmp_path / "n.lock").write_text(stale.name)
+    ResultStore(tmp_path / "n.jsonl", lock=True).close()  # taken over
+    assert stale.exists() and not group.exists()  # the stale file left alone; the writer removed its own
+
+
 # --- import ------------------------------------------------------------------------------------------------------------------
 
 
