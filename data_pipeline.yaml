@@ -11,6 +11,7 @@ sources:
     prefer_15min: false
     neighbours: null
     prefix: ''
+    price_exaa: false
 - class: OpenMeteoSource
   params:
     latitude: 52.2297
