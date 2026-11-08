@@ -685,3 +685,37 @@ def test_a_run_with_validation_resumes_plain_fit_results_whose_test_started_earl
         fresh = lines(tmp_path / "fresh" / "m.jsonl", "day_in_test", "window")
         assert set(fresh) <= set(stored)  # with the plain run's 27 and 28 March, as a refit model's would stay
         assert len(set(stored) - set(fresh)) == 2 * 24
+
+
+def friday_list(ctx):
+    return MASKED if ctx.issue_day.weekday() == 4 else NO_LEVEL
+
+
+def test_a_friday_run_of_a_function_is_the_run_of_every_day_s_fridays():
+    """The default reads the Friday list's mask on the first Friday in a run of every day and on the window's first day, a Monday,
+    in a run of Fridays, so the two differ (`tests/models/test_issue_days.py`). With `"fit"` there is no mask day: every Friday's
+    record is the run of every day's."""
+    data = market("1h", "2023-01-20", 85, "2023-03-22")
+
+    def run(rule, **days):
+        records = ols(friday_list, binary_mask=rule).run(data, S, E, horizon=2, **days)._results
+        return keyed([r for r in records if r["run_weekday"] == 4])
+
+    for rule in ("fit", None):
+        assert (run(rule, issue_days=["friday"]) == run(rule)) == (rule == "fit"), rule
+
+
+def every_day_masked(ctx):
+    return MASKED
+
+
+def test_a_fit_resume_still_compares_each_stored_forecast_s_list(spring, tmp_path):
+    """No mask digest to compare is no reason to compare nothing: a stored forecast whose list a fresh run wouldn't give it is
+    refused, as for the default."""
+    for rule in ("fit", None):
+        path = tmp_path / str(rule) / "m.jsonl"
+        ols(weekday_lists, binary_mask=rule).run(spring, "2023-03-27", "2023-04-02", horizon=1, save_to=str(path))
+        with pytest.raises(ManifestMismatchError, match="another predictor list"):
+            ols(every_day_masked, binary_mask=rule).run(
+                spring, "2023-03-27", "2023-04-02", horizon=1, save_to=str(path)
+            )
