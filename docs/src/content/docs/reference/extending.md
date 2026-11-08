@@ -146,7 +146,9 @@ same class: a subclass of `OLSModel`, `LassoCVModel`, `RidgeModel` or `LEARModel
 `ModelPipeline(engine="on")` runs a model in an [engine group](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine) only
 if one class defines all three and `_fit_stats` (the fit from shared statistics), as the four built-in fitting models do, and keeps
 `BaseModel`'s `run`. A custom model like the one above runs on its own there, with the numbers it has with `engine="off"`; so does a
-subclass of a built-in model that overrides its fit without `_fit_stats`. Each instance of a subclass that builds its period
+subclass of a built-in model that overrides its fit without `_fit_stats`. A subclass of `OLSModel`, `RidgeModel` or `LEARModel` that
+keeps all four is fitted there from shared statistics as its parent is (with `scaler="standard"`), through its parent's estimator:
+`_fit_stats` hands a fit back to the model path when `_estimator()` isn't exactly the estimator the statistics reproduce. Each instance of a subclass that builds its period
 frames itself (`_preprocess`) is a group of its own, which reads its own frames, so a setting of the instance that its
 `_preprocess` reads (a lag, say) is that instance's; so is a model with such a method set on the instance itself, and one with
 its own `run`, `_run_tasks` or `_build_hour_arrays` (on the class or the instance) runs on its own.

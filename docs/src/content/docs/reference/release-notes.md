@@ -202,10 +202,18 @@ an issue day it didn't sample.
   writes every model's results into its own file as before, through one writer. A model's per-run cost beyond its fits drops (the
   pool start, the `gc.collect()` and the read of the data are once per group, and the checks of the frame and of the information
   set and each column's binary mask once for the models that share them): about 0.23 s per OLS model on its own, 0.005 s in a
-  group of 1,000 (one test day, 24 periods). **Every number is the same**: in this release a group fits each model on its own rows exactly as `"off"` does, so
-  records, manifests and tables are identical to the bit, alone, in any group, in any order and at any process count; fits from
-  statistics shared across the group come later. `NaiveModel`, a `train_on="matching"` list, a subclass with its own fit and a
-  `forecast_only` run go through their own run as with `"off"`, the default, which runs nothing new. `ENGINE_MAX_MODELS` (20,000)
+  group of 1,000 (one test day, 24 periods). **OLS, Ridge and LEAR with `scaler="standard"` are fitted from exact sums shared
+  across the group**: the same bits alone and in any group, order or process count, within 1e-8 EUR/MWh of `"off"` for OLS and 1e-9
+  for Ridge and LEAR (the same penalty, the same kink), not to the bit, with the same counts of forecasts and skips; a fit the sums
+  can't give to those digits is fitted as with `"off"`, to the bit, and so is the forecast of an issue row far outside its
+  training values (more than 30 training standard deviations out for OLS and 10 for LEAR, along the eigenvectors of the fit's
+  Gram, past scikit-learn's rounding budget for Ridge) and a LEAR fit whose chosen columns are nearly collinear (their Gram's
+  condition number above 1e6); within those bounds the largest gaps measured were 2.2e-9 (OLS), 6.1e-10 (Ridge) and 3.5e-10
+  (LEAR) EUR/MWh. Their manifests record `fit_path: "engine-1"`, compared on resume, so results written with the engine on
+  refuse a resume with it off and the other way round (`allow_manifest_mismatch=True` overrides), and as provenance how many fits
+  came from the sums. LassoCV, LEAR's `solver="cd"` and the models with a variance-stabilising scaler (LEAR's default) are fitted as
+  with `"off"`, to the bit. `NaiveModel`, a `train_on="matching"` list, a subclass with its own fit and a `forecast_only` run go through their own run as
+  with `"off"`, the default, which runs nothing new. `ENGINE_MAX_MODELS` (20,000)
   and `ENGINE_MAX_COLUMNS` (4,096) bound how many models and columns a group reads at once; `verify` runs each model through the
   engine too. YAML writes `engine` only when it is `"on"`. See
   [Many Models: the Engine](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine).

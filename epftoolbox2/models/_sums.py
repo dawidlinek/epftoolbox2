@@ -7,7 +7,7 @@ columns' values in those rows and of the span: the same whatever other columns t
 or tiling, at any BLAS thread count, with rows chunked or not, and summed directly or as all rows minus the others (a downdate).
 A BLAS Gram has none of these properties: its blocking, and so its rounding, follows the shape of the whole matrix.
 
-Nothing calls this module yet; the engine (5i) will. numpy only.
+Engine groups build one per span (`_engine_worker`, step 5i). numpy only.
 
 How (per span; n rows, m = min(n, 2^15), L = ceil(log2 m)):
 
@@ -97,6 +97,11 @@ MAX_ROWS = 1 << 24
 
 _SAFE_EXPONENT = 400
 """Column exponents within ±this of β scale a Gram by two multiplications, every intermediate a normal float."""
+
+
+class SumsOverflow(ValueError):
+    """A requested column (or y) has values too large for exact sums: their sum or x - shift overflows float64. The engine
+    hands such a fit back to the model path (`_engine_worker.EngineFits`)."""
 
 
 class RawSums(NamedTuple):
@@ -316,6 +321,31 @@ def _float_terms(a: np.ndarray, b: np.ndarray, sym: bool, pieces, with_x12: bool
     return f11, f22, f13, f12
 
 
+def _few_rows_gram(a: np.ndarray) -> np.ndarray:
+    """`_gram_terms(a, None, ...)` for at most `CHUNK_ROWS` rows (a downdate's removed rows, mostly), in four products: Q1'Q1,
+    Q1'Q2 + its transpose (T3), Q1'Q3 + its transpose and Q2'Q2 (T4, added in int64). Each is an integer sum of at most
+    min(n, 2^15) slice products, under 2^53 (see the module), so exact in float64: the same integers as `_gram_terms`'."""
+    a1, a2, a3 = a[0], a[1], a[2]
+    out = np.empty((3, a.shape[1], a.shape[1]), dtype=np.int64)
+    out[0] = a1 @ a1.T
+    t12 = a1 @ a2.T
+    t12 += t12.T.copy()
+    out[1] = t12
+    t13 = a1 @ a3.T
+    t13 += t13.T.copy()
+    out[2] = t13
+    out[2] += (a2 @ a2.T).astype(np.int64)
+    return out
+
+
+def _few_rows_y(qy: np.ndarray):
+    """(ΣQ_s, (T2, T3, T4)) of y's slices `qy` (3 × at most `CHUNK_ROWS` rows), exact as `_few_rows_gram`'s."""
+    q1, q2, q3 = qy[0], qy[1], qy[2]
+    lin = qy.sum(axis=1).astype(np.int64)
+    t13 = int(q1 @ q3)
+    return lin, np.array([int(q1 @ q1), 2 * int(q1 @ q2), 2 * t13 + int(q2 @ q2)], dtype=np.int64)
+
+
 def _vector_terms(a: np.ndarray, qy: np.ndarray, chunk: int) -> np.ndarray:
     """(T2, T3, T4) as int64 of each column of slices `a` (3 × columns × rows) against y's slices `qy` (3 × rows)."""
     t = np.zeros((3, a.shape[1]), dtype=np.int64)
@@ -440,9 +470,17 @@ class SpanSums:
             self._vec[:, cols] = _vector_terms(q, self._qy, self._chunk)
             self._ready[b] = True
 
+    def _blocks(self, cols: np.ndarray) -> list:
+        """The column blocks of `cols`, sorted and distinct."""
+        if self.p <= self._block:
+            return [0] if cols.size else []
+        return np.unique(cols // self._block).tolist()
+
     def _totals(self, blocks) -> None:
         """The span's totals for every pair of `blocks` (sorted, distinct), computing the missing ones."""
-        if not blocks or self._pair_done[np.ix_(blocks, blocks)].all():
+        if not blocks or (self._pair_done[blocks[0], blocks[0]] if len(blocks) == 1 else False):
+            return
+        if self._pair_done[np.ix_(blocks, blocks)].all():
             return
         fresh = not self._pair_done[np.ix_(blocks, blocks)].any()
         if fresh and blocks == list(range(blocks[0], blocks[-1] + 1)):
@@ -472,16 +510,23 @@ class SpanSums:
         sums the removed rows and subtracts them from the span's totals when they are fewer than the kept ones; "direct" and
         "downdate" force one way. All three give the same bits.
         """
-        rows = self._rows(rows)
+        given = np.asarray(rows)
+        rows = self._rows(given)
         cols = np.asarray(cols, dtype=np.int64).reshape(-1)
         if cols.size and (cols.min() < 0 or cols.max() >= self.p):
             raise ValueError(f"column indices must be in [0, {self.p})")
         if method not in ("auto", "direct", "downdate"):
             raise ValueError(f"method must be 'auto', 'direct' or 'downdate', got {method!r}")
-        blocks = np.unique(cols // self._block).tolist()
+        blocks = self._blocks(cols)
         self._prepare(blocks)
         self._check_finite(rows, cols)
-        removed = np.setdiff1d(np.arange(self.n), rows, assume_unique=True)
+        # The span's rows not in `rows`, ascending.
+        if given.dtype == bool:
+            removed = np.flatnonzero(~given)
+        else:
+            kept_rows = np.zeros(self.n, dtype=bool)
+            kept_rows[rows] = True
+            removed = np.flatnonzero(~kept_rows)
         fewer = removed.size < rows.size
         if method == "auto":
             method = "downdate" if fewer else "direct"
@@ -493,7 +538,7 @@ class SpanSums:
             return self._raw(rows.size, cols, gram, lin, vec, ylin, yy, e, ey)
         keep = np.flatnonzero(~rebase)
         kept = cols[keep]
-        self._totals(np.unique(kept // self._block).tolist())
+        self._totals(self._blocks(kept))
         run = _as_run(kept)
         gram = self._gram[:, run, run] if run is not None else self._gram[:, kept[:, None], kept[None, :]]
         lin, vec, ylin, yy = self._lin[:, kept], self._vec[:, kept], self._ylin, self._yy
@@ -577,22 +622,24 @@ class SpanSums:
         return unique
 
     def _check_finite(self, rows: np.ndarray, cols: np.ndarray) -> None:
-        too_large = np.unique(cols[self._unusable[cols]])
-        if too_large.size:
-            raise ValueError(
-                f"column(s) {too_large.tolist()} of x have values too large for exact sums (their sum or x - shift "
-                "overflows float64)"
+        unusable = self._unusable[cols]
+        if unusable.any():
+            raise SumsOverflow(
+                f"column(s) {np.unique(cols[unusable]).tolist()} of x have values too large for exact sums (their sum or "
+                "x - shift overflows float64)"
             )
         if self._y_unusable:
-            raise ValueError("y has values too large for exact sums (its sum or y - shift overflows float64)")
+            raise SumsOverflow("y has values too large for exact sums (its sum or y - shift overflows float64)")
         if self._ybad[rows].any():
             raise ValueError("y has a NaN or inf in the requested rows")
-        gappy = np.unique(cols[self._n_bad[cols] > 0])
-        if gappy.size and self._bad[gappy[:, None], rows[None, :]].any():
+        gappy = self._n_bad[cols] > 0
+        if gappy.any() and self._bad[np.unique(cols[gappy])[:, None], rows[None, :]].any():
             raise ValueError("x has a NaN or inf in the requested rows and columns")
 
     def _terms(self, a: np.ndarray, qy: np.ndarray):
         """The integer sums of slices `a` (3 × columns × rows) and y's `qy` (3 × rows): Gram, linear, against y, y's."""
+        if a.shape[2] <= self._chunk:
+            return (_few_rows_gram(a), _linear_terms(a), _vector_terms(a, qy, self._chunk), *_few_rows_y(qy))
         return (
             _gram_terms(a, None, self._chunk, self._pair_chunk),
             _linear_terms(a),
@@ -603,15 +650,25 @@ class SpanSums:
 
     def _raw(self, n: int, cols: np.ndarray, gram, lin, vec, ylin, yy, e, ey) -> RawSums:
         beta = self.beta
+        p = cols.size
+        # Σ(x - c), Σ(x - c)(y - c_y), Σ(y - c_y), Σ(y - c_y)² combined in one call: elementwise, so each element's bits
+        # are those of its own `_combine`.
+        line = _combine(
+            *(
+                np.concatenate([lin[s], vec[s], np.asarray(ylin[s : s + 1]), np.asarray(yy[s : s + 1])])
+                for s in range(3)
+            ),
+            beta,
+        )
         return RawSums(
             n=int(n),
             shift=self._shift[cols].copy(),
             yshift=self.yshift,
-            u=np.ldexp(_combine(lin[0], lin[1], lin[2], beta), e - beta),
+            u=np.ldexp(line[:p], e - beta),
             S=_scale_gram(_combine(gram[0], gram[1], gram[2], beta), e - beta),
-            v=np.ldexp(_combine(vec[0], vec[1], vec[2], beta), e + ey - 2 * beta),
-            sy=float(np.ldexp(_combine(ylin[0], ylin[1], ylin[2], beta), ey - beta)),
-            syy=float(np.ldexp(_combine(yy[0], yy[1], yy[2], beta), 2 * ey - 2 * beta)),
+            v=np.ldexp(line[p : 2 * p], e + ey - 2 * beta),
+            sy=float(np.ldexp(line[2 * p], ey - beta)),
+            syy=float(np.ldexp(line[2 * p + 1], 2 * ey - 2 * beta)),
         )
 
 

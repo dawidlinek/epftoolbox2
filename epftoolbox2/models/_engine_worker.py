@@ -4,14 +4,54 @@ block, period) holding the pending tasks of every model of the chunk on that day
 Each task runs on its model's **own** inputs (`_worker.TaskInputs`: the chunk's union arrays, which a fit reads by column name,
 and the model's expanded lists, config and rebuilt model), through the model path's functions: `_run_task` for a refit=None
 task, `_run_unit` for each unit of a refit block (`_worker.block_units`), whose records `_worker.block_records` makes as
-`_run_block` does. So a model's records are what its own `run` gives, to the bit, whatever else is in the job: step 5h runs no
-fit from shared statistics (`_fit_stats` is 5i's).
+`_run_block` does. Those functions select every fit's rows, mask and skips, and build every record.
+
+**Fits from shared statistics** (step 5i). A model whose config names a fit path (`config["fit_path"]`, `fit_path_of`: its
+`_ENGINE_NEEDS` asks for no CV blocks and its scaler is exactly `StandardScaler`, so OLS, Ridge and LEAR with
+`scaler="standard"`) hands each fit to `EngineFits` once the model path has selected it (`_worker.StatsFit`), in place of the
+scaler and `_fit_predict` / `_fit_model`:
+
+- per **span** (period, horizon and the period's rows of `training_span`, before any filter: the same rows, by date, in any
+  group), one `_sums.SpanSums` over the columns the job's fits of that span read (`_job_spans`), built when its first fit asks
+  and let go after its last; one per task thread, never shared between threads;
+- per fit, `SpanSums.over(ρ, its columns)` (ρ the model path's finite rows; a downdate when at most `DOWNDATE_SHARE` (τ) of the
+  span's rows are left out, else a direct sum: the same bits either way), `_stats.standard_stats` with the fit's mask and
+  `scale_binary`, `model._fit_stats`, and each issue row through `params.transform`, `model._predict_fitted` (one row at a time)
+  and `params.inverse`.
+
+A fit of no column, one with fewer than `_stats.MIN_ROWS` rows in ρ, one whose sums overflow float64 (`_sums.SumsOverflow`) or
+that `standard_stats` can't scale (`StatsFallback`: cancellation, overflow), one `_fit_stats` declines (None: OLS's rank and
+conditioning guards, Ridge's n <= p and rounding budget, an estimator that isn't the one the statistics reproduce) or raises a
+ValueError on, and one whose active columns' Gram is too ill-conditioned for its class (`_ENGINE_CONDITION_MAX`, LEAR) is
+**handed back**: the model path fits it there, on the same values, to the bit. So is the forecast of an issue row too far from
+the fit's training rows (`far_issue`): beyond its model's `_ENGINE_ISSUE_Z` training standard deviations along the
+eigenvectors of the fit's Gram (`_stats.issue_distance`: OLS 30, LEAR 10), or where RidgeCV's own rounding at that row exceeds
+its budget (`_stats.issue_rounding_ok`), since an extrapolation multiplies the last bits in which the two paths' coefficients
+differ; a refit unit forecasts its other rows from statistics. Each hand-back is decided from the fit's own rows and span, and the issue
+row's alone, so it is the same in any group and whichever rows a unit forecasts.
+
+Every element of the sums is a function of the two columns' values in ρ and of the span (exact integer slices, `_sums`), and
+everything after them is the fit's own, run on one BLAS thread (`_one_blas_thread`: LAPACK's own blocking moves bits with the
+thread count), so a model's records are the same bits alone, in any group, order or chunking, at any process, task thread or
+BLAS thread count, and whatever τ. Nothing stored names the engine but the manifest's `fit_path` (compared on
+resume) and its provenance counts (`EngineCounts`, never compared).
 """
 
+import contextlib
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
+import numpy as np
+from threadpoolctl import threadpool_limits
+
+from ..scalers.registry import make_scaler
+from ..scalers.standard import StandardScaler
+from . import _worker as worker
+from ._stats import MIN_ROWS, StatsFallback, issue_distance, issue_metric, issue_rounding_ok, standard_stats
+from ._sums import SpanSums, SumsOverflow
 from ._worker import (
+    StatsFit,
     TaskFailed,
     TaskInputs,
     _limit_native_threads,
@@ -20,18 +60,70 @@ from ._worker import (
     _run_unit,
     block_records,
     block_units,
+    issue_row,
+    member_rows,
     task_inputs,
+    task_list,
+    task_newest,
+    task_place,
+    unit_rows,
 )
+
+# The numeric path of the fits from shared statistics, as a manifest records it (`fit_path`, compared on resume): a later
+# release that changes their numbers gets another name. None runs every fit of a group on the model path (5h's plumbing, which
+# `tests/models/test_engine_groups.py` checks to the bit against engine off).
+ENGINE_FIT_PATH: Optional[str] = "engine-1"
+
+# τ: a fit's sums are the span's totals minus the rows ρ leaves out when those are at most this share of the span's rows, else
+# summed over ρ directly. Both give the same bits (`_sums`); τ decides speed alone.
+DOWNDATE_SHARE = 0.5
+
+# How far out of its training values an issue row may be for the engine to forecast it, in training standard deviations
+# (`_stats.issue_distance`), where a model class sets none (`_ENGINE_ISSUE_Z`): an extrapolation multiplies the last bits of
+# a coefficient, in which the engine and the model path differ, so a row beyond its model's bound is forecast on the model path.
+ISSUE_Z_MAX = 10.0
+
+# Why a fit went back to the model path (`EngineCounts.fallbacks`): no column (the model path then skips, or forecasts as it
+# does); an active Gram whose condition number is above the model's `_ENGINE_CONDITION_MAX` (LEAR, `ILL_CONDITIONED`);
+# fewer than `MIN_ROWS` rows in ρ; sums past float64's range ("overflow", also `StatsFallback`'s) or `StatsFallback`'s
+# other reason ("cancellation"); `_fit_stats` returned None; `_fit_stats` raised a ValueError. And per issue row: one beyond its
+# model's bound (`FAR_ISSUE`, counted per row; the fit forecasts its other rows).
+NO_COLUMNS = "no_columns"
+ILL_CONDITIONED = "ill_conditioned"
+FEW_ROWS = "few_rows"
+OVERFLOW = "overflow"
+DECLINED = "declined"
+ERROR = "error"
+FAR_ISSUE = "far_issue"
 
 # What `_engine_init` loaded into a pool's worker: the chunk's models' inputs, by their place in the chunk.
 _E_MODELS: List["ModelInputs"] = []
 
 
+def fit_path_of(model) -> Optional[str]:
+    """The numeric path of a model's fits in an engine group (`ENGINE_FIT_PATH`), or None where they are the model path's: a
+    model whose `_ENGINE_NEEDS` asks for CV blocks (LassoCV, LEAR `"cv"`; or that declares none), one that says its fits can't
+    come from statistics to the model path's digits (`_ENGINE_FROM_STATS` False: LEAR with `solver="cd"`), or one whose scaler
+    isn't exactly `StandardScaler` (a VST) keeps the model path in this release."""
+    if ENGINE_FIT_PATH is None:
+        return None
+    needs = getattr(model, "_ENGINE_NEEDS", None)
+    if needs is None or set(needs) - {"rows"} or not getattr(model, "_ENGINE_FROM_STATS", True):
+        return None
+    try:
+        scaler = make_scaler(getattr(model, "scaler", "standard"))
+    except (TypeError, ValueError):
+        return None
+    return ENGINE_FIT_PATH if type(scaler) is StandardScaler else None
+
+
 class ModelInputs(NamedTuple):
-    """One model of a chunk in a worker: its name (for errors) and its `TaskInputs`."""
+    """One model of a chunk in a worker: its name (for errors), its `TaskInputs`, and with fits from shared statistics
+    (`config["fit_path"]`) its scaler's `scale_binary`, else None (every fit on the model path)."""
 
     name: str
     inputs: TaskInputs
+    scale_binary: Optional[bool] = None
 
 
 class EngineTaskFailed(TaskFailed):
@@ -47,13 +139,48 @@ class EngineTaskFailed(TaskFailed):
         return self.message
 
 
+class EngineCounts:
+    """What one model's fits from shared statistics did, for the manifest's provenance (never compared): `fits` made from the
+    statistics (that forecast at least one row), `fallbacks` handed back to the model path by reason (fits, and issue rows for
+    `FAR_ISSUE`), and the largest distance of an issue row the engine forecast from its training values (`max_issue_z`, in
+    training standard deviations along the eigenvectors of its fit's Gram, `_stats.issue_distance`)."""
+
+    __slots__ = ("fits", "fallbacks", "max_issue_z")
+
+    def __init__(self):
+        self.fits = 0
+        self.fallbacks: Counter = Counter()
+        self.max_issue_z = 0.0
+
+    def __bool__(self) -> bool:
+        return bool(self.fits or self.fallbacks)
+
+    def add(self, other: "EngineCounts") -> None:
+        self.fits += other.fits
+        self.fallbacks.update(other.fallbacks)
+        self.max_issue_z = max(self.max_issue_z, other.max_issue_z)
+
+    def issue(self, z: float) -> None:
+        self.max_issue_z = max(self.max_issue_z, z)
+
+    def to_dict(self) -> Dict:
+        return {
+            "fits": int(self.fits),
+            "fallbacks": {reason: int(self.fallbacks[reason]) for reason in sorted(self.fallbacks)},
+            "max_issue_z": float(self.max_issue_z),
+        }
+
+
 def model_inputs(hour_arrays: Dict, models: Sequence[tuple]) -> List[ModelInputs]:
     """Each model's inputs from (name, expanded lists, config, class, `_model_kwargs`), the model rebuilt as a pool's worker
     rebuilds it (`_worker.task_inputs`), all on the chunk's one set of arrays."""
-    return [
-        ModelInputs(name, task_inputs(hour_arrays, expanded, config, model_cls, model_kwargs))
-        for name, expanded, config, model_cls, model_kwargs in models
-    ]
+    out = []
+    for name, expanded, config, model_cls, model_kwargs in models:
+        scale_binary = None
+        if config.get("fit_path") is not None:
+            scale_binary = bool(make_scaler(config.get("scaler", "standard")).scale_binary)
+        out.append(ModelInputs(name, task_inputs(hour_arrays, expanded, config, model_cls, model_kwargs), scale_binary))
+    return out
 
 
 def _engine_init(hour_arrays: Dict, models: Sequence[tuple]) -> None:
@@ -68,14 +195,204 @@ def _engine_load(hour_arrays: Dict, models: Sequence[tuple]) -> None:
     _E_MODELS = model_inputs(hour_arrays, models)
 
 
-Outcome = Tuple[int, List[Dict], List[Tuple[tuple, str]]]
+# --- spans ------------------------------------------------------------------------------------------------------------
+
+SpanKey = Tuple[
+    int, int, int, int
+]  # (period, horizon, first row, end row) of the period's arrays: a span's rows, by date
+
+
+def _item_spans(what: tuple, unit_tasks: Optional[List[tuple]], inputs: TaskInputs) -> List[Tuple[SpanKey, List[int]]]:
+    """The spans of a task's (refit=None: each member's) or a unit's fits, with the columns each reads, by the model path's own
+    selection (`_fit_one_numpy`, `_fit_unit`): what a job's `SpanSums` must hold. A task with no issue row has none."""
+    cfg = inputs.config
+    if unit_tasks is None:
+        hour, hz, day_in_test = what
+        arrays = inputs.hour_arrays[hour]
+        days = arrays["days"]
+        day = cfg["offset"] + day_in_test
+        if issue_row(days, day) is None:
+            return []
+        _, _, position = task_place(cfg, day_in_test)
+        newest = task_newest(cfg, hour, position)
+        _, predictors, _ = task_list(cfg, inputs.expanded, hour, hz, position)
+        members = cfg.get("members")
+        windows = [cfg["training_window"]] if members is None else members
+        spans = [member_rows(days, day, member, hz, newest) for member in windows]
+    else:
+        hour, hz = what.period, what.horizon
+        arrays = inputs.hour_arrays[hour]
+        spans = [unit_rows(cfg, arrays["days"], what)[0]]
+        predictors = inputs.expanded[(hour, hz) if what.list_id is None else what.list_id]
+    columns = [arrays["col_index"][name] for name in predictors]
+    return [((hour, hz, rows.start, rows.stop), columns) for rows in spans if rows.stop > rows.start]
+
+
+class _Span:
+    """One span's `SpanSums` over the columns its job's fits read (their places in the period's arrays, ascending)."""
+
+    __slots__ = ("sums", "columns", "n")
+
+    def __init__(self, arrays: Dict, key: SpanKey, columns: np.ndarray):
+        _, hz, start, stop = key
+        self.columns = columns
+        self.n = stop - start
+        self.sums = SpanSums(arrays["x"][start:stop][:, columns], arrays["y"][start:stop, hz - 1].copy())
+
+    def local(self, columns: Sequence[int]) -> np.ndarray:
+        """The places of a fit's columns among the span's; a column the job's plan didn't give the span is a bug, not a fit."""
+        wanted = np.asarray(columns, dtype=np.int64)
+        at = np.searchsorted(self.columns, wanted)
+        if wanted.size and (at.max() >= self.columns.size or not np.array_equal(self.columns[at], wanted)):
+            raise RuntimeError(
+                f"a fit reads columns {wanted.tolist()} its span's sums don't hold {self.columns.tolist()}"
+            )
+        return at
+
+
+class _Spans:
+    """The spans of one task thread: each span's `_Span` built when a fit first asks for it, from the job's plan (`columns`, the
+    columns each span's fits read), and let go once the thread ran the last item that reads it (`done`)."""
+
+    def __init__(self, hour_arrays: Dict, columns: Dict[SpanKey, np.ndarray], uses: Counter):
+        self.hour_arrays = hour_arrays
+        self.columns = columns
+        self.uses = uses
+        self.built: Dict[SpanKey, _Span] = {}
+
+    def get(self, period: int, horizon: int, rows: slice) -> _Span:
+        key = (period, horizon, rows.start, rows.stop)
+        span = self.built.get(key)
+        if span is None:
+            if key not in self.columns:
+                raise RuntimeError(f"a fit of span {key} that its job's plan doesn't have")
+            span = self.built[key] = _Span(self.hour_arrays[period], key, self.columns[key])
+        return span
+
+    def done(self, keys) -> None:
+        for key in keys:
+            self.uses[key] -= 1
+            if self.uses[key] <= 0:
+                self.built.pop(key, None)
+
+
+class EngineFits:
+    """A model's fits from shared statistics in one task thread: the `engine` its tasks' `_fit_member` and units' `_fit_unit`
+    call with each fit (`_worker.StatsFit`), returning (prediction in target units, coefficients) per issue row, or None to hand
+    the fit back to the model path (see the module)."""
+
+    def __init__(self, spans: _Spans, model, scale_binary: bool, counts: EngineCounts):
+        self.spans = spans
+        self.model = model
+        self.scale_binary = scale_binary
+        self.counts = counts
+
+    def _back(self, reason: str) -> None:
+        self.counts.fallbacks[reason] += 1
+        return None
+
+    def __call__(self, fit: StatsFit) -> Optional[List[Optional[Tuple[float, list]]]]:
+        """The fit's forecast of each issue row (prediction in target units, coefficients) or None for a row the model path
+        forecasts (`FAR_ISSUE`); None for the whole fit (a hand-back)."""
+        if fit.x.shape[1] == 0:
+            return self._back(NO_COLUMNS)  # the model path's own outcome: a fit_error, or LEAR's mean
+        r = fit.x.shape[0]
+        if r < MIN_ROWS:
+            return self._back(FEW_ROWS)
+        span = self.spans.get(fit.period, fit.horizon, fit.rows)
+        columns = span.local(fit.columns)
+        method = "downdate" if span.n - r <= DOWNDATE_SHARE * span.n else "direct"
+        try:
+            raw = span.sums.over(fit.finite, columns, method=method)
+        except SumsOverflow:
+            return self._back(OVERFLOW)
+        try:
+            stats, params = standard_stats(raw, (fit.x, fit.y), fit.mask, self.scale_binary)
+        except StatsFallback as exc:
+            return self._back(exc.reason)
+        try:
+            fitted = self.model._fit_stats(stats)
+        except ValueError:
+            return self._back(ERROR)
+        if fitted is None:
+            return self._back(DECLINED)
+        bound = getattr(self.model, "_ENGINE_ISSUE_Z", ISSUE_Z_MAX)
+        condition_max = getattr(self.model, "_ENGINE_CONDITION_MAX", None)
+        metric = issue_metric(stats, fitted) if bound < np.inf or condition_max is not None else None
+        if condition_max is not None and not metric.condition <= condition_max:
+            return self._back(ILL_CONDITIONED)
+        out: List[Optional[Tuple[float, list]]] = []
+        for row in range(fit.test.shape[0]):
+            # One row at a time, as the model path forecasts (decision 16 of the step 3 spec). Whether a row is too far out is
+            # decided from the fit and that row alone, so the same whichever other rows a unit forecasts.
+            z = params.transform(fit.test[row : row + 1])
+            distance = 0.0 if metric is None else issue_distance(metric, z)
+            if not (distance <= bound and issue_rounding_ok(fitted, stats, z)):
+                self.counts.fallbacks[FAR_ISSUE] += 1
+                out.append(None)
+                continue
+            self.counts.issue(distance)
+            prediction, coefs = self.model._predict_fitted(fitted, z)
+            out.append((params.inverse(float(prediction)), coefs))
+        if all(row is None for row in out):
+            return None
+        self.counts.fits += 1
+        return out
+
+
+def _one_blas_thread(fits_from_statistics: bool):
+    """The BLAS thread count a job with fits from statistics runs at: one, whatever the process's. The sums are exact at any
+    count, but a fit's own solve isn't: LAPACK's `eigh` (Ridge) and Cholesky, and a threaded GEMM on the fit's rows, change their
+    last bits with the thread count once a fit has about a hundred columns (n 400, p 120: Ridge's eigenvectors and `Zc @ V`;
+    p 247: `dpotrf` too). A pool's worker runs at `NATIVE_THREADS_PER_TASK` = 1 already, so nothing changes there; set once per
+    job, before its task threads start, since a BLAS library's thread count is the process's."""
+    if not fits_from_statistics or (worker._W_THREADPOOLS is not None and worker.NATIVE_THREADS_PER_TASK == 1):
+        return contextlib.nullcontext()
+    return threadpool_limits(limits=1, user_api="blas")
+
+
+def _job_spans(
+    items: Sequence[Tuple[int, tuple, Optional[List[tuple]]]], models: Sequence[ModelInputs]
+) -> Tuple[List[List[SpanKey]], Dict[SpanKey, np.ndarray]]:
+    """Per item the spans its engine fits read (none for a model on the model path), and per span the columns of all of them."""
+    keys: List[List[SpanKey]] = []
+    columns: Dict[SpanKey, set] = {}
+    for place, what, unit_tasks in items:
+        if models[place].scale_binary is None:
+            keys.append([])
+            continue
+        spans = _item_spans(what, unit_tasks, models[place].inputs)
+        keys.append(list(dict.fromkeys(key for key, _ in spans)))
+        for key, cols in spans:
+            columns.setdefault(key, set()).update(cols)
+    return keys, {key: np.array(sorted(cols), dtype=np.int64) for key, cols in columns.items()}
+
+
+def _batches(keys: List[List[SpanKey]], threads: int) -> List[List[int]]:
+    """The items cut into at most `threads` batches, each run on one thread with its own spans: the items that read the same
+    spans together, the largest such sets first onto the least loaded batch (ties: the earlier batch); each batch in item
+    order."""
+    together: Dict[tuple, List[int]] = {}
+    for i, item_keys in enumerate(keys):
+        together.setdefault(tuple(sorted(item_keys)), []).append(i)
+    batches: List[List[int]] = [[] for _ in range(threads)]
+    for _, indices in sorted(together.items(), key=lambda kv: (-len(kv[1]), kv[1][0])):
+        least = min(range(threads), key=lambda b: (len(batches[b]), b))
+        batches[least].extend(indices)
+    return [sorted(batch) for batch in batches if batch]
+
+
+Outcome = Tuple[int, List[Dict], List[Tuple[tuple, str]], Optional[EngineCounts]]
 
 
 def run_job(job: Sequence[Tuple[int, List[tuple]]], models: Optional[Sequence[ModelInputs]] = None) -> List[Outcome]:
     """Run one engine job: (model's place in the chunk, its tasks of the job's day or block and period) for each model with
-    some, on `models` (the pool's if None). Returns (place, records, [(task, skip reason)]) per model, as `_run_day` or
-    `_run_block` returns them for that model's tasks. With `THREADS_PER_PROCESS` above 1, the job's tasks (refit=None) or units
-    (refit) of every model run on that many threads. A task that raises raises `EngineTaskFailed` naming its model."""
+    some, on `models` (the pool's if None). Returns (place, records, [(task, skip reason)], its `EngineCounts` or None) per
+    model, as `_run_day` or `_run_block` returns them for that model's tasks, its tasks or units in their order in the job.
+    With `THREADS_PER_PROCESS` above 1 the job's tasks (refit=None) or units (refit) of every model run on that many threads,
+    those that read exactly the same spans on one (`_batches`), each thread with its own spans: a span that items of two
+    threads read (a window list's and a single window's) is built on both. A task that raises raises
+    `EngineTaskFailed` naming its model."""
     models = _E_MODELS if models is None else models
     items: List[Tuple[int, tuple, Optional[List[tuple]]]] = []  # (place, task or unit, the unit's tasks or None)
     blocks: Dict[int, bool] = {}
@@ -87,27 +404,54 @@ def run_job(job: Sequence[Tuple[int, List[tuple]]], models: Optional[Sequence[Mo
         else:
             items.extend((place, task, None) for task in tasks)
     threads = models[job[0][0]].inputs.config["threads_per_process"] if job else 1
+    keys, columns = _job_spans(items, models)
+    arrays = {id(models[place].inputs.hour_arrays) for place, _ in job if models[place].scale_binary is not None}
+    if len(arrays) > 1:
+        raise RuntimeError("the models of an engine job with fits from shared statistics must share one set of arrays")
+    hour_arrays = models[job[0][0]].inputs.hour_arrays if job else {}
 
-    def run(item: Tuple[int, tuple, Optional[List[tuple]]]) -> Tuple[int, tuple, Union[Dict, str, list]]:
-        place, what, unit_tasks = item
-        inputs = models[place].inputs
-        try:
-            if unit_tasks is None:
-                return place, what, _run_task(what, inputs)
-            return place, what, _run_unit(what, unit_tasks, inputs)
-        except TaskFailed as exc:
-            raise EngineTaskFailed(place, str(exc)) from None
+    def run(batch: List[int]) -> Tuple[List[Tuple[int, Union[Dict, str, list]]], Dict[int, EngineCounts]]:
+        spans = _Spans(hour_arrays, columns, Counter(key for i in batch for key in keys[i]))
+        counts: Dict[int, EngineCounts] = {}
+        fitters: Dict[int, EngineFits] = {}
+        out = []
+        for i in batch:
+            place, what, unit_tasks = items[i]
+            model = models[place]
+            engine = None
+            if model.scale_binary is not None:
+                engine = fitters.get(place)
+                if engine is None:
+                    counts[place] = EngineCounts()
+                    engine = fitters[place] = EngineFits(spans, model.inputs.model, model.scale_binary, counts[place])
+            try:
+                if unit_tasks is None:
+                    outcome = _run_task(what, model.inputs, engine)
+                else:
+                    outcome = _run_unit(what, unit_tasks, model.inputs, engine)
+            except TaskFailed as exc:
+                raise EngineTaskFailed(place, str(exc)) from None
+            spans.done(keys[i])
+            out.append((i, outcome))
+        return out, counts
 
-    if len(items) <= 1 or threads == 1:
-        ran = [run(item) for item in items]
-    else:
-        with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
-            futures = [pool.submit(run, item) for item in items]
-            ran = [future.result() for future in as_completed(futures)]
+    with _one_blas_thread(bool(columns)):
+        if len(items) <= 1 or threads == 1:
+            parts = [run(list(range(len(items))))]
+        else:
+            with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
+                futures = [pool.submit(run, batch) for batch in _batches(keys, threads)]
+                parts = [future.result() for future in as_completed(futures)]
+    ran = sorted(((i, outcome) for part, _ in parts for i, outcome in part), key=lambda done: done[0])
+    totals: Dict[int, EngineCounts] = {}
+    for _, counts in parts:
+        for place, part_counts in counts.items():
+            totals.setdefault(place, EngineCounts()).add(part_counts)
 
-    # Per model, in the order its tasks or units came back, as `_run_day` and `_run_block` collect them.
+    # Per model, in the order of its tasks or units in the job, as `_run_day` and `_run_block` collect them on one thread.
     done: Dict[int, list] = {place: [] for place, _ in job}
-    for place, what, outcome in ran:
+    for i, outcome in ran:
+        place, what, _ = items[i]
         done[place].append((what, outcome))
     out: List[Outcome] = []
     for place, outcomes in done.items():
@@ -116,5 +460,5 @@ def run_job(job: Sequence[Tuple[int, List[tuple]]], models: Optional[Sequence[Mo
         else:
             results = [outcome for _, outcome in outcomes if not isinstance(outcome, str)]
             skipped = [(task, outcome) for task, outcome in outcomes if isinstance(outcome, str)]
-        out.append((place, results, skipped))
+        out.append((place, results, skipped, totals.get(place)))
     return out

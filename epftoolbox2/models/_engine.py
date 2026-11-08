@@ -15,7 +15,10 @@ warning, its ref) and its store's close once its chunk has run.
 
 Nothing a model stores depends on its group, chunk, the union or the job: every task runs on its model's own inputs through the
 model path's functions (`_engine_worker.run_job`), and a fit reads its own columns by name, the same rows (dates) whatever else
-the union holds. So engine on equals engine off to the bit in 5h; the fits from shared statistics (`_fit_stats`) are 5i's.
+the union holds. A model whose fits come from shared statistics (`_engine_worker.fit_path_of`: OLS, Ridge and LEAR with
+`scaler="standard"`) has each fit made from its span's exact sums, which no other model can move by a bit; its manifest records
+`fit_path` (compared on resume) and, after its chunk, what those fits did (`results.manifest.record_engine`, provenance). Every
+other model's records are engine off's to the bit.
 """
 
 import datetime
@@ -31,10 +34,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 from rich.progress import Progress
 
+from ..results.manifest import manifest_path, record_engine
 from ..results.ref import ModelResultRef
 from ..results.store import StoreWriter
 from ._calendar import resolve_horizons
-from ._engine_worker import EngineTaskFailed, _engine_init, run_job
+from ._engine_worker import EngineCounts, EngineTaskFailed, _engine_init, fit_path_of, run_job
 from .base import (
     _FRAME_READERS,
     _MASK_READERS,
@@ -187,10 +191,12 @@ def run_group(
                         periods = chunk[0]._load_periods(data, list(dict.fromkeys([target, *union])), horizon, target)
                         periods.memo[_MASK_READERS] = mask_readers(chunk, columns)
                     for model in chunk:
-                        state = model._prepare_run(**arguments.pop(model.name), periods=periods, writer=writer)
+                        state = model._prepare_run(
+                            **arguments.pop(model.name), periods=periods, writer=writer, fit_path=fit_path_of(model)
+                        )
                         prepared.append((model, state))
                     periods = None  # the models hold the frames until `_release`
-                    _run_chunk(prepared, bar)
+                    counts = _run_chunk(prepared, bar)
                 except BaseException:
                     _release(prepared, writer, chunk, raising=False)
                     _close(prepared, raising=False)
@@ -199,6 +205,8 @@ def run_group(
                 error: Optional[BaseException] = None
                 for model, state in prepared:
                     try:
+                        if state.store and counts.get(model.name):
+                            record_engine(manifest_path(state.store.path), state.manifest, counts[model.name].to_dict())
                         refs[model.name] = model._finish_run(state)
                     except Exception as exc:  # every model's counts and warnings, then the first failure
                         error = error or exc
@@ -254,16 +262,19 @@ class _Bar:
             self.progress.advance(self.task, n)
 
 
-def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> None:
-    """One chunk's pool: the union arrays, each model's worker inputs (`_worker_inputs`, explicit config), the jobs, and each
-    job's records into each model's sink as it comes back (`_collect`)."""
+def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> Dict[str, EngineCounts]:
+    """One chunk's pool: the union arrays, each model's worker inputs (`_worker_inputs`, explicit config, with its fit path
+    `config["fit_path"]` where its fits come from shared statistics, `_engine_worker.fit_path_of`), the jobs, and each job's
+    records into each model's sink as it comes back (`_collect`). Returns, by model name, what its fits from shared statistics
+    did (`EngineCounts`), for the manifest's provenance."""
     pending = [(model, state) for model, state in prepared if state.tasks]
     bar.add(
         sum(len(state.all_tasks) for _, state in prepared),
         sum(len(state.all_tasks) - len(state.tasks) for _, state in prepared),
     )
+    counts: Dict[str, EngineCounts] = {}
     if not pending:
-        return
+        return counts
     first, state0 = prepared[0]
     union = list(dict.fromkeys(name for model, _ in pending for name in model._used_predictors))
     hour_arrays = hour_arrays_of(
@@ -274,6 +285,9 @@ def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> None:
     jobs: Dict[Tuple[Any, int], Dict[int, List[tuple]]] = {}
     for place, (model, state) in enumerate(pending):
         expanded, config = model._worker_inputs(state, threads)
+        fit_path = fit_path_of(model)
+        if fit_path is not None:
+            config = {**config, "fit_path": fit_path}
         inputs.append((model.name, expanded, config, type(model), model._model_kwargs))
         for job, tasks in model._jobs(state.tasks, state.first_day).items():
             for task in tasks:
@@ -299,9 +313,11 @@ def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> None:
                     outcomes = future.result()
                 except Exception as exc:
                     raise _job_failed(exc, key, job, pending, refit) from exc
-                for place, results, skipped in outcomes:
+                for place, results, skipped, fitted in outcomes:
                     model, state = pending[place]
                     model._collect(state, results, skipped, sinks[place])
+                    if fitted is not None:
+                        counts.setdefault(model.name, EngineCounts()).add(fitted)
                 bar.advance(sum(len(tasks) for tasks in job.values()))
         except BaseException:
             # Whatever stops the loop, a task, a store's failed write that `_collect` raises or an interrupt: no job not yet
@@ -309,6 +325,7 @@ def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> None:
             # fixed rerun resumes from here.
             pool.shutdown(wait=True, cancel_futures=True)
             raise
+    return counts
 
 
 def _job_failed(
