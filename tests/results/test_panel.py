@@ -161,13 +161,19 @@ def test_models_are_scored_on_the_same_cells_and_keys_by_default():
         "PT": EvaluationReport({"TSO": records(7, 2.5, 50.0), "A": records(8, 2.5), "B": []}, [MAEEvaluator()]),
     }
     panel = PanelReport(zones, target="max")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # nothing to warn about: every model on the same cells
-        table = panel.log_gain("TSO", by=("zone",)).set_index("model")
+    # Every model on the same cells, so no word of unequal cells; but B's gap cuts A's sample, and A's gaps B's: that warns.
+    with pytest.warns(UserWarning, match=r"A on 46 of its 70; B on 46 of its 48") as caught:
+        table = panel.log_gain("TSO", by=("zone",))
+    assert not [w for w in caught if "different cells" in str(w.message)]
+    assert table.attrs["shared"] == {"A": (46, 70), "B": (46, 48)}
+    table = table.set_index("model")
     assert table.loc["A", "cells"] == table.loc["B", "cells"] == 2
     assert table.loc["A", "empty"] == table.loc["B", "empty"] == 1
     assert table.loc["A", "forecasts"] == table.loc["B", "forecasts"] == 22 + 24
-    cells = panel.log_gain("TSO", by=("zone",), cells=True)
+    assert table.loc["A", "own_forecasts"] == 22 + 24 + 24 and table.loc["B", "own_forecasts"] == 24 + 24
+    with pytest.warns(UserWarning, match="of its"):
+        cells = panel.log_gain("TSO", by=("zone",), cells=True)
+    assert cells.set_index(["zone", "model"]).loc[("PT", "A"), "own_forecasts"] == 24
     pl = cells[cells["zone"] == "PL"].set_index("model")
     assert pl.loc["A", "forecasts"] == pl.loc["B", "forecasts"] == 22  # B on A's keys too
     keys = ["run_date", "target_date", "hour", "horizon"]

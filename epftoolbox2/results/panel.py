@@ -24,8 +24,18 @@ CELL_KEYS = ("zone", "target", "horizon", "hour")
 DEFAULT_CELLS = ("zone", "target", "horizon")
 
 # The columns of `log_gain(cells=True)` after the cell's keys, and of `log_gain()`.
-CELL_COLUMNS = ["model", "benchmark", "forecasts", "mae", "mae_benchmark", "log_gain"]
-SUMMARY_COLUMNS = ["model", "benchmark", "log_gain", "cells", "cells_lost", "empty", "forecasts", "min_cell_forecasts"]
+CELL_COLUMNS = ["model", "benchmark", "forecasts", "own_forecasts", "mae", "mae_benchmark", "log_gain"]
+SUMMARY_COLUMNS = [
+    "model",
+    "benchmark",
+    "log_gain",
+    "cells",
+    "cells_lost",
+    "empty",
+    "forecasts",
+    "own_forecasts",
+    "min_cell_forecasts",
+]
 
 
 class PanelReport:
@@ -165,10 +175,14 @@ class PanelReport:
         Returns one row per model (the benchmark left out): `model`, `benchmark`, `log_gain` (the mean), `cells` (scored),
         `cells_lost` (cells with a negative gain), `empty` (cells some listed model or the benchmark has forecasts in where this
         model is not scored: with `common=True` the cells where any of them lacks every common key, the same for each model;
-        with `common=False` those where it shares no forecast with the benchmark), `forecasts` (summed over its scored cells)
-        and `min_cell_forecasts`, the fewest in a scored cell. With `cells=True`, one row per (model, cell) instead, every
-        cell any of them has forecasts in: the keys of `by`, `model`, `benchmark`, `forecasts` (0 where not scored), `mae`,
-        `mae_benchmark` and `log_gain` (NaN where not scored). `attrs` holds `by` and `common`.
+        with `common=False` those where it shares no forecast with the benchmark), `forecasts` (the forecasts it is scored on,
+        summed over its scored cells), `own_forecasts` (those it holds with the benchmark at all, with a finite prediction and
+        actual, over every cell: what `common=False` would score it on) and `min_cell_forecasts`, the fewest in a scored cell.
+        Where `common=True` scores a model on fewer forecasts than its own, it warns, and `attrs["shared"]` holds (forecasts,
+        own_forecasts) of each such model: the other models' gaps cut its sample, inside a cell too. With `cells=True`, one row
+        per (model, cell) instead, every cell any of them has forecasts in: the keys of `by`, `model`, `benchmark`,
+        `forecasts` (0 where not scored), `own_forecasts`, `mae`, `mae_benchmark` and `log_gain` (NaN where not scored).
+        `attrs` holds `by` and `common`.
         """
         cell_keys = _check_cells(by)
         names = self._models(benchmark, models)
@@ -188,6 +202,7 @@ class PanelReport:
                     "cells_lost": int((scored["log_gain"] < 0).sum()),
                     "empty": int(len(mine) - len(scored)),
                     "forecasts": int(scored["forecasts"].sum()),
+                    "own_forecasts": int(mine["own_forecasts"].sum()),
                     "min_cell_forecasts": int(scored["forecasts"].min()) if len(scored) else 0,
                 }
             )
@@ -257,11 +272,13 @@ class PanelReport:
         scored_cells: Dict[str, set] = {}
         for j, name in enumerate(models, start=1):
             mine_errors = wide[name].to_numpy(dtype=float)[order]
-            usable = shared if common else found[:, 0] & found[:, j]
+            own = found[:, 0] & found[:, j]
+            usable = shared if common else own
             for i, cell in enumerate(cells_of):
                 lo, hi = int(bounds[i]), int(bounds[i + 1])
                 take = np.nonzero(usable[lo:hi])[0] + lo
                 n = len(take)
+                n_own = int(own[lo:hi].sum())
                 mae = float(np.mean(mine_errors[take])) if n else math.nan
                 mae_b = float(np.mean(bench_errors[take])) if n else math.nan
                 gain = _gain(mae_b, mae) if n else math.nan
@@ -274,6 +291,7 @@ class PanelReport:
                         "model": name,
                         "benchmark": benchmark,
                         "forecasts": n,
+                        "own_forecasts": n_own,
                         "mae": mae,
                         "mae_benchmark": mae_b,
                         "log_gain": gain,
@@ -285,6 +303,22 @@ class PanelReport:
             warnings.warn(
                 "log_gain: a cell where the model's or the benchmark's MAE is zero has an infinite gain (a perfect forecast: "
                 "+inf a win, -inf a loss), so its model's mean is infinite. log_gain(..., cells=True) shows which.",
+                UserWarning,
+                stacklevel=3,
+            )
+        totals = table.groupby("model", sort=False)[["forecasts", "own_forecasts"]].sum()
+        shared_of = {
+            name: (int(totals.loc[name, "forecasts"]), int(totals.loc[name, "own_forecasts"]))
+            for name in models
+            if name in totals.index and totals.loc[name, "forecasts"] < totals.loc[name, "own_forecasts"]
+        }
+        if shared_of and common:
+            table.attrs["shared"] = shared_of
+            shown = "; ".join(f"{name} on {used} of its {own}" for name, (used, own) in shared_of.items())
+            warnings.warn(
+                f"log_gain: common=True scores every model on the forecasts all of them and the benchmark share, so some are "
+                f"scored on fewer than their own ({shown}): another model's gaps cut their sample. own_forecasts says how many "
+                "each has; common=False scores each on its own (with cells that may then differ).",
                 UserWarning,
                 stacklevel=3,
             )
