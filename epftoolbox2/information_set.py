@@ -1084,6 +1084,12 @@ NEWEST_TARGET_FROM = -31
 _NEWEST_TABLES: Dict[Tuple[Any, ...], np.ndarray] = {}
 _NEWEST_TABLES_KEPT = 16
 _NEWEST_TABLES_LOCK = threading.Lock()
+# The verdicts `violations` reached for one column (`InformationSet._late_of`), by everything they are computed from, the
+# oldest first, and their lock: a sweep of variants checks the same columns on the same days once per variant. A verdict is
+# a few late periods, so many are kept; 0 keeps none, and every check computes its own, as before (the tests compare the two).
+_VERDICTS: Dict[Tuple[Any, ...], Tuple[Tuple[Any, ...], Tuple[Any, ...]]] = {}
+_VERDICTS_KEPT = 65_536
+_VERDICTS_LOCK = threading.Lock()
 ROLE_VALUE = "ctx.value"
 ROLE_PUBLISHED = "ctx.published"
 
@@ -1404,7 +1410,27 @@ class InformationSet:
         days = pd.DatetimeIndex(issue_days) if issue_days is not None else self._issue_days(index, test_start, test_end)
         if not len(days):
             return [], unknown
-        clock = self._issue_clock(days, index, freq)
+        clocks: List[_IssueClock] = []
+
+        def clock() -> "_IssueClock":
+            """The issue clock of these days, made when a verdict isn't kept already."""
+            if not clocks:
+                clocks.append(self._issue_clock(days, index, freq))
+            return clocks[0]
+
+        # What a column's verdict is computed from besides the column itself (`_verdict`): the issue clock's inputs (the issue
+        # time and its zone, the data's zone, a daily frame's row time, the issue days) and the assumptions, whose hints it says.
+        clock_key = (
+            self.issue_time,
+            self.issue_timezone,
+            self._data_zone(index),
+            getattr(index, "tz", None) is None,
+            freq,
+            _row_anchor(index, freq),
+            str(days.tz),
+            tuple(days.asi8.tolist()),
+            tuple(self.assumptions),
+        )
 
         late: Dict[Tuple[str, str, int], _LatePeriod] = {}  # (name, role, period) -> its worst day
         # (name, period, horizon) -> its worst day, of a predictor whose rule changes over time: its training rows depend on h.
@@ -1413,26 +1439,20 @@ class InformationSet:
             col = resolved[name]
             if col.rule is None:
                 continue
-            rows = np.array(sorted(rows))
-            avail = clock.available(col, rows, step, uses[role])
-            own = None
-            if training_rows is not None and over_time(col.rule):
-                if role == ROLE_PREDICTOR:
-                    known = _RowsKnown(col, rows, clock, step)
-                    for (other, hz), at in by_horizon.items():
-                        if other != name:
-                            continue
-                        at = np.array(sorted(at))
-                        where = np.searchsorted(rows, at)
-                        own = avail[where]
-                        trained = training_rows.latest(known, hz)[where]
-                        for found in self._late_periods(col, at, np.maximum(own, trained), clock, step, own=own):
-                            late_at[(name, found.period, hz)] = found
-                    continue
-                own = avail
-                avail = np.maximum(avail, training_rows.target_latest(_RowsKnown(col, rows, clock, step)))
-            for found in self._late_periods(col, rows, avail, clock, step, uses[role], own=own):
-                late[(name, role, found.period)] = found
+            judged = training_rows if training_rows is not None and over_time(col.rule) else None
+            # A predictor whose rule changes over time is judged on each horizon's training rows, of the periods reading it there.
+            horizons = (
+                tuple(sorted((hz, tuple(sorted(at))) for (other, hz), at in by_horizon.items() if other == name))
+                if judged is not None and role == ROLE_PREDICTOR
+                else ()
+            )
+            found, found_at = self._verdict(
+                col, role, tuple(sorted(rows)), uses[role], step, clock, clock_key, judged, horizons
+            )
+            for one in found:
+                late[(name, role, one.period)] = one
+            for hz, one in found_at:
+                late_at[(name, one.period, hz)] = one
 
         out: List[Violation] = []
         for (period, hz), predictors in sorted(expanded.items()):
@@ -1443,6 +1463,70 @@ class InformationSet:
                     col = resolved[name]
                     out.append(found.use(name, hz, col, role, self._weather_cutoff_hint(col)))
         return out, unknown
+
+    def _verdict(
+        self,
+        col: ResolvedColumn,
+        role: str,
+        rows: Tuple[int, ...],
+        row_day: int,
+        step: int,
+        clock: Callable[[], "_IssueClock"],
+        clock_key: Tuple[Any, ...],
+        training_rows: Optional[TrainingRows],
+        horizons: Tuple[Tuple[int, Tuple[int, ...]], ...],
+    ) -> Tuple[Tuple[_LatePeriod, ...], Tuple[Tuple[int, _LatePeriod], ...]]:
+        """`_late_of`, kept by everything it is computed from (`_VERDICTS`): the column as resolved (its rule included), the
+        role, the periods reading it, the row's day, the step, the clock's inputs (`clock_key`), and for a rule over time the
+        training rows and each horizon's periods. So the models of a sweep reading one column on the same days judge it once."""
+        if _VERDICTS_KEPT <= 0:
+            return self._late_of(col, role, rows, row_day, step, clock(), training_rows, horizons)
+        key = (clock_key, repr(col), role, rows, row_day, step, training_rows, horizons)
+        with _VERDICTS_LOCK:
+            found = _VERDICTS.get(key)
+        if found is None:
+            found = self._late_of(col, role, rows, row_day, step, clock(), training_rows, horizons)
+            with _VERDICTS_LOCK:
+                _VERDICTS[key] = found
+                while len(_VERDICTS) > _VERDICTS_KEPT:
+                    del _VERDICTS[next(iter(_VERDICTS))]
+        return found
+
+    def _late_of(
+        self,
+        col: ResolvedColumn,
+        role: str,
+        rows: Tuple[int, ...],
+        row_day: int,
+        step: int,
+        clock: "_IssueClock",
+        training_rows: Optional[TrainingRows],
+        horizons: Tuple[Tuple[int, Tuple[int, ...]], ...],
+    ) -> Tuple[Tuple[_LatePeriod, ...], Tuple[Tuple[int, _LatePeriod], ...]]:
+        """The late periods of one column `violations` reads in the periods `rows` (sorted) as `role`, on the row of D +
+        `row_day`: (each late period, on its worst issue day; for a predictor whose rule changes over time, judged on its
+        training rows at each horizon of `horizons` instead, (horizon, late period) of each). `training_rows` is given for a rule
+        over time alone."""
+        rows = np.array(rows)
+        avail = clock.available(col, rows, step, row_day)
+        own = None
+        if training_rows is not None:
+            if role == ROLE_PREDICTOR:
+                known = _RowsKnown(col, rows, clock, step)
+                found_at = []
+                for hz, at in horizons:
+                    at = np.array(at)
+                    where = np.searchsorted(rows, at)
+                    own = avail[where]
+                    trained = training_rows.latest(known, hz)[where]
+                    found_at.extend(
+                        (hz, found)
+                        for found in self._late_periods(col, at, np.maximum(own, trained), clock, step, own=own)
+                    )
+                return (), tuple(found_at)
+            own = avail
+            avail = np.maximum(avail, training_rows.target_latest(_RowsKnown(col, rows, clock, step)))
+        return tuple(self._late_periods(col, rows, avail, clock, step, row_day, own=own)), ()
 
     @staticmethod
     def _latest_of_rows(
