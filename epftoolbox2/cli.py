@@ -292,6 +292,126 @@ def cmd_results(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _carded_classes(name: str) -> List[tuple]:
+    """(how `epf weights` names it, class) for `name`: a model class registered in COMPONENT_REGISTRY, `module:Class`, or
+    `all` (every registered class whose card has weights). SystemExit for a name that is none of them."""
+    import importlib
+
+    from .models._cards import class_path
+    from .pipelines.model_pipeline import COMPONENT_REGISTRY
+
+    registry = COMPONENT_REGISTRY["models"]
+    if name == "all":
+        found = [getattr(importlib.import_module(module), cls) for cls, module in registry.items()]
+        return [(class_path(cls), cls) for cls in found if getattr(getattr(cls, "_card", None), "weights", None)]
+    if ":" in name:
+        module, _, qualname = name.partition(":")
+        try:
+            target: object = importlib.import_module(module)
+            for part in qualname.split("."):
+                target = getattr(target, part)
+        except (ImportError, AttributeError) as exc:
+            console.print(f"[red]Can't import {escape(name)}: {escape(str(exc))}[/red]")
+            sys.exit(1)
+        return [(name, target)]
+    if name not in registry:
+        console.print(
+            f"[red]Unknown model class {escape(name)!r}.[/red] Give a registered model ({', '.join(sorted(registry))}), "
+            "`module:Class` for one of your own, or `all`."
+        )
+        sys.exit(1)
+    return [(name, getattr(importlib.import_module(registry[name]), name))]
+
+
+def _card_of(label: str, cls: type, size: Optional[str]):
+    """The card of `cls` to fetch: its `_card`, or with `--size` the one of `_card_variants` named so."""
+    variants = getattr(cls, "_card_variants", None) or {}
+    if size is not None:
+        if size not in variants:
+            sizes = ", ".join(sorted(variants)) if variants else "none (it has one card)"
+            console.print(f"[red]{escape(label)} has no size {escape(size)!r}; its sizes: {escape(sizes)}[/red]")
+            sys.exit(1)
+        return f"{label} --size {size}", variants[size]
+    return label, getattr(cls, "_card", None)
+
+
+def cmd_weights(args: argparse.Namespace) -> None:
+    """`epf weights list|fetch|verify`: the model weights a run reads, which only this command downloads."""
+    from .models import _weights
+
+    plain = {"markup": False, "highlight": False, "soft_wrap": True}
+    root = _weights.weights_dir()
+    if args.weights_cmd == "list":
+        rows = _weights.cache_rows()
+        if not rows:
+            console.print(f"No model weights in {root}. Fetch them with `epf weights fetch <Model>`.", **plain)
+            return
+        from rich.table import Table
+
+        table = Table(title=f"Weights in {root}")
+        for column in ("weights", "family", "files", "size", "licence", "fetched"):
+            table.add_column(column, overflow="fold")
+        for row in rows:
+            table.add_row(*row)
+        console.print(table)
+        return
+    if args.weights_cmd == "verify":
+        findings = _weights.verify_cache()
+        for finding in findings:
+            detail = f": {finding.detail}" if finding.detail else ""
+            console.print(f"{finding.status:8} {finding.directory / finding.name}{detail}", **plain)
+        bad = [f for f in findings if f.status != "ok"]
+        if bad:
+            console.print(
+                f"[red]{len(bad)} file(s) changed or missing.[/red] Fetch them again with `epf weights fetch`."
+            )
+            sys.exit(1)
+        console.print(f"[green]{len(findings)} file(s) verified[/green] in {escape(str(root))}.")
+        return
+
+    accepted = list(args.accept or [])
+    failed = 0
+    classes = _carded_classes(args.model)
+    if not classes:
+        console.print("No registered model has weights to fetch.", **plain)
+        return
+    for label, cls in classes:
+        what, card = _card_of(label, cls, args.size)
+        if card is None or card.weights is None:
+            console.print(f"{what} has no weights to fetch: it trains on the run's data.", **plain)
+            continue
+        plan = _weights.fetch_plan(card, what, args.revision)
+        console.print(
+            f"\n{what}: {plan.repo}@{plan.revision} ({len(plan.files) or 'all'} file(s), {_weights.size_text(plan.bytes)})",
+            **plain,
+        )
+        console.print(f"  licence:     {plan.licence} ({plan.licence_url})", **plain)
+        if not card.commercial_use:
+            console.print("  commercial use: not allowed", **plain)
+        if plan.revenue_cap:
+            console.print(f"  revenue cap: {plan.revenue_cap}", **plain)
+        if plan.attribution:
+            console.print(f"  attribution: {plan.attribution}", **plain)
+        console.print(f"  destination: {plan.destination}", **plain)
+        accept = card.licence if card.licence in accepted else (accepted[0] if len(accepted) == 1 else None)
+        try:
+            sidecar = _weights.fetch(card, what, revision=args.revision, accept=accept)
+        except (_weights.LicenceNotAcceptedError, _weights.WeightsMismatchError, ValueError) as exc:
+            console.print(f"[red]{escape(str(exc))}[/red]")
+            failed += 1
+            continue
+        except ImportError as exc:  # huggingface_hub not installed
+            console.print(f"[red]{escape(str(exc))}[/red]")
+            sys.exit(1)
+        note = "" if sidecar.get("reference") is not False else " (new hashes recorded: not the reference weights)"
+        console.print(
+            f"  fetched {len(sidecar['files'])} file(s), {_weights.size_text(sidecar['bytes'])}, sha256 verified{note}",
+            **plain,
+        )
+    if failed:
+        sys.exit(1)
+
+
 def cmd_validate(args: argparse.Namespace) -> None:
     import yaml as _yaml
 
@@ -586,6 +706,35 @@ def build_parser() -> argparse.ArgumentParser:
     verify_results_p.add_argument("save_dir", metavar="SAVE_DIR", help="A model pipeline's save_dir")
     verify_results_p.add_argument("--model", metavar="NAME", help="Verify this model's results only")
 
+    # -- weights --
+    weights_p = sub.add_parser(
+        "weights",
+        help="List, fetch or re-hash the model weights in the cache (EPFTOOLBOX2_WEIGHTS_DIR); a run never downloads",
+    )
+    weights_sub = weights_p.add_subparsers(dest="weights_cmd", required=True, metavar="<action>")
+    weights_sub.add_parser("list", help="What is in the cache: repository, revision, files, size, licence, fetch time")
+    fetch_p = weights_sub.add_parser(
+        "fetch", help="Download a model's weights from Hugging Face into the cache and verify their sha256"
+    )
+    fetch_p.add_argument(
+        "model", metavar="MODEL", help="A registered model class (T0Model), module:Class for one of your own, or all"
+    )
+    fetch_p.add_argument("--size", metavar="SIZE", help="Which of the class's sizes (its _card_variants), e.g. 209m")
+    fetch_p.add_argument(
+        "--revision",
+        metavar="REV",
+        help="Another revision than the card's; files whose sha256 differs from the card's are then recorded, not refused",
+    )
+    fetch_p.add_argument(
+        "--accept",
+        metavar="LICENCE",
+        action="append",
+        help="Accept this licence (its id as the card names it): needed for a non-commercial or revenue-capped one",
+    )
+    weights_sub.add_parser(
+        "verify", help="Re-hash every file in the cache against its fetch record (exit 1 on a change)"
+    )
+
     # -- validate --
     val_p = sub.add_parser("validate", help="Validate a pipeline or workflow YAML")
     val_p.add_argument("yaml", metavar="pipeline.yaml", help="Path to YAML file to validate")
@@ -613,6 +762,7 @@ def main() -> None:
         "model": cmd_model,
         "verify": cmd_verify,
         "results": cmd_results,
+        "weights": cmd_weights,
         "validate": cmd_validate,
         "init": cmd_init,
     }

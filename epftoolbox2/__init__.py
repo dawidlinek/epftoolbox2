@@ -15,6 +15,30 @@ from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, CalendarSour
 __version__ = "2.3.0"
 
 
+def _print_extras_and_weights(console: Console) -> None:
+    """The extras (installed, the versions of their modules) and the weights in the cache (`epf weights list`): what a run of a
+    family with a card would find. Imports no extra."""
+    from epftoolbox2._extras import extras_rows
+    from epftoolbox2.models._weights import cache_rows, weights_dir
+
+    extras = Table(title="Extras")
+    for column in ("extra", "installed", "modules"):
+        extras.add_column(column)
+    for name, installed, modules in extras_rows():
+        extras.add_row(name, "yes" if installed else "no", modules)
+    console.print(extras)
+    rows = cache_rows()
+    if not rows:
+        console.print(f"No model weights in {weights_dir()} (fetch them with `epf weights fetch <Model>`).")
+        return
+    weights = Table(title=f"Weights in {weights_dir()}")
+    for column in ("weights", "family", "files", "size", "licence", "fetched"):
+        weights.add_column(column, overflow="fold")
+    for row in rows:
+        weights.add_row(*row)
+    console.print(weights)
+
+
 def verify():
     console = Console()
     table = Table(show_header=False)
@@ -46,6 +70,7 @@ def verify():
 
     console.print()
     console.print(Panel(table, title="[bold]EPFToolbox2[/bold]", border_style="blue"))
+    _print_extras_and_weights(console)
 
     if gil_info:
         console.print(f"\n💡 [yellow]Info:[/yellow] {gil_info}")
