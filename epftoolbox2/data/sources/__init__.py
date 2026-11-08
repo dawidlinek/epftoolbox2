@@ -6,6 +6,7 @@ from .open_meteo import OpenMeteoSource
 from .csv import CsvSource
 from .calendar import CalendarSource
 from .benchmark import EpftoolboxBenchmarkSource
+from .pse import PseSource
 
 __all__ = [
     "DataSource",
@@ -14,4 +15,5 @@ __all__ = [
     "CsvSource",
     "CalendarSource",
     "EpftoolboxBenchmarkSource",
+    "PseSource",
 ]
