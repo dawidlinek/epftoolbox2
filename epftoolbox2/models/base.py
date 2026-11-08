@@ -185,7 +185,8 @@ class BaseModel(ABC):
         is `W` in everything (`_calendar.resolve_training_window`).
 
         `binary_mask` says which training rows decide that a column is binary 0/1, which the scaler leaves as it is: None (the
-        default) reads it, without `refit`, on the first calendar day of the test (or of each window of a run with validation)
+        default) reads it, without `refit`, on the first calendar day of the test (or of each window of a run with validation;
+        a predictor function's list on its first planned issue day)
         and keeps it for every forecast of the window, so a forecast can depend on where the test starts; with `refit` each unit
         reads it from its own rows. `"first_day"` is the first rule by name (it raises with `refit`). `"fit"` reads it from the
         rows of each fit's own span, before any filter, as a refit unit does, so no forecast depends on `test_start`; it moves

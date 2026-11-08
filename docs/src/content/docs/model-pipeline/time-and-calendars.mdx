@@ -247,7 +247,7 @@ model = OLSModel(["load_forecast_d+{horizon}", "solar_forecast_d+{horizon}", "is
 
 | `binary_mask` | Without `refit` | With `refit` |
 |---|---|---|
-| `None`, the default | the rows of the window's first calendar day, for every forecast of the window | each unit's own rows |
+| `None`, the default | the rows of the window's first calendar day (a predictor function's list: its first planned issue day), for every forecast of the window | each unit's own rows |
 | `"first_day"` | the same as `None` | raises `ValueError` |
 | `"fit"` | each forecast's own rows | each unit's own rows, the same as `None` |
 
@@ -273,8 +273,10 @@ model = OLSModel(["load_forecast_d+{horizon}", "solar_forecast_d+{horizon}", "is
 - **Resuming and YAML.** The manifest's `training_cut` gains `"binary_mask": "fit"` without `refit`, so resuming results made with
   the other rule refuses with `ManifestMismatchError`. `"first_day"` is the default's rule and resumes it, and with `refit` `"fit"`
   is the refit's own rule and writes nothing. Such a manifest has no `binary_masks`, as a fit's mask follows from its rows, which the
-  data hash covers, so results of `"fit"` resume across test starts where the default's refuse. YAML writes `binary_mask` only
-  when it is set.
+  data hash covers, so results of `"fit"` resume across test starts and stay what a fresh run gives. The default refuses that
+  only for predictor functions and runs with validation: plain fixed-list results resume across test starts without an error and
+  then hold masks read on two different first days (a known gap; in one check 286 of 812 records differed from a fresh run).
+  YAML writes `binary_mask` only when it is set.
 
 ## What a clock change does
 
