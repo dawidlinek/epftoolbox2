@@ -980,12 +980,40 @@ def test_the_extras_table_lists_every_extra(monkeypatch):
 def test_the_socket_guard_refuses_and_records(no_network):
     import socket
 
-    with pytest.raises(OSError, match="network access"):
-        socket.create_connection(("example.invalid", 80))
-    with pytest.raises(OSError, match="network access"):
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("192.0.2.1", 80))
-    assert [what for what, _ in no_network] == ["create_connection", "connect"]
+    refused = {
+        "create_connection": lambda: socket.create_connection(("example.invalid", 80)),
+        "connect": lambda: socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("192.0.2.1", 80)),
+        "connect_ex": lambda: socket.socket(socket.AF_INET6, socket.SOCK_STREAM).connect_ex(("::1", 9)),
+        "sendto": lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"x", ("127.0.0.1", 9)),
+        "getaddrinfo": lambda: socket.getaddrinfo("localhost", 80),
+        "gethostbyname": lambda: socket.gethostbyname("localhost"),
+        "gethostbyname_ex": lambda: socket.gethostbyname_ex("localhost"),
+        "gethostbyaddr": lambda: socket.gethostbyaddr("127.0.0.1"),
+    }
+    for what, attempt in refused.items():
+        with pytest.raises(OSError, match="network access"):
+            attempt()
+    assert [what for what, _ in no_network] == list(refused)
+    left, right = socket.socketpair()  # a Unix socket, as a process pool's, is no network
+    left.sendall(b"ok")
+    assert right.recv(2) == b"ok"
+    left.close(), right.close()
     no_network.clear()  # caught here on purpose
+
+
+def test_the_socket_guard_hears_a_forked_worker_that_caught_its_error(no_network):
+    import socket
+
+    pid = os.fork()
+    if pid == 0:  # the worker: its code catches the guard's error, as code under test may
+        try:
+            socket.create_connection(("127.0.0.1", 9))
+        except OSError:
+            pass
+        os._exit(0)
+    os.waitpid(pid, 0)
+    assert [what for what, _ in no_network] == ["create_connection"]  # the test would fail at teardown
+    no_network.clear()
 
 
 def test_the_carded_family_passes_the_adapter_suite(data, fetched, tmp_path, monkeypatch, no_network):

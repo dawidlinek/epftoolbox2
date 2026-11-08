@@ -75,35 +75,69 @@ def no_kept_hashes():
     _weights._HASHES.clear()
 
 
+class NetworkAttempts:
+    """The attempts `no_network` refused, in this process and in every process forked from it: each is a line appended to
+    `log`, so a worker's attempt reaches the test even when the worker caught the error. Iterates over (what, detail)."""
+
+    def __init__(self, log):
+        self.log = log
+        self.log.write_text("")
+
+    def add(self, what: str, detail) -> None:
+        line = f"{what}\t{detail!r}\t{os.getpid()}\n".encode()
+        handle = os.open(self.log, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+        try:
+            os.write(handle, line)  # one write in append mode: lines of several processes don't interleave
+        finally:
+            os.close(handle)
+
+    def read(self):
+        return [tuple(line.split("\t")[:2]) for line in self.log.read_text().splitlines()]
+
+    def clear(self) -> None:
+        self.log.write_text("")
+
+    def __iter__(self):
+        return iter(self.read())
+
+    def __len__(self) -> int:
+        return len(self.read())
+
+    def __eq__(self, other) -> bool:
+        return self.read() == list(other)
+
+
 @pytest.fixture
-def no_network(monkeypatch):
-    """Fail the test on any attempt to reach a network: a `connect` (or `connect_ex`) of a socket that isn't a Unix one (a
-    process pool's own sockets are), `socket.create_connection`, or a name lookup. Each attempt raises OSError and is recorded,
-    and the test fails at teardown if there was one, also when the code under test caught the error. A forked worker inherits
-    the guard. Yields the list of attempts (a test of the guard empties it)."""
+def no_network(monkeypatch, tmp_path_factory):
+    """Fail the test on any attempt to reach a network: `connect`, `connect_ex`, `sendto` or `sendmsg` on a socket that isn't
+    a Unix one (a process pool's own sockets are), `socket.create_connection`, or a name or address lookup (`getaddrinfo`,
+    `gethostbyname`, `gethostbyname_ex`, `gethostbyaddr`, `getnameinfo`). Each attempt raises OSError and is logged to a file
+    (`NetworkAttempts`), and the test fails at teardown if there was one, also when the code under test caught the error and
+    when it was made in a forked worker, which inherits the guard. Yields the attempts (a test of the guard clears them)."""
     import socket
 
-    attempts = []
-    real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+    attempts = NetworkAttempts(tmp_path_factory.mktemp("network") / "attempts.log")
+    real = {name: getattr(socket.socket, name) for name in ("connect", "connect_ex", "sendto", "sendmsg")}
 
     def refuse(what, detail):
-        attempts.append((what, detail))
+        attempts.add(what, detail)
         raise OSError(f"network access in a test that forbids it: {what} {detail!r}")
 
-    def connect(self, address):
-        return real_connect(self, address) if self.family == socket.AF_UNIX else refuse("connect", address)
+    def guarded(name):
+        def call(self, *args, **kwargs):
+            if self.family == socket.AF_UNIX:
+                return real[name](self, *args, **kwargs)
+            return refuse(name, args[-1] if name in ("sendto", "sendmsg") and args else (args[0] if args else None))
 
-    def connect_ex(self, address):
-        return real_connect_ex(self, address) if self.family == socket.AF_UNIX else refuse("connect_ex", address)
+        return call
 
-    monkeypatch.setattr(socket.socket, "connect", connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
-    monkeypatch.setattr(
-        socket, "create_connection", lambda address, *args, **kwargs: refuse("create_connection", address)
-    )
-    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *args, **kwargs: refuse("getaddrinfo", host))
+    for name in real:
+        monkeypatch.setattr(socket.socket, name, guarded(name))
+    monkeypatch.setattr(socket, "create_connection", lambda address, *a, **k: refuse("create_connection", address))
+    for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo"):
+        monkeypatch.setattr(socket, name, lambda host, *a, _name=name, **k: refuse(_name, host))
     yield attempts
-    assert not attempts, f"the test reached for the network: {attempts}"
+    assert not attempts.read(), f"the test reached for the network: {attempts.read()}"
 
 
 @pytest.fixture
