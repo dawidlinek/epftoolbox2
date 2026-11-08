@@ -7,6 +7,7 @@ from .csv import CsvSource
 from .calendar import CalendarSource
 from .benchmark import EpftoolboxBenchmarkSource
 from .pse import PseSource
+from .energy_charts import EnergyChartsSource
 
 __all__ = [
     "DataSource",
@@ -16,4 +17,5 @@ __all__ = [
     "CalendarSource",
     "EpftoolboxBenchmarkSource",
     "PseSource",
+    "EnergyChartsSource",
 ]

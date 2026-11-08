@@ -44,6 +44,7 @@ Rules to know before using the library:
 
 - [EntsoeSource](docs/src/content/docs/data-sources/entsoe.mdx): ENTSO-E load, price, generation, transfer and installed capacity, with output columns and safe shifts
 - [OpenMeteoSource](docs/src/content/docs/data-sources/openmeteo.mdx): archived weather forecasts by cutoff run, models, horizon limits and several locations
+- [EnergyChartsSource](docs/src/content/docs/data-sources/energy-charts.mdx): keyless Energy-Charts forecasts by vintage, actuals, day-ahead prices and flows, with licence, rate limits and availability rules
 - [CalendarSource](docs/src/content/docs/data-sources/calendar.mdx): holidays, school holidays, weekday, hour, month and daylight features
 - [CsvSource](docs/src/content/docs/data-sources/csv.md): time series from a CSV file
 - [EpftoolboxBenchmarkSource](docs/src/content/docs/data-sources/epftoolbox-benchmark.mdx): the five benchmark datasets (NP, PJM, FR, BE, DE) of Lago et al. (2021)

@@ -194,6 +194,12 @@ For a predictor function it shows [the distinct lists first](/epftoolbox2/model-
 
 An `OpenMeteoSource` column's rule (below) is a `snapshot`, and so is an `EpftoolboxBenchmarkSource`'s `price`.
 
+An `EnergyChartsSource`'s columns (prefixed `ec_` by default, so none falls to a default above) have rules from `source_rules` only, in Europe/Berlin: `*_forecast_day_ahead` is published 18:00 on D-1 and
+`*_forecast_intraday` 08:00 on the delivery day (both `latest_revision`), `actual_*`, `cbet_*` and `cbpf_*` are known 1h after the period
+(`latest_revision`), `price_day_ahead` is published 13:00 on D-1 (`snapshot`; CH, which has its own auction, 12:00), and
+`*_forecast_current` has no rule that holds on any day (`latest_revision`), so a model that reads it, at any shift, is refused. See
+[EnergyChartsSource](/epftoolbox2/data-sources/energy-charts/#vintages-and-availability).
+
 A31 holds one value per local date of each market's Monday-to-Sunday week, and every TSO publishes the next week on Friday two hours
 before the 12:00 CET gate closure. So the built-in rule is `Availability.weekly("friday", "10:00", week_zone="data")`: the week is
 read in the data's local dates, and the publication instant is 10:00 Brussels in every zone. On an hourly frame in Helsinki the first
@@ -317,8 +323,9 @@ archive of most series keeps only the newest revision, not the value a forecast 
 | `last_write_stamp` | a stamp of each value's last write: it can tell a leak, but it is no vintage | the PSE load and generation tables |
 | `latest_revision` | the newest value only | ENTSO-E A65, A69 `current`, A75, SMARD, Energy-Charts `current` |
 
-`PseSource` has these classes on its columns (prices and `pdgsz` are `snapshot`, the other tables `last_write_stamp`). The library has no source
-for SMARD or Energy-Charts yet: they are here to say what each class means, and a rule of yours for such a column can carry its class.
+`PseSource` has these classes on its columns (prices and `pdgsz` are `snapshot`, the other tables `last_write_stamp`), and
+`EnergyChartsSource` has its own rules and classes. The library has no source for SMARD yet: they are here to say what each
+class means, and a rule of yours for such a column can carry its class.
 
 ```python
 from epftoolbox2.information_set import Availability, InformationSet
