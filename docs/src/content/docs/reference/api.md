@@ -109,9 +109,9 @@ class ModelPipeline:
         rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,  # Builds the input from source data
         horizons: Optional[Sequence[int]] = None,  # The horizons a run lists, in place of horizon
         issue_days: Optional[Sequence[str]] = None,  # The weekdays a run lists: only those are sampled
-        device: Optional[str] = None,     # Set on every model that has a device, e.g. "cpu"
-        co_batch: Optional[bool] = None,  # Noise in the other items of a call; None: models that predict together or have a card
-        rerun: Optional[bool] = None,     # Run each day twice first; any difference is inconclusive. None: as co_batch
+        device: Optional[str] = None,     # Set on every model with an attribute named device, e.g. "cpu"
+        co_batch: Optional[bool] = None,  # Probe over runs holding the other items of a call; None: models that predict together, name them or have a card
+        rerun: Optional[bool] = None,     # Run each day twice first, from other seeds; any difference is inconclusive. None: as co_batch
     ) -> VerifyReport: ...
 
     def explain(                          # What one forecast's predictors hold and when each is known; no side effects
@@ -152,6 +152,8 @@ class VerifyReport:
     def ok(self) -> bool: ...             # Every model's status is "ok"
     @property
     def models(self) -> List[str]: ...
+    @property
+    def devices(self) -> Dict[str, str]: ...    # Model -> the device verify(device=) ran it on
 
     def status(self, model: str) -> str: ...    # "ok", "leak" or "inconclusive"
     def table(self) -> pd.DataFrame: ...        # model, days, forecasts, changed, max change, control moved, rerun, co_batch, status

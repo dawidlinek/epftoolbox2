@@ -2264,6 +2264,7 @@ def leakage_probe(
     check_target_boundary: bool = False,
     availability: str = "raise",
     horizons: Optional[Sequence[int]] = None,
+    span: Optional[Tuple[str, str]] = None,
 ) -> ProbeResult:
     """Perturb every value not known at issue time on `run_day` and check that the forecasts don't change.
 
@@ -2305,7 +2306,9 @@ def leakage_probe(
     `horizon=H` runs every horizon from 1 to H, 1 if neither is given, and `horizons` the ones it lists, as `run` does.
 
     A model with `refit` runs from `run_day` to the end of its refit block (or of the frame) and only `run_day`'s forecasts are
-    compared, since a fit serves every issue day of its block and a leak can need the later ones in the run to show.
+    compared, since a fit serves every issue day of its block and a leak can need the later ones in the run to show. `span`
+    (first, last), ISO dates, widens the runs to cover them too, as `co_batch_probe` does with the other items of a call: the
+    perturbation is the same, every cell unknown at `run_day`'s issue time on every row.
     """
     run_day = str(pd.Timestamp(run_day).date())
     horizon = _horizon_arguments(horizon, horizons, 1)
@@ -2329,7 +2332,7 @@ def leakage_probe(
             perturbed, more, _ = perturb_unknown(perturbed, run_day, information_set, freq, ruled, seed)
             counts = {**counts, **{name: max(counts.get(name, 0), n) for name, n in more.items()}}
 
-    common = (run_day, target, horizon, freq, information_set, availability)
+    common = (run_day, target, horizon, freq, information_set, availability, span)
     original, read, late = _issue_day_forecasts(model, base, *common)
     probed, read_probed, _ = _issue_day_forecasts(model, perturbed, *common)
     changed, max_abs_change, missing = _compare_forecasts(original, probed, atol)
@@ -2498,6 +2501,7 @@ def positive_control(
     rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
     availability: str = "raise",
     horizons: Optional[Sequence[int]] = None,
+    span: Optional[Tuple[str, str]] = None,
 ) -> ControlResult:
     """Perturb the freshest values known at issue time on `run_day` and check that the forecasts do change.
 
@@ -2520,7 +2524,8 @@ def positive_control(
     change, so that what row D builds from them (`x_d-1`) does, and every built row before D is put back.
 
     `model` is a model instance or a zero-argument factory, and `availability` the level a predictor function is planned
-    at, and `horizon` or `horizons` what it runs, as in `leakage_probe`. A model with `refit` runs to the end of its block, as there.
+    at, and `horizon` or `horizons` what it runs, as in `leakage_probe`. A model with `refit` runs to the end of its block, as there,
+    and `span` widens the runs as there.
     """
     run_day = str(pd.Timestamp(run_day).date())
     horizon = _horizon_arguments(horizon, horizons, 1)
@@ -2540,8 +2545,9 @@ def positive_control(
         perturbed, counts, unchecked = perturb_recent(in_market_zone, run_day, information_set, freq, names, seed)
         perturbed.index = data.index
         perturbed = _with_training_data_of(base, rebuild(perturbed), run_day, target, first_row_day)
-    original, *_ = _issue_day_forecasts(model, base, run_day, target, horizon, freq, information_set, availability)
-    other, *_ = _issue_day_forecasts(model, perturbed, run_day, target, horizon, freq, information_set, availability)
+    common = (run_day, target, horizon, freq, information_set, availability, span)
+    original, *_ = _issue_day_forecasts(model, base, *common)
+    other, *_ = _issue_day_forecasts(model, perturbed, *common)
     moved, max_abs_change, _ = _compare_forecasts(original, other, atol)
     return ControlResult(
         run_day=run_day,
@@ -2556,69 +2562,35 @@ def positive_control(
 
 @dataclass
 class CoBatchResult:
-    """Outcome of `co_batch_probe`: forecasts of the issue day that moved when the other items of their call were replaced by
-    noise."""
+    """Outcome of `co_batch_probe`: the leakage probe (and control) over a run widened to the other items of the call that
+    predicts the issue day's forecasts, so that the call holds them."""
 
     run_day: str
     # The other issue days of the call, as the model names them and the frame has them; None for a model that names none
     # (no `_co_batch_items`), whose check could not run.
     items: Optional[List[str]]
-    forecasts: int  # forecasts of the issue day compared; 0 when there was nothing to replace
-    moved: List[Tuple[int, int]]  # (period, horizon)
-    max_abs_change: float
-    perturbed: Dict[str, int]  # column -> number of cells replaced
-    missing: List[Tuple[int, int]] = field(default_factory=list)  # forecasts present in only one of the runs
+    probe: Optional[ProbeResult] = None  # None when nothing ran: no other item the frame has
+    control: Optional[ControlResult] = None  # the positive control over the same widened run, when it ran
 
     @property
     def ok(self) -> bool:
-        return not self.moved and not self.missing
+        return self.probe is None or self.probe.ok
 
 
-def co_batch_items(model: Any, run_day: str) -> Optional[List[str]]:
+def co_batch_items(model: Any, run_day: str, frame: Optional[pd.DataFrame] = None) -> Optional[List[str]]:
     """The issue days whose items share the call that predicts `run_day`'s forecasts, as the model names them
-    (`model._co_batch_items(run_day)`), as ISO dates, sorted, without `run_day` itself; None for a model without the hook.
-    `model` is a model instance or a zero-argument factory."""
+    (`model._co_batch_items(run_day)`), as ISO dates, sorted, without `run_day` itself, and with `frame` only the dates it has
+    rows on; None for a model without the hook. `model` is a model instance or a zero-argument factory."""
     m = model() if callable(model) and not hasattr(model, "run") else model
     hook = getattr(m, "_co_batch_items", None)
     if hook is None:
         return None
     run_day = str(pd.Timestamp(run_day).date())
-    return sorted({str(pd.Timestamp(day).date()) for day in hook(run_day)} - {run_day})
-
-
-def _local_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    """The local date of each row: the wall clock of an aware index, the stamps of a naive one."""
-    return (index.tz_localize(None) if index.tz is not None else index).normalize()
-
-
-def perturb_items(
-    data: pd.DataFrame, days: Iterable[Any], keep: Sequence[str] = (), seed: int = 0
-) -> Tuple[pd.DataFrame, Dict[str, int]]:
-    """Copy of `data` where every numeric value on a row dated one of `days` (local dates) is replaced by noise, except in the
-    columns of `keep` and where it is missing.
-
-    The perturbation of `co_batch_probe`: the rows of the other items of a call, whatever their rules say. `keep` is the target a
-    model trains on, which on a block's own days can be a training target (`newest_target="published"` trains on the anchor's
-    price). A missing value stays missing, so the call holds the same items as before, only with other values; boolean columns
-    are left alone, as by `perturb_unknown`.
-    """
-    rng = np.random.default_rng(seed)
-    wanted = pd.DatetimeIndex([pd.Timestamp(str(pd.Timestamp(day).date())) for day in days])
-    rows = np.asarray(_local_dates(data.index).isin(wanted))
-    out = data.copy()
-    counts: Dict[str, int] = {}
-    if not rows.any():
-        return out, counts
-    for name in data.columns:
-        if name in keep or not pd.api.types.is_numeric_dtype(data[name]) or pd.api.types.is_bool_dtype(data[name]):
-            continue
-        values = out[name].to_numpy(dtype=float, copy=True)
-        mask = rows & np.isfinite(values)
-        if mask.any():
-            values[mask] = 1e6 + rng.normal(0.0, 1e4, int(mask.sum()))
-            out[name] = values
-            counts[name] = int(mask.sum())
-    return out, counts
+    named = {str(pd.Timestamp(day).date()) for day in hook(run_day)} - {run_day}
+    if frame is not None:
+        local = frame.index.tz_localize(None) if frame.index.tz is not None else frame.index
+        named &= {str(day.date()) for day in local.normalize().unique()}
+    return sorted(named)
 
 
 def co_batch_probe(
@@ -2629,43 +2601,50 @@ def co_batch_probe(
     target: str = "price",
     horizon: Optional[int] = None,
     freq: str = "1h",
+    columns: Optional[Sequence[str]] = None,
     atol: float = 1e-9,
     seed: int = 0,
+    rebuild: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
+    check_target_boundary: bool = False,
     availability: str = "raise",
     horizons: Optional[Sequence[int]] = None,
     items: Optional[Iterable[Any]] = None,
+    control: bool = False,
 ) -> CoBatchResult:
-    """Replace every other item of the call that predicts `run_day`'s forecasts by noise and check that they don't change.
+    """The leakage probe over the issue day's whole call: `run_day`'s forecasts must not depend on anything unknown at its issue
+    time, whatever else is predicted with them.
 
-    A model that predicts several items in one call (the issue rows of a refit block, a batch of contexts) can let one forecast
-    depend on the others: an in-context model attending to the rows it is asked about, a batch statistic. The leakage probe misses
-    it when the other items hold only values known at the issue time (the days of a block before the issue day). The model names
-    the other items through its hook `_co_batch_items(run_day)`: the issue days whose items share the call (`items` overrides
-    it). Every numeric value on their rows is replaced by noise (`perturb_items`), the target a model trains on and missing values
-    excepted, the model runs on both frames over the issue day's block and every named day (`_issue_day_forecasts`), and only
-    `run_day`'s forecasts are compared, at `atol`.
+    A model that predicts several items in one call (the issue rows of a refit block, a batch of issue days) puts other days' rows
+    into the call that predicts `run_day`'s forecasts, and can let those forecasts read them: an in-context model attending to
+    the rows it is asked about, a batch statistic. The plain probe runs `run_day` alone (or to the end of its refit block), so a
+    call made of the run's own days holds `run_day` alone there and such a read can't show. Here the model names the other items
+    (`_co_batch_items(run_day)`, or `items`), the runs are widened to cover them (`leakage_probe(span=...)`) and the perturbation
+    is the probe's: every cell the information set calls unknown at `run_day`'s issue time, on every row, the other items'
+    targets and late inputs among them, and with `check_target_boundary` the target from `run_day` on. What is known by then
+    stays: a known-ahead covariate on another item's row, a block's earlier days, training rows. Only `run_day`'s forecasts are
+    compared. `control` runs the positive control over the same widened runs as well.
 
-    A hook names only items whose rows are no input of `run_day`'s own forecast: a refit unit trains on rows before its anchor,
-    so the other days of its block qualify. A predictor function reads the issue day's own row, so its lists don't move. A model
-    without the hook gives `items=None` and runs nothing; one that names no day the frame has (a block of one day) gives
-    `items=[]`. `model` is a model instance or a zero-argument factory; `availability`, `horizon` and `horizons` are as in
-    `leakage_probe`.
+    A model without the hook gives `items=None` and runs nothing; one that names no other day the frame has gives `items=[]`
+    and runs nothing either. The other arguments are `leakage_probe`'s.
     """
     run_day = str(pd.Timestamp(run_day).date())
-    named = co_batch_items(model, run_day) if items is None else sorted({str(pd.Timestamp(d).date()) for d in items})
-    if named is None:
-        return CoBatchResult(run_day, None, 0, [], 0.0, {})
-    present = {str(day.date()) for day in _local_dates(data.index).unique()}
-    others = [day for day in named if day != run_day and day in present]
+    frame = data if rebuild is None else rebuild(data)
+    if items is None:
+        others = co_batch_items(model, run_day, frame)
+    else:
+        local = frame.index.tz_localize(None) if frame.index.tz is not None else frame.index
+        present = {str(day.date()) for day in local.normalize().unique()}
+        others = sorted({str(pd.Timestamp(day).date()) for day in items} & present - {run_day})
     if not others:
-        return CoBatchResult(run_day, [], 0, [], 0.0, {})
-    perturbed, counts = perturb_items(data, others, keep=[target], seed=seed)
-    common = (run_day, target, _horizon_arguments(horizon, horizons, 1), freq, information_set, availability)
+        return CoBatchResult(run_day, others)
     span = (others[0], others[-1])
-    original, *_ = _issue_day_forecasts(model, data, *common, span=span)
-    other, *_ = _issue_day_forecasts(model, perturbed, *common, span=span)
-    moved, max_abs_change, missing = _compare_forecasts(original, other, atol)
-    return CoBatchResult(run_day, others, len(original), moved, max_abs_change, counts, missing)
+    common = dict(freq=freq, columns=columns, atol=atol, seed=seed, rebuild=rebuild, availability=availability)
+    common.update(horizon=horizon, horizons=horizons, span=span)
+    probe = leakage_probe(
+        model, data, run_day, information_set, target, check_target_boundary=check_target_boundary, **common
+    )
+    moved = positive_control(model, data, run_day, information_set, target, **common) if control else None
+    return CoBatchResult(run_day, others, probe, moved)
 
 
 def _horizon_arguments(horizon: Optional[int], horizons: Optional[Sequence[int]], default: int) -> Dict[str, Any]:
@@ -3227,7 +3206,6 @@ __all__ = [
     "default_rules",
     "leakage_probe",
     "parse_predictor",
-    "perturb_items",
     "perturb_recent",
     "perturb_unknown",
     "positive_control",
