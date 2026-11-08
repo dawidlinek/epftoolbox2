@@ -356,6 +356,43 @@ def standard_stats(
 # --- fits -------------------------------------------------------------------------------------------------------------
 
 
+def estimator_params(estimator, cls, honoured: Sequence[str], fixed: Optional[dict] = None) -> Optional[dict]:
+    """The parameters of a model's `estimator` (its `_estimator()`, what the model path fits) where a fit from statistics may
+    stand in for it, else None (the model path fits it, and raises where scikit-learn's `fit` would).
+
+    It may where the estimator is exactly a `cls` (not a subclass), its parameters pass the installed scikit-learn's own
+    validation (`_validate_params`, the check `fit` makes first: a float `max_iter` or a `fit_intercept` of 1 fails it), and
+    every parameter equals that of `cls(**honoured, **fixed)`, the `honoured` ones (what the fit from statistics reads) taken
+    from the estimator itself. So an option the statistics don't honour (a subclass's `eps=1e-5`, another `gcv_mode`) sends
+    the fit back."""
+    if type(estimator) is not cls:
+        return None
+    validate = getattr(estimator, "_validate_params", None)
+    if validate is None:
+        return None  # a scikit-learn without the check: the model path decides
+    try:
+        validate()
+    except (TypeError, ValueError):  # InvalidParameterError is both
+        return None
+    params = estimator.get_params(deep=False)
+    reference = cls(**{name: params[name] for name in honoured}, **(fixed or {})).get_params(deep=False)
+    if params.keys() != reference.keys() or not all(_same(params[k], reference[k]) for k in params):
+        return None
+    return params
+
+
+def _same(a, b) -> bool:
+    """Whether two parameter values are the same: identical, or equal and of one type (False where `==` isn't a truth)."""
+    if a is b:
+        return True
+    if type(a) is not type(b):
+        return False
+    try:
+        return bool(a == b)
+    except (TypeError, ValueError):
+        return False
+
+
 class LinearFit:
     """A linear fit from statistics: `predict(X) = X @ coef_ + intercept_`, as the scikit-learn estimators it stands for.
 
@@ -510,6 +547,7 @@ __all__ = [
     "StandardParams",
     "StatsFallback",
     "cholesky_solve",
+    "estimator_params",
     "ols_fit",
     "ridge_fit",
     "ridgecv_rounding",

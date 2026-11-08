@@ -137,5 +137,10 @@ class RidgeModel(BaseModel):
         """`RidgeCV(alphas, fit_intercept, cv=None)` from a unit's scaled sums and rows (`_stats.ridge_fit`: the eigendecomposition
         of the centred Gram and exact leave-one-out leverages), or None where the model path must fit it: n <= p (scikit-learn's
         `eigen` mode), fewer than 3 rows, or scikit-learn's own rounding at the chosen penalty above `_stats.RIDGE_ROUNDING_MAX`
-        (it errs by about `_stats.ridgecv_rounding`/α, so no exact fit can stay within 1e-9 of it there)."""
-        return _stats.ridge_fit(stats, self._model_kwargs["alphas"], self.fit_intercept)
+        (it errs by about `_stats.ridgecv_rounding`/α, so no exact fit can stay within 1e-9 of it there), and wherever
+        `_estimator()` isn't exactly that `RidgeCV` with valid parameters (`_stats.estimator_params`). The settings are the
+        estimator's own."""
+        params = _stats.estimator_params(self._estimator(), RidgeCV, ("alphas", "fit_intercept"), {"cv": None})
+        if params is None:
+            return None
+        return _stats.ridge_fit(stats, params["alphas"], bool(params["fit_intercept"]))

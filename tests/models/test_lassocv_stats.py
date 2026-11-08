@@ -414,6 +414,46 @@ def test_hands_back_n_at_most_p_and_short_training_parts():
     assert delta <= 1e-12
 
 
+class FineGridLassoCV(LassoCVModel):
+    """Overrides only the estimator: a finer grid the statistics don't honour."""
+
+    def _estimator(self):
+        return LassoCV(cv=self.cv, max_iter=self.max_iter, n_jobs=1, fit_intercept=self.fit_intercept, eps=1e-5)
+
+
+class ShortLassoCV(LassoCVModel):
+    """Overrides only the estimator, with a setting the statistics honour: they read it from the estimator."""
+
+    def _estimator(self):
+        return LassoCV(cv=self.cv, max_iter=20, n_jobs=1, fit_intercept=self.fit_intercept)
+
+
+def test_the_fit_reads_the_estimators_settings_and_hands_back_what_it_cant_honour():
+    """`_fit_stats` takes cv, max_iter and fit_intercept from `_estimator()` and hands back (None) where that isn't exactly
+    `LassoCV(cv, max_iter, n_jobs=1, fit_intercept)` with valid parameters: the model path raises there (a `fit_error`
+    skip) or fits other settings."""
+    rng = np.random.default_rng(14)
+    x = rng.normal(size=(301, 6)) * 3 + 10
+    y = 50 + x @ rng.normal(size=6) + rng.normal(size=301)
+    xs, ys, x0 = x[:-1], y[:-1], x[-1:]
+    mask = np.ones(6, dtype=bool)
+    stats, params = engine_stats(xs, ys, np.arange(300), mask)
+    Z, yz, z0, scaler = scaled_rows(xs, ys, x0, mask)
+    assert LassoCVModel([])._fit_stats(stats) is not None
+    for kwargs in (dict(max_iter=1e4), dict(max_iter=0), dict(fit_intercept=1)):
+        model = LassoCVModel([], **kwargs)
+        assert model._fit_stats(stats) is None, kwargs
+        with pytest.raises(ValueError):  # scikit-learn's InvalidParameterError
+            model._fit_model(Z, yz)
+    assert FineGridLassoCV([])._fit_stats(stats) is None
+    short = ShortLassoCV([])
+    fitted = short._fit_model(Z, yz)
+    assert position(fitted.alphas_, short._fit_stats(stats).alpha_) == position(fitted.alphas_, fitted.alpha_)
+    pe, _ = engine_path(short, stats, params, x0)
+    pm = scaler.inverse(float(fitted.predict(z0)[0]))
+    assert abs(pe - pm) <= LASSO_TOL
+
+
 def test_cancellation_in_a_fold_and_a_constant_target_hand_back():
     """A column that barely varies on a training part far from the span's shift, and a target constant on ρ (which
     `standard_stats` lets through with the scale 1.0), raise `StatsFallback("cancellation")`: the engine sends them back."""

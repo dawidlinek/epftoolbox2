@@ -2,7 +2,7 @@ import numbers
 
 from sklearn.linear_model import LassoCV
 
-from . import _cv_stats
+from . import _cv_stats, _stats
 from ._lars import CV_FOLDS
 from ._stats import ScaledStats
 from .base import BaseModel
@@ -46,9 +46,14 @@ class LassoCVModel(BaseModel):
     def _fit_stats(self, stats: ScaledStats):
         """`LassoCV(cv, max_iter, n_jobs=1, fit_intercept)` from a unit's scaled sums and its KFold blocks
         (`_cv_stats.lassocv_fit`: scikit-learn's own coordinate descent on each fold's Gram through `enet_path`), or None
-        where the model path must fit it: `cv` not a number of folds, no blocks or another number of them, a fold whose
-        training part has no more rows than columns (n <= p among them), or anything that isn't finite."""
-        folds = CV_FOLDS if self.cv is None else self.cv
+        where the model path must fit it: `_estimator()` not exactly that `LassoCV` with valid parameters
+        (`_stats.estimator_params`), `cv` not a number of folds, no blocks or another number of them, a fold whose training
+        part has no more rows than columns (n <= p among them), or anything that isn't finite. The settings are the
+        estimator's own."""
+        params = _stats.estimator_params(self._estimator(), LassoCV, ("cv", "max_iter", "fit_intercept"), {"n_jobs": 1})
+        if params is None:
+            return None
+        folds = CV_FOLDS if params["cv"] is None else params["cv"]
         if isinstance(folds, bool) or not isinstance(folds, numbers.Integral):
             return None  # a splitter object: its folds aren't KFold's blocks
-        return _cv_stats.lassocv_fit(stats, self.fit_intercept, self.max_iter, folds=int(folds))
+        return _cv_stats.lassocv_fit(stats, bool(params["fit_intercept"]), int(params["max_iter"]), folds=int(folds))
