@@ -132,6 +132,12 @@ def random_design(rng, max_cond=1e4):
     return x[:-1], y[:-1], x[-1:]
 
 
+def designs(part):
+    """The 100 random designs of one part of the OLS and Ridge tests (the same designs for both)."""
+    rng = np.random.default_rng(1000 + part)
+    return [random_design(rng) for _ in range(100)]
+
+
 @functools.lru_cache(maxsize=None)
 def lear_design(hour):
     """A Lago-shaped design from the DE fixture: rows are target days t, 247 columns (the prices of t-1, t-2, t-3 and t-7; both
@@ -403,10 +409,8 @@ def test_ols_within_1e_8_of_linear_regression_on_random_designs(part):
     """500 random designs (100 per part), n > p + 1, cond(Z) up to 1e4, with and without an intercept: every fit the engine
     keeps is within 1e-8 of `LinearRegression`; it hands back only fits with cond(Z) above √GUARD (the pivot ratio is at most
     cond(Z)²), and keeps most."""
-    rng = np.random.default_rng(1000 + part)
     kept = 0
-    for _ in range(100):
-        x, y, x0 = random_design(rng)
+    for x, y, x0 in designs(part):
         mask = StandardScaler.get_scalable_mask(x)
         stats, params = stats_of(x, y, np.arange(x.shape[0]), mask)
         for fit_intercept in (False, True):
@@ -510,15 +514,14 @@ def test_conditioning_sweep_every_fit_the_guard_lets_through_is_within_1e_8():
 
 @pytest.mark.parametrize("part", range(5))
 def test_ridge_same_penalty_and_within_1e_9_of_ridgecv(part):
-    """500 random designs (100 per part), the default 36-value grid and one-value grids, with and without an intercept: the
+    """The OLS test's 500 random designs, the default 36-value grid and one-value grids, with and without an intercept: the
     same penalty as `RidgeCV(alphas, fit_intercept, cv=None)` in every fit, and the forecast within 1e-9 in every fit the
     engine keeps. It hands back the fits where scikit-learn's own rounding at the chosen penalty, `ridgecv_rounding / α` in
     target units, exceeds `RIDGE_ROUNDING_MAX`: there RidgeCV is up to about 4e-8/α off an exact ridge (research sweep), the
     engine is not."""
     rng = np.random.default_rng(2000 + part)
     kept = 0
-    for i in range(100):
-        x, y, x0 = random_design(rng)
+    for i, (x, y, x0) in enumerate(designs(part)):
         mask = StandardScaler.get_scalable_mask(x)
         stats, params = stats_of(x, y, np.arange(x.shape[0]), mask)
         alphas = None if i % 2 else [float(DEFAULT_ALPHAS[int(rng.integers(0, 36))])]
