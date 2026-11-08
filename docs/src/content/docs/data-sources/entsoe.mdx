@@ -44,7 +44,7 @@ df = source.fetch(
 | `prefer_15min` | bool | No | Defaults to `False`. Selects the grid of the `price` column: `False` gives hourly prices, `True` gives 15-minute prices. See [Price resolution](#price-resolution). |
 | `neighbours` | List[str] or str | With `transfer_capacity` | Defaults to `None`. Neighbouring bidding zones for `transfer_capacity`, e.g. `["DE_LU", "CZ"]` or `"DE_LU,CZ"`. Required with that type and rejected without it. |
 | `prefix` | str | No | Defaults to `""`. Prepended to every column as `f"{prefix}_{column}"`, so several zones can be combined in one pipeline. |
-| `price_exaa` | bool | No | Defaults to `False`. `True` adds the EXAA auction as a second column `price_exaa`. Only for `"AT"` and `"DE_LU"`, and `type` must include `"price"`; any other zone raises `ValueError`. See [Early auctions](#early-auctions-exaa-and-switzerland). |
+| `price_exaa` | bool | No | Defaults to `False`. `True` adds the EXAA auction as a second column `price_exaa`. Only for `"AT"`, `"DE_LU"` and `"DE_AT_LU"` (the last, for Germany before 2018-10-01, is not verified against the live API), and `type` must include `"price"`; any other zone raises `ValueError`. See [Early auctions](#early-auctions-exaa-and-switzerland). |
 
 ## Returned range
 
@@ -112,7 +112,7 @@ columns the week of the zone it stamps them at (see
 | Column | Document | Description |
 |--------|----------|-------------|
 | `price` | A44 | Day-ahead price of the single day-ahead coupling (SDAC) in the bidding zone (EUR/MWh). For `"CH"`, which is not in SDAC, the Swiss day-ahead auction |
-| `price_exaa` | A44, position 2 | With `price_exaa=True` (AT and DE_LU): the EXAA auction, on the same grid as `price` |
+| `price_exaa` | A44, position 2 | With `price_exaa=True` (AT, DE_LU, DE_AT_LU): the EXAA auction, on the same grid as `price` |
 
 #### Price resolution
 
@@ -142,7 +142,7 @@ their results for D+1:
 
 | Column | Auction | Gate on D-1 (local) | Built-in rule |
 |---|---|---|---|
-| `price_exaa` (`price_exaa=True`, AT and DE_LU) | EXAA, 15-minute products | 10:15 | `published("11:15", 1)` in Vienna or Berlin (legal bound: one hour after the gate, Art. 12.1.d) |
+| `price_exaa` (`price_exaa=True`, AT, DE_LU, DE_AT_LU) | EXAA, 15-minute products | 10:15 | `published("11:15", 1)` in Vienna or Berlin (legal bound: one hour after the gate, Art. 12.1.d) |
 | `price` of `"CH"` | Swiss day-ahead auction | 11:00 | `published("12:00", 1)` in Zurich (legal bound) |
 
 Both rules are `snapshot`s. Both times are the **legal bounds, not measured first-seen times.** EXAA was seen at about 10:35
@@ -151,9 +151,15 @@ period. A forecast issued between the gate and the legal bound (EXAA from 10:15,
 by the information set, which is conservative. A forecast issued at 11:45 relies on Switzerland's 12:00 bound being
 too late: **measure first-seen times before relying on that**, or issue at 12:00 or later.
 
-A `Workflow` gives the Swiss `price` its 12:00 Zurich rule from the source. A bare `InformationSet` or `ModelPipeline(issue_time=...)` has only
-the built-in rules: `price_exaa` is built in (11:15), but a Swiss `price` there gets the generic `price` rule, 13:00 Brussels (13:00
-Zurich), an hour later than the legal bound and so safe, but it refuses a 12:00 issue; declare `Availability.published("12:00", 1, timezone="Europe/Zurich")` for `price` yourself to use it.
+**DE_AT_LU** (Germany before 2018-10-01) is accepted with the same request and rule. It is **unverified until a live check**:
+no response for it has been seen.
+
+A `Workflow` gives the Swiss `price` its 12:00 Zurich rule from the source, and a prefixed `ch_price` too. A bare `InformationSet` or
+`ModelPipeline(issue_time=...)` has only the built-in rules. `price_exaa` and any `<prefix>_price_exaa` (`de_price_exaa`) are built in (11:15).
+An unprefixed Swiss `price` gets the generic `price` rule there, 13:00 Brussels (13:00 Zurich), an hour later than the legal bound and so safe,
+but it refuses a 12:00 issue. A prefixed `ch_price` has **no built-in rule**, and a column without a rule counts as known at the default
+`availability="warn"`. So with a bare set use `Workflow` or declare `Availability.published("12:00", 1, timezone="Europe/Zurich")` for it, and
+pass `availability="raise"` to have a column without a rule refused.
 
 `price_exaa` is requested with `classificationSequence_AttributeInstanceComponent.position=2` in a second A44 request
 per chunk; the plain request is unchanged and keeps SDAC only, so a source without `price_exaa` returns exactly what it
@@ -174,23 +180,23 @@ from epftoolbox2.information_set import InformationSet
 from epftoolbox2.models import LassoCVModel
 from epftoolbox2.pipelines import ModelPipeline
 
-source = EntsoeSource("DE_LU", api_key=key, type=["price"], price_exaa=True)  # price, price_exaa
-# After DailyProfileTransformer(columns=["price", "price_exaa"]) the frame has price_h00 ... and price_exaa_h00 ...
+source = EntsoeSource("DE_LU", api_key=key, type=["price"], price_exaa=True, prefix="de")  # de_price, de_price_exaa
+# After DailyProfileTransformer(columns=["de_price", "de_price_exaa"]) the frame has de_price_exaa_h00 ...
 
 HOURS = [f"h{h:02d}" for h in range(24)]
-base = presets.lear_predictors([])
+base = presets.lear_predictors([], price="de_price")
 
 
 def lear_with_exaa(ctx):
     x = list(base)
-    exaa = [f"price_exaa_{h}_d+{{horizon}}" for h in HOURS]
-    if ctx.published(exaa):  # False before 11:15 on D-1, for horizons above 1, and where the value is missing
+    exaa = [f"de_price_exaa_{h}_d+{{horizon}}" for h in HOURS]
+    if ctx.published(exaa):  # False before 11:15 on D-1, at horizon 2 and above (D+2 is out on D+1), and where missing
         x += exaa
     return x
 
 
-info = InformationSet("11:45", "Europe/Berlin")  # price_exaa has a built-in rule
-pipeline = ModelPipeline(information_set=info).add_model(
+info = InformationSet("11:45", "Europe/Berlin")  # price_exaa and <prefix>_price_exaa have a built-in rule
+pipeline = ModelPipeline(information_set=info, availability="raise").add_model(  # "raise": a column without a rule is refused
     LassoCVModel(predictors=lear_with_exaa, training_window=728, name="LEAR_exaa")
 )
 ```
@@ -301,7 +307,7 @@ as produced by `LagTransformer` (`x_d-1` is yesterday, `x_d+1` tomorrow):
 | Column | Publication deadline (543/2013) | Safe as a predictor for a forecast issued on D |
 |---|---|---|
 | `price` | No later than 1 hour after gate closure (Art. 12) | `price` (delivery D, cleared on D-1) and `_d-k`. `price_d+1` is the target |
-| `price_exaa` (AT, DE_LU) | No later than 1 hour after the EXAA gate at 10:15 (Art. 12.1.d): 11:15 | `_d+1` for a forecast issued at or after 11:15; `_d+2` and later never |
+| `price_exaa` (AT, DE_LU, DE_AT_LU) | No later than 1 hour after the EXAA gate at 10:15 (Art. 12.1.d): 11:15 | `_d+1` for a forecast issued at or after 11:15; `_d+2` and later never |
 | `price` of `CH` | No later than 1 hour after the Swiss gate at 11:00: 12:00 | `_d+1` for a forecast issued at or after 12:00 (the first-seen time of 11:05 to 11:30 is unmeasured) |
 | `load_actual` | No later than 1 hour after the operating period (Art. 6) | `_d-1` and older only. Unlagged `load_actual` is look-ahead for the hours after the issue time |
 | `load_forecast` | 2 hours before gate closure (10:00 CET) on the day before delivery, updated when significant changes occur (Art. 6) | `load_forecast` and `_d+1` if the forecast is issued at or after 10:00. `_d+2` and later are published on D+1 or later: look-ahead |
