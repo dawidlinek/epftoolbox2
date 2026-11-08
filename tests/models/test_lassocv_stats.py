@@ -263,21 +263,27 @@ def test_blocks_must_be_kfolds_blocks_of_rho_over_the_same_span():
 # --- LassoCV against scikit-learn --------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("part", range(5))
-def test_lassocv_same_alpha_within_1e_8_on_random_designs(part):
-    """500 designs in all (100 per part), with an intercept, and every fifth design without one too."""
-    rng = np.random.default_rng(500 + part)
+def test_lassocv_same_alpha_within_1e_8_on_random_designs():
+    """500 designs, with an intercept, and every fifth design without one too: the same `alpha_` and within 1e-8, a flip
+    allowed only as a tie of the CV error and at most once in the 500 (the spec's rate)."""
     worst, flips = 0.0, []
-    for i in range(100):
-        x, y, x0 = random_design(rng)
-        for fit_intercept in (True, False) if i % 5 == 0 else (True,):
-            delta, flip = compare_lassocv(x, y, x0, None, fit_intercept)
-            if flip is None:
-                worst = max(worst, delta)
-            else:
-                (a, b), (ma, mb) = flip
-                assert abs(ma - mb) <= 1e-10 * ma, (i, fit_intercept, flip)  # a tie of the CV error, nothing else
-                flips.append((i, fit_intercept, flip))
+    for part in range(5):
+        rng = np.random.default_rng(500 + part)
+        for i in range(100):
+            x, y, x0 = random_design(rng)
+            for fit_intercept in (True, False) if i % 5 == 0 else (True,):
+                delta, flip = compare_lassocv(x, y, x0, None, fit_intercept)
+                if flip is None:
+                    worst = max(worst, delta)
+                else:
+                    (a, b), (ma, mb) = flip
+                    assert abs(ma - mb) <= 1e-10 * ma, (
+                        part,
+                        i,
+                        fit_intercept,
+                        flip,
+                    )  # a tie of the CV error, nothing else
+                    flips.append((part, i, fit_intercept, flip))
     assert worst <= LASSO_TOL, worst
     assert len(flips) <= 1, flips
 
