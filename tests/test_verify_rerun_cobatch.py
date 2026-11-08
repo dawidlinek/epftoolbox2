@@ -477,6 +477,11 @@ def test_suite_verify_passes_a_clean_adapter_and_fails_a_leaky_or_noisy_one(data
 
     with pytest.raises(AssertionError, match="replaced by noise"):
         suite.check_verify(lambda name, **p: make(name, leak=1e-3), data, INFO, [LAST])
+    # One that forgot `_predicts_together`: verify's defaults leave the co-batch check off, the suite turns it on.
+    undeclared = type("Undeclared", (FakeInContext,), {"_predicts_together": False})
+    assert pipeline(undeclared(CLEAN, leak=1e-3, refit="7D")).verify(data, LAST, LAST, days=1).ok
+    with pytest.raises(AssertionError, match="replaced by noise"):
+        suite.check_verify(lambda name, **p: undeclared(CLEAN, leak=1e-3, refit="7D", name=name), data, INFO, [LAST])
     with pytest.raises(AssertionError, match="nondeterministic"):
         suite.check_verify(lambda name, **p: Unseeded(CLEAN, name=name), data, INFO, [MIDDLE])
     with pytest.raises(AssertionError, match="doesn.t name them"):
