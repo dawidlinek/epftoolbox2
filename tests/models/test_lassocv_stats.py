@@ -362,7 +362,8 @@ def test_the_grid_is_lassocvs():
 
 def test_a_shape_only_x_gives_the_same_path():
     """With a Gram and `check_input=False`, `enet_path` reads X only for its shape and y only for y·y: the training rows, a
-    NaN-filled array and the module's broadcast view give bitwise the same coefficients, and so does the one-value y."""
+    NaN-filled array and the module's broadcast view give bitwise the same coefficients, and so does the zero-padded y of
+    the same y·y."""
     rng = np.random.default_rng(7)
     X = rng.normal(size=(200, 9)) * [1, 2, 3, 1, 1, 5, 1, 1, 1]
     y = X @ rng.normal(size=9) + rng.normal(size=200)
@@ -373,12 +374,16 @@ def test_a_shape_only_x_gives_the_same_path():
     want = enet_path(np.asfortranarray(Xc), yc, **kwargs)[1]
     assert enet_path(np.full((200, 9), np.nan), yc, **kwargs)[1].tobytes() == want.tobytes()
     assert enet_path(np.broadcast_to(np.nan, (200, 9)), yc, **kwargs)[1].tobytes() == want.tobytes()
-    one = _cv_stats._norm_vector(float(yc @ yc))
-    if float(one @ one) == float(yc @ yc):
-        assert enet_path(np.full((200, 9), np.nan), one, **kwargs)[1].tobytes() == want.tobytes()
-    assert _cv_stats._path(G, q, float(yc @ yc), 200, grid, MAX_ITER, 1e-4).tobytes() == (
-        enet_path(np.full((200, 9), np.nan), _cv_stats._norm_vector(float(yc @ yc)), **kwargs)[1].tobytes()
+    yy = float(yc @ yc)
+    padded = _cv_stats._norm_vector(yy, 200)
+    assert padded.shape == (200,) and (padded[1:] == 0).all() and float(padded @ padded) == padded[0] * padded[0]
+    assert abs(float(padded @ padded) - yy) <= np.spacing(yy)
+    if float(padded @ padded) == yy:
+        assert enet_path(np.full((200, 9), np.nan), padded, **kwargs)[1].tobytes() == want.tobytes()
+    assert _cv_stats._path(G, q, yy, 200, grid, MAX_ITER, 1e-4).tobytes() == (
+        enet_path(np.full((200, 9), np.nan), padded, **kwargs)[1].tobytes()
     )
+    assert _cv_stats._norm_vector(0.0, 200) is None and _cv_stats._norm_vector(np.nan, 200) is None
 
 
 def test_hands_back_n_at_most_p_and_short_training_parts():

@@ -39,7 +39,9 @@ scikit-learn 1.8.0's `LinearModelCV.fit` runs it (`_coordinate_descent.py:1617-1
    `enet_path(X, y, l1_ratio=1, alphas=grid, precompute=G_tr, Xy=q_tr, check_input=False)`, the path warm-started from zeros
    along the grid. Its Gram kernel (`_cd_fast.pyx:959-1142`) reads X only for its shape (`enet_path`, lines 604 and 672:
    `l1_reg = alpha * n_samples`) and y only for y·y (line 1008: the stopping tolerance tol·y·y and the duality gap), so X is a
-   shape-only array and y the one value √yy_tr whose square is yy_tr (the next float either way where √yy_tr's isn't).
+   shape-only array and y has the training part's n_tr values, √yy_tr and zeros (a scikit-learn that read y's length would
+   still see n_tr). y·y is then yy_tr exactly where a float's square is (about half the values) and 1 ulp off elsewhere, below
+   the model path's own rounding of y·y.
 3. The held-out mean squared error at every penalty, with `_path_residuals`' intercept ȳ_tr - z̄_tr·w (none without an
    intercept): (w'Aw - 2b'w + c) / r_k from the block's sums about the training part's means. Then the mean over the folds, each
    fold counted once, and its first argmin (`np.argmin`).
@@ -269,22 +271,27 @@ def alpha_grid(Xy, n: int, eps: float = GRID_EPS, n_alphas: int = N_ALPHAS) -> n
     return np.geomspace(alpha_max, alpha_max * eps, num=n_alphas)
 
 
-def _norm_vector(yy: float) -> Optional[np.ndarray]:
-    """A one-value y with y·y = yy (the coordinate descent reads y only for y·y): √yy, or a neighbour whose square is yy
-    exactly; None where yy isn't positive and finite."""
+def _norm_vector(yy: float, n: int) -> Optional[np.ndarray]:
+    """A y of `n` values with y·y as close to yy as one float's square comes (the coordinate descent reads y only for y·y):
+    √yy, or a neighbour whose square is yy exactly, then zeros. A neighbour hits yy for about half the values (51 % of
+    200,000 random ones); elsewhere y·y is 1 ulp off, below the model path's own rounding of y·y. None where yy isn't
+    positive and finite."""
     if not (math.isfinite(yy) and yy > 0.0):
         return None
     s = math.sqrt(yy)
     for t in (s, float(np.nextafter(s, 0.0)), float(np.nextafter(s, np.inf))):
         if t * t == yy:
-            return np.array([t])
-    return np.array([s])
+            s = t
+            break
+    y = np.zeros(max(int(n), 1))
+    y[0] = s
+    return y
 
 
 def _path(Q: np.ndarray, Xy: np.ndarray, yy: float, n: int, alphas: np.ndarray, max_iter: int, tol: float):
     """`enet_path`'s lasso coefficients (p, len(alphas)) on the Gram `Q`, `Xy` and y·y = `yy` of `n` rows, or None where yy
     isn't positive. X is a shape-only array: with `check_input=False` and a Gram the path reads its shape alone."""
-    y = _norm_vector(yy)
+    y = _norm_vector(yy, n)
     if y is None:
         return None
     Q = np.ascontiguousarray(Q, dtype=np.float64)
