@@ -2027,7 +2027,8 @@ def test_perturbation_keeps_a_repeated_hours_own_occurrence():
 
 def test_perturbation_covers_a_day_lag_of_a_weather_column():
     """The same rule drives the probe: the issue day's value of `x_d+1_d+1` comes from the next day's run, which is
-    unknown at issue time, while `x_d+1` itself (D's run, published by 10:36 CET) is known."""
+    unknown at issue time, while `x_d+1` itself (D's run, published by 10:36 CET) is known on D's row and before. A later
+    row's `x_d+1` comes from that row's own run, unknown at D's issue time too."""
     index = pd.date_range("2024-01-01", "2024-02-01", freq="h", tz="Europe/Warsaw", inclusive="left")
     df = pd.DataFrame(
         {
@@ -2038,8 +2039,10 @@ def test_perturbation_covers_a_day_lag_of_a_weather_column():
     )
     info = InformationSet("11:45", "Europe/Brussels").with_source_rules([_warsaw_weather_source()])
     perturbed, counts, _ = perturb_unknown(df, "2024-01-16", info)
-    assert "warsaw_temperature_2m_d+1" not in counts
-    assert (perturbed["warsaw_temperature_2m_d+1"] == df["warsaw_temperature_2m_d+1"]).all()
+    later = np.asarray(df.index.tz_localize(None).normalize() > pd.Timestamp("2024-01-16"))
+    column = "warsaw_temperature_2m_d+1"
+    assert (perturbed.loc[~later, column] == df.loc[~later, column]).all()
+    assert (perturbed.loc[later, column] > 1e5).all() and counts[column] == later.sum()
     issue_day = df.index.normalize() == pd.Timestamp("2024-01-16", tz="Europe/Warsaw")
     assert (perturbed.loc[issue_day, "warsaw_temperature_2m_d+1_d+1"] > 1e5).all()
 
@@ -2060,7 +2063,11 @@ def test_probe_detects_a_model_reading_a_weather_column_through_a_forward_day_la
         lambda: OLSModel(predictors + ["temperature_d+1"], training_window=45), df, "2023-04-12", info, horizon=1
     )
     clean.assert_ok()
-    assert "temperature_d+1" not in clean.perturbed
+    # Only the rows after the issue day, each from its own day's run; the clean model reads D's row, which stays.
+    assert (
+        clean.perturbed["temperature_d+1"]
+        == (df.index.tz_localize(None).normalize() > pd.Timestamp("2023-04-12")).sum()
+    )
 
     leaky = leakage_probe(
         lambda: OLSModel(predictors + ["temperature_d+1_d+1"], training_window=45), df, "2023-04-12", info, horizon=1

@@ -183,6 +183,21 @@ an issue day it didn't sample.
 
 ### New
 
+- **`verify` checks determinism and what else is in a forecast's call.** `ModelPipeline.verify(..., rerun=None, co_batch=None,
+  device=None)`: the rerun runs each sampled issue day twice first, each run from other seeds of the global generators, and a
+  forecast that differs at all makes the model `inconclusive` (`nondeterministic`), never `ok`; on such a day a move under the
+  probe is a `leak` only beyond 100 times the day's rerun difference (`NOISE_MARGIN`). The co-batch check runs the probe once more
+  over runs widened to the other items of the call that predicts the issue day's forecasts (the other days of a refit block a
+  model predicts in one call, or of a batch), with the probe's perturbation (a row after D read as of its own issue day, so a
+  later row's `weather_cutoff` or `as_of` forecast is unknown), so a forecast that reads what it can't know through
+  another item of its call is a `leak`, which the probe alone misses where the call is made of the run's own days. Both are on
+  by default for the models that predict several items in one call (`_predicts_together`, or naming them with
+  `_co_batch_items(run_day)`) or have a card, the model families to come, and off for every other. `device` sets an attribute
+  named `device` on the models that have one (`report.devices`; a warning when none has). `epf verify` takes `--device`,
+  `--rerun`/`--no-rerun` and `--co-batch`/`--no-co-batch`. `VerifyReport.table()` gains the columns `rerun` and `co_batch`,
+  between `control moved` and `status`, empty for every model of today: **no status or other column moves**. `co_batch_probe`
+  joins `leakage_probe` in `epftoolbox2.information_set`, and `leakage_probe` and `positive_control` take `span=`. See
+  [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/#rerun-and-co-batch).
 - **Scoring by period: hourly and block aggregates, the shape within the hour, normalised MAEs, breakdowns by a data column.**
   `report.aggregate("1h", agg="mean")` turns 15-minute results into hourly ones (an hour counts with all four quarter-hours finite;
   dropped hours are `incomplete_hour` in its `forecast_counts()`), and `aggregate("1D", agg="peak")` / `"offpeak"` scores the mean over
