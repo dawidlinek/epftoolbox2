@@ -496,6 +496,68 @@ def test_offline_holds_the_variables_and_puts_back_what_was_there(monkeypatch):
     assert constants.HF_HUB_OFFLINE is False
 
 
+@pytest.fixture
+def fake_hub(tmp_path, monkeypatch):
+    """A `huggingface_hub` that reads HF_HUB_OFFLINE once, at import, as the real one does, importable for one test: whatever
+    huggingface_hub modules were loaded are set aside and put back, and the fake ones dropped, afterwards."""
+    package = tmp_path / "fakehub" / "huggingface_hub"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("from . import constants\n")
+    (package / "constants.py").write_text(
+        "import os\n"
+        "HF_HUB_OFFLINE = (os.environ.get('HF_HUB_OFFLINE') or os.environ.get('TRANSFORMERS_OFFLINE') or '').upper() in "
+        "{'1', 'ON', 'YES', 'TRUE'}\n"
+    )
+    loaded = {name: module for name, module in sys.modules.items() if name.split(".")[0] == "huggingface_hub"}
+    for name in loaded:
+        del sys.modules[name]
+    monkeypatch.syspath_prepend(str(package.parent))
+    yield
+    for name in [name for name in sys.modules if name.split(".")[0] == "huggingface_hub"]:
+        del sys.modules[name]
+    sys.modules.update(loaded)
+
+
+@pytest.mark.parametrize("before", [None, "1", "0"])
+def test_offline_puts_back_a_module_first_imported_inside_it(fake_hub, monkeypatch, before):
+    """An adapter's load imports its backend inside the scope (tabpfn imports huggingface_hub): the constant it read then is
+    put back to what the environment outside says, whatever that was."""
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+    if before is None:
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    else:
+        monkeypatch.setenv("HF_HUB_OFFLINE", before)
+    with offline():
+        import huggingface_hub
+
+        assert huggingface_hub.constants.HF_HUB_OFFLINE is True
+    assert os.environ.get("HF_HUB_OFFLINE") == before
+    assert huggingface_hub.constants.HF_HUB_OFFLINE is (before == "1")
+
+
+@pytest.mark.parametrize("before", [None, "1"])
+def test_an_adapter_s_load_is_offline_and_puts_the_environment_back(fetched, monkeypatch, before):
+    """The fake family's load, in this process (a run does it in a forked worker, where the parent can't see it), from either
+    environment a node starts with (WCSS GPU nodes export HF_HUB_OFFLINE=1)."""
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        if before is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, before)
+    seen = []
+    real_resolve = _cards.resolve
+
+    def resolve_inside(*args, **kwargs):
+        seen.append((os.environ.get("HF_HUB_OFFLINE"), os.environ.get("TRANSFORMERS_OFFLINE")))
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(_cards, "resolve", resolve_inside)
+    model = carded()
+    assert model._loaded_offset() == 0.0
+    assert seen == [("1", "1")]
+    assert (os.environ.get("HF_HUB_OFFLINE"), os.environ.get("TRANSFORMERS_OFFLINE")) == (before, before)
+
+
 def test_resolve_reads_the_cache_and_paths_and_refuses_a_changed_file(fetched, tmp_path):
     resolved = resolve(CARD)
     assert resolved.ref == f"{REPO}@{REVISION}" and resolved.files == {WEIGHTS_FILE: REFERENCE_SHA}
@@ -641,7 +703,6 @@ def test_a_run_reads_its_weights_offline_and_records_its_card(data, fetched, tmp
     save_dir = tmp_path / "out"
     report = run(data, OLSModel(PREDICTORS, WINDOW, name="ols"), carded(), save_dir=save_dir)
     assert forecasts(report, "carded") == forecasts(report, "ols")  # the reference weights add 0.0
-    assert "HF_HUB_OFFLINE" not in os.environ and "TRANSFORMERS_OFFLINE" not in os.environ
     stored = manifest(save_dir, "carded")
     assert stored["card"]["family"] == "fake-fm" and stored["card"]["verdicts"] == {"test": POSSIBLY_CONTAMINATED}
     assert stored["runtime"]["device"] == "cpu" and stored["runtime"]["threads_per_fit"] == 1

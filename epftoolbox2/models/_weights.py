@@ -294,6 +294,8 @@ def _resolve_cached(
     return ResolvedWeights(f"{repo}@{revision}", directory, files, _reference(ref, files), unlisted)
 
 
+# The values huggingface_hub reads as true for HF_HUB_OFFLINE (`constants._is_true`).
+_TRUE = {"1", "ON", "YES", "TRUE"}
 _OFFLINE_LOCK = threading.Lock()
 _OFFLINE_DEPTH = 0
 _OFFLINE_SAVED: Dict[str, Any] = {}
@@ -302,8 +304,10 @@ _OFFLINE_SAVED: Dict[str, Any] = {}
 @contextlib.contextmanager
 def offline() -> Iterator[None]:
     """Hold `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` (and huggingface_hub's `constants.HF_HUB_OFFLINE`, which it reads
-    when it is imported, if it is) while an adapter loads, and put back what was there afterwards, also after an exception. Nested
-    and overlapping scopes of several threads restore once the last one ends."""
+    when it is imported, if it is) while an adapter loads, and put back what was there afterwards, also after an exception: the
+    constant's value if the module was loaded before, else, for a module first imported inside (an adapter importing its
+    backend), what huggingface_hub reads from the environment put back. Nested and overlapping scopes of several threads
+    restore once the last one ends."""
     global _OFFLINE_DEPTH
     with _OFFLINE_LOCK:
         if _OFFLINE_DEPTH == 0:
@@ -332,6 +336,11 @@ def offline() -> Iterator[None]:
                         os.environ.pop(name, None)
                     else:
                         os.environ[name] = value
+                constants = sys.modules.get("huggingface_hub.constants")
+                if held is None and constants is not None and hasattr(constants, "HF_HUB_OFFLINE"):
+                    # First imported inside the scope, it read "1": what it reads from the environment now, as it would have.
+                    outside = os.environ.get("HF_HUB_OFFLINE") or os.environ.get("TRANSFORMERS_OFFLINE") or ""
+                    constants.HF_HUB_OFFLINE = outside.upper() in _TRUE
 
 
 def licence_flagged(card: "ModelCard") -> bool:
