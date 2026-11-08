@@ -45,7 +45,14 @@ from ..results.manifest import (
 from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
-from ..results.store import read_records
+from ..results.store import (
+    DEFAULT_SAVE_FORMAT,
+    SAVE_FORMATS,
+    ResultsFormatError,
+    check_no_other_format,
+    check_save_format,
+    read_records,
+)
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
 from ..results.vintages import read_vintages
 from ..verification import VerifyReport, sample_issue_days, verify_model
@@ -184,6 +191,8 @@ class ModelPipeline:
         test: Optional[Tuple[Any, Any]] = None,
         horizons: Optional[Sequence[int]] = None,
         issue_days: Optional[Sequence[str]] = None,
+        save_format: str = DEFAULT_SAVE_FORMAT,
+        save_coefficients: bool = True,
     ) -> EvaluationReport:
         """Run every model, compute the ensembles from what they stored, then (unless `forecast_only`) run the evaluators
         and exporters.
@@ -207,6 +216,12 @@ class ModelPipeline:
         a different configuration raises `ManifestMismatchError`; `allow_manifest_mismatch` overwrites the
         manifest and resumes anyway, and `require_manifest` refuses results that predate the manifest
         feature instead of accepting them with a warning.
+
+        `save_format="parquet"` writes each model's results as a directory of Parquet parts, `<name>.parquet/`, in place of
+        `<name>.jsonl`: the same records, read by the same rules, for studies of thousands of models (see the docs page on
+        caching). A model with results in the other format in `save_dir` raises before any fit; `epf results convert` turns
+        one into the other exactly. `save_coefficients=False` writes each record's `coefficients` as `[]` and nothing else
+        differs.
 
         `test=(start, end)` is the test period, the same as `test_start` and `test_end` (passing both raises). With
         `validation`, each model forecasts the days of both windows in one run, into one results file, and nothing between
@@ -236,6 +251,9 @@ class ModelPipeline:
         windows, test_start, test_end = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
         self._check_ensembles(save_dir)
         self._refuse_top_without_validation(self.ensembles, windows)
+        check_save_format(save_format)
+        if save_dir:
+            self._check_save_format(save_dir, save_format)
         if windows is not None:
             check_start, check_end = windows.first_day, windows.last_day
         elif forecast_only:
@@ -288,7 +306,7 @@ class ModelPipeline:
         # Of this call alone: a frame changed before the next one must be hashed again.
         frame_hashes = FrameHashes(data) if save_dir else None
         for model in self.models:
-            save_to = str(self.results_path(save_dir, model)) if save_dir else None
+            save_to = str(self.results_path(save_dir, model, save_format)) if save_dir else None
             planned = {"plan": plans[model.name]} if model.name in plans else {}
             ref = model.run(
                 data=data,
@@ -308,6 +326,7 @@ class ModelPipeline:
                 **horizon_arguments(horizon, horizons),
                 **days_argument,
                 **planned,
+                **({} if save_coefficients else {"save_coefficients": False}),
             )
             refs[model.name] = ref
 
@@ -569,7 +588,7 @@ class ModelPipeline:
                 issue_days=weekdays,
             )
             # Through the ref: the file can hold more than this period, and a line outside it is no forecast of it.
-            ref.produced = sum(1 for _ in ref.iter_records(cols=["hour"]))
+            ref.produced = ref.count_records()
             refs[model.name] = ref
         if missing and not allow_missing:
             raise FileNotFoundError(f"No results for model(s): {', '.join(missing)}. Run them first.")
@@ -692,7 +711,7 @@ class ModelPipeline:
                     "their forecasts are already chosen or averaged on those days. A plain average of ensembles is fine."
                 )
             if save_dir:
-                path = self.results_path(save_dir, ensemble)
+                path = self.results_path(save_dir, ensemble, "jsonl")
                 if (path.exists() or manifest_path(path).exists()) and not is_ensemble_manifest(manifest_path(path)):
                     raise ManifestMismatchError(
                         f"Ensemble {ensemble.name!r} would overwrite {path}, which is not an ensemble's. Rename it, or use a "
@@ -745,7 +764,7 @@ class ModelPipeline:
             test_only = ensemble.needs_validation or not test_only_names.isdisjoint(ensemble.members)
             if test_only:
                 test_only_names.add(ensemble.name)
-            path = self.results_path(save_dir, ensemble) if save_dir else None
+            path = self.results_path(save_dir, ensemble, "jsonl") if save_dir else None
             leaves[ensemble.name] = list(
                 dict.fromkeys(leaf for member in ensemble.members for leaf in leaves.get(member, [member]))
             )
@@ -957,14 +976,34 @@ class ModelPipeline:
         return [by_name[name] for name in dict.fromkeys(names)]
 
     @staticmethod
-    def results_path(save_dir: Union[str, Path], model: BaseModel) -> Path:
-        """The JSONL file a model's results are written to inside `save_dir`."""
-        return Path(save_dir) / f"{model.name.lower().replace(' ', '_')}.jsonl"
+    def results_path(save_dir: Union[str, Path], model: BaseModel, save_format: Optional[str] = None) -> Path:
+        """Where a model's results live inside `save_dir`: `<name>.jsonl`, or the directory `<name>.parquet` (`save_format`).
+        Without `save_format`, the one that exists, JSONL if neither does; both raise `ResultsFormatError`, as a model's
+        results are in one format (a convert that stopped midway leaves both, and `epf results convert` again finishes it).
+        An ensemble's are always JSONL."""
+        stem = Path(save_dir) / model.name.lower().replace(" ", "_")
+        if save_format is not None:
+            return stem.with_name(stem.name + SAVE_FORMATS[check_save_format(save_format)])
+        jsonl, parquet = (
+            stem.with_name(stem.name + suffix) for suffix in (SAVE_FORMATS["jsonl"], SAVE_FORMATS["parquet"])
+        )
+        if jsonl.exists() and parquet.is_dir():
+            raise ResultsFormatError(
+                f"{model.name}: results in both formats, {jsonl} and {parquet}. A model's results are in one: run "
+                f"`epf results convert {Path(save_dir)} --to <format>` again to finish a conversion, or remove the one no run "
+                "wrote."
+            )
+        return parquet if parquet.is_dir() else jsonl
+
+    def _check_save_format(self, save_dir: Union[str, Path], save_format: str) -> None:
+        """Before any fit: no model may have results in the other format than this run writes (`check_no_other_format`)."""
+        for model in self.models:
+            check_no_other_format(self.results_path(save_dir, model, save_format))
 
     def _check_model_names(self) -> None:
         named = [*self.models, *self.ensembles]
         names = [m.name for m in named]
-        stems = [self.results_path("", m).name for m in named]
+        stems = [self.results_path("", m, "jsonl").name for m in named]
         if len(set(names)) != len(names) or len(set(stems)) != len(stems):
             what = "Model and ensemble names" if self.ensembles else "Model names"
             raise ValueError(

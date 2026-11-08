@@ -12,6 +12,7 @@ from .model_pipeline import ModelPipeline
 from ..information_set import InformationSet
 from ..models._calendar import every_horizon, issue_day_names, resolve_horizons, resolve_issue_days
 from ..results.report import EvaluationReport
+from ..results.store import DEFAULT_SAVE_FORMAT, check_save_format
 from ..logging import get_logger
 from ._yaml import dump_yaml
 
@@ -106,6 +107,10 @@ class Workflow:
     (`model_issue_days`) issues forecasts on those weekdays only, as `ModelPipeline.run(issue_days=...)`, and is written only
     when it isn't every day.
 
+    `model_pipeline.save_format: parquet` (`model_save_format`) writes each model's results as a Parquet directory, and
+    `save_coefficients: false` (`model_save_coefficients`) writes `coefficients` as `[]`, as `ModelPipeline.run` does; each is
+    written only when it isn't the default. `report()` reads either format.
+
     Example:
         >>> workflow = Workflow(
         ...     data_pipeline="data_pipeline.yaml",
@@ -147,9 +152,12 @@ class Workflow:
         models_per_task: Optional[int] = None,
         model_horizons: Optional[Sequence[int]] = None,
         model_issue_days: Optional[Sequence[str]] = None,
+        model_save_format: str = DEFAULT_SAVE_FORMAT,
+        model_save_coefficients: bool = True,
     ):
         resolve_horizons(model_horizon, model_horizons, 7)  # both, or a list that isn't one, raise before anything runs
         resolve_issue_days(model_issue_days)
+        check_save_format(model_save_format)
         self.data_pipeline = str(data_pipeline) if data_pipeline is not None else None
         self.model_pipeline = str(model_pipeline) if model_pipeline is not None else None
         self.data_start = data_start
@@ -173,6 +181,8 @@ class Workflow:
         self.model_require_manifest = model_require_manifest
         self.model_validation = model_validation
         self.model_test = model_test
+        self.model_save_format = model_save_format
+        self.model_save_coefficients = model_save_coefficients
         self._yaml_dir: Optional[Path] = None  # set by load(), used for relative path resolution
         self._dp_inline: dict = {}  # inline sources/transformers/validators overrides
         self._mp_inline: dict = {}  # inline models/evaluators/exporters overrides
@@ -324,6 +334,8 @@ class Workflow:
             require_manifest=self.model_require_manifest,
             validation=self.model_validation,
             test=self.model_test,
+            save_format=self.model_save_format,
+            save_coefficients=self.model_save_coefficients,
         )
         if array_task:
             logger.info(
@@ -404,6 +416,10 @@ class Workflow:
             mp["test"] = _as_yaml_period(self.model_test)
         if self.model_save_dir is not None:
             mp["save_dir"] = self.model_save_dir
+        if self.model_save_format != DEFAULT_SAVE_FORMAT:
+            mp["save_format"] = self.model_save_format
+        if not self.model_save_coefficients:
+            mp["save_coefficients"] = False
         if self.model_allow_manifest_mismatch:
             mp["allow_manifest_mismatch"] = True
         if self.model_require_manifest:
@@ -455,6 +471,8 @@ class Workflow:
             model_validation=mp.get("validation"),
             model_test=mp.get("test"),
             models_per_task=env.get("models_per_task"),
+            model_save_format=mp.get("save_format", DEFAULT_SAVE_FORMAT),
+            model_save_coefficients=mp.get("save_coefficients", True),
         )
         workflow._yaml_dir = path.parent
         workflow._dp_inline = {k: dp[k] for k in _DP_SECTIONS if k in dp}
