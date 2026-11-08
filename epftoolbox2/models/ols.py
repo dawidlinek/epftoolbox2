@@ -1,8 +1,13 @@
 from sklearn.linear_model import LinearRegression
+
+from . import _stats
+from ._stats import ScaledStats
 from .base import BaseModel
 
 
 class OLSModel(BaseModel):
+    # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the sums alone.
+    _ENGINE_NEEDS = frozenset()
     # Saved to YAML only when not at these values, so files saved before the option existed don't move.
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "fit_intercept": False}
 
@@ -29,3 +34,8 @@ class OLSModel(BaseModel):
 
     def _predict_fitted(self, fitted, test_x):
         return fitted.predict(test_x)[0], fitted.coef_.tolist()
+
+    def _fit_stats(self, stats: ScaledStats):
+        """The fit from a unit's scaled sums by the normal equations (`_stats.ols_fit`), or None where the model path must fit
+        it: n <= p + 1, a failed Cholesky factorisation or (largest/smallest pivot)² above `_stats.GUARD`."""
+        return _stats.ols_fit(stats, self.fit_intercept)
