@@ -4,6 +4,7 @@
 span's shifts) into `ScaledStats`, the centred sums of the rows as `StandardScaler.fit_transform` would scale them, and
 `StandardParams`, the scaler's parameters (to scale the issue row and map a forecast back). `OLSModel`, `RidgeModel` and
 `LEARModel` fit from `ScaledStats` through `_fit_stats`, as engine groups do (`_engine_worker.EngineFits`, step 5i).
+`transformed_stats(raw)` is the same without a map, for rows a VST's own `fit_transform` has already scaled (step 5j).
 
 The map, per fit (r rows; c the span's shift of a column, d = x - c, u = Σd, S = Σdd', v = Σd(y - c_y)):
 
@@ -364,6 +365,59 @@ def standard_stats(
     return stats, params
 
 
+def transformed_stats(
+    raw: RawSums, rows: Optional[Callable[[], Tuple[np.ndarray, np.ndarray]]] = None, yscale: Optional[float] = None
+) -> Tuple[ScaledStats, StandardParams]:
+    """`ScaledStats` of rows that are already in scaled space, from their exact sums `raw`: a VST's `fit_transform` output on
+    a fit's rows ρ (step 5j), which no map from the sums could reproduce (the transform is nonlinear and fitted on ρ). So
+    there is no map: z̄ = c + u/r and ȳ = c_y + Σ(y - c_y)/r are the columns' and the target's own means on the rows (not 0),
+    G = S - uu'/r, q = v - u·Σ(y - c_y)/r and yy = Σ(y - c_y)² - (Σ(y - c_y))²/r their centred sums, as `gram_stats` takes
+    them from the same rows. `raw` must be over the very rows its shifts come from (a `SpanSums` of ρ alone, every row
+    requested): the shifts are then the columns' means, so the centring cancels nothing. A column the scaler zeroed (constant
+    on ρ) or a 0/1 column constant on ρ has x - c = 0 in every row, so its S, u and row of G are exactly 0 and its mean is its
+    value. `rows` gives the transformed (Z, y) for a model that reads them (Ridge); `yscale` is what a scaled target unit is
+    in target units, for a fit that bounds an error in them (Ridge's budget): the VST's inverse is nonlinear, so the caller
+    gives the largest slope it has over the training targets.
+
+    The `StandardParams` are the identity on those rows (`transform` and `inverse` return their input, to the bit): the
+    columns as unscaled, the ones constant on ρ marked constant, for `_cv_stats.block_stats(..., absolute=True)`. Raises
+    `StatsFallback("overflow")` where a sum isn't finite."""
+    r = int(raw.n)
+    shift = np.asarray(raw.shift, dtype=np.float64)
+    p = shift.size
+    if r < MIN_ROWS:
+        raise ValueError(f"transformed_stats needs at least {MIN_ROWS} rows, got {r}")
+    u = np.asarray(raw.u, dtype=np.float64)
+    S = np.asarray(raw.S, dtype=np.float64)
+    v = np.asarray(raw.v, dtype=np.float64)
+    sy, syy = float(raw.sy), float(raw.syy)
+    if not (np.isfinite(u).all() and np.isfinite(S).all() and np.isfinite(v).all() and np.isfinite([sy, syy]).all()):
+        raise StatsFallback("overflow", "a sum of the fit's rows is not finite (squares past float64's range)")
+    with np.errstate(over="ignore", invalid="ignore"):
+        G = S - np.outer(u, u) / r
+        q = v - u * (sy / r)
+        yy = syy - sy * sy / r
+        zbar = shift + u / r
+        ybar = float(raw.yshift) + sy / r
+    if not (
+        np.isfinite(G).all() and np.isfinite(q).all() and np.isfinite(zbar).all() and np.isfinite([yy, ybar]).all()
+    ):
+        raise StatsFallback("overflow", "a centred sum or mean of the fit is not finite")
+    zeros = np.zeros(p)
+    params = StandardParams(
+        mean=zeros,
+        scale=np.ones(p),
+        scaled=np.zeros(p, dtype=bool),
+        constant=np.diag(S) == 0.0,
+        ymean=0.0,
+        yscale=1.0,
+        shift=zeros,
+        offset=zeros,
+    )
+    stats = ScaledStats(n=r, zbar=zbar, ybar=ybar, G=G, q=q, yy=float(yy), blocks=None, rows=rows, yscale=yscale)
+    return stats, params
+
+
 # --- fits -------------------------------------------------------------------------------------------------------------
 
 
@@ -612,6 +666,25 @@ def issue_distance(metric: IssueMetric, z: np.ndarray) -> float:
     return float(max(column.max(), eigen.max()))
 
 
+def near_twins(G: np.ndarray, bound: float) -> bool:
+    """Whether two live columns of a centred Gram are near twins: 1 - |cos| of their centred values at most `bound` but above
+    half of `_lars.TWIN_RTOL` (1e-12), the exact twins LEAR drops, so that a pair at the twin rule's own edge, which the two
+    paths' last bits could decide differently, counts as near too. O(p²)."""
+    from ._lars import TWIN_RTOL
+
+    G = np.asarray(G, dtype=np.float64)
+    d = np.diag(G)
+    live = np.flatnonzero(d > 0.0)
+    if live.size < 2:
+        return False
+    s = np.sqrt(d[live])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        gap = 1.0 - np.abs(G[np.ix_(live, live)]) / np.outer(s, s)
+    upper = np.triu_indices(live.size, 1)
+    gap = gap[upper]
+    return bool(((gap > 0.5 * TWIN_RTOL) & (gap <= bound)).any())
+
+
 def issue_rounding_ok(fitted, stats: ScaledStats, z: np.ndarray, rounding_max: float = RIDGE_ROUNDING_MAX) -> bool:
     """Whether the model path's own rounding at an issue row stays within the budget it has at the training rows: a fit
     that carries `rounding` (Ridge's `LinearFit`) keeps `rounding @ |z - z̄|` at most `rounding_max` (target units); any
@@ -705,4 +778,5 @@ __all__ = [
     "ridge_fit",
     "ridgecv_rounding",
     "standard_stats",
+    "transformed_stats",
 ]
