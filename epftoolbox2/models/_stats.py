@@ -34,13 +34,19 @@ The fits (`LinearFit` for OLS and Ridge; LEAR's `LearFit` from `ScaledStats.gram
 
 - **OLS**, n > p + 1: the Cholesky factor of G (with an intercept) or A (without), its zero columns (constant ones) left out
   with the coefficient 0, as the model path's minimum-norm `lstsq` gives an exact zero column. The fit is handed back (None) when
-  the factorisation fails or (largest/smallest pivot)² exceeds `GUARD`: the normal equations err as eps·cond(Z)², gelsd as
-  eps·cond(Z), and gelsd cuts its rank at max(n, p)·eps·σ_max, which a Gram can't resolve. `GUARD` is 1e5, set by a
-  conditioning sweep (`epftoolbox2-research/library_check_step5/stats_fits/guard_sweep.py`; 9,588 fits of four design
-  families, cond(Z) 1e2 to 1e8): with no guard the engine was up to 4.9e-10 from `LinearRegression` at cond(Z) 1e2 to 1e3,
-  2.6e-7 at 1e3 to 1e4 and 8.5e-6 at 1e4 to 1e5; of the fits a pivot ratio of 1e5 let through (cond(Z) up to 1.5e4) none was
-  over 7.9e-10, at 1e6 three were over 1e-8. The pivot ratio is at most cond(Z)², so every fit with cond(Z) below 316 is kept;
-  the DE fixture's Lago-shaped rows (p 247, cond(Z) 1.7e3 to 6.2e3) have ratios of 2.3e3 to 1.2e4 and are kept.
+  the factorisation fails, (largest/smallest pivot)² exceeds `GUARD` (1e5) or `dpocon`'s 1-norm condition estimate exceeds
+  `CONDITION_MAX` (1e9): the normal equations err as eps·cond(Z)², gelsd as eps·cond(Z), and gelsd cuts its rank at
+  max(n, p)·eps·σ_max, which a Gram can't resolve. The pivot ratio is only a lower bound on the condition number (1e3 times
+  too small on the DE fixture's Lago rows, 1e5 times where a column is the mean of many others: such a fit, 1.2e-8 off,
+  passed it alone), hence the estimate too. Both are set by the conditioning sweep
+  (`epftoolbox2-research/library_check_step5/stats_fits/guard_sweep2.py`: 13,361 fits, p up to 248, four synthetic families
+  and the Lago rows with a daily-mean column at four positions; no guard: up to 1.1e-10 from `LinearRegression` at cond(Z) 1e2
+  to 1e3 on Gaussian designs, 3e-8 at 1e3 to 1e4, 2.3e-6 at 1e4 to 1e5). Of the 4,360 fits both guards keep, the worst is
+  5.9e-9 where the issue row lies within 10 training standard deviations of the mean, 8.7e-9 where it lies 76,600 out (an
+  extrapolation multiplies any coefficient's last bit; no property of the fit can see it); the 30 fits with a condition
+  estimate between 1e9 and 1e10 reach 8.0e-9 and those between 1e10 and 1e11 1.2e-7. Every fit with cond(Z) below 316 is kept
+  (the pivot ratio is at most cond(Z)², the estimate at most p·cond(Z)²), and so is every plain Lago row (ratios up to 1.2e4,
+  estimates up to 1.2e8).
 - **Ridge**, n > p (scikit-learn's `svd` mode): `RidgeCV(alphas, fit_intercept, cv=None)`'s leave-one-out error, computed from
   the eigendecomposition G = VΛV' (or of A) and the scaled rows (`ScaledStats.rows`, which Ridge alone needs): with U = Z_c V,
   the fit at α is U(V'q/(λ + α)), each row's leverage Σ_k U_ik²/(λ_k + α) plus 1/n for the unpenalised intercept, and its
@@ -58,7 +64,7 @@ The fits (`LinearFit` for OLS and Ridge; LEAR's `LearFit` from `ScaledStats.gram
 from typing import Callable, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
-from scipy.linalg.lapack import dpotrf, dpotrs
+from scipy.linalg.lapack import dpocon, dpotrf, dpotrs
 
 from ..scalers.base import mean_std
 from ._lars import GramStats
@@ -74,9 +80,14 @@ CANCELLATION_MAX = 1e4
 """The largest S_jj / (S_jj - u_j²/r) (a column's cancellation factor) scaled from the sums; above it, `StatsFallback`."""
 
 GUARD = 1e5
-"""OLS hands a fit back when (largest/smallest Cholesky pivot)² of its normal equations exceeds this: the largest power of ten
-at which every fit of the conditioning sweep that the guard let through was within 1e-8 of `LinearRegression` (see the
-module). Engine2's 1e10 let fits through that were 1.8e-4 off."""
+"""OLS hands a fit back when (largest/smallest Cholesky pivot)² of its normal equations exceeds this (see the module; at 1e6
+five fits the condition estimate let through were over 1e-8). Engine2's 1e10 let fits through that were 1.8e-4 off."""
+
+CONDITION_MAX = 1e9
+"""OLS also hands a fit back when LAPACK's estimate of the 1-norm condition number of its normal equations (`dpocon` on the
+Cholesky factor, O(p²)) exceeds this: the pivot ratio alone is a lower bound on it, 1e3 to 1e5 times too small where a column
+is the mean of many others. A decade below the largest power of ten at which no fit of the sweep was over 1e-8 (see the
+module)."""
 
 RIDGE_ROUNDING_MAX = 1e-10
 """Ridge hands a fit back when scikit-learn's own rounding at the chosen penalty, `ridgecv_rounding`/α in target units, exceeds
@@ -382,20 +393,26 @@ def _live(M: np.ndarray) -> np.ndarray:
     return ~((M == 0.0).all(axis=0))
 
 
-def cholesky_solve(M: np.ndarray, b: np.ndarray, guard: float = GUARD) -> Optional[np.ndarray]:
-    """The solution w of M w = b over M's live columns (a zero column gets 0), or None when the Cholesky factorisation fails or
-    (largest/smallest pivot)² exceeds `guard`."""
+def cholesky_solve(
+    M: np.ndarray, b: np.ndarray, guard: float = GUARD, condition_max: float = CONDITION_MAX
+) -> Optional[np.ndarray]:
+    """The solution w of M w = b over M's live columns (a zero column gets 0), or None when the Cholesky factorisation fails,
+    (largest/smallest pivot)² exceeds `guard` or `dpocon`'s 1-norm condition estimate exceeds `condition_max`."""
     p = b.size
     w = np.zeros(p)
     live = np.flatnonzero(_live(M))
     if live.size == 0:
         return w
-    L, info = dpotrf(np.ascontiguousarray(M[np.ix_(live, live)]), lower=1, clean=1)
+    Ml = np.ascontiguousarray(M[np.ix_(live, live)])
+    L, info = dpotrf(Ml, lower=1, clean=1)
     if info != 0:
         return None
     pivots = np.diag(L)
     small = pivots.min()
     if not small > 0.0 or not (pivots.max() / small) ** 2 <= guard:
+        return None
+    rcond, info = dpocon(L, float(np.abs(Ml).sum(axis=0).max()), uplo="L")
+    if info != 0 or not rcond * condition_max >= 1.0:
         return None
     x, info = dpotrs(L, np.ascontiguousarray(b[live]), lower=1)
     if info != 0 or not np.isfinite(x).all():
@@ -404,9 +421,11 @@ def cholesky_solve(M: np.ndarray, b: np.ndarray, guard: float = GUARD) -> Option
     return w
 
 
-def ols_fit(stats: ScaledStats, fit_intercept: bool, guard: float = GUARD) -> Optional[LinearFit]:
+def ols_fit(
+    stats: ScaledStats, fit_intercept: bool, guard: float = GUARD, condition_max: float = CONDITION_MAX
+) -> Optional[LinearFit]:
     """`LinearRegression(fit_intercept)` from scaled sums by the normal equations, or None where the model path must fit it:
-    n <= p + 1, a failed factorisation, or the guard."""
+    n <= p + 1, a failed factorisation, or either guard."""
     p = np.asarray(stats.q).size
     if stats.n < MIN_ROWS or stats.n <= p + 1 or not _finite(stats):
         return None
@@ -414,7 +433,7 @@ def ols_fit(stats: ScaledStats, fit_intercept: bool, guard: float = GUARD) -> Op
         M, b = stats.G, stats.q
     else:
         M, b, _ = stats.uncentred()
-    w = cholesky_solve(M, b, guard)
+    w = cholesky_solve(M, b, guard, condition_max)
     if w is None:
         return None
     intercept = float(stats.ybar - stats.zbar @ w) if fit_intercept else 0.0

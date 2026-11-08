@@ -565,31 +565,70 @@ def test_ols_hands_back_rank_problems_and_short_windows():
         assert (OLSModel([])._fit_stats(stats) is None) == (n <= 6)
 
 
-def test_conditioning_sweep_every_fit_the_guard_lets_through_is_within_1e_8():
-    """cond(Z) from 1e2 to 1e7 (the research sweep has 4,500 more and the LEAR rows): every fit kept within 1e-8; the guard
-    hands back every fit whose (largest/smallest pivot)² exceeds `GUARD`, and without it some fit is off by more."""
+def mean_columns(rng, x, cond, positions):
+    """x with columns inserted at `positions`, each the mean of 10 to all of x's standardised columns plus noise of 1/cond of
+    its spread: a near-dependency the pivot ratio barely sees (its smallest pivot is spread over many columns)."""
+    sd = np.std(x, axis=0)
+    usable = np.flatnonzero(sd > 0)
+    out = x
+    for pos in sorted(positions):
+        block = rng.choice(usable, size=int(rng.integers(min(10, usable.size), usable.size + 1)), replace=False)
+        col = (x[:, block] / sd[block]).mean(axis=1) * rng.uniform(1, 1e3)
+        out = np.insert(out, min(pos, out.shape[1]), col + np.std(col) * rng.normal(size=x.shape[0]) / cond, axis=1)
+    return out
+
+
+def test_conditioning_sweep_every_fit_the_guards_let_through_is_within_1e_8():
+    """cond(Z) from 1e2 to 1e7, half the designs with a column that is the mean of many others at the front, the middle or the
+    end (the research sweep has 13,361 fits, p up to 248): every fit both guards keep is within 1e-8, and without them some
+    fit is off by more. (Where the pivot ratio alone fails is `test_a_mean_of_many_columns_in_front_is_handed_back`.)"""
     rng = np.random.default_rng(77)
     worst_kept, worst_unguarded = 0.0, 0.0
     for i in range(160):
-        p = int(rng.integers(2, 40))
+        p = int(rng.integers(2, 40)) if i % 8 else int(rng.integers(100, 160))
         n = int(rng.integers(p + 2, 4 * p + 200))
         cond = 10 ** rng.uniform(2, 7)
-        x, y = (harsh_design if i % 2 else mixed_design)(rng, n + 1, p, cond)
+        x, y = (harsh_design if i % 2 else mixed_design)(rng, n + 1, p, cond if i % 4 < 2 else 10 ** rng.uniform(0, 2))
+        if i % 4 >= 2 and p > 10:
+            x = mean_columns(rng, x, cond, [rng.choice([0, x.shape[1] // 2, x.shape[1]])])
         x, y, x0 = x[:-1], y[:-1], x[-1:]
         mask = StandardScaler.get_scalable_mask(x)
         stats, params = stats_of(x, y, np.arange(n), mask)
         for fit_intercept in (False, True):
             pm, _, _ = model_path(OLSModel([], fit_intercept=fit_intercept), x, y, x0, mask)
-            fit = _stats.ols_fit(stats, fit_intercept)
-            free = _stats.ols_fit(stats, fit_intercept, guard=np.inf)
-            if free is not None:
-                worst_unguarded = max(
-                    worst_unguarded, abs(params.inverse(float(free.predict(params.transform(x0))[0])) - pm)
-                )
-            if fit is not None:
-                worst_kept = max(worst_kept, abs(params.inverse(float(fit.predict(params.transform(x0))[0])) - pm))
+            gaps = {}
+            for name, kw in (
+                ("kept", {}),
+                ("free", dict(guard=np.inf, condition_max=np.inf)),
+            ):
+                fit = _stats.ols_fit(stats, fit_intercept, **kw)
+                if fit is not None:
+                    gaps[name] = abs(params.inverse(float(fit.predict(params.transform(x0))[0])) - pm)
+            worst_kept = max(worst_kept, gaps.get("kept", 0.0))
+            worst_unguarded = max(worst_unguarded, gaps.get("free", 0.0))
     assert worst_kept <= OLS_TOL
     assert worst_unguarded > OLS_TOL
+
+
+def test_a_mean_of_many_columns_in_front_is_handed_back():
+    """The review's case: the DE Lago rows (Sunday dropped, an intercept, n 364, hour 0) with the daily mean of price(t-1) plus
+    1e-4 of its spread in front. The pivot ratio² is 8e4 (under `GUARD`), cond(Z) 1.1e5, and the normal equations are 1.2e-8
+    off; `dpocon`'s estimate, 3.8e10, hands it back. Without the column the fit is kept (estimate 8.3e7)."""
+    x, y, x0 = lear_rows(0, 364, drop_sunday=True)
+    rng = np.random.default_rng(0)
+    full, _ = lear_design(0)
+    daily = full[:, :24].mean(axis=1)
+    daily = (daily + 1e-4 * np.std(daily) * rng.normal(size=daily.size))[-365:]
+    xk, x0k = np.column_stack([daily[:-1], x]), np.column_stack([daily[-1:], x0])
+    mask = StandardScaler.get_scalable_mask(xk)
+    stats, params = stats_of(xk, y, np.arange(364), mask)
+    pm, _, _ = model_path(OLSModel([], fit_intercept=True), xk, y, x0k, mask)
+    pivot_only = _stats.ols_fit(stats, True, condition_max=np.inf)
+    assert pivot_only is not None
+    assert abs(params.inverse(float(pivot_only.predict(params.transform(x0k))[0])) - pm) > OLS_TOL
+    assert _stats.ols_fit(stats, True) is None
+    plain, _ = stats_of(x, y, np.arange(364), StandardScaler.get_scalable_mask(x))
+    assert _stats.ols_fit(plain, True) is not None
 
 
 # --- Ridge ---------------------------------------------------------------------------------------------------------------
