@@ -57,10 +57,9 @@ class CsvExporter(Exporter):
             self.summary_path.parent.mkdir(parents=True, exist_ok=True)
             report.summary().to_csv(self.summary_path, index=False)
 
+        # Only with a carded model: the file is there whenever a licence must travel with the numbers.
         provenance = report.provenance()
-        if (
-            not provenance.empty
-        ):  # only with a carded model: the file is there whenever a licence must travel with the numbers
+        if not provenance.empty:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             provenance.to_csv(self.provenance_path, index=False)
 

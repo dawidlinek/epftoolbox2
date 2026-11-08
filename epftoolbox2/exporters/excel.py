@@ -129,10 +129,9 @@ class ExcelExporter(Exporter):
                 )
             if "details" in self.sheets:
                 self._write_details(writer, report)
+            # A sheet only with a carded model, whatever `sheets` asks for: the licence travels along.
             provenance = report.provenance()
-            if (
-                not provenance.empty
-            ):  # a sheet only with a carded model, whatever `sheets` asks for: the licence travels along
+            if not provenance.empty:
                 provenance.to_excel(writer, sheet_name=_sheet_name("Provenance", writer.book.sheetnames), index=False)
 
     def _write_summary(self, writer: pd.ExcelWriter, report: EvaluationReport, summary: pd.DataFrame) -> None:
