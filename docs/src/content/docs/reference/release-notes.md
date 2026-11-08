@@ -112,6 +112,14 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **Pool workers no longer start idle BLAS threads.** Limiting a forked worker to one BLAS thread started OpenBLAS's thread pool
+  again in it (OpenBLAS stops the pool before a fork and starts it when its thread count is set): one thread per CPU for numpy's
+  OpenBLAS and as many for scipy's, each spinning for about a tenth of a second before it slept, in every worker of every pool. On
+  32 CPUs that was 62 threads per worker, a fit at a worker's start cost 5 to 50 times its wall time in CPU, and a 768-forecast
+  OLS, Ridge or LEAR run at 32 processes took 48 to 64 core-seconds, now 12 to 16. Workers stop those threads after the limit and
+  run on their task threads alone, engine off and on. Every forecast is bit for bit as before, your own process keeps its threads
+  and limits, and `OMP_NUM_THREADS=1` before Python starts is no longer needed to avoid the cost.
+
 - **Every `by_*()` table counts the forecasts of each model, and warns when the models of a group differ.** `by_hour()`, `by_horizon()`,
   `by_hour_horizon()`, `by_year()`, `by_year_horizon()`, `by_run_weekday_horizon()` and `by_target_weekday_horizon()` printed a metric per
   (model, group) and not how many forecasts it rests on, so a `NaiveModel(known_only=True)` benchmark at horizon 7 could show a MAE on 24
