@@ -38,6 +38,8 @@ def lear_dynamic(ctx):
     return x
 ```
 
+For DE_LU and AT, `EntsoeSource(price_exaa=True)` gives the real EXAA column with a [built-in rule](/epftoolbox2/data-sources/entsoe/#early-auctions-exaa-and-switzerland) (11:15), so the rule above isn't needed there.
+
 ```python
 pipeline = ModelPipeline(information_set=info).add_model(
     LassoCVModel(predictors=lear_dynamic, training_window=728, name="LEAR_dyn")

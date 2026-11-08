@@ -594,6 +594,39 @@ _A31_NOTE = "A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6
 _A31 = Availability.weekly("friday", "10:00", note=_A31_NOTE, vintage=_REVISED, week_zone=DATA_ZONE)
 
 
+_EXAA_NOTE = (
+    "A44 position 2, the EXAA auction (gate 10:15 on D-1): legally within 1 h after the gate (Art. 12.1.d), so "
+    "11:15; first seen about 10:35 in the one check made, not yet measured, so 11:15 is kept until it is"
+)
+_SWISS_NOTE = (
+    "A44 for CH, the Swiss day-ahead auction (CH is not in SDAC; gate 11:00 on D-1): legally by 12:00; the practical "
+    "first-seen time (about 11:05 to 11:30) is unmeasured, so measure first-seen times before issuing at 11:45"
+)
+
+
+def _exaa_rule(zone: str) -> Availability:
+    return Availability.published("11:15", 1, timezone=zone, note=_EXAA_NOTE, vintage="snapshot")
+
+
+_EXAA_RULE_VIENNA = _exaa_rule("Europe/Vienna")
+
+
+def _entsoe_price_rules(source: Any, prefix: str) -> Dict[str, Availability]:
+    """The rules `EntsoeSource` prices need beyond the built-in `price`: the EXAA column of AT and DE_LU, and CH's `price`,
+    which is the Swiss auction that closes before SDAC (11:00, so published by 12:00 and not 13:00)."""
+    rules: Dict[str, Availability] = {}
+    if "price" not in source.type:
+        return rules
+    if getattr(source, "price_exaa", False):
+        zone = "Europe/Vienna" if source._area_name == "AT" else "Europe/Berlin"  # DE_LU, DE_AT_LU
+        rules[f"{prefix}price_exaa"] = _exaa_rule(zone)
+    if source._area_name == "CH":
+        rules[f"{prefix}price"] = Availability.published(
+            "12:00", 1, timezone="Europe/Zurich", note=_SWISS_NOTE, vintage="snapshot"
+        )
+    return rules
+
+
 def default_rules() -> Dict[str, Availability]:
     """Built-in rules for the columns the library's ENTSO-E and calendar sources emit (unprefixed names).
 
@@ -621,6 +654,10 @@ def _built_in_rules() -> Dict[str, Availability]:
             note="A44 day-ahead prices: SDAC results within about 1 h after the 12:00 gate closure on D-1",
             vintage="snapshot",
         ),
+        # The EXAA auction (EntsoeSource(price_exaa=True), AT and DE_LU): see `_EXAA_RULE`.
+        "price_exaa": _EXAA_RULE_VIENNA,
+        # Prefixed, as AT and DE_LU need to be told apart (`de_price_exaa`): a bare InformationSet has no source rules.
+        "*_price_exaa": _EXAA_RULE_VIENNA,
         # ENTSO-E keeps the newest value of these only: A65 was revised after the gate on 22 of 42 days measured.
         "load_actual": Availability.realised(
             "1h", note="A65/A16 actual load: 1 h after the period (Reg. 543/2013 Art. 6(2)(a))", vintage=_REVISED
@@ -689,12 +726,15 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             for key, rule in defaults.items():
                 if rule.kind == "static":
                     rules[f"{prefix}{key}"] = rule
-        elif isinstance(source, EntsoeSource) and "load" in source.type:
+        elif isinstance(source, EntsoeSource):
+            prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
+            rules.update(_entsoe_price_rules(source, prefix))
+            if "load" not in source.type:
+                continue
             # A31 week-ahead daily values are stamped at the market's own local midnight (EntsoeSource's
             # bound zone, see `_daily_zone`), not necessarily this area's own when it is a neighbour combined into
             # another market's pipeline. The week is read in that zone, which holds on a frame in any zone (the
             # built-in rule reads the data's); the publication instant stays 10:00 Brussels, 2 h before the gate.
-            prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
             rule = Availability.weekly(
                 "friday",
                 "10:00",

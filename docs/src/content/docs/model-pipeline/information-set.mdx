@@ -182,6 +182,8 @@ For a predictor function it shows [the distinct lists first](/epftoolbox2/model-
 | Column | Available from | [Class](#vintage-classes) |
 |---|---|---|
 | `price` (ENTSO-E A44) | published ~13:00 Brussels on D-1 (within about 1h of the 12:00 gate closure) | `snapshot` |
+| `price_exaa` (A44, `EntsoeSource(price_exaa=True)`, AT, DE_LU and DE_AT_LU; prefixed `<prefix>_price_exaa` too) | published 11:15 Vienna (Berlin for DE_LU) on D-1: one hour after the EXAA gate at 10:15 (legal bound, Art. 12.1.d; first seen about 10:35 in one check, unmeasured) | `snapshot` |
+| `price` of an `EntsoeSource("CH", ...)` | published 12:00 Zurich on D-1: the legal bound for the Swiss auction (gate 11:00). Its first-seen time, about 11:05 to 11:30, is unmeasured: measure it before issuing at 11:45 | `snapshot` |
 | `load_actual` (A65/A16) | 1h after the end of the delivery period | `latest_revision` |
 | `load_forecast` (A65/A01) | published 10:00 Brussels on D-1 | `latest_revision` |
 | `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00 Brussels for the whole following Monday-to-Sunday week of the data's local dates, each market's own (a bound `EntsoeSource` names its market's zone, see below) | `latest_revision` |

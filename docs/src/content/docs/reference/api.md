@@ -324,7 +324,8 @@ class EntsoeSource(DataSource):
     def __init__(self, country_code: str, api_key: str, type: List[str],
                  prefer_15min: bool = False,
                  neighbours: Optional[Union[List[str], str]] = None,
-                 prefix: str = ""): ...
+                 prefix: str = "",
+                 price_exaa: bool = False): ...  # True: adds price_exaa (EXAA auction), AT and DE_LU only
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), UTC
 
 class OpenMeteoSource(DataSource):

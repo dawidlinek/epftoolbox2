@@ -183,13 +183,19 @@ an issue day it didn't sample.
 
 ### New
 
-- **`PseSource`: the Polish TSO's reports API, no key.** `PseSource(datasets=["kse-load", "csdac-pln"], columns=None, prefix="")` loads
+- **`PseSource`: the Polish TSO's reports API, no key.** `PseSource(datasets=["kse-load", "csdac-pln"], columns=None, prefix="pse")` loads
   `kse-load` (`load_actual`, `load_fcst`), `his-wlk-cal` (`demand`, `wi`, `pv`, `jg` and more on request), `csdac-pln` (the SDAC price in
   PLN), `rce-pln` (the prosumer net-billing price, another series), `pdgsz` (recommended-usage code, the version stamped by
   `pdgsz_cutoff` on D-1, NaN where none was) and `przeplywy-mocy` (`flow_*`) on the 15-minute grid, UTC start of the period (PSE
   stamps the end), every column prefixed `pse_` by default. It loads from YAML, is offered in the TUI and has built-in availability
   rules (`load_fcst` 10:00 and the prices 15:00 on D-1, `usage_fcst` at the cutoff, the actuals 13:00 on D+1) with the classes
   `snapshot` (prices, `pdgsz`) and `last_write_stamp`. Nothing existing moves. See [PseSource](/epftoolbox2/data-sources/pse/).
+- **`EntsoeSource(price_exaa=True)` adds the EXAA auction; CH prices are the Swiss auction.** For AT and DE_LU the new column
+  `price_exaa` (A44, `classificationSequence` position 2) comes beside `price` on the same grid; other zones raise. Its built-in rule
+  is `published("11:15", 1)` in Vienna or Berlin and the Swiss `price` gets `published("12:00", 1)` in Zurich, both the legal
+  bounds and `snapshot`s (first-seen times unmeasured). A source without `price_exaa` returns and requests exactly what it did, and its
+  cache key is unchanged. The [ENTSO-E page](/epftoolbox2/data-sources/entsoe/#early-auctions-exaa-and-switzerland) shows how
+  to keep a model that works when the column is missing.
 - **`MirrorLogScaler` and `PolyScaler`: the mirror-log and polynomial VSTs.** `scaler="mlog"` and `scaler="poly"` are the
   transformations of Uniejewski, Weron & Ziel (2018) on `AsinhScaler`'s median/MAD normalisation, then standardised like every VST:
   `sgn(u) (log(|u| + 1/c) + log c)` with `c=1/3`, and `sgn(u) ((|u| + (c/λ)^(1/(λ-1)))^λ - (c/λ)^(λ/(λ-1)))` with `lam=0.125`,

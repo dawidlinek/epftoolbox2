@@ -240,6 +240,10 @@ _PERIOD_COLUMN_PREFIXES = {
     "installed_capacity_": "P1Y",
 }
 
+# Bidding zones whose A44 document also carries the EXAA auction (classificationSequence position 2) next to SDAC.
+EXAA_AREAS = ("AT", "DE_LU", "DE_AT_LU")  # DE_AT_LU (before 2018-10-01) is not verified live
+_EXAA_SEQUENCE = "2"
+
 VALID_TYPES = ("load", "generation", "price", "transfer_capacity", "installed_capacity")
 
 _RESOLUTION_RE = re.compile(r"^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$")
@@ -322,6 +326,11 @@ class EntsoeSource(DataSource):
     hourly (quarter-hours averaged into hours) with ``prefer_15min=False``, 15-minute (hourly periods step-filled)
     with ``prefer_15min=True``. Other series keep the resolution ENTSO-E publishes.
 
+    ``price`` is the single day-ahead coupling (SDAC) price. For ``CH``, which is not in SDAC, it is the Swiss
+    day-ahead auction (closing 11:00 local time on D-1). ``price_exaa=True`` (AT, DE_LU and DE_AT_LU only, with ``"price"`` in
+    ``type``) adds a ``price_exaa`` column: the EXAA auction (A44, classificationSequence position 2), cleared at
+    10:15 on D-1, before SDAC, on the same grid as ``price``.
+
     The week-ahead daily columns (``load_forecast_daily_min/max``, A31) hold one value per **this area's own**
     local day D. When this source is part of a ``DataPipeline``, that value is stamped at the *market's* local
     midnight of the same day D (see ``_daily_zone``), not this area's own midnight — so a neighbouring area
@@ -356,6 +365,7 @@ class EntsoeSource(DataSource):
         prefer_15min: bool = False,
         neighbours: Optional[Union[List[str], str]] = None,
         prefix: str = "",
+        price_exaa: bool = False,
     ):
         self.country_code = country_code
         self.api_key = api_key
@@ -365,6 +375,7 @@ class EntsoeSource(DataSource):
             neighbours = [n.strip() for n in neighbours.split(",") if n.strip()]
         self.neighbours = list(neighbours) if neighbours else None
         self.prefix = prefix or ""
+        self.price_exaa = price_exaa
         self._area_name, self._area_code = lookup_area(country_code)
         self._timezone = AREA_TIMEZONES.get(self._area_name, _DEFAULT_TIMEZONE)
         self.session = requests.Session()
@@ -437,6 +448,17 @@ class EntsoeSource(DataSource):
         if not isinstance(self.prefix, str):
             raise ValueError(f"prefix must be a string, got {self.prefix!r}")
 
+        if not isinstance(self.price_exaa, bool):
+            raise ValueError(f"price_exaa must be True or False, got {self.price_exaa!r}")
+        if self.price_exaa:
+            if "price" not in self.type:
+                raise ValueError("price_exaa=True adds a column to the prices, so type must include 'price'")
+            if self._area_name not in EXAA_AREAS:
+                raise ValueError(
+                    f"price_exaa=True is available for {', '.join(EXAA_AREAS[:-1])} and {EXAA_AREAS[-1]} only (the EXAA auction is "
+                    f"published by ENTSO-E for those zones), not for '{self.country_code}'"
+                )
+
         return True
 
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
@@ -457,6 +479,7 @@ class EntsoeSource(DataSource):
         # that lands mid-hour splits that hour's quarter-hours across two API responses, and gridding each chunk
         # on its own would see an incomplete hour in both and drop it.
         price_by_resolution: Dict[pd.Timedelta, List[pd.Series]] = {}
+        exaa_by_resolution: Dict[pd.Timedelta, List[pd.Series]] = {}
 
         with Progress(
             SpinnerColumn(),
@@ -482,6 +505,9 @@ class EntsoeSource(DataSource):
                         for step, series in chunk_data.get("price", {}).items():
                             if series is not None and not series.empty:
                                 price_by_resolution.setdefault(step, []).append(series)
+                        for step, series in chunk_data.get("price_exaa", {}).items():
+                            if series is not None and not series.empty:
+                                exaa_by_resolution.setdefault(step, []).append(series)
                         continue
                     chunk_df = chunk_data.get(dtype)
                     if chunk_df is not None and not chunk_df.empty:
@@ -490,9 +516,13 @@ class EntsoeSource(DataSource):
 
         if "price" in self.type:
             merged = {step: _combine(parts) for step, parts in price_by_resolution.items()}
-            graded = self._prices_to_grid(merged)
-            if not graded.empty:
-                all_results["price"].append(pd.DataFrame({"price": graded}))
+            price_columns = {"price": self._prices_to_grid(merged)}
+            if self.price_exaa:
+                exaa_merged = {step: _combine(parts) for step, parts in exaa_by_resolution.items()}
+                price_columns["price_exaa"] = self._prices_to_grid(exaa_merged)
+            price_columns = {name: series for name, series in price_columns.items() if not series.empty}
+            if price_columns:
+                all_results["price"].append(pd.DataFrame(price_columns))
 
         dataframes = []
         for dtype in self.type:
@@ -549,6 +579,8 @@ class EntsoeSource(DataSource):
         if "price" in self.type:
             # Ungridded: by native resolution. Gridding happens once in fetch(), over all chunks together.
             result["price"] = self._fetch_price_raw(start, end)
+            if self.price_exaa:
+                result["price_exaa"] = self._fetch_price_raw(start, end, sequence=_EXAA_SEQUENCE)
 
         if "transfer_capacity" in self.type:
             result["transfer_capacity"] = self._fetch_transfer_capacity(start, end)
@@ -682,18 +714,22 @@ class EntsoeSource(DataSource):
         dfs = [df for df in dfs if not df.empty]
         return pd.concat(dfs, axis=1, sort=True) if dfs else pd.DataFrame()
 
-    def _fetch_price_raw(self, start: pd.Timestamp, end: pd.Timestamp) -> Dict[pd.Timedelta, pd.Series]:
-        """Day-ahead prices for one chunk, by native resolution and not yet put on a grid (see fetch())."""
-        xml = self._api_request(
-            {
-                "documentType": "A44",
-                "in_Domain": self._area_code,
-                "out_Domain": self._area_code,
-            },
-            start,
-            end,
-        )
-        return self._parse_prices(xml)
+    def _fetch_price_raw(
+        self, start: pd.Timestamp, end: pd.Timestamp, sequence: Optional[str] = None
+    ) -> Dict[pd.Timedelta, pd.Series]:
+        """Day-ahead prices for one chunk, by native resolution and not yet put on a grid (see fetch()).
+
+        Without ``sequence`` the request is the plain A44 one and SDAC is kept. With ``sequence="2"`` the request asks
+        for classificationSequence position 2, the EXAA auction of AT, DE_LU and DE_AT_LU."""
+        params = {
+            "documentType": "A44",
+            "in_Domain": self._area_code,
+            "out_Domain": self._area_code,
+        }
+        if sequence is not None:
+            params["classificationSequence_AttributeInstanceComponent.position"] = sequence
+        xml = self._api_request(params, start, end)
+        return self._parse_prices(xml, sequence=sequence)
 
     def _fetch_transfer_capacity(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """Day-ahead forecasted transfer capacity (A61, contract type A01) per direction and neighbour, in MW.
@@ -835,20 +871,22 @@ class EntsoeSource(DataSource):
             return pd.DataFrame()
         return pd.DataFrame({name: _combine(parts) for name, parts in columns.items()}).sort_index()
 
-    def _parse_prices(self, xml_text: Optional[str]) -> Dict[pd.Timedelta, pd.Series]:
-        """Day-ahead prices by native resolution. Only the SDAC series is kept: classificationSequence position 1,
-        or no classificationSequence. DE_LU and AT also publish a separate 15-minute auction as position 2."""
+    def _parse_prices(self, xml_text: Optional[str], sequence: Optional[str] = None) -> Dict[pd.Timedelta, pd.Series]:
+        """Day-ahead prices by native resolution. By default only the SDAC series is kept: classificationSequence
+        position 1, or no classificationSequence. DE_LU and AT also publish a separate 15-minute auction (EXAA) as
+        position 2, kept only with ``sequence="2"`` and then the only series kept."""
         by_resolution: Dict[pd.Timedelta, List[pd.Series]] = {}
         skipped = set()
+        accepted = (None, "1") if sequence is None else (sequence,)
         for meta, series in self._parse_timeseries(xml_text, "price.amount"):
-            if meta["sequence"] not in (None, "1"):
+            if meta["sequence"] not in accepted:
                 skipped.add(meta["sequence"])
                 continue
             step = parse_resolution(meta["resolution"])
             if not isinstance(step, pd.Timedelta):
                 continue
             by_resolution.setdefault(step, []).append(series)
-        if skipped and not by_resolution:
+        if skipped and not by_resolution and sequence is None:
             self.logger.warning(
                 f"ENTSOE [{self._area_name}]: only price series with classificationSequence {sorted(skipped)} were "
                 "published; they are not the day-ahead coupling price and were ignored"
@@ -982,6 +1020,8 @@ class EntsoeSource(DataSource):
             config["neighbours"] = sorted(lookup_area(n)[0] for n in self.neighbours)
         if self.prefix:
             config["prefix"] = self.prefix
+        if self.price_exaa:
+            config["price_exaa"] = True
         # Only "load" fetches week-ahead daily values (A31), whose local-midnight anchor depends on this (see
         # _daily_zone): a pipeline bound to a different market zone must not share a cache entry with another.
         if "load" in self.type:
