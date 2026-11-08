@@ -691,6 +691,37 @@ def test_a_worker_outliving_a_killed_run_does_not_keep_the_lock(tmp_path):
         os.kill(worker, 9)
 
 
+HOLD_RAW = textwrap.dedent(
+    """
+    import fcntl, os, sys
+    fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    print("held", flush=True)
+    sys.stdin.read()
+    """
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="flock")
+def test_a_lock_file_this_run_cant_write_still_refuses_a_second_writer(tmp_path, recwarn):
+    """Another user's lock file in a shared directory, as a file of mode 0444: flock needs no write access, so it is locked."""
+    lock = tmp_path / "ols.lock"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", HOLD_RAW, str(lock)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        lock.chmod(0o444)
+        with pytest.raises(ResultsLockedError, match="ols.lock"):
+            run(market(), OLSModel(PREDICTORS, 45, name="ols"), tmp_path)
+    finally:
+        holder.communicate("")
+    report = run(market(), OLSModel(PREDICTORS, 45, name="ols"), tmp_path)  # read-only, free: locked, no warning
+    assert report.refs["ols"].produced == 48
+    assert not [w for w in recwarn if "refused a lock" in str(w.message)]
+    lock.chmod(0o644)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="flock")
 @pytest.mark.parametrize("code", [errno.ENOSYS, errno.ENOLCK, errno.EOPNOTSUPP])
 def test_a_file_system_that_refuses_locks_warns_and_the_run_goes_on(tmp_path, monkeypatch, code):

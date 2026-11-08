@@ -561,13 +561,18 @@ def _hold_lock(path: Path) -> Callable[[], None]:
     process that is killed holds none. Where there is no flock (Windows) filelock's lock. Raises `_LockHeld` when another holds
     it, OSError when the file system refuses locks.
 
-    A process forked while the lock is held closes its copy of the descriptor (`_close_held_in_child`), so a pool worker
-    outliving a killed run doesn't keep the lock."""
+    The lock file is opened read-write (created if missing) or, where that is refused (another user's lock file in a shared
+    directory), read-only: flock doesn't need write access, so a writer of a file it can't write is refused as any other. Only a
+    lock file that can't be opened at all is a file system that refuses locks. A process forked while the lock is held closes
+    its copy of the descriptor (`_close_held_in_child`), so a pool worker outliving a killed run doesn't keep the lock."""
     try:
         import fcntl
     except ImportError:  # pragma: no cover (Windows)
         return _hold_filelock(path)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except PermissionError:
+        fd = os.open(path, os.O_RDONLY)  # raises PermissionError if it can't be read either
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
