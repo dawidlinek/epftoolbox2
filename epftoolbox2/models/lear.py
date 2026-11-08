@@ -6,6 +6,7 @@ from typing import Optional, Sequence, Tuple, Union
 import numpy as np
 
 from . import _lars
+from ._cv_stats import cv_stats_of
 from ._lars import CRITERIA, CV_SOLVER_ERROR, SOLVERS, CvStats, GramStats, LearFit, cv_stats, gram_stats
 from ._stats import ScaledStats
 from .base import BaseModel
@@ -19,7 +20,8 @@ LAGO_SCALER = {"name": "asinh", "params": {"standardise": False}}
 
 
 class LEARModel(BaseModel):
-    # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the sums alone (`"cv"`'s blocks come in 5e).
+    # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the sums alone for an information criterion.
+    # A `criterion="cv"` instance needs the CV blocks too (`_cv_stats.block_stats`): `__setattr__` sets its own.
     _ENGINE_NEEDS = frozenset()
 
     def __init__(
@@ -86,6 +88,9 @@ class LEARModel(BaseModel):
             if {value, other} == {"cv", "cd"}:
                 raise ValueError(CV_SOLVER_ERROR)
         super().__setattr__(key, value)
+        if key == "criterion":
+            # Starts with "_", so YAML and the manifest never see it.
+            super().__setattr__("_ENGINE_NEEDS", frozenset({"blocks"}) if value == "cv" else frozenset())
 
     @classmethod
     def lago(
@@ -147,13 +152,10 @@ class LEARModel(BaseModel):
     def _fit_stats(self, stats: Union[GramStats, CvStats, ScaledStats]) -> LearFit:
         """The fit from the centred sums of a unit's scaled training rows alone, `GramStats` for an information criterion and
         `CvStats` (those of the five blocks in date order) for `"cv"`: where step 5's engine hands in statistics it shares
-        between models. The engine's `ScaledStats` are read through `.gram()`; for `"cv"` they need their blocks (step 5e)."""
+        between models. The engine's `ScaledStats` are read through `.gram()`, and for `"cv"` through their blocks
+        (`_cv_stats.cv_stats_of`; TypeError when they carry none)."""
         if isinstance(stats, ScaledStats):
-            if self.criterion == "cv":
-                raise TypeError(
-                    "criterion='cv' fits from the five CV blocks, which ScaledStats don't carry yet (step 5e)"
-                )
-            stats = stats.gram()
+            stats = cv_stats_of(stats) if self.criterion == "cv" else stats.gram()
         return _lars._kernels().lear_fit(stats, self.criterion, self.solver)
 
     def _predict_fitted(self, fitted: LearFit, test_x) -> Tuple[float, list]:
