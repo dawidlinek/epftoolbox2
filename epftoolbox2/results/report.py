@@ -23,7 +23,8 @@ from ..evaluators._compare import (
     too_few_distinct_models,
     verdict,
 )
-from ..evaluators._days import periods_per_hour
+from .._date_utils import zone_name
+from ..evaluators._days import check_period_ids, periods_per_hour
 from ..evaluators.base import FORECAST_KEYS, Evaluator, SetEvaluator
 from ..evaluators.dm import DMEvaluator, check_test_settings
 from ..evaluators.economic import EconomicEvaluator
@@ -37,6 +38,7 @@ from .breakdowns import (
     PEAK_HOURS,
     block_aggregate,
     check_peak_hours,
+    numbered_by_the_clock,
     daily_aggregate,
     hourly_aggregate,
     price_level,
@@ -357,6 +359,8 @@ class EvaluationReport:
                 f"aggregate('1h') turns quarter-hours into hours, so it needs 15-minute results; these are {freqs}."
             )
         self._require_one_frequency("Aggregating")
+        if freq == DAILY:
+            self._refuse_hours_dropped_without_a_zone()
 
         frames = self._model_frames()
         starts = [df["run_date"].min() for df in frames.values() if "run_date" in df and len(df)]
@@ -385,7 +389,9 @@ class EvaluationReport:
                 if ref.zone is not None and "target_date" in frame:
                     clock = clock_periods_on(frame["target_date"].unique(), model_freq, ref.zone)
                 if block:
-                    on_the_day = clock if clock is not None else day_ids
+                    if "hour" in frame:
+                        check_period_ids(frame["hour"].to_numpy(), model_freq, f"aggregate({agg!r}) of {name!r}")
+                    on_the_day = clock if clock is not None else numbered_by_the_clock(day_ids, per_hour)
                     rows, seen, missing = block_aggregate(frame, agg, per_hour, peak_hours, on_the_day)
                 else:
                     rows, seen, missing = daily_aggregate(frame, agg, per_hour, periods, clock)
@@ -442,6 +448,23 @@ class EvaluationReport:
             )
         evaluators = [e for e in self.evaluators if not any(e is out for out in (*economic, *sourced))]
         return EvaluationReport(results, evaluators, choices=self._choices)
+
+    def _refuse_hours_dropped_without_a_zone(self) -> None:
+        """Hourly results of `aggregate("1h")` that dropped hours, with no zone to tell what a day has: a day without its
+        dropped 02:00 (the repeated autumn hour, which has no actual) looks like a 23-hour spring day and would be aggregated
+        over the hours left, while `aggregate("1D")` of the quarter-hours drops it. Refused, never scored."""
+        dropped = {
+            name: ref.skipped["incomplete_hour"]
+            for name, ref in self.refs.items()
+            if ref.zone is None and ref.skipped.get("incomplete_hour")
+        }
+        if dropped:
+            raise ValueError(
+                f"These hourly results come from aggregate('1h'), which left out hours (incomplete_hour per model: "
+                f"{dropped}), and they have no time zone: a day without such an hour can't be told from a day whose clock "
+                "skips it. Aggregate the quarter-hour report to '1D' directly, or give its results a zone "
+                "(ModelResultRef.zone), which a report of a run has."
+            )
 
     def error_split(self, period: str = "1h") -> pd.DataFrame:
         """How each model's squared error divides into the level of the day, its hour profile and the shape within the hour.
@@ -540,7 +563,19 @@ class EvaluationReport:
         return grouped
 
     def _source_table(self, columns: Sequence[str], frames: Mapping[str, pd.DataFrame], freq: str) -> pd.DataFrame:
-        """`breakdowns.source_table` of the report's source data, checked over the target dates of `frames`."""
+        """`breakdowns.source_table` of the report's source data, checked over the target dates of `frames`.
+
+        The join reads the source's wall clock, so a source in another time zone than the results' would give each forecast
+        another hour's value: with results that know their zone, the source's index must be in it."""
+        zones = {zone_name(ref.zone) or str(ref.zone) for ref in self.refs.values() if ref.zone is not None}
+        if zones:
+            source_zone = zone_name(getattr(self.source_data.index, "tz", None))
+            if zones != {source_zone}:
+                raise ValueError(
+                    f"The source data's index is in the time zone {source_zone}, the results in {sorted(zones)}: its "
+                    "wall clock would put each forecast on another hour's row. Convert the source to the results' zone "
+                    "(source.tz_convert(...)), as the frame of the run is."
+                )
         dates = [df["target_date"] for df in frames.values() if len(df) and "target_date" in df]
         days = None
         if dates:

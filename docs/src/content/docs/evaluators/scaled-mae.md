@@ -49,6 +49,11 @@ print(report.summary())  # columns MAE/cap (a fraction) and "MAE/cap left out"
   second row, the one a run forecasts from. A report of `ModelPipeline` has the data it ran on as its `source_data`; an
   `EvaluationReport` built by hand needs `source_data=`. `aggregate()` leaves the evaluator out with a warning, since its report has
   no source data.
+- **Checked before any fit.** `run()` (and each task of a SLURM array) raises when the data lacks the column, so a typo costs no
+  fits. A report from files needs the data: `ModelPipeline.report(save_dir, data=...)` raises without it, and
+  `Workflow.report()` (`epf report`) runs the data pipeline for it.
+- **The source's time zone is the results'.** The join reads the source's wall clock, so with results that know their zone a
+  source indexed in another one (or in none) raises.
 - The value is read at the **target** row: for a capacity that is known only later, use a column that holds, on each row, what was
   known when the forecast was issued (the renewables study's proxy: the largest actual of the 365 days up to D-1).
 - A fraction; multiply by 100 for the percentage the renewables study prints as `MAE_cap_pct`.

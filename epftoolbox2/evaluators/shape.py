@@ -4,7 +4,7 @@ from typing import Dict, Mapping, Optional
 import numpy as np
 import pandas as pd
 
-from ._days import QUARTERS, day_codes, periods_per_hour, whole_hours
+from ._days import QUARTERS, check_period_ids, day_codes, periods_per_hour, whole_hours
 from .base import Evaluator, EvaluatorResult
 
 # The results a within-hour shape exists in: quarter-hours.
@@ -50,6 +50,8 @@ def shape_mae(df: pd.DataFrame, freq: Optional[str]) -> float:
     above 24 means quarter-hours)."""
     if df.empty:
         return math.nan
+    if freq is not None:
+        check_period_ids(df["hour"].to_numpy(), freq, "ShapeMAEEvaluator")
     quarter_hours = freq == _SHAPE_FREQ if freq is not None else periods_per_hour(df["hour"].to_numpy()) == QUARTERS
     if not quarter_hours:
         return math.nan

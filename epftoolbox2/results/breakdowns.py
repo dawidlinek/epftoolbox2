@@ -250,7 +250,8 @@ def block_aggregate(
     known, else every period that any model has a record for on that date. A day counts when the model has every one of
     them that is in the block, each with a finite prediction and actual, so the peak of a switch day counts and its offpeak
     counts only when the day has no repeated hour (whose actual is missing). Returns `(days, n_seen, n_dropped)` as
-    `daily_aggregate` does.
+    `daily_aggregate` does. A day with a record of a slot its date doesn't have in `day_periods` is dropped too: its ids are
+    numbered otherwise (see `numbered_by_the_clock`), so they aren't its local hours.
     """
     if agg not in BLOCK_AGGREGATES:
         raise ValueError(f"agg must be one of {list(BLOCK_AGGREGATES)}, got {agg!r}")
@@ -263,16 +264,21 @@ def block_aggregate(
     stamps = pd.DatetimeIndex(targets)
     expected = [np.asarray(day_periods.get(date, ()), dtype=np.int64) for date in stamps]
     size = max([int(hour.max()), *(int(ids.max()) for ids in expected if len(ids))]) + 1
+    known = np.zeros((len(targets), size), dtype=bool)  # the slots of each target date
     wanted = np.zeros((len(targets), size), dtype=bool)  # the block's slots of each target date
     for code, ids in enumerate(expected):
+        known[code, ids] = True
         wanted[code, ids[in_block(ids, per_hour, agg, peak_hours)]] = True
+    # A day with a record of a slot its date doesn't have is numbered otherwise than by the clock: its hours aren't the
+    # local hours of the ids, so its block can't be read.
+    stray = np.unique(day_key[~known[target, hour]])
 
     prediction = frame["prediction"].to_numpy(dtype=float)
     actual = frame["actual"].to_numpy(dtype=float)
     rows = order[np.isfinite(prediction[order]) & np.isfinite(actual[order])]
     rows = rows[wanted[target[rows], hour[rows]]]
     codes, first, counts = np.unique(day_key[rows], return_index=True, return_counts=True)
-    whole = counts == wanted.sum(axis=1)[target[rows[first]]]
+    whole = (counts == wanted.sum(axis=1)[target[rows[first]]]) & ~np.isin(codes, stray)
 
     reduced_prediction, reduced_actual = np.full(len(codes), np.nan), np.full(len(codes), np.nan)
     for length in np.unique(counts[whole]).tolist():
@@ -293,6 +299,22 @@ def block_aggregate(
         }
     )[[*FORECAST_KEYS, "prediction", "actual"]]
     return days, n_seen, n_seen - int(whole.sum())
+
+
+def numbered_by_the_clock(
+    day_periods: Mapping[pd.Timestamp, Sequence[int]], per_hour: int
+) -> Dict[pd.Timestamp, Tuple]:
+    """`day_periods` without the dates whose ids are numbered through rather than by the clock, which `whole_days` accepts:
+    a day with an id past 23:59 (a 25-hour day numbered 0-24, 0-99 at 15 minutes) and a Sunday numbered exactly 0-22 (0-91),
+    a 23-hour day. Their ids aren't local hours after the switch, so a block of hours would be read an hour early or late;
+    a date mapped to no periods is dropped and counted by `block_aggregate`."""
+    out: Dict[pd.Timestamp, Tuple] = {}
+    short = tuple(range(23 * per_hour))
+    for date, ids in day_periods.items():
+        ids = tuple(ids)
+        through = (ids and max(ids) >= 24 * per_hour) or (pd.Timestamp(date).day_of_week == 6 and ids == short)
+        out[date] = () if through else ids
+    return out
 
 
 def hourly_aggregate(frame: pd.DataFrame, agg: str) -> Tuple[pd.DataFrame, int, int]:
@@ -340,8 +362,8 @@ _DAY_QUARTERS = 24 * QUARTERS
 def error_split(frame: pd.DataFrame, switch_dates: Optional[set] = None) -> Dict[str, Any]:
     """How one model's squared error divides into the level of the day, the profile of its hours and the shape within them.
 
-    On the whole non-switch days of the frame: forecast days (run date, target date, horizon) with all 96 quarter-hours
-    0-95 finite, whose target date is not in `switch_dates` (the dates a known zone's clocks change on; without a zone, a
+    On the whole non-switch days of the frame: forecast days (run date, target date, horizon) whose finite quarter-hours are
+    exactly 0-95, whose target date is not in `switch_dates` (the dates a known zone's clocks change on; without a zone, a
     switch day lacks quarter-hours or its repeated hour has no actual, so it is not whole). With `e` the errors of a day,
     `level` the day's mean error and `hour_mean` each hour's, the mean squared error is exactly
     `mean(level²) + mean((hour_mean - level)²) + mean((e - hour_mean)²)`, averaged over the days, hours and quarter-hours,
@@ -357,9 +379,11 @@ def error_split(frame: pd.DataFrame, switch_dates: Optional[set] = None) -> Dict
     order = np.lexsort((period, day))
     if ((day[order][1:] == day[order][:-1]) & (period[order][1:] == period[order][:-1])).any():
         raise ValueError("error_split() needs each forecast key once; the frame has duplicated keys.")
-    kept = order[np.isfinite(error[order]) & (period[order] < _DAY_QUARTERS)]
+    kept = order[np.isfinite(error[order])]
     codes, first, counts = np.unique(day[kept], return_index=True, return_counts=True)
-    whole = counts == _DAY_QUARTERS
+    # Each day's finite ids are distinct and in order, so 96 of them ending at 95 are exactly 0-95: a day numbered through
+    # with 100 (a 25-hour day) is not whole, whatever its first 96 hold.
+    whole = (counts == _DAY_QUARTERS) & (period[kept][first + counts - 1] < _DAY_QUARTERS)
     if switch_dates:
         dates = pd.DatetimeIndex(frame["target_date"].to_numpy()[kept[first]])
         whole &= ~dates.isin(pd.DatetimeIndex(sorted(switch_dates)))

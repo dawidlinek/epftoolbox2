@@ -75,6 +75,24 @@ def hour_of_code(codes: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return codes // _HOURS_PER_KEY, codes % _HOURS_PER_KEY
 
 
+_PER_HOUR = {"1h": 1, "15min": QUARTERS}
+
+
+def check_period_ids(hour: Sequence[int], freq: str, what: str) -> None:
+    """Raise when the period ids are beyond what results at `freq` hold: a day of 25 hours numbered through has ids up to
+    24 (99 at 15 minutes), so a larger id is a quarter-hour read as an hour, as plain 15-minute records without a `freq`
+    key are (read as "1h", the default). Scoring them would put the peak hours at 02:00-04:59 without a word."""
+    per_hour = _PER_HOUR.get(freq)
+    if per_hour is None or not len(hour):
+        return
+    largest = int(np.max(hour))
+    if largest >= 25 * per_hour:
+        raise ValueError(
+            f"{what}: the records have period ids up to {largest}, but {freq} results have at most {25 * per_hour - 1}. "
+            'They are probably quarter-hours read as hours: give each record "freq": "15min" (a run writes it).'
+        )
+
+
 def periods_per_hour(hour: Sequence[int]) -> int:
     """4 when the period ids say quarter-hours (an id above 24), else 1: the frame's largest id says what a period is."""
     return 4 if len(hour) and np.max(hour) > 24 else 1

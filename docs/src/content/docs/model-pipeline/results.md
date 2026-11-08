@@ -208,7 +208,7 @@ joins, so the source must be at the results' frequency, and on the day clocks fa
 one a run forecasts from. The value is read from the data, never from a forecast, so the groups are the same rows for every model.
 With `bins` (a list of increasing edges, each interval closed on the left) a numeric column is cut into intervals. A forecast with no
 value there (NaN, no source row, outside the bins) is in no group; `df.attrs["no_value"]` counts them per model, so the groups add up
-to `summary()`. A report from `aggregate()` has no source data, so call it on the report you aggregated.
+to `summary()`. A report from `aggregate()` has no source data, so call it on the report you aggregated. When the results know their time zone (a run's do), the source's index must be in it: a source in UTC would put each forecast on another hour's row, so it raises.
 
 ## Daily aggregates
 
@@ -235,7 +235,7 @@ print(daily_max.forecast_counts())
 - **Without a zone**, for records passed as plain lists, the periods of a target date are every period that any model has a record for, at any horizon. A period that no model has at any horizon is taken at its word, because that is how a clock change looks in the ids: the day after the spring switch, from the switch day alone, is then aggregated over its 23 forecast hours.
 - **Each model on its own days.** A model that lacks a period loses that day for itself and for nobody else. The comparison tables then use the days the models share and print how many.
 - **Dropped days are counted.** They are in `forecast_counts()` of the new report as `missing` and under `incomplete_day`, and a warning names the models. `planned` there is the number of days with any forecast of the model; days without a single forecast are in the `forecast_counts()` of the report you aggregated. As in the example, models can then have different numbers of forecasts, so compare them with `rMAE` or `tests()`, which use the common days, and not with the raw `MAE` column.
-- **Peak and offpeak blocks.** `agg="peak"` is the mean over the periods of `peak_hours` (local hours, the end left out: `(8, 20)`, the default, is 08:00 to 19:59, the window of the resolution and renewables studies), and `"offpeak"` over the rest of the day. A block counts when every period of it the day has (by its clock, or without a zone the periods any model has on that date) is there with a finite prediction and actual. So the peak of both switch days counts, the offpeak of the spring day counts over the hours its clock has, and the offpeak of the autumn day is dropped for its repeated hour; a model that lacks 09:00 loses its peak of that day, not its offpeak. Dropped days are counted as for the other aggregates.
+- **Peak and offpeak blocks.** `agg="peak"` is the mean over the periods of `peak_hours` (local hours, the end left out: `(8, 20)`, the default, is 08:00 to 19:59, the window of the resolution and renewables studies), and `"offpeak"` over the rest of the day. A block counts when every period of it the day has (by its clock, or without a zone the periods any model has on that date) is there with a finite prediction and actual. So the peak of both switch days counts, the offpeak of the spring day counts over the hours its clock has, and the offpeak of the autumn day is dropped for its repeated hour; a model that lacks 09:00 loses its peak of that day, not its offpeak. Dropped days are counted as for the other aggregates. A block is read by the local hour of each period id, so a day whose ids aren't the clock's is dropped too: without a zone, a 25-hour day numbered through (0-24) and a Sunday numbered 0-22, where the ids after the switch are an hour off. Period ids beyond the results' frequency (quarter-hours 0-95 in records without `freq`, read as hours) raise `ValueError`.
 - **What differs from an hourly report.** `tests(by="hour")` raises (a day has no hours), and the `hours_*` columns of `compare()` are NaN. `EconomicEvaluator` is left out with a warning, since a schedule needs the periods of a day, and so is [`ScaledMAEEvaluator`](/epftoolbox2/evaluators/scaled-mae/), which reads the source data. The new report has no `source_data`, and `day_in_test` counts days from the earliest run date. It is a daily report, so it cannot be joined to an hourly one.
 
 ## Hourly aggregates, shape and the error split
@@ -258,10 +258,10 @@ print(report.error_split())  # two models of the resolution study, DE_LU, April 
   repeated autumn hour, which has no actual, is dropped, and the hour the spring switch skips is no hour of that day. Each model
   loses only its own hours; dropped hours are in the new report's `forecast_counts()` under `incomplete_hour`, with a warning. The new
   report has frequency `"1h"`, `hour` the local hour and the time zone of the first, so `aggregate("1D")` of it judges days by the
-  clock again; the evaluators carry over (`EconomicEvaluator` then schedules hours) except `ScaledMAEEvaluator`.
+  clock again; the evaluators carry over (`EconomicEvaluator` then schedules hours) except `ScaledMAEEvaluator`. Without a zone (plain lists), `aggregate("1D")` of an hourly report that dropped hours raises: an autumn day without its 02:00 would look like a 23-hour spring day. Aggregate the quarter-hours to `"1D"` directly instead.
 - **[`ShapeMAEEvaluator`](/epftoolbox2/evaluators/shape-mae/)** is the error of the shape within the hour: the mean of
   |(ŷ − ŷ̄) − (y − ȳ)| over the quarter-hours of whole hours, with ŷ̄ and ȳ the hour's means.
-- **`error_split(period="1h")`** divides each model's mean squared error, on its whole non-switch days (all 96 quarter-hours finite,
+- **`error_split(period="1h")`** divides each model's mean squared error, on its whole non-switch days (finite quarter-hours exactly 0-95,
   on a date whose clock doesn't change), into three shares that add up to 1: `level`, the day's mean error squared; `hour`, each
   hour's mean error minus the day's; `quarter`, each quarter-hour's error minus its hour's. `days` and `forecasts` say what each row
   is on; models with different numbers of whole days warn (`df.attrs["unequal_days"]`).

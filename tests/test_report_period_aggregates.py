@@ -75,22 +75,22 @@ def records(freq="15min", error=lambda target, period: 1.0, runs=RUNS, drop=(), 
     return out
 
 
-def zoned(name, recs, freq="15min", zone=ZONE):
+def zoned(name, recs, freq="15min", zone=ZONE, horizon=1):
     return ModelResultRef(
         name=name,
         path=None,
         count=len(recs),
         test_start="",
         test_end="",
-        horizon=1,
+        horizon=horizon,
         freq=freq,
         _results=recs,
         zone=zone,
     )
 
 
-def report_of(models, evaluators=(MAEEvaluator(),), freq="15min", zone=ZONE, source_data=None):
-    refs = {name: zoned(name, recs, freq, zone) if zone else recs for name, recs in models.items()}
+def report_of(models, evaluators=(MAEEvaluator(),), freq="15min", zone=ZONE, source_data=None, horizon=1):
+    refs = {name: zoned(name, recs, freq, zone, horizon) if zone else recs for name, recs in models.items()}
     return EvaluationReport(refs, list(evaluators), source_data=source_data)
 
 
@@ -629,3 +629,152 @@ def test_exporters_take_the_new_columns(tmp_path, capsys):
     ]
     TerminalExporter(show=["summary"]).export(report)
     assert "MAE/cap" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Review of step 7b
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+
+def zoned_quarter_records(seed):
+    """c_dst.py's records: clock-numbered 15-minute forecasts across both switches, horizons 1 and 2."""
+    rng = np.random.default_rng(seed)
+    spring, autumn = pd.Timestamp(SPRING), pd.Timestamp(AUTUMN)
+    rows = []
+    runs = list(pd.date_range("2024-03-28", "2024-04-02")) + list(pd.date_range("2024-10-24", "2024-10-29"))
+    for d, run in enumerate(runs):
+        for h in (1, 2):
+            target = run + pd.Timedelta(days=h)
+            for p in range(96):
+                if (target == spring or run == spring) and 8 <= p < 12:
+                    continue
+                a = 50.0 + 20 * np.sin(p / 96 * 6.28) + p % 4
+                rows.append(
+                    {
+                        "run_date": run.date().isoformat(),
+                        "target_date": target.date().isoformat(),
+                        "run_weekday": run.dayofweek,
+                        "hour": p,
+                        "horizon": h,
+                        "day_in_test": d,
+                        "prediction": float(a + rng.normal(0, 3)),
+                        "actual": None if (target == autumn and 8 <= p < 12) else float(a),
+                        "freq": "15min",
+                    }
+                )
+    return rows
+
+
+def test_hourly_then_daily_is_the_daily_aggregate_or_refused():
+    models = {"base": zoned_quarter_records(1), "m": zoned_quarter_records(2)}
+    zoned = report_of(models, [MAEEvaluator()], horizon=2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        chained = zoned.aggregate("1h", agg="mean").aggregate("1D", agg="mean")
+        direct = zoned.aggregate("1D", agg="mean")
+    for name in models:
+        a, b = as_frame(chained, name), as_frame(direct, name)
+        assert (
+            a[["run_date", "target_date", "horizon"]].values.tolist()
+            == b[["run_date", "target_date", "horizon"]].values.tolist()
+        )
+        assert AUTUMN not in a["target_date"].tolist()
+        np.testing.assert_allclose(a["prediction"], b["prediction"], rtol=0, atol=1e-12)
+        np.testing.assert_allclose(a["actual"], b["actual"], rtol=0, atol=1e-12)
+    # Without a zone the hourly report can't tell a dropped hour from one the clock skips: a daily aggregate of it is refused.
+    plain = report_of(models, [MAEEvaluator()], zone=None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        hourly = plain.aggregate("1h", agg="mean")
+        direct = plain.aggregate("1D", agg="mean")
+    assert AUTUMN not in as_frame(direct, "m")["target_date"].tolist()
+    for agg in ("mean", "max", "peak"):
+        with pytest.raises(ValueError, match="incomplete_hour"):
+            hourly.aggregate("1D", agg=agg)
+    # With no hour dropped there is nothing to mistake, and the chain is the direct aggregate.
+    whole = {name: [r for r in rows if r["target_date"] != AUTUMN] for name, rows in models.items()}
+    plain = report_of(whole, [MAEEvaluator()], zone=None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        chained = plain.aggregate("1h", agg="mean").aggregate("1D", agg="mean")
+        direct = plain.aggregate("1D", agg="mean")
+    a, b = as_frame(chained, "m"), as_frame(direct, "m")
+    assert a[["run_date", "target_date"]].values.tolist() == b[["run_date", "target_date"]].values.tolist()
+    np.testing.assert_allclose(a["prediction"], b["prediction"], rtol=0, atol=1e-12)
+
+
+def test_blocks_and_shape_refuse_period_ids_beyond_the_results_frequency():
+    recs = records(with_freq=False)  # quarter-hour ids 0-95 that the report reads as hours ("1h", the default)
+    report = EvaluationReport({"m": recs}, [MAEEvaluator(), ShapeMAEEvaluator()])
+    for agg in ("peak", "offpeak"):
+        with pytest.raises(ValueError, match="period ids up to 95"):
+            report.aggregate("1D", agg=agg)
+    with pytest.raises(ValueError, match="period ids up to 95"):
+        report.summary()
+
+
+def test_error_split_judges_a_day_by_all_its_finite_quarter_hours():
+    rows = []
+    for d, run in enumerate(pd.date_range("2024-10-25", "2024-10-28")):
+        target = run + pd.Timedelta(days=1)
+        n = 100 if target == pd.Timestamp(AUTUMN) else 96  # the autumn day numbered through, ids 0-99
+        for p in range(n):
+            a = 50.0 + p % 4
+            rows.append(
+                {
+                    "run_date": run.date().isoformat(),
+                    "target_date": target.date().isoformat(),
+                    "hour": p,
+                    "horizon": 1,
+                    "prediction": a + (30.0 if p >= 96 else np.sin(p)),
+                    "actual": a,
+                    "freq": "15min",
+                }
+            )
+    row = EvaluationReport({"m": rows}, []).error_split().iloc[0]
+    assert row["days"] == 3  # the 100-quarter-hour day is not a whole day of 96
+    assert row["forecasts"] == 3 * 96
+
+
+def numbered_through(target, hours, run=None, value=lambda hour: float(hour)):
+    """One day of hourly records numbered 0, 1, 2, ... over the local hours `hours`; the error is `value(local hour)`."""
+    run = run or (pd.Timestamp(target) - pd.Timedelta(days=1)).date().isoformat()
+    return [
+        {"run_date": run, "target_date": target, "hour": i, "horizon": 1, "prediction": 50.0 + value(h), "actual": 50.0}
+        for i, h in enumerate(hours)
+    ]
+
+
+def test_blocks_leave_out_switch_days_numbered_through():
+    plain = numbered_through("2024-03-30", range(24))
+    short = numbered_through(SPRING, [h for h in range(24) if h != 2])  # a Sunday, ids 0-22
+    long = numbered_through(AUTUMN, [*range(3), 2, *range(3, 24)])  # 25 local hours, ids 0-24
+    report = EvaluationReport({"m": plain + short + long}, [MAEEvaluator()])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert len(list(report.aggregate("1D", agg="mean").refs["m"].iter_records())) == 3  # whole_days takes all three
+        for agg in ("peak", "offpeak"):
+            daily = report.aggregate("1D", agg=agg)
+            kept = list(daily.refs["m"].iter_records())
+            assert [r["target_date"] for r in kept] == ["2024-03-30"], agg
+            assert daily.forecast_counts().loc[0, "incomplete_day"] == 2
+    peak = list(EvaluationReport({"m": plain}, []).aggregate("1D", agg="peak").refs["m"].iter_records())[0]
+    assert peak["prediction"] - peak["actual"] == pytest.approx(13.5)  # local 08:00-19:59
+
+
+def test_source_columns_need_the_results_time_zone():
+    recs = records("1h")
+    local = hourly_source({"flag": lambda idx: (idx.hour.to_numpy() < 7).astype(float)})
+    for source in (local.tz_convert("UTC"), local.tz_localize(None)):
+        report = report_of({"m": recs}, [MAEEvaluator()], "1h", source_data=source)
+        with pytest.raises(ValueError, match="time zone"):
+            report.by_column("flag")
+        scaled = report_of({"m": recs}, [ScaledMAEEvaluator("flag")], "1h", source_data=source)
+        with pytest.raises(ValueError, match="time zone"):
+            scaled.summary()
+    assert len(report_of({"m": recs}, [MAEEvaluator()], "1h", source_data=local).by_column("flag")) == 2
+    # Results without a zone (plain lists) read the source's wall clock, as CsvExporter does.
+    assert len(
+        report_of({"m": recs}, [MAEEvaluator()], "1h", zone=None, source_data=local.tz_convert("UTC")).by_column("flag")
+    )
