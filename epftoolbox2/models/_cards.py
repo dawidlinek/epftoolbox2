@@ -22,7 +22,9 @@ Nothing here imports an extra.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.metadata
+import itertools
 import json
 import os
 import re
@@ -179,24 +181,130 @@ def contamination_verdict(
     return POSSIBLY_CONTAMINATED
 
 
-# --- runtime pins -----------------------------------------------------------------------------------------------------
+# --- runtime pins: PEP 440 versions and specifiers (`packaging` is no core dependency, so its rules are here) -------------
 
 _NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(.*?)\s*$")
-_SPECIFIER = re.compile(r"^\s*(===|==|!=|~=|<=|>=|<|>)\s*([A-Za-z0-9.*+!_-]+)\s*$")
-_VERSION = re.compile(
-    r"^v?(?:(\d+)!)?(\d+(?:\.\d+)*)"
-    r"(?:[-_.]?(a|alpha|b|beta|rc|c|pre|preview)[-_.]?(\d*))?"
-    r"(?:-(\d+)|[-_.]?(?:post|rev|r)[-_.]?(\d*))?"
-    r"(?:[-_.]?dev[-_.]?(\d*))?"
-    r"(?:\+[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)?$",
-    re.IGNORECASE,
-)
-_PRE_RANK = {"a": 0, "alpha": 0, "b": 1, "beta": 1, "rc": 2, "c": 2, "pre": 2, "preview": 2}
+_SPECIFIER = re.compile(r"^\s*(?P<op>~=|===|==|!=|<=|>=|<|>)\s*(?P<version>[^\s,;]*)\s*$")
+_VERSION_PARTS = r"""
+    v?
+    (?:(?P<epoch>[0-9]+)!)?
+    (?P<release>[0-9]+(?:\.[0-9]+)*)
+    (?P<pre>[-_.]?(?P<pre_l>alpha|a|beta|b|preview|pre|c|rc)[-_.]?(?P<pre_n>[0-9]+)?)?
+    (?P<post>(?:-(?P<post_n1>[0-9]+))|(?:[-_.]?(?P<post_l>post|rev|r)[-_.]?(?P<post_n2>[0-9]+)?))?
+    (?P<dev>[-_.]?(?P<dev_l>dev)[-_.]?(?P<dev_n>[0-9]+)?)?
+    (?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?
+"""
+_VERSION = re.compile(r"^\s*" + _VERSION_PARTS + r"\s*$", re.VERBOSE | re.IGNORECASE)
+# `==`/`!=` with a wildcard: an epoch and a release only, then `.*`.
+_WILDCARD = re.compile(r"^v?(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*\.\*$", re.IGNORECASE)
+_PRE_LETTER = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc", "preview": "rc"}
+_PRE_RANK = {"a": 0, "b": 1, "rc": 2}
+_SPLIT_PRE = re.compile(r"^([0-9]+)((?:a|b|c|rc)[0-9]+)$")
+
+
+@dataclass(frozen=True)
+class _Version:
+    """A PEP 440 version, normalised: compare by `key`, print canonically with `str`."""
+
+    epoch: int
+    release: Tuple[int, ...]
+    pre: Optional[Tuple[str, int]]
+    post: Optional[int]
+    dev: Optional[int]
+    local: Optional[Tuple[Union[int, str], ...]]
+
+    @property
+    def is_prerelease(self) -> bool:
+        return self.pre is not None or self.dev is not None
+
+    @property
+    def public(self) -> "_Version":
+        return dataclasses.replace(self, local=None)
+
+    @property
+    def base(self) -> "_Version":
+        return _Version(self.epoch, self.release, None, None, None, None)
+
+    @property
+    def key(self) -> Tuple:
+        """PEP 440's order: trailing zeros of the release don't count; a dev-only release before its pre-releases, those
+        before the release, then post-releases, each dev release before its own; a local version after the public one."""
+        release = list(self.release)
+        while release and release[-1] == 0:
+            release.pop()
+        if self.pre is None and self.post is None and self.dev is not None:
+            pre: Tuple = (0,)
+        elif self.pre is None:
+            pre = (2,)
+        else:
+            pre = (1, _PRE_RANK[self.pre[0]], self.pre[1])
+        post = (0,) if self.post is None else (1, self.post)
+        dev = (1,) if self.dev is None else (0, self.dev)
+        local: Tuple = (0,)
+        if self.local is not None:
+            local = (1, tuple((1, part, "") if isinstance(part, int) else (0, 0, part) for part in self.local))
+        return (self.epoch, tuple(release), pre, post, dev, local)
+
+    def __str__(self) -> str:
+        text = (f"{self.epoch}!" if self.epoch else "") + ".".join(str(part) for part in self.release)
+        if self.pre is not None:
+            text += f"{self.pre[0]}{self.pre[1]}"
+        if self.post is not None:
+            text += f".post{self.post}"
+        if self.dev is not None:
+            text += f".dev{self.dev}"
+        if self.local is not None:
+            text += "+" + ".".join(str(part) for part in self.local)
+        return text
+
+
+def parse_version(text: str) -> Optional[_Version]:
+    """`text` as a PEP 440 version, or None for one that isn't."""
+    match = _VERSION.match(text or "")
+    if not match:
+        return None
+    pre = None
+    if match["pre_l"]:
+        letter = match["pre_l"].lower()
+        pre = (_PRE_LETTER.get(letter, letter), int(match["pre_n"] or 0))
+    post = None
+    if match["post_n1"] is not None:
+        post = int(match["post_n1"])
+    elif match["post_l"]:
+        post = int(match["post_n2"] or 0)
+    local = None
+    if match["local"]:
+        local = tuple(int(part) if part.isdigit() else part.lower() for part in re.split(r"[-_.]", match["local"]))
+    return _Version(
+        int(match["epoch"] or 0),
+        tuple(int(part) for part in match["release"].split(".")),
+        pre,
+        post,
+        int(match["dev_n"] or 0) if match["dev_l"] else None,
+        local,
+    )
+
+
+def _check_specifier(operator: str, version: str) -> bool:
+    """Whether `operator version` is a PEP 440 specifier: `===` takes any text; `==` and `!=` a version (a local one too) or
+    a release with `.*`; `~=` a version with at least two release parts and no local part; the others a version without a
+    local part or wildcard."""
+    if operator == "===":
+        return bool(version)
+    if operator in ("==", "!=") and _WILDCARD.match(version):
+        return True
+    parsed = parse_version(version)
+    if parsed is None:
+        return False
+    if operator in ("==", "!="):
+        return True
+    return parsed.local is None and (operator != "~=" or len(parsed.release) >= 2)
 
 
 def parse_pin(text: str) -> Tuple[str, Tuple[Tuple[str, str], ...], Optional[str]]:
     """(distribution name, ((operator, version), ...), commit) of a runtime entry: `"torch"`, `"tabpfn>=6,<10"` (PEP 440
-    specifiers, no markers or extras) or `"timestral@a534bdb..."` (a VCS commit or its prefix). ValueError on anything else."""
+    specifiers, no markers or extras) or `"timestral@a534bdb..."` (a VCS commit or its prefix). ValueError on anything else,
+    such as a specifier PEP 440 doesn't allow (`~=1`, `<=2.3+cu121`, `>=2.*`)."""
     match = _NAME.match(text or "")
     if not match:
         raise ValueError(f"Can't read the runtime pin {text!r}: expected a distribution name and optional specifiers")
@@ -207,75 +315,70 @@ def parse_pin(text: str) -> Tuple[str, Tuple[Tuple[str, str], ...], Optional[str
             raise ValueError(f"Can't read the runtime pin {text!r}: a commit pin is 7 to 40 hex digits after '@'")
         return name, (), commit
     specifiers = []
-    for part in [p for p in rest.split(",") if p.strip()]:
+    for part in rest.split(",") if rest else ():
         spec = _SPECIFIER.match(part)
-        if not spec or (spec.group(2).endswith(".*") and spec.group(1) not in ("==", "!=")):
-            raise ValueError(f"Can't read the runtime pin {text!r} (specifier {part.strip()!r})")
-        if _version_key(spec.group(2).removesuffix(".*")) is None:
-            raise ValueError(f"Can't read the runtime pin {text!r} (version {spec.group(2)!r})")
-        specifiers.append((spec.group(1), spec.group(2)))
+        if not spec or not _check_specifier(spec["op"], spec["version"]):
+            raise ValueError(f"Can't read the runtime pin {text!r}: {part.strip()!r} is no PEP 440 specifier")
+        specifiers.append((spec["op"], spec["version"]))
     return name, tuple(specifiers), None
 
 
-def _version_key(text: str) -> Optional[Tuple]:
-    """A sort key of a PEP 440 version (epoch, release without trailing zeros, pre, post, dev; the local part ignored), or
-    None for a version it can't read."""
-    match = _VERSION.match(text.strip())
-    if not match:
-        return None
-    # An optional part that matched has its number group set ("" without digits); one that didn't is None.
-    epoch, release, pre_letter, pre_number, post_dash, post_number, dev = match.groups()
-    numbers = [int(part) for part in release.split(".")]
-    while len(numbers) > 1 and numbers[-1] == 0:
-        numbers.pop()
-    post = None if post_dash is None and post_number is None else int(post_dash or post_number or 0)
-    if pre_letter is not None:
-        pre_key: Tuple = (1, _PRE_RANK[pre_letter.lower()], int(pre_number or 0))
-    elif post is None and dev is not None:
-        pre_key = (0,)  # 1.0.dev1 comes before 1.0a1
-    else:
-        pre_key = (2,)
-    post_key = (0,) if post is None else (1, post)
-    dev_key = (0, int(dev or 0)) if dev is not None else (1,)
-    return (int(epoch or 0), tuple(numbers), pre_key, post_key, dev_key)
+def _version_split(text: str) -> List[str]:
+    """PEP 440's components of a canonical version for prefix matching: the epoch, then each dot-separated part, a release
+    part with a pre-release split in two (`0rc1` -> `0`, `rc1`)."""
+    epoch, _, rest = text.rpartition("!")
+    out = [epoch or "0"]
+    for item in rest.split("."):
+        found = _SPLIT_PRE.match(item)
+        out.extend(found.groups() if found else [item])
+    return out
 
 
-def _release(text: str) -> List[int]:
-    match = _VERSION.match(text.strip())
-    return [int(part) for part in match.group(2).split(".")] if match else []
+def _prefix_matches(candidate: _Version, prefix: List[str]) -> bool:
+    """Whether the candidate's public version starts with `prefix` (components of `_version_split`), its release padded with
+    zeros to the prefix's length: `==1.0.*` holds for 1, 1.0.3 and 1.0rc1, not 1.1."""
+    mine = _version_split(str(candidate.public))
+    release = list(itertools.takewhile(str.isdigit, mine))
+    wanted = list(itertools.takewhile(str.isdigit, prefix))
+    padded = release + ["0"] * max(0, len(wanted) - len(release)) + mine[len(release) :]
+    return padded[: len(prefix)] == prefix
+
+
+def _matches(candidate: _Version, operator: str, text: str) -> bool:
+    """One PEP 440 specifier, with pre-releases allowed (an installed pre-release is what it is): `<V` excludes V's own
+    pre-releases unless V is one, `>V` V's post-releases unless V is one and V's local versions; `==V` compares the public
+    version unless V has a local part; `<=`, `>=` and `~=` compare the public version."""
+    if operator == "===":
+        return str(candidate).lower() == text.lower()
+    if text.endswith(".*"):
+        prefix = _version_split(str(parse_version(text[:-2])))
+        return _prefix_matches(candidate, prefix) == (operator == "==")
+    wanted = parse_version(text)
+    if operator in ("==", "!="):
+        mine = candidate if wanted.local is not None else candidate.public
+        return (mine.key == wanted.key) == (operator == "==")
+    if operator == "~=":
+        prefix = [str(wanted.epoch), *(str(part) for part in wanted.release[:-1])]
+        return candidate.public.key >= wanted.key and _prefix_matches(candidate, prefix)
+    if operator == "<=":
+        return candidate.public.key <= wanted.key
+    if operator == ">=":
+        return candidate.public.key >= wanted.key
+    same_base = candidate.base.key == wanted.base.key
+    if operator == "<":
+        return candidate.key < wanted.key and not (not wanted.is_prerelease and candidate.is_prerelease and same_base)
+    return (
+        candidate.key > wanted.key
+        and not (wanted.post is None and candidate.post is not None and same_base)
+        and not (candidate.local is not None and same_base)
+    )
 
 
 def version_matches(version: str, specifiers: Iterable[Tuple[str, str]]) -> bool:
-    """Whether `version` meets every (operator, version) of a pin: PEP 440's comparisons, `==X.*`/`!=X.*` prefixes and
-    `~=` (pre-releases are compared as versions, never excluded)."""
-    key = _version_key(version)
-    if key is None:
-        return False
-    for operator, wanted in specifiers:
-        if operator == "===":
-            ok = version.strip() == wanted
-        elif wanted.endswith(".*"):
-            prefix = _release(wanted[:-2])
-            mine = _release(version) + [0] * len(prefix)
-            ok = mine[: len(prefix)] == prefix
-            ok = ok if operator == "==" else not ok
-        else:
-            other = _version_key(wanted)
-            if operator == "~=":
-                prefix = _release(wanted)[:-1]
-                ok = key >= other and (_release(version) + [0] * len(prefix))[: len(prefix)] == prefix
-            else:
-                ok = {
-                    "==": key == other,
-                    "!=": key != other,
-                    "<=": key <= other,
-                    ">=": key >= other,
-                    "<": key < other,
-                    ">": key > other,
-                }[operator]
-        if not ok:
-            return False
-    return True
+    """Whether the installed `version` meets every (operator, version) of a pin (`parse_pin`), by PEP 440 with pre-releases
+    allowed. False for a version PEP 440 can't read."""
+    candidate = parse_version(version)
+    return candidate is not None and all(_matches(candidate, operator, text) for operator, text in specifiers)
 
 
 def installed_distribution(name: str, seen: Optional[Dict] = None) -> Optional[Tuple[str, Optional[str]]]:

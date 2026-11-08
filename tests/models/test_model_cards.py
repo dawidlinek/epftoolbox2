@@ -203,20 +203,87 @@ def test_the_contamination_verdict_follows_the_window_s_first_issue_day():
     [
         ("9.1.0", "tabpfn>=6,<10", True),
         ("10.0", "tabpfn>=6,<10", False),
+        ("10.0.0rc1", "tabpfn>=6,<10", False),  # <10 excludes 10's own pre-releases
+        ("10.0.0.dev0", "tabpfn>=6,<10", False),
+        ("10.0.0rc1", "tabpfn<10.0.0rc2", True),  # unless the bound is one
         ("0.5.0", "tfc-t0==0.5.0", True),
+        ("0.5", "tfc-t0==0.5.0", True),
         ("0.6.0", "tfc-t0==0.5.0", False),
         ("2.9.0+cpu", "torch==2.9.*", True),
+        ("2.9.0+cpu", "torch==2.9.0", True),  # == compares the public version
+        ("2.3.0+cpu", "torch==2.3.0+cu121", False),  # unless the spec has a local part
+        ("2.3.0+cu121", "torch==2.3.0+cu121", True),
+        ("2.3.0+cpu", "torch!=2.3.0+cu121", True),
+        ("2.3.0", "torch!=2.3.0+cu121", True),
         ("2.10.1", "torch~=2.9", True),
         ("3.0", "torch~=2.9", False),
         ("2.9.0rc1", "torch>=2.9", False),
-        ("2.9.0.post1", "torch>2.9", True),
+        ("2.9.0.post1", "torch>2.9", False),  # >2.9 excludes 2.9's post-releases
+        ("2.9.0+cpu", "torch>2.9", False),  # and its local versions
+        ("2.9.1", "torch>2.9", True),
+        ("2.2.post3", "x>2.2.post1", True),
         ("1.0.dev1", "x<1.0a1", True),
+        ("1.0rc1", "x==1.0.*", True),
+        ("1.1", "x==1.0.*", False),
+        ("1!0.5", "x>=1!0", True),
+        ("0.5", "x>=1!0", False),
         ("2.3.2", "chronos-forecasting>=2.3.2,<3", True),
         ("1.6.3", "autogluon.tabular!=1.6.3", False),
+        ("1.6.3", "pkg===1.6.3", True),
+        ("not-a-version", "pkg>=1", False),
     ],
 )
 def test_runtime_pins_follow_pep_440(version, pin, expected):
     assert version_matches(version, parse_pin(pin)[1]) is expected
+
+
+VERSIONS = [
+    "1.0.dev1", "1.0a1.dev1", "1.0a1", "1.0a2", "1.0b1", "1.0rc1", "1.0", "1.0+local", "1.0.post1.dev1", "1.0.post1",
+    "1.0-1", "1.0.1", "1.1", "1.1rc1", "2.0", "2.3.0+cu121", "2.3.0+cpu", "2.3.0", "1!0.5", "0.5", "1.0.0", "1.4.5",
+    "1.4.6", "1.5", "2.2", "2.2.post3", "2.3", "3.0a1", "10.0", "9.2.0", "6.0", "6.0rc1", "1.0a1.post1", "10.0.0rc1",
+    "10.0.0.dev0", "2.2.post1", "1.0+abc.5", "1.0+5", "1.0+abc", "2.3.0+cu121.2", "1.0alpha2", "1.0-dev3", "v1.2",
+]  # fmt: skip
+SPECIFIERS = [
+    "==1.0", "!=1.0", ">=1.0", ">1.0", "<1.0", "<=1.0", "~=1.0", "~=1.4.5", "~=2.2", "~=2.2.post3", "==1.*", "==1.0.*",
+    "!=1.0.*", ">=6,<10", "==2.3.0+cu121", "!=2.3.0+cu121", ">1.0.post1", "<1.0rc1", ">=1.0.dev1", "==1!0.5", "<2.0",
+    ">=1!0", ">1.0a1", "==1.0a1", "<1.1", "~=1.0a1", "==1.1.*", "==1.0+local", ">2.2", "<10", "===1.0", "~=1.4.5a4",
+    "==1.0+abc.5", "!=1.0+5",
+]  # fmt: skip
+INVALID = [
+    "~=1",
+    "<=2.3+cu121",
+    ">=1.0+local",
+    ">=2.*",
+    "~=2.2.*",
+    "==1.0.dev1.*",
+    "==1.0+local.*",
+    "<1.0+5",
+    "==",
+    ">=x",
+]
+
+
+def test_the_pins_agree_with_packaging_on_a_grid():
+    """Every specifier of the grid on every version, the order of the versions, and the specifiers refused, as `packaging`
+    (installed with pytest, not with the core) has them, with pre-releases allowed."""
+    specifiers = pytest.importorskip("packaging.specifiers")
+    version = pytest.importorskip("packaging.version")
+    wrong = []
+    for spec in SPECIFIERS:
+        reference = specifiers.SpecifierSet(spec, prereleases=True)
+        parsed = parse_pin("pkg" + spec)[1]
+        for candidate in VERSIONS:
+            if version_matches(candidate, parsed) != reference.contains(version.Version(candidate), prereleases=True):
+                wrong.append((spec, candidate))
+    assert wrong == []
+    ordered = sorted(VERSIONS, key=version.Version)
+    assert sorted(VERSIONS, key=lambda v: _cards.parse_version(v).key) == ordered
+    assert [str(_cards.parse_version(v)) for v in VERSIONS] == [str(version.Version(v)) for v in VERSIONS]
+    for spec in INVALID:
+        with pytest.raises(specifiers.InvalidSpecifier):
+            specifiers.SpecifierSet(spec)
+        with pytest.raises(ValueError, match="no PEP 440 specifier"):
+            parse_pin("pkg" + spec)
 
 
 def test_a_commit_pin_and_bad_pins():
@@ -226,9 +293,18 @@ def test_a_commit_pin_and_bad_pins():
         "a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff",
     )
     assert parse_pin("torch") == ("torch", (), None)
-    for bad in ("torch>=", "torch@xyz", "torch>=2.*", "torch; python_version<'3.14'"):
+    assert parse_pin("tabpfn >= 6, < 10")[1] == ((">=", "6"), ("<", "10"))
+    for bad in (
+        "torch>=",
+        "torch@xyz",
+        "torch>=2.*",
+        "torch; python_version<'3.14'",
+        "torch[cpu]>=2",
+        "torch>=2,",
+        *INVALID,
+    ):
         with pytest.raises(ValueError):
-            parse_pin(bad)
+            parse_pin(bad if bad.startswith("torch") else "torch" + bad)
 
 
 # --- the pre-flight -------------------------------------------------------------------------------------------------------
