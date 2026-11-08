@@ -1,14 +1,16 @@
 from dataclasses import replace
-from typing import Callable, List, Optional, Sequence, Tuple, Union, Dict, Any
+from typing import Callable, List, Mapping, Optional, Sequence, Tuple, Union, Dict, Any
 from pathlib import Path
 import copy
 import importlib
+import json
+import re
 import warnings
 import pandas as pd
 import yaml
 
 from .._date_utils import resolve_date
-from ..information_set import InformationSet, InformationSetError, check_level
+from ..information_set import DATA_ZONE, InformationSet, InformationSetError, check_level
 from ..models._calendar import (
     DAILY,
     IssueCalendar,
@@ -30,6 +32,15 @@ from ..models._engine import (
 )
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model
+from ..models.pooled import PooledModel, check_pooled_model
+from ..models._pooled import (
+    check_horizon_lists,
+    member_of,
+    needed_columns,
+    run_pooled,
+    shared_fit_checks,
+    with_missing_columns,
+)
 from ..ensembles._compute import compute
 from ..ensembles.base import Ensemble
 from ..evaluators.base import Evaluator
@@ -52,6 +63,7 @@ from ..results.manifest import (
     rows_unverified,
 )
 from ..results.matching import rows_of_refs, warn_about_thin
+from ..results.panel import PanelReport
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
 from ..results.store import (
@@ -70,6 +82,9 @@ from ._yaml import dump_yaml, to_yaml_value
 
 logger = get_logger(__name__)
 
+# A zone of `run(data={zone: frame})` names a folder of `save_dir`.
+_ZONE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
 
 COMPONENT_REGISTRY = {
     "models": {
@@ -78,6 +93,7 @@ COMPONENT_REGISTRY = {
         "RidgeModel": "epftoolbox2.models.ridge",
         "LEARModel": "epftoolbox2.models.lear",
         "NaiveModel": "epftoolbox2.models.naive",
+        "PooledModel": "epftoolbox2.models.pooled",
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",
@@ -182,7 +198,8 @@ class ModelPipeline:
                 "issue_time or information_set too, or leave availability out."
             )
 
-    def add_model(self, model: BaseModel) -> "ModelPipeline":
+    def add_model(self, model: Union[BaseModel, PooledModel]) -> "ModelPipeline":
+        """Add a model, or a `PooledModel` (one fit over the zones of `run(data={zone: frame})`)."""
         self.models.append(model)
         return self
 
@@ -208,7 +225,7 @@ class ModelPipeline:
 
     def run(
         self,
-        data: pd.DataFrame,
+        data: Union[pd.DataFrame, Mapping[str, pd.DataFrame]],
         test_start: str = None,
         test_end: str = None,
         target: str = "price",
@@ -269,9 +286,37 @@ class ModelPipeline:
         Ensembles are computed after every model has run, from what the models stored. An ensemble that chooses (`top`) needs a
         validation window in this run, and a problem with one that shows before any fit raises before any fit. See the docs
         page on ensembles.
+
+        `data` can be a dict of frames, `{"PL": df_pl, "CZ": df_cz, ...}`: a run over several zones. Every model then runs once
+        per zone on that zone's frame, in its own data zone, into `save_dir/<zone>/` (one store and manifest per zone and
+        model), and is exactly that model run on the zone's frame alone. A `PooledModel` is fitted once per unit over every zone
+        and writes each zone's forecasts into that zone's store. Ensembles are computed per zone. The run returns a
+        `PanelReport`, one `EvaluationReport` per zone. With `issue_timezone="data"` each zone issues at the issue time on its
+        own clock. Exporters export one report, so a run over zones refuses them: export `report.zones[zone]`. See the docs page
+        Several Zones.
         """
+        if isinstance(data, Mapping):
+            return self._run_zones(
+                data,
+                test_start=test_start,
+                test_end=test_end,
+                target=target,
+                horizon=horizon,
+                freq=freq,
+                save_dir=save_dir,
+                forecast_only=forecast_only,
+                allow_manifest_mismatch=allow_manifest_mismatch,
+                require_manifest=require_manifest,
+                validation=validation,
+                test=test,
+                horizons=horizons,
+                issue_days=issue_days,
+                save_format=save_format,
+                save_coefficients=save_coefficients,
+            )
         if not self.models:
             raise ValueError("At least one model is required")
+        self._refuse_pooled("run")
         horizon, horizons = resolve_horizons(horizon, horizons, 7)
         weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
@@ -299,7 +344,7 @@ class ModelPipeline:
         # Check every model's inputs before running any, so a bad predictor in the last model fails in seconds. A
         # predictor function is planned here, once, and the run uses that plan; each run uses its check, too. The frame
         # contract is checked once for the models that read the same days (`_RunChecks`, of this call alone).
-        info = self.information_set
+        info = self._information_set_for(data)
         shared = _RunChecks(data)
         plans: Dict[str, PredictorPlan] = {}
         checks: Dict[str, Any] = {}
@@ -357,7 +402,7 @@ class ModelPipeline:
                 freq=freq,
                 save_to=save_to,
                 forecast_only=forecast_only,
-                information_set=self.information_set,
+                information_set=info,
                 allow_manifest_mismatch=allow_manifest_mismatch,
                 require_manifest=require_manifest,
                 availability=level,
@@ -406,6 +451,260 @@ class ModelPipeline:
                 exporter.export(report)
 
         return report
+
+    def _information_set_for(self, data: pd.DataFrame) -> Optional[InformationSet]:
+        """The pipeline's information set for a frame: with `issue_timezone="data"` issued in the frame's zone
+        (`InformationSet.in_data_zone`), else itself."""
+        return None if self.information_set is None else self.information_set.in_data_zone(data.index)
+
+    def _refuse_pooled(self, action: str) -> None:
+        """A `PooledModel` is fitted over the zones of `run(data={zone: frame})`: on one frame it raises before anything runs."""
+        pooled = [model.name for model in self.models if isinstance(model, PooledModel)]
+        if pooled:
+            raise ValueError(
+                f"{action}() of one frame: {pooled} pool zones, and fit over the frames of run(data={{zone: frame, ...}}). Run "
+                "the zones as a dict (one zone is the model itself), or add the inner model in place of the PooledModel."
+            )
+
+    @staticmethod
+    def _check_zones(frames: Mapping[str, Any]) -> List[str]:
+        """The zones of a run over several, in their order: names that make a folder of `save_dir` (letters, digits, `_` and `-`,
+        unique whatever their case), each a DataFrame."""
+        zones = list(frames)
+        if not zones:
+            raise ValueError("run(data={...}) needs at least one zone's frame")
+        bad = [zone for zone in zones if not isinstance(zone, str) or not _ZONE_NAME.fullmatch(zone)]
+        if bad:
+            raise ValueError(
+                f"Zone names name the folders of save_dir, so they are letters, digits, '_' and '-', starting with a letter or "
+                f"digit: {bad} aren't."
+            )
+        folded = [zone.lower() for zone in zones]
+        if len(set(folded)) != len(folded):
+            raise ValueError(f"Zone names must be unique whatever their case (they name folders): {zones}")
+        frames_not = [zone for zone in zones if not isinstance(frames[zone], pd.DataFrame)]
+        if frames_not:
+            raise TypeError(f"run(data={{zone: frame}}) takes a DataFrame per zone; {frames_not} aren't")
+        return zones
+
+    def _run_zones(
+        self,
+        frames: Mapping[str, pd.DataFrame],
+        test_start: Optional[str],
+        test_end: Optional[str],
+        target: str,
+        horizon: Optional[int],
+        freq: str,
+        save_dir: Optional[str],
+        forecast_only: bool,
+        allow_manifest_mismatch: bool,
+        require_manifest: bool,
+        validation: Union[Tuple[Any, Any], str, None],
+        test: Optional[Tuple[Any, Any]],
+        horizons: Optional[Sequence[int]],
+        issue_days: Optional[Sequence[str]],
+        save_format: str,
+        save_coefficients: bool,
+    ) -> PanelReport:
+        """`run` over several zones (see `run`): each zone's frame checked and run as `run` checks and runs one frame, every
+        model's and zone's check before any fit, then each plain model per zone, each `PooledModel` over all of them
+        (`models._pooled.run_pooled`), the ensembles per zone, and one report per zone."""
+        if not self.models:
+            raise ValueError("At least one model is required")
+        zones = self._check_zones(frames)
+        horizon, horizons = resolve_horizons(horizon, horizons, 7)
+        weekdays = resolve_issue_days(issue_days)
+        self._check_model_names()
+        self._check_availability()
+        self._check_evaluators_for(freq)
+        if self.exporters and not forecast_only:
+            raise ValueError(
+                f"A run over zones returns one report per zone, and an exporter exports one report: remove the exporters "
+                f"{[type(e).__name__ for e in self.exporters]} and export each `report.zones[zone]` yourself."
+            )
+        if not forecast_only:
+            self._check_benchmarks()
+            for zone in zones:
+                self._check_source_columns(frames[zone])
+        windows, test_start, test_end = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
+        pooled = [model for model in self.models if isinstance(model, PooledModel)]
+        plain = [model for model in self.models if not isinstance(model, PooledModel)]
+        if pooled and windows is not None:
+            raise ValueError(
+                f"{[model.name for model in pooled]}: a PooledModel runs a test window alone in this step; run validation and "
+                "test as two runs into two save_dirs."
+            )
+        dirs = {zone: None if not save_dir else Path(save_dir) / zone for zone in zones}
+        for zone in zones:
+            self._check_ensembles(dirs[zone])
+        self._refuse_top_without_validation(self.ensembles, windows)
+        check_save_format(save_format)
+        if save_dir:
+            beside = [model.name for model in self.models if self.results_path(save_dir, model).exists()]
+            if beside:
+                raise ValueError(
+                    f"{save_dir} holds the results of {beside} run on one frame; a run over zones writes into a folder per "
+                    "zone, and a report couldn't tell which to read. Use another save_dir."
+                )
+            for zone in zones:
+                self._check_save_format(dirs[zone], save_format)
+        if windows is not None:
+            check_start, check_end = windows.first_day, windows.last_day
+        elif forecast_only:
+            check_start, check_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
+        else:
+            check_start, check_end = test_start, test_end
+        for name, (start, end) in windows.periods if windows is not None else [("test", (check_start, check_end))]:
+            check_issue_days_in(start, end, weekdays, name)
+        days_argument = {} if weekdays is None else {"issue_days": issue_day_names(weekdays)}
+        level = self.availability
+        infos = {zone: self._information_set_for(frames[zone]) for zone in zones}
+
+        # Every model's and zone's inputs, before any fit (as `run` checks one frame's).
+        common = dict(availability=level, windows=windows, horizons=horizons, weekdays=weekdays)
+        plans: Dict[Tuple[str, str], PredictorPlan] = {}
+        checks: Dict[Tuple[str, str], Any] = {}
+        for zone in zones:
+            frame, info = frames[zone], infos[zone]
+            shared = _RunChecks(frame)
+            for model in plain:
+                plan = model._plan_predictors(
+                    frame, target, horizon, freq, info, check_start, check_end, shared=shared, **common
+                )
+                checks[(zone, model.name)] = model._checked_inputs(
+                    frame, target, horizon, freq, info, check_start, check_end, plan=plan, shared=shared, **common
+                )
+                if plan is not None:
+                    plans[(zone, model.name)] = plan
+        members: Dict[str, Dict[str, BaseModel]] = {}
+        member_frames: Dict[str, Dict[str, pd.DataFrame]] = {}
+        for model in pooled:
+            check_pooled_model(model.model)
+            members[model.name], member_frames[model.name] = {}, {}
+            by_zone = {}
+            for zone in zones:
+                member = member_of(model, model.identity(zones))
+                check_horizon_lists(model, member, freq, horizons)
+                frame = with_missing_columns(model, zone, frames[zone], needed_columns(member, freq, horizons))
+                shared = _RunChecks(frame)
+                member._plan_predictors(
+                    frame, target, horizon, freq, infos[zone], check_start, check_end, shared=shared, **common
+                )
+                by_zone[zone] = member._checked_inputs(
+                    frame, target, horizon, freq, infos[zone], check_start, check_end, shared=shared, **common
+                )
+                members[model.name][zone], member_frames[model.name][zone] = member, frame
+            by_zone = shared_fit_checks(
+                model,
+                members[model.name],
+                member_frames[model.name],
+                by_zone,
+                infos,
+                target,
+                freq,
+                check_start,
+                check_end,
+                weekdays,
+                level,
+            )
+            checks.update({(zone, model.name): check for zone, check in by_zone.items()})
+        # Once for every model and zone, before the hours a run can take.
+        warn_about({f"{name} ({zone})": check.listing for (zone, name), check in checks.items()}, stacklevel=4)
+
+        # Of this call alone, one per frame: a frame changed before the next call must be hashed again.
+        hashes: Dict[int, FrameHashes] = {}
+
+        def hashes_of(frame: pd.DataFrame) -> Optional[FrameHashes]:
+            if not save_dir:
+                return None
+            if id(frame) not in hashes:
+                hashes[id(frame)] = FrameHashes(frame)
+                hashes[id(frame)].provenance()  # read before any model, as `run` reads it
+            return hashes[id(frame)]
+
+        if save_dir:
+            for model in pooled:
+                # Each zone's manifest records the other zones' data: another zone's frame moves this zone's forecasts.
+                data_of = {
+                    zone: hashes_of(member_frames[model.name][zone]).of_columns(
+                        check_end, [target, *checks[(zone, model.name)].used_predictors]
+                    )
+                    for zone in zones
+                }
+                for zone, member in members[model.name].items():
+                    member._pooled = {
+                        **model.identity(zones),
+                        "data": {other: data_of[other] for other in zones if other != zone},
+                    }
+
+        def arguments(zone: str, model: BaseModel, frame: pd.DataFrame) -> Dict[str, Any]:
+            """What the model's (or a pooled model's member's) run in `zone` is called with."""
+            key = (zone, model.name)
+            save_to = str(self.results_path(dirs[zone], model, save_format)) if save_dir else None
+            return dict(
+                data=frame,
+                test_start=test_start,
+                test_end=test_end,
+                target=target,
+                freq=freq,
+                save_to=save_to,
+                forecast_only=forecast_only,
+                information_set=infos[zone],
+                allow_manifest_mismatch=allow_manifest_mismatch,
+                require_manifest=require_manifest,
+                availability=level,
+                warn_listing=False,
+                windows=windows,
+                frame_hashes=hashes_of(frame),
+                **horizon_arguments(horizon, horizons),
+                **days_argument,
+                **({"plan": plans[key]} if key in plans else {}),
+                checked=checks.pop(key),  # held no longer than the model's run
+                **({} if save_coefficients else {"save_coefficients": False}),
+            )
+
+        refs: Dict[str, Dict[str, ModelResultRef]] = {zone: {} for zone in zones}
+        for zone in zones:
+            frame = frames[zone]
+            if self.engine == ENGINE_ON:
+                capable = [m for m in plain if m._engine_capable(plans.get((zone, m.name)), forecast_only)]
+                for group in engine_groups(capable):
+                    columns = {model.name: checks[(zone, model.name)].used_predictors for model in group}
+                    group_arguments = {model.name: run_arguments(**arguments(zone, model, frame)) for model in group}
+                    refs[zone].update(run_group(group, group_arguments, columns))
+            for model in plain:
+                if model.name not in refs[zone]:
+                    refs[zone][model.name] = model.run(**arguments(zone, model, frame))
+        for model in pooled:
+            ran = run_pooled(
+                model,
+                {
+                    zone: (member, arguments(zone, member, member_frames[model.name][zone]))
+                    for zone, member in members[model.name].items()
+                },
+            )
+            for zone in zones:
+                refs[zone][model.name] = ran[zone]
+
+        reports: Dict[str, EvaluationReport] = {}
+        evaluators = [] if forecast_only else self.evaluators
+        for zone in zones:
+            zone_refs = {model.name: refs[zone][model.name] for model in self.models}
+            choices: Dict[str, List[Dict]] = {}
+            if self.ensembles:
+                paths = {model.name: self.results_path(dirs[zone], model) for model in self.models} if save_dir else {}
+                on_file = self._stored_windows(paths)
+                first = hashes_of(frames[zone])
+                computed, choices = self._compute_ensembles(
+                    self._ordered_ensembles(),
+                    zone_refs,
+                    on_file or windows,
+                    dirs[zone],
+                    provenance=None if first is None else first.provenance,
+                )
+                zone_refs.update(computed)
+            reports[zone] = EvaluationReport(zone_refs, evaluators, source_data=frames[zone], choices=choices)
+        return PanelReport(reports, target=target)
 
     @staticmethod
     def _resolve_windows(validation, test, test_start, test_end, forecast_only: bool, required: bool = True):
@@ -573,9 +872,32 @@ class ModelPipeline:
         record. Without any window the report is on every window they record. Results whose manifests record different
         windows raise `ValueError`, as they would be compared on different forecasts. The report is what `run` returns: on
         the test window, with `report.validation`, or the validation report if there is no test window.
+
+        A `save_dir` of a run over zones (`run(data={zone: frame})`) holds a folder per zone: the report is then a
+        `PanelReport`, each zone's folder reported as above (`data` a dict of the zones' frames, if a zone's evaluators need
+        it), the zones in the order of their names. Exporters export one report, so they raise there.
         """
         if not self.models:
             raise ValueError("At least one model is required")
+        zones = self._zone_folders(save_dir)
+        if zones:
+            return self._report_zones(
+                save_dir,
+                zones,
+                test_start=test_start,
+                test_end=test_end,
+                horizon=horizon,
+                freq=freq,
+                forecast_only=forecast_only,
+                data=data,
+                allow_missing=allow_missing,
+                validation=validation,
+                test=test,
+                horizons=horizons,
+                issue_days=issue_days,
+            )
+        if isinstance(data, Mapping):
+            raise ValueError(f"report(data={{zone: frame}}) is for a save_dir of zone folders, and {save_dir} has none")
         told_weekdays = resolve_issue_days(issue_days)
         self._check_model_names()
         if not forecast_only:
@@ -722,6 +1044,65 @@ class ModelPipeline:
             for exporter in self.exporters:
                 exporter.export(report)
         return report
+
+    def _zone_folders(self, save_dir: Union[str, Path]) -> List[str]:
+        """The zones of a run over several whose results are in `save_dir`: its sub-folders that hold results of one of the
+        pipeline's models, by name. None (an empty list) when `save_dir` holds a run of one frame; both raise."""
+        root = Path(save_dir)
+        if not root.is_dir():
+            return []
+        named = [*self.models, *self.ensembles]
+        zones = sorted(
+            folder.name
+            for folder in root.iterdir()
+            if folder.is_dir()
+            and _ZONE_NAME.fullmatch(folder.name)
+            and any(
+                self.results_path(folder, model, fmt).exists()
+                or manifest_path(self.results_path(folder, model, fmt)).exists()
+                for model in named
+                for fmt in SAVE_FORMATS
+            )
+        )
+        here = [
+            model.name for model in named if any(self.results_path(root, model, fmt).exists() for fmt in SAVE_FORMATS)
+        ]
+        if zones and here:
+            raise ValueError(
+                f"{root} holds both the results of one frame ({here}) and the folders of a run over zones ({zones}): a report "
+                "can't tell which to read. Move one of them to its own save_dir."
+            )
+        return zones
+
+    def _report_zones(self, save_dir: Union[str, Path], zones: List[str], data: Any = None, **told: Any) -> PanelReport:
+        """`report` of a save_dir of zone folders: one report per zone (`data[zone]`, if given), in a `PanelReport`."""
+        if self.exporters and not told.get("forecast_only"):
+            raise ValueError(
+                "A report of a run over zones is one report per zone, and an exporter exports one: remove the exporters and "
+                "export each `report.zones[zone]` yourself."
+            )
+        if data is not None and not isinstance(data, Mapping):
+            raise ValueError(
+                f"{save_dir} holds a run over the zones {zones}: pass data as a dict of their frames, {{zone: frame}}"
+            )
+        reports = {}
+        target = None
+        for zone in zones:
+            folder = Path(save_dir) / zone
+            reports[zone] = self.report(folder, data=None if data is None else data.get(zone), **told)
+            target = target or self._stored_target(folder)
+        return PanelReport(reports, target=target)
+
+    def _stored_target(self, folder: Path) -> Optional[str]:
+        """The target a model's manifest in `folder` records, or None if none does."""
+        for model in self.models:
+            path = manifest_path(self.results_path(folder, model))
+            if path.exists():
+                try:
+                    return json.loads(path.read_text()).get("target")
+                except (OSError, ValueError):
+                    continue
+        return None
 
     def _ordered_ensembles(self) -> List[Ensemble]:
         """The ensembles, each after the ensembles it is made of; `ValueError` for an unknown member or a cycle."""
@@ -957,16 +1338,27 @@ class ModelPipeline:
         if not self.models:
             raise ValueError("At least one model is required")
         self._check_model_names()
+        chosen = self._select_models(models)
+        pooled = [model.name for model in chosen if isinstance(model, PooledModel)]
+        if pooled:
+            raise ValueError(
+                f"verify() of {pooled}: a PooledModel is fitted over zones, and verify probes one frame. Verify its inner model "
+                "on each zone's frame (the fit's inputs), and see the docs page Several Zones."
+            )
+        # With `rebuild` the frame the models read is the rebuilt one, whose zone is the market's (a source can be in UTC).
+        info = self.information_set
+        if info.issue_timezone == DATA_ZONE:
+            info = info.in_data_zone((data if rebuild is None else rebuild(data.copy())).index)
         check_issue_days_in(resolve_date(test_start), resolve_date(test_end), weekdays)
         run_days = sample_issue_days(data.index, test_start, test_end, days, seed, issue_days=weekdays)
         report = VerifyReport(issue_days=run_days)
-        for model in self._select_models(models):
+        for model in chosen:
             report.checks.extend(
                 verify_model(
                     model,
                     data,
                     run_days,
-                    self.information_set,
+                    info,
                     target=target,
                     freq=freq,
                     seed=seed,
@@ -1026,11 +1418,14 @@ class ModelPipeline:
         horizon, horizons = resolve_horizons(horizon, horizons, 1)
         if hour is None:
             hour = 0 if freq == DAILY else 12
-        chosen = copy.deepcopy(self._select_models([model])[0])  # planning leaves state on a model; this is only a look
+        chosen = self._select_models([model])[0]
+        if isinstance(chosen, PooledModel):
+            chosen = chosen.model  # its predictors and rules in one zone's frame: what each zone's member reads
+        chosen = copy.deepcopy(chosen)  # planning leaves state on a model; this is only a look
         if test is not None:
             test = (resolve_date(test[0]), resolve_date(test[1]))
         return explain_model(
-            chosen, data, self.information_set, test, horizon, hour, target, freq, echo, horizons=horizons
+            chosen, data, self._information_set_for(data), test, horizon, hour, target, freq, echo, horizons=horizons
         )
 
     def _select_models(self, names: Optional[Sequence[str]]) -> List[BaseModel]:
@@ -1137,6 +1532,18 @@ class ModelPipeline:
 
     def _serialize_component(self, component: Any) -> Dict[str, Any]:
         class_name = type(component).__name__
+        if isinstance(component, PooledModel):
+            # The pooled model is written inside, as any model is; `over` as a list, every setting written.
+            return {
+                "class": class_name,
+                "params": {
+                    "model": self._serialize_component(component.model),
+                    "over": list(component.over),
+                    "zone_feature": component.zone_feature,
+                    "missing": component.missing,
+                    "name": component.name,
+                },
+            }
         self._check_predictors_can_be_saved(component)
         label = f"{class_name}({component.name!r})" if isinstance(component, BaseModel) else class_name
         params = {
@@ -1186,6 +1593,8 @@ class ModelPipeline:
             params["strategy"] = cls._load_component("strategies", params["strategy"])
         if component_type == "models" and isinstance(params.get("predictors"), dict):
             params["predictors"] = cls._load_predictor_function(class_name, params["predictors"])
+        if component_type == "models" and class_name == "PooledModel" and isinstance(params.get("model"), dict):
+            params["model"] = cls._load_component("models", params["model"])
         module = importlib.import_module(COMPONENT_REGISTRY[component_type][class_name])
         return getattr(module, class_name)(**params)
 

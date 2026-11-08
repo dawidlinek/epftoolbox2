@@ -9,7 +9,8 @@ from epftoolbox2.data.sources import CalendarSource, CsvSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.ensembles import AverageEnsemble
-from epftoolbox2.models import OLSModel, LassoCVModel, LEARModel, NaiveModel, RidgeModel
+from epftoolbox2.models import OLSModel, LassoCVModel, LEARModel, NaiveModel, PooledModel, RidgeModel
+from epftoolbox2.models.base import BaseModel
 from epftoolbox2.evaluators import (
     BatteryArbitrage,
     BiasEvaluator,
@@ -749,6 +750,13 @@ class TestModelPipelineParameterFidelity:
                     newest_target="published",
                     refit="7D",
                 ),
+                PooledModel(
+                    RidgeModel(["price_d-1"], training_window=70, alphas=[1.0, 8.0], name="inner", refit="7D"),
+                    over=("zone", "horizon"),
+                    zone_feature="code",
+                    missing="zero",
+                    name="P",
+                ),
             ],
             "ensembles": [AverageEnsemble(["O", "L"], top=1, by="validation", name="best")],
             "evaluators": [
@@ -793,7 +801,10 @@ class TestModelPipelineParameterFidelity:
         loaded = ModelPipeline.load(path)
 
         def public(obj):
-            return {k: str(v) for k, v in vars(obj).items() if not k.startswith("_")}
+            # A model inside another (`PooledModel.model`) by its own parameters.
+            return {
+                k: public(v) if isinstance(v, BaseModel) else str(v) for k, v in vars(obj).items() if not k.startswith("_")
+            }
 
         for kind, objs in originals.items():
             reloaded = getattr(loaded, kind)
