@@ -139,27 +139,43 @@ for window in range(28, 365, 7):
     pipeline.add_model(OLSModel(["price_d-1", "load_d+{horizon}"], training_window=window, name=f"ols_{window}"))
 ```
 
-- **Fits from shared statistics.** `OLSModel`, `RidgeModel` and `LEARModel` with `scaler="standard"` (and LEAR's exact
-  `solver="lars"`, the default) are fitted from exact sums of their training rows, one set per period, horizon and training span, shared by every model of the group that trains on those
-  rows. The sums are integers in disguise, so no other model, order, chunking, process, thread or BLAS thread count can move a bit:
-  a model's forecasts are the same alone and in any group. Against `engine="off"` they agree within 1e-8 EUR/MWh for OLS (the
-  normal equations against scikit-learn's SVD) and 1e-9 for Ridge and LEAR, with the same penalty and the same kink, not to the bit;
-  every other field of a record, and every count of forecasts and skips, is the same. A fit the statistics can't give to those
-  digits is fitted as with `"off"`, to the bit: one of no column, fewer than three training rows, an OLS whose design is too
+- **Fits from shared statistics.** `OLSModel`, `RidgeModel`, `LassoCVModel` and `LEARModel` (with its exact `solver="lars"`, the
+  default) are fitted from exact sums of their training rows, shared by every model of the group that trains on those rows. With
+  `scaler="standard"` the sums are of the raw rows, one set per period, horizon and training span, and the scaler's map is applied
+  to them. With a variance-stabilising scaler (`"asinh"`, LEAR's default, `"npit"`, `"mlog"`, `"poly"`) the scaler is fitted on
+  the rows themselves, so the engine runs the scaler's own transform once for every set of models with the same rows (training
+  rows whose inputs are all present) and scaler, on all the columns they read, and sums the transformed columns: each
+  transformed column is the one the model would have on its own, to the bit, and models whose rows differ (a column with gaps)
+  get transforms of their own. LassoCV and LEAR's `criterion="cv"` score their penalties on the five (or `cv`) blocks of those
+  rows, cut and summed the same way. The sums are integers in disguise, so no other model, order, chunking, process, thread or
+  BLAS thread count can move a bit: a model's forecasts are the same alone and in any group. Against `engine="off"` they agree
+  within 1e-8 EUR/MWh for OLS (the normal equations against scikit-learn's SVD) and LassoCV (scikit-learn's own coordinate
+  descent on the Gram) and 1e-9 for Ridge and LEAR, with the same penalty and the same kink, not to the bit; every other field of
+  a record, and every count of forecasts and skips, is the same. A fit the statistics can't give to those digits is fitted as
+  with `"off"`, to the bit: one of no column, fewer than three training rows (or than CV folds), an OLS whose design is too
   ill-conditioned for the normal equations or not of full rank, a LEAR whose chosen columns are nearly collinear (the condition
-  number of their Gram above 1e6), Ridge at the smallest penalties of its grid, a column whose sums cancel or overflow. So is the
-  forecast of an issue row far outside its training values, since an extrapolation multiplies the last bits in which the two
-  paths' coefficients differ: more than 30 training standard deviations out for OLS and 10 for LEAR, measured along the
-  eigenvectors of the fit's own Gram (so a row out along the difference of two near-collinear inputs counts, however close each
-  is to its training values), or for Ridge where scikit-learn's own rounding at that row exceeds the budget it has at the
-  training rows. Within these bounds the largest gaps measured were 2.2e-9 (OLS), 6.1e-10 (Ridge) and 3.5e-10 (LEAR) EUR/MWh;
-  past them gaps grow with the distance, to 1e-7 at 20,000. A refit's other forecasts of the same fit still come from the sums,
-  so a refit block with a row far out writes two coefficient vectors, the model path's for that row and the engine's for the
-  others, a few last bits apart, where engine off writes one. `LassoCVModel`, LEAR's `solver="cd"` (a coordinate descent that
-  stops at a tolerance, so it follows its Gram's last bits) and the models with a variance-stabilising scaler (LEAR's default
-  `asinh`) are fitted as with `"off"` in this release, to the bit. Ridge still reads its scaled rows for the
-  leave-one-out leverages, so it saves the scaler and the SVD of its rows, not the work on them; LEAR's path dominates its fit,
-  so it gains less than OLS.
+  number of their Gram above 1e6), a LassoCV or a LEAR `"cv"` with two inputs that are near copies of each other (1 − |correlation|
+  below 1e-6, exact copies aside: a coordinate descent or a fold's penalty follows the last bits of such a pair), a
+  LassoCV whose folds have no more rows than columns, Ridge at the smallest penalties of its grid, a column whose sums cancel or
+  overflow. So is the forecast of an issue row far outside its training values, since an extrapolation multiplies the last bits
+  in which the two paths' coefficients differ: more than 30 training standard deviations out for OLS and 10 for the others,
+  measured along the eigenvectors of the fit's own Gram (so a row out along the difference of two near-collinear inputs counts,
+  however close each is to its training values), for Ridge where scikit-learn's own rounding at that row exceeds the budget it
+  has at the training rows, and with a variance-stabilising scaler where its inverse is more than three times as steep at the
+  forecast as at the median training target (a forecast past the training prices, which an asinh scaler maps back through a
+  sinh). Within these bounds the largest gaps measured were 6.3e-9 (OLS), 5.4e-9 (LassoCV), 6.1e-10 (Ridge) and 7.6e-10 (LEAR)
+  EUR/MWh; past them gaps grow with the distance, to 1e-7 at 20,000 and 1e-4 for an asinh OLS forecast far past its prices. A
+  refit's other forecasts of the same fit still come from the sums, so a refit block with a row far out writes two coefficient
+  vectors, the model path's for that row and the engine's for the others, a few last bits apart, where engine off writes one.
+  LEAR's `solver="cd"` (a coordinate descent that stops at a tolerance, so it follows its Gram's last bits; `LEARModel.lago()`'s)
+  is fitted as with `"off"`, to the bit. Ridge still reads its scaled rows for the leave-one-out leverages, so it saves the scaler
+  and the SVD of its rows, not the work on them; LEAR's path and LassoCV's descent dominate their fits, so they gain less than
+  OLS, and a variance-stabilising scaler shares its transform only between models whose rows are the same.
+- **`engine="check"`** runs as `"on"` and also fits about one fit in 50 (those of a training span whose hash, from its period,
+  horizon and dates, is 0 modulo 50, the same in any run) the way `"off"` does, on the same values, and compares the two. The
+  results are `"on"`'s; the manifest records, as provenance, how many fits were checked, the largest absolute and relative gaps of
+  their forecasts and how many chose another kink or penalty (`engine_check`), and a warning names a model whose largest gap is
+  above its class's tolerance (1e-8 EUR/MWh for OLS and LassoCV, 1e-9 for Ridge and LEAR). `"check"` costs those fits twice.
 - **Checked once.** The pipeline checks the frame's index and names once for the models that read the same days, judges each
   column against the information set once per rule and issue days, and a group reads the binary mask of a column several of its
   models read with one training window once per period: every check, listing and mask is what the model finds on its own. In a group of 1,000 OLS models (one test
@@ -171,14 +187,14 @@ for window in range(28, 365, 7):
   for one model per training window, which read other rows). `ENGINE_MAX_MODELS` (default 20,000) and
   `ENGINE_MAX_COLUMNS` (default 4,096) bound a part of a group read at once, environment variables like `MAX_PROCESSES`; where the
   cuts fall changes no number.
-- **Saved and checked.** `engine` goes to the pipeline's YAML only when it is `"on"`, and `model_pipeline.engine` in a workflow
+- **Saved and checked.** `engine` goes to the pipeline's YAML only when it is `"on"` or `"check"`, and `model_pipeline.engine` in a workflow
   overrides it; in array mode each task groups the models of its block. `pipeline.verify(...)` runs each model through the engine too.
   The manifest of a model fitted from shared statistics records `fit_path: "engine-1"`, compared on resume: results written with
   the engine on resume with it on, and those written with it off with it off (another setting raises `ManifestMismatchError`, and
   `allow_manifest_mismatch=True` resumes anyway, into a file that then mixes the two). It also records, as provenance never
   compared, what the last run that fitted anything from statistics did (`engine`: how many fits, how many fits or issue rows went
-  back to the model path and why, and how far out of its training values an issue row the engine forecast was). Those are that
-  run's alone: after a crash and a resume they count the resumed run's fits, not the file's.
+  back to the model path and why, and how far out of its training values an issue row the engine forecast was; with `"check"`,
+  `engine_check`). Those are that run's alone: after a crash and a resume they count the resumed run's fits, not the file's.
 
 ## See Also
 
