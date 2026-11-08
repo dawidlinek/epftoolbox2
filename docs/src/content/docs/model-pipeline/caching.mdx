@@ -84,15 +84,20 @@ the start of that window), `predictor_list` for a predictor function, `member_pr
 had it.
 
 **What is read.** Every table, count, ensemble and exporter reads the forecasts alone: records with `status` `"ok"`, or without
-`status` (written before it). Per key `(hour, horizon, run_date)` the highest `revision` counts; within it a forecast counts over skip
-records, and of two forecasts of one key the first in the file, with a warning that says how many were left out and how many differ.
-The per-window skip counts of `report.forecast_counts()` come from the manifest, as before. Files written before these keys resume and
-report as they did, and a file holding both kinds reads as one.
+`status` (written before it). **Code that reads the lines of a results file itself must do the same**: keep the records whose
+`status` is `"ok"`, and take a record without `status` as one, or skip records come in with `prediction` null. Per key
+`(hour, horizon, run_date)` the highest `revision` counts, and within it a forecast counts over skip records. A forecast repeated with
+the same numbers (equal but for the four keys, so an old line and a new one of one forecast are one) is read once, with a warning; a
+key with two different forecasts raises `ValueError` naming the file and a key, since they are two configurations' forecasts and no
+table may pick one: two runs that wrote one file at once, or files joined by hand. The per-window skip counts of
+`report.forecast_counts()` come from the manifest, as before. Files written before these keys resume and report as they did, and a
+file holding both kinds reads as one.
 
 **Resuming.** A task is done by its `(hour, horizon, run_date)`, the actual calendar date, not the `day_in_test` offset from
 `test_start`, so extending or shifting `test_start` between runs into the same directory can't make an unrelated date look already
-computed. Only a forecast makes a key done: a skipped key is tried again by every run, and gets a new skip record only when its reason
-changed, so resuming again doesn't grow the file.
+computed. A key is done when the record a reader takes for it is a forecast: a skipped key is tried again by every run, and gets a new
+skip record only when its reason changed, so resuming again doesn't grow the file. What a run writes for a key whose records reach a
+higher `revision` gets that revision, so that it is the record read.
 
 **A crash while writing** can leave the last line half-written. Reading skips it with a warning, and the next run into the file cuts
 it off, with a warning naming its bytes, before it appends: its key is forecast again, and the file ends as a fresh run's would. A line

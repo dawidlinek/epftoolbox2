@@ -77,8 +77,11 @@ A record of a model with a list has `member_predictions`, each member's forecast
 
 ```json
 {"run_date": "2017-03-01", "target_date": "2017-03-02", "run_weekday": 2, "hour": 12, "horizon": 1, "day_in_test": 0,
- "prediction": 41.37, "member_predictions": [40.92, 41.18, 41.66, 41.72], "actual": 40.1, "coefficients": [], "freq": "1h"}
+ "prediction": 41.37, "member_predictions": [40.92, 41.18, 41.66, 41.72], "actual": 40.1, "coefficients": [], "freq": "1h",
+ "status": "ok", "list_hash": "2a5b7c0f9e31", "refit_anchor": "2017-03-01", "revision": 1}
 ```
+
+It ends with the four keys every record has ([Results File Format](/epftoolbox2/model-pipeline/caching/#results-file-format)).
 
 A model with one window writes the records it always wrote: its coefficients, and no `member_predictions`.
 

@@ -18,12 +18,14 @@ Notes for changes that need something from you. The full list of changes of a re
     their numbers are bit for bit as before, and files written before resume and report as they did. A skipped key is tried again by
     every run, as before, and gets a new skip record only when its reason changed. Records held in memory are the forecasts alone.
     Manifests add `record_schema: 2`, provenance like `git_sha`, never compared. About 90 bytes more per record (60 with `refit`).
-  - **One forecast per key.** Of two forecasts of one key in a file the first is read, with a warning, where a table used to count
-    both and an ensemble refused the member; the highest `revision` of a key wins.
+  - **One forecast per key.** A forecast repeated in a file with the same numbers is read once, with a warning, where a table used to
+    count it twice; a key with two different forecasts raises `ValueError` naming the file and a key, in every table, ensemble and
+    resume. The highest `revision` of a key wins, and a run writes at it.
   - **A half-written last line no longer stops a resume.** Reading skips it with a warning, and the next run cuts it off (a warning
     names its bytes) before appending; a damaged line before the last raises `ValueError` with its number.
   - **One writer per results file.** A run holds `<model>.lock` next to `<model>.jsonl` while it writes, and a second run into the
-    same model's results raises `ResultsLockedError` naming it; where the file system refuses locks the run warns and goes on.
+    same model's results raises `ResultsLockedError` naming it; where the file system refuses locks (an NFS mount without a lock
+    daemon, say) the run warns and goes on, whatever the installed filelock.
   See [Incremental Training](/epftoolbox2/model-pipeline/caching/#results-file-format).
 - **The week-ahead load forecast's rule follows each market's own week.** The built-in rule of `load_forecast_daily_min`/`_max`
   (ENTSO-E A31) read the delivery week in Brussels dates, while A31 holds one value per local date of each market's Monday-to-Sunday
