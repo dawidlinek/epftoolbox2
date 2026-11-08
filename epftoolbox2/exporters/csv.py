@@ -35,10 +35,19 @@ class CsvExporter(Exporter):
 
         With 15min results `hour` holds the period of the day (0-95) and a `target_time`
         column next to it gives that period's local start time as HH:MM.
+
+        A report with a model that has a card (licence, corpus, weights: see the docs page
+        Licences and Weights) also writes `report.provenance()` to `provenance.csv` next to
+        `path`; without one nothing more is written.
         """
         self.path = Path(path)
         self.extra_columns = extra_columns or []
         self.summary_path = Path(summary_path) if summary_path is not None else None
+
+    @property
+    def provenance_path(self) -> Path:
+        """Where a report with a carded model's provenance goes: `provenance.csv` next to `path`."""
+        return self.path.parent / "provenance.csv"
 
     def export(self, report: EvaluationReport) -> None:
         if not report.refs:
@@ -47,6 +56,13 @@ class CsvExporter(Exporter):
         if self.summary_path is not None:
             self.summary_path.parent.mkdir(parents=True, exist_ok=True)
             report.summary().to_csv(self.summary_path, index=False)
+
+        provenance = report.provenance()
+        if (
+            not provenance.empty
+        ):  # only with a carded model: the file is there whenever a licence must travel with the numbers
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            provenance.to_csv(self.provenance_path, index=False)
 
         freq = self._results_freq(report)
         self.path.parent.mkdir(parents=True, exist_ok=True)
