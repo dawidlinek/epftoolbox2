@@ -122,7 +122,7 @@ from epftoolbox2.models import OLSModel, LassoCVModel
 | `THREADS_PER_PROCESS` | `1` | Tasks each worker process runs at once, on threads |
 | `EPFTOOLBOX2_KERNELS` | `auto` | `LEARModel`'s kernels: `auto` (numba when the [`[fast]` extra](#the-fast-extra) imports), `numpy` or `numba` |
 
-You don't need `OMP_NUM_THREADS`, `MKL_NUM_THREADS` or `OPENBLAS_NUM_THREADS`: each worker process limits BLAS and OpenMP to one thread per task itself (with `threadpoolctl`), and your own process keeps its settings.
+You don't need `OMP_NUM_THREADS`, `MKL_NUM_THREADS` or `OPENBLAS_NUM_THREADS`: each worker process limits BLAS and OpenMP to one thread per task itself (with `threadpoolctl`). While a run's worker pools exist (from the first model to the last in `ModelPipeline.run`, `verify` and so `Workflow`; one pool in a model's own `run`), your own process's OpenBLAS runs on one thread too: a worker forked from it inherits that count, and setting it there would start one idle OpenBLAS thread per CPU (on Windows, where workers are spawned and load their own libraries, these three variables, `BLIS_NUM_THREADS` and `VECLIB_MAXIMUM_THREADS` are also set to `1` for that time). It gets its count back when the models are done, before ensembles, evaluators and exporters, which restarts its OpenBLAS threads once. Other BLAS and OpenMP libraries in your process, and the variables on Linux and macOS, keep their settings.
 
 ### Platform Notes
 

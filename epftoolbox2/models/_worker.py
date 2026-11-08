@@ -40,7 +40,7 @@ _HOLD_LOCK = threading.Lock()
 _HOLDS = 0
 _HELD_COUNTS: List[Tuple[Any, int]] = []  # (threadpoolctl library controller, the thread count it had)
 _HELD_ENV: Dict[str, Optional[str]] = {}  # the thread variables as they were, under spawn
-# Whether the pools spawn their workers rather than fork them (`BaseModel._run_tasks`, `_engine.run_group`).
+# Whether the pools spawn their workers rather than fork them (`BaseModel._run_tasks`, `_engine._run_chunk`).
 _POOLS_SPAWN = sys.platform == "win32"
 
 # Reasons a task produces no forecast without being an error. They are counted per model and reported.
