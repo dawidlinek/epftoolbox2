@@ -2190,3 +2190,24 @@ def test_issue_timezone_data_is_each_frame_s_own_zone():
     assert InformationSet.from_dict(info.to_dict()).issue_timezone == "data"
     with pytest.raises(ValueError, match="Unknown time zone"):
         InformationSet("12:00", "Mars/Olympus")
+
+
+def test_issue_timezone_data_given_to_a_model_s_own_run_is_its_frame_s_zone():
+    """An unresolved "data" read straight by a check or a model's own run is the frame's zone (`_issue_zone`), not a crash."""
+    frame = make_market_data(start="2023-01-01", days=60, tz="Europe/Lisbon", horizon=2)
+    rules = {"load": Availability.published("10:00", 7), "wind": Availability.published("10:00", 7)}
+    names = ["load_d+{horizon}", "wind_d+{horizon}"]
+    runs = {}
+    for zone in ("data", "Europe/Lisbon"):
+        model = OLSModel(predictors=names, training_window=20)
+        info = InformationSet("12:00", zone, rules=rules)
+        runs[zone] = model.run(frame, "2023-02-10", "2023-02-12", horizon=1, information_set=info)._results
+    key = ["run_date", "hour", "horizon"]
+    assert sorted(runs["data"], key=lambda r: [r[k] for k in key]) == sorted(
+        runs["Europe/Lisbon"], key=lambda r: [r[k] for k in key]
+    )
+    late = InformationSet("10:00", "data", rules={"load": Availability.published("12:00", 0)})
+    with pytest.raises(InformationSetError, match="12:00"):
+        late.check({(0, 1): ["load"]}, "price", "1h", frame.index, "2023-02-10", "2023-02-10", check_target=False)
+    with pytest.raises(InformationSetError, match="has none"):
+        late.check({(0, 1): ["load"]}, "price", "1h", frame.index.tz_localize(None), "2023-02-10", "2023-02-10")

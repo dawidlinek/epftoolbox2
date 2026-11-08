@@ -1124,7 +1124,8 @@ class InformationSet:
         issue_time: Local time the forecast is issued on day D, "HH:MM".
         issue_timezone: Zone of `issue_time`, or "data" (`DATA_ZONE`): each frame's own zone, so that every market of a run
             over several (`ModelPipeline.run(data={zone: frame})`) issues at `issue_time` on its own clock. `ModelPipeline`
-            resolves it for each frame (`in_data_zone`) before anything reads it.
+            resolves it for each frame (`in_data_zone`) before anything reads it, so its manifests record the zone; given to a
+            model's own `run` or a check directly, it is read in the zone of the frame it judges (`_issue_zone`).
         rules: Overrides and additions, `{column name or glob pattern: Availability or dict}`, or a list of them with
             disjoint validity periods for a lag that changed over time (`Availability.during`, `RuleChain`). They take
             precedence over accepted assumptions, rules derived from data sources, and the built-in defaults.
@@ -1687,11 +1688,10 @@ class InformationSet:
         """The issue times of these issue days (naive midnights, the first one first) on an index like `index`, whose rows are
         at `freq`: a daily frame's row is at the time of day its index says (`_date_utils.daily_anchor`), any other's at its
         period."""
-        ctx = _Context(
-            days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None, issue_zone=self.issue_timezone
-        )
+        zone = self._issue_zone(index)
+        ctx = _Context(days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None, issue_zone=zone)
         offset = np.asarray((days - days[0]) // pd.Timedelta(days=1), dtype=np.int64)
-        issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), self.issue_timezone, ctx)
+        issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), zone, ctx)
         midnight = _to_instants(offset * 1440.0, ctx.data_zone, ctx)
         return _IssueClock(days, ctx, offset, issue, midnight, _row_anchor(index, freq))
 
@@ -1804,7 +1804,19 @@ class InformationSet:
         return pd.date_range("2024-01-01", periods=7, freq="D")
 
     def _data_zone(self, index) -> str:
-        return str(index.tz) if getattr(index, "tz", None) is not None else self.issue_timezone
+        return str(index.tz) if getattr(index, "tz", None) is not None else self._issue_zone(index)
+
+    def _issue_zone(self, index) -> str:
+        """The zone the issue time is read in on a frame with this index: `issue_timezone`, or with `"data"` (`DATA_ZONE`) the
+        index's own zone, as `in_data_zone` resolves it. A naive index has no zone to issue in, and raises."""
+        if self.issue_timezone != DATA_ZONE:
+            return self.issue_timezone
+        if getattr(index, "tz", None) is None:
+            raise InformationSetError(
+                "issue_timezone='data' issues each forecast on the clock of its frame's zone, and this frame's index has none: "
+                "localise it (df.tz_localize('Europe/Warsaw')) or name the issue zone."
+            )
+        return str(index.tz)
 
     def _format(self, violations: List[Violation], model_name: str, advice: bool = True) -> str:
         # One line per base column and rule, listing the predictors that read it.
@@ -2726,13 +2738,9 @@ def _rows_around_issue(
     # for its delivery day, its publication instant for the way back), not at run_day's noon or at the row's own
     # date. They differ across a DST switch whenever the data zone and a rule's zone don't switch together, e.g. a
     # UTC or fixed-offset (benchmark source) index against Europe/Brussels rules.
-    ctx = _Context(
-        pd.Timestamp(run_day),
-        information_set._data_zone(index),
-        naive=index.tz is None,
-        issue_zone=information_set.issue_timezone,
-    )
-    issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), information_set.issue_timezone, ctx)
+    zone = information_set._issue_zone(index)
+    ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index), naive=index.tz is None, issue_zone=zone)
+    issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), zone, ctx)
     ctx = replace(ctx, issue_minute=float(issue[0]))
     local = index.tz_localize(None) if index.tz is not None else index
     day = np.asarray((local.normalize() - pd.Timestamp(run_day)) // pd.Timedelta(days=1), dtype=np.int64)
