@@ -43,7 +43,8 @@ print(report.summary())  # nMAE is a fraction: 0.101 is 10.1 % of the mean outpu
 - **On the keys of the MAE.** The mean actual is taken on the forecasts the MAE is taken on, never on every actual of the data, so
   a model that has no forecast for some hours is divided by its own mean. Compare models on identical keys (`forecast_counts()`):
   with different keys both the MAE and the mean differ.
-- A fraction, not a percentage. Meant for quantities whose mean is positive; a mean actual of 0 gives inf, and prices with a
-  negative mean give a negative number.
+- A fraction, not a percentage. Meant for quantities whose mean is positive. Where the mean actual is 0 it is NaN, even for a
+  perfect forecast: there is nothing to normalise by (the night hours of solar in `by_hour()`). Prices with a negative mean give
+  a negative number.
 - In grouped views it is taken on that group's forecasts, with that group's mean.
 - No parameters; serializable to YAML.

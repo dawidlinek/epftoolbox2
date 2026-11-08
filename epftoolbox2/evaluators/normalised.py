@@ -12,8 +12,9 @@ class NMAEEvaluator(Evaluator):
 
     The normalised MAE of generation and load forecasts, comparable across zones and years of different size. It is read on
     the same keys as the MAE, never on every actual of the data, so a model that skips the night hours of solar is divided
-    by its own mean, not by one that the night's zeros lower. NaN without a forecast; meant for quantities whose mean is
-    positive (a mean actual of 0 gives inf).
+    by its own mean, not by one that the night's zeros lower. NaN without a forecast, and NaN when the mean actual is 0 (the
+    night hours of solar in `by_hour()`, even forecast perfectly): there is nothing to normalise by. Meant for quantities
+    whose mean is positive.
     """
 
     name = "nMAE"
@@ -26,7 +27,7 @@ class NMAEEvaluator(Evaluator):
             return math.nan
         mean_actual = actual[keys].mean()
         mae = np.abs(prediction[keys] - actual[keys]).mean()
-        return float(mae / mean_actual) if mean_actual != 0 else math.inf
+        return float(mae / mean_actual) if mean_actual != 0 else math.nan
 
 
 class ScaledMAEEvaluator(Evaluator):

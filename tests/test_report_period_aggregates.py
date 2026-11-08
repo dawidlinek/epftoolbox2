@@ -809,3 +809,9 @@ def test_source_columns_need_the_results_time_zone():
     assert len(
         report_of({"m": recs}, [MAEEvaluator()], "1h", zone=None, source_data=local.tz_convert("UTC")).by_column("flag")
     )
+
+
+def test_nmae_of_a_zero_mean_is_nan():
+    zeros = pd.DataFrame({"prediction": [0.0, 0.0], "actual": [0.0, 0.0]})
+    assert np.isnan(NMAEEvaluator().compute(zeros))
+    assert np.isnan(NMAEEvaluator().compute(zeros.assign(prediction=[1.0, 2.0])))
