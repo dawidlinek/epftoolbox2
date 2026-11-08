@@ -545,3 +545,17 @@ def test_verify_judges_the_shared_fit_at_the_earliest_issue():
             PREDICTORS, {**RULES, "actual_daily_max": Availability.realised("12h")}, {zone: frames[zone]}
         )
         assert alone.ok, alone.problems()
+
+
+def test_pooled_horizons_need_one_length_per_period_before_any_fit(tmp_path):
+    def names(horizon, hour):  # one more input per horizon at hour 0, all three at every other hour
+        full = [name.replace("{horizon}", str(horizon)) for name in PREDICTORS]
+        return full[: 1 + horizon] if hour == 0 else full
+
+    model = PooledModel(OLSModel(predictors=names, training_window=20, name="m"), over=("zone", "horizon"))
+    frames = {"PL": hourly("PL"), "FI": hourly("FI", seed=1)}
+    with pytest.raises(ValueError, match="period 0"):
+        ModelPipeline().add_model(model).run(
+            frames, test=("2023-03-24", "2023-03-25"), horizon=2, save_dir=str(tmp_path)
+        )
+    assert not any(tmp_path.rglob("*.jsonl"))  # refused before any record

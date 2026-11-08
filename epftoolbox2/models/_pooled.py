@@ -94,15 +94,21 @@ def with_missing_columns(pooled: PooledModel, zone: str, frame: pd.DataFrame, co
 
 
 def check_horizon_lists(pooled: PooledModel, member: BaseModel, freq: str, horizons: Sequence[int]) -> None:
-    """With pooled horizons the lists of every horizon are stacked by place: a ValueError unless they have one length."""
+    """With pooled horizons a unit (period, day) stacks the lists of every horizon by place: a ValueError, before any fit,
+    unless each period's lists have one length at every horizon (a `(horizon, hour)` function can differ by period)."""
     if not pooled.pools_horizons:
         return
     member._set_freq(freq)
-    lengths = {hz: len(names) for (_, hz), names in member._precompute_expanded_predictors(horizons).items()}
-    if len(set(lengths.values())) > 1:
+    lengths: Dict[int, Dict[int, int]] = {}
+    for (period, hz), names in member._precompute_expanded_predictors(horizons).items():
+        lengths.setdefault(period, {})[hz] = len(names)
+    uneven = {period: by_horizon for period, by_horizon in lengths.items() if len(set(by_horizon.values())) > 1}
+    if uneven:
+        period, by_horizon = next(iter(uneven.items()))
         raise ValueError(
             f"PooledModel {pooled.name!r} pools horizons, which stacks each horizon's predictors by their place in the list, "
-            f"but the lists have different lengths by horizon ({lengths}). Give every horizon a list of the same length."
+            f"but at {len(uneven)} period(s) the lists have different lengths by horizon, e.g. period {period}: {by_horizon}. "
+            "Give every horizon of a period a list of the same length."
         )
 
 
