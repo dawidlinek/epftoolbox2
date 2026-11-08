@@ -21,6 +21,7 @@ import pandas as pd
 import pytest
 from filelock import FileLock
 
+import epftoolbox2
 from epftoolbox2.ensembles import AverageEnsemble
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.information_set import Availability, InformationSet
@@ -658,6 +659,36 @@ def test_a_second_writer_in_one_process_raises_and_the_lock_goes_with_the_run(tm
     holding.close()
     run(data, OLSModel(PREDICTORS, 45, name="ols"), tmp_path)
     ResultStore(tmp_path / "ols.jsonl", lock=True).close()  # the run let it go
+
+
+ORPHAN = textwrap.dedent(
+    """
+    import os, signal, sys, time
+    sys.path.insert(0, sys.argv[2])  # the epftoolbox2 the test imported, whatever the working directory
+    from epftoolbox2.results.store import ResultStore
+    store = ResultStore(sys.argv[1], lock=True)
+    worker = os.fork()  # as a pool worker of a run is
+    if worker == 0:
+        time.sleep(60)
+        os._exit(0)
+    print(worker, flush=True)
+    os.kill(os.getpid(), signal.SIGKILL)  # the run killed, its worker not
+    """
+)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork")
+def test_a_worker_outliving_a_killed_run_does_not_keep_the_lock(tmp_path):
+    path = tmp_path / "ols.jsonl"
+    root = str(Path(epftoolbox2.__file__).resolve().parents[1])
+    run_ = subprocess.Popen([sys.executable, "-c", ORPHAN, str(path), root], stdout=subprocess.PIPE, text=True)
+    worker = int(run_.stdout.readline())
+    try:
+        run_.wait(timeout=60)
+        os.kill(worker, 0)  # the worker is still there
+        ResultStore(path, lock=True).close()  # and the lock is free
+    finally:
+        os.kill(worker, 9)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="flock")

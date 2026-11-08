@@ -559,7 +559,10 @@ _HELD_ERRNOS = frozenset((errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES))
 def _hold_lock(path: Path) -> Callable[[], None]:
     """An exclusive `fcntl.flock` on `path`, held until the returned function is called: the operating system's lock, so a
     process that is killed holds none. Where there is no flock (Windows) filelock's lock. Raises `_LockHeld` when another holds
-    it, OSError when the file system refuses locks."""
+    it, OSError when the file system refuses locks.
+
+    A process forked while the lock is held closes its copy of the descriptor (`_close_held_in_child`), so a pool worker
+    outliving a killed run doesn't keep the lock."""
     try:
         import fcntl
     except ImportError:  # pragma: no cover (Windows)
@@ -572,14 +575,35 @@ def _hold_lock(path: Path) -> Callable[[], None]:
         if exc.errno in _HELD_ERRNOS:
             raise _LockHeld() from None
         raise
+    _HELD_FDS.add(fd)
 
     def release() -> None:
+        _HELD_FDS.discard(fd)
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 
     return release
+
+
+# The descriptors of the locks this process holds. A forked child (a pool worker of `BaseModel.run`) shares their open file
+# descriptions, and with them the lock: it closes its copies, never unlocking them (that would release the parent's lock), so
+# the lock ends with the process that took it.
+_HELD_FDS: Set[int] = set()
+
+
+def _close_held_in_child() -> None:
+    for fd in list(_HELD_FDS):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    _HELD_FDS.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_close_held_in_child)
 
 
 def _hold_filelock(path: Path) -> Callable[[], None]:  # pragma: no cover (Windows)
