@@ -138,15 +138,19 @@ def run_group(
     columns: Optional[Dict[str, Sequence[str]]] = None,
 ) -> Dict[str, ModelResultRef]:
     """Run one engine group: `models` (one refit block rule, engine-capable), each with its `run` arguments (`arguments[name]`,
-    from `run_arguments`; one frame, target, horizons and freq for all), and return each model's ref by name.
+    from `run_arguments`; one frame, target, horizons and freq for all), and return each model's ref by name. A model's
+    arguments are taken out of `arguments` when its chunk starts, so the caller's dict holds no model's check past its chunk.
 
     `columns[name]` is each model's predictors (its check's `used_predictors`), which a chunk's period frames are read for once;
     None only for a group of one model, which reads its own (`verify`'s probes, `run_alone`). Called where a `run` would be
     (`ModelPipeline.run`), so each model's `_prepare_run` and `_finish_run` warn at the line their `run` would.
 
-    A task that raises stops the group as a model's `run` stops: the pool is shut down, what came back is in the stores, and a
-    RuntimeError names the model, the day or block and the period; a later run resumes. Every model's `_finish_run` runs (the
-    first error it raises, such as no forecast at all, is raised after the others finished), then every store is closed."""
+    Each chunk is finished before the next starts: its pool, its stores flushed, each model's `_finish_run` (skip counts, the
+    shortfall warning, its ref) and its stores closed, so what a model holds for its run (its tasks, its store's done keys)
+    lives as long as its chunk. A task that raises stops the group as a model's `run` stops: the pool is shut down, what came
+    back is in the stores, and a RuntimeError names the model, the day or block and the period; a later run resumes. The
+    first error a chunk's `_finish_run` raises (no forecast at all) is raised once the chunk's other models finished, and the
+    later chunks don't run, as later models don't with engine off."""
     if not models:
         return {}
     if columns is None and len(models) > 1:
@@ -158,7 +162,6 @@ def run_group(
     horizon, _ = resolve_horizons(first["horizon"], first["horizons"], 7)
     chunks = engine_chunks(models, columns, *engine_limits())
     writer = StoreWriter() if any(arguments[model.name]["save_to"] for model in models) else None
-    states: List[Tuple[BaseModel, _RunState]] = []
     refs: Dict[str, ModelResultRef] = {}
     try:
         with Progress() as progress:
@@ -172,26 +175,30 @@ def run_group(
                         chunk[0]._set_freq(freq)
                         periods = chunk[0]._load_periods(data, list(dict.fromkeys([target, *union])), horizon, target)
                     for model in chunk:
-                        state = model._prepare_run(**arguments[model.name], periods=periods, writer=writer)
+                        state = model._prepare_run(**arguments.pop(model.name), periods=periods, writer=writer)
                         prepared.append((model, state))
-                        states.append((model, state))
+                    periods = None  # the models hold the frames until `_release`
                     _run_chunk(prepared, bar)
                 except BaseException:
                     _release(prepared, writer, chunk, raising=False)
+                    _close(prepared, raising=False)
                     raise
                 _release(prepared, writer, chunk)
-        error: Optional[BaseException] = None
-        for model, state in states:
-            try:
-                refs[model.name] = model._finish_run(state)
-            except Exception as exc:  # every model's counts and warnings, then the first failure
-                error = error or exc
-        if error is not None:
-            raise error
+                error: Optional[BaseException] = None
+                for model, state in prepared:
+                    try:
+                        refs[model.name] = model._finish_run(state)
+                    except Exception as exc:  # every model's counts and warnings, then the first failure
+                        error = error or exc
+                _close(prepared, raising=error is None)
+                prepared.clear()
+                state = None  # nothing of the chunk's runs outlives it but the refs
+                if error is not None:
+                    raise error
     except BaseException:
-        _close(states, writer, raising=False)
+        _close_writer(writer, raising=False)
         raise
-    _close(states, writer)
+    _close_writer(writer)
     return refs
 
 
@@ -256,27 +263,42 @@ def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> None:
     ) as pool:
         futures = {pool.submit(run_job, list(job.items())): key for key, job in jobs.items()}
         for future in as_completed(futures):
-            key = futures[future]
+            # A job's records leave with its future (`as_completed` keeps none it has given), so the parent holds one job's
+            # records at a time, not the chunk's.
+            key = futures.pop(future)
+            job = jobs.pop(key)
             try:
                 outcomes = future.result()
             except Exception as exc:
                 # Results already saved stay in the stores, so a fixed rerun resumes from here.
                 pool.shutdown(wait=True, cancel_futures=True)
-                day, period = key
-                what = (
-                    f"the refit block from {day}"
-                    if refit
-                    else f"run date {state0.first_day + datetime.timedelta(days=day)}"
-                )
-                if isinstance(exc, EngineTaskFailed):
-                    name = pending[exc.model][0].name
-                    raise RuntimeError(f"{name}: forecasting failed for {what}, period {period}: {exc}") from exc
-                names = ", ".join(pending[place][0].name for place in jobs[key])
-                raise RuntimeError(f"forecasting failed for {what}, period {period} (models {names}): {exc}") from exc
+                raise _job_failed(exc, key, job, pending, refit) from exc
             for place, results, skipped in outcomes:
                 model, state = pending[place]
                 model._collect(state, results, skipped, sinks[place])
-            bar.advance(sum(len(tasks) for tasks in jobs[key].values()))
+            bar.advance(sum(len(tasks) for tasks in job.values()))
+
+
+def _job_failed(
+    exc: BaseException,
+    key: Tuple[Any, int],
+    job: Dict[int, List[tuple]],
+    pending: List[Tuple[BaseModel, _RunState]],
+    refit: bool,
+) -> RuntimeError:
+    """The error of a job that raised: the failing model's name (or the job's models', for a pool that broke), its day or
+    refit block (from that model's run) and the period."""
+    day, period = key
+    place = exc.model if isinstance(exc, EngineTaskFailed) else next(iter(job))
+    what = (
+        f"the refit block from {day}"
+        if refit
+        else f"run date {pending[place][1].first_day + datetime.timedelta(days=day)}"
+    )
+    if isinstance(exc, EngineTaskFailed):
+        return RuntimeError(f"{pending[place][0].name}: forecasting failed for {what}, period {period}: {exc}")
+    names = ", ".join(pending[at][0].name for at in job)
+    return RuntimeError(f"forecasting failed for {what}, period {period} (models {names}): {exc}")
 
 
 def _release(
@@ -304,22 +326,28 @@ def _release(
         gc.collect()
 
 
-def _close(states: List[Tuple[BaseModel, _RunState]], writer: Optional[StoreWriter], raising: bool = True) -> None:
-    """Close every store of the group (releasing its lock), then the writer; the first failure is raised after all, unless
-    `raising` is False (the group is raising already)."""
+def _close(states: List[Tuple[BaseModel, _RunState]], raising: bool = True) -> None:
+    """Close these models' stores (releasing their locks); the first failure is raised after all, unless `raising` is False
+    (the group is raising already)."""
     error: Optional[BaseException] = None
     for _, state in states:
         try:
             state.close()
         except BaseException as exc:
             error = error or exc
-    if writer is not None:
-        try:
-            writer.close()
-        except BaseException as exc:
-            error = error or exc
     if error is not None and raising:
         raise error
+
+
+def _close_writer(writer: Optional[StoreWriter], raising: bool = True) -> None:
+    """Close the group's writer (its thread and its lock files), raising what it raises unless `raising` is False."""
+    if writer is None:
+        return
+    try:
+        writer.close()
+    except BaseException:
+        if raising:
+            raise
 
 
 class EngineAlone:

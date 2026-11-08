@@ -1400,7 +1400,7 @@ class BaseModel(ABC):
                     completed=state.n_days - days_with_tasks,
                 )
                 for future in as_completed(futures):
-                    job = futures[future]
+                    job = futures.pop(future)  # its records leave with it: the parent holds one job's at a time
                     try:
                         day_results, day_skipped = future.result()
                     except Exception as exc:

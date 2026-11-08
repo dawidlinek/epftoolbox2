@@ -9,6 +9,7 @@ measurement are in `epftoolbox2-research/library_check_step5/engine_groups/`.
 """
 
 import datetime
+import gc
 import json
 import random
 from concurrent.futures import Future
@@ -24,9 +25,9 @@ from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import LassoCVModel, LEARModel, NaiveModel, OLSModel, RidgeModel, Use
 from epftoolbox2.models import _engine, _engine_worker
 from epftoolbox2.models import _worker as worker
-from epftoolbox2.models.base import BaseModel
+from epftoolbox2.models.base import BaseModel, _RunState
 from epftoolbox2.pipelines import ModelPipeline, Workflow
-from epftoolbox2.results.store import iter_file_records
+from epftoolbox2.results.store import ResultStore, iter_file_records
 from epftoolbox2.scalers.standard import StandardScaler
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
@@ -687,6 +688,42 @@ def test_masks_read_on_the_union_frames_are_the_models_own(spring, monkeypatch):
     assert all(not again[key].all() for key in again)  # the 0/1 columns are left unscaled
     grouped._release()
     assert grouped._first_day_masks == {}
+
+
+def test_the_parent_holds_one_job_and_one_chunk_at_a_time(wide, tmp_path, monkeypatch, in_process):
+    """Memory: a job's records leave the parent with its future once collected (not when the chunk's pool ends), and a
+    chunk's runs (their tasks, their stores' done keys) are finished and closed before the next chunk starts, so nothing of
+    them is alive but the refs."""
+    monkeypatch.setenv("ENGINE_MAX_MODELS", "2")
+    held, seen = [], {}
+    real_collect, real_prepare = BaseModel._collect, BaseModel._prepare_run
+
+    def collect(self, state, results, skipped, sink):
+        held.append(sum(1 for o in gc.get_objects() if isinstance(o, Future) and o.done() and not o.cancelled()))
+        return real_collect(self, state, results, skipped, sink)
+
+    def prepare(self, *args, **kwargs):
+        if self.name == "m002":  # the second chunk's first model
+            gc.collect()
+            seen["states"] = sum(1 for o in gc.get_objects() if isinstance(o, _RunState))
+            for name in ("m000", "m001"):  # the first chunk's stores are closed: their locks are free
+                ResultStore(tmp_path / "group" / f"{name}.jsonl", lock=True).close()
+        return real_prepare(self, *args, **kwargs)
+
+    monkeypatch.setattr(BaseModel, "_collect", collect)
+    monkeypatch.setattr(BaseModel, "_prepare_run", prepare)
+    pipeline = ModelPipeline(engine="on")
+    for model in many_models(4):
+        pipeline.add_model(model)
+    report = pipeline.run(wide, "2023-03-20", "2023-04-14", horizon=1, freq="1D", save_dir=str(tmp_path / "group"))
+    # A collect per model and job (26 days, one period, two models a chunk). The stand-in pool has every job done at once, so
+    # the futures alive at a job's collect are those not collected yet (about 26 down to 1 in each chunk), none collected
+    # before: it was about 26 throughout, every collected job's records alive until the chunk's pool ended.
+    assert len(held) == 4 * 26
+    assert held[0] >= 25 and held[52] >= 25
+    assert max(held[48:52]) <= 3 and max(held[100:]) <= 3
+    assert seen["states"] == 0
+    assert report.forecast_counts()["produced"].between(24, 26).all()  # a few skipped for missing cells
 
 
 # --- union isolation --------------------------------------------------------------------------------------------------

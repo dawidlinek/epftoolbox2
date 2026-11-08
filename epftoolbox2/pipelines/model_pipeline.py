@@ -356,7 +356,7 @@ class ModelPipeline:
                 **horizon_arguments(horizon, horizons),
                 **days_argument,
                 **planned,
-                checked=checks[model.name],
+                checked=checks.pop(model.name),  # held no longer than the model's run
                 **({} if save_coefficients else {"save_coefficients": False}),
             )
 
@@ -365,12 +365,10 @@ class ModelPipeline:
             # The engine groups first, each in one go (models/_engine.py), then the rest in list order, as with "off".
             capable = [model for model in self.models if model._engine_capable(plans.get(model.name), forecast_only)]
             for group in engine_groups(capable):
+                columns = {model.name: checks[model.name].used_predictors for model in group}
+                # `run_group` takes each model's arguments (its check with them) out of this dict when its chunk starts.
                 ran.update(
-                    run_group(
-                        group,
-                        {model.name: run_arguments(**arguments(model)) for model in group},
-                        {model.name: checks[model.name].used_predictors for model in group},
-                    )
+                    run_group(group, {model.name: run_arguments(**arguments(model)) for model in group}, columns)
                 )
         refs: dict[str, ModelResultRef] = {}
         for model in self.models:
