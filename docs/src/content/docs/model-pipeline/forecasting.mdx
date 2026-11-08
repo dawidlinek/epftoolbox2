@@ -139,9 +139,16 @@ for window in range(28, 365, 7):
     pipeline.add_model(OLSModel(["price_d-1", "load_d+{horizon}"], training_window=window, name=f"ols_{window}"))
 ```
 
-- **The same numbers.** In this release a group fits each model on its own rows exactly as `engine="off"` does, so every record,
-  manifest and table is identical to the bit, whatever else is in the group, in any order and at any number of processes. Fits from
-  statistics the group shares come in a later release.
+- **Fits from shared statistics.** `OLSModel`, `RidgeModel` and `LEARModel` with `scaler="standard"` are fitted from exact sums
+  of their training rows, one set per period, horizon and training span, shared by every model of the group that trains on those
+  rows. The sums are integers in disguise, so no other model, order, chunking, process, thread or BLAS thread count can move a bit:
+  a model's forecasts are the same alone and in any group. Against `engine="off"` they agree within 1e-8 EUR/MWh for OLS (the
+  normal equations against scikit-learn's SVD) and 1e-9 for Ridge and LEAR, with the same penalty and the same kink, not to the bit;
+  every other field of a record is the same. A fit the statistics can't give to those digits is fitted as with `"off"`, to the bit:
+  fewer than three training rows, an OLS whose design is too ill-conditioned for the normal equations or not of full rank, Ridge
+  at the smallest penalties of its grid, a column whose sums cancel. `LassoCVModel` and the models with a variance-stabilising
+  scaler (LEAR's default `asinh`) are fitted as with `"off"` in this release, to the bit. Ridge's leverages need its rows, so it
+  saves the scaling and the eigendecomposition's Gram; LEAR's path dominates its fit, so it gains less than OLS.
 - **Which models.** OLS, Ridge, LassoCV and LEAR. `NaiveModel`, a predictor function with a `train_on="matching"` list, a subclass
   that overrides the fit (`_fit_predict`, `_fit_model`, `_predict_fitted`) without its own `_fit_stats`, and every
   `forecast_only=True` run go through their own run, as with `"off"`, after the groups.
@@ -150,6 +157,11 @@ for window in range(28, 365, 7):
   cuts fall changes no number.
 - **Saved and checked.** `engine` goes to the pipeline's YAML only when it is `"on"`, and `model_pipeline.engine` in a workflow
   overrides it; in array mode each task groups the models of its block. `pipeline.verify(...)` runs each model through the engine too.
+  The manifest of a model fitted from shared statistics records `fit_path: "engine-1"`, compared on resume: results written with
+  the engine on resume with it on, and those written with it off with it off (another setting raises `ManifestMismatchError`, and
+  `allow_manifest_mismatch=True` resumes anyway, into a file that then mixes the two). It also records, as provenance never
+  compared, what the last run's fits from statistics did (`engine`: how many, how many went back to the model path and why, and how
+  far out of its training values an issue row was).
 
 ## See Also
 
