@@ -679,6 +679,7 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     from .data.sources.calendar import CalendarSource
     from .data.sources.entsoe import EntsoeSource
     from .data.sources.open_meteo import OpenMeteoSource
+    from .data.sources.pse import PseSource
 
     rules: Dict[str, Availability] = {}
     defaults = default_rules()
@@ -707,6 +708,8 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             rule = _weather_availability(source)
             for name in _weather_column_names(source):
                 rules[name] = rule
+        elif isinstance(source, PseSource):
+            rules.update(_pse_rules(source))
         elif isinstance(source, EpftoolboxBenchmarkSource):
             # The files are local wall-clock time, and `index_timezone` only labels that clock (one hour off the true
             # instants in summer). So a row's delivery day is the day on that same clock: the file's 23:00 on D is
@@ -723,6 +726,59 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             for name in DATASETS[source.dataset]["exogenous"].values():
                 rules[f"{prefix}{name}"] = Availability.published(
                     "10:00", 1, timezone=zone, note="day-ahead forecast of the benchmark files, available on d-1"
+                )
+    return rules
+
+
+_PSE_ZONE = "Europe/Warsaw"
+_PSE_STAMP = (
+    "PSE `publication_ts` is a stamp of the last write, so the table can show a rewrite, not the first publication"
+)
+
+
+def _pse_rules(source: Any) -> Dict[str, Availability]:
+    """The rules of a PseSource's columns, in Warsaw time (the local day of a PSE business date).
+
+    A delivery day D is known: `kse-load` forecast at 09:00 on D-1; the day-ahead prices (`csdac-pln`, `rce-pln`) at 15:00 on
+    D-1 (365 days measured: median 13:47, 99th percentile 14:59, latest 18:00); `pdgsz` at 16:00 on D-1; the actuals (`kse-load`,
+    `his-wlk-cal`, `przeplywy-mocy`) at 13:00 on D+1. Every table but `pdgsz` is stamped by its last write (rows reloaded in
+    bulk carry the reload time), so none has a vintage: `last_write_stamp`. `pdgsz` keeps every version with the time it was
+    written, and the source reads each hour's first: `row_stamp`."""
+    published_d1 = {
+        "kse-load": ("load_fcst", "09:00", "PSE kse-load day-ahead load forecast: published about 09:00 on D-1"),
+        "csdac-pln": (
+            "csdac_pln",
+            "15:00",
+            "PSE csdac-pln SDAC price in PLN: published on D-1 (latest 18:00 in a year)",
+        ),
+        "rce-pln": ("rce_pln", "15:00", "PSE rce-pln prosumer net-billing price, not the SDAC price: published on D-1"),
+    }
+    rules: Dict[str, Availability] = {}
+    for dataset in source.datasets:
+        for column in source._columns_of(dataset):
+            name = source._named(column)
+            if dataset == "pdgsz":
+                rules[name] = Availability.published(
+                    "16:00",
+                    1,
+                    _PSE_ZONE,
+                    note="PSE pdgsz: the first version of an hour is out by about 16:00 on D-1 (a quarter of the hours "
+                    "later, the latest 19:00 in a year); the table keeps every version with its UTC stamp",
+                    vintage="row_stamp",
+                )
+            elif dataset in published_d1 and column == published_d1[dataset][0]:
+                _, time, note = published_d1[dataset]
+                rules[name] = Availability.published(
+                    time, 1, _PSE_ZONE, note=f"{note}. {_PSE_STAMP}", vintage="last_write_stamp"
+                )
+            else:
+                # The actuals, `his-wlk-cal` and the flows: known on D+1 at 13:00.
+                rules[name] = Availability.published(
+                    "13:00",
+                    -1,
+                    _PSE_ZONE,
+                    note=f"PSE {dataset}: known about 13:00 on D+1. {_PSE_STAMP}",
+                    vintage="last_write_stamp",
                 )
     return rules
 
