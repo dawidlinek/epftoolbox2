@@ -719,3 +719,32 @@ def test_a_fit_resume_still_compares_each_stored_forecast_s_list(spring, tmp_pat
             ols(every_day_masked, binary_mask=rule).run(
                 spring, "2023-03-27", "2023-04-02", horizon=1, save_to=str(path)
             )
+
+
+def test_a_column_that_starts_inside_the_test_needs_no_re_read(spring, tmp_path):
+    """`late` has no value before 23 March. The default reads it again on the first day whose rows have one (`test_masks.py`) and
+    records the digests that changed; under `"fit"` a fit whose rows have no value of it has no finite row and is skipped, and every
+    other fit reads its own rows. Both scale the continuous column from then on, so every forecast and every skip is the same, and
+    only the default's manifest has digests."""
+    late = np.where(
+        local_dates(spring) >= np.datetime64("2023-03-23"), np.random.default_rng(9).normal(size=len(spring)), np.nan
+    )
+    data = spring.assign(late=late)
+    stored = {}
+    for rule in (None, "fit"):
+        path = tmp_path / str(rule) / "m.jsonl"
+        ols(NO_LEVEL + ["late"], binary_mask=rule).run(data, S, E, horizon=2, save_to=str(path))
+        stored[rule] = (lines(path), manifest_of(path))
+    assert stored["fit"][0] == stored[None][0]
+    assert any('"no_finite_training_rows"' in line for line in stored["fit"][0])
+    assert stored[None][1]["binary_masks"] and "binary_masks" not in stored["fit"][1]
+
+
+def test_scale_binary_ignores_the_rule():
+    """`StandardScaler(scale_binary=True)` scales every column whatever the mask, so `"fit"` is the default to the bit."""
+    data = market("1h", "2023-01-20", 85, "2023-03-24")
+    scaler = {"name": "standard", "params": {"scale_binary": True}}
+    own, plain = (
+        keyed(ols(scaler=scaler, binary_mask=rule).run(data, S, E, horizon=2)._results) for rule in ("fit", None)
+    )
+    assert own == plain
