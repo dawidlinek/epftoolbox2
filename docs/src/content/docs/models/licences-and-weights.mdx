@@ -19,7 +19,7 @@ until when, the runtime packages its numbers depend on, and the weight files wit
 - **The manifest** records the card, the runtime versions and the weights' hashes; a resume with another runtime version or other
   weights is refused.
 - **Every report** says what each model is under: `report.provenance()`, a "Model provenance" block in the terminal exporter,
-  `provenance.csv` next to the `CsvExporter` file and a "Provenance" sheet in the `ExcelExporter` workbook.
+  `<stem>.provenance.csv` next to the `CsvExporter` file and a "Provenance" sheet in the `ExcelExporter` workbook.
 
 A core model has no card, and none of this changes anything of its runs, files or reports. No family shipped in this release
 has a card yet: the in-context, foundation and neural-network families of the next releases bring theirs, and a family of your own

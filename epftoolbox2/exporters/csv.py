@@ -37,7 +37,7 @@ class CsvExporter(Exporter):
         column next to it gives that period's local start time as HH:MM.
 
         A report with a model that has a card (licence, corpus, weights: see the docs page
-        Licences and Weights) also writes `report.provenance()` to `provenance.csv` next to
+        Licences and Weights) also writes `report.provenance()` to `<stem>.provenance.csv` next to
         `path`; without one nothing more is written.
         """
         self.path = Path(path)
@@ -46,8 +46,9 @@ class CsvExporter(Exporter):
 
     @property
     def provenance_path(self) -> Path:
-        """Where a report with a carded model's provenance goes: `provenance.csv` next to `path`."""
-        return self.path.parent / "provenance.csv"
+        """Where a report with a carded model's provenance goes: `<stem>.provenance.csv` next to `path` (`forecasts.csv` ->
+        `forecasts.provenance.csv`), so two exporters in one folder don't share one, and none overwrites its own file."""
+        return self.path.with_name(f"{self.path.stem}.provenance.csv")
 
     def export(self, report: EvaluationReport) -> None:
         if not report.refs:

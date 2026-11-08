@@ -208,7 +208,7 @@ an issue day it didn't sample.
   licence; `epf weights list` and `epf weights verify` show and re-hash the cache. A carded model's manifest adds `card` (provenance)
   and `runtime` and `weights` (compared: another runtime version, commit, device type, thread count or weight hash refuses a resume).
   `report.provenance()` lists each carded model's licence, weights, runtime and the contamination verdict of each window (`clean`,
-  `clean (released before)`, `possibly contaminated`, or the card's own), and the terminal, CSV (`provenance.csv`) and Excel
+  `clean (released before)`, `possibly contaminated`, or the card's own), and the terminal, CSV (`<stem>.provenance.csv` next to its file) and Excel
   ("Provenance" sheet) exporters print it. `epftoolbox2.verify()` adds a table of extras and of the weights in the cache.
   `BaseModel._engine_ok = False` keeps a family out of the engine whatever it defines. **Nothing of the core models moves**: no
   shipped model has a card, so their records, manifests, tables and exporter files are as before. See

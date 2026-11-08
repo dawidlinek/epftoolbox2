@@ -78,6 +78,12 @@ Every table has a `forecasts` column: the number of forecasts of the model in th
 has fewer in a group than another is visible in the table. When the models of a table differ in their counts the exporter also emits the
 `UserWarning` of the report: see [Forecasts per group](/epftoolbox2/model-pipeline/results/#forecasts-per-group).
 
+## Model Provenance
+
+A report with a model that has a card (see [Licences and Weights](/epftoolbox2/models/licences-and-weights/)) prints a "Model
+provenance" table before the metric tables, whatever `show` lists: each such model's licence, attribution, weights, runtime and
+contamination verdicts. Without one nothing more is printed.
+
 ## In Pipeline
 
 ```python

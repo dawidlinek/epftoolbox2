@@ -805,7 +805,7 @@ def test_the_exporters_print_provenance_only_for_a_carded_model(
     core = tmp_path / "core"
     out = export(OLSModel(PREDICTORS, WINDOW, name="ols"), where=core)
     assert "Model provenance" not in out
-    assert not (core / "provenance.csv").exists()
+    assert not (core / "forecasts.provenance.csv").exists()
     assert load_workbook(core / "report.xlsx").sheetnames == ["Summary"]
 
     both = tmp_path / "both"
@@ -813,7 +813,7 @@ def test_the_exporters_print_provenance_only_for_a_carded_model(
     assert "Model provenance" in out
     for text in ("fake-fm", LICENCE, "2026 - Fake Labs", "possibly contaminated", REFERENCE_SHA[:12]):
         assert text in out
-    table = pd.read_csv(both / "provenance.csv")
+    table = pd.read_csv(both / "forecasts.provenance.csv")
     assert list(table.columns) == PROVENANCE_COLUMNS and list(table["model"]) == ["carded"]
     assert table.loc[0, "licence"] == LICENCE
     book = load_workbook(both / "report.xlsx")
@@ -1223,3 +1223,20 @@ def test_epf_weights_verify_fails_on_an_unlisted_file(fetched, monkeypatch, caps
     assert epf(monkeypatch, "weights", "verify") == 1
     out = said(capsys)
     assert "unlisted" in out and "pytorch_model.bin" in out and "1 file(s) no fetch recorded" in out
+
+
+def test_each_csv_exporter_names_its_provenance_file_after_its_own(data, fetched, tmp_path, no_network):
+    """Two exporters in one folder each write their own, and one whose file is called provenance.csv keeps its forecasts."""
+    pipeline = ModelPipeline().add_model(carded())
+    pipeline.add_exporter(CsvExporter(str(tmp_path / "a.csv")))
+    pipeline.add_exporter(CsvExporter(str(tmp_path / "provenance.csv")))
+    pipeline.run(data, test_start=TEST[0], test_end=TEST[1], horizon=1)
+    for stem in ("a", "provenance"):
+        assert list(pd.read_csv(tmp_path / f"{stem}.provenance.csv")["model"]) == ["carded"]
+    assert "carded_prediction" in pd.read_csv(tmp_path / "provenance.csv").columns  # the forecasts, not overwritten
+    assert sorted(p.name for p in tmp_path.glob("*.csv")) == [
+        "a.csv",
+        "a.provenance.csv",
+        "provenance.csv",
+        "provenance.provenance.csv",
+    ]
