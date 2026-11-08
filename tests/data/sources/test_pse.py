@@ -15,6 +15,7 @@ from epftoolbox2.data.sources import PseSource
 from epftoolbox2.data.sources.pse import DATASET_COLUMNS, FLOW_COLUMNS, PseApiError
 from epftoolbox2.pipelines.data_pipeline import COMPONENT_REGISTRY, DataPipeline
 from tests.pse_fake import (
+    bare_source,
     API,
     AUTUMN,
     SPRING,
@@ -471,7 +472,7 @@ LIVE_DATASETS = ["kse-load", "his-wlk-cal", "csdac-pln", "rce-pln", "pdgsz", "pr
     [("2025-10-26", 100, "2025-10-25 22:00"), ("2026-03-29", 92, "2026-03-28 23:00")],
 )
 def test_live_dst_days_have_92_or_100_quarters_of_every_dataset(day, quarters, first_utc):
-    source = PseSource(datasets=LIVE_DATASETS, prefix="")
+    source = bare_source(LIVE_DATASETS)
     start = utc(first_utc)
 
     df = source.fetch(start, start + pd.Timedelta(minutes=15 * quarters))
@@ -487,7 +488,7 @@ def test_live_dst_days_have_92_or_100_quarters_of_every_dataset(day, quarters, f
 
 @pytest.mark.integration
 def test_live_the_index_is_the_start_of_the_period_pse_stamps_with_its_end():
-    source = PseSource(datasets=["csdac-pln"], prefix="")
+    source = bare_source(["csdac-pln"])
     raw = source._request_table("csdac-pln", pd.Timestamp("2026-03-29"), pd.Timestamp("2026-03-29"))
     first, last = raw[0], raw[-1]
 
@@ -502,7 +503,7 @@ def test_live_the_index_is_the_start_of_the_period_pse_stamps_with_its_end():
 
 @pytest.mark.integration
 def test_live_a_range_before_the_history_is_empty_and_a_year_pages_through_nextlink():
-    source = PseSource(datasets=["csdac-pln"], prefix="")
+    source = bare_source(["csdac-pln"])
 
     assert source.fetch(utc("2020-01-01"), utc("2020-01-03")).empty
     year = source.fetch(utc("2025-01-01"), utc("2026-01-01"))

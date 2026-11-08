@@ -192,7 +192,24 @@ class PseSource(DataSource):
             for dataset in self.datasets:
                 if not self._columns_of(dataset):
                     raise ValueError(f"No column of the dataset {dataset!r} is selected in columns={self.columns}")
+        self._check_names_against_default_rules()
         return True
+
+    def _check_names_against_default_rules(self) -> None:
+        """Refuse a prefix under which a column would silently get a built-in default rule. Outside a ``Workflow`` no source
+        rules are applied, so ``load_actual`` would be ENTSO-E's ``realised 1h`` and ``holiday_load_actual`` the calendar's
+        static ``holiday_*`` rule (known in advance)."""
+        from epftoolbox2.information_set import InformationSet
+
+        info = InformationSet("11:45", MARKET_ZONE)
+        for name in self.output_columns():
+            for predictor in (name, f"{name}_d-1"):
+                resolved = info.resolve(predictor)
+                if resolved.layer == "defaults":
+                    raise ValueError(
+                        f"PseSource column {name!r} would get the built-in default rule for {resolved.base!r}: "
+                        f"{resolved.rule.describe()}. Choose another prefix (the default is 'pse')."
+                    )
 
     def _columns_of(self, dataset: str) -> List[str]:
         """The output columns (unprefixed) of one dataset, in the dataset's order."""

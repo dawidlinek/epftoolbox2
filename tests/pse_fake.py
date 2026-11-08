@@ -159,9 +159,17 @@ def answer(body=None, status=200, headers=None, text=""):
     return response
 
 
+def bare_source(dataset_names, **kwargs) -> PseSource:
+    """A source whose columns have PSE's own names, for tests of parsing and rules. The constructor refuses such a prefix
+    (the names would get ENTSO-E's default rules), so the prefix is cleared after it. A different prefix stays as given."""
+    wanted = kwargs.pop("prefix", "")
+    source = PseSource(datasets=dataset_names, prefix=wanted or "pse", **kwargs)
+    source.prefix = wanted
+    return source
+
+
 def make_source(tables, dataset_names, monkeypatch=None, **kwargs):
-    kwargs.setdefault("prefix", "")  # the columns by PSE's names; the default prefix is tested on its own
-    source = PseSource(datasets=dataset_names, **kwargs)
+    source = bare_source(dataset_names, **kwargs)
     source.session.get = FakeApi(tables)
     source.logger = Mock()
     return source

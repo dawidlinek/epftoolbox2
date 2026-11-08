@@ -20,7 +20,7 @@ from epftoolbox2.information_set import Availability, InformationSet, RuleChain,
 from epftoolbox2.models import OLSModel
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
-from tests.pse_fake import WARSAW, local_day_starts, make_source, table
+from tests.pse_fake import WARSAW, bare_source, local_day_starts, make_source, table
 
 EVERY_DATASET = ["kse-load", "his-wlk-cal", "csdac-pln", "rce-pln", "pdgsz", "przeplywy-mocy"]
 EXPECTED = {  # column: (time, days_before, class)
@@ -33,9 +33,8 @@ EXPECTED = {  # column: (time, days_before, class)
 
 
 def every_column_source(**kwargs):
-    kwargs.setdefault("prefix", "")  # PSE's own names; the default prefix has its tests below
     columns = [c for d in EVERY_DATASET for c in DATASET_COLUMNS[d]]
-    return PseSource(datasets=EVERY_DATASET, columns=columns, **kwargs)
+    return bare_source(EVERY_DATASET, columns=columns, **kwargs)
 
 
 def test_every_column_has_the_rule_of_its_table():
@@ -71,7 +70,7 @@ def test_without_a_prefix_pse_load_actual_takes_the_source_rule_only_where_sourc
     """Why the prefix defaults to `pse`: `load_actual` is the name of ENTSO-E's column too, and outside a `Workflow` (a plain
     `InformationSet`, `ModelPipeline(issue_time=...)`) no source rules are applied, so the default `realised 1h` would read."""
     plain = InformationSet().resolve("load_actual_d-1")
-    info = InformationSet("11:45", WARSAW).with_source_rules([PseSource(datasets=["kse-load"], prefix="")])
+    info = InformationSet("11:45", WARSAW).with_source_rules([bare_source(["kse-load"])])
     column = info.resolve("load_actual_d-1")
 
     assert (plain.layer, plain.rule.kind) == ("defaults", "realised")
@@ -91,6 +90,33 @@ def test_no_default_column_name_resolves_to_a_built_in_default_rule(dataset):
     assert set(source_rules([source])) == set(source.output_columns())
 
 
+ALL_NAMES_SELECTION = ["kse-load", "his-wlk-cal", "przeplywy-mocy"]
+
+
+@pytest.mark.parametrize(
+    "prefix, column, rule",
+    [
+        ("", "load_actual", "known 1h after"),  # ENTSO-E's A65 rule
+        ("holiday", "holiday_load_actual", "known in advance"),  # the calendar's `holiday_*`
+        ("generation", "generation_load_actual", "known 1h after"),  # A75's `generation_*`
+        ("is_2", "is_2_load_actual", "known in advance"),  # the calendar's `is_[0-9]*`
+    ],
+)
+def test_a_prefix_under_which_a_column_gets_a_built_in_default_rule_is_refused(prefix, column, rule):
+    with pytest.raises(
+        ValueError, match=f"column '{column}' would get the built-in default rule.*{rule}.*another prefix"
+    ):
+        PseSource(datasets=ALL_NAMES_SELECTION, prefix=prefix)
+
+
+def test_the_default_prefix_and_other_clear_ones_are_accepted():
+    for prefix in ("pse", "pl_tso", "psereports"):
+        source = PseSource(
+            datasets=list(DATASET_COLUMNS), columns=list(c for v in DATASET_COLUMNS.values() for c in v), prefix=prefix
+        )
+        assert all(name.startswith(f"{prefix}_") for name in source.output_columns())
+
+
 def test_the_rule_of_pdgsz_follows_the_source_s_cutoff():
     for cutoff in ("17:30", "19:00", "22:15"):
         rule = source_rules([PseSource(datasets=["pdgsz"], pdgsz_cutoff=cutoff)])["pse_usage_fcst"]
@@ -105,7 +131,7 @@ def test_the_rule_of_pdgsz_follows_the_source_s_cutoff():
 
 def test_the_load_forecast_is_known_from_10_00_on_the_day_before():
     index = pd.date_range("2026-03-10", "2026-04-10", freq="1h", tz=WARSAW, inclusive="left")
-    source = PseSource(datasets=["kse-load", "csdac-pln"], prefix="")
+    source = bare_source(["kse-load", "csdac-pln"])
 
     def issue(clock):
         info = InformationSet(clock, WARSAW).with_source_rules([source])
@@ -161,12 +187,8 @@ def test_a_forecast_issued_at_1145_sees_the_next_day_s_load_forecast_and_not_the
 def test_the_next_days_actual_is_known_at_13_00_on_the_day_after_not_before():
     """The rule in elapsed time: an issue at 13:15 sees D-1's actual, one at 12:45 does not."""
     index = pd.date_range("2026-03-10", "2026-04-10", freq="1h", tz=WARSAW, inclusive="left")
-    after = InformationSet("13:15", WARSAW).with_source_rules(
-        [PseSource(datasets=["kse-load", "csdac-pln"], prefix="")]
-    )
-    before = InformationSet("12:45", WARSAW).with_source_rules(
-        [PseSource(datasets=["kse-load", "csdac-pln"], prefix="")]
-    )
+    after = InformationSet("13:15", WARSAW).with_source_rules([bare_source(["kse-load", "csdac-pln"])])
+    before = InformationSet("12:45", WARSAW).with_source_rules([bare_source(["kse-load", "csdac-pln"])])
 
     assert late(after, ["load_actual_d-1"], "1h", index, "2026-03-16", "2026-04-05") == {}
     assert late(before, ["load_actual_d-1"], "1h", index, "2026-03-16", "2026-04-05") == {
@@ -181,9 +203,7 @@ def test_a_user_rule_chain_for_a_pse_column_still_wins():
             Availability.published("14:30", -1, WARSAW).during(valid_from="2026-10-08"),
         )
     )
-    info = InformationSet("11:45", WARSAW, rules={"load_actual": chain}).with_source_rules(
-        [PseSource(datasets=["kse-load"], prefix="")]
-    )
+    info = InformationSet("11:45", WARSAW, rules={"load_actual": chain}).with_source_rules([bare_source(["kse-load"])])
 
     assert info.resolve("load_actual_d-1").layer == "rules"
 
