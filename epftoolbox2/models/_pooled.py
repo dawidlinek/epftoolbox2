@@ -21,6 +21,7 @@ stack is that zone's rows and nothing is added, so a record is the model's own t
 import copy
 import datetime
 import multiprocessing
+from pathlib import Path
 import sys
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -33,6 +34,7 @@ from rich.progress import Progress
 
 from ..information_set import InformationSet, InformationSetError, frame_first_day, over_time
 from ..results.availability import listing_rows, merge_listings
+from ..results.manifest import manifest_path
 from ..results.ref import ModelResultRef
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
@@ -537,14 +539,33 @@ def run_pooled_job(
 def run_pooled(pooled: PooledModel, zones: Dict[str, Tuple[BaseModel, Dict[str, Any]]]) -> Dict[str, ModelResultRef]:
     """Run a pooled model over its zones, `zones[zone]` = (that zone's member, what its `run` is called with), and return each
     zone's ref. Each member's `_prepare_run` and `_finish_run` are its own run's: its store, manifest, skips and ref. A zone
-    whose preparation raises stops the run before any fit, its stores closed."""
+    whose preparation raises stops the run before any fit, its stores closed, the error naming the zone.
+
+    The zones whose results have a manifest already are prepared first: a resume's refusal (`ManifestMismatchError`) comes from
+    them, before any zone without results has a manifest written that records the others' data. `ModelPipeline` checks the
+    rest of what a preparation refuses (the frames, the days) for every zone before any. The states keep the zones' order,
+    which is the order of the stack."""
+    prepared: Dict[str, Tuple[BaseModel, _RunState]] = {}
     states: List[Tuple[str, BaseModel, _RunState]] = []
+    on_file = [
+        zone
+        for zone, (_, arguments) in zones.items()
+        if arguments.get("save_to") and manifest_path(Path(arguments["save_to"])).exists()
+    ]
     try:
-        for zone, (member, arguments) in zones.items():
-            states.append((zone, member, member._prepare_run(**run_arguments(**arguments))))
+        for zone in [*on_file, *(zone for zone in zones if zone not in on_file)]:
+            member, arguments = zones[zone]
+            try:
+                prepared[zone] = (member, member._prepare_run(**run_arguments(**arguments)))
+            except (ValueError, TypeError) as exc:
+                named = _named(zone, exc)
+                if named is exc:
+                    raise
+                raise named from exc
+        states = [(zone, *prepared[zone]) for zone in zones]
         _execute(pooled, states)
     except BaseException:
-        _close(states)
+        _close(states or [(zone, *found) for zone, found in prepared.items()])
         raise
     refs: Dict[str, ModelResultRef] = {}
     error: Optional[BaseException] = None
@@ -557,6 +578,16 @@ def run_pooled(pooled: PooledModel, zones: Dict[str, Tuple[BaseModel, Dict[str, 
     if error is not None:
         raise error
     return refs
+
+
+def _named(zone: str, exc: BaseException) -> BaseException:
+    """`exc` with its zone named first, of the same type where it can be built from a message alone."""
+    if f"zone {zone!r}" in str(exc):
+        return exc
+    try:
+        return type(exc)(f"zone {zone!r}: {exc}")
+    except Exception:
+        return exc
 
 
 def _close(states: List[Tuple[str, BaseModel, _RunState]]) -> None:

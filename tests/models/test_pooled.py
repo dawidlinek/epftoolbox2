@@ -580,3 +580,30 @@ def test_pooled_horizons_need_one_length_per_period_before_any_fit(tmp_path):
             frames, test=("2023-03-24", "2023-03-25"), horizon=2, save_dir=str(tmp_path)
         )
     assert not any(tmp_path.rglob("*.jsonl"))  # refused before any record
+
+
+def test_every_zone_is_checked_before_any_zone_s_files_are_written(tmp_path):
+    def pipeline():
+        return (
+            ModelPipeline()
+            .add_model(NaiveModel(predictors=["load_d+{horizon}"], name="tso", known_only=False))
+            .add_model(PooledModel(OLSModel(predictors=PREDICTORS, training_window=40, name="m")))
+        )
+
+    run = dict(test=FRIDAYS, horizons=[1, 2], freq="1D", issue_days=["friday"], save_dir=str(tmp_path))
+    short = {"PL": daily("PL"), "FI": with_daily_columns(hourly("FI", seed=1).iloc[: 100 * 24]).at_time("12:00")}
+    with pytest.raises(ValueError, match="zone 'FI': 'test_end' date '2023-04-28' is not in the data"):
+        pipeline().run(short, **run)
+    assert not any(tmp_path.rglob("*.json*"))  # no manifest and no record, PL's plain model's included
+    pipeline().run({"PL": daily("PL"), "FI": daily("FI", seed=1)}, **run)  # FI's data fetched through the test: it runs
+
+    mixed = {"PL": daily("PL"), "FI": hourly("FI", seed=1)}
+    with pytest.raises(ValueError, match="zone 'FI': Data rows are most commonly 1 h apart"):
+        pipeline().run(mixed, test=FRIDAYS, horizons=[1, 2], freq="1D", issue_days=["friday"])
+
+
+def test_a_refused_resume_writes_no_manifest_in_a_new_zone(tmp_path):
+    run_pooled(tmp_path, {"PL": daily("PL")})
+    with pytest.raises(ManifestMismatchError, match="zone 'PL'"):
+        run_pooled(tmp_path, {"FI": daily("FI", seed=1), "PL": daily("PL")})  # FI first in the stack, PL on file
+    assert not (tmp_path / "FI").exists() or not any((tmp_path / "FI").glob("*.manifest.json"))

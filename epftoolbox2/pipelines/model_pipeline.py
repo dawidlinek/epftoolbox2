@@ -1,7 +1,9 @@
+from contextlib import contextmanager
 from dataclasses import replace
-from typing import Callable, List, Mapping, Optional, Sequence, Tuple, Union, Dict, Any
+from typing import Callable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union, Dict, Any
 from pathlib import Path
 import copy
+import datetime
 import importlib
 import json
 import re
@@ -85,6 +87,43 @@ logger = get_logger(__name__)
 
 # A zone of `run(data={zone: frame})` names a folder of `save_dir`.
 _ZONE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+@contextmanager
+def _zone_errors(zone: str) -> Iterator[None]:
+    """A ValueError or TypeError raised for one zone of a run over several, with the zone named first ("zone 'FI': ..."),
+    of the same type where it can be built from a message alone."""
+    try:
+        yield
+    except (ValueError, TypeError) as exc:
+        if f"zone {zone!r}" in str(exc):
+            raise
+        try:
+            named = type(exc)(f"zone {zone!r}: {exc}")
+        except Exception:
+            raise exc from None
+        raise named from exc
+
+
+def _check_days_in_frame(
+    frame: pd.DataFrame, windows: Optional[RunWindows], test_start: Optional[str], test_end: Optional[str]
+) -> None:
+    """A ValueError unless every first and last day the run names (each window's, or the test's) is a local date of `frame`, as
+    `BaseModel._resolve_day` requires: checked for every zone before any zone's files are written."""
+    named = [(f"{name} start", start) for name, (start, _) in windows.periods] if windows is not None else []
+    named += [(f"{name} end", end) for name, (_, end) in windows.periods] if windows is not None else []
+    if windows is None:
+        named = [("test_start", test_start), ("test_end", test_end)]
+    if not len(frame.index):
+        raise ValueError("the frame has no rows")
+    local = frame.index.tz_localize(None) if frame.index.tz is not None else frame.index
+    dates = set(local.normalize().date)
+    for label, day in named:
+        if day is not None and datetime.date.fromisoformat(str(day)) not in dates:
+            last = local.max().date()
+            raise ValueError(
+                f"'{label}' date '{day}' is not in the data (data ends at {last}). Fetch data through at least '{day}'."
+            )
 
 
 COMPONENT_REGISTRY = {
@@ -567,16 +606,20 @@ class ModelPipeline:
         checks: Dict[Tuple[str, str], Any] = {}
         for zone in zones:
             frame, info = frames[zone], infos[zone]
-            shared = _RunChecks(frame)
-            for model in plain:
-                plan = model._plan_predictors(
-                    frame, target, horizon, freq, info, check_start, check_end, shared=shared, **common
-                )
-                checks[(zone, model.name)] = model._checked_inputs(
-                    frame, target, horizon, freq, info, check_start, check_end, plan=plan, shared=shared, **common
-                )
-                if plan is not None:
-                    plans[(zone, model.name)] = plan
+            with _zone_errors(zone):
+                # What `_prepare_run` would refuse after an earlier zone's files were written: every day the run names
+                # must be a local date of each zone's frame.
+                _check_days_in_frame(frame, windows, check_start, check_end)
+                shared = _RunChecks(frame)
+                for model in plain:
+                    plan = model._plan_predictors(
+                        frame, target, horizon, freq, info, check_start, check_end, shared=shared, **common
+                    )
+                    checks[(zone, model.name)] = model._checked_inputs(
+                        frame, target, horizon, freq, info, check_start, check_end, plan=plan, shared=shared, **common
+                    )
+                    if plan is not None:
+                        plans[(zone, model.name)] = plan
         members: Dict[str, Dict[str, BaseModel]] = {}
         member_frames: Dict[str, Dict[str, pd.DataFrame]] = {}
         for model in pooled:
@@ -586,14 +629,15 @@ class ModelPipeline:
             for zone in zones:
                 member = member_of(model, model.identity(zones))
                 check_horizon_lists(model, member, freq, horizons)
-                frame = with_missing_columns(model, zone, frames[zone], needed_columns(member, freq, horizons))
-                shared = _RunChecks(frame)
-                member._plan_predictors(
-                    frame, target, horizon, freq, infos[zone], check_start, check_end, shared=shared, **common
-                )
-                by_zone[zone] = member._checked_inputs(
-                    frame, target, horizon, freq, infos[zone], check_start, check_end, shared=shared, **common
-                )
+                with _zone_errors(zone):
+                    frame = with_missing_columns(model, zone, frames[zone], needed_columns(member, freq, horizons))
+                    shared = _RunChecks(frame)
+                    member._plan_predictors(
+                        frame, target, horizon, freq, infos[zone], check_start, check_end, shared=shared, **common
+                    )
+                    by_zone[zone] = member._checked_inputs(
+                        frame, target, horizon, freq, infos[zone], check_start, check_end, shared=shared, **common
+                    )
                 members[model.name][zone], member_frames[model.name][zone] = member, frame
             by_zone = shared_fit_checks(
                 model,
@@ -667,15 +711,18 @@ class ModelPipeline:
         refs: Dict[str, Dict[str, ModelResultRef]] = {zone: {} for zone in zones}
         for zone in zones:
             frame = frames[zone]
-            if self.engine == ENGINE_ON:
-                capable = [m for m in plain if m._engine_capable(plans.get((zone, m.name)), forecast_only)]
-                for group in engine_groups(capable):
-                    columns = {model.name: checks[(zone, model.name)].used_predictors for model in group}
-                    group_arguments = {model.name: run_arguments(**arguments(zone, model, frame)) for model in group}
-                    refs[zone].update(run_group(group, group_arguments, columns))
-            for model in plain:
-                if model.name not in refs[zone]:
-                    refs[zone][model.name] = model.run(**arguments(zone, model, frame))
+            with _zone_errors(zone):
+                if self.engine == ENGINE_ON:
+                    capable = [m for m in plain if m._engine_capable(plans.get((zone, m.name)), forecast_only)]
+                    for group in engine_groups(capable):
+                        columns = {model.name: checks[(zone, model.name)].used_predictors for model in group}
+                        group_arguments = {
+                            model.name: run_arguments(**arguments(zone, model, frame)) for model in group
+                        }
+                        refs[zone].update(run_group(group, group_arguments, columns))
+                for model in plain:
+                    if model.name not in refs[zone]:
+                        refs[zone][model.name] = model.run(**arguments(zone, model, frame))
         for model in pooled:
             ran = run_pooled(
                 model,
