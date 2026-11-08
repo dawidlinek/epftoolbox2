@@ -47,6 +47,7 @@ Rules to know before using the library:
 - [CalendarSource](docs/src/content/docs/data-sources/calendar.mdx): holidays, school holidays, weekday, hour, month and daylight features
 - [CsvSource](docs/src/content/docs/data-sources/csv.md): time series from a CSV file
 - [EpftoolboxBenchmarkSource](docs/src/content/docs/data-sources/epftoolbox-benchmark.mdx): the five benchmark datasets (NP, PJM, FR, BE, DE) of Lago et al. (2021)
+- [PseSource](docs/src/content/docs/data-sources/pse.mdx): the Polish TSO's reports API without a key: load, SDAC price in PLN, wind and PV, flows, with availability rules
 
 ## Transformers
 

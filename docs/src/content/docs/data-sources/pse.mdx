@@ -1,0 +1,121 @@
+---
+title: PseSource
+description: Polish TSO (PSE) reports API, no key - load, SDAC price, wind and PV, flows, with 15-minute periods
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Loads tables of the Polish transmission system operator's reports API (`https://api.raporty.pse.pl`): the national load and PSE's day-ahead forecast of it, demand with wind and PV generation, the SDAC price of the Polish bidding zone in PLN, the prosumer net-billing price, cross-border flows and PSE's recommended-usage periods. **No API key.** Source: PSE.
+
+<Aside type="caution">
+  The API's terms of use are not published. Don't redistribute the data in bulk and don't commit it to a repository: the library's tests use synthetic answers, not PSE data.
+</Aside>
+
+## Basic Usage
+
+```python
+from epftoolbox2.pipelines import DataPipeline
+from epftoolbox2.data.sources import PseSource
+from epftoolbox2.data.transformers import TimezoneTransformer, ResampleTransformer, LagTransformer
+
+pipeline = (
+    DataPipeline()
+    .add_source(PseSource(datasets=["kse-load", "csdac-pln"]))
+    .add_transformer(TimezoneTransformer(target_tz="Europe/Warsaw"))
+    .add_transformer(ResampleTransformer(freq="1h"))
+    .add_transformer(LagTransformer(columns=["pse_csdac_pln", "pse_load_actual"], lags=[1, 2, 7], freq="day"))
+    .add_transformer(LagTransformer(columns=["pse_load_fcst"], lags=[-1], freq="day"))
+)
+df = pipeline.run("2025-01-01", "2025-03-01")
+# pse_csdac_pln, pse_load_actual, pse_load_fcst, pse_csdac_pln_d-1, ..., pse_load_actual_d-2, ..., pse_load_fcst_d+1
+```
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `datasets` | list[str] \| None | No | `["kse-load", "csdac-pln"]` | Datasets to load, from the table below |
+| `columns` | list[str] \| None | No | `None` | Columns to keep. `None` = every column of the datasets, for `his-wlk-cal` `demand`, `wi`, `pv` and `jg`. A column of a dataset that is not in `datasets` raises |
+| `prefix` | str | No | `"pse"` | Column prefix, `{prefix}_{column}`. Every column is prefixed by default, see below |
+| `pdgsz_cutoff` | str | No | `"19:00"` | `"HH:MM"` in Europe/Warsaw on the day before the delivery day: `pdgsz` keeps the latest version of an hour stamped at or before it. Part of the cache key; the rule of `usage_fcst` is published at this time |
+
+**Why a prefix by default.** PSE's `load_actual` has the name of ENTSO-E's column, and the built-in default rules are by name. Only a `Workflow` applies a source's rules (`with_source_rules`); a plain `InformationSet` or `ModelPipeline(issue_time=...)` would read an unprefixed PSE `load_actual` with the ENTSO-E rule (known 1 h after the period), while PSE publishes it at 13:00 on D+1. With the prefix no PSE name falls to a default rule. The tables below name the columns without the prefix; with the default they are `pse_load_actual`, `pse_csdac_pln`, ... The constructor refuses a prefix under which a column (or its `_d-1` form) would resolve to a built-in default rule, naming the column and the rule, for example `prefix=""` (ENTSO-E's `load_actual`), `"holiday"`, `"generation"` or `"is_2"` (the calendar and generation patterns); choose another prefix.
+
+`output_columns()` lists the names `fetch` returns. The output follows the dataset order of `datasets`, and within a dataset the order of the table.
+
+## Datasets and columns
+
+| Dataset | Columns | Meaning |
+|---------|---------|---------|
+| `kse-load` | `load_actual`, `load_fcst` | National load (MW) and PSE's day-ahead forecast of it |
+| `his-wlk-cal` | `demand`, `wi`, `pv`, `jg` | Demand, wind, PV and generation (MW; `jg` is PSE's generation field). With `columns` also `jga`, `jgm`, `jgo`, `jgm1`, `jgm2`, `jgw1`, `jgw2`, `jgz1`, `jgz2`, `jgz3`, `jnwrb`, `swm_p`, `swm_np`, under PSE's field names |
+| `csdac-pln` | `csdac_pln` | SDAC price of the Polish bidding zone in PLN/MWh: the EUR price times the day's EUR/PLN rate |
+| `rce-pln` | `rce_pln` | Market energy price (RCE) of the prosumer net-billing scheme, PLN/MWh |
+| `pdgsz` | `usage_fcst` | PSE's recommended-usage code of each hour. Hourly; see below |
+| `przeplywy-mocy` | `flow_de_pl`, `flow_pl_de`, `flow_cz_pl`, `flow_pl_cz`, `flow_sk_pl`, `flow_pl_sk`, `flow_ua_pl`, `flow_pl_ua`, `flow_lt_pl`, `flow_pl_lt`, `flow_se_pl`, `flow_pl_se` | Cross-border flows per section, in the sign PSE publishes |
+
+<Aside type="caution">
+  `rce_pln` is **not** the day-ahead price. It is another series: in a comparison its correlation with `csdac_pln` was 0.98 and the mean absolute difference 43 PLN/MWh. Use `csdac_pln` as the SDAC price and as a forecast target.
+</Aside>
+
+The history of the tables starts in mid-June 2024 for load, SDAC, RCE, generation and `pdgsz`. A range before it returns no rows (with a warning). Values PSE has not published yet are NaN.
+
+PSE's tables not offered yet, because their publication lag changed during the history or they have no usable timing: the balancing tables (`sk`, `cor`, `energy-prices`), `poze-redoze` (curtailment, mostly empty) and `unav-pk5l` (unavailability, whose archive is the latest revision only).
+
+## Time index
+
+- PSE stamps a 15-minute row with the **end** of its period: `dtime` (local) and `dtime_utc`, with `period` and `period_utc` giving both ends. The source reads `dtime_utc` and moves it back 15 minutes, so the index is the UTC **start** of the period, as in every source of the library. The row of 00:00 - 00:15 Warsaw time is at 00:00 local.
+- A 23-hour day has 92 rows and a 25-hour day 100; there is no gap or repeat in UTC. Convert with `TimezoneTransformer("Europe/Warsaw")`.
+- `business_date` is the local date of the period's start. The source asks for the local days that hold `[start, end)` and clips to the range, so a sub-range gives the values of a larger one.
+- `pdgsz` is hourly and stamps the hour's start. Its value is repeated over the four quarter-hours of the hour, so all datasets share the 15-minute grid. `ResampleTransformer(freq="1h")` turns the frame into an hourly one (mean).
+
+### `pdgsz`: the version stamped by the cutoff
+
+The table keeps every version of an hour (`valid_from_ts`, `valid_to_ts`, a UTC publication stamp). The source keeps, per hour, the **latest version stamped at or before `pdgsz_cutoff`** (Warsaw time) on the day before the delivery day, and an hour with none is NaN. The table has had two regimes:
+
+- **Until about spring 2025** (seen from June 2024 to at least 2025-03-30): one version per hour, written on the delivery day itself, about 22:20 to 23:35. No version exists on D-1, so these hours are **NaN under any cutoff on D-1**: the value was not known the day before, and reading it would be look-ahead.
+- **From June 2025** (seen from 2025-06-02): 35 to 44 versions per hour, the first about 15:51 to 15:58 on D-1. A quarter of the hours get their first version after 16:00, the latest at 18:52 in a year, hence the default cutoff 19:00.
+
+Between those dates check how many hours are NaN (`df["pse_usage_fcst"].isna().mean()`) before you use the column. The kept version is a `snapshot`: the table as it stood at the cutoff.
+
+### `publication_ts` is not used
+
+Every PSE row has a `publication_ts`, but it is the stamp of the **last write**: rows reloaded in bulk show the reload time (`kse-load` rows were stamped after the end of D+1 on 37.7 % of business days). The source doesn't use it, except for the stamps of the `pdgsz` versions, which are written one by one, and the other rules below don't read it.
+
+## Availability rules
+
+`InformationSet.with_source_rules` (so every `Workflow`) gives the columns of a `PseSource` these rules, in `Europe/Warsaw` and with the prefix. A delivery day D is known:
+
+| Column | Available from | [Class](/epftoolbox2/model-pipeline/information-set/#vintage-classes) |
+|--------|----------------|-------|
+| `load_fcst` | 10:00 on D-1, the ENTSO-E rule for the same day-ahead forecast. Not measured: the row stamp can't give a first-seen time, since the rows also hold `load_actual` and are rewritten. It is the conservative choice until first-seen times are measured | `last_write_stamp` |
+| `csdac_pln`, `rce_pln` | 15:00 on D-1 (over 365 days: median 13:47, 99th percentile 14:59, latest 18:00 on D-1; sample rows stamped about 13:54 and never rewritten) | `snapshot` |
+| `usage_fcst` | `pdgsz_cutoff` on D-1 (19:00 by default), built from the parameter so the rule and the data can't disagree | `snapshot` |
+| `load_actual`, the `his-wlk-cal` columns, the `flow_*` columns | 13:00 on D+1 | `last_write_stamp` |
+
+So a forecast issued at 11:45 on D sees `pse_load_fcst_d+1`, the prices of D, `pse_csdac_pln_d-1`, and the actuals up to `pse_load_actual_d-2`; it doesn't see `pse_load_actual_d-1` (known at 13:00 on D).
+
+A backtest reads the last-written value of a `last_write_stamp` column, not what was out at the issue time, so a model that reads one can look better than it would have been live (see [vintage classes](/epftoolbox2/model-pipeline/information-set/#vintage-classes)).
+
+## Requests and caching
+
+- One request per dataset and 31 local days, with `$filter` on `business_date`, `$first=10000` rows a page and `nextLink` followed from page to page (a year of `csdac-pln`, 35 040 rows, takes about 3 s). A `nextLink` to another host is refused.
+- The generic User-Agent `epftoolbox2` is sent. 429, 5xx and network errors are retried with backoff and `Retry-After`; any other error raises `PseApiError`, so a failed request never becomes a silent gap.
+- `get_cache_config()` holds the datasets, the selected columns, the prefix, `pdgsz_cutoff` and a schema version, so the per-source cache of the [data pipeline](/epftoolbox2/data-pipeline/caching/) is used and a change of any of them is a new entry.
+- **Two caches can differ.** The cache never records anything newer than two days, so a PSE bulk reload (which rewrites old rows) after that is not seen by a cache already filled: two machines, or one machine at two times, can hold different values for the same hours. That is a reproducibility gap, not a look-ahead. Clear the source's cache to take the current values.
+
+## YAML
+
+```yaml
+sources:
+- class: PseSource
+  params:
+    datasets:
+    - kse-load
+    - csdac-pln
+    columns: null
+    prefix: pse
+    pdgsz_cutoff: '19:00'
+```
+
+Attribution: source: PSE.

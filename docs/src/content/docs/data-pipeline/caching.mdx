@@ -170,6 +170,7 @@ processes pointed at the same file download the data once.
 | `CalendarSource` | ✅ Yes (including `school_holidays`, see below) |
 | `CsvSource` | ❌ No (reads from file) |
 | `EpftoolboxBenchmarkSource` | ❌ No (keeps its own verified copy of the file instead) |
+| `PseSource` | ✅ Yes |
 
 `CalendarSource.get_cache_config()` includes every constructor parameter that affects its output, plus the
 resolved market time zone, the installed `holidays` package version (its holiday data changes between releases)

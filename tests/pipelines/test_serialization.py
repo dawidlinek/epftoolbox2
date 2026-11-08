@@ -164,7 +164,7 @@ class TestDataPipelineSerializationFidelity:
         pd.testing.assert_frame_equal(a, b)
 
     def test_every_registered_component_round_trips(self, tmp_path):
-        from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource
+        from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource, PseSource
         from epftoolbox2.data.transformers import TimezoneTransformer
         from epftoolbox2.data.validators import EdaValidator
         from epftoolbox2.pipelines.data_pipeline import COMPONENT_REGISTRY
@@ -193,6 +193,7 @@ class TestDataPipelineSerializationFidelity:
                 lon=19.94,
                 freq="15min",
             ),
+            "PseSource": PseSource(datasets=["kse-load", "his-wlk-cal"], columns=["load_fcst", "pv"], prefix="pse"),
             "TimezoneTransformer": TimezoneTransformer("Europe/Berlin", daily_columns=["a"]),
             "ResampleTransformer": ResampleTransformer("15min", agg={"a": "sum"}, fill=None),
             "LagTransformer": LagTransformer(["a"], [1, -2], "15min"),

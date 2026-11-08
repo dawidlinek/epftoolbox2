@@ -420,6 +420,37 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "PseSource": [
+        {
+            "name": "datasets",
+            "description": "PSE datasets to fetch (no API key)",
+            "required": True,
+            "default": None,
+            "kind": "multiselect",
+            "choices": ["kse-load", "his-wlk-cal", "csdac-pln", "rce-pln", "pdgsz", "przeplywy-mocy"],
+        },
+        {
+            "name": "columns",
+            "description": "Columns to keep, comma-separated (blank = the datasets' default columns)",
+            "required": False,
+            "default": None,
+            "kind": "comma_list",
+        },
+        {
+            "name": "prefix",
+            "description": "Column name prefix (keep one: PSE load_actual shares ENTSO-E's name)",
+            "required": False,
+            "default": "pse",
+            "kind": "text",
+        },
+        {
+            "name": "pdgsz_cutoff",
+            "description": "pdgsz: keep the version stamped by this time (HH:MM Warsaw) on the day before",
+            "required": False,
+            "default": "19:00",
+            "kind": "text",
+        },
+    ],
     "TimezoneTransformer": [
         {
             "name": "target_tz",
@@ -1331,6 +1362,7 @@ _SOURCES = [
     "CsvSource",
     "CalendarSource",
     "EpftoolboxBenchmarkSource",
+    "PseSource",
 ]
 _TRANSFORMERS = [
     "TimezoneTransformer",
