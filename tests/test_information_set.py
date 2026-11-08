@@ -2211,3 +2211,24 @@ def test_issue_timezone_data_given_to_a_model_s_own_run_is_its_frame_s_zone():
         late.check({(0, 1): ["load"]}, "price", "1h", frame.index, "2023-02-10", "2023-02-10", check_target=False)
     with pytest.raises(InformationSetError, match="has none"):
         late.check({(0, 1): ["load"]}, "price", "1h", frame.index.tz_localize(None), "2023-02-10", "2023-02-10")
+
+
+def test_issue_timezone_data_refuses_a_frame_in_utc_or_at_a_fixed_offset():
+    """A Warsaw frame indexed in UTC (`DataPipeline(timezone=None)`) has no market's clock: "data" there would issue at 12:00
+    UTC, 14:00 in Warsaw in summer, and accept what a Warsaw noon doesn't know. It is refused, as a naive index is."""
+    import datetime as dt
+
+    frame = make_market_data(start="2023-05-01", days=40, tz="Europe/Warsaw", horizon=2, seed=3).drop(columns=["price_d-1"])
+    rules = {"load": Availability.published("13:00", 0, timezone="Europe/Warsaw")}
+    for zone in ("UTC", "Etc/GMT-1", dt.timezone(dt.timedelta(hours=2))):
+        moved = frame.tz_convert(zone)
+        info = InformationSet("12:00", "data", rules=rules)
+        with pytest.raises(InformationSetError, match="no market's clock"):
+            OLSModel(predictors=["load_d+{horizon}"], training_window=20).run(
+                moved, "2023-05-25", "2023-05-27", horizon=1, information_set=info
+            )
+        with pytest.raises(ValueError, match="no market's clock"):
+            info.in_data_zone(moved.index)
+    named = InformationSet("10:00", "data", rules={"load": Availability.published("12:00", 0)})
+    with pytest.raises(InformationSetError, match=r"\(10:00 Europe/Warsaw on the issue day D\)"):
+        named.check({(0, 1): ["load"]}, "price", "1h", frame.index, "2023-05-25", "2023-05-25", check_target=False)

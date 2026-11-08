@@ -117,6 +117,25 @@ def _iso_day(value: Any, name: str) -> Optional[str]:
     return day.date().isoformat()
 
 
+def _market_clock(tz: Any) -> str:
+    """The name of the zone `issue_timezone="data"` issues in on a frame in zone `tz`: a region's (`Europe/Warsaw`), as
+    `zone_name` gives it. A naive index, UTC, an `Etc/` zone or a fixed offset is no market's clock, and a forecast issued "at
+    12:00" there would be issued at another hour in every market east or west of it: a ValueError says to name the zone."""
+    if tz is None:
+        raise ValueError(
+            "issue_timezone='data' issues each forecast on the clock of its frame's zone, and this frame's index has none: "
+            "localise it (df.tz_localize('Europe/Warsaw')) or name the issue zone (issue_timezone='Europe/Warsaw')."
+        )
+    name = zone_name(tz) or str(tz)
+    if name == "UTC" or name.startswith("Etc/") or "/" not in name:
+        raise ValueError(
+            f"issue_timezone='data' issues each forecast on the clock of its frame's zone, and this frame is indexed in {name}, "
+            "no market's clock (a frame from DataPipeline(timezone=None) is in UTC): name the issue zone "
+            "(issue_timezone='Europe/Warsaw'), or index the frame in the market's zone (df.tz_convert('Europe/Warsaw'))."
+        )
+    return name
+
+
 def _check_zone(zone: str) -> None:
     try:
         pd.Timestamp("2000-01-01", tz=zone)
@@ -1192,17 +1211,11 @@ class InformationSet:
     def in_data_zone(self, index: pd.DatetimeIndex) -> "InformationSet":
         """This information set for a frame with this index: itself, or with `issue_timezone="data"` a copy issued in the
         index's zone (`zone_name`, as a manifest records it), which a run with the zone written out gives to the bit. A naive
-        index has no zone to issue in, and raises."""
+        index has no zone to issue in, and neither has one in UTC or at a fixed offset (`_market_clock`): both raise."""
         if self.issue_timezone != DATA_ZONE:
             return self
-        tz = getattr(index, "tz", None)
-        if tz is None:
-            raise ValueError(
-                "issue_timezone='data' issues each forecast on the clock of its frame's zone, and this frame's index has none: "
-                "localise it (df.tz_localize('Europe/Warsaw')) or name the issue zone."
-            )
         out = self.copy()
-        out.issue_timezone = zone_name(tz) or str(tz)
+        out.issue_timezone = _market_clock(getattr(index, "tz", None))
         _check_zone(out.issue_timezone)
         return out
 
@@ -1309,7 +1322,7 @@ class InformationSet:
         )
         self._report_unknown(unknown, model_name)
         if violations:
-            raise InformationSetError(self._format(violations, model_name))
+            raise InformationSetError(self._format(violations, model_name, zone=self._issue_zone(index)))
         self._log_assumptions(model_name)
 
     def late_uses(
@@ -1808,24 +1821,28 @@ class InformationSet:
 
     def _issue_zone(self, index) -> str:
         """The zone the issue time is read in on a frame with this index: `issue_timezone`, or with `"data"` (`DATA_ZONE`) the
-        index's own zone, as `in_data_zone` resolves it. A naive index has no zone to issue in, and raises."""
+        index's own zone, as `in_data_zone` resolves it. An index that is naive, in UTC or at a fixed offset has no market's
+        clock to issue on, and raises (`_market_clock`)."""
         if self.issue_timezone != DATA_ZONE:
             return self.issue_timezone
-        if getattr(index, "tz", None) is None:
-            raise InformationSetError(
-                "issue_timezone='data' issues each forecast on the clock of its frame's zone, and this frame's index has none: "
-                "localise it (df.tz_localize('Europe/Warsaw')) or name the issue zone."
-            )
+        try:
+            _market_clock(getattr(index, "tz", None))
+        except ValueError as exc:
+            raise InformationSetError(str(exc)) from None
         return str(index.tz)
 
-    def _format(self, violations: List[Violation], model_name: str, advice: bool = True) -> str:
+    def _format(
+        self, violations: List[Violation], model_name: str, advice: bool = True, zone: Optional[str] = None
+    ) -> str:
+        """The message of a refusal; `zone` is the issue zone as resolved for the frame (`_issue_zone`), `issue_timezone` if
+        not given."""
         # One line per base column and rule, listing the predictors that read it.
         grouped: Dict[Tuple[str, str, Optional[str]], List[Violation]] = {}
         for v in violations:
             grouped.setdefault((v.role, v.column.base, v.column.key), []).append(v)
         lines = [
             f"{model_name}: {len(violations)} use(s) of inputs not known at the issue time "
-            f"({self.issue_time} {self.issue_timezone} on the issue day D):"
+            f"({self.issue_time} {zone or self.issue_timezone} on the issue day D):"
         ]
         for (role, base, key), items in grouped.items():
             worst = max(items, key=lambda v: v.available - v.issue)
