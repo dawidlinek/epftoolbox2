@@ -770,10 +770,10 @@ def test_a_list_is_the_same_in_any_pool_and_after_a_stopped_run(monkeypatch, tmp
     else:
         real = worker._fit_unit
 
-        def stopping(unit, tasks):
+        def stopping(unit, tasks, *inputs):
             if unit.anchor.isoformat() == "2023-03-27" and unit.member == 1:
                 stop_once_stored(stopped)
-            return real(unit, tasks)
+            return real(unit, tasks, *inputs)
 
         monkeypatch.setattr(worker, "_fit_unit", stopping)
     with pytest.raises(RuntimeError, match="forecasting failed"):

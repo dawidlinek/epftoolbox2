@@ -729,10 +729,10 @@ def cut_on_the_last_issue_day(fit_unit):
     """The review's mutant: a unit's rows cut on the last issue day of its forecasts in the run, not on its anchor. A run of one
     day has one forecast per unit, which hides it."""
 
-    def mutant(unit, tasks):
+    def mutant(unit, tasks, *inputs):
         start = day(worker._W_CONFIG["test_start"])
         last = max(start + datetime.timedelta(days=task[2]) for task in tasks)
-        return fit_unit(unit._replace(anchor=last), tasks)
+        return fit_unit(unit._replace(anchor=last), tasks, *inputs)
 
     return mutant
 

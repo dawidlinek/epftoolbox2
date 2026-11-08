@@ -176,10 +176,10 @@ def test_the_backends_agree_on_the_fixture_with_the_same_kink(market, monkeypatc
     seen = []
     original_fit = worker._fit_member
 
-    def keeping(arrays, cfg, hour, hz, day, member, newest, test, list_id, predictors, mask):
+    def keeping(arrays, cfg, hour, *args):
         if hour % 8 == 0:
             seen.append(hour)
-        return original_fit(arrays, cfg, hour, hz, day, member, newest, test, list_id, predictors, mask)
+        return original_fit(arrays, cfg, hour, *args)
 
     stats = []
     kept = LEARModel._fit_predict

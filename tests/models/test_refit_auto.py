@@ -439,9 +439,9 @@ def test_a_block_holds_the_long_member_s_one_fit_and_the_short_member_s_daily_on
     fitted, jobs = [], []
     real_unit, real_block = worker._fit_unit, worker._run_block
 
-    def count_unit(unit, tasks):
+    def count_unit(unit, tasks, *inputs):
         fitted.append((unit.member, unit.anchor))
-        return real_unit(unit, tasks)
+        return real_unit(unit, tasks, *inputs)
 
     def count_block(tasks):
         jobs.append(sorted({task[2] for task in tasks}))
