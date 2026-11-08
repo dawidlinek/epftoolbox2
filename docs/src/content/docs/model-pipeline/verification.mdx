@@ -199,6 +199,14 @@ given a batch of issue days, can break either. Two checks test that:
   `leak`. The plain probe misses it where the call is made of the run's own days, which holds the issue day alone in its runs. A
   model that reads known values of other items, a block's earlier days say, is no leak by this definition.
 
+  A model that predicts its refit blocks in one call ([`_predict_block`](/epftoolbox2/reference/extending/#predicting-a-refit-block-in-one-call))
+  gets one more comparison: its call holds the block's later days that the frame has, which a run on the issue day doesn't, so
+  the issue day's forecasts are run again on the frame cut after its date and must be the whole frame's to the bit (within the
+  rerun's noise margin, as any other move). A forecast that depends on how many rows its call holds, or which, though it reads
+  no unknown value, is a `leak`: a backtest and a run on the day would give different numbers. A model that predicts each row
+  on its own passes, since its call has one shape and the issue day's row the same place in both. The `co_batch` column counts
+  the forecasts that moved either way, each once.
+
 Both run by default for the models that need them: those that predict several items in one call (`_predicts_together`), name
 the other items (`_co_batch_items`) or have a card (a family with an extra or weights). For every other model, which predicts
 each forecast on its own and is deterministic, both are off by default and their columns are empty. `rerun=` and `co_batch=`

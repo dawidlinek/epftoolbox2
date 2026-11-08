@@ -197,8 +197,12 @@ model = KernelModel(["load_d+{horizon}", "wind_d+{horizon}"], refit="7D")
 ```
 
 Such a class has `block_predict = True`; `block_predict=False` predicts one row at a time through `_predict_fitted`, as every other
-model does. Workers rebuild a model from `_model_kwargs`, so a class that takes `block_predict` as a parameter returns it there.
-With `refit=None` every forecast is fitted on its own, as for any model.
+model does. The model you run decides: the workers get its answer with their configuration, whatever `_model_kwargs` holds, and the
+manifest records it, so a resume with the other setting is refused. `_predict_block` is called only when it is defined in the class
+that defines `_predict_fitted`: a subclass that changes the estimator (`_fit_predict`, `_fit_model`, `_predict_fitted`) but inherits
+`_predict_block`, or one that overrides `_predict_block` alone, predicts one row at a time, so its forecasts are always those of its
+own estimator. With `refit=None` every forecast is fitted on its own, as for any model. Each row's coefficients are a flat list of
+numbers (or a 1-D numeric array, written as its list); anything else raises a `TypeError` naming the model.
 
 `ModelPipeline(engine="on")` runs a model in an [engine group](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine) only
 if one class defines all three and `_fit_stats` (the fit from shared statistics), as the four built-in fitting models do, and keeps

@@ -203,9 +203,11 @@ an issue day it didn't sample.
   that the frame has with finite inputs, whichever days the run forecasts, padded to the rule's nominal length (7 rows for `"7D"`, 31
   for `"1MS"`) with copies of the first, each forecast taken from its own row. A forecast is then the same to the bit alone, in its
   block, from any `test_start` and after a resume. It is for the in-context models to come, whose call costs as much for one row as
-  for a week of them; `block_predict=False` predicts one row at a time. Such a class gets `_predicts_together` and
-  `_co_batch_items` (the other days of the block), so `verify`'s co-batch check runs on it by default. **No model of today defines
-  it, and none of their numbers moves.** See [Extending](/epftoolbox2/reference/extending/#predicting-a-refit-block-in-one-call).
+  for a week of them; `block_predict=False` predicts one row at a time, and the manifest records which. Such a class gets
+  `_predicts_together` and `_co_batch_items` (the other days of the block), so `verify`'s co-batch check runs on it by default,
+  and that check also runs the issue day on the frame cut after its date and requires the same forecasts to the bit
+  (`issue_day_cut`, `CutResult` in `epftoolbox2.information_set`): a forecast that depends on which later days its call holds
+  is a `leak`. **No model of today defines it, and none of their numbers moves.** See [Extending](/epftoolbox2/reference/extending/#predicting-a-refit-block-in-one-call).
 - **Scoring by period: hourly and block aggregates, the shape within the hour, normalised MAEs, breakdowns by a data column.**
   `report.aggregate("1h", agg="mean")` turns 15-minute results into hourly ones (an hour counts with all four quarter-hours finite;
   dropped hours are `incomplete_hour` in its `forecast_counts()`), and `aggregate("1D", agg="peak")` / `"offpeak"` scores the mean over
