@@ -7,8 +7,11 @@ from pathlib import Path
 import warnings
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
-from .store import OK_ONLY, STATUS_OK, read_records
+from .store import OK_ONLY, STATUS_OK, iter_file_records, read_records
 from .windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
+
+# What `_on_the_clock` reads of a record.
+_CLOCK_FIELDS = ("hour", "run_date", "target_date", "freq")
 
 
 @dataclass
@@ -89,9 +92,18 @@ class ModelResultRef:
         return (read for read, _ in self._records(cols, clock=self._on_the_clock()))
 
     def off_the_clock(self) -> int:
-        """How many records of this ref are of a slot the clock doesn't have, which `iter_records` leaves out."""
+        """How many records of this ref are of a slot the clock doesn't have, which `iter_records` leaves out. Reads what the
+        clock needs of each record, never its coefficients."""
         on_the_clock = self._on_the_clock()
-        return 0 if on_the_clock is None else sum(1 for r, _ in self._records(None) if not on_the_clock(r))
+        if on_the_clock is None:
+            return 0
+        return sum(1 for r, _ in self._records(list(_CLOCK_FIELDS)) if not on_the_clock(r))
+
+    def first_record(self, cols: Optional[List[str]] = None) -> Optional[Dict]:
+        """The first forecast of this ref in file order, as `iter_records` reads it, without reading the rest of the file: for
+        what every record of a file shares, such as `freq`. None if it has none."""
+        read = next(self._records(cols, clock=self._on_the_clock(), first=True), None)
+        return None if read is None else read[0]
 
     def _on_the_clock(self) -> Optional[Callable[[Dict], bool]]:
         if self.zone is None:
@@ -114,11 +126,13 @@ class ModelResultRef:
         cols: Optional[List[str]],
         statuses: Optional[Iterable[str]] = OK_ONLY,
         clock: Optional[Callable[[Dict], bool]] = None,
+        first: bool = False,
     ) -> Iterator[Tuple[Dict, Dict]]:
         """(the record as read, the whole record; the record as read again when `cols` are given) of each record of this ref's
         dates and window, and on the clock if `clock` (`_on_the_clock`) is given: a file's forecasts (`read_records`: one record a
         key, the highest revision, the first forecast; status "ok", or none) unless told other `statuses` (None for every key's),
-        and the forecasts of results held in memory as they are."""
+        and the forecasts of results held in memory as they are. `first` reads a file's lines in order without the per-key rule, for
+        a caller that stops at the first (`first_record`)."""
         filter_dates = bool(self.test_start and self.test_end)
         window_start = date.fromisoformat(self.test_start) if self.window is not None and self.test_start else None
         horizons = None if self.horizons is None else frozenset(self.horizons)
@@ -145,7 +159,15 @@ class ModelResultRef:
                     as_read = self._as_read(r, cols, window_start)
                     return as_read, (r if cols is None else as_read)  # a file's whole records aren't held
 
-                yield from read_records(path, statuses, read)
+                if not first:
+                    yield from read_records(path, statuses, read)
+                    return
+                wanted = None if statuses is None else frozenset(statuses)
+                for r in iter_file_records(path):
+                    if wanted is None or r.get("status", STATUS_OK) in wanted:
+                        out = read(r)
+                        if out is not None:
+                            yield out
         else:
             wanted = None if statuses is None else frozenset(statuses)
             for r in self._results or []:

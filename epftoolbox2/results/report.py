@@ -1016,9 +1016,7 @@ class EvaluationReport:
         """
         freqs: Dict[str, str] = {}
         for name, ref in self.refs.items():
-            records = self._iter_ref(ref, cols=["freq"])
-            first = next(records, None)
-            records.close()
+            first = ref.first_record(cols=["freq"])  # one line of a file, not the whole of it
             if first is not None:
                 freqs[name] = first.get("freq", ref.freq)
         return freqs

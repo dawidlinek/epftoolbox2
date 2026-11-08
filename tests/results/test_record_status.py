@@ -439,21 +439,45 @@ def test_a_whole_last_record_without_its_newline_is_kept(tmp_path):
 # --- repeated keys and revisions -------------------------------------------------------------------------------------------
 
 
-def test_repeated_forecasts_warn_once_and_the_first_is_read(tmp_path):
+def test_repeats_with_the_same_forecast_warn_once_and_are_read_once(tmp_path):
+    """The same forecast twice, once as an old-format line: equal but for D4's keys, so one forecast, read once."""
     data = market()
     report = run(data, OLSModel(PREDICTORS, 45, name="ols"), tmp_path)
     clean = tables(report)
     path = tmp_path / "ols.jsonl"
     stored = records(path)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(stored[0]) + "\n" + json.dumps(without_new_keys(stored[1])) + "\n")
+    pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, 45, name="ols")).add_evaluator(MAEEvaluator())
+    with pytest.warns(
+        UserWarning, match=r"2 records repeat a forecast key .*, with the same forecast: each key is read once"
+    ):
+        assert_same_tables(tables(pipeline.report(str(tmp_path), DAY, DAY, horizon=2)), clean)
+    with pytest.warns(UserWarning, match="repeat a forecast key"):
+        assert ResultStore(path).load_all() == stored
+
+
+def test_a_repeat_with_another_forecast_raises_naming_the_file_and_a_key(tmp_path):
+    """Two configurations' forecasts on one key: no table, count, ensemble or resume may pick one."""
+    data = market()
+    model = OLSModel(PREDICTORS, 45, name="ols")
+    run(data, model, tmp_path)
+    path = tmp_path / "ols.jsonl"
+    stored = records(path)
     changed = {**stored[5], "prediction": stored[5]["prediction"] + 1.0}
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(stored[0]) + "\n" + json.dumps(changed) + "\n")
-    with pytest.warns(UserWarning, match=r"2 records repeat a forecast key .* \(1 of them differ from it\)") as caught:
-        read = ModelPipeline().add_model(OLSModel(PREDICTORS, 45, name="ols")).add_evaluator(MAEEvaluator())
-        assert_same_tables(tables(read.report(str(tmp_path), DAY, DAY, horizon=2)), clean)
-    assert len([w for w in caught if "repeat a forecast key" in str(w.message)]) >= 1
-    with pytest.warns(UserWarning, match="repeat a forecast key"):
-        assert ResultStore(path).load_all() == stored
+    key = f"period {stored[5]['hour']}, horizon {stored[5]['horizon']}, run date {DAY}"
+    message = rf"{path.name} holds forecast keys twice with different forecasts \(1 records, e.g. {key}; 1 more"
+    pipeline = ModelPipeline().add_model(model).add_evaluator(MAEEvaluator())
+    with pytest.raises(ValueError, match=message):
+        pipeline.report(str(tmp_path), DAY, DAY, horizon=2)
+    with pytest.raises(ValueError, match=message):
+        run(data, model, tmp_path)  # a resume
+    with pytest.raises(ValueError, match=message):
+        list(ModelResultRef("ols", path, 48, DAY, DAY, 2).iter_records())
+    with pytest.warns(UserWarning, match=r"2 records repeat .* \(1 with another forecast, the first read\)"):
+        assert list(read_records(path, duplicates="first")) == stored  # for a repair tool alone
 
 
 def test_the_highest_revision_wins_wherever_it_stands(tmp_path):
@@ -481,6 +505,25 @@ def test_the_highest_revision_wins_wherever_it_stands(tmp_path):
     assert sorted(r["prediction"] for r in ref.iter_records()) == [2.0, 3.0, 6.0, 7.0]
     store = ResultStore(path, test_start=DAY)
     assert [store.is_done(hour, 1, 0) for hour in range(4)] == [True] * 4
+
+
+def test_the_first_pass_reads_a_line_s_key_as_json_does(tmp_path):
+    """The first pass of `read_records` reads key, revision and status off the line without parsing it: other spacing and key
+    order, a quoted "status" or "revision" inside a string, and values not as the store writes them give what JSON gives."""
+    path = tmp_path / "m.jsonl"
+    rows = [
+        '{"hour":0,"horizon":1,"run_date":"2023-04-12","prediction":1.0,"status":"ok"}',
+        '{"run_date": "2023-04-12", "horizon": 1, "hour": 0, "prediction": 2.0, "status": "fit_error", "revision": 2,'
+        ' "detail": "x \\"status\\": \\"ok\\", \\"revision\\": 9"}',
+        '{"hour": 1.0, "horizon": 1, "run_date": "2023-04-12", "prediction": 3.0}',  # a float hour: parsed
+        '{ "hour" : 2 , "horizon" : 1 , "run_date" : "2023-04-12" , "prediction" : 4.0 , "revision" : 1 }',
+        '{"hour": 3, "horizon": 1, "run_date": "2023-04-12", "prediction": 5.0, "status": "too_few_rows"}',
+        '{"hour": 3, "horizon": 1, "run_date": "2023-04-12", "prediction": 6.0, "status": "ok"}',
+    ]
+    path.write_text("".join(row + "\n" for row in rows), encoding="utf-8")
+    chosen = {(r["hour"], r["horizon"]): (r["prediction"], r.get("status")) for r in read_records(path, statuses=None)}
+    assert chosen == {(0, 1): (2.0, "fit_error"), (1, 1): (3.0, None), (2, 1): (4.0, None), (3, 1): (6.0, "ok")}
+    assert [r["prediction"] for r in read_records(path)] == [3.0, 4.0, 6.0]
 
 
 def test_skip_records_alone_are_not_done_and_the_last_is_the_keys(tmp_path):

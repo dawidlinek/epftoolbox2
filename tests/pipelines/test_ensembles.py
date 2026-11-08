@@ -1422,9 +1422,17 @@ def test_disagreeing_actuals_are_refused(tmp_path):
         report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
 
 
-def test_a_key_held_twice_reads_the_first_with_a_warning(tmp_path):
-    """A results file gives one forecast per key, the first, and warns of the others (step 5a, `results.store.read_records`), so
-    an ensemble averages that one: what it did before the file held the repeat."""
+def test_a_key_held_twice_is_refused(tmp_path):
+    days = HAND.issue_days()
+    write_member(tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND)
+    records = forecasts(days, 2.0, windows=HAND)
+    write_member(tmp_path, "b", [*records, {**records[0], "prediction": records[0]["prediction"] + 1.0}], HAND)
+    with pytest.raises(ValueError, match="twice"):
+        report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b"))
+
+
+def test_a_key_held_twice_with_the_same_forecast_is_read_once_with_a_warning(tmp_path):
+    """The same line twice is one forecast (step 5a, `results.store.read_records`): the ensemble is what it is without the repeat."""
     days = HAND.issue_days()
     write_member(tmp_path, "a", forecasts(days, 1.0, windows=HAND), HAND)
     records = forecasts(days, 2.0, windows=HAND)
@@ -1432,11 +1440,10 @@ def test_a_key_held_twice_reads_the_first_with_a_warning(tmp_path):
     once = forecast_lines(
         records_of(report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b")), "e")
     )
-    write_member(tmp_path, "b", [*records, {**records[0], "prediction": records[0]["prediction"] + 1.0}], HAND)
-    with pytest.warns(UserWarning, match=r"1 records repeat a forecast key .* \(1 of them differ from it\)"):
+    write_member(tmp_path, "b", [*records, records[0]], HAND)
+    with pytest.warns(UserWarning, match="1 records repeat a forecast key .*, with the same forecast"):
         twice = records_of(report_of(tmp_path, AverageEnsemble(["a", "b"], name="e"), members=("a", "b")), "e")
-    twice = forecast_lines(twice)
-    assert twice == once
+    assert forecast_lines(twice) == once
 
 
 def test_no_common_validation_key_is_refused(tmp_path):

@@ -3,6 +3,7 @@ import datetime
 import functools
 import inspect
 import json
+import re
 import queue
 import threading
 import warnings
@@ -43,35 +44,86 @@ def with_status(
     return record
 
 
-def _parse_lines(path: Path) -> Iterator[Tuple[int, bytes, Dict]]:
-    """(line number, line, record) of each record of a JSONL results file, read as UTF-8.
+# What a forecast differs in from its repeat without being another forecast: D4's keys, which an old-format record lacks.
+_NOT_THE_FORECAST = frozenset(("status", "list_hash", "refit_anchor", "revision", "detail"))
+# The fields the first pass of `read_records` reads of a line, without parsing it: (name, its value, whether to look from the end,
+# where the store writes it). JSON escapes every quote inside a string, so `"name"` followed by a colon is a key, and the first
+# (last) one is the record's: a result record has no nested object.
+_FIELDS = tuple(
+    (b'"' + name + b'"', re.compile(rb"\s*:\s*" + value), from_end)
+    for name, value, from_end in (
+        (b"hour", rb"(-?\d+)[\s,}]", False),
+        (b"horizon", rb"(-?\d+)[\s,}]", False),
+        (b"run_date", rb'"([^"\\]*)"', False),
+        (b"revision", rb"(-?\d+)[\s,}]", True),
+        (b"status", rb'"([^"\\]*)"', True),
+    )
+)
+
+
+def _parse_lines(path: Path) -> Iterator[Tuple[int, int, bytes, Dict]]:
+    """(line number, byte offset, line, record) of each record of a JSONL results file, read as UTF-8.
 
     A last line without its newline that isn't a record is what a crash leaves while a batch is written: it is skipped with a
     warning (a writer cuts it off before appending, `ResultStore`). A line that isn't a record anywhere else raises ValueError
     naming its number: the file was damaged, and reading on would count what is left as the results."""
     with open(path, "rb") as f:
+        offset = 0
         for number, raw in enumerate(f, 1):
+            at, offset = offset, offset + len(raw)
             line = raw.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line.decode("utf-8"))
-                if not isinstance(record, dict):
-                    raise ValueError(f"a JSON {type(record).__name__}, not an object")
-            except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
-                if raw.endswith(b"\n"):
-                    raise ValueError(
-                        f"{path}: line {number} is not a result record ({exc}): {_preview(line)}"
-                    ) from None
-                warnings.warn(
-                    f"{path}: its last line ({len(raw)} bytes, line {number}) is not a whole record, as a run that stopped "
-                    f"while writing leaves it: {_preview(line)}. It is left out; the next run into this file cuts it off and "
-                    "forecasts its key again.",
-                    UserWarning,
-                    stacklevel=4,
-                )
-                return
-            yield number, line, record
+            if line:
+                record = _parse(path, number, raw, line)
+                if record is None:
+                    return
+                yield number, at, line, record
+
+
+def _parse(path: Path, number: int, raw: bytes, line: bytes) -> Optional[Dict]:
+    """The record of one line; None (with a warning) for a half-written last line; ValueError for any other that isn't one."""
+    try:
+        record = json.loads(line.decode("utf-8"))
+        if not isinstance(record, dict):
+            raise ValueError(f"a JSON {type(record).__name__}, not an object")
+        return record
+    except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
+        if raw.endswith(b"\n"):
+            raise ValueError(f"{path}: line {number} is not a result record ({exc}): {_preview(line)}") from None
+        warnings.warn(
+            f"{path}: its last line ({len(raw)} bytes, line {number}) is not a whole record, as a run that stopped "
+            f"while writing leaves it: {_preview(line)}. It is left out; the next run into this file cuts it off and "
+            "forecasts its key again.",
+            UserWarning,
+            stacklevel=5,
+        )
+        return None
+
+
+def _key_fields(path: Path, number: int, raw: bytes, line: bytes) -> Optional[Tuple[Any, int, str]]:
+    """(key, revision, status) of a line, read without parsing it where it is written as the store writes; parsed otherwise.
+    None for a half-written last line (`_parse`)."""
+    found = []
+    if line[:1] == b"{" and line[-1:] == b"}":
+        for name, value, from_end in _FIELDS:
+            at = line.rfind(name) if from_end else line.find(name)
+            match = None if at < 0 else value.match(line, at + len(name))
+            if match is None and (at >= 0 or not from_end):
+                break  # a key field missing, or a value not as the store writes it: parse the line
+            found.append(None if match is None else match.group(1))
+    if len(found) == len(_FIELDS):
+        hour, horizon, run_date, revision, status = found
+        try:
+            key = (int(hour), int(horizon), run_date.decode("utf-8"))
+            status = STATUS_OK if status is None or status == b"ok" else status.decode("utf-8")
+            return key, BACKTEST_REVISION if revision is None else int(revision), status
+        except ValueError:
+            pass
+    record = _parse(path, number, raw, line)
+    if record is None:
+        return None
+    key = (record.get("hour"), record.get("horizon"), record.get("run_date"))
+    status = record.get("status", STATUS_OK)
+    return (number if None in key else key), record.get("revision", BACKTEST_REVISION), status
 
 
 def _preview(line: bytes, size: int = 80) -> str:
@@ -82,66 +134,113 @@ def read_records(
     path: Path,
     statuses: Optional[Iterable[str]] = OK_ONLY,
     transform: Optional[Callable[[Dict], Any]] = None,
+    duplicates: str = "raise",
 ) -> Iterator[Any]:
-    """One record per forecast key `(hour, horizon, run_date)` of a JSONL results file, in the order the records chosen stand in
-    the file, `transform(record)` of each if given (None drops it).
+    """One record per forecast key `(hour, horizon, run_date)` of a JSONL results file, in file order, `transform(record)` of
+    each if given (None drops it).
 
     Per key the highest `revision` wins; within it a record with `status` "ok" wins over skip records (a key a later run forecast)
-    and is the first ok one in the file: ok records after it are left out, with one warning per read giving how many and how many
-    differ from it. Of skip records alone the last is the key's. `statuses` keeps the keys whose chosen record has one of them,
-    "ok" by default (a record without `status` is ok); None keeps every key. A file without skip records, revisions or repeated
-    keys is read as it stands, line for line. A record without the key fields is kept as it is."""
+    and is the first ok one in the file. Of skip records alone the last is the key's. `statuses` keeps the keys whose chosen
+    record has one of them, "ok" by default (a record without `status` is ok); None keeps every key. A file without skip records,
+    revisions or repeated keys is read as it stands, line for line. A record without the key fields is kept as it is.
+
+    A forecast repeating its key's chosen one with the same forecast (equal but for D4's keys, so an old-format line and a 5a line
+    of the same numbers are one) is left out, with one warning per read giving how many. One with another forecast raises
+    ValueError naming the file, how many and a key: two configurations' forecasts on one key, which no reader may pick between.
+    `duplicates="first"` reads the first anyway, with a warning: for a tool that repairs such a file, never for a run or a report.
+
+    Two passes, so that memory stays what the caller keeps: the first reads each line's key, revision and status alone and keeps
+    the offset of each key's chosen line, the second parses only those lines, in file order."""
+    if duplicates not in ("raise", "first"):
+        raise ValueError(f"duplicates must be 'raise' or 'first', not {duplicates!r}")
     wanted = None if statuses is None else frozenset(statuses)
-    chosen: Dict[Any, tuple] = {}  # key -> (revision, status, what is yielded or None)
-    repeated: Dict[Any, int] = {}  # key -> how many forecasts of its chosen revision were left out
-    for number, _, record in _parse_lines(path):
-        key = (record.get("hour"), record.get("horizon"), record.get("run_date"))
-        if None in key:
-            key = number  # no key to resume by: kept as it is
-        revision = record.get("revision", BACKTEST_REVISION)
-        status = record.get("status", STATUS_OK)
-        held = chosen.get(key)
-        if held is not None:
-            if revision < held[0]:
+    chosen: Dict[Any, Tuple[int, str, int]] = {}  # key -> (revision, status, offset of its chosen line)
+    repeats: Dict[Any, List[int]] = {}  # key -> offsets of the forecasts repeating its chosen one
+    with open(path, "rb") as f:
+        offset = 0
+        for number, raw in enumerate(f, 1):
+            at, offset = offset, offset + len(raw)
+            line = raw.strip()
+            if not line:
                 continue
-            if revision == held[0] and held[1] == STATUS_OK:
-                if status == STATUS_OK:
-                    repeated[key] = repeated.get(key, 0) + 1
-                continue
-            del chosen[key]  # re-inserted at the end: the chosen records keep their order in the file
-            repeated.pop(key, None)
-        out = None
-        if wanted is None or status in wanted:
-            out = record if transform is None else transform(record)
-        chosen[key] = (revision, status, out)
-    if repeated:
-        warnings.warn(
-            f"{path}: {sum(repeated.values())} records repeat a forecast key that already has a forecast in the file "
-            f"({_differing(path, chosen, repeated)} of them differ from it): the first is read and the others are left out. Two "
-            "runs writing one file at once, or files joined by hand, leave such lines.",
-            UserWarning,
-            stacklevel=3,
+            fields = _key_fields(path, number, raw, line)
+            if fields is None:
+                break  # a half-written last line
+            key, revision, status = fields
+            held = chosen.get(key)
+            if held is not None:
+                if revision < held[0]:
+                    continue
+                if revision == held[0] and held[1] == STATUS_OK:
+                    if status == STATUS_OK:
+                        repeats.setdefault(key, []).append(at)
+                    continue
+                repeats.pop(key, None)
+            chosen[key] = (revision, status, at)
+    if repeats:
+        _check_repeats(path, chosen, repeats, duplicates)
+    keep = sorted(at for _, status, at in chosen.values() if wanted is None or status in wanted)
+    del chosen, repeats
+    if not keep:
+        return
+    with open(path, "rb") as f:
+        offset = 0
+        following = iter(keep)
+        wanted_at = next(following)
+        for number, raw in enumerate(f, 1):
+            at, offset = offset, offset + len(raw)
+            if at == wanted_at:
+                record = _parse(path, number, raw, raw.strip())
+                out = record if transform is None else transform(record)
+                if out is not None:
+                    yield out
+                wanted_at = next(following, None)
+                if wanted_at is None:
+                    return
+
+
+def _check_repeats(path: Path, chosen: Dict[Any, tuple], repeats: Dict[Any, List[int]], duplicates: str) -> None:
+    """Compare each repeated forecast with its key's chosen one, without D4's keys: the same warn, another raises (or warns with
+    `duplicates="first"`)."""
+    same = differ = 0
+    example = None
+    with open(path, "rb") as f:
+
+        def forecast(at: int) -> str:
+            f.seek(at)
+            record = json.loads(f.readline().strip().decode("utf-8"))
+            return json.dumps({k: v for k, v in record.items() if k not in _NOT_THE_FORECAST}, sort_keys=True)
+
+        for key, offsets in repeats.items():
+            first = forecast(chosen[key][2])
+            for at in offsets:
+                if forecast(at) == first:
+                    same += 1
+                else:
+                    differ += 1
+                    example = example or key
+    if differ and duplicates == "raise":
+        hour, horizon, run_date = example if isinstance(example, tuple) else (None, None, example)
+        raise ValueError(
+            f"{path} holds forecast keys twice with different forecasts ({differ} records, e.g. period {hour}, horizon "
+            f"{horizon}, run date {run_date}; {same} more repeat theirs with the same one): two configurations' forecasts on "
+            "one key, as two runs writing one file at once or results files joined by hand leave them, and no reader can tell "
+            "which is the run's. Write each run into its own save_dir and keep the file it wrote."
         )
-    for _, _, out in chosen.values():
-        if out is not None:
-            yield out
+    warnings.warn(
+        f"{path}: {same + differ} records repeat a forecast key that already has a forecast in the file"
+        + (f" ({differ} with another forecast, the first read)" if differ else ", with the same forecast")
+        + ": each key is read once. Two runs writing one file at once, or files joined by hand, leave such lines.",
+        UserWarning,
+        stacklevel=4,
+    )
 
 
-def _differing(path: Path, chosen: Dict[Any, tuple], repeated: Dict[Any, int]) -> int:
-    """Of the forecasts `read_records` left out, how many differ from the one it read: a second pass, over a file that has them."""
-    first: Dict[Any, bytes] = {}
-    differ = 0
-    for _, line, record in _parse_lines(path):
-        key = (record.get("hour"), record.get("horizon"), record.get("run_date"))
-        if key not in repeated or record.get("status", STATUS_OK) != STATUS_OK:
-            continue
-        if record.get("revision", BACKTEST_REVISION) != chosen[key][0]:
-            continue
-        if key in first:
-            differ += line != first[key]
-        else:
-            first[key] = line
-    return differ
+def iter_file_records(path: Path) -> Iterator[Dict]:
+    """Every record of a JSONL results file in file order, as it stands (no per-key rule), for a reader that stops early, such
+    as one that needs what every record of a file shares (`freq`). A half-written last line is skipped with a warning."""
+    for _, _, _, record in _parse_lines(path):
+        yield record
 
 
 class ResultsLockedError(RuntimeError):
