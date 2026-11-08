@@ -1,7 +1,21 @@
 from abc import ABC, abstractmethod
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import TYPE_CHECKING, Any, List, Dict, Callable, Iterable, Sequence, Union, Tuple, Optional
+from dataclasses import dataclass, field
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    List,
+    Dict,
+    Callable,
+    Iterable,
+    NamedTuple,
+    Protocol,
+    Sequence,
+    Union,
+    Tuple,
+    Optional,
+)
 
 import datetime
 import gc
@@ -146,6 +160,175 @@ def _usable_cpu_count() -> int:
     if hasattr(os, "sched_getaffinity"):
         return len(os.sched_getaffinity(0)) or 1
     return os.cpu_count() or 1
+
+
+class _Sink(Protocol):
+    """Where a run's records go as its jobs come back (`BaseModel._collect`): a `ResultStore`, or `_MemorySink`."""
+
+    def save(self, record: Dict) -> Any: ...
+
+    def save_skip(self, record: Dict) -> Any: ...
+
+
+class _MemorySink:
+    """The sink of a run without a store: its forecasts, appended to `records` in the order they come. It keeps no skip
+    record (none is built without a store: `_RunState.skip_record` is None)."""
+
+    def __init__(self, records: List[Dict]):
+        self.records = records
+
+    def save(self, record: Dict) -> None:
+        self.records.append(record)
+
+    def save_skip(self, record: Dict) -> bool:
+        return False
+
+
+def _frozen(value: Any) -> Any:
+    """`value` as nested tuples, compared by `==` to the bit: dicts by their items in key order, lists and tuples, arrays by
+    their type, shape and bytes, sets in order; anything else as it is (callables and classes by identity)."""
+    if isinstance(value, dict):
+        return (
+            "dict",
+            tuple((repr(key), _frozen(item)) for key, item in sorted(value.items(), key=lambda kv: repr(kv[0]))),
+        )
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_frozen(item) for item in value))
+    if isinstance(value, (set, frozenset)):
+        return ("set", tuple(sorted(repr(item) for item in value)))
+    if isinstance(value, np.ndarray):
+        return ("ndarray", value.dtype.str, value.shape, value.tobytes())
+    return value
+
+
+class _Checked(NamedTuple):
+    """What `BaseModel._check_inputs` found for one model's inputs (the expanded lists, the columns they read, what
+    `availability="warn"` lists for the run and for each window) and the run it checked them for (`run_of`), which
+    `run(checked=...)` uses in place of checking again when its own run is that one, of the same model in the same settings:
+    `ModelPipeline` checks every model before any runs (`_checked_inputs`)."""
+
+    expanded: Dict[Tuple[int, int], List[str]]
+    used_predictors: Tuple[str, ...]
+    listing: List[Dict]
+    window_listings: Dict[str, List[Dict]]
+    run: Tuple[Tuple[Any, ...], Tuple[Any, ...]]
+
+    @staticmethod
+    def run_of(
+        model: "BaseModel",
+        data: pd.DataFrame,
+        target: str,
+        horizon: int,
+        horizons: Optional[Sequence[int]],
+        freq: str,
+        information_set: Optional["InformationSet"],
+        test_start: Optional[str],
+        test_end: Optional[str],
+        plan: Optional[PredictorPlan],
+        availability: str,
+        windows: Optional[RunWindows],
+        cut_rules: Optional["InformationSet"],
+        weekdays: Optional[Sequence[int]],
+    ) -> Tuple[Tuple[Any, ...], Tuple[Any, ...]]:
+        """(the objects a check read, compared by identity: the model, the frame, the information set, the plan, `cut_rules`;
+        the model's settings (`BaseModel._check_settings`) and everything else it was given, compared by value), `horizons` as
+        the check reads them. So another model's check, or this model's from before a setting changed, is no check of the run."""
+        horizons = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
+        days = None if weekdays is None else tuple(weekdays)
+        return (model, data, information_set, plan, cut_rules), (
+            model._check_settings(),
+            target,
+            horizon,
+            horizons,
+            freq,
+            test_start,
+            test_end,
+            availability,
+            windows,
+            days,
+        )
+
+    def is_for(self, run: Tuple[Tuple[Any, ...], Tuple[Any, ...]]) -> bool:
+        """Whether this check was of `run` (`run_of`): the same objects and equal values."""
+        objects, values = run
+        return (
+            len(objects) == len(self.run[0])
+            and all(mine is theirs for mine, theirs in zip(self.run[0], objects))
+            and self.run[1] == values
+        )
+
+
+class _Periods(NamedTuple):
+    """A frame read into the frames of its periods (`BaseModel._load_periods`), which `_prepare_run(periods=...)` takes from a
+    caller that read it once for several models: of one frame (`source`), target, largest horizon and freq, in `columns`, the
+    union of theirs (a fit reads its own by name, so the others' change nothing; `_use_periods`)."""
+
+    source: pd.DataFrame
+    target: str
+    horizon: int
+    freq: str
+    columns: Tuple[str, ...]
+    data: pd.DataFrame  # `_preprocess`ed: targets, day ids and periods
+    first_ordinal: int
+    hour_data: Dict[int, pd.DataFrame]
+    hour_days: Dict[int, np.ndarray]
+
+
+@dataclass
+class _RunState:
+    """One model's run between `BaseModel._prepare_run` and `_finish_run`: what `_execute`'s pool and the records need, and the
+    counts the skips add to as they come (`skip`). `tasks` are the pending tasks no skip was decided for before any fit."""
+
+    data: pd.DataFrame
+    target: str
+    horizon: int
+    horizons: Tuple[int, ...]
+    freq: str
+    test_start: str
+    test_end: str
+    first_day: datetime.date
+    weekdays: Optional[Tuple[int, ...]]
+    windows: Optional[RunWindows]
+    stored_windows: Optional[RunWindows]
+    plan: Optional[PredictorPlan]
+    expanded: Dict[Tuple[int, int], List[str]]
+    listing: List[Dict]
+    window_listings: Dict[str, List[Dict]]
+    vintages: Any
+    matching_lists: Optional[Dict[str, int]]
+    calendar: IssueCalendar
+    all_tasks: List[tuple]
+    pending: List[tuple]
+    run_days: List[int]
+    n_days: int
+    test_days: Dict[int, datetime.date]
+    window_days: Optional[Dict[int, Tuple[str, int, int]]]
+    run_positions: Optional[Dict[int, tuple]]
+    masks: Dict
+    store: Optional[ResultStore]
+    manifest: Any
+    in_memory: Optional[List[Dict]]
+    skipped: Counter
+    window_skipped: Dict[str, Counter]
+    skip_examples: Dict[str, str]
+    skip_record: Optional[Callable[[tuple, str], Dict]]
+    tasks: List[tuple] = field(default_factory=list)
+
+    def skip(self, task: tuple, outcome: str, example: str, sink: Optional[_Sink]) -> None:
+        """Count a task with no forecast under its reason (`outcome` before any ": detail"), in its window too, keep `example` if
+        it is the reason's first, and write its skip record through `sink` (none without a store)."""
+        reason = outcome.partition(": ")[0]
+        self.skipped[reason] += 1
+        if self.window_days is not None:
+            self.window_skipped[self.window_days[task[2]][0]][reason] += 1
+        self.skip_examples.setdefault(reason, example)
+        if self.skip_record is not None and sink is not None:
+            sink.save_skip(self.skip_record(task, outcome))
+
+    def close(self) -> None:
+        """Let go of the store, and with it the results file's lock."""
+        if self.store:
+            self.store.close()
 
 
 class BaseModel(ABC):
@@ -341,6 +524,7 @@ class BaseModel(ABC):
         cut_rules: Optional["InformationSet"] = None,
         horizons: Optional[Sequence[int]] = None,
         issue_days: Optional[Sequence[str]] = None,
+        checked: Optional["_Checked"] = None,
     ) -> ModelResultRef:
         """Forecast every period and horizon the clock has on each day in [test_start, test_end] and on its target day.
 
@@ -387,7 +571,73 @@ class BaseModel(ABC):
         `cut_rules` is an information set read for that alone, when `information_set` isn't given: nothing is checked or listed
         with it, and a predictor function doesn't answer through it. `leakage_probe` runs models so. A `known_only` model
         (`NaiveModel`) reads from either which of its forecasts are published by the issue time: the others are `not_published`.
+
+        `checked` is what `ModelPipeline` found when it checked this model's inputs before any model ran (`_checked_inputs`): a run
+        it was found for uses it instead of checking again, and any other run checks its inputs itself.
+
+        The run is `_prepare_run` (windows, the plan, the checks, the period frames, the masks, the store and its manifest, the
+        pending tasks and the skips decided before any fit), `_execute` (the pool) and `_finish_run` (counts, the ref).
         """
+        state = self._prepare_run(
+            data,
+            test_start,
+            test_end,
+            target,
+            horizon,
+            freq,
+            save_to,
+            forecast_only,
+            information_set,
+            allow_manifest_mismatch,
+            require_manifest,
+            plan,
+            availability,
+            warn_listing,
+            windows,
+            frame_hashes,
+            cut_rules,
+            horizons,
+            issue_days,
+            checked,
+        )
+        try:
+            self._execute(state)
+            return self._finish_run(state)
+        finally:
+            state.close()
+
+    def _prepare_run(
+        self,
+        data: pd.DataFrame,
+        test_start: Optional[str],
+        test_end: Optional[str],
+        target: str,
+        horizon: Optional[int],
+        freq: str,
+        save_to: Optional[str],
+        forecast_only: bool,
+        information_set: Optional["InformationSet"],
+        allow_manifest_mismatch: bool,
+        require_manifest: bool,
+        plan: Optional[PredictorPlan],
+        availability: str,
+        warn_listing: bool,
+        windows: Optional[RunWindows],
+        frame_hashes: Optional[FrameHashes],
+        cut_rules: Optional["InformationSet"],
+        horizons: Optional[Sequence[int]],
+        issue_days: Optional[Sequence[str]],
+        checked: Optional["_Checked"] = None,
+        periods: Optional["_Periods"] = None,
+    ) -> "_RunState":
+        """Everything of `run` before the pool, for its arguments: the windows, the plan (or its check), the inputs' check
+        (`checked` if it was found for this run, else `_check_inputs`), the period frames (`periods` if given: read once by
+        `_load_periods` for several models, see `_use_periods`), the masks, the store and its manifest, the pending tasks and
+        the skips decided here (`missing_test_row`, `not_published`), whose skip records go to the store at once. The store
+        stays open in the state (`_RunState.close`), and is closed here if this raises.
+
+        Called by `run`: each stacklevel here counts `run`'s frame, so a warning is attributed where it was when `run` was one
+        function (to the caller of `run`, mostly)."""
         self._set_freq(freq)
         check_level(availability)
         horizon, horizons = resolve_horizons(horizon, horizons, 7)
@@ -432,6 +682,7 @@ class BaseModel(ABC):
                 cut_rules=cut_rules,
                 horizons=horizons,
                 weekdays=weekdays,
+                stacklevel=5,
             )
         else:
             self._check_plan_is_for(
@@ -448,30 +699,57 @@ class BaseModel(ABC):
                 horizons,
                 weekdays,
             )
-        expanded = self._check_inputs(
+        run = _Checked.run_of(
+            self,
             data,
             target,
             horizon,
+            horizons,
             freq,
             information_set,
             test_start,
             test_end,
-            plan=plan,
-            availability=availability,
-            windows=windows,
-            cut_rules=cut_rules,
-            horizons=horizons,
-            weekdays=weekdays,
+            plan,
+            availability,
+            windows,
+            cut_rules,
+            weekdays,
         )
+        if checked is not None and checked.is_for(run):
+            # Checked by `ModelPipeline` before any model ran, for exactly this run: what the check leaves on the model.
+            expanded = checked.expanded
+            self._used_predictors = list(checked.used_predictors)
+            self._availability_listing = checked.listing
+            self._window_listings = checked.window_listings
+        else:
+            expanded = self._check_inputs(
+                data,
+                target,
+                horizon,
+                freq,
+                information_set,
+                test_start,
+                test_end,
+                plan=plan,
+                availability=availability,
+                windows=windows,
+                cut_rules=cut_rules,
+                horizons=horizons,
+                weekdays=weekdays,
+                stacklevel=5,
+            )
         listing = self._availability_listing
         window_listings = self._window_listings
         if warn_listing:
-            warn_about({self.name: listing}, stacklevel=3)
+            warn_about({self.name: listing}, stacklevel=4)
         used_columns = list(dict.fromkeys([target, *self._used_predictors]))
         # What the archive of each input holds, by its rule: recorded, read by nothing that makes a number.
         vintages = vintage_rows(information_set, freq, self._used_predictors, () if plan is None else plan.queried)
 
-        self._load_periods(data, used_columns, horizon, target)
+        if periods is None:
+            self._load_periods(data, used_columns, horizon, target)
+        else:
+            self._use_periods(periods, data, used_columns, horizon, target)
         self._newest = newest
 
         first_day = datetime.date.fromisoformat(test_start)
@@ -523,6 +801,7 @@ class BaseModel(ABC):
         else:
             masks = self._precompute_scalable_masks(horizons)
         stored_windows = None
+        manifest = None
 
         kernels = self._kernel_backend  # before any pool forks: numba compiles once, here
         # Held until the run is over, manifest included: a second writer of these results raises (`ResultStore`).
@@ -534,7 +813,7 @@ class BaseModel(ABC):
                     f"{store.path.parent} won't know which periods a date has on the clock: it plans every period of every day and "
                     "judges a whole day by its records. Give the index a named zone, such as tz_convert('Europe/Warsaw').",
                     UserWarning,
-                    stacklevel=2,
+                    stacklevel=3,
                 )
             if store:
                 frame_hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
@@ -611,115 +890,133 @@ class BaseModel(ABC):
                 absent = {(period, first_day.toordinal() + day) for period, day in absent_slots}
                 counts = self._matching_day_counts(plan, target, absent)
                 warn_about_thin(
-                    training_day_rows(self.name, self._matching_uses(plan, counts), matching_lists), stacklevel=2
+                    training_day_rows(self.name, self._matching_uses(plan, counts), matching_lists), stacklevel=3
                 )
             pending = store.get_missing(all_tasks) if store else all_tasks
             unpublished = self._unpublished(data, rules, freq, expanded, plan, test_days, run_days, pending)
 
-            skipped: Counter = Counter()
-            window_skipped: Dict[str, Counter] = (
-                {} if windows is None else {name: Counter() for name, _ in windows.periods}
-            )
-            skip_examples: Dict[str, str] = {}
-            save_skip = self._skip_writer(store, first_day, run_positions, plan, expanded)
-            tasks = []
-            for task in pending:
-                if (task[0], task[2]) in absent_slots:
-                    skipped[SKIP_MISSING_TEST_ROW] += 1
-                    if window_days is not None:
-                        window_skipped[window_days[task[2]][0]][SKIP_MISSING_TEST_ROW] += 1
-                    skip_examples.setdefault(SKIP_MISSING_TEST_ROW, f"period {task[0]} on {test_days[task[2]]}")
-                    if save_skip:
-                        save_skip(task, SKIP_MISSING_TEST_ROW)
-                elif task in unpublished:
-                    skipped[SKIP_NOT_PUBLISHED] += 1
-                    if window_days is not None:
-                        window_skipped[window_days[task[2]][0]][SKIP_NOT_PUBLISHED] += 1
-                    skip_examples.setdefault(
-                        SKIP_NOT_PUBLISHED, f"period {task[0]}, horizon {task[1]}, run date {test_days[task[2]]}"
-                    )
-                    if save_skip:
-                        save_skip(task, SKIP_NOT_PUBLISHED)
-                else:
-                    tasks.append(task)
-
-            in_memory = None if save_to else []
-            try:
-                if tasks:
-                    self._run_tasks(
-                        tasks,
-                        horizons,
-                        test_start,
-                        n_days,
-                        store,
-                        in_memory,
-                        skipped,
-                        skip_examples,
-                        plan,
-                        masks,
-                        window_days,
-                        window_skipped,
-                        run_positions,
-                        None if weekdays is None else [test_days[day] for day in run_days],
-                        save_skip,
-                    )
-            finally:
-                if store:
-                    store.flush()
-                self._cleanup()
-            if store:  # not after a crash: what it skipped so far is no count of anything
-                record_skips(
-                    manifest_path(store.path), manifest, {TEST: skipped} if windows is None else window_skipped
-                )
-
-            if not pending:
-                print(f"All {len(all_tasks)} tasks completed")
-            produced = len(all_tasks) - len(store.get_missing(all_tasks)) if store else len(in_memory)
-            self._report_counts(len(all_tasks), produced, skipped, skip_examples)
-
-            ref = ModelResultRef(
-                name=self.name,
-                path=store.path if store else None,
-                count=len(all_tasks),
+            state = _RunState(
+                data=data,
+                target=target,
+                horizon=horizon,
+                horizons=horizons,
+                freq=freq,
                 test_start=test_start,
                 test_end=test_end,
-                horizon=horizon,
-                freq=self._freq,
-                _results=in_memory,
-                produced=produced,
-                skipped=dict(skipped),
-                predictor_lists=None if plan is None else plan.describe(),
-                availability_listing=listing,
+                first_day=first_day,
+                weekdays=weekdays,
                 windows=windows,
-                matching_lists=matching_lists,
-                zone=data.index.tz,
-                horizons=None if every_horizon(horizon, horizons) else horizons,
-                issue_days=weekdays,
+                stored_windows=stored_windows,
+                plan=plan,
+                expanded=expanded,
+                listing=listing,
+                window_listings=window_listings,
                 vintages=vintages,
+                matching_lists=matching_lists,
+                calendar=calendar,
+                all_tasks=all_tasks,
+                pending=pending,
+                run_days=run_days,
+                n_days=n_days,
+                test_days=test_days,
+                window_days=window_days,
+                run_positions=run_positions,
+                masks=masks,
+                store=store,
+                manifest=manifest,
+                in_memory=None if save_to else [],
+                skipped=Counter(),
+                window_skipped={} if windows is None else {name: Counter() for name, _ in windows.periods},
+                skip_examples={},
+                skip_record=self._skip_records(store, first_day, run_positions, plan, expanded),
             )
-            if store:
-                warn_off_the_clock({self.name: ref}, stacklevel=2)
-            if windows is not None:
-                ref.by_window = split_by_window(
-                    ref,
-                    windows,
-                    calendar,
-                    skipped=window_skipped,
-                    predictor_lists=None if plan is None else self._window_lists(plan, windows),
-                    listings=window_listings,
-                    target_before=(stored_windows or windows).target_before,
-                )
-                empty = [name for name, part in ref.by_window.items() if part.produced == 0]
-                if empty:
-                    warnings.warn(
-                        f"{self.name}: no forecasts in the {' and '.join(empty)} window of this run. See forecast_counts().",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-            return ref
-        finally:
+            for task in pending:
+                if (task[0], task[2]) in absent_slots:
+                    state.skip(task, SKIP_MISSING_TEST_ROW, f"period {task[0]} on {test_days[task[2]]}", store)
+                elif task in unpublished:
+                    where = f"period {task[0]}, horizon {task[1]}, run date {test_days[task[2]]}"
+                    state.skip(task, SKIP_NOT_PUBLISHED, where, store)
+                else:
+                    state.tasks.append(task)
+            return state
+        except BaseException:
             if store:
                 store.close()
+            raise
+
+    def _execute(self, state: "_RunState", sink: Optional["_Sink"] = None) -> None:
+        """Fit and forecast the run's tasks in one pool (`_run_tasks`), each record written through `sink` as its job comes back
+        (`_collect`): the run's store, or without one the list `_finish_run` holds in memory. The store is flushed and the period
+        frames let go of however it ends."""
+        if sink is None:
+            sink = state.store if state.store else _MemorySink(state.in_memory)
+        try:
+            if state.tasks:
+                self._run_tasks(state.tasks, state, sink)
+        finally:
+            if state.store:
+                state.store.flush()
+            self._cleanup()
+
+    def _finish_run(self, state: "_RunState") -> ModelResultRef:
+        """Everything of `run` after the pool: the skip counts into the manifest, the shortfall's warning (or error), and the
+        ref of the run, split by window. Not after a crash: what it skipped so far is no count of anything. The store stays open
+        (`_RunState.close`). Called by `run`: its stacklevels count `run`'s frame, so its warnings point at the caller of `run`."""
+        store = state.store
+        windows = state.windows
+        plan = state.plan
+        if store:
+            record_skips(
+                manifest_path(store.path),
+                state.manifest,
+                {TEST: state.skipped} if windows is None else state.window_skipped,
+            )
+
+        if not state.pending:
+            print(f"All {len(state.all_tasks)} tasks completed")
+        produced = len(state.all_tasks) - len(store.get_missing(state.all_tasks)) if store else len(state.in_memory)
+        self._report_counts(len(state.all_tasks), produced, state.skipped, state.skip_examples)
+
+        ref = ModelResultRef(
+            name=self.name,
+            path=store.path if store else None,
+            count=len(state.all_tasks),
+            test_start=state.test_start,
+            test_end=state.test_end,
+            horizon=state.horizon,
+            freq=self._freq,
+            _results=state.in_memory,
+            produced=produced,
+            skipped=dict(state.skipped),
+            predictor_lists=None if plan is None else plan.describe(),
+            availability_listing=state.listing,
+            windows=windows,
+            matching_lists=state.matching_lists,
+            zone=state.data.index.tz,
+            horizons=None if every_horizon(state.horizon, state.horizons) else state.horizons,
+            issue_days=state.weekdays,
+            vintages=state.vintages,
+        )
+        if store:
+            warn_off_the_clock({self.name: ref}, stacklevel=3)
+        if windows is not None:
+            ref.by_window = split_by_window(
+                ref,
+                windows,
+                state.calendar,
+                skipped=state.window_skipped,
+                predictor_lists=None if plan is None else self._window_lists(plan, windows),
+                listings=state.window_listings,
+                target_before=(state.stored_windows or windows).target_before,
+            )
+            empty = [name for name, part in ref.by_window.items() if part.produced == 0]
+            if empty:
+                warnings.warn(
+                    f"{self.name}: no forecasts in the {' and '.join(empty)} window of this run. See forecast_counts().",
+                    UserWarning,
+                    stacklevel=3,
+                )
+        return ref
 
     def _cut_rules(
         self, information_set: Optional["InformationSet"], cut_rules: Optional["InformationSet"]
@@ -987,51 +1284,71 @@ class BaseModel(ABC):
     def _window_lists(plan: PredictorPlan, windows: RunWindows) -> Dict[str, List[Dict]]:
         return {name: plan.describe(plan.days_between(start, end)) for name, (start, end) in windows.periods}
 
-    def _run_tasks(
-        self,
-        tasks,
-        horizons,
-        test_start,
-        n_days,
-        store,
-        in_memory,
-        skipped,
-        skip_examples,
-        plan=None,
-        masks=None,
-        window_days=None,
-        window_skipped=None,
-        run_positions=None,
-        newest_days=None,
-        save_skip=None,
-    ) -> None:
+    def _run_tasks(self, tasks: List[tuple], state: "_RunState", sink: "_Sink") -> None:
+        """Fit and forecast `tasks` of the run `state` in a pool of processes, each initialised once with the model's arrays,
+        lists, config and class (`_pool_init`): a job is a day, or with `refit` a block (`_jobs`), and each job's records go
+        through `sink` as it comes back (`_collect`)."""
         # Targets for every horizon from 1 to the largest, whatever is planned: the worker reads the column of `hz - 1`.
-        hour_arrays = self._build_hour_arrays(max(horizons))
+        hour_arrays = self._build_hour_arrays(max(state.horizons))
+        threads_per_process, n_processes = self._executor_config()
+        expanded_preds, config = self._worker_inputs(state, threads_per_process)
+        jobs = self._jobs(tasks, state.first_day)
+        days_with_tasks = len({t[2] for t in tasks})
+        n_processes = min(n_processes, len(jobs))  # a worker runs whole days (blocks); more would sit idle
+        if sys.platform == "win32":
+            n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
+
+        mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
+        with ProcessPoolExecutor(
+            max_workers=n_processes,
+            mp_context=mp_context,
+            initializer=_pool_init,
+            initargs=(
+                hour_arrays,
+                expanded_preds,
+                config,
+                type(self),
+                self._model_kwargs,
+            ),
+        ) as pool:
+            run_job = _run_day if self.refit is None else _run_block
+            futures = {pool.submit(run_job, day_tasks): day for day, day_tasks in jobs.items()}
+            with Progress() as progress:
+                task_id = progress.add_task(
+                    f"[cyan]{self.name}",
+                    total=state.n_days,
+                    completed=state.n_days - days_with_tasks,
+                )
+                for future in as_completed(futures):
+                    job = futures[future]
+                    try:
+                        day_results, day_skipped = future.result()
+                    except Exception as exc:
+                        # Results already saved stay in the store, so a fixed rerun resumes from here.
+                        pool.shutdown(wait=True, cancel_futures=True)
+                        what = (
+                            f"run date {state.first_day + datetime.timedelta(days=job)}"
+                            if self.refit is None
+                            else f"the refit block from {job}"
+                        )
+                        raise RuntimeError(f"{self.name}: forecasting failed for {what}: {exc}") from exc
+                    self._collect(state, day_results, day_skipped, sink)
+                    progress.advance(task_id, len({t[2] for t in jobs[job]}))
+
+    def _worker_inputs(self, state: "_RunState", threads_per_process: int) -> Tuple[Dict, Dict]:
+        """(the expanded lists, the config) a worker runs the run's tasks with (`_worker.TaskInputs`, with the period arrays of
+        `_build_hour_arrays` and the model rebuilt from its class and `_model_kwargs`): every option of the model a fit reads,
+        explicitly, so a worker needs nothing else of the parent's."""
+        horizons, plan, masks = state.horizons, state.plan, state.masks
         if plan is None:
             expanded_preds = self._precompute_expanded_predictors(horizons)
             scalable_masks = self._precompute_scalable_masks(horizons) if masks is None else masks
         else:
             expanded_preds = {list_id: list(names) for list_id, names in enumerate(plan.lists)}
             scalable_masks = masks
-
-        first_day = datetime.date.fromisoformat(test_start)
-        # A pool job is a day, or with `refit` a block: the issue days of one anchor, whose units it fits once each. With
-        # "auto" a block of the coarsest member's rule, which holds its one fit and the finer members' fits of the same days.
-        block = self._refit_block
-        tasks_by_day: Dict[Any, list] = {}
-        for t in tasks:
-            job = t[2] if block is None else refit_anchor(first_day + datetime.timedelta(days=t[2]), block)
-            tasks_by_day.setdefault(job, []).append(t)
-        days_with_tasks = len({t[2] for t in tasks})
-
-        threads_per_process, n_processes = self._executor_config()
-        n_processes = min(n_processes, len(tasks_by_day))  # a worker runs whole days (blocks); more would sit idle
-        if sys.platform == "win32":
-            n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
-
         config = {
             "offset": self._offset,
-            "test_start": test_start,
+            "test_start": state.test_start,
             "training_window": self.training_window,
             "scalable_masks": scalable_masks,
             # A list of training windows: each member fitted on its own rows (`_worker._fit_member`), their forecasts averaged.
@@ -1054,8 +1371,8 @@ class BaseModel(ABC):
         else:
             # Each record's `list_hash`: the hash a predictor function returning the (period, horizon)'s list gets.
             config["fixed_list_hashes"] = {key: list_hash(names) for key, names in expanded_preds.items()}
-        if run_positions is not None:
-            config["run_days"] = run_positions
+        if state.run_positions is not None:
+            config["run_days"] = state.run_positions
         if self._fits_nothing:
             config["fits"] = False  # each task reads its issue row alone (`_worker._row_value`)
         if self.binary_mask == MASK_FIT and self.refit is None:
@@ -1066,85 +1383,60 @@ class BaseModel(ABC):
             # The newest targets were read on the anchors (`_newest_targets`), and a unit looks its own up by date. `rule` is the
             # block's, `rules` each member's (`member_rules`): a unit is anchored on its member's.
             config["refit"] = {
-                "rule": block,
+                "rule": self._refit_block,
                 "rules": self._refit_rules,
                 "first_ordinal": self._first_ordinal,
                 "newest": self._newest,
             }
         elif self._newest is not None:
             # By a task's place among the issue days: with `issue_days`, among the days of the listed weekdays alone.
+            newest_days = None if state.weekdays is None else [state.test_days[day] for day in state.run_days]
             config["newest"] = self._newest.by_position(newest_days)
+        return expanded_preds, config
 
-        mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
-        with ProcessPoolExecutor(
-            max_workers=n_processes,
-            mp_context=mp_context,
-            initializer=_pool_init,
-            initargs=(
-                hour_arrays,
-                expanded_preds,
-                config,
-                type(self),
-                self._model_kwargs,
-            ),
-        ) as pool:
-            run_job = _run_day if self.refit is None else _run_block
-            futures = {pool.submit(run_job, day_tasks): day for day, day_tasks in tasks_by_day.items()}
-            with Progress() as progress:
-                task_id = progress.add_task(
-                    f"[cyan]{self.name}",
-                    total=n_days,
-                    completed=n_days - days_with_tasks,
-                )
-                for future in as_completed(futures):
-                    job = futures[future]
-                    try:
-                        day_results, day_skipped = future.result()
-                    except Exception as exc:
-                        # Results already saved stay in the store, so a fixed rerun resumes from here.
-                        pool.shutdown(wait=True, cancel_futures=True)
-                        what = (
-                            f"run date {first_day + datetime.timedelta(days=job)}"
-                            if self.refit is None
-                            else f"the refit block from {job}"
-                        )
-                        raise RuntimeError(f"{self.name}: forecasting failed for {what}: {exc}") from exc
-                    for result in day_results:
-                        if store:
-                            store.save(result)
-                        else:
-                            in_memory.append(result)
-                    for (hour, hz, day), outcome in day_skipped:
-                        reason, _, detail = outcome.partition(": ")
-                        skipped[reason] += 1
-                        if window_days is not None:
-                            window_skipped[window_days[day][0]][reason] += 1
-                        where = f"period {hour}, horizon {hz}, run date {first_day + datetime.timedelta(days=day)}"
-                        skip_examples.setdefault(reason, f"{where}: {detail}" if detail else where)
-                        if save_skip:
-                            save_skip((hour, hz, day), outcome)
-                    progress.advance(task_id, len({t[2] for t in tasks_by_day[job]}))
+    def _jobs(self, tasks: Iterable[tuple], first_day: datetime.date) -> Dict[Any, List[tuple]]:
+        """The run's pool jobs: a day's tasks, or with `refit` a block's, the issue days of one anchor, whose units it fits once
+        each. With "auto" a block of the coarsest member's rule, which holds its one fit and the finer members' fits of the same
+        days. In the order of `tasks`."""
+        block = self._refit_block
+        jobs: Dict[Any, list] = {}
+        for t in tasks:
+            job = t[2] if block is None else refit_anchor(first_day + datetime.timedelta(days=t[2]), block)
+            jobs.setdefault(job, []).append(t)
+        return jobs
 
-    def _skip_writer(
+    def _collect(
+        self, state: "_RunState", results: List[Dict], skipped: List[Tuple[tuple, str]], sink: "_Sink"
+    ) -> None:
+        """What a job gave back, into the run: its records through `sink`, then each skipped task counted (per window too) and
+        its skip record through `sink`, with one example per reason."""
+        for result in results:
+            sink.save(result)
+        for (hour, hz, day), outcome in skipped:
+            detail = outcome.partition(": ")[2]
+            where = f"period {hour}, horizon {hz}, run date {state.first_day + datetime.timedelta(days=day)}"
+            state.skip((hour, hz, day), outcome, f"{where}: {detail}" if detail else where, sink)
+
+    def _skip_records(
         self,
         store: Optional[ResultStore],
         first_day: datetime.date,
         run_positions: Optional[Dict[int, tuple]],
         plan: Optional[PredictorPlan],
         expanded: Dict[Tuple[int, int], List[str]],
-    ) -> Optional[Callable[[tuple, str], None]]:
-        """What writes the skip record of a task (`_worker.skip_record`) into `store`, from the task and its skip reason (with its
-        detail after ": "); None without a store. A task's window, day and list are read as the worker reads them
-        (`run_positions`, the plan's assignment, or a fixed list's hash), its `actual` from the row it would have been issued from
-        (null without one), and its `refit_anchor` is the block's anchor with `refit`, as its forecast's record has it, else its
-        run date. Records held in memory get none: they are the forecasts alone."""
+    ) -> Optional[Callable[[tuple, str], Dict]]:
+        """What builds the skip record of a task (`_worker.skip_record`), from the task and its skip reason (with its detail
+        after ": "); None without a store. A task's window, day and list are read as the worker reads them (`run_positions`, the
+        plan's assignment, or a fixed list's hash), its `actual` from the row it would have been issued from (null without one),
+        and its `refit_anchor` is the block's anchor with `refit`, as its forecast's record has it, else its run date. Records
+        held in memory get none: they are the forecasts alone."""
         if store is None:
             return None
         fixed = None if plan is not None else {key: list_hash(names) for key, names in expanded.items()}
         block = self._refit_block
         targets: Dict[Tuple[int, int], np.ndarray] = {}
 
-        def save_skip(task: tuple, outcome: str) -> None:
+        def build(task: tuple, outcome: str) -> Dict:
             hour, hz, day = task
             window, day_in_window, position = (None, day, day) if run_positions is None else run_positions[day]
             run_date = first_day + datetime.timedelta(days=day)
@@ -1158,13 +1450,11 @@ class BaseModel(ABC):
                 actual = float(column[row])
             hashed = fixed[(hour, hz)] if plan is None else plan.hashes[int(plan.assignment[(hour, hz)][position])]
             anchor = run_date if block is None else refit_anchor(run_date, block)
-            store.save_skip(
-                skip_record(
-                    run_date, hour, hz, day_in_window, actual, self._freq, window, outcome, hashed, anchor.isoformat()
-                )
+            return skip_record(
+                run_date, hour, hz, day_in_window, actual, self._freq, window, outcome, hashed, anchor.isoformat()
             )
 
-        return save_skip
+        return build
 
     def _report_counts(self, planned: int, produced: int, skipped: Counter, examples: Dict[str, str]) -> None:
         """Make a shortfall of forecasts loud: a warning with the reasons, an error if nothing was produced."""
@@ -1196,6 +1486,7 @@ class BaseModel(ABC):
         cut_rules: Optional["InformationSet"] = None,
         horizons: Optional[Sequence[int]] = None,
         weekdays: Optional[Sequence[int]] = None,
+        stacklevel: int = 4,
     ) -> Dict[Tuple[int, int], List[str]]:
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
 
@@ -1221,6 +1512,9 @@ class BaseModel(ABC):
 
         `weekdays` (`resolve_issue_days` of a run's `issue_days`) checks and lists the issue days of those weekdays alone: what a
         forecast of another weekday would read late is no use of this run's.
+
+        `stacklevel` is that of the warning about a midnight stamp (`_contract.warn_about_a_midnight_stamp`): 4 attributes it to
+        the caller of the method that calls this one.
         """
         self._set_freq(freq)
         horizons = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
@@ -1255,6 +1549,7 @@ class BaseModel(ABC):
                     cut_rules=cut_rules,
                     horizons=horizons,
                     weekdays=weekdays,
+                    stacklevel=stacklevel,
                 )
             expanded = plan.names_by_pair()
             self._check_reaches_back(
@@ -1262,7 +1557,12 @@ class BaseModel(ABC):
             )
             self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
             _contract.warn_about_a_midnight_stamp(
-                data.index, freq, self._used_predictors, self._cut_rules(information_set, cut_rules), self.name
+                data.index,
+                freq,
+                self._used_predictors,
+                self._cut_rules(information_set, cut_rules),
+                self.name,
+                stacklevel=stacklevel,
             )
             if information_set is not None and availability == "raise":
                 plan.check(target, self.name)
@@ -1276,7 +1576,12 @@ class BaseModel(ABC):
         expanded = fixed
         self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
         _contract.warn_about_a_midnight_stamp(
-            data.index, freq, self._used_predictors, self._cut_rules(information_set, cut_rules), self.name
+            data.index,
+            freq,
+            self._used_predictors,
+            self._cut_rules(information_set, cut_rules),
+            self.name,
+            stacklevel=stacklevel,
         )
         days = None if windows is None else windows.issue_days(weekdays)
         if days is None and weekdays is not None and test_start is not None and test_end is not None:
@@ -1343,6 +1648,81 @@ class BaseModel(ABC):
                     )
                 self._window_listings[name] = listing_rows(uses)
         return expanded
+
+    def _checked_inputs(
+        self,
+        data: pd.DataFrame,
+        target: str,
+        horizon: int,
+        freq: str,
+        information_set: Optional["InformationSet"] = None,
+        test_start: Optional[str] = None,
+        test_end: Optional[str] = None,
+        plan: Optional[PredictorPlan] = None,
+        availability: str = "raise",
+        windows: Optional[RunWindows] = None,
+        cut_rules: Optional["InformationSet"] = None,
+        horizons: Optional[Sequence[int]] = None,
+        weekdays: Optional[Sequence[int]] = None,
+    ) -> _Checked:
+        """`_check_inputs`, with what it found and the run it checked, for `run(checked=...)`: `ModelPipeline` checks every
+        model before any runs, and each run then uses its check. Its warnings are attributed as `_check_inputs`' own, to the
+        caller of the method that calls this one."""
+        expanded = self._check_inputs(
+            data,
+            target,
+            horizon,
+            freq,
+            information_set,
+            test_start,
+            test_end,
+            plan=plan,
+            availability=availability,
+            windows=windows,
+            cut_rules=cut_rules,
+            horizons=horizons,
+            weekdays=weekdays,
+            stacklevel=5,
+        )
+        run = _Checked.run_of(
+            self,
+            data,
+            target,
+            horizon,
+            horizons,
+            freq,
+            information_set,
+            test_start,
+            test_end,
+            plan,
+            availability,
+            windows,
+            cut_rules,
+            weekdays,
+        )
+        return _Checked(expanded, tuple(self._used_predictors), self._availability_listing, self._window_listings, run)
+
+    def _check_settings(self) -> Tuple[Any, ...]:
+        """What of the model its inputs' check reads, or could, frozen for comparing by value (`_Checked.run_of`): its class,
+        name, predictors (the list, a `(horizon)` function, a function of `ctx`), training window, refit rule, newest target,
+        binary-column rule, scaler, whether it fits nothing or forecasts what is known only, and `_model_kwargs`."""
+        return _frozen(
+            (
+                type(self),
+                self.name,
+                self.predictors,
+                self._predictors_fn,
+                self._ctx_fn,
+                self.training_window,
+                self.refit,
+                self.newest_target,
+                self.binary_mask,
+                self.scaler,
+                self._fits_nothing,
+                self._known_only,
+                self._model_kwargs,
+            )
+        )
 
     def _check_reaches_back(
         self,
@@ -1559,6 +1939,7 @@ class BaseModel(ABC):
         cut_rules: Optional["InformationSet"] = None,
         horizons: Optional[Sequence[int]] = None,
         weekdays: Optional[Sequence[int]] = None,
+        stacklevel: int = 4,
     ) -> Optional[PredictorPlan]:
         """The plan of a predictor function of `ctx` for this data and test period, or None for a model with fixed lists.
 
@@ -1566,7 +1947,9 @@ class BaseModel(ABC):
         `windows` plans the days of a run with validation, once each and none between them; the function doesn't see them.
         `availability` is the level `ctx` answers at (see `epftoolbox2.models.context`). `cut_rules` is as in `run`.
         `horizons` are the horizons planned, every one from 1 to `horizon` (the largest) if not given. `weekdays` plans the days of
-        those weekdays alone (a run's `issue_days`), not with `issue_days`, which are already the days to plan.
+        those weekdays alone (a run's `issue_days`), not with `issue_days`, which are already the days to plan. `stacklevel` is
+        that of the warning about a `published()` never True in one window (`warn_never_published_in`): 4 attributes it to the
+        caller of the method that calls this one.
         """
         if self._ctx_fn is None:
             return None
@@ -1614,7 +1997,7 @@ class BaseModel(ABC):
         )
         if windows is not None and warn_unpublished and len(windows.periods) > 1:
             for name, (start, end) in windows.periods:
-                warn_never_published_in(plan, name, plan.days_between(start, end))
+                warn_never_published_in(plan, name, plan.days_between(start, end), stacklevel=stacklevel)
         return plan
 
     def _check_plan_is_for(
@@ -1741,14 +2124,54 @@ class BaseModel(ABC):
                     break
         return mask
 
-    def _load_periods(self, data: pd.DataFrame, used_columns: Sequence[str], horizon: int, target: str) -> None:
-        """Read `data` into the frames of the periods, whose rows the tasks are cut from."""
+    def _load_periods(self, data: pd.DataFrame, used_columns: Sequence[str], horizon: int, target: str) -> _Periods:
+        """Read `data` into the frames of the periods, whose rows the tasks are cut from, and return them: what
+        `_prepare_run(periods=...)` takes for another model of this frame, target, horizon and freq that reads no other column."""
         self._data = self._preprocess(data[list(used_columns)], horizon, target)
         self._first_ordinal = self._data.index[0].date().toordinal()
         for hour in range(self._periods_per_day):
             hour_df = self._data[self._data["hour"] == hour].copy()
             self._hour_data[hour] = hour_df
             self._hour_days[hour] = hour_df["day"].values
+        return _Periods(
+            source=data,
+            target=target,
+            horizon=horizon,
+            freq=self._freq,
+            columns=tuple(used_columns),
+            data=self._data,
+            first_ordinal=self._first_ordinal,
+            hour_data={hour: self._hour_data[hour] for hour in range(self._periods_per_day)},
+            hour_days={hour: self._hour_days[hour] for hour in range(self._periods_per_day)},
+        )
+
+    def _use_periods(
+        self, periods: _Periods, data: pd.DataFrame, used_columns: Sequence[str], horizon: int, target: str
+    ) -> None:
+        """Take period frames another model read (`_load_periods`) as this run's, as `_load_periods` would leave them: they
+        must be of this frame (the same object), target, largest horizon and freq, and hold every column of `used_columns`. The
+        frames are shared, read only: the model keeps its own dicts of them, which `_cleanup` empties."""
+        problems = [
+            what
+            for what, differs in (
+                ("frame", periods.source is not data),
+                ("target", periods.target != target),
+                ("horizon", periods.horizon != horizon),
+                ("freq", periods.freq != self._freq),
+            )
+            if differs
+        ]
+        missing = [column for column in used_columns if column not in periods.columns]
+        if problems or missing:
+            raise ValueError(
+                f"{self.name}: these period frames were read for another {', '.join(problems)}"
+                if problems
+                else f"{self.name}: these period frames don't hold {missing}"
+            )
+        self._data = periods.data
+        self._first_ordinal = periods.first_ordinal
+        self._hour_data.update(periods.hour_data)
+        self._hour_days.update(periods.hour_days)
 
     def _grid_start(self, plan: PredictorPlan) -> int:
         """The day id of the first day of `plan.day_lists`, which may be before the frame's."""

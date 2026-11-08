@@ -396,7 +396,12 @@ def test_pipeline_precheck_reads_the_same_days_as_run(tmp_path, as_date, checked
         )
 
     assert run("2023-09-01").refs["OLS"].produced == 96
-    # The pre-check, then run: 2023-09-01 less 45 + 1 + 1 days, plus 1 + 1 days.
+    # The pre-check, which the run then uses (`run(checked=)`): 2023-09-01 less 45 + 1 + 1 days, plus 1 + 1 days.
+    assert checked_days == [(pd.Timestamp("2023-07-16"), pd.Timestamp("2023-09-03"))]
+    # A run on its own checks the same days.
+    OLSModel(PREDICTORS, training_window=45, name="OLS").run(
+        df, day("2023-09-01"), day("2023-09-01"), horizon=1, freq="15min"
+    )
     assert checked_days == [(pd.Timestamp("2023-07-16"), pd.Timestamp("2023-09-03"))] * 2
     with pytest.raises(ValueError, match="coarser"):
         run("2023-04-20", save_dir=str(tmp_path))
@@ -422,7 +427,8 @@ def test_forecast_only_checks_the_days_read_from_today(use_pipeline, checked_day
     ref = run(history_up_to_today(hourly_until_days_ago=100))
     today = datetime.date.today().isoformat()
     assert ref.test_start == today and ref.produced > 0
-    assert checked_days == [_contract.read_days(today, today, 45, 1)] * (2 if use_pipeline else 1)
+    # A pipeline's run uses its pre-check (`run(checked=)`): one check either way.
+    assert checked_days == [_contract.read_days(today, today, 45, 1)]
     with pytest.raises(ValueError, match="coarser"):
         run(history_up_to_today(hourly_until_days_ago=20))
 

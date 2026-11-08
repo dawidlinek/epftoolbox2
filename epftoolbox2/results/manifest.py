@@ -761,7 +761,7 @@ def _kernels_on_file(
             f"file mixes them (its manifest records kernels: {used}). Set EPFTOOLBOX2_KERNELS to one backend and use a new "
             "save_dir for results of one.",
             UserWarning,
-            stacklevel=4,
+            stacklevel=5,
         )
     return used[0] if len(used) == 1 else used
 
@@ -796,7 +796,7 @@ def _mark_rows_unverified(manifest: Manifest, model_name: str, path: Path, why: 
             f"({why}). They stay in the file, and every report() of it will say so. Run again into a new save_dir to be rid "
             "of them.",
             UserWarning,
-            stacklevel=4,
+            stacklevel=5,
         )
     manifest.training_cut = {**(manifest.training_cut or TRAINING_CUT_BY_DATE), "stored": "unverified"}
 

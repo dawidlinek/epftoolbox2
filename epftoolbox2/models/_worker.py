@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 import datetime
 import hashlib
 import math
@@ -14,11 +14,11 @@ from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
 from ._calendar import MASK_FIT, FitUnit, member_window, refit_anchor, training_span
 
+# What `_worker_init` loads into a pool's worker: the default `TaskInputs` of every task function (`_pool_inputs`).
 _W_HOUR_ARRAYS: Dict = {}
 _W_EXPANDED_PREDS: Dict = {}
 _W_CONFIG: Dict = {}
-_W_FIT_PREDICT = None
-_W_MODEL = None  # the instance `_W_FIT_PREDICT` is bound to, whose `_fit_model` and `_predict_fitted` a refit uses
+_W_MODEL = None  # built with refit=None: its `_fit_predict`, or a refit's `_fit_model` and `_predict_fitted`
 
 # Native thread pools (BLAS, OpenMP) used by one task. The pool already runs MAX_PROCESSES x THREADS_PER_PROCESS
 # tasks at once, so more threads per task only oversubscribe the cores (an OLS run took 4-40x longer that way).
@@ -76,6 +76,25 @@ def _limit_openmp_in_task_thread() -> None:
         _W_THREADPOOLS.limit(limits=NATIVE_THREADS_PER_TASK, user_api="openmp")
 
 
+class TaskInputs(NamedTuple):
+    """What the task functions of this module run one model's tasks with: the period arrays (`BaseModel._build_hour_arrays`:
+    `x`, `y`, `days`, `timestamps`, `col_index` per period; a fit reads its columns by name through `col_index`, so arrays with
+    more columns give the same records), the expanded lists (keyed (period, horizon), or list id with a predictor function), the
+    model's config (`BaseModel._worker_inputs`) and the model, rebuilt as `model_cls(predictors=[], **model_kwargs)` with
+    refit=None whatever the model's (`task_inputs`): what a refit needs travels in `config["refit"]`. Every task function takes
+    one; None is the pool's (`_pool_inputs`), what `_worker_init` loaded."""
+
+    hour_arrays: Dict
+    expanded: Dict
+    config: Dict
+    model: Any
+
+
+def task_inputs(hour_arrays, expanded_preds, config, model_cls, model_kwargs) -> TaskInputs:
+    """The inputs of one model's tasks, the model rebuilt from its class and `_model_kwargs` as a worker rebuilds it."""
+    return TaskInputs(hour_arrays, expanded_preds, config, model_cls(predictors=[], **model_kwargs))
+
+
 def _pool_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
     """Initialiser of the worker pool: limit native threads, then load the data and the model."""
     _limit_native_threads()
@@ -83,13 +102,29 @@ def _pool_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
 
 
 def _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
-    global _W_HOUR_ARRAYS, _W_EXPANDED_PREDS, _W_CONFIG, _W_FIT_PREDICT, _W_MODEL
+    """Load one model's inputs into this process's module globals, the default of every task function (`_pool_inputs`)."""
+    global _W_HOUR_ARRAYS, _W_EXPANDED_PREDS, _W_CONFIG, _W_MODEL
     _W_HOUR_ARRAYS = hour_arrays
     _W_EXPANDED_PREDS = expanded_preds
     _W_CONFIG = config
-    # Built with refit=None whatever the model's: what a refit needs travels in `config["refit"]`.
-    _W_MODEL = model_cls(predictors=[], **model_kwargs)
-    _W_FIT_PREDICT = _W_MODEL._fit_predict
+    _W_MODEL = task_inputs(hour_arrays, expanded_preds, config, model_cls, model_kwargs).model
+
+
+def _pool_inputs() -> TaskInputs:
+    """The inputs `_worker_init` loaded into this process: what a task function runs with when it is given none."""
+    return TaskInputs(_W_HOUR_ARRAYS, _W_EXPANDED_PREDS, _W_CONFIG, _W_MODEL)
+
+
+def _inputs_of(inputs: Optional[TaskInputs]) -> TaskInputs:
+    """The inputs a task function runs with: `inputs` whole, or without them the pool's, all four of what `_worker_init` loaded,
+    never some of each. A ValueError if they have no model (no `_worker_init` in this process, or inputs built without one):
+    a fit never falls back to another model."""
+    resolved = _pool_inputs() if inputs is None else inputs
+    if resolved.model is None:
+        raise ValueError(
+            "a task's inputs have no model: pass TaskInputs with one (task_inputs), or run it in a process _worker_init set up"
+        )
+    return resolved
 
 
 def training_rows(days: np.ndarray, day: int, training_window: int, hz: int, newest: int = -1) -> slice:
@@ -136,8 +171,122 @@ def matching_digest(row_days: np.ndarray, first_ordinal: int) -> str:
     return hashlib.sha256(days.tobytes()).hexdigest()[:12]
 
 
-def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
-    """Fit and forecast one task.
+def task_place(cfg: Dict, day_in_test: int) -> Tuple[Optional[str], int, int]:
+    """(window, days since its start, place among the issue days) of a task's day, `day_in_test` counting from the run's first
+    day: `config["run_days"]` in a run with windows or `issue_days`, else (None, the day, the day)."""
+    run_days = cfg.get("run_days")
+    return (None, day_in_test, day_in_test) if run_days is None else run_days[day_in_test]
+
+
+def task_newest(cfg: Dict, hour: int, position: int) -> int:
+    """The newest target of a task of a refit=None model, relative to its issue day, by its place among the issue days: -1 with
+    `newest_target="d-1"` (no `config["newest"]`)."""
+    newest_targets = cfg.get("newest")
+    return -1 if newest_targets is None else int(newest_targets[hour][position])
+
+
+def task_list(cfg: Dict, expanded: Dict, hour: int, hz: int, position: int) -> Tuple[Optional[int], List[str], tuple]:
+    """(list id, the list's names, its masks' key) of the task (`hour`, `hz`) at its place among the issue days. A fixed list is
+    keyed by (period, horizon), with no id. With a predictor function of `ctx` (see epftoolbox2.models.context) each task has its
+    own list (`config["task_lists"]`), and each list its own binary-column mask per (period, horizon). The mask of a matching
+    list is that list's too, not one per set of days, while the scaler is fitted on what the filter leaves."""
+    task_lists = cfg.get("task_lists")
+    if task_lists is None:
+        return None, expanded[(hour, hz)], (hour, hz)
+    list_id = int(task_lists[(hour, hz)][position])
+    return list_id, expanded[list_id], (list_id, hour, hz)
+
+
+def task_mask(cfg: Dict, window: Optional[str], mask_of: tuple, member: Any = None) -> Optional[np.ndarray]:
+    """The parent's binary-column mask of a refit=None fit: of the task's list (`mask_of`, from `task_list`) in its window, and
+    with a list of training windows of its member. None with `binary_mask="fit"` (`config["binary_mask"]`): the fit reads its own
+    from its span's rows (`_fit_member`)."""
+    if cfg.get("binary_mask") == MASK_FIT:
+        return None
+    masks = cfg["scalable_masks"] if window is None else cfg["scalable_masks"][window]
+    return masks[mask_of if member is None else (*mask_of, member)]
+
+
+def member_rows(days: np.ndarray, day: int, member: Any, hz: int, newest: int) -> slice:
+    """The rows one training window's fit of the task (`hz`, day id `day`) trains on, in a period whose rows are on `days`, before
+    any filter: those of `training_span` with the member's window (`member_window`: `"expanding"` from the frame's first date) and
+    the task's newest target (-1 with `newest_target="d-1"`, which takes today's path, call for call)."""
+    span = member_window(member, day)
+    return training_rows(days, day, span, hz) if newest == -1 else training_rows(days, day, span, hz, newest)
+
+
+def unit_rows(cfg: Dict, days: np.ndarray, unit: FitUnit) -> Tuple[slice, int]:
+    """(the rows, the newest target relative to the anchor) of a refit unit, in a period whose rows are on `days`, before any
+    filter: those of a forecast issued on the anchor, `training_span(anchor, W, h, newest)`, W the model's window or with a list of
+    them the unit's member's, the newest target read on the anchor (a target published between the anchor and the issue day
+    doesn't reach the fit), -1 with `newest_target="d-1"`."""
+    refit = cfg["refit"]
+    anchor = unit.anchor.toordinal() - refit["first_ordinal"]
+    members = cfg.get("members")
+    span = member_window(cfg["training_window"] if members is None else members[unit.member], anchor)
+    newest_targets = refit["newest"]
+    if newest_targets is None:
+        return training_rows(days, anchor, span, unit.horizon), -1
+    newest = int(newest_targets.at(unit.period, unit.anchor.toordinal()))
+    return training_rows(days, anchor, span, unit.horizon, newest), newest
+
+
+def finite_rows(train_x: np.ndarray, train_y: np.ndarray) -> np.ndarray:
+    """Which training rows a fit keeps: those whose target and every predictor are finite (NaN or inf would fail the fit)."""
+    rows = np.isfinite(train_y)
+    if train_x.size:
+        rows &= np.isfinite(train_x).all(axis=1)
+    return rows
+
+
+def forecast_record(
+    run_date: datetime.date,
+    hour: int,
+    hz: int,
+    day_in_window: int,
+    prediction: Optional[float],
+    actual: float,
+    coefficients: list,
+    freq: str,
+    list_hash: str,
+    window: Optional[str] = None,
+    predictor_list: Optional[str] = None,
+    newest_target_day: Optional[str] = None,
+    refit_anchor: Optional[str] = None,
+    extra: Optional[Dict] = None,
+) -> Dict:
+    """The record of a forecast, keys in their order: the key fields, `prediction`, `actual` (the issue row's target),
+    `coefficients`, `freq`; a refit unit's `refit_anchor`; `newest_target_day` with `newest_target="published"`; a predictor
+    function's `predictor_list`; a matching list's `extra` (`training_days`, `matching_days`); `window` in a run with windows;
+    then D4's keys (`with_status`): `status` "ok", `list_hash`, `refit_anchor` (the issue day where the record has none: each
+    forecast of a refit=None model is its own fit) and `revision`. `_combined` makes a list of training windows' from it."""
+    record = {
+        "run_date": run_date.isoformat(),
+        "target_date": (run_date + datetime.timedelta(days=hz)).isoformat(),
+        "run_weekday": run_date.weekday(),
+        "hour": hour,
+        "horizon": hz,
+        "day_in_test": day_in_window,
+        "prediction": prediction,
+        "actual": actual,
+        "coefficients": coefficients,
+        "freq": freq,
+    }
+    if refit_anchor is not None:
+        record["refit_anchor"] = refit_anchor
+    if newest_target_day is not None:
+        record["newest_target_day"] = newest_target_day
+    if predictor_list is not None:
+        record["predictor_list"] = predictor_list
+    if extra:
+        record.update(extra)
+    if window is not None:
+        record["window"] = window
+    return with_status(record, list_hash=list_hash, refit_anchor=record["run_date"])
+
+
+def _fit_one_numpy(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskInputs] = None) -> Union[Dict, str]:
+    """Fit and forecast one task, with `inputs` (the pool's if None).
 
     Returns the result record, or a skip reason (one of the SKIP_* names, optionally followed by ": detail")
     when no forecast is possible.
@@ -153,94 +302,76 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     skipped with the first failing member's reason, tagged with its window. Member i's forecast is that of the model with
     `training_window` its window, to the bit. With one window the body runs once, as it always did.
     """
-    arrays = _W_HOUR_ARRAYS[hour]
-    cfg = _W_CONFIG
+    inputs = _inputs_of(inputs)
+    arrays = inputs.hour_arrays[hour]
+    cfg = inputs.config
     day = cfg["offset"] + day_in_test
-    run_days = cfg.get("run_days")
-    window, day_in_window, position = (None, day_in_test, day_in_test) if run_days is None else run_days[day_in_test]
-    # binary_mask="fit": no mask from the parent, each fit reads its own (`_fit_member`, mask None).
-    own_masks = cfg.get("binary_mask") == MASK_FIT
-    scalable_masks = cfg["scalable_masks"] if window is None else cfg["scalable_masks"][window]
+    window, day_in_window, position = task_place(cfg, day_in_test)
 
     days = arrays["days"]
     # A model with newest_target="published" has the day of its newest target per issue day, read from the target's rule.
-    newest_targets = cfg.get("newest")
-    newest = -1 if newest_targets is None else int(newest_targets[hour][position])
+    newest = task_newest(cfg, hour, position)
     test = issue_row(days, day)
     if test is None:
         return SKIP_MISSING_TEST_ROW
-
-    # A fixed list is keyed by (period, horizon). With a predictor function of `ctx` (see epftoolbox2.models.context)
-    # each task has its own list, and each list its own binary-column mask per (period, horizon). The mask of a matching
-    # list is that list's too, not one per set of days, while the scaler below is fitted on what the filter leaves.
-    task_lists = cfg.get("task_lists")
-    if task_lists is None:
-        list_id = None
-        predictors = _W_EXPANDED_PREDS[(hour, hz)]
-        mask_of = (hour, hz)
-    else:
-        list_id = int(task_lists[(hour, hz)][position])
-        predictors = _W_EXPANDED_PREDS[list_id]
-        mask_of = (list_id, hour, hz)
+    list_id, predictors, mask_of = task_list(cfg, inputs.expanded, hour, hz, position)
 
     def fit(member, scalable_mask):
-        return _fit_member(arrays, cfg, hour, hz, day, member, newest, test, list_id, predictors, scalable_mask)
+        return _fit_member(
+            arrays, cfg, hour, hz, day, member, newest, test, list_id, predictors, scalable_mask, inputs.model
+        )
 
     members = cfg.get("members")
     if members is None:  # one training window: masks keyed as they always were
-        fitted = fit(cfg["training_window"], None if own_masks else scalable_masks[mask_of])
+        fitted = fit(cfg["training_window"], task_mask(cfg, window, mask_of))
         if isinstance(fitted, str):
             return fitted
         prediction, coefs, extra = fitted
     else:
         outcomes = []
         for member in members:
-            fitted = fit(member, None if own_masks else scalable_masks[(*mask_of, member)])
+            fitted = fit(member, task_mask(cfg, window, mask_of, member))
             if isinstance(fitted, str):
                 return _tagged(fitted, member)
             outcomes.append(fitted)
         prediction, coefs, extra = None, [], {}
 
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
-    record = {
-        "run_date": run_date.isoformat(),
-        "target_date": (run_date + datetime.timedelta(days=hz)).isoformat(),
-        "run_weekday": run_date.weekday(),
-        "hour": hour,
-        "horizon": hz,
-        "day_in_test": day_in_window,
-        "prediction": prediction,
-        "actual": float(arrays["y"][test, hz - 1]),
-        "coefficients": coefs,
-        "freq": cfg.get("freq", "1h"),
-    }
-    if newest_targets is not None:
+    record = forecast_record(
+        run_date,
+        hour,
+        hz,
+        day_in_window,
+        prediction,
+        float(arrays["y"][test, hz - 1]),
+        coefs,
+        cfg.get("freq", "1h"),
+        _list_hash_of(cfg, inputs.expanded, hour, hz, list_id),
+        window=window,
+        predictor_list=None if list_id is None else cfg["list_hashes"][list_id],
         # The newest target date of the training span, D + min(k, h-1); a row is never dated `day` or later (`training_span`).
         # Not necessarily a target that trained: it can be a slot the clock skips or a missing value, whose row drops.
-        record["newest_target_day"] = (run_date + datetime.timedelta(days=min(newest, hz - 1))).isoformat()
-    if list_id is not None:
-        record["predictor_list"] = cfg["list_hashes"][list_id]
-    record.update(extra)
-    if window is not None:
-        record["window"] = window
-    # Each forecast is its own fit: its anchor is its issue day.
-    with_status(record, list_hash=_list_hash_of(cfg, hour, hz, list_id), refit_anchor=record["run_date"])
+        newest_target_day=None
+        if cfg.get("newest") is None
+        else (run_date + datetime.timedelta(days=min(newest, hz - 1))).isoformat(),
+        extra=extra,
+    )
     if members is not None:
         return _combined(record, [prediction for prediction, _, _ in outcomes])
     return record
 
 
-def _list_hash_of(cfg: Dict, hour: int, hz: int, list_id: Optional[int]) -> str:
+def _list_hash_of(cfg: Dict, expanded: Dict, hour: int, hz: int, list_id: Optional[int]) -> str:
     """The `list_hash` of a record: a predictor function's list's (`config["list_hashes"]`, what `predictor_list` holds), or a
     fixed list's of its (period, horizon), the hash a function returning that list gets (`config["fixed_list_hashes"]`, or from
-    the list itself for a worker set up without them)."""
+    the list itself, in `expanded`, for a worker set up without them)."""
     if list_id is not None:
         return cfg["list_hashes"][list_id]
     fixed = cfg.get("fixed_list_hashes")
     if fixed is None:
         from .context import list_hash  # it imports this module
 
-        return list_hash(_W_EXPANDED_PREDS[(hour, hz)])
+        return list_hash(expanded[(hour, hz)])
     return fixed[(hour, hz)]
 
 
@@ -256,17 +387,17 @@ def _fit_member(
     list_id,
     predictors,
     scalable_mask,
+    model,
 ) -> Union[Tuple[float, list, Dict], str]:
     """One training window's forecast of the task (`hour`, `hz`, day id `day`) issued from row `test`: (the prediction in target
-    units, the coefficients, a matching list's record fields), or a skip reason. Its rows are those of `training_span` with the
-    member's window (`member_window`: `"expanding"` from the frame's first date), with the task's newest target.
+    units, the coefficients, a matching list's record fields), or a skip reason. Its rows are `member_rows`: those of
+    `training_span` with the member's window (`member_window`: `"expanding"` from the frame's first date), with the task's newest
+    target. `model` fits it (`_fit_predict`): the task's own, from its inputs, never one of the process's.
 
     `scalable_mask` None (`binary_mask="fit"`) is read here from those rows in the list's columns, before the matching and the
     finite filters, as `_fit_unit` reads a refit unit's: which columns are binary is then a function of this fit's span alone."""
     days = arrays["days"]
-    span = member_window(member, day)
-    # newest_target="d-1" takes today's path, call for call.
-    train = training_rows(days, day, span, hz) if newest == -1 else training_rows(days, day, span, hz, newest)
+    train = member_rows(days, day, member, hz, newest)
 
     col_idx = [arrays["col_index"][c] for c in predictors]
     train_x = arrays["x"][train][:, col_idx]
@@ -295,11 +426,9 @@ def _fit_member(
         matching_days = matching_digest(train_days, matching["first_ordinal"])
 
     # Drop rows with NaN/inf in either predictors or target to avoid model fit failures.
-    finite_rows = np.isfinite(train_y)
-    if train_x.size:
-        finite_rows &= np.isfinite(train_x).all(axis=1)
-    train_x = train_x[finite_rows]
-    train_y = train_y[finite_rows]
+    finite = finite_rows(train_x, train_y)
+    train_x = train_x[finite]
+    train_y = train_y[finite]
 
     if train_x.shape[0] == 0:
         return SKIP_NO_FINITE_TRAINING_ROWS
@@ -316,14 +445,14 @@ def _fit_member(
         columns=predictors,
     )
     try:
-        pred, coefs = _W_FIT_PREDICT(train_x, train_y, test_x)
+        pred, coefs = model._fit_predict(train_x, train_y, test_x)
     except ValueError as exc:
         # scikit-learn raises ValueError on degenerate input (e.g. fewer rows than CV folds); counted, not fatal.
         return f"{SKIP_FIT_ERROR}: {exc}"
 
     extra = {}
     if matching_days is not None:
-        extra["training_days"] = int(np.unique(train_days[finite_rows]).size)
+        extra["training_days"] = int(np.unique(train_days[finite]).size)
         extra["matching_days"] = matching_days
     return scaler.inverse(float(pred)), coefs, extra
 
@@ -353,43 +482,37 @@ def _combined(record: Dict, predictions: List[float]) -> Dict:
     return out
 
 
-def _row_value(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
+def _row_value(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskInputs] = None) -> Union[Dict, str]:
     """Forecast one task of a model that fits nothing (`NaiveModel`): its one predictor's value on the row the forecast is
     issued from, the last row dated on the issue day, as it stands. No training row, scaler or mask is read, so a task needs
     no history. Returns the record, with no coefficients, or a skip reason, as `_fit_one_numpy` does."""
-    arrays = _W_HOUR_ARRAYS[hour]
-    cfg = _W_CONFIG
+    inputs = _inputs_of(inputs)
+    arrays = inputs.hour_arrays[hour]
+    cfg = inputs.config
     day = cfg["offset"] + day_in_test
-    run_days = cfg.get("run_days")
-    window, day_in_window, position = (None, day_in_test, day_in_test) if run_days is None else run_days[day_in_test]
+    window, day_in_window, position = task_place(cfg, day_in_test)
     test = issue_row(arrays["days"], day)
     if test is None:
         return SKIP_MISSING_TEST_ROW
-    task_lists = cfg.get("task_lists")
-    list_id = None if task_lists is None else int(task_lists[(hour, hz)][position])
-    (name,) = _W_EXPANDED_PREDS[(hour, hz) if list_id is None else list_id]
+    list_id, (name,), _ = task_list(cfg, inputs.expanded, hour, hz, position)
     value = float(arrays["x"][test, arrays["col_index"][name]])
     if not np.isfinite(value):
         return SKIP_MISSING_TEST_PREDICTORS
 
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
-    record = {
-        "run_date": run_date.isoformat(),
-        "target_date": (run_date + datetime.timedelta(days=hz)).isoformat(),
-        "run_weekday": run_date.weekday(),
-        "hour": hour,
-        "horizon": hz,
-        "day_in_test": day_in_window,
-        "prediction": value,
-        "actual": float(arrays["y"][test, hz - 1]),
-        "coefficients": [],
-        "freq": cfg.get("freq", "1h"),
-    }
-    if list_id is not None:
-        record["predictor_list"] = cfg["list_hashes"][list_id]
-    if window is not None:
-        record["window"] = window
-    return with_status(record, list_hash=_list_hash_of(cfg, hour, hz, list_id), refit_anchor=record["run_date"])
+    return forecast_record(
+        run_date,
+        hour,
+        hz,
+        day_in_window,
+        value,
+        float(arrays["y"][test, hz - 1]),
+        [],
+        cfg.get("freq", "1h"),
+        _list_hash_of(cfg, inputs.expanded, hour, hz, list_id),
+        window=window,
+        predictor_list=None if list_id is None else cfg["list_hashes"][list_id],
+    )
 
 
 def skip_record(
@@ -426,10 +549,11 @@ def skip_record(
     return with_status(record, status, list_hash, refit_anchor, detail or None)
 
 
-def _run_task(task: tuple) -> Union[Dict, str]:
+def _run_task(task: tuple, inputs: Optional[TaskInputs] = None) -> Union[Dict, str]:
+    inputs = _inputs_of(inputs)
     try:
         # A model that fits nothing has `config["fits"]` False and forecasts from the issue row alone.
-        return _fit_one_numpy(*task) if _W_CONFIG.get("fits", True) else _row_value(*task)
+        return _fit_one_numpy(*task, inputs) if inputs.config.get("fits", True) else _row_value(*task, inputs)
     except Exception as exc:
         hour, hz, day_in_test = task
         raise TaskFailed(
@@ -437,9 +561,11 @@ def _run_task(task: tuple) -> Union[Dict, str]:
         ) from None
 
 
-def _run_day(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
-    """Run one test day's tasks. Returns (results, [(task, skip reason)]); unexpected errors raise TaskFailed."""
-    threads = _W_CONFIG["threads_per_process"]
+def _run_day(tasks: list, inputs: Optional[TaskInputs] = None) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
+    """Run one test day's tasks, with `inputs` (the pool's if None). Returns (results, [(task, skip reason)]); unexpected errors
+    raise TaskFailed."""
+    inputs = _inputs_of(inputs)
+    threads = inputs.config["threads_per_process"]
     results, skipped = [], []
 
     def collect(task, outcome):
@@ -450,43 +576,38 @@ def _run_day(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
 
     if len(tasks) <= 1 or threads == 1:
         for t in tasks:
-            collect(t, _run_task(t))
+            collect(t, _run_task(t, inputs))
         return results, skipped
 
     with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
-        futures = {pool.submit(_run_task, t): t for t in tasks}
+        futures = {pool.submit(_run_task, t, inputs): t for t in tasks}
         for future in as_completed(futures):
             collect(futures[future], future.result())
     return results, skipped
 
 
-def _place_of(day_in_test: int) -> Tuple[Optional[str], int, int]:
-    """(window, days since its start, place among the issue days) of a task's day, as `_fit_one_numpy` reads it."""
-    run_days = _W_CONFIG.get("run_days")
-    return (None, day_in_test, day_in_test) if run_days is None else run_days[day_in_test]
-
-
-def _unit_of(task: tuple, member: int = 0) -> FitUnit:
+def _unit_of(cfg: Dict, task: tuple, member: int = 0) -> FitUnit:
     """The fit a task of a model with `refit` forecasts from: its period and horizon, the anchor of its issue day under its
     member's rule (`config["refit"]["rules"]`, each member's with `"auto"`), its list, and the index of its training window among
     the model's (0 with one window)."""
     hour, hz, day_in_test = task
-    cfg = _W_CONFIG
     task_lists = cfg.get("task_lists")
-    list_id = None if task_lists is None else int(task_lists[(hour, hz)][_place_of(day_in_test)[2]])
+    list_id = None if task_lists is None else int(task_lists[(hour, hz)][task_place(cfg, day_in_test)[2]])
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
     return FitUnit(hour, hz, refit_anchor(run_date, cfg["refit"]["rules"][member]), list_id, member)
 
 
-def _units_of(task: tuple) -> List[FitUnit]:
+def _units_of(cfg: Dict, task: tuple) -> List[FitUnit]:
     """The units a task forecasts from: one, or with a list of training windows one per member, in member order."""
-    members = _W_CONFIG.get("members")
-    return [_unit_of(task)] if members is None else [_unit_of(task, member) for member in range(len(members))]
+    members = cfg.get("members")
+    return [_unit_of(cfg, task)] if members is None else [_unit_of(cfg, task, member) for member in range(len(members))]
 
 
-def _fit_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict, str]]]:
-    """Fit one unit of a model with `refit` and forecast each of `tasks` from it, one row at a time. Returns (task, record or
-    skip reason) of each.
+def _fit_unit(
+    unit: FitUnit, tasks: List[tuple], inputs: Optional[TaskInputs] = None
+) -> List[Tuple[tuple, Union[Dict, str]]]:
+    """Fit one unit of a model with `refit` and forecast each of `tasks` from it, one row at a time, with `inputs` (the pool's
+    if None). Returns (task, record or skip reason) of each.
 
     The rows are those of a forecast issued on the anchor: `training_span(anchor, W, h, newest)` with the anchor's newest target,
     filtered as `_fit_one_numpy` filters a task's. Which columns are binary is read from these rows, before any filter, so a
@@ -495,25 +616,16 @@ def _fit_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict
     value by value, so a forecast is the same whichever other forecasts of its unit are run with it: one cut short and resumed
     equals a fresh one.
     """
-    cfg = _W_CONFIG
-    refit = cfg["refit"]
+    inputs = _inputs_of(inputs)
+    cfg = inputs.config
+    model = inputs.model
     hour, hz = unit.period, unit.horizon
-    arrays = _W_HOUR_ARRAYS[hour]
+    arrays = inputs.hour_arrays[hour]
     days = arrays["days"]
-    anchor = unit.anchor.toordinal() - refit["first_ordinal"]
-    members = cfg.get("members")
-    # The unit's training window: the model's, or with a list of them its member's (`"expanding"` from the frame's first date).
-    span = member_window(cfg["training_window"] if members is None else members[unit.member], anchor)
-    newest_targets = refit["newest"]
-    if newest_targets is None:
-        newest = -1
-        train = training_rows(days, anchor, span, hz)
-    else:
-        # Read on the anchor: a target published between the anchor and the issue day doesn't reach the fit.
-        newest = int(newest_targets.at(hour, unit.anchor.toordinal()))
-        train = training_rows(days, anchor, span, hz, newest)
+    # The unit's training window: the model's, or with a list of them its member's; its newest target read on the anchor.
+    train, newest = unit_rows(cfg, days, unit)
 
-    predictors = _W_EXPANDED_PREDS[(hour, hz) if unit.list_id is None else unit.list_id]
+    predictors = inputs.expanded[(hour, hz) if unit.list_id is None else unit.list_id]
     col_idx = [arrays["col_index"][c] for c in predictors]
     train_x = arrays["x"][train][:, col_idx]
     train_y = arrays["y"][train][:, hz - 1]
@@ -545,11 +657,9 @@ def _fit_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict
             return skip_all(SKIP_NO_MATCHING_DAYS)
         matching_days = matching_digest(train_days, matching["first_ordinal"])
 
-    finite_rows = np.isfinite(train_y)
-    if train_x.size:
-        finite_rows &= np.isfinite(train_x).all(axis=1)
-    train_x = train_x[finite_rows]
-    train_y = train_y[finite_rows]
+    finite = finite_rows(train_x, train_y)
+    train_x = train_x[finite]
+    train_y = train_y[finite]
     if train_x.shape[0] == 0:
         return skip_all(SKIP_NO_FINITE_TRAINING_ROWS)
 
@@ -571,45 +681,46 @@ def _fit_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict
         columns=predictors,
     )
     try:
-        fitted = _W_MODEL._fit_model(train_x, train_y)
+        fitted = model._fit_model(train_x, train_y)
     except ValueError as exc:
         return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]
 
+    extra = None
+    if matching_days is not None:
+        extra = {"training_days": int(np.unique(train_days[finite]).size), "matching_days": matching_days}
     for row, (task, test) in enumerate(forecast):
         # One row at a time (decision 16 of the step 3 spec): a product over several rows can differ in the last bits.
-        pred, coefs = _W_MODEL._predict_fitted(fitted, test_x[row : row + 1])
-        window, day_in_window, _ = _place_of(task[2])
+        pred, coefs = model._predict_fitted(fitted, test_x[row : row + 1])
+        window, day_in_window, _ = task_place(cfg, task[2])
         run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=task[2])
-        record = {
-            "run_date": run_date.isoformat(),
-            "target_date": (run_date + datetime.timedelta(days=hz)).isoformat(),
-            "run_weekday": run_date.weekday(),
-            "hour": hour,
-            "horizon": hz,
-            "day_in_test": day_in_window,
-            "prediction": scaler.inverse(float(pred)),
-            "actual": float(arrays["y"][test, hz - 1]),
-            "coefficients": coefs,
-            "freq": cfg.get("freq", "1h"),
-            "refit_anchor": unit.anchor.isoformat(),
-        }
-        if newest_targets is not None:
+        record = forecast_record(
+            run_date,
+            hour,
+            hz,
+            day_in_window,
+            scaler.inverse(float(pred)),
+            float(arrays["y"][test, hz - 1]),
+            coefs,
+            cfg.get("freq", "1h"),
+            _list_hash_of(cfg, inputs.expanded, hour, hz, unit.list_id),
+            window=window,
+            predictor_list=None if unit.list_id is None else cfg["list_hashes"][unit.list_id],
             # The newest target date of the unit's span, anchor + min(k, h-1), as `_fit_one_numpy` writes it for its day.
-            record["newest_target_day"] = (unit.anchor + datetime.timedelta(days=min(newest, hz - 1))).isoformat()
-        if unit.list_id is not None:
-            record["predictor_list"] = cfg["list_hashes"][unit.list_id]
-        if matching_days is not None:
-            record["training_days"] = int(np.unique(train_days[finite_rows]).size)
-            record["matching_days"] = matching_days
-        if window is not None:
-            record["window"] = window
-        outcomes.append((task, with_status(record, list_hash=_list_hash_of(cfg, hour, hz, unit.list_id))))
+            newest_target_day=None
+            if cfg["refit"]["newest"] is None
+            else (unit.anchor + datetime.timedelta(days=min(newest, hz - 1))).isoformat(),
+            refit_anchor=unit.anchor.isoformat(),
+            extra=extra,
+        )
+        outcomes.append((task, record))
     return outcomes
 
 
-def _run_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict, str]]]:
+def _run_unit(
+    unit: FitUnit, tasks: List[tuple], inputs: Optional[TaskInputs] = None
+) -> List[Tuple[tuple, Union[Dict, str]]]:
     try:
-        return [(task, outcome, unit.member) for task, outcome in _fit_unit(unit, tasks)]
+        return [(task, outcome, unit.member) for task, outcome in _fit_unit(unit, tasks, inputs)]
     except Exception as exc:
         raise TaskFailed(
             f"fit unit (period={unit.period}, horizon={unit.horizon}, anchor={unit.anchor}, list={unit.list_id}, "
@@ -617,21 +728,24 @@ def _run_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict
         ) from None
 
 
-def _run_block(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
-    """Run the tasks of one refit block, those whose issue days share an anchor: each unit's fit once, then its forecasts.
-    Returns what `_run_day` does. Nothing carries over between units: each fits from scratch on its own rows.
+def _run_block(tasks: list, inputs: Optional[TaskInputs] = None) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
+    """Run the tasks of one refit block, those whose issue days share an anchor, with `inputs` (the pool's if None): each unit's
+    fit once, then its forecasts. Returns what `_run_day` does. Nothing carries over between units: each fits from scratch on its
+    own rows.
 
     With a list of training windows a task has a unit per member, all in its block, and its record is made after every one of
     them ran: the members' mean if each forecast it, else the first failing member's reason (in member order), tagged with its
     window, as `_fit_one_numpy` does. With `refit="auto"` the block is one of the coarsest member's rule (`config["refit"]["rule"]`)
     and a finer member has a unit per anchor of its own in it; the record's `refit_anchor` is the block's, the oldest fit the
     forecast uses, and its `newest_target_day` the newest of its members'."""
+    inputs = _inputs_of(inputs)
+    cfg = inputs.config
     units: Dict[FitUnit, List[tuple]] = {}
     for task in tasks:
-        for unit in _units_of(task):
+        for unit in _units_of(cfg, task):
             units.setdefault(unit, []).append(task)
-    threads = _W_CONFIG["threads_per_process"]
-    members = _W_CONFIG.get("members")
+    threads = cfg["threads_per_process"]
+    members = cfg.get("members")
     by_task: Dict[tuple, Dict[int, Union[Dict, str]]] = {}
     results, skipped = [], []
 
@@ -646,10 +760,10 @@ def _run_block(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
 
     if len(units) <= 1 or threads == 1:
         for unit, unit_tasks in units.items():
-            collect(_run_unit(unit, unit_tasks))
+            collect(_run_unit(unit, unit_tasks, inputs))
     else:
         with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
-            futures = [pool.submit(_run_unit, unit, unit_tasks) for unit, unit_tasks in units.items()]
+            futures = [pool.submit(_run_unit, unit, unit_tasks, inputs) for unit, unit_tasks in units.items()]
             for future in as_completed(futures):
                 collect(future.result())
     for task, outcomes in by_task.items():
@@ -658,16 +772,18 @@ def _run_block(tasks: list) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
         if failed is not None:
             skipped.append((task, _tagged(failed[1], members[failed[0]])))
         else:
-            results.append(_combined(_across_members(ordered), [record["prediction"] for record in ordered]))
+            results.append(
+                _combined(_across_members(ordered, cfg["refit"]["rule"]), [record["prediction"] for record in ordered])
+            )
     return results, skipped
 
 
-def _across_members(records: List[Dict]) -> Dict:
+def _across_members(records: List[Dict], block_rule: str) -> Dict:
     """The first member's record of a task of a refit model with a list of windows, with what differs between its members when
     their rules do (`refit="auto"`): `refit_anchor`, the block's anchor, which is the coarsest member's, and `newest_target_day`,
     the newest of the members'. With one rule for every member these are every member's, so the record is the first's."""
     first = records[0]
-    anchor = refit_anchor(first["run_date"], _W_CONFIG["refit"]["rule"]).isoformat()
+    anchor = refit_anchor(first["run_date"], block_rule).isoformat()
     if anchor == first["refit_anchor"] and all(record["refit_anchor"] == anchor for record in records):
         return first
     out = dict(first, refit_anchor=anchor)

@@ -1256,7 +1256,7 @@ def _warn_never_published(cells: _Cells, fn: Any) -> None:
         )
 
 
-def warn_never_published_in(plan: PredictorPlan, window: str, days: Tuple[int, int]) -> None:
+def warn_never_published_in(plan: PredictorPlan, window: str, days: Tuple[int, int], stacklevel: int = 4) -> None:
     """What a plain run over one window warns about, for a run of several: a `published()` argument never True in that
     window, unless it wasn't True anywhere, which `build_plan` has said already."""
     cells = plan._cells
@@ -1271,7 +1271,7 @@ def warn_never_published_in(plan: PredictorPlan, window: str, days: Tuple[int, i
             f"{function_name(plan.function)}: ctx.published({shown}) was never True on the {asked} forecast(s) that asked "
             f"in the {window} window, so the function never switched on what it guards there: {why}.",
             UserWarning,
-            stacklevel=4,
+            stacklevel=stacklevel,
         )
 
 
