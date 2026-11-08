@@ -171,7 +171,12 @@ for window in range(28, 365, 7):
   LEAR's `solver="cd"` (a coordinate descent that stops at a tolerance, so it follows its Gram's last bits; `LEARModel.lago()`'s)
   is fitted as with `"off"`, to the bit. Ridge still reads its scaled rows for the leave-one-out leverages, so it saves the scaler
   and the SVD of its rows, not the work on them; LEAR's path and LassoCV's descent dominate their fits, so they gain less than
-  OLS, and a variance-stabilising scaler shares its transform only between models whose rows are the same.
+  OLS, and a variance-stabilising scaler shares its transform only between models whose rows are the same. Measured on 1,000
+  LEAR variants (asinh, three windows) of a 40-column weather union: 1.3-1.5 times fewer core-seconds than `"off"` where the
+  inputs have no gaps, but 5-20 % more core-seconds (a third to a half more of the workers' own time) where every variant's
+  gaps give it rows of its own, so that nothing is shared and the exact sums come on top of the model's own transform and fit;
+  the run's wall time is still several times shorter, with one pool for all. LassoCV, whose fit is mostly scikit-learn's own descent, spends 1.5-1.6
+  times fewer core-seconds.
 - **`engine="check"`** runs as `"on"` and also fits about one fit in 50 (those of a training span whose hash, from its period,
   horizon and dates, is 0 modulo 50, the same in any run) the way `"off"` does, on the same values, and compares the two. The
   results are `"on"`'s; the manifest records, as provenance, how many fits were checked, the largest absolute and relative gaps of
