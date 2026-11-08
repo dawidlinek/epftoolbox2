@@ -165,6 +165,12 @@ an issue day it didn't sample.
 
 ### New
 
+- **`EntsoeSource(price_exaa=True)` adds the EXAA auction; CH prices are the Swiss auction.** For AT and DE_LU the new column
+  `price_exaa` (A44, `classificationSequence` position 2) comes beside `price` on the same grid; other zones raise. Its built-in rule
+  is `published("11:15", 1)` in Vienna or Berlin and the Swiss `price` gets `published("12:00", 1)` in Zurich, both the legal
+  bounds and `snapshot`s (first-seen times unmeasured). A source without `price_exaa` returns and requests exactly what it did, and its
+  cache key is unchanged. The [ENTSO-E page](/epftoolbox2/data-sources/entsoe/#early-auctions-exaa-and-switzerland) shows how
+  to keep a model that works when the column is missing.
 - **`MirrorLogScaler` and `PolyScaler`: the mirror-log and polynomial VSTs.** `scaler="mlog"` and `scaler="poly"` are the
   transformations of Uniejewski, Weron & Ziel (2018) on `AsinhScaler`'s median/MAD normalisation, then standardised like every VST:
   `sgn(u) (log(|u| + 1/c) + log c)` with `c=1/3`, and `sgn(u) ((|u| + (c/λ)^(1/(λ-1)))^λ - (c/λ)^(λ/(λ-1)))` with `lam=0.125`,

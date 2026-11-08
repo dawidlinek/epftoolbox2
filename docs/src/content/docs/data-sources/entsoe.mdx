@@ -44,6 +44,7 @@ df = source.fetch(
 | `prefer_15min` | bool | No | Defaults to `False`. Selects the grid of the `price` column: `False` gives hourly prices, `True` gives 15-minute prices. See [Price resolution](#price-resolution). |
 | `neighbours` | List[str] or str | With `transfer_capacity` | Defaults to `None`. Neighbouring bidding zones for `transfer_capacity`, e.g. `["DE_LU", "CZ"]` or `"DE_LU,CZ"`. Required with that type and rejected without it. |
 | `prefix` | str | No | Defaults to `""`. Prepended to every column as `f"{prefix}_{column}"`, so several zones can be combined in one pipeline. |
+| `price_exaa` | bool | No | Defaults to `False`. `True` adds the EXAA auction as a second column `price_exaa`. Only for `"AT"` and `"DE_LU"`, and `type` must include `"price"`; any other zone raises `ValueError`. See [Early auctions](#early-auctions-exaa-and-switzerland). |
 
 ## Returned range
 
@@ -110,7 +111,8 @@ columns the week of the zone it stamps them at (see
 
 | Column | Document | Description |
 |--------|----------|-------------|
-| `price` | A44 | Day-ahead price of the single day-ahead coupling (SDAC) in the bidding zone (EUR/MWh) |
+| `price` | A44 | Day-ahead price of the single day-ahead coupling (SDAC) in the bidding zone (EUR/MWh). For `"CH"`, which is not in SDAC, the Swiss day-ahead auction |
+| `price_exaa` | A44, position 2 | With `price_exaa=True` (AT and DE_LU): the EXAA auction, on the same grid as `price` |
 
 #### Price resolution
 
@@ -128,9 +130,74 @@ are treated the same way.
 <Aside type="caution">
   **Only the SDAC price is returned.** For DE_LU and AT the API also publishes a second, 15-minute series
   (`classificationSequence` 2, a separate auction) on the same timestamps. It differs from the coupling price by
-  up to several hundred EUR/MWh and is ignored. Before 2025-10-01, `prefer_15min=True` therefore gives the hourly
-  SDAC price step-filled to 15 minutes, not the 15-minute auction.
+  up to several hundred EUR/MWh and is ignored in `price`; `price_exaa=True` returns it as its own column.
+  Before 2025-10-01, `prefer_15min=True` therefore gives the hourly SDAC price step-filled to 15 minutes, not the
+  15-minute auction.
 </Aside>
+
+#### Early auctions: EXAA and Switzerland
+
+Two day-ahead auctions close before SDAC's 12:00 CET gate, so a forecast issued before noon on D can already see
+their results for D+1:
+
+| Column | Auction | Gate on D-1 (local) | Built-in rule |
+|---|---|---|---|
+| `price_exaa` (`price_exaa=True`, AT and DE_LU) | EXAA, 15-minute products | 10:15 | `published("11:15", 1)` in Vienna or Berlin (legal bound: one hour after the gate, Art. 12.1.d) |
+| `price` of `"CH"` | Swiss day-ahead auction | 11:00 | `published("12:00", 1)` in Zurich (legal bound) |
+
+Both rules are `snapshot`s. Both times are the **legal bounds, not measured first-seen times.** EXAA was seen at about 10:35
+in the one check made, the Swiss auction is assumed to be out about 11:05 to 11:30, and neither was measured over a
+period. A forecast issued between the gate and the legal bound (EXAA from 10:15, Switzerland from 11:00) is refused
+by the information set, which is conservative. A forecast issued at 11:45 relies on Switzerland's 12:00 bound being
+too late: **measure first-seen times before relying on that**, or issue at 12:00 or later.
+
+A `Workflow` gives the Swiss `price` its 12:00 Zurich rule from the source. A bare `InformationSet` or `ModelPipeline(issue_time=...)` has only
+the built-in rules: `price_exaa` is built in (11:15), but a Swiss `price` there gets the generic `price` rule, 13:00 Brussels (13:00
+Zurich), an hour later than the legal bound and so safe, but it refuses a 12:00 issue; declare `Availability.published("12:00", 1, timezone="Europe/Zurich")` for `price` yourself to use it.
+
+`price_exaa` is requested with `classificationSequence_AttributeInstanceComponent.position=2` in a second A44 request
+per chunk; the plain request is unchanged and keeps SDAC only, so a source without `price_exaa` returns exactly what it
+returned before. The column follows `prefer_15min` like `price`: a 15-minute auction is averaged into hours (an hour
+with a missing quarter-hour stays empty) or kept as published. A zone that publishes no position 2 for a period leaves
+the column empty there. The Swiss `price` is not the SDAC price and has no SDAC twin: combine `"CH"` with SDAC zones
+knowing that it is another auction (give it a `prefix`, e.g. `prefix="ch"`).
+
+**Serve-time lesson: build a model that works without the column.** In earlier projects a missing EXAA value at serving
+time raised the DE error from 15.23 to 38.44 (a model that had always been trained with the column). So don't put
+`price_exaa` into a fixed predictor list. Make the model a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/)
+that adds the EXAA columns only when `ctx.published(...)` says they are out, and keep the base list as the fallback:
+
+```python
+from epftoolbox2 import presets
+from epftoolbox2.data.sources import EntsoeSource
+from epftoolbox2.information_set import InformationSet
+from epftoolbox2.models import LassoCVModel
+from epftoolbox2.pipelines import ModelPipeline
+
+source = EntsoeSource("DE_LU", api_key=key, type=["price"], price_exaa=True)  # price, price_exaa
+# After DailyProfileTransformer(columns=["price", "price_exaa"]) the frame has price_h00 ... and price_exaa_h00 ...
+
+HOURS = [f"h{h:02d}" for h in range(24)]
+base = presets.lear_predictors([])
+
+
+def lear_with_exaa(ctx):
+    x = list(base)
+    exaa = [f"price_exaa_{h}_d+{{horizon}}" for h in HOURS]
+    if ctx.published(exaa):  # False before 11:15 on D-1, for horizons above 1, and where the value is missing
+        x += exaa
+    return x
+
+
+info = InformationSet("11:45", "Europe/Berlin")  # price_exaa has a built-in rule
+pipeline = ModelPipeline(information_set=info).add_model(
+    LassoCVModel(predictors=lear_with_exaa, training_window=728, name="LEAR_exaa")
+)
+```
+
+The forecasts that find the column missing use `base`, which is the list a model without EXAA would have used; the
+others use both. Report how many forecasts used each list (`ModelPipeline` prints the distinct lists), and compare it
+with a run on `base` alone on the same keys.
 
 <Aside type="caution">
   **Bidding zones:** prices are published per bidding zone. For Germany use `"DE_LU"` (since 2018-10-01,
@@ -234,6 +301,8 @@ as produced by `LagTransformer` (`x_d-1` is yesterday, `x_d+1` tomorrow):
 | Column | Publication deadline (543/2013) | Safe as a predictor for a forecast issued on D |
 |---|---|---|
 | `price` | No later than 1 hour after gate closure (Art. 12) | `price` (delivery D, cleared on D-1) and `_d-k`. `price_d+1` is the target |
+| `price_exaa` (AT, DE_LU) | No later than 1 hour after the EXAA gate at 10:15 (Art. 12.1.d): 11:15 | `_d+1` for a forecast issued at or after 11:15; `_d+2` and later never |
+| `price` of `CH` | No later than 1 hour after the Swiss gate at 11:00: 12:00 | `_d+1` for a forecast issued at or after 12:00 (the first-seen time of 11:05 to 11:30 is unmeasured) |
 | `load_actual` | No later than 1 hour after the operating period (Art. 6) | `_d-1` and older only. Unlagged `load_actual` is look-ahead for the hours after the issue time |
 | `load_forecast` | 2 hours before gate closure (10:00 CET) on the day before delivery, updated when significant changes occur (Art. 6) | `load_forecast` and `_d+1` if the forecast is issued at or after 10:00. `_d+2` and later are published on D+1 or later: look-ahead |
 | `load_forecast_daily_min/max` | Fridays, 2 hours before gate closure, for Monday–Sunday of the following week. Updated when significant changes occur (Art. 6) | `_d+0` to `_d+2` always. `_d+3` when issued at or after 10:00 (on Friday mornings only the week up to Sunday is known). Larger horizons leak on some weekdays. On a Friday issued at or after 10:00 `_d+3` to `_d+9` are known, which a run with `issue_days=["friday"]` can use (see [Some weekdays only](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)) |
@@ -326,7 +395,7 @@ and generation but have no day-ahead price.
 
 ## Caching
 
-The cache key contains the area, the types, `prefer_15min` and a schema version of the parser. Changing any of
+The cache key contains the area, the types, `prefer_15min`, `price_exaa` (only when `True`) and a schema version of the parser. Changing any of
 them uses a new cache directory under `.cache/sources/`. Directories for other values are not read and can be
 deleted.
 
