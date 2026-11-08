@@ -7,6 +7,7 @@ import numpy as np
 
 from . import _lars
 from ._lars import CRITERIA, CV_SOLVER_ERROR, SOLVERS, CvStats, GramStats, LearFit, cv_stats, gram_stats
+from ._stats import ScaledStats
 from .base import BaseModel
 
 # Lago et al.'s calibration windows of 56, 84, 1092 and 1456 days as this library's training rows. The original keeps the last
@@ -18,6 +19,9 @@ LAGO_SCALER = {"name": "asinh", "params": {"standardise": False}}
 
 
 class LEARModel(BaseModel):
+    # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the sums alone (`"cv"`'s blocks come in 5e).
+    _ENGINE_NEEDS = frozenset()
+
     def __init__(
         self,
         predictors,
@@ -140,10 +144,16 @@ class LEARModel(BaseModel):
             return self._fit_stats(cv_stats(train_x, train_y))
         return self._fit_stats(gram_stats(train_x, train_y))
 
-    def _fit_stats(self, stats: Union[GramStats, CvStats]) -> LearFit:
+    def _fit_stats(self, stats: Union[GramStats, CvStats, ScaledStats]) -> LearFit:
         """The fit from the centred sums of a unit's scaled training rows alone, `GramStats` for an information criterion and
         `CvStats` (those of the five blocks in date order) for `"cv"`: where step 5's engine hands in statistics it shares
-        between models."""
+        between models. The engine's `ScaledStats` are read through `.gram()`; for `"cv"` they need their blocks (step 5e)."""
+        if isinstance(stats, ScaledStats):
+            if self.criterion == "cv":
+                raise TypeError(
+                    "criterion='cv' fits from the five CV blocks, which ScaledStats don't carry yet (step 5e)"
+                )
+            stats = stats.gram()
         return _lars._kernels().lear_fit(stats, self.criterion, self.solver)
 
     def _predict_fitted(self, fitted: LearFit, test_x) -> Tuple[float, list]:

@@ -1,6 +1,8 @@
 import numpy as np
 from sklearn.linear_model import RidgeCV
 
+from . import _stats
+from ._stats import ScaledStats
 from .base import BaseModel
 
 # The grid `alphas=None` stands for: `np.logspace(-3, 4, 36)`, 36 penalties from 1e-3 to 1e4, a factor of 10^0.2 = 1.585 apart,
@@ -80,6 +82,8 @@ def _check_alphas(value):
 
 
 class RidgeModel(BaseModel):
+    # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the scaled rows too, for the leverages.
+    _ENGINE_NEEDS = frozenset({"rows"})
     # Saved to YAML only when not at these values: `alphas=None` is the default grid, which a manifest records in full.
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "alphas": None, "fit_intercept": True}
 
@@ -128,3 +132,10 @@ class RidgeModel(BaseModel):
 
     def _predict_fitted(self, fitted, test_x):
         return fitted.predict(test_x)[0], fitted.coef_.tolist()
+
+    def _fit_stats(self, stats: ScaledStats):
+        """`RidgeCV(alphas, fit_intercept, cv=None)` from a unit's scaled sums and rows (`_stats.ridge_fit`: the eigendecomposition
+        of the centred Gram and exact leave-one-out leverages), or None where the model path must fit it: n <= p (scikit-learn's
+        `eigen` mode), fewer than 3 rows, or scikit-learn's own rounding at the chosen penalty above `_stats.RIDGE_ROUNDING_MAX`
+        (it errs by about `_stats.ridgecv_rounding`/α, so no exact fit can stay within 1e-9 of it there)."""
+        return _stats.ridge_fit(stats, self._model_kwargs["alphas"], self.fit_intercept)
