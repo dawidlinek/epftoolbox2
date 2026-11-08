@@ -144,8 +144,9 @@ The manifest of a carded model has three keys a core model's lacks:
   between machines that hold the same files.
 
 A change of any compared entry raises `ManifestMismatchError` naming it (`runtime.packages.torch: '2.9.0' (existing results) vs
-'2.10.0' (this run)`), and `allow_manifest_mismatch=True` overrides it, as for every compared field. See
-[Incremental Training](/epftoolbox2/model-pipeline/caching/).
+'2.10.0' (this run)`), and `allow_manifest_mismatch=True` overrides it, as for every compared field. A file that then holds
+forecasts of two sets of weights keeps each set's hashes in its manifest (`weights_history`), every later resume warns, and
+`report.provenance()` says so in `weights`. See [Incremental Training](/epftoolbox2/model-pipeline/caching/).
 
 ## Declaring a card
 

@@ -1240,3 +1240,23 @@ def test_each_csv_exporter_names_its_provenance_file_after_its_own(data, fetched
         "provenance.csv",
         "provenance.provenance.csv",
     ]
+
+
+def test_results_resumed_over_other_weights_say_they_mix_them(data, fetched, tmp_path, monkeypatch, no_network):
+    """allow_manifest_mismatch=True accepts other weights into a results file: the manifest keeps every set of hashes the
+    file's forecasts were made with, every later resume warns, and report.provenance() says so."""
+    save_dir = tmp_path / "out"
+    ModelPipeline().add_model(carded()).run(
+        data, test_start=TEST[0], test_end="2023-03-07", horizon=1, save_dir=str(save_dir)
+    )
+    assert "weights_history" not in manifest(save_dir, "carded")
+    replaced = weights_bytes(0.0, note=" (squashed)")
+    fetch_into_cache(monkeypatch, replaced, revision=REVISION)
+    with pytest.warns(UserWarning, match="2 sets of weights"):
+        run(data, carded(), save_dir=save_dir, allow_manifest_mismatch=True)
+    history = manifest(save_dir, "carded")["weights_history"]
+    assert history == [{WEIGHTS_FILE: REFERENCE_SHA}, {WEIGHTS_FILE: hashlib.sha256(replaced).hexdigest()}]
+    with pytest.warns(UserWarning, match="2 sets of weights"):  # the same weights now, but the file still mixes them
+        report = run(data, carded(), save_dir=save_dir)
+    assert manifest(save_dir, "carded")["weights_history"] == history
+    assert "mixes 2 sets of weights" in report.provenance().iloc[0]["weights"]

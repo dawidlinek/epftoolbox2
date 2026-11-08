@@ -604,7 +604,10 @@ def run_provenance(model: Any, manifest: Any, windows: Any, test_start: Optional
     if getattr(model, "_card", None) is None:
         return None
     if manifest is not None and getattr(manifest, "card", None) is not None:
-        return {"card": manifest.card, "runtime": manifest.runtime, "weights": manifest.weights}
+        out = {"card": manifest.card, "runtime": manifest.runtime, "weights": manifest.weights}
+        if manifest.weights_history:
+            out["weights_history"] = manifest.weights_history
+        return out
     return manifest_fields(model, window_starts(windows, test_start))
 
 
@@ -617,7 +620,10 @@ def read_provenance(stored: Union[str, "os.PathLike", Mapping[str, Any]]) -> Opt
         stored = json.loads(path.read_text())
     if not stored.get("card"):
         return None
-    return {"card": stored["card"], "runtime": stored.get("runtime"), "weights": stored.get("weights")}
+    out = {"card": stored["card"], "runtime": stored.get("runtime"), "weights": stored.get("weights")}
+    if stored.get("weights_history"):
+        out["weights_history"] = stored["weights_history"]
+    return out
 
 
 def _short_hashes(weights: Optional[Mapping[str, Any]]) -> str:
@@ -625,6 +631,13 @@ def _short_hashes(weights: Optional[Mapping[str, Any]]) -> str:
     if len(files) == 1:
         return next(iter(files.values()))[:12]
     return "; ".join(f"{name} {digest[:12]}" for name, digest in files.items())
+
+
+def _weights_text(weights: Optional[Mapping[str, Any]], history: Optional[Sequence[Any]]) -> Optional[str]:
+    ref = (weights or {}).get("ref")
+    if ref is not None and history and len(history) > 1:
+        return f"{ref} (the results file mixes {len(history)} sets of weights: weights_history)"
+    return ref
 
 
 def _runtime_text(runtime: Optional[Mapping[str, Any]]) -> str:
@@ -658,7 +671,7 @@ def provenance_frame(
                 "commercial_use": card.get("commercial_use"),
                 "revenue_cap": card.get("revenue_cap"),
                 "attribution": card.get("attribution"),
-                "weights": (weights or {}).get("ref"),
+                "weights": _weights_text(weights, record.get("weights_history")),
                 "sha256": _short_hashes(weights) or None,
                 "runtime": _runtime_text(record.get("runtime")) or None,
                 "corpus": card.get("corpus"),

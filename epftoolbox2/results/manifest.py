@@ -135,6 +135,9 @@ _PROVENANCE_FIELDS += ("engine",)
 # `card`: a carded family's licence, corpus, runtime pins and weights reference, with the contamination verdict of each window
 # (`models._cards.manifest_fields`): what the model is under, which a new release may reword without changing a forecast.
 _PROVENANCE_FIELDS += ("card",)
+# `weights_history`: every set of weight file hashes a results file's forecasts were made with, in the order first used, once a
+# resume accepted other weights (`allow_manifest_mismatch=True`); a resume warns while the file mixes them (`_weights_on_file`).
+_PROVENANCE_FIELDS += ("weights_history",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -305,6 +308,9 @@ class Manifest:
     # resume: every runtime entry, and the weights' file hashes.
     runtime: Optional[Dict[str, Any]] = None
     weights: Optional[Dict[str, Any]] = None
+    # Every set of weight file hashes ({file: sha256}) the file's forecasts were made with, once there are two or more (a resume
+    # over other weights, allowed); None (and no key) while there is one. Provenance: never compared, and a resume warns.
+    weights_history: Optional[List[Dict[str, str]]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -366,7 +372,7 @@ class Manifest:
             del out["fit_path"]
         if out["engine"] is None:  # no fit from shared statistics
             del out["engine"]
-        for name in ("card", "runtime", "weights"):  # a core model, or a family without weights
+        for name in ("card", "runtime", "weights", "weights_history"):  # a core model, or one set of weights
             if out[name] is None:
                 del out[name]
         return out
@@ -825,6 +831,7 @@ def check_and_write(
         if check_stored is not None:
             check_stored()
         manifest.kernels = _kernels_on_file(existing, manifest, model_name, path, has_existing_results)
+        manifest.weights_history = _weights_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.created_at = existing.created_at  # keep the first run's provenance
         manifest.skipped = existing.skipped  # until this run finishes and says otherwise: it may not
         manifest.engine = existing.engine  # the same: until this run's fits from shared statistics are counted
@@ -887,6 +894,29 @@ def _kernels_on_file(
             stacklevel=5,
         )
     return used[0] if len(used) == 1 else used
+
+
+def _weights_on_file(
+    existing: Manifest, manifest: Manifest, model_name: str, path: Path, has_existing_results: bool
+) -> Optional[List[Dict[str, str]]]:
+    """What the manifest records as `weights_history` after this run: every set of weight file hashes the file's forecasts
+    were made with, in the order first used, once there are two (a resume that `allow_manifest_mismatch` let in over other
+    weights); None while there is one. As for the kernels, a resume warns every time the file mixes them."""
+    mine = None if manifest.weights is None else manifest.weights.get("files")
+    if not has_existing_results or mine is None:
+        return None
+    stored = list(existing.weights_history or ([existing.weights["files"]] if existing.weights else []))
+    used = stored if mine in stored else [*stored, mine]
+    if len(used) < 2:
+        return None
+    warnings.warn(
+        f"{model_name}: the results in {path.parent} hold forecasts made with {len(used)} sets of weights (their manifest "
+        "records each in weights_history), which a resume with allow_manifest_mismatch=True let in. Use a new save_dir for "
+        "results of one.",
+        UserWarning,
+        stacklevel=5,
+    )
+    return used
 
 
 def unrecorded_masks(existing: Manifest, manifest: Manifest, has_existing_results: bool) -> List[str]:
