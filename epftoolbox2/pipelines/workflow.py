@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 
 _DP_SECTIONS = ("sources", "transformers", "validators")
 _MP_SECTIONS = ("models", "ensembles", "evaluators", "exporters")
-_MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set", "availability")
+_MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set", "availability", "engine")
 
 
 def _plain(value: Any) -> Any:
@@ -110,6 +110,9 @@ class Workflow:
     `model_pipeline.save_format: parquet` (`model_save_format`) writes each model's results as a Parquet directory, and
     `save_coefficients: false` (`model_save_coefficients`) writes `coefficients` as `[]`, as `ModelPipeline.run` does; each is
     written only when it isn't the default. `report()` reads either format.
+
+    `model_pipeline.engine: on` runs the models the engine takes in engine groups (`ModelPipeline(engine=...)`), over what the
+    pipeline YAML says; in array mode each task groups the models of its block, and nothing stored depends on the block.
 
     Example:
         >>> workflow = Workflow(
@@ -268,6 +271,8 @@ class Workflow:
             mp.information_set = InformationSet.from_dict(info) if info else None
         if "availability" in self._mp_inline:
             mp.availability = self._mp_inline["availability"]
+        if "engine" in self._mp_inline:
+            mp.engine = self._mp_inline["engine"]
         if isinstance(self.model_index, int) and not all_models:
             mp.models = self._block_of(mp.models)
         return mp

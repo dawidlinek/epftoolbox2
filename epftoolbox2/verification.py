@@ -38,6 +38,7 @@ from .information_set import (
     vintage_of,
 )
 from .models._calendar import every_horizon, horizon_arguments, resolve_horizons, resolve_issue_days
+from .models._engine import ENGINE_OFF, EngineAlone, check_engine
 from .models._contract import wall_clock
 from .results.availability import LATE
 
@@ -271,6 +272,7 @@ def verify_model(
     availability: str = "raise",
     horizons: Optional[Sequence[int]] = None,
     issue_days: Optional[Sequence[str]] = None,
+    engine: str = "off",
 ) -> List[IssueDayCheck]:
     """Probe (and control) one model on each of `run_days`. The model itself is never run, only copies of it.
 
@@ -288,12 +290,20 @@ def verify_model(
     `horizon=H` verifies every horizon from 1 to H (1 if neither is given), `horizons` the ones it lists (`run(horizons=...)`).
     `issue_days` are the weekdays of a run that issues on some only (`run(issue_days=["friday"])`): `test_period` is planned on
     those days alone, as the run plans it.
+
+    `engine="on"` (`ModelPipeline(engine="on")`) runs each probe of a model the engine takes through it, as a group of one
+    (`models._engine.EngineAlone`): those are its forecasts in any group, so the probe and its control cover that path.
     """
     horizon, horizons = resolve_horizons(horizon, horizons, 1)
     weekdays = resolve_issue_days(issue_days)
+    check_engine(engine)
 
     def make_model():
         return copy.deepcopy(model)
+
+    def probed():
+        copied = make_model()
+        return copied if engine == ENGINE_OFF else EngineAlone(copied)
 
     # A rebuild that edits its argument must not reach the caller's frame.
     features = None if rebuild is None else (lambda frame: rebuild(frame.copy()))
@@ -369,7 +379,7 @@ def verify_model(
     for run_day in run_days:
         if features is None and label == target:
             probe = leakage_probe(
-                make_model,
+                probed,
                 data,
                 run_day,
                 information_set,
@@ -380,12 +390,12 @@ def verify_model(
             )
         else:
             probe = leakage_probe(
-                make_model, data, run_day, information_set, target, columns=columns, rebuild=features, **common
+                probed, data, run_day, information_set, target, columns=columns, rebuild=features, **common
             )
             # On the built frame, not the source: perturbing the raw target from D on would also move what `rebuild`
             # legally builds from D's published price, e.g. `price_day_max` for a forecast of D+1.
             boundary = leakage_probe(
-                make_model,
+                probed,
                 with_label(built),
                 run_day,
                 label_rules,
@@ -399,7 +409,7 @@ def verify_model(
         if control:
             frame = with_label(data) if features is None else data
             result = positive_control(
-                make_model, frame, run_day, label_rules, label, columns=columns, rebuild=labelled, **common
+                probed, frame, run_day, label_rules, label, columns=columns, rebuild=labelled, **common
             )
         checks.append(
             IssueDayCheck(
