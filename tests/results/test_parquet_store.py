@@ -425,6 +425,66 @@ def test_the_frame_path_equals_the_dict_path(jsonl_runs, tmp_path, name, monkeyp
             assert ref.count_records() == sum(1 for _ in ref.iter_records(cols=["hour"]))
 
 
+def filter_records():
+    """Records across the spring switch in Warsaw (2023-03-26 has no 02:00): run dates either side of a test period, horizons 1
+    and 2, both windows, a skip record, a superseded revision, and a record of the slot the clock skips (as files written before
+    rows were chosen by date hold them)."""
+    out = []
+    for day in pd.date_range("2023-03-22", "2023-03-29"):
+        run_date = day.date().isoformat()
+        window = "validation" if run_date < "2023-03-25" else None
+        for hour in (1, 2, 3):
+            for horizon in (1, 2):
+                extra = {} if window is None else {"window": window}
+                out.append(
+                    record(hour=hour, horizon=horizon, run_date=run_date, prediction=hour + horizon / 8, **extra)
+                )
+    out.append(record(hour=3, horizon=1, run_date="2023-03-27", status="too_few_rows", revision=2))
+    out.append(record(hour=1, horizon=2, run_date="2023-03-28", prediction=0.25, revision=2))
+    return out
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"test_start": "2023-03-24", "test_end": "2023-03-27"},
+        {"horizons": (2,)},
+        {"issue_days": (0, 3)},
+        {"window": "validation", "target_before": "2023-03-24"},
+        {"window": "test", "test_start": "2023-03-25", "test_end": "2023-03-29"},
+        {"zone": "Europe/Warsaw"},
+        {"zone": "Europe/Warsaw", "test_start": "2023-03-25", "test_end": "2023-03-27", "horizons": (1,)},
+    ],
+)
+def test_the_frame_path_reads_what_iter_records_reads_under_every_filter(tmp_path, monkeypatch, fields):
+    from dataclasses import replace
+
+    from epftoolbox2.results.ref import ModelResultRef
+
+    directory = tmp_path / "m.parquet"
+    write_parts(directory, filter_records()[:30], filter_records()[30:])
+    ref = ModelResultRef(name="m", path=directory, count=0, test_start="2023-03-22", test_end="2023-03-29", horizon=2)
+    ref = replace(ref, **fields)
+    report = EvaluationReport({"m": ref}, [MAEEvaluator()])
+    fast = report._model_frame(ref)
+    with monkeypatch.context() as patch:
+        patch.setattr(type(ref), "frame", lambda self, columns: None)
+        slow = report._model_frame(ref)
+    pd.testing.assert_frame_equal(fast, slow, check_exact=True)
+    assert list(fast.dtypes) == list(slow.dtypes) and bits(fast) == bits(slow)
+    assert ref.count_records() == sum(1 for _ in ref.iter_records(cols=["hour"])) == len(slow)
+    assert len(slow) and (len(slow) < 96 or fields == {})  # each filter leaves something out, and something in
+    if "zone" in fields:
+        assert ref.off_the_clock() > 0  # the 02:00 records of 2023-03-26 (as run date and as target date)
+        with monkeypatch.context() as patch:
+            patch.setattr(type(ref), "_frame", lambda self, columns, clock: None)
+            patch.setattr(type(ref), "frame", lambda self, columns: None)
+            assert ref.off_the_clock() == sum(
+                1 for r, _ in ref._records(["hour", "run_date", "target_date", "freq"]) if not ref._on_the_clock()(r)
+            )
+
+
 def test_a_report_s_cache_reads_a_parquet_directory_again_when_its_catalog_changes(tmp_path):
     path = tmp_path / "m.parquet"
     store = ParquetResultStore(path, test_start="2023-04-12")

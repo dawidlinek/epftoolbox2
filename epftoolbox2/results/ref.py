@@ -189,8 +189,9 @@ class ModelResultRef:
         on_the_clock = self._on_the_clock()
         if on_the_clock is None:
             return 0
-        if self.path is not None and is_parquet_path(self.path) and Path(self.path).exists():
-            return len(self._frame(["hour"], clock=False)) - len(self._frame(["hour"], clock=True))
+        every = self._frame(["hour"], clock=False)
+        if every is not None:  # Parquet: the rows the clock leaves out
+            return len(every) - len(self._frame(["hour"], clock=True))
         return sum(1 for r, _ in self._records(list(_CLOCK_FIELDS)) if not on_the_clock(r))
 
     def first_record(self, cols: Optional[List[str]] = None) -> Optional[Dict]:
