@@ -636,6 +636,37 @@ def test_exporters_take_the_new_columns(tmp_path, capsys):
 # ---------------------------------------------------------------------------------------------------------------------
 
 
+def test_excel_sheet_titles_that_clash_after_the_cut_get_their_own_sheets(tmp_path):
+    from openpyxl import load_workbook
+
+    from epftoolbox2.exporters import ExcelExporter
+
+    column = "installed_capacity_mw"  # MAE/... and MAE/... left out are one title once cut to 31 characters
+    source = hourly_source({column: lambda idx: 100.0 + idx.hour.to_numpy()})
+    local = source.index.tz_localize(None)
+    source.loc[local.normalize() == pd.Timestamp("2024-10-26"), column] = np.nan  # 24 forecasts left out
+    report = report_of(
+        {"a": records("1h"), "b": records("1h", error=lambda t, p: 2.0)},
+        [MAEEvaluator(), ScaledMAEEvaluator(column)],
+        "1h",
+        source_data=source,
+    )
+    path = tmp_path / "out.xlsx"
+    ExcelExporter(str(path), sheets=["summary", "horizon", "hour_horizon", "run_weekday_horizon"]).export(report)
+    book = load_workbook(path)
+    assert all(len(name) <= 31 for name in book.sheetnames)
+    assert len({name.casefold() for name in book.sheetnames}) == len(book.sheetnames)
+    table = report.by_horizon().set_index("model")
+    for prefix in ("horizon", "HourHorizon", "RunWeekdayHorizon"):
+        titles = [name for name in book.sheetnames if name.startswith(f"{prefix}_MAE_inst")]
+        assert len(titles) == 2, (prefix, book.sheetnames)
+    first, second = (book[name] for name in book.sheetnames if name.startswith("horizon_MAE_inst"))
+    assert first["A1"].value == f"MAE/{column}" and second["A1"].value == f"MAE/{column} left out"
+    assert second["B2"].value == table.loc["a", f"MAE/{column} left out"] == 24
+    assert first["B2"].value == pytest.approx(table.loc["a", f"MAE/{column}"])
+    # a title that clashes with nothing keeps its name
+    assert {"horizon_MAE", "horizon_forecasts", "Summary"} <= set(book.sheetnames)
+
 
 def zoned_quarter_records(seed):
     """c_dst.py's records: clock-numbered 15-minute forecasts across both switches, horizons 1 and 2."""

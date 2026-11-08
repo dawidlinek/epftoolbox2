@@ -1,5 +1,5 @@
 import re
-from typing import List
+from typing import Iterable, List
 from pathlib import Path
 import pandas as pd
 from openpyxl.formatting.rule import ColorScaleRule
@@ -16,11 +16,22 @@ COUNTS = "forecasts"
 
 # The characters an Excel sheet title can't hold; an evaluator's column may (`ScaledMAEEvaluator`'s "MAE/cap").
 _SHEET_FORBIDDEN = re.compile(r"[\\/?*\[\]:]")
+_TITLE_LENGTH = 31
 
 
-def _sheet_name(title: str) -> str:
-    """A sheet title Excel takes: the forbidden characters as "_", at most 31 characters. Titles without them are as before."""
-    return _SHEET_FORBIDDEN.sub("_", title)[:31]
+def _sheet_name(title: str, taken: Iterable[str] = ()) -> str:
+    """A sheet title Excel takes: the forbidden characters as "_", at most 31 characters, and none of the titles in `taken`
+    (Excel compares them ignoring case). Cut to 31 characters, two metrics can give one title (`MAE/installed_capacity_mw` and
+    `MAE/installed_capacity_mw left out`); the later one ends in `~2` (`~3`, ...) within the 31, so it is a sheet of its own.
+    A title that clashes with nothing is as before."""
+    name = _SHEET_FORBIDDEN.sub("_", title)[:_TITLE_LENGTH]
+    used = {t.casefold() for t in taken}
+    unique, k = name, 2
+    while unique.casefold() in used:
+        suffix = f"~{k}"
+        unique = name[: _TITLE_LENGTH - len(suffix)] + suffix
+        k += 1
+    return unique
 
 
 def _cell(value):
@@ -132,7 +143,7 @@ class ExcelExporter(Exporter):
             pivot.columns = [f"{col_col}_{c}" for c in pivot.columns]
             pivot.index.name = metric
 
-            sheet_name = _sheet_name(f"{sheet_prefix}_{metric}")
+            sheet_name = _sheet_name(f"{sheet_prefix}_{metric}", writer.book.sheetnames)
             pivot.to_excel(writer, sheet_name=sheet_name)
 
             if metric != COUNTS:
@@ -153,7 +164,7 @@ class ExcelExporter(Exporter):
         models = list(data["model"].unique())
 
         for metric in _sheet_columns(data):
-            sheet_name = _sheet_name(f"{sheet_prefix}_{metric}")
+            sheet_name = _sheet_name(f"{sheet_prefix}_{metric}", writer.book.sheetnames)
             ws = writer.book.create_sheet(sheet_name)
 
             col_offset = 1
@@ -222,7 +233,7 @@ class ExcelExporter(Exporter):
         models = list(data["model"].unique())
 
         for metric in _sheet_columns(data):
-            sheet_name = _sheet_name(f"{sheet_prefix}_{metric}")
+            sheet_name = _sheet_name(f"{sheet_prefix}_{metric}", writer.book.sheetnames)
             ws = writer.book.create_sheet(sheet_name)
 
             col_offset = 1
