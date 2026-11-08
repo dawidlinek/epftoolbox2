@@ -143,12 +143,15 @@ def compute(
     path: Optional[Path],
     test_only: bool,
     leaves: Sequence[str],
+    provenance: Optional[Callable[[], Tuple[str, Optional[str]]]] = None,
 ) -> Computed:
     """Compute `ensemble` from `refs`, which hold its members and its `leaves`, and write it to `path`, if any.
 
     `stored` is every window on file. `like` is a model's ref of this run or report, which says what that covers (`windows`,
     the part of `stored` it names, `test_start`, `test_end`, `count`, `horizon`, `freq`). `test_only` is for an ensemble that
-    has forecasts in the test window alone. `leaves` are the models under it, however nested.
+    has forecasts in the test window alone. `leaves` are the models under it, however nested. `provenance` gives the package
+    version and git SHA its manifest records (a run's `FrameHashes.provenance`, so that a run's manifests agree), read now if
+    not given.
     """
     members = {name: _read_member(ensemble, name, refs[name], stored) for name in ensemble.members}
     manifests = {name: _read_manifest(refs[name]) for name in ensemble.members}
@@ -168,7 +171,7 @@ def compute(
     records = _records(grid, picked, prediction, freq, stored)
     if path is not None:
         # In this order: results with no manifest of an ensemble are not an ensemble's, and nothing overwrites them.
-        _write_manifest(path, ensemble, stored, freq, members, manifests, choices)
+        _write_manifest(path, ensemble, stored, freq, members, manifests, choices, provenance)
         _write_atomically(path, (json.dumps(record) + "\n" for record in records))
     # What the members' refs plan, so that one report plans one list for all: a report's refs always name it (`report()` reads it
     # from the manifests when told nothing), and a run's do unless it is every horizon to the largest. `_check_members_agree` has
@@ -572,8 +575,10 @@ def _write_manifest(
     members: Mapping[str, _Member],
     manifests: Mapping[str, Optional[Dict[str, Any]]],
     choices: List[Dict[str, Any]],
+    provenance: Optional[Callable[[], Tuple[str, Optional[str]]]] = None,
 ) -> None:
     target = manifest_path(path)
+    package_version, git_sha = (_package_version(), _git_sha()) if provenance is None else provenance()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     recorded = [manifest for manifest in manifests.values() if manifest is not None]
 
@@ -600,8 +605,8 @@ def _write_manifest(
             for name, member in members.items()
         },
         "choices": choices,
-        "package_version": _package_version(),
-        "git_sha": _git_sha(),
+        "package_version": package_version,
+        "git_sha": git_sha,
         "created_at": created,
         "updated_at": now,
         "schema_version": SCHEMA_VERSION,

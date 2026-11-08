@@ -382,10 +382,15 @@ class FrameHashes:
         return self._frames[through]
 
     def provenance(self) -> Tuple[str, Optional[str]]:
-        """(`_package_version()`, `_git_sha()`), read once for the run's manifests: `_git_sha` starts a process."""
-        if self._provenance is None:
-            self._provenance = (_package_version(), _git_sha())
-        return self._provenance
+        """(`_package_version()`, `_git_sha()`), read once for the run's manifests, models' and ensembles' (`_git_sha` starts a
+        process): `ModelPipeline.run` reads it at its start, the code the process runs. A git SHA that couldn't be read (no
+        repository, a timeout) isn't kept: the next manifest tries again."""
+        if self._provenance is not None:
+            return self._provenance
+        read = (_package_version(), _git_sha())
+        if read[1] is not None:
+            self._provenance = read
+        return read
 
 
 def hash_predictor_layout(expanded: Dict[Tuple[int, int], Sequence[str]]) -> str:

@@ -338,6 +338,8 @@ class ModelPipeline:
 
         # Of this call alone: a frame changed before the next one must be hashed again.
         frame_hashes = FrameHashes(data) if save_dir else None
+        if frame_hashes is not None:
+            frame_hashes.provenance()  # the package version and git SHA every manifest of the run records, read before any model
 
         def arguments(model: BaseModel) -> Dict[str, Any]:
             """What the model's run is called with."""
@@ -383,7 +385,13 @@ class ModelPipeline:
         if self.ensembles:
             paths = {model.name: self.results_path(save_dir, model) for model in self.models} if save_dir else {}
             on_file = self._stored_windows(paths)
-            computed, choices = self._compute_ensembles(self._ordered_ensembles(), refs, on_file or windows, save_dir)
+            computed, choices = self._compute_ensembles(
+                self._ordered_ensembles(),
+                refs,
+                on_file or windows,
+                save_dir,
+                provenance=None if frame_hashes is None else frame_hashes.provenance,
+            )
             refs.update(computed)
 
         evaluators = [] if forecast_only else self.evaluators
@@ -801,8 +809,10 @@ class ModelPipeline:
         refs: Dict[str, ModelResultRef],
         stored: Optional[RunWindows],
         save_dir: Union[str, Path, None],
+        provenance: Optional[Callable[[], Tuple[str, Optional[str]]]] = None,
     ) -> Tuple[Dict[str, ModelResultRef], Dict[str, List[Dict]]]:
-        """`({name: ref} of what a report shows, {name: rows of report.choices()})`, in the order they were added."""
+        """`({name: ref} of what a report shows, {name: rows of report.choices()})`, in the order they were added. `provenance`
+        is a run's (`FrameHashes.provenance`), which its ensembles' manifests record as its models' do."""
         like = next(iter(refs.values()))
         held = dict(refs)
         leaves: Dict[str, List[str]] = {}
@@ -817,7 +827,7 @@ class ModelPipeline:
             leaves[ensemble.name] = list(
                 dict.fromkeys(leaf for member in ensemble.members for leaf in leaves.get(member, [member]))
             )
-            result = compute(ensemble, held, stored, like, path, test_only, leaves[ensemble.name])
+            result = compute(ensemble, held, stored, like, path, test_only, leaves[ensemble.name], provenance)
             held[ensemble.name] = result.ref
             # A ref with no window to show, as a `top` ensemble has in a validation report, is not a row of its tables.
             if result.ref.by_window is None or result.ref.by_window:

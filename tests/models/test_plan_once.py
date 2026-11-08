@@ -28,12 +28,15 @@ import pytest
 from threadpoolctl import threadpool_limits
 
 from epftoolbox2 import information_set as info_module
+from epftoolbox2.ensembles import AverageEnsemble
+from epftoolbox2.ensembles import _compute as ensemble_compute
 from epftoolbox2.information_set import Availability, InformationSet, TrainingRows
 from epftoolbox2.models import LEARModel, NaiveModel, OLSModel, RidgeModel
 from epftoolbox2.models import _contract, _engine, _engine_worker
 from epftoolbox2.models import base as base_module
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.results import manifest as manifest_module
 from epftoolbox2.scalers.standard import StandardScaler
 from tests.synthetic import calendar_shift, make_market_data
 
@@ -536,3 +539,24 @@ def test_a_kept_verdict_holds_no_copy_of_the_issue_days(monkeypatch):
     held = tracemalloc.get_traced_memory()[0] - before
     tracemalloc.stop()
     assert len(info_module._VERDICTS) == 41 and held / 40 < 5_000
+
+
+@pytest.mark.parametrize("engine", ["off", "on"])
+def test_a_run_reads_its_provenance_once_for_its_models_and_ensembles(frames, monkeypatch, tmp_path, engine):
+    """A pipeline run reads the package version and git SHA at its start and every manifest of the run records them, its
+    ensembles' too; a SHA that couldn't be read isn't kept, and the next manifest reads it again."""
+    reads = []
+
+    def git_sha():
+        reads.append(1)
+        return None if len(reads) == 1 else f"sha{len(reads)}"  # the first read fails
+
+    for module in (manifest_module, ensemble_compute):
+        monkeypatch.setattr(module, "_git_sha", git_sha)
+    pipeline = ModelPipeline(engine=engine)
+    for model in variants(3):
+        pipeline.add_model(model)
+    pipeline.add_ensemble(AverageEnsemble(["v0", "v1"], name="average"))
+    pipeline.run(frames[("1h", "spring")], test=("2023-03-27", "2023-03-27"), horizon=1, save_dir=str(tmp_path))
+    recorded = {path.name: json.loads(path.read_text())["git_sha"] for path in tmp_path.glob("*.manifest.json")}
+    assert len(recorded) == 4 and set(recorded.values()) == {"sha2"} and len(reads) == 2
