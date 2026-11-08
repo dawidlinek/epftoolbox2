@@ -1214,6 +1214,32 @@ def test_a_torn_catalog_line_is_cut_before_the_first_part_without_the_lock(tmp_p
         assert (path / CATALOG).read_bytes().count(b"\n") == 2 and verify(tmp_path / how) == []
 
 
+def test_a_missing_part_makes_reads_and_resumes_raise_naming_verify(tmp_path):
+    path = tmp_path / "m.parquet"
+    write_parts(path, [record(hour=0)], [record(hour=1)])
+    next(path.glob("year=*/part-test-001-*.parquet")).unlink()
+    for read in (
+        lambda: list(read_records(path)),
+        lambda: list(iter_file_records(path)),
+        lambda: ParquetResultStore(path, lock=True),
+    ):
+        with pytest.raises(parquet_store.MissingPartError, match="epf results verify"):
+            read()
+    found = verify(tmp_path)
+    assert [f.level for f in found] == ["error"] and "is missing" in found[0].message
+
+
+def test_a_part_s_rename_and_a_new_catalog_are_synced_to_their_directories(tmp_path, monkeypatch):
+    synced = []
+    monkeypatch.setattr(parquet_store, "_sync_directory", lambda directory: synced.append(Path(directory)))
+    path = tmp_path / "m.parquet"
+    path.mkdir()
+    write_parts(path, [record(hour=0)], [record(hour=1)])
+    year = path / "year=2023"
+    # The new year directory in the model's, each rename in the year's, the new catalog in the model's.
+    assert synced == [path, year, path, year]
+
+
 def test_a_group_file_this_process_holds_is_never_probed_nor_removed(tmp_path, monkeypatch):
     """Where flock is emulated by POSIX locks (NFS), a process's own locks don't conflict, and dropping one drops them all: a
     probe of this process's group file would get the shared lock, release the group's own and remove its file, freeing every

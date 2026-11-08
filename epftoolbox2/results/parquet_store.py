@@ -191,10 +191,36 @@ def _repair_catalog(directory: Path) -> None:
 
 
 def _append_entry(directory: Path, entry: Dict[str, Any]) -> None:
-    with open(Path(directory) / CATALOG, "ab") as f:
+    """Commit a part: its line appended to the catalog and synced (and the directory, when this creates the catalog)."""
+    path = Path(directory) / CATALOG
+    created = not path.exists()
+    with open(path, "ab") as f:
         f.write(_catalog_line(entry))
         f.flush()
         os.fsync(f.fileno())
+    if created:
+        _sync_directory(path.parent)
+
+
+def _sync_directory(directory: Path) -> None:
+    """fsync a directory, so that a name created or renamed in it survives a power cut; nothing where directories can't be
+    opened (Windows)."""
+    if os.name == "nt":  # pragma: no cover
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+class MissingPartError(ValueError):
+    """A part the catalog lists isn't on disk: the results can't be read as committed."""
 
 
 # --- parts ------------------------------------------------------------------------------------------------------------------
@@ -235,7 +261,9 @@ def _write_table(directory: Path, year: str, table, name: str) -> Dict[str, Any]
     data = sink.getvalue().to_pybytes()
     relative = f"year={year}/{name}"
     final = Path(directory) / relative
-    final.parent.mkdir(parents=True, exist_ok=True)
+    if not final.parent.is_dir():
+        final.parent.mkdir(parents=True, exist_ok=True)
+        _sync_directory(final.parent.parent)
     tmp = final.with_name(f".{final.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         with open(tmp, "wb") as f:
@@ -243,6 +271,7 @@ def _write_table(directory: Path, year: str, table, name: str) -> Dict[str, Any]
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, final)
+        _sync_directory(final.parent)  # the rename, before the catalog line that commits it
     finally:
         if tmp.exists():
             tmp.unlink()
@@ -264,7 +293,14 @@ def _read_part(directory: Path, entry: Dict[str, Any], columns: Optional[Sequenc
     import pyarrow.parquet as pq
 
     path = Path(directory) / entry["file"]
-    size = path.stat().st_size
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        raise MissingPartError(
+            f"{path} is listed in {Path(directory) / CATALOG} as a committed part and isn't on disk, so these results can't "
+            "be read (or resumed) as they were committed. `epf results verify` lists what is missing; restore the file, or "
+            "write the model's results again into a new save_dir."
+        ) from None
     if size != entry.get("bytes", size):
         raise ValueError(
             f"{path} has {size} bytes, its catalog line says {entry['bytes']}: the part changed after it was committed. "
@@ -298,7 +334,7 @@ def read_table(directory: Path, columns: Optional[Sequence[str]] = None, entries
         try:
             tables = [_read_part(directory, entry, read) for entry in live]
             break
-        except FileNotFoundError:
+        except MissingPartError:  # a compaction may have replaced it meanwhile: the catalog again, then it is missing
             if entries is not None or attempt == 2:
                 raise
     if not tables:
@@ -994,7 +1030,14 @@ def verify(save_dir: Any, model: Optional[str] = None) -> List[Finding]:
         for entry in live:
             path = directory / entry["file"]
             if not path.exists():
-                found.append(Finding("error", stem, f"{entry['file']}: catalogued but missing"))
+                found.append(
+                    Finding(
+                        "error",
+                        stem,
+                        f"{entry['file']}: a committed part the catalog lists is missing, so every read and resume of "
+                        "these results raises",
+                    )
+                )
                 continue
             data = path.read_bytes()
             if len(data) != entry.get("bytes", len(data)) or hashlib.sha256(data).hexdigest() != entry.get("sha256"):
