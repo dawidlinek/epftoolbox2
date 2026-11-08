@@ -188,7 +188,11 @@ an issue day it didn't sample.
   `save_dir/<model>.parquet/`, with a catalog of the committed parts, in place of `<model>.jsonl`: the same records (a record
   converts both ways exactly, keys, their order, nulls and float bits), read by the same rules, so every table and count is the same
   to the last bit, and resuming, skip records, the lock and array tasks work as with JSONL. A crash leaves at most an orphan part that
-  no reader sees. `save_coefficients=False` writes `coefficients` as `[]` and changes nothing else. `epf results convert SAVE_DIR
+  no reader sees; a write that fails raises, and its keys are forecast again. Part files differ between identical runs (how
+  records split into parts depends on timing), the records don't. `save_coefficients=False` writes `coefficients` as `[]` and
+  changes no other key; the manifest records it (`save_coefficients: false`) and a resume with the other setting raises
+  `ManifestMismatchError`. A writer of many models names its own lock file in each model's lock file, which an older epftoolbox2
+  doesn't read: don't write one save_dir with two library versions at once. `epf results convert SAVE_DIR
   --to parquet|jsonl` converts a save_dir record for record (JSONL to Parquet and back gives the same lines), `epf results compact`
   merges each (model, year)'s parts, and `epf results verify` checks catalogs, part checksums, orphans and repeated keys. **Nothing
   moves without it**: JSONL stays the default and every file is as before; a run in the other format than a model's results on disk

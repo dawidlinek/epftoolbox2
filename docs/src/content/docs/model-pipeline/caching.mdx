@@ -97,7 +97,8 @@ file holding both kinds reads as one.
 `test_start`, so extending or shifting `test_start` between runs into the same directory can't make an unrelated date look already
 computed. A key is done when the record a reader takes for it is a forecast: a skipped key is tried again by every run, and gets a new
 skip record only when its reason changed, so resuming again doesn't grow the file. What a run writes for a key whose records reach a
-higher `revision` gets that revision, so that it is the record read.
+higher `revision` gets that revision, so that it is the record read. A forecast counts as done once its line is written: a write
+that fails raises from the run, and its keys are forecast again by the next one.
 
 **A crash while writing** can leave the last line half-written. Reading skips it with a warning, and the next run into the file cuts
 it off, with a warning naming its bytes, before it appends: its key is forecast again, and the file ends as a fresh run's would. A line
@@ -149,12 +150,19 @@ report = pipeline.run(
 - **Parts.** Records are buffered per year of their `run_date` (converted to columns in the background as they come) and written
   as a part (zstd, rows sorted by `run_date`, `hour`, `horizon`) when a buffer reaches 200,000 rows, is 5 minutes old, and when the
   run ends; the environment variables `PARQUET_ROWS_PER_PART`, `PARQUET_FLUSH_SECONDS` and `PARQUET_MAX_BUFFERED_ROWS` (1,000,000,
-  all of a writer's buffers together) change those.
+  all of a writer's buffers together) change those. So how records split into parts depends on when buffers were written, and two
+  identical runs give the same records in other part files (other names, sizes and sha256): compare results by their records
+  (`epf results convert --to jsonl` and sorted lines, or a report), never by their files.
+- **Done once on disk.** A forecast counts as done (for `forecast_counts()`, and for what the next run skips) once its part is
+  committed, as a JSONL forecast once its line is written. A write that fails (a full disk) raises from the run, at the latest when
+  it ends, and the keys whose part wasn't committed are forecast again by the next run.
 - **The catalog.** A part is written under a temporary name, synced and renamed, and only then gets its line in `_catalog.jsonl`
   (file, rows, bytes, first and last run date, its sha256, and a CRC-32 of the line). Readers read the parts the catalog lists and
   nothing else, so a crash leaves at most an orphan file that no reader sees: the next run forecasts its keys again, `epf results
   verify` reports it and `epf results compact` removes it. A catalog line a crash left half-written is skipped with a warning and
-  cut off by the next writer, as a JSONL line is.
+  cut off by the next writer, with or without the lock, as a JSONL line is. Each part, the catalog and the directories are synced
+  after a write, so a committed line never names a part a power cut lost. A part the catalog lists that is missing (deleted by hand,
+  a disk error) makes every read and resume of the model's results raise, naming `epf results verify`, which lists it.
 - **The same records.** One column per record key (dates as dates, `hour`, `horizon`, `revision` as small integers, `prediction`
   and `actual` as float64, `coefficients` and `member_predictions` as lists of float64, `freq`, `window`, `status` as dictionary
   strings), and a column `_keys` with each record's keys in their order, so that a record converts both ways exactly: its keys in
@@ -163,13 +171,18 @@ report = pipeline.run(
 - **The same rules.** One record per key `(hour, horizon, run_date)`, the highest `revision`, a forecast over skip records, the first
   forecast in catalog order; forecasts alone by default; a repeat with the same forecast warns, one with another raises. Resuming,
   the lock (`<model>.lock`, the same file for both formats), skip records and the manifest work as for JSONL. The manifest records
-  `save_format: "parquet"`, as provenance.
+  `save_format: "parquet"`, as provenance. Many models written by one writer (as one process writing a group of models does) share
+  a lock file of that writer's, `.writer-<pid>-<random>.lock`, whose name each model's lock file holds; a killed writer's stays
+  behind, harmless. An epftoolbox2 older than these Parquet results doesn't read those names, so two library versions writing one
+  `save_dir` at once is unsupported.
 - **One format per model.** A run with `save_format="jsonl"` into a `save_dir` where a model has Parquet results raises before any
   fit, and the other way round, naming the command that converts them. [Array tasks](/epftoolbox2/workflow/overview/#slurm-arrays-one-model-or-a-block-per-task)
   write Parquet with `model_pipeline.save_format: parquet`, and `report()` / `epf report` read either format.
 - **Coefficients.** `save_coefficients=False` writes `coefficients` as `[]`, as a training window list's records have them, and
-  changes nothing else: no table reads them. A study of 10,000 models over a year of hourly forecasts with 140 coefficients a record
-  is 271 GB of JSONL.
+  changes no other key of a record: no table reads them. The manifest records `save_coefficients: false` (no key with the default)
+  and compares it on resume: a run into such results with the default raises `ManifestMismatchError` (and the other way round),
+  since the file would mix records with and without coefficients that nobody could tell apart; `allow_manifest_mismatch=True`
+  resumes anyway. A study of 10,000 models over a year of hourly forecasts with 140 coefficients a record is 271 GB of JSONL.
 
 Three commands work on a `save_dir` (`--model NAME` for one model):
 

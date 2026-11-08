@@ -114,7 +114,7 @@ model_pipeline:
 | `model_forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted |
 | `model_save_dir` | str | `None` | Directory for one resumable JSONL per model (YAML: `model_pipeline.save_dir`), resolved from the YAML's directory |
 | `model_save_format` | str | `"jsonl"` | `"parquet"` writes each model's results as a [Parquet directory](/epftoolbox2/model-pipeline/caching/#parquet-results) (YAML: `model_pipeline.save_format`, written only when set) |
-| `model_save_coefficients` | bool | `True` | `False` writes each record's `coefficients` as `[]` and nothing else differs (YAML: `model_pipeline.save_coefficients`, written only when `false`) |
+| `model_save_coefficients` | bool | `True` | `False` writes each record's `coefficients` as `[]` and no other key differs; the manifest records it and a resume with the other setting raises (YAML: `model_pipeline.save_coefficients`, written only when `false`) |
 | `model_allow_manifest_mismatch` | bool | `False` | Resume into `model_save_dir` even if its [manifest](/epftoolbox2/model-pipeline/caching/) disagrees with this run's configuration (overwrites it) (YAML: `model_pipeline.allow_manifest_mismatch`) |
 | `model_require_manifest` | bool | `False` | Refuse to resume from a `model_save_dir` that has results but no manifest, instead of warning (YAML: `model_pipeline.require_manifest`) |
 | `model_validation` | list \| str | `None` | Validation period `[start, end]` or `"previous_year"` (YAML: `model_pipeline.validation`). See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/) |

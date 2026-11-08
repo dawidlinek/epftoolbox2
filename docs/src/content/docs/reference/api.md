@@ -74,7 +74,7 @@ class ModelPipeline:
         horizons: Optional[Sequence[int]] = None,  # Only these horizons, e.g. [1, 3, 7] or range(3, 10); not with horizon
         issue_days: Optional[Sequence[str]] = None,  # Only these weekdays, e.g. ["friday"]; any case, all seven = every day
         save_format: str = "jsonl",       # "jsonl" or "parquet": <name>.jsonl or the directory <name>.parquet in save_dir
-        save_coefficients: bool = True,   # False writes coefficients as [] (nothing else changes)
+        save_coefficients: bool = True,   # False writes coefficients as []; recorded in the manifest, compared on resume
     ) -> EvaluationReport: ...
 
     def report(                           # Report from the results a run wrote to save_dir, JSONL or Parquet

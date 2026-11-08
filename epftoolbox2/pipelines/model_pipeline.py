@@ -220,8 +220,8 @@ class ModelPipeline:
         `save_format="parquet"` writes each model's results as a directory of Parquet parts, `<name>.parquet/`, in place of
         `<name>.jsonl`: the same records, read by the same rules, for studies of thousands of models (see the docs page on
         caching). A model with results in the other format in `save_dir` raises before any fit; `epf results convert` turns
-        one into the other exactly. `save_coefficients=False` writes each record's `coefficients` as `[]` and nothing else
-        differs.
+        one into the other exactly. `save_coefficients=False` writes each record's `coefficients` as `[]` and no other key
+        differs; the manifest records it, and a resume with the other setting raises `ManifestMismatchError`.
 
         `test=(start, end)` is the test period, the same as `test_start` and `test_end` (passing both raises). With
         `validation`, each model forecasts the days of both windows in one run, into one results file, and nothing between
