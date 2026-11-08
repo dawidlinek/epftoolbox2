@@ -325,8 +325,12 @@ class Workflow:
             # Knows the columns of the configured sources, e.g. a CalendarSource prefix or Open-Meteo variables.
             mp.information_set = mp.information_set.with_source_rules(dp.sources)
 
+        data = self._run_data(dp)
+        if array_task and not self.model_forecast_only:
+            # The evaluators run in report(), after every task: a column they read that the data lacks is refused now.
+            self._build_model_pipeline(all_models=True)._check_source_columns(data)
         report = mp.run(
-            data=self._run_data(dp),
+            data=data,
             test_start=self.model_test_start,
             test_end=self.model_test_end,
             target=self.model_target,
@@ -357,13 +361,15 @@ class Workflow:
         Use after an array job in which each task ran one model or a block of them. Raises FileNotFoundError naming each
         model whose results file is missing, unless `allow_missing` is set, which leaves out that model and every ensemble
         it is a member of. The data pipeline is only run when an exporter joins source columns (CsvExporter
-        `extra_columns`).
+        `extra_columns`) or an evaluator reads them (`ScaledMAEEvaluator`).
         """
         save_dir = self._save_dir()
         if save_dir is None:
             raise ValueError("report() reads the results from model_pipeline.save_dir, which is not set")
         mp = self._build_model_pipeline(all_models=True)
-        needs_data = any(getattr(e, "extra_columns", None) for e in mp.exporters)
+        needs_data = any(getattr(e, "extra_columns", None) for e in mp.exporters) or (
+            not self.model_forecast_only and any(getattr(e, "source_columns", ()) for e in mp.evaluators)
+        )
         return mp.report(
             save_dir,
             test_start=self.model_test_start,

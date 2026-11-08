@@ -34,7 +34,7 @@ exporter = ExcelExporter("results.xlsx")
 
 A model with no forecasts in the report's window has a row with 0 forecasts in `summary` and an empty `prediction_{model}` column in `details`; it has no row in the breakdowns, which hold only forecasts.
 
-An evaluator with several columns, such as `DMEvaluator`, gets one sheet per column in the breakdowns (`horizon_DM ratio`, `horizon_DM p`, ...). Empty cells are values that do not exist for that group, such as `DM p_holm` in a per-hour sheet.
+An evaluator with several columns, such as `DMEvaluator`, gets one sheet per column in the breakdowns (`horizon_DM ratio`, `horizon_DM p`, ...). Empty cells are values that do not exist for that group, such as `DM p_holm` in a per-hour sheet. A sheet title holds at most 31 characters and none of `\ / ? * [ ] :`, which become `_`: `ScaledMAEEvaluator("cap")`'s column `MAE/cap` is the sheet `hour_MAE_cap`. Two titles that are one once cut, such as `horizon_MAE/installed_capacity_mw` and `horizon_MAE/installed_capacity_mw left out`, get sheets of their own: the later one ends in `~2` (`horizon_MAE_installed_capacit~2`).
 
 Each breakdown also gets a sheet of counts after its metric sheets (`horizon_forecasts`, `HourHorizon_forecasts`, `RunWeekdayHorizon_forecasts`, ...): the number of
 forecasts of each model in each group, laid out like the metric sheets. A model with no forecast in a group has 0 there, and in the sheets with a block for

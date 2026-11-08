@@ -23,7 +23,7 @@ from ..evaluators._compare import (
     too_few_distinct_models,
     verdict,
 )
-from ..evaluators._days import periods_per_hour
+from ..evaluators._days import check_period_ids, periods_per_hour
 from ..evaluators.base import FORECAST_KEYS, Evaluator, SetEvaluator
 from ..evaluators.dm import DMEvaluator, check_test_settings
 from ..evaluators.economic import EconomicEvaluator
@@ -31,7 +31,23 @@ from ..evaluators.mcs import check_mcs_settings
 from ..logging import get_logger
 from ..models._calendar import clock_periods_on
 from .availability import listing_frame
-from .breakdowns import AGGREGATES, daily_aggregate, price_level, spike_threshold
+from .breakdowns import (
+    AGGREGATES,
+    BLOCK_AGGREGATES,
+    PEAK_HOURS,
+    block_aggregate,
+    check_peak_hours,
+    check_source_zone,
+    numbered_by_the_clock,
+    daily_aggregate,
+    hourly_aggregate,
+    price_level,
+    source_table,
+    source_values,
+    spike_threshold,
+    switch_dates,
+)
+from .breakdowns import error_split as split_errors
 from .matching import rows_of_refs, training_day_frame
 from .ref import ModelResultRef
 from .store import fingerprint_path
@@ -65,9 +81,17 @@ _BREAKDOWN_KEYS = ("quarter", "target_date", "price_level")
 # The columns of `summary()` and of the grouped tables that no evaluator wrote.
 _TABLE_KEYS = {"model", "forecasts", *(key for _, keys in GROUP_CONFIGS for key in keys), *_BREAKDOWN_KEYS}
 
-# The frequency of a report made by `aggregate()`, and the periods an hour holds at each frequency of results.
+# The frequencies of a report made by `aggregate()`, and the periods an hour holds at each frequency of results.
 DAILY = "1D"
+HOURLY = "1h"
+QUARTER_HOURLY = "15min"
 _PERIODS_PER_HOUR = {"1h": 1, "15min": 4}
+
+# What `aggregate()` writes in `skipped` for the periods it drops, by the frequency it builds.
+_INCOMPLETE = {DAILY: "incomplete_day", HOURLY: "incomplete_hour"}
+
+# The columns of `EvaluationReport.error_split()`.
+ERROR_SPLIT_COLUMNS = ["model", "days", "forecasts", "mse", "level", "hour", "quarter"]
 
 # Two-sided size of the `verdict` of `tests()`.
 _TEST_ALPHA = 0.05
@@ -90,7 +114,8 @@ CHOICE_COLUMNS = [
 
 def metric_columns(table: pd.DataFrame) -> List[str]:
     """The columns of a table of `summary()`, `compute_all()` or `by_*()` that evaluators wrote, in table order."""
-    return [c for c in table.columns if c not in _TABLE_KEYS]
+    keys = _TABLE_KEYS | {table.attrs["by_column"]} if "by_column" in table.attrs else _TABLE_KEYS
+    return [c for c in table.columns if c not in keys]
 
 
 def _in_record_order(df: pd.DataFrame, first: Tuple[str, ...] = ()) -> pd.DataFrame:
@@ -264,45 +289,80 @@ class EvaluationReport:
         )
         return table
 
-    def aggregate(self, freq: str = "1D", agg: str = "max") -> "EvaluationReport":
-        """A report on daily aggregates of every model's forecasts and actuals, with the same evaluators.
+    def aggregate(
+        self, freq: str = "1D", agg: str = "max", peak_hours: Tuple[int, int] = PEAK_HOURS
+    ) -> "EvaluationReport":
+        """A report on daily or hourly aggregates of every model's forecasts and actuals, with the same evaluators.
 
-        For each (run date, target date, horizon) the prediction and the actual are reduced by `agg` over the periods of
-        the day, which turns hourly or 15-minute forecasts into forecasts of the day's maximum, minimum, mean or spread.
-        The new report has `hour` 0 and frequency `"1D"`. A day counts only when all its periods are there, with a
-        finite prediction and actual: 23, 24 or 25 hours (92, 96 or 100 quarter-hours), judged by the period ids as
-        `EconomicEvaluator` does, and against the clock of the data's time zone (`ModelResultRef.zone`): a day with fewer
-        finite periods than `clock_periods` gives it is dropped. So a model that lacks 02:00 on an ordinary Tuesday is not
-        aggregated over 23 hours while another is aggregated over 24, which would score them against different actuals on one
-        key. The spring switch day is whole over its 23 hours. The day after it, from a forecast issued on the switch day, lacks
-        the hour no forecast was issued from and is dropped at every horizon, and the autumn switch day is dropped for its
-        repeated hour, which has no `actual`.
+        With `freq="1D"`, for each (run date, target date, horizon) the prediction and the actual are reduced by `agg` over
+        the periods of the day, which turns hourly or 15-minute forecasts into forecasts of the day's maximum, minimum, mean or
+        spread, or of the mean over a block of its hours: `"peak"` is the mean over the periods of `peak_hours` (local
+        08:00 to 19:59 by default) and `"offpeak"` over the rest of the day. The new report has `hour` 0 and frequency
+        `"1D"`. A day counts only when all its periods are there, with a finite prediction and actual: 23, 24 or 25 hours
+        (92, 96 or 100 quarter-hours), judged by the period ids as `EconomicEvaluator` does, and against the clock of the
+        data's time zone (`ModelResultRef.zone`): a day with fewer finite periods than `clock_periods` gives it is dropped.
+        So a model that lacks 02:00 on an ordinary Tuesday is not aggregated over 23 hours while another is aggregated over
+        24, which would score them against different actuals on one key. The spring switch day is whole over its 23 hours.
+        The day after it, from a forecast issued on the switch day, lacks the hour no forecast was issued from and is dropped
+        at every horizon, and the autumn switch day is dropped for its repeated hour, which has no `actual`. A block counts
+        when every period of it that the day has is there and finite: the peak of both switch days counts, and so does the
+        offpeak of the spring day, over the hours its clock has.
+
+        With `freq="1h"`, which only 15-minute results take, the four quarter-hours of each hour are reduced by `agg` (the
+        study's MAEh is the MAE of `aggregate("1h", agg="mean")`). An hour counts when all four quarter-hours are there
+        with a finite prediction and actual: the repeated autumn hour, which has no actual, is dropped, and the hour the
+        spring switch skips is no hour of that day. The new report has frequency `"1h"`, `hour` the local hour, and keeps
+        the time zone, so `aggregate("1D")` of it judges days by the clock again.
 
         Without a zone, for plain lists of records, the periods of a target date are every period that any model has a record
         for, at any horizon. A period that no model has at any horizon is then taken at its word, since that is how a clock
         change looks in the ids (a 23-hour day lacks the hour it skips).
 
-        Each model is judged on its own days, so a model missing a period loses that day and no other model does. Dropped days are
-        counted, never lost silently: `forecast_counts()` of the new report has them as `missing` and under
-        `incomplete_day`, and a warning names the models. `planned` there is the days with any forecast, so days without a
-        single forecast are in the first report's `forecast_counts()`.
+        Each model is judged on its own days, so a model missing a period loses that day (or hour) and no other model does.
+        Dropped days are counted, never lost silently: `forecast_counts()` of the new report has them as `missing` and under
+        `incomplete_day` (`incomplete_hour` at `"1h"`), and a warning names the models. `planned` there is the days (hours)
+        with any forecast, so days without a single forecast are in the first report's `forecast_counts()`.
 
-        The evaluators carry over, except `EconomicEvaluator` (a schedule needs the periods of a day), which is left out
-        with a warning. `summary()`, `by_*()`, `tests()`, `mcs()`, `ranks()`, `compare()` and `leaderboard()` work;
-        `tests(by="hour")` raises, and `compare()` has no per-hour columns. The new report has no `source_data`.
+        The evaluators carry over, except `EconomicEvaluator` at `"1D"` (a schedule needs the periods of a day), and the
+        evaluators that read source-data columns (`ScaledMAEEvaluator`), which are left out with a warning: the new report
+        has no `source_data`. `summary()`, `by_*()`, `tests()`, `mcs()`, `ranks()`, `compare()` and `leaderboard()` work; on
+        a daily report `tests(by="hour")` raises, and `compare()` has no per-hour columns.
 
         Args:
-            freq: `"1D"`, the only aggregation so far.
-            agg: `"max"`, `"min"`, `"mean"` or `"spread"` (the maximum minus the minimum of the day).
+            freq: `"1D"` for daily series, `"1h"` for hourly ones from quarter-hours.
+            agg: `"max"`, `"min"`, `"mean"` or `"spread"` (the maximum minus the minimum) at either frequency; `"peak"` or
+                `"offpeak"` at `"1D"`.
+            peak_hours: `(first, end)` local hours of the peak block, the end left out: `(8, 20)` is 08:00 to 19:59. Only
+                for `agg="peak"` and `"offpeak"`.
         """
-        if freq != DAILY:
-            raise ValueError(f"aggregate() only builds daily series: freq must be {DAILY!r}, got {freq!r}")
+        if freq not in (DAILY, HOURLY):
+            raise ValueError(
+                f"aggregate() builds daily or hourly series: freq must be {DAILY!r} or {HOURLY!r}, got {freq!r}"
+            )
         if agg not in AGGREGATES:
             raise ValueError(f"agg must be one of {list(AGGREGATES)}, got {agg!r}")
+        block = agg in BLOCK_AGGREGATES
+        if block and freq != DAILY:
+            raise ValueError(f"agg={agg!r} is the mean over a block of a day's hours: it needs freq={DAILY!r}.")
+        peak_hours = check_peak_hours(peak_hours)
+        if not block and peak_hours != PEAK_HOURS:
+            raise ValueError(
+                f"peak_hours sets the block of agg='peak' and 'offpeak'; it means nothing for agg={agg!r}."
+            )
+        if agg == "offpeak" and peak_hours == (0, 24):
+            raise ValueError("peak_hours=(0, 24) leaves no offpeak hours.")
         freqs = self._result_freqs()
         if DAILY in freqs.values():
             raise ValueError(f"These results are daily already ({freqs}): there is nothing to aggregate.")
+        if freq == HOURLY and set(freqs.values()) - {QUARTER_HOURLY}:
+            raise ValueError(
+                f"aggregate('1h') turns quarter-hours into hours, so it needs 15-minute results; these are {freqs}."
+            )
         self._require_one_frequency("Aggregating")
+        if freq == DAILY:
+            self._refuse_hours_dropped_without_a_zone()
+        if block or freq == HOURLY:
+            self._refuse_records_off_the_clock(agg)
 
         frames = self._model_frames()
         starts = [df["run_date"].min() for df in frames.values() if "run_date" in df and len(df)]
@@ -311,20 +371,33 @@ class EvaluationReport:
         keyed = [
             df[["target_date", "hour"]] for df in frames.values() if len(df) and {"target_date", "hour"} <= set(df)
         ]
-        periods = pd.concat(keyed).drop_duplicates().groupby("target_date").size() if keyed else None
+        periods = pd.concat(keyed).drop_duplicates().groupby("target_date").size() if keyed and freq == DAILY else None
+        day_ids: Dict[pd.Timestamp, Tuple[int, ...]] = {}
+        if block and keyed:
+            for date, ids in pd.concat(keyed).drop_duplicates().groupby("target_date")["hour"]:
+                day_ids[pd.Timestamp(date)] = tuple(sorted(int(i) for i in ids))
         results: Dict[str, ModelResultRef] = {}
         dropped: Dict[str, int] = {}
         for name, ref in self.refs.items():
             frame = frames[name]
             model_freq = freqs.get(name, ref.freq)
-            per_hour = _PERIODS_PER_HOUR.get(model_freq)
-            if per_hour is None:
-                per_hour = periods_per_hour(frame["hour"].to_numpy()) if "hour" in frame else 1
-            clock = None
-            if ref.zone is not None and "target_date" in frame:
-                clock = clock_periods_on(frame["target_date"].unique(), model_freq, ref.zone)
-            days, seen, missing = daily_aggregate(frame, agg, per_hour, periods, clock)
-            records = _daily_records(days, start, ref.window)
+            if freq == HOURLY:
+                rows, seen, missing = hourly_aggregate(frame, agg)
+            else:
+                per_hour = _PERIODS_PER_HOUR.get(model_freq)
+                if per_hour is None:
+                    per_hour = periods_per_hour(frame["hour"].to_numpy()) if "hour" in frame else 1
+                clock = None
+                if ref.zone is not None and "target_date" in frame:
+                    clock = clock_periods_on(frame["target_date"].unique(), model_freq, ref.zone)
+                if block:
+                    if "hour" in frame:
+                        check_period_ids(frame["hour"].to_numpy(), model_freq, f"aggregate({agg!r}) of {name!r}")
+                    on_the_day = clock if clock is not None else numbered_by_the_clock(day_ids, per_hour)
+                    rows, seen, missing = block_aggregate(frame, agg, per_hour, peak_hours, on_the_day)
+                else:
+                    rows, seen, missing = daily_aggregate(frame, agg, per_hour, periods, clock)
+            records = _period_records(rows, start, ref.window, freq)
             results[name] = ModelResultRef(
                 name=name,
                 path=None,
@@ -335,33 +408,188 @@ class EvaluationReport:
                 horizon=ref.horizon,
                 horizons=ref.horizons,
                 issue_days=ref.issue_days,
-                freq=DAILY,
+                freq=freq,
                 _results=records,
                 produced=len(records),
-                skipped={"incomplete_day": missing},
+                skipped={_INCOMPLETE[freq]: missing},
                 availability_listing=ref.availability_listing,
                 vintages=ref.vintages,
                 window=ref.window,
                 target_before=ref.target_before,
                 windows=ref.windows,
+                **({"zone": ref.zone} if freq == HOURLY else {}),
             )
             if missing:
                 dropped[name] = missing
 
         if dropped:
+            if freq == HOURLY:
+                what = "hours that lack some of their quarter-hours (hours"
+            elif block:
+                what = f"days whose {agg} hours lack some of their periods (days"
+            else:
+                what = "days that lack some of their periods (days"
             warnings.warn(
-                f"aggregate({agg!r}) left out days that lack some of their periods (days per model: {dropped}). They "
-                "are in forecast_counts() of the new report as incomplete_day.",
+                f"aggregate({agg!r}) left out {what} per model: {dropped}). They are in forecast_counts() of the new "
+                f"report as {_INCOMPLETE[freq]}.",
                 stacklevel=2,
             )
-        if any(isinstance(e, EconomicEvaluator) for e in self.evaluators):
+        economic = [e for e in self.evaluators if isinstance(e, EconomicEvaluator)] if freq == DAILY else []
+        if economic:
             warnings.warn(
                 "aggregate() leaves EconomicEvaluator out of the new report: a schedule needs the periods of a day, and "
                 "a daily series has one.",
                 stacklevel=2,
             )
-        evaluators = [e for e in self.evaluators if not isinstance(e, EconomicEvaluator)]
+        sourced = [e for e in self.evaluators if _source_columns_of(e)]
+        if sourced:
+            warnings.warn(
+                f"aggregate() leaves {[type(e).__name__ for e in sourced]} out of the new report: they read source-data "
+                "columns at the periods of the results, and the new report has no source data.",
+                stacklevel=2,
+            )
+        evaluators = [e for e in self.evaluators if not any(e is out for out in (*economic, *sourced))]
         return EvaluationReport(results, evaluators, choices=self._choices)
+
+    def _refuse_records_off_the_clock(self, agg: str) -> None:
+        """Results with a zone that hold records of slots the clock doesn't have on their date: the reader leaves those out
+        (`ModelResultRef.off_the_clock`), so a day numbered through (0-22 on a 23-hour day, 0-91 at 15 minutes) would pass for
+        the clock's day with every hour after the switch an hour off, and a block or an hour of it would be read shifted. A run
+        never writes such a record; refused, never scored."""
+        off = {name: n for name, ref in self.refs.items() if ref.zone is not None and (n := ref.off_the_clock())}
+        if off:
+            raise ValueError(
+                f"aggregate({agg!r}) reads period ids as the local clock's, but these results hold records of slots their "
+                f"clock doesn't have, which are off the clock and left out (per model: {off}): their days are numbered "
+                "otherwise, so their hours after a switch would be read an hour off. Number the periods by the clock, as a "
+                "run does, or pass the records without a zone."
+            )
+
+    def _refuse_hours_dropped_without_a_zone(self) -> None:
+        """Hourly results of `aggregate("1h")` that dropped hours, with no zone to tell what a day has: a day without its
+        dropped 02:00 (the repeated autumn hour, which has no actual) looks like a 23-hour spring day and would be aggregated
+        over the hours left, while `aggregate("1D")` of the quarter-hours drops it. Refused, never scored."""
+        dropped = {
+            name: ref.skipped["incomplete_hour"]
+            for name, ref in self.refs.items()
+            if ref.zone is None and ref.skipped.get("incomplete_hour")
+        }
+        if dropped:
+            raise ValueError(
+                f"These hourly results come from aggregate('1h'), which left out hours (incomplete_hour per model: "
+                f"{dropped}), and they have no time zone: a day without such an hour can't be told from a day whose clock "
+                "skips it. Aggregate the quarter-hour report to '1D' directly, or give its results a zone "
+                "(ModelResultRef.zone), which a report of a run has."
+            )
+
+    def error_split(self, period: str = "1h") -> pd.DataFrame:
+        """How each model's squared error divides into the level of the day, its hour profile and the shape within the hour.
+
+        One row per model: `model, days, forecasts, mse, level, hour, quarter`. On the model's whole non-switch days (a
+        forecast day with all 96 quarter-hours finite, on a date whose clock doesn't change), with `e` the errors of a day,
+        the mean squared error `mse` is exactly the sum of three parts, and the table gives each as a share of it: `level`,
+        the square of the day's mean error; `hour`, each hour's mean error minus the day's; `quarter`, each quarter-hour's
+        error minus its hour's. A forecast flat within the hour has a large `quarter` share, one with the daily level wrong a
+        large `level` share. `days` and `forecasts` (quarter-hours) are what each share is on. Each model is judged on its
+        own days, so a model with holes has fewer of them; when the counts differ a warning says so and
+        `df.attrs["unequal_days"]` holds them.
+
+        Args:
+            period: The period the shape is measured within: `"1h"`, the only one so far.
+        """
+        if period != "1h":
+            raise ValueError(f"error_split() splits the error at the hour: period must be '1h', got {period!r}")
+        freqs = self._result_freqs()
+        if set(freqs.values()) - {QUARTER_HOURLY}:
+            raise ValueError(
+                f"error_split() splits quarter-hour errors into the day, its hours and the quarter-hours within them, so "
+                f"it needs 15-minute results; these are {freqs}."
+            )
+        frames = self._model_frames()
+        rows = []
+        for name, ref in self.refs.items():
+            frame = frames[name]
+            switches = None
+            if ref.zone is not None and len(frame) and "target_date" in frame:
+                switches = switch_dates(frame["target_date"].unique(), ref.zone)
+            rows.append({"model": name, **split_errors(frame, switches)})
+        table = pd.DataFrame(rows, columns=ERROR_SPLIT_COLUMNS)
+        table.attrs["period"] = period
+        days = dict(zip(table["model"], table["days"]))
+        if len(set(days.values())) > 1:
+            table.attrs["unequal_days"] = days
+            warnings.warn(
+                f"The models have different numbers of whole days ({days}), so their error splits are on different "
+                "samples; see report.forecast_counts().",
+                stacklevel=2,
+            )
+        return table
+
+    def by_column(self, column: str, bins: Optional[Sequence[float]] = None) -> pd.DataFrame:
+        """One row per (value of a source-data column, model): `model, <column>, forecasts`, then the metrics.
+
+        Each forecast is grouped by the value of `column` in the report's `source_data` at its target row: the row of its
+        target date and period, joined as `CsvExporter(extra_columns=)` joins (the repeated autumn hour takes its second
+        row, the one a run forecasts from), so the source must be at the results' frequency. A 0/1 flag such as
+        `is_night` gives two groups (daylight MAE is the row of 0); with `bins`, a numeric column is cut into the
+        intervals between the edges, each closed on the left (`bins=[-inf, 0, inf]` puts prices below 0 apart). The value
+        is read from the data, never from a forecast, so it is the same for every model. A forecast without a value (no
+        source row, NaN, or outside the bins) is in no group: `df.attrs["no_value"]` counts them per model, so the groups
+        add up to `summary()`. Every evaluator runs on the group alone, on the keys the models share inside it.
+
+        Args:
+            column: The source-data column to group by.
+            bins: Increasing edges to cut a numeric column at; None groups by the values themselves.
+        """
+        if self.source_data is None:
+            raise ValueError(
+                "by_column() groups forecasts by a column of the report's source data, and this report has none (a report "
+                "from aggregate() has none: group the report it came from)."
+            )
+        if column in _TABLE_KEYS or column in ("prediction", "actual"):
+            raise ValueError(f"by_column({column!r}): the report's tables already use that name; rename the column.")
+        edges = None
+        if bins is not None:
+            if isinstance(bins, (int, float, np.number)) or isinstance(bins, str):
+                raise ValueError(
+                    f"bins must be a list of edges, not {bins!r}: a number of bins would put each model's edges elsewhere."
+                )
+            edges = np.asarray(list(bins), dtype=float)
+            if len(edges) < 2 or not (np.diff(edges) > 0).all():
+                raise ValueError(f"bins must be at least two increasing edges, got {list(bins)}")
+        freq = self._require_one_frequency("by_column()") or HOURLY
+        frames = self._model_frames()
+        table = self._source_table([column], frames, freq)
+
+        def value_of(df: pd.DataFrame) -> pd.Series:
+            if not len(df) or not {"target_date", "hour"} <= set(df):
+                return pd.Series(np.nan, index=df.index, dtype=object)
+            values = source_values(table, df)[column]
+            if edges is None:
+                return values
+            cut = pd.cut(pd.to_numeric(values, errors="coerce"), edges, right=False)
+            return pd.Series(cut.astype(object), index=df.index)
+
+        no_value = {}
+        for name, df in frames.items():
+            if n := int(value_of(df).isna().sum()):
+                no_value[name] = n
+        grouped = self._grouped_table(frames, [column], labels={column: value_of})
+        grouped.attrs.update(by_column=column, bins=None if edges is None else edges.tolist(), no_value=no_value)
+        return grouped
+
+    def _source_table(self, columns: Sequence[str], frames: Mapping[str, pd.DataFrame], freq: str) -> pd.DataFrame:
+        """`breakdowns.source_table` of the report's source data, checked over the target dates of `frames`.
+
+        The join reads the source's wall clock, so a source in another time zone than the results' would give each forecast
+        another hour's value: with results that know their zone, the source's index must be in it."""
+        check_source_zone(self.source_data, [ref.zone for ref in self.refs.values()], "Joining source-data columns")
+        dates = [df["target_date"] for df in frames.values() if len(df) and "target_date" in df]
+        days = None
+        if dates:
+            every = pd.DatetimeIndex(pd.concat(dates))
+            days = (every.min(), every.max())
+        return source_table(self.source_data, columns, freq, days)
 
     def join(self, other: "EvaluationReport") -> "EvaluationReport":
         """A report with the models of both, for results of separate runs that are to be compared.
@@ -1031,10 +1259,16 @@ class EvaluationReport:
             del df, rows
 
     def _apply_evaluators(
-        self, model_dfs: Mapping[str, pd.DataFrame], group_keys: Sequence[str] = ()
+        self,
+        model_dfs: Mapping[str, pd.DataFrame],
+        group_keys: Sequence[str] = (),
+        freqs: Optional[Mapping[str, str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
-        """`{model: {column: value}}` for one group: each evaluator runs once, on every model's frame of that group."""
-        frames = model_dfs if isinstance(model_dfs, ModelFrames) else ModelFrames(model_dfs, group_keys)
+        """`{model: {column: value}}` for one group: each evaluator runs once, on every model's frame of that group.
+
+        `freqs` (`_result_freqs()`) goes to the evaluators with the frames (`ModelFrames.freqs`): a within-hour shape exists
+        only in quarter-hour results."""
+        frames = model_dfs if isinstance(model_dfs, ModelFrames) else ModelFrames(model_dfs, group_keys, freqs)
         columns: Dict[str, Dict[str, Any]] = {name: {} for name in model_dfs}
         written_by: Dict[str, Tuple[Evaluator, bool]] = {}
         for evaluator in self.evaluators:
@@ -1117,7 +1351,8 @@ class EvaluationReport:
 
     def _summary_table(self, model_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         self._check_set_evaluators()
-        frames = ModelFrames(model_dfs)
+        model_dfs = self._with_source_columns(model_dfs)
+        frames = ModelFrames(model_dfs, freqs=self._result_freqs())
         metrics = self._apply_evaluators(frames)
         table = pd.DataFrame(
             [{"model": name, "forecasts": len(df), **metrics.get(name, {})} for name, df in model_dfs.items()]
@@ -1144,11 +1379,13 @@ class EvaluationReport:
         `labels` gives a group key that is not a column of the frames or one `_split` knows: a function of a model's frame
         to the group of each row."""
         self._check_set_evaluators()
+        model_dfs = self._with_source_columns(model_dfs)
+        freqs = self._result_freqs()
         groups = {name: dict(self._split(df, group_keys, labels)) for name, df in model_dfs.items()}
         rows = []
         for key in sorted({k for g in groups.values() for k in g}):
             group_dfs = {name: g[key] for name, g in groups.items() if key in g}
-            metrics = self._apply_evaluators(group_dfs, group_keys)
+            metrics = self._apply_evaluators(group_dfs, group_keys, freqs)
             for name, group in group_dfs.items():
                 row = {"model": name, **dict(zip(group_keys, key)), "forecasts": len(group)}
                 rows.append({**row, **metrics.get(name, {})})
@@ -1156,6 +1393,32 @@ class EvaluationReport:
         _flag_unequal_counts(table, group_keys, list(model_dfs))
         self._flag_dm_vintages(table, list(model_dfs), stacklevel=3)
         return table
+
+    def _with_source_columns(self, model_dfs: Mapping[str, pd.DataFrame]) -> Mapping[str, pd.DataFrame]:
+        """The frames with the source-data columns that evaluators read (`ScaledMAEEvaluator`), joined at each forecast's
+        target date and period; the frames themselves when no evaluator reads any."""
+        readers = [e for e in self.evaluators if _source_columns_of(e)]
+        if not readers:
+            return model_dfs
+        columns = list(dict.fromkeys(c for e in readers for c in _source_columns_of(e)))
+        names = [type(e).__name__ for e in readers]
+        if self.source_data is None:
+            raise ValueError(
+                f"{names} read {columns} from the report's source data, and this report has none: build it with "
+                "source_data (a report of ModelPipeline has it; one from aggregate() has none)."
+            )
+        clash = [c for c in columns if c in (*FORECAST_KEYS, "prediction", "actual")]
+        if clash:
+            raise ValueError(f"{names} read the source column(s) {clash}, whose names the forecast frames use.")
+        freq = self._require_one_frequency("Joining source-data columns") or HOURLY
+        table = self._source_table(columns, model_dfs, freq)
+        joined = {}
+        for name, df in model_dfs.items():
+            if len(df) and {"target_date", "hour"} <= set(df):
+                values = source_values(table, df)
+                df = df.assign(**{c: values[c] for c in columns})
+            joined[name] = df
+        return joined
 
     @staticmethod
     def _split(
@@ -1230,35 +1493,44 @@ def _period_of(ref: ModelResultRef) -> Optional[Tuple[str, str, Optional[str]]]:
     return (ref.test_start, ref.test_end, ref.target_before) if ref.test_start else None
 
 
-def _daily_records(days: pd.DataFrame, start: pd.Timestamp, window: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Result records for the daily forecasts of `aggregate()`; `day_in_test` counts days from the earliest run date."""
-    if days.empty:
+def _period_records(
+    rows: pd.DataFrame, start: pd.Timestamp, window: Optional[str] = None, freq: str = DAILY
+) -> List[Dict[str, Any]]:
+    """Result records for the daily or hourly forecasts of `aggregate()`; `day_in_test` counts days from the earliest run
+    date, and `hour` is the period of the new frequency (0 for a day)."""
+    if rows.empty:
         return []
-    run, target = days["run_date"], days["target_date"]
+    run, target = pd.to_datetime(rows["run_date"]), pd.to_datetime(rows["target_date"])
     columns = (
         run.dt.strftime("%Y-%m-%d").tolist(),
         target.dt.strftime("%Y-%m-%d").tolist(),
         run.dt.day_of_week.tolist(),
-        days["horizon"].tolist(),
+        rows["hour"].astype(np.int64).tolist(),
+        rows["horizon"].tolist(),
         (run - start).dt.days.tolist(),
-        days["prediction"].tolist(),
-        days["actual"].tolist(),
+        rows["prediction"].tolist(),
+        rows["actual"].tolist(),
     )
     return [
         {
             "run_date": run_date,
             "target_date": target_date,
             "run_weekday": run_weekday,
-            "hour": 0,
+            "hour": hour,
             "horizon": horizon,
             "day_in_test": day_in_test,
             "prediction": prediction,
             "actual": actual,
-            "freq": DAILY,
+            "freq": freq,
             **({} if window is None else {"window": window}),
         }
-        for run_date, target_date, run_weekday, horizon, day_in_test, prediction, actual in zip(*columns)
+        for run_date, target_date, run_weekday, hour, horizon, day_in_test, prediction, actual in zip(*columns)
     ]
+
+
+def _source_columns_of(evaluator: Evaluator) -> Tuple[str, ...]:
+    """The source-data columns an evaluator reads from its frames (`ScaledMAEEvaluator`), which the report joins first."""
+    return tuple(getattr(evaluator, "source_columns", ()))
 
 
 def _describe(obj: Any) -> str:

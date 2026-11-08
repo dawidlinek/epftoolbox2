@@ -536,6 +536,11 @@ is counted as `incomplete_day`.
 | Any other day after the switch | 24 (96) | Whole |
 | The autumn switch day | 24 (96) | **Dropped:** the repeated hour has no `actual` |
 
+`aggregate("1D", agg="peak")` and `"offpeak"` need the block whole by the same clock: the peak (08:00-19:59) of every day above
+counts, the offpeak of the spring day counts over the offpeak hours its clock has, and the offpeak of S+h and of the autumn day
+are dropped. `aggregate("1h")` needs each hour's four quarter-hours: the repeated autumn hour has no `actual` and is dropped, and the
+hour the spring switch skips is no hour of that day.
+
 Plain lists of records have no zone. There the periods of a date are those any model has a record for, as described on
 [Working with Results](/epftoolbox2/model-pipeline/results/#daily-aggregates). `EconomicEvaluator` judges a whole day by the period ids,
 as it did.

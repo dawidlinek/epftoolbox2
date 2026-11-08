@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -7,6 +7,7 @@ import pandas as pd
 from .base import Exporter
 from ..models._calendar import DAILY
 from ..models._contract import check_index, period_index
+from ..results.breakdowns import check_source_zone
 from ..results.report import EvaluationReport
 
 _MERGE_KEYS = ["run_date", "target_date", "hour", "horizon"]
@@ -87,7 +88,8 @@ class CsvExporter(Exporter):
             base_df.insert(base_df.columns.get_loc("hour") + 1, "target_time", base_df["hour"].map(_clock_time))
 
         if self.extra_columns and report.source_data is not None:
-            base_df = self._join_extra_columns(base_df, report.source_data, freq)
+            zones = [ref.zone for ref in report.refs.values()]
+            base_df = self._join_extra_columns(base_df, report.source_data, freq, zones)
 
         sort_keys = ["target_date", "hour", "horizon"]
         base_df = base_df.sort_values(by=sort_keys).reset_index(drop=True)
@@ -105,10 +107,14 @@ class CsvExporter(Exporter):
             )
         return freqs[0] if freqs else "1h"
 
-    def _join_extra_columns(self, base_df: pd.DataFrame, source_data: pd.DataFrame, freq: str) -> pd.DataFrame:
+    def _join_extra_columns(
+        self, base_df: pd.DataFrame, source_data: pd.DataFrame, freq: str, zones: Sequence[Any] = ()
+    ) -> pd.DataFrame:
         available = [c for c in self.extra_columns if c in source_data.columns]
         if not available:
             return base_df
+        # The join reads the source's wall clock: with results that know their zone, the source must be in it.
+        check_source_zone(source_data, zones, "CsvExporter extra_columns")
 
         # The join is on (target date, period of the day), so the source must have one row per date and period at the
         # resolution of the results. A finer source would write each forecast once per source row (96 hourly forecasts

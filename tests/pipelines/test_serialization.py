@@ -17,7 +17,10 @@ from epftoolbox2.evaluators import (
     EconomicEvaluator,
     MAEEvaluator,
     MCSEvaluator,
+    NMAEEvaluator,
     RMSEEvaluator,
+    ScaledMAEEvaluator,
+    ShapeMAEEvaluator,
     rMAEEvaluator,
 )
 from epftoolbox2.exporters import TerminalExporter, ExcelExporter
@@ -766,6 +769,9 @@ class TestModelPipelineParameterFidelity:
                 ),
                 MCSEvaluator(alpha=0.25, statistic="max", block=14, reps=2000, seed=5),
                 EconomicEvaluator(BatteryArbitrage(power_mw=2, energy_mwh=8, efficiency=0.85)),
+                ShapeMAEEvaluator(period="1h"),
+                NMAEEvaluator(),
+                ScaledMAEEvaluator("installed_capacity"),
             ],
             "exporters": [
                 CsvExporter(

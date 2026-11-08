@@ -1106,6 +1106,26 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
     ],
     "BiasEvaluator": [],
+    "ShapeMAEEvaluator": [
+        {
+            "name": "period",
+            "description": "Period the within-hour shape is measured in (15-minute results)",
+            "required": False,
+            "default": "1h",
+            "kind": "select",
+            "choices": ["1h"],
+        },
+    ],
+    "NMAEEvaluator": [],
+    "ScaledMAEEvaluator": [
+        {
+            "name": "column",
+            "description": "Source-data column to divide each error by (e.g. installed capacity)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+    ],
     "DMEvaluator": [
         {
             "name": "benchmark",
@@ -1509,6 +1529,9 @@ _EVALUATORS = [
     "RMSEEvaluator",
     "rMAEEvaluator",
     "BiasEvaluator",
+    "ShapeMAEEvaluator",
+    "NMAEEvaluator",
+    "ScaledMAEEvaluator",
     "DMEvaluator",
     "MCSEvaluator",
     "EconomicEvaluator",
