@@ -32,7 +32,7 @@ from rich.progress import Progress
 
 from ..scalers.standard import StandardScaler
 from ..scalers.registry import ScalerSpec, scaler_spec
-from ..results.store import ResultStore, open_store
+from ..results.store import ResultStore, StoreWriter, open_store
 from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
 from ..results.availability import LISTING_TIMES, listing_rows, warn_about
 from ..results.matching import training_day_rows, warn_about_thin
@@ -125,6 +125,12 @@ _FREQ_TO_PERIODS: Dict[str, int] = {freq: periods_per_day(freq) for freq in FREQ
 
 # A model's own fit, and the two methods a refit forecasts from: `_can_refit` requires them to agree.
 _REFIT_METHODS = ("_fit_predict", "_fit_model", "_predict_fitted")
+# And the fit from shared statistics an engine group makes (`models/_engine.py`): `_engine_capable` requires all four to agree.
+_ENGINE_METHODS = (*_REFIT_METHODS, "_fit_stats")
+# What an engine group does in a model's place: a model whose class overrides any of them runs on its own (`_engine_capable`).
+_ENGINE_REPLACES = ("run", "_execute", "_run_tasks", "_build_hour_arrays")
+# What reads a model's period frames: a chunk reads them once for the models whose readers these are (`_frame_readers`).
+_FRAME_READERS = ("_load_periods", "_preprocess", "_shift_index_by_calendar_days", "_compute_period_index")
 
 # ProcessPoolExecutor refuses more workers than this on Windows.
 _WINDOWS_MAX_WORKERS = 61
@@ -151,6 +157,34 @@ def _days_back(names: Iterable[str]) -> Tuple[int, Optional[str]]:
 def _names_of(lists: Dict[Any, List[str]]) -> List[str]:
     """Every predictor name of these lists, each once, in order."""
     return list(dict.fromkeys(name for names in lists.values() for name in names))
+
+
+def hour_arrays_of(
+    hour_data: Dict[int, pd.DataFrame],
+    hour_days: Dict[int, np.ndarray],
+    target: str,
+    horizon: int,
+    columns: Sequence[str],
+    periods: int,
+) -> Dict[int, Dict]:
+    """The period arrays a worker's tasks read (`_worker.TaskInputs.hour_arrays`), from period frames (`_load_periods`): per
+    period `x` (these columns as float64), `y` (the targets of horizons 1 to `horizon`), `days`, `timestamps` (UTC instants) and
+    `col_index`. A fit reads its own columns by name, so arrays of more columns (an engine group's union) give its records
+    unchanged."""
+    target_cols = _contract.target_columns(target, horizon)
+    feature_cols = list(columns)
+    hour_arrays = {}
+    for hour in range(periods):
+        hour_df = hour_data[hour]
+        instants = hour_df.index.tz_convert(None) if hour_df.index.tz is not None else hour_df.index  # UTC values
+        hour_arrays[hour] = {
+            "x": hour_df[feature_cols].to_numpy(dtype=np.float64, copy=True),
+            "y": hour_df[target_cols].to_numpy(dtype=np.float64, copy=True),
+            "days": hour_days[hour].copy(),
+            "timestamps": instants.to_numpy().copy(),
+            "col_index": {c: i for i, c in enumerate(feature_cols)},
+        }
+    return hour_arrays
 
 
 def _usable_cpu_count() -> int:
@@ -449,6 +483,32 @@ class BaseModel(ABC):
         owners = {cls._owner_of(name) for name in _REFIT_METHODS}
         return len(owners) == 1 and BaseModel not in owners
 
+    def _engine_capable(self, plan: Optional[PredictorPlan] = None, forecast_only: bool = False) -> bool:
+        """Whether `ModelPipeline(engine="on")` runs this model in an engine group (`models/_engine.py`) rather than through its
+        own `run`: one class other than BaseModel defines `_fit_predict`, `_fit_model`, `_predict_fitted` and `_fit_stats`
+        (`_can_refit`'s rule with the fit from statistics, so a subclass that overrides the fit without `_fit_stats` isn't fitted
+        with its parent's estimator), it fits something (not `NaiveModel`), its plan (`plan`, of a predictor function) has no
+        `train_on="matching"` list, the run isn't `forecast_only`, and its class keeps BaseModel's `run`, `_execute`,
+        `_run_tasks` and `_build_hour_arrays`, which a group does in their place. OLS, Ridge, LassoCV and LEAR are."""
+        owners = {
+            next((klass for klass in type(self).__mro__ if name in vars(klass)), None) for name in _ENGINE_METHODS
+        }
+        return (
+            len(owners) == 1
+            and None not in owners
+            and BaseModel not in owners
+            and all(self._owner_of(name) is BaseModel for name in _ENGINE_REPLACES)
+            and not self._fits_nothing
+            and not forecast_only
+            and not (plan is not None and plan.uses_matching)
+        )
+
+    def _frame_readers(self) -> Tuple[type, ...]:
+        """The classes whose `_load_periods`, `_preprocess`, `_shift_index_by_calendar_days` and `_compute_period_index` read
+        this model's period frames: an engine chunk reads the frames once for models that share them (`_engine.engine_groups`),
+        so a subclass that builds its frames otherwise gets frames of its own."""
+        return tuple(self._owner_of(name) for name in _FRAME_READERS)
+
     @property
     def _masks_from_fits(self) -> bool:
         """Whether each fit reads its binary-column mask from its own span's rows, in the worker (`_worker._fit_member`, and
@@ -634,12 +694,15 @@ class BaseModel(ABC):
         checked: Optional["_Checked"] = None,
         periods: Optional["_Periods"] = None,
         save_coefficients: bool = True,
+        writer: Optional[StoreWriter] = None,
     ) -> "_RunState":
         """Everything of `run` before the pool, for its arguments: the windows, the plan (or its check), the inputs' check
         (`checked` if it was found for this run, else `_check_inputs`), the period frames (`periods` if given: read once by
         `_load_periods` for several models, see `_use_periods`), the masks, the store and its manifest, the pending tasks and
         the skips decided here (`missing_test_row`, `not_published`), whose skip records go to the store at once. The store
-        stays open in the state (`_RunState.close`), and is closed here if this raises.
+        stays open in the state (`_RunState.close`), and is closed here if this raises. `writer` is a `StoreWriter` the store is
+        opened on, shared with other models' stores (an engine group, `models/_engine.py`); without it the store writes on its
+        own thread.
 
         Called by `run`: each stacklevel here counts `run`'s frame, so a warning is attributed where it was when `run` was one
         function (to the caller of `run`, mostly)."""
@@ -811,7 +874,9 @@ class BaseModel(ABC):
         kernels = self._kernel_backend  # before any pool forks: numba compiles once, here
         # Held until the run is over, manifest included: a second writer of these results raises (`ResultStore`).
         store = (
-            open_store(save_to, test_start=test_start, lock=True, save_coefficients=save_coefficients)
+            (open_store if writer is None else writer.open)(
+                save_to, test_start=test_start, lock=True, save_coefficients=save_coefficients
+            )
             if save_to
             else None
         )
@@ -2337,11 +2402,16 @@ class BaseModel(ABC):
         return threads, processes
 
     def _cleanup(self) -> None:
+        self._release()
+        gc.collect()
+
+    def _release(self) -> None:
+        """Let go of the run's frames and newest targets (`_cleanup` without its `gc.collect()`, which an engine group runs
+        once for all its models)."""
         self._data = None
         self._newest = None
         self._hour_data.clear()
         self._hour_days.clear()
-        gc.collect()
 
     def _preprocess(self, data: pd.DataFrame, horizon: int, target: str) -> pd.DataFrame:
         # The worker finds a period's rows by their date and takes the last of a date, so rows must be in time order.
@@ -2383,21 +2453,10 @@ class BaseModel(ABC):
         return _contract.period_index(index, self._freq)
 
     def _build_hour_arrays(self, horizon: int) -> Dict[int, Dict]:
-        target_cols = _contract.target_columns(self._target, horizon)
         # Only the predictors the model uses are converted to float and sent to the workers.
-        feature_cols = list(self._used_predictors)
-        hour_arrays = {}
-        for hour in range(self._periods_per_day):
-            hour_df = self._hour_data[hour]
-            instants = hour_df.index.tz_convert(None) if hour_df.index.tz is not None else hour_df.index  # UTC values
-            hour_arrays[hour] = {
-                "x": hour_df[feature_cols].to_numpy(dtype=np.float64, copy=True),
-                "y": hour_df[target_cols].to_numpy(dtype=np.float64, copy=True),
-                "days": self._hour_days[hour].copy(),
-                "timestamps": instants.to_numpy().copy(),
-                "col_index": {c: i for i, c in enumerate(feature_cols)},
-            }
-        return hour_arrays
+        return hour_arrays_of(
+            self._hour_data, self._hour_days, self._target, horizon, self._used_predictors, self._periods_per_day
+        )
 
     def _precompute_scalable_masks(
         self, horizons: Sequence[int], offset: Optional[int] = None, last: Optional[int] = None

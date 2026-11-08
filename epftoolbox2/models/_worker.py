@@ -740,16 +740,38 @@ def _run_block(tasks: list, inputs: Optional[TaskInputs] = None) -> Tuple[List[D
     forecast uses, and its `newest_target_day` the newest of its members'."""
     inputs = _inputs_of(inputs)
     cfg = inputs.config
+    units = block_units(cfg, tasks)
+    threads = cfg["threads_per_process"]
+    if len(units) <= 1 or threads == 1:
+        ran = [_run_unit(unit, unit_tasks, inputs) for unit, unit_tasks in units.items()]
+    else:
+        with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
+            futures = [pool.submit(_run_unit, unit, unit_tasks, inputs) for unit, unit_tasks in units.items()]
+            ran = [future.result() for future in as_completed(futures)]
+    return block_records(cfg, ran)
+
+
+def block_units(cfg: Dict, tasks: List[tuple]) -> Dict[FitUnit, List[tuple]]:
+    """The units of a refit block's tasks (`_units_of`: one per task, or one per member), each with the tasks it forecasts, in
+    the order of `tasks`. A unit's tasks are all of its period, so a job that holds a block's tasks of one period holds each of
+    its units whole."""
     units: Dict[FitUnit, List[tuple]] = {}
     for task in tasks:
         for unit in _units_of(cfg, task):
             units.setdefault(unit, []).append(task)
-    threads = cfg["threads_per_process"]
+    return units
+
+
+def block_records(
+    cfg: Dict, ran: List[List[Tuple[tuple, Union[Dict, str], int]]]
+) -> Tuple[List[Dict], List[Tuple[tuple, str]]]:
+    """What `_run_block` returns, from what its units gave (`_run_unit` of each, in the order they came back): a task's record,
+    or with a list of training windows the members' combination once every member's unit ran (`_combined`), else the first
+    failing member's reason, tagged with its window."""
     members = cfg.get("members")
     by_task: Dict[tuple, Dict[int, Union[Dict, str]]] = {}
     results, skipped = [], []
-
-    def collect(outcomes):
+    for outcomes in ran:
         for task, outcome, member in outcomes:
             if members is not None:
                 by_task.setdefault(task, {})[member] = outcome
@@ -757,15 +779,6 @@ def _run_block(tasks: list, inputs: Optional[TaskInputs] = None) -> Tuple[List[D
                 skipped.append((task, outcome))
             else:
                 results.append(outcome)
-
-    if len(units) <= 1 or threads == 1:
-        for unit, unit_tasks in units.items():
-            collect(_run_unit(unit, unit_tasks, inputs))
-    else:
-        with ThreadPoolExecutor(max_workers=threads, initializer=_limit_openmp_in_task_thread) as pool:
-            futures = [pool.submit(_run_unit, unit, unit_tasks, inputs) for unit, unit_tasks in units.items()]
-            for future in as_completed(futures):
-                collect(future.result())
     for task, outcomes in by_task.items():
         ordered = [outcomes[member] for member in range(len(members))]
         failed = next(((member, outcome) for member, outcome in enumerate(ordered) if isinstance(outcome, str)), None)
