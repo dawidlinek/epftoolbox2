@@ -65,7 +65,7 @@ class ModelPipeline:
         target: str = "price",            # Target column
         horizon: Optional[int] = None,    # Every horizon from 1 to it; 7 if neither it nor horizons is given
         freq: str = "1h",                 # "1h", "15min" or "1D" (one row per date at one time of day); must match the data
-        save_dir: Optional[str] = None,   # Result cache directory (one JSONL per model)
+        save_dir: Optional[str] = None,   # Result cache directory (one JSONL file, or Parquet directory, per model)
         forecast_only: bool = False,      # Skip evaluators/exporters; dates default to today
         allow_manifest_mismatch: bool = False,  # Overwrite a disagreeing manifest and resume anyway
         require_manifest: bool = False,   # Refuse results in save_dir that have no manifest
@@ -73,9 +73,11 @@ class ModelPipeline:
         test: Optional[Tuple[Any, Any]] = None,  # (start, end), the same as test_start and test_end
         horizons: Optional[Sequence[int]] = None,  # Only these horizons, e.g. [1, 3, 7] or range(3, 10); not with horizon
         issue_days: Optional[Sequence[str]] = None,  # Only these weekdays, e.g. ["friday"]; any case, all seven = every day
+        save_format: str = "jsonl",       # "jsonl" or "parquet": <name>.jsonl or the directory <name>.parquet in save_dir
+        save_coefficients: bool = True,   # False writes coefficients as []; recorded in the manifest, compared on resume
     ) -> EvaluationReport: ...
 
-    def report(                           # Report from the JSONL files a run wrote to save_dir
+    def report(                           # Report from the results a run wrote to save_dir, JSONL or Parquet
         self,
         save_dir: Union[str, Path],
         test_start: Optional[str] = None,
@@ -183,6 +185,8 @@ class Workflow:
         models_per_task: Optional[int] = None,                # With model_index: task i runs models [i*k, (i+1)*k)
         model_horizons: Optional[Sequence[int]] = None,       # Only these horizons, e.g. [1, 3, 7]; not with model_horizon
         model_issue_days: Optional[Sequence[str]] = None,     # Only these weekdays, e.g. ["friday"]
+        model_save_format: str = "jsonl",                     # "parquet": one Parquet directory per model (YAML: save_format)
+        model_save_coefficients: bool = True,                 # False writes coefficients as [] (YAML: save_coefficients)
     ): ...
 
     def run(self) -> EvaluationReport: ...
@@ -555,7 +559,7 @@ class Use:                                  # What the function may return inste
 
 `PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, `ModelResultRef.availability_listing` holds the rows behind `report.availability()`, `ModelResultRef.vintages` those behind `report.vintages()` (None when no input has a class), and `ModelResultRef.matching_lists` the hash and number of predictors of each `train_on="matching"` list, which `report.training_days()` reads the records for. `ModelResultRef.zone` is the data's time zone, which says what periods a date has on the clock (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned)). `ModelResultRef.horizon` is the largest horizon of a run and `ModelResultRef.horizons` the ones it lists, None for every one from 1 to `horizon`; only records of those horizons are read (see [Horizons](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)). `ModelResultRef.issue_days` is the weekdays a run issued on, as `date.weekday()` numbers (Monday is 0), None for every day; only records issued on them (their `run_weekday`) are read (see [Weekdays](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)).
 
-`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`. And `frame_hashes`, what one `ModelPipeline.run` call shares between its models so that it hashes each column once. And `cut_rules`, an information set a model with `newest_target="published"` reads its newest targets from when `information_set` isn't given, without checking anything with it: the leakage probe runs models so. And `horizons` and `issue_days`, as in `ModelPipeline.run`; its `horizon` defaults to 7 too. And `checked`, what `ModelPipeline` found when it checked the model's inputs before any model ran: a run it was found for uses it instead of checking again, and any other run checks its inputs itself. `leakage_probe` and `positive_control` take `horizon` (default 1) or `horizons` the same way. Their `freq`, and `BaseModel.run()`'s, takes `"1D"` as `ModelPipeline.run()`'s does, see [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames).
+`BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`. And `frame_hashes`, what one `ModelPipeline.run` call shares between its models so that it hashes each column once. And `cut_rules`, an information set a model with `newest_target="published"` reads its newest targets from when `information_set` isn't given, without checking anything with it: the leakage probe runs models so. And `horizons`, `issue_days` and `save_coefficients`, as in `ModelPipeline.run`; its `horizon` defaults to 7 too, and its `save_to` names the format, `<name>.jsonl` or `<name>.parquet`. And `checked`, what `ModelPipeline` found when it checked the model's inputs before any model ran: a run it was found for uses it instead of checking again, and any other run checks its inputs itself. `leakage_probe` and `positive_control` take `horizon` (default 1) or `horizons` the same way. Their `freq`, and `BaseModel.run()`'s, takes `"1D"` as `ModelPipeline.run()`'s does, see [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames).
 
 ### Scalers
 

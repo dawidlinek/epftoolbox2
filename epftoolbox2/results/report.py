@@ -34,6 +34,7 @@ from .availability import listing_frame
 from .breakdowns import AGGREGATES, daily_aggregate, price_level, spike_threshold
 from .matching import rows_of_refs, training_day_frame
 from .ref import ModelResultRef
+from .store import fingerprint_path
 from .vintages import flag_mixed_classes, vintage_frame
 from .windows import TEST, VALIDATION, RunWindows
 
@@ -1068,12 +1069,13 @@ class EvaluationReport:
 
     def _cached_frame(self, name: str, ref: ModelResultRef) -> pd.DataFrame:
         """`_model_frame(ref)`, read from a results file only when the file changed: parsing the JSONL is the slowest
-        step of a report, and a comparison session calls several of its methods. Results held in memory are always read
+        step of a report, and a comparison session calls several of its methods. A Parquet directory changes with its catalog,
+        which every committed part appends to (`results.store.fingerprint_path`). Results held in memory are always read
         again, since nothing tells when a list changed."""
         path = None if ref.path is None else Path(ref.path)
         if path is None or not path.exists():
             return self._model_frame(ref)
-        status = path.stat()
+        status = fingerprint_path(path).stat()
         fingerprint = (
             str(path),
             status.st_mtime_ns,
@@ -1093,6 +1095,10 @@ class EvaluationReport:
 
     def _model_frame(self, ref: ModelResultRef) -> pd.DataFrame:
         columns = [*FORECAST_KEYS, "prediction", "actual"]
+        read = ref.frame(columns) if type(self)._iter_ref is EvaluationReport._iter_ref else None
+        if read is not None and len(read):  # Parquet: the frame the records below would make, without a dict per record
+            keep = [c for c in columns if c in ("prediction", "actual") or read[c].notna().any()]
+            return _in_record_order(read[keep])
         values: Dict[str, list] = {c: [] for c in columns}
         for r in self._iter_ref(ref, cols=columns):
             for c in columns:

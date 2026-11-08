@@ -91,7 +91,7 @@ epf run experiment.yaml --dry-run
 
 ## `epf report`: Merge array results
 
-After a SLURM array in which each task ran one model or a [block of them](/epftoolbox2/workflow/overview/#slurm-arrays-one-model-or-a-block-per-task) (`--model-index`), merge every model's JSONL from `model_pipeline.save_dir`, compute the [ensembles](/epftoolbox2/model-pipeline/ensembles/) from them and run the evaluators and exporters once. Prints planned vs produced forecasts per model, and what the ensembles chose.
+After a SLURM array in which each task ran one model or a [block of them](/epftoolbox2/workflow/overview/#slurm-arrays-one-model-or-a-block-per-task) (`--model-index`), merge every model's results (JSONL or [Parquet](/epftoolbox2/model-pipeline/caching/#parquet-results)) from `model_pipeline.save_dir`, compute the [ensembles](/epftoolbox2/model-pipeline/ensembles/) from them and run the evaluators and exporters once. Prints planned vs produced forecasts per model, and what the ensembles chose.
 
 ```bash
 epf report experiment.yaml
@@ -226,6 +226,25 @@ Exits with code 0 only if every model is `ok`, and with code 1 on a `leak`, an `
 | `--seed N` | Picks the days and the noise (default: `0`) |
 | `--models NAME [NAME ...]` | Names of the models to verify (default: all) |
 | `--no-positive-control` | Skip the check that perturbing what is known moves the forecasts; a pass then only says nothing moved |
+
+---
+
+## `epf results`: Convert, compact or verify results
+
+Work on the results in a `save_dir` (see [Parquet Results](/epftoolbox2/model-pipeline/caching/#parquet-results)). Each takes
+`--model NAME` for one model's results alone, and takes each model's lock, so it refuses results a run is writing.
+
+```bash
+epf results convert results --to parquet   # every model's JSONL into a Parquet directory; --to jsonl the other way
+epf results compact results                # each (model, year)'s Parquet parts into one; orphans removed
+epf results verify results                 # catalogs, part checksums, orphans, repeated forecast keys
+```
+
+| Action | What it does |
+|--------|--------------|
+| `convert SAVE_DIR --to parquet\|jsonl` | Every record, in its order and with its keys in theirs; the new results are read back and compared with the old ones before those are removed, and the manifest records the format. JSONL to Parquet and back gives the same lines byte for byte. Ensembles are left as they are: every report computes them again |
+| `compact SAVE_DIR` | Merges the parts of each (model, year) into one, keeping every record, and removes files no catalog line lists (what a crash leaves) and parts a compaction superseded. A second compaction changes nothing |
+| `verify SAVE_DIR` | Reads everything and changes nothing: each catalog line's CRC-32, each part's size, sha256 and rows, superseded and orphan files, repeated keys, results in both formats. Prints what it found; exits with code 1 on an error (a damaged catalog or part, two forecasts on one key), 0 when there are only notes (an orphan, a repeat of the same forecast) |
 
 ---
 

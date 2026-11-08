@@ -2,16 +2,23 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import warnings
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from .store import OK_ONLY, STATUS_OK, iter_file_records, read_records
+from .store import OK_ONLY, STATUS_OK, is_parquet_path, iter_file_records, read_records
 from .windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
+
+if TYPE_CHECKING:  # pragma: no cover
+    import pandas as pd
 
 # What `_on_the_clock` reads of a record.
 _CLOCK_FIELDS = ("hour", "run_date", "target_date", "freq")
+# What `_records`' filter and `_as_read` read of a record besides the columns asked for (a Parquet directory reads these alone).
+_FILTER_FIELDS = ("run_date", "target_date", "run_weekday", "horizon", "hour", "window", "freq", "day_in_test")
+# 1970-01-01, day 0 of a Parquet date column, and its weekday (a Thursday).
+_EPOCH = date(1970, 1, 1)
 
 
 @dataclass
@@ -77,6 +84,91 @@ class ModelResultRef:
     issue_days: Optional[Tuple[int, ...]] = None
     vintages: Optional[List[Dict]] = None
 
+    def frame(self, columns: Sequence[str]) -> Optional["pd.DataFrame"]:
+        """The forecasts `iter_records(columns)` gives, as a DataFrame of `columns` read without a dict per record, for results
+        in a Parquet directory (`results.parquet_store.read_frame`): the same rule, filters and clock, and each column as a
+        list of the records' values would make it (`parquet_store._series`). None for any other results (a JSONL file, results
+        held in memory), which `iter_records` reads. Internal: `EvaluationReport._model_frame` and the counts of
+        `ModelPipeline.report` read through it."""
+        return self._frame(columns, clock=True)
+
+    def count_records(self) -> int:
+        """How many forecasts `iter_records` gives, through `frame` where it can."""
+        frame = self.frame(["hour"])
+        return len(frame) if frame is not None else sum(1 for _ in self.iter_records(cols=["hour"]))
+
+    def _frame(self, columns: Sequence[str], clock: bool) -> Optional["pd.DataFrame"]:
+        if self.path is None or not is_parquet_path(self.path) or not Path(self.path).exists():
+            return None
+        from .parquet_store import read_frame
+
+        return read_frame(Path(self.path), list(columns), self._keep_rows(clock), extra=_FILTER_FIELDS)
+
+    def _keep_rows(self, clock: bool) -> Callable[[Any, Any], Any]:
+        """`_records`' filter (and the clock's, with `clock` and a zone) over rows of a Parquet table: a boolean per row."""
+        import numpy as np
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        def days_of(text: str) -> int:
+            return (date.fromisoformat(text) - _EPOCH).days
+
+        def keep(table: Any, rows: Any) -> Any:
+            mask = np.ones(len(rows), dtype=bool)
+            if not len(rows):
+                return mask
+            index = pa.array(rows, pa.int64())
+
+            def column(name: str) -> Any:
+                return table.column(name).take(index)
+
+            def days(name: str) -> Any:
+                return column(name).cast(pa.int32()).to_numpy(zero_copy_only=False)
+
+            def text(name: str, missing: str) -> Any:
+                return np.asarray(pc.fill_null(column(name).cast(pa.string()), missing).to_pylist(), dtype=object)
+
+            run_days = days("run_date")
+            if self.test_start and self.test_end:
+                mask &= (run_days >= days_of(self.test_start)) & (run_days <= days_of(self.test_end))
+            if self.horizons is not None:
+                mask &= np.isin(column("horizon").to_numpy(zero_copy_only=False), list(self.horizons))
+            if self.issue_days is not None:
+                weekday = column("run_weekday").to_numpy(zero_copy_only=False)
+                weekday = (
+                    np.where(np.isnan(weekday), (run_days + 3) % 7, weekday) if weekday.dtype.kind == "f" else weekday
+                )
+                mask &= np.isin(weekday, list(self.issue_days))
+            if self.window is not None:
+                mask &= text("window", TEST) == self.window
+            if self.target_before is not None:
+                mask &= days("target_date") < days_of(self.target_before)
+            if clock and self.zone is not None:
+                mask &= self._on_the_clock_rows(column, days, text)
+            return mask
+
+        return keep
+
+    def _on_the_clock_rows(self, column: Callable, days: Callable, text: Callable) -> Any:
+        """`_on_the_clock` over rows: False where the record's period is one its run date or target date lacks."""
+        import numpy as np
+
+        from ..models._calendar import FREQ_STEPS, skipped_periods
+
+        freqs = text("freq", self.freq)
+        hours = column("hour").to_numpy(zero_copy_only=False)
+        on = np.ones(len(freqs), dtype=bool)
+        for freq in set(freqs.tolist()):
+            if freq not in FREQ_STEPS:
+                continue
+            of_freq = freqs == freq
+            for day_numbers in (days("run_date"), days("target_date")):
+                for day in np.unique(day_numbers[of_freq]).tolist():
+                    skipped = skipped_periods((_EPOCH + timedelta(days=int(day))).isoformat(), freq, self.zone)
+                    if skipped:
+                        on &= ~(of_freq & (day_numbers == day) & np.isin(hours, list(skipped)))
+        return on
+
     def iter_records(self, cols: Optional[List[str]] = None) -> Iterator[Dict]:
         """The forecasts of this ref, wherever they live: records with `status` "ok" or without one, a skip record never, and from
         a file one per key (`results.store.read_records`: the highest revision, the first forecast).
@@ -97,6 +189,9 @@ class ModelResultRef:
         on_the_clock = self._on_the_clock()
         if on_the_clock is None:
             return 0
+        every = self._frame(["hour"], clock=False)
+        if every is not None:  # Parquet: the rows the clock leaves out
+            return len(every) - len(self._frame(["hour"], clock=True))
         return sum(1 for r, _ in self._records(list(_CLOCK_FIELDS)) if not on_the_clock(r))
 
     def first_record(self, cols: Optional[List[str]] = None) -> Optional[Dict]:
@@ -160,7 +255,9 @@ class ModelResultRef:
                     return as_read, (r if cols is None else as_read)  # a file's whole records aren't held
 
                 if not first:
-                    yield from read_records(path, statuses, read)
+                    yield from read_records(
+                        path, statuses, read, columns=None if cols is None else [*cols, *_FILTER_FIELDS]
+                    )
                     return
                 wanted = None if statuses is None else frozenset(statuses)
                 for r in iter_file_records(path):

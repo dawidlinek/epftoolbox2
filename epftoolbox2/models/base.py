@@ -32,7 +32,7 @@ from rich.progress import Progress
 
 from ..scalers.standard import StandardScaler
 from ..scalers.registry import ScalerSpec, scaler_spec
-from ..results.store import ResultStore
+from ..results.store import ResultStore, open_store
 from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
 from ..results.availability import LISTING_TIMES, listing_rows, warn_about
 from ..results.matching import training_day_rows, warn_about_thin
@@ -525,6 +525,7 @@ class BaseModel(ABC):
         horizons: Optional[Sequence[int]] = None,
         issue_days: Optional[Sequence[str]] = None,
         checked: Optional["_Checked"] = None,
+        save_coefficients: bool = True,
     ) -> ModelResultRef:
         """Forecast every period and horizon the clock has on each day in [test_start, test_end] and on its target day.
 
@@ -548,7 +549,9 @@ class BaseModel(ABC):
         models at once.
 
         With `save_to`, a manifest is written next to the results (see epftoolbox2.results.manifest) and,
-        if one is already there, compared to this run's configuration before anything is resumed.
+        if one is already there, compared to this run's configuration before anything is resumed. `save_to` names the format:
+        `<name>.jsonl`, or `<name>.parquet` for a directory of Parquet parts (`results.store.open_store`); `save_coefficients=False`
+        writes `coefficients` as `[]` there.
         `allow_manifest_mismatch` overwrites a disagreeing manifest instead of raising; `require_manifest`
         raises instead of warning when `save_to` has results but no manifest.
 
@@ -599,6 +602,7 @@ class BaseModel(ABC):
             horizons,
             issue_days,
             checked,
+            save_coefficients=save_coefficients,
         )
         try:
             self._execute(state)
@@ -629,6 +633,7 @@ class BaseModel(ABC):
         issue_days: Optional[Sequence[str]],
         checked: Optional["_Checked"] = None,
         periods: Optional["_Periods"] = None,
+        save_coefficients: bool = True,
     ) -> "_RunState":
         """Everything of `run` before the pool, for its arguments: the windows, the plan (or its check), the inputs' check
         (`checked` if it was found for this run, else `_check_inputs`), the period frames (`periods` if given: read once by
@@ -805,7 +810,11 @@ class BaseModel(ABC):
 
         kernels = self._kernel_backend  # before any pool forks: numba compiles once, here
         # Held until the run is over, manifest included: a second writer of these results raises (`ResultStore`).
-        store = ResultStore(save_to, test_start=test_start, lock=True) if save_to else None
+        store = (
+            open_store(save_to, test_start=test_start, lock=True, save_coefficients=save_coefficients)
+            if save_to
+            else None
+        )
         try:
             if store and data.index.tz is not None and zone_name(data.index.tz) is None:
                 warnings.warn(
@@ -870,6 +879,8 @@ class BaseModel(ABC):
                     manifest_path(store.path),
                     manifest,
                     has_existing_results=store.has_results(),
+                    save_format=store.save_format,
+                    save_coefficients=save_coefficients,
                     allow_mismatch=allow_manifest_mismatch,
                     require_manifest=require_manifest,
                     model_name=self.name,

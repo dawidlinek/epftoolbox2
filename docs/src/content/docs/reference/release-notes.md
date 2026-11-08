@@ -218,6 +218,21 @@ an issue day it didn't sample.
   rows). The manifest's `training_cut` records `"binary_mask": "fit"` without
   `refit`, so a resume under the other rule refuses; YAML writes it only when set. **Nothing moves without it.** See
   [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start).
+- **Parquet results: `run(save_format="parquet")`, `save_coefficients=False` and `epf results`.** With `save_format="parquet"`
+  (`model_pipeline.save_format: parquet` in a workflow) each model's results are a directory of zstd Parquet parts,
+  `save_dir/<model>.parquet/`, with a catalog of the committed parts, in place of `<model>.jsonl`: the same records (a record
+  converts both ways exactly, keys, their order, nulls and float bits), read by the same rules, so every table and count is the same
+  to the last bit, and resuming, skip records, the lock and array tasks work as with JSONL. A crash leaves at most an orphan part that
+  no reader sees; a write that fails raises, and its keys are forecast again. Part files differ between identical runs (how
+  records split into parts depends on timing), the records don't. `save_coefficients=False` writes `coefficients` as `[]` and
+  changes no other key; the manifest records it (`save_coefficients: false`) and a resume with the other setting raises
+  `ManifestMismatchError`. A writer of many models names its own lock file in each model's lock file, which an older epftoolbox2
+  doesn't read: don't write one save_dir with two library versions at once. `epf results convert SAVE_DIR
+  --to parquet|jsonl` converts a save_dir record for record (JSONL to Parquet and back gives the same lines), `epf results compact`
+  merges each (model, year)'s parts, and `epf results verify` checks catalogs, part checksums, orphans and repeated keys. **Nothing
+  moves without it**: JSONL stays the default and every file is as before; a run in the other format than a model's results on disk
+  raises before any fit, naming `epf results convert`. The manifest of Parquet results records `save_format: "parquet"`
+  (provenance). See [Parquet Results](/epftoolbox2/model-pipeline/caching/#parquet-results).
 - **`MirrorLogScaler` and `PolyScaler`: the mirror-log and polynomial VSTs.** `scaler="mlog"` and `scaler="poly"` are the
   transformations of Uniejewski, Weron & Ziel (2018) on `AsinhScaler`'s median/MAD normalisation, then standardised like every VST:
   `sgn(u) (log(|u| + 1/c) + log c)` with `c=1/3`, and `sgn(u) ((|u| + (c/λ)^(1/(λ-1)))^λ - (c/λ)^(λ/(λ-1)))` with `lam=0.125`,
