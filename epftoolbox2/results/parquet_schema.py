@@ -122,7 +122,7 @@ def to_table(
             for name, column in zip(
                 keys, zip(*map(itemgetter(*keys), records)) if len(keys) > 1 else [[r[keys[0]] for r in records]]
             ):
-                values[name] = column  # a tuple: pyarrow takes it as it is
+                values[name] = list(column)  # a list: pyarrow converts a tuple of numbers 100 times slower
     else:
         for keys, at in layouts.items():
             group = [records[i] for i in at]
@@ -134,9 +134,20 @@ def to_table(
                     held = values[name] = np.full(n, None, dtype=object)
                 held[index] = np.fromiter(column, dtype=object, count=len(at))
     arrays = []
+    dates: List[
+        Tuple[Any, Any]
+    ] = []  # a date column equal to one before it (refit_anchor is run_date without refit) reuses it
     for name, kind in COLUMNS:
         column = values.get(name)
-        arrays.append(pa.nulls(n, arrow_type(kind)) if column is None else _array(column, name, kind, where))
+        if column is None:
+            arrays.append(pa.nulls(n, arrow_type(kind)))
+            continue
+        made = next((array for earlier, array in dates if kind == "date" and _same(earlier, column)), None)
+        if made is None:
+            made = _array(column, name, kind, where)
+            if kind == "date":
+                dates.append((column, made))
+        arrays.append(made)
     names = [",".join(keys) for keys in layouts]
     layout_of = np.zeros(n, dtype=np.int32)
     for number, at in enumerate(layouts.values()):
@@ -149,9 +160,47 @@ def to_table(
     return pa.Table.from_arrays(arrays, schema=arrow_schema())
 
 
+def _same(a: Any, b: Any) -> bool:
+    """Whether two columns of values are equal value for value (lists, or object arrays where layouts mix)."""
+    if isinstance(a, list) and isinstance(b, list):
+        return a == b
+    return len(a) == len(b) and all(x == y for x, y in zip(a, b))
+
+
+# The types a column's values have, for the columns whose one repeated value is built at once (`_constant`).
+_ONE_TYPE = {"category": str, "string": str, "int8": int, "int16": int, "int32": int}
+
+
+def _constant(values: Any, kind: str):
+    """The column of `values` built from its one value, where every value is that one and of the column's own type (so an int 1
+    and a bool True, which a set takes as one, never are): a model's `freq`, `status`, `list_hash`, `horizon` and `revision`
+    mostly are. None otherwise. Empty lists of `floats` too."""
+    pa = _pa()
+    n = len(values)
+    if kind == "floats":
+        if n and not any(values) and set(map(type, values)) == {list}:
+            import numpy as np
+
+            return pa.ListArray.from_arrays(pa.array(np.zeros(n + 1, dtype=np.int32)), pa.array([], pa.float64()))
+        return None
+    expected = _ONE_TYPE.get(kind)
+    if expected is None or not n or type(values[0]) is not expected:
+        return None
+    if len(set(values)) != 1 or set(map(type, values)) != {expected}:
+        return None
+    if kind == "category":
+        import numpy as np
+
+        return pa.DictionaryArray.from_arrays(pa.array(np.zeros(n, dtype=np.int32)), pa.array([values[0]], pa.string()))
+    return pa.repeat(pa.scalar(values[0], arrow_type(kind)), n)
+
+
 def _array(values: Any, name: str, kind: str, where: str):
     pa = _pa()
     try:
+        made = _constant(values, kind)
+        if made is not None:
+            return made
         if kind == "date":
             # A results file has a few hundred distinct dates: parse and check each once.
             text = pa.array(values, pa.string()).dictionary_encode()

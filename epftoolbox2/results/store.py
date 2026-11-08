@@ -447,8 +447,7 @@ class _Store:
         if not self._save_coefficients and result.get("coefficients"):
             result = {**result, "coefficients": []}  # the key keeps its place
         key = (result["hour"], result["horizon"], result["run_date"])
-        with self._lock:
-            revision = self._revisions.get(key)
+        revision = self._revisions.get(key)  # filled before the first save, read only after
         if revision is not None:
             result["revision"] = revision
         layout = self._validate(result)  # before the key counts as done
@@ -752,6 +751,8 @@ MAX_OPEN_HANDLES = 64
 # How often the writer's thread looks at its stores: a JSONL store's records are written within this of being saved, as the
 # store's own thread does.
 _TICK_SECONDS = 0.1
+# How many stores `StoreWriter.flush()` writes at once.
+FLUSH_THREADS = 4
 
 
 class StoreWriter:
@@ -767,10 +768,13 @@ class StoreWriter:
     `flush` or `close`. What a store writes is what it writes on its own thread: the same records, lines and parts.
     """
 
-    def __init__(self, max_open: int = MAX_OPEN_HANDLES, _private: bool = False):
+    def __init__(self, max_open: int = MAX_OPEN_HANDLES, threads: int = FLUSH_THREADS, _private: bool = False):
         if max_open < 1:
             raise ValueError(f"max_open must be at least 1, got {max_open!r}")
+        if threads < 1:
+            raise ValueError(f"threads must be at least 1, got {threads!r}")
         self.max_open = max_open
+        self.threads = threads
         self._private = _private  # one store's own writer: it holds that store's lock itself
         self._handles = threading.BoundedSemaphore(max_open)
         self._cond = threading.Condition()
@@ -800,14 +804,29 @@ class StoreWriter:
         return store
 
     def flush(self) -> None:
-        """Write every store's buffered records now."""
+        """Write every store's buffered records now, `threads` stores at a time (a part's encoding and compression run outside
+        the GIL, so they overlap the next store's conversion). Raises the first store's failure once every store was written."""
         with self._cond:
             stores = list(self._dirty.values())
-        for store in stores:
-            self._write_now(store)
+        if self.threads == 1 or len(stores) < 2:
+            for store in stores:
+                self._write_now(store)
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(self.threads, len(stores)), thread_name_prefix="store-flush") as pool:
+            futures = [pool.submit(self._write_now, store) for store in stores]
+        for future in futures:
+            future.result()
 
     def close(self) -> None:
         """Write everything, stop the thread, and release the stores' locks."""
+        try:
+            self.flush()
+        finally:
+            self._stop_and_close()
+
+    def _stop_and_close(self) -> None:
         self._stopping = True
         with self._cond:
             self._cond.notify()
