@@ -603,3 +603,29 @@ def test_new_evaluators_round_trip_through_yaml(tmp_path):
     assert isinstance(nmae, NMAEEvaluator)
     assert isinstance(scaled, ScaledMAEEvaluator) and scaled.column == "installed_capacity"
     assert scaled.name == "MAE/installed_capacity"
+
+
+def test_exporters_take_the_new_columns(tmp_path, capsys):
+    from openpyxl import load_workbook
+
+    from epftoolbox2.exporters import CsvExporter, ExcelExporter, TerminalExporter
+
+    source = hourly_source({"cap": lambda idx: 100.0 + idx.hour.to_numpy()})
+    evaluators = [MAEEvaluator(), NMAEEvaluator(), ScaledMAEEvaluator("cap"), ShapeMAEEvaluator()]
+    report = report_of(
+        {"a": records("1h"), "b": records("1h", error=lambda t, p: 2.0)}, evaluators, "1h", source_data=source
+    )
+
+    ExcelExporter(str(tmp_path / "out.xlsx"), sheets=["summary", "hour"]).export(report)
+    names = load_workbook(tmp_path / "out.xlsx", read_only=True).sheetnames
+    assert {"Summary", "hour_MAE_cap", "hour_MAE_cap left out", "hour_nMAE"} <= set(names)  # "/" is no sheet character
+    CsvExporter(str(tmp_path / "out.csv"), summary_path=str(tmp_path / "summary.csv")).export(report)
+    assert list(pd.read_csv(tmp_path / "summary.csv").columns)[2:] == [
+        "MAE",
+        "nMAE",
+        "MAE/cap",
+        "MAE/cap left out",
+        "ShapeMAE",
+    ]
+    TerminalExporter(show=["summary"]).export(report)
+    assert "MAE/cap" in capsys.readouterr().out

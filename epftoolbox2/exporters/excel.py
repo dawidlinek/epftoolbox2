@@ -1,3 +1,4 @@
+import re
 from typing import List
 from pathlib import Path
 import pandas as pd
@@ -12,6 +13,14 @@ from ..results.report import EvaluationReport, metric_columns
 # sheets of its metrics, with 0 where a model has no forecast in the group (it has no row in the table there) and every model on
 # the groups of the whole table, and no colors: a large count is not a bad value.
 COUNTS = "forecasts"
+
+# The characters an Excel sheet title can't hold; an evaluator's column may (`ScaledMAEEvaluator`'s "MAE/cap").
+_SHEET_FORBIDDEN = re.compile(r"[\\/?*\[\]:]")
+
+
+def _sheet_name(title: str) -> str:
+    """A sheet title Excel takes: the forbidden characters as "_", at most 31 characters. Titles without them are as before."""
+    return _SHEET_FORBIDDEN.sub("_", title)[:31]
 
 
 def _cell(value):
@@ -123,7 +132,7 @@ class ExcelExporter(Exporter):
             pivot.columns = [f"{col_col}_{c}" for c in pivot.columns]
             pivot.index.name = metric
 
-            sheet_name = f"{sheet_prefix}_{metric}"[:31]
+            sheet_name = _sheet_name(f"{sheet_prefix}_{metric}")
             pivot.to_excel(writer, sheet_name=sheet_name)
 
             if metric != COUNTS:
@@ -144,7 +153,7 @@ class ExcelExporter(Exporter):
         models = list(data["model"].unique())
 
         for metric in _sheet_columns(data):
-            sheet_name = f"{sheet_prefix}_{metric}"[:31]
+            sheet_name = _sheet_name(f"{sheet_prefix}_{metric}")
             ws = writer.book.create_sheet(sheet_name)
 
             col_offset = 1
@@ -213,7 +222,7 @@ class ExcelExporter(Exporter):
         models = list(data["model"].unique())
 
         for metric in _sheet_columns(data):
-            sheet_name = f"{sheet_prefix}_{metric}"[:31]
+            sheet_name = _sheet_name(f"{sheet_prefix}_{metric}")
             ws = writer.book.create_sheet(sheet_name)
 
             col_offset = 1
