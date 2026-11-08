@@ -1,8 +1,8 @@
 from pathlib import Path
 import datetime
-import functools
-import inspect
+import errno
 import json
+import os
 import re
 import queue
 import threading
@@ -269,8 +269,9 @@ class ResultStore:
     What is written for a key whose records reach a higher revision than 1 gets that revision, so a reader takes it. `iter_lines`
     gives the forecasts alone unless told other statuses.
 
-    With `lock=True` (what `BaseModel.run` opens) the store holds `<name>.lock` next to the file until `close()`, and a second
-    writer raises `ResultsLockedError` naming it; a file system that refuses locks warns and the run goes on. A last line a crash
+    With `lock=True` (what `BaseModel.run` opens) the store holds `<name>.lock` next to the file (an `fcntl.flock`) until
+    `close()`, and a second writer raises `ResultsLockedError` naming it; a file system that refuses locks warns and the run goes
+    on. A last line a crash
     left half-written is cut off, with a warning naming its bytes, when the store opens with the lock, and otherwise before its
     first write, never under another writer's hands. Files are read and written as UTF-8.
     """
@@ -388,21 +389,19 @@ class ResultStore:
             if revision != BACKTEST_REVISION:
                 self._revisions[key] = revision
 
-    def _acquire_file_lock(self):
-        """The lock of this results file, held; None (with a warning) where the file system refuses locks."""
-        from filelock import FileLock, Timeout
-
+    def _acquire_file_lock(self) -> Optional[Callable[[], None]]:
+        """Hold the lock of this results file and return what releases it; None, with a warning, where the file system refuses
+        locks. The errors are read here (`_hold_lock`), so they mean the same whatever filelock's version."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            lock = FileLock(str(self.lock_path), **_lock_options())
-            lock.acquire(timeout=0)
-        except Timeout:
+            return _hold_lock(self.lock_path)
+        except _LockHeld:
             raise ResultsLockedError(
                 f"{self.path} is being written by another run, which holds its lock {self.lock_path}. Two runs writing one "
                 "model's results would put two forecasts on its keys: wait for it to finish, or write into another save_dir. "
                 "If no run is writing it (a process that was killed holds no lock), report this as a bug."
             ) from None
-        except (OSError, NotImplementedError) as exc:
+        except OSError as exc:
             warnings.warn(
                 f"{self.path}: the file system refused a lock on {self.lock_path} ({exc}), so a second run writing these "
                 "results at the same time would not be refused. Run one writer per model's results here.",
@@ -410,12 +409,11 @@ class ResultStore:
                 stacklevel=4,
             )
             return None
-        return lock
 
     def _release_file_lock(self) -> None:
-        lock, self._file_lock = self._file_lock, None
-        if lock is not None:
-            lock.release()
+        release, self._file_lock = self._file_lock, None
+        if release is not None:
+            release()
 
     def _cut_tail(self) -> None:
         """Cut off a last line a crash left half-written, before anything is appended after it, with a warning naming its
@@ -507,14 +505,50 @@ class ResultStore:
                 f.write(json.dumps(item) + "\n")
 
 
-@functools.lru_cache(maxsize=None)
-def _lock_options() -> Dict[str, Any]:
-    """`FileLock` options: no soft lock where flock is missing (filelock 4 falls back to one, which a killed run leaves held, so
-    every later run would be refused); such a file system warns instead (`ResultStore`)."""
-    try:
-        from filelock import FileLock
+class _LockHeld(Exception):
+    """Another process (or another open file in this one) holds the lock."""
 
-        parameters = inspect.signature(FileLock.__init__).parameters
-    except (ImportError, TypeError, ValueError):  # pragma: no cover
-        return {}
-    return {"fallback_to_soft": False} if "fallback_to_soft" in parameters else {}
+
+# What a non-blocking flock says when another holds the lock; any other error is a file system that refuses locks (ENOLCK on an
+# NFS mount without a lock daemon, ENOSYS, EOPNOTSUPP), which warns. filelock 3 read most of those as a held lock and filelock 4
+# falls back to a soft lock a killed run leaves held, so the store takes the lock itself where it can.
+_HELD_ERRNOS = frozenset((errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES))
+
+
+def _hold_lock(path: Path) -> Callable[[], None]:
+    """An exclusive `fcntl.flock` on `path`, held until the returned function is called: the operating system's lock, so a
+    process that is killed holds none. Where there is no flock (Windows) filelock's lock. Raises `_LockHeld` when another holds
+    it, OSError when the file system refuses locks."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover (Windows)
+        return _hold_filelock(path)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in _HELD_ERRNOS:
+            raise _LockHeld() from None
+        raise
+
+    def release() -> None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    return release
+
+
+def _hold_filelock(path: Path) -> Callable[[], None]:  # pragma: no cover (Windows)
+    from filelock import FileLock, Timeout
+
+    lock = FileLock(str(path))
+    try:
+        lock.acquire(timeout=0)
+    except Timeout:
+        raise _LockHeld() from None
+    except NotImplementedError as exc:
+        raise OSError(errno.ENOSYS, str(exc)) from exc
+    return lock.release

@@ -608,14 +608,9 @@ def test_a_second_writer_in_one_process_raises_and_the_lock_goes_with_the_run(tm
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="flock")
-@pytest.mark.parametrize("code", [errno.ENOSYS, errno.ENOLCK])
+@pytest.mark.parametrize("code", [errno.ENOSYS, errno.ENOLCK, errno.EOPNOTSUPP])
 def test_a_file_system_that_refuses_locks_warns_and_the_run_goes_on(tmp_path, monkeypatch, code):
     import fcntl
-
-    import filelock
-
-    if code == errno.ENOLCK and int(filelock.__version__.split(".")[0]) < 4:
-        pytest.skip("filelock 3 reads any other error as a held lock")
 
     def refuse(fd, operation):
         if operation & fcntl.LOCK_UN:
