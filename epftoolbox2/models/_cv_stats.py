@@ -45,6 +45,11 @@ scikit-learn 1.8.0's `LinearModelCV.fit` runs it (`_coordinate_descent.py:1617-1
    fold counted once, and its first argmin (`np.argmin`).
 4. The fit at that penalty on the window's Gram, from zeros; the intercept ȳ - z̄·w.
 
+Products outside scikit-learn's kernel (the held-out errors, the intercept) are `np.einsum` loops, not BLAS: a threaded GEMM
+sums in another order at another thread count (at p 247, 1 and 8 OpenBLAS threads gave held-out errors 4.4e-16 apart), and
+those bits reach the choice of penalty. scikit-learn's kernel calls level-1 BLAS on p-vectors only, which OpenBLAS
+threads on long vectors alone: its paths were bitwise the same at 1, 4 and 8 threads at p 247 (the tests check 1 and 4).
+
 What differs from the model path: in the folds only rounding (the Gram from exact sums, not BLAS on the scaled rows; the same
 kernel); in the final fit also the kernel's form, since `LassoCV` refits on the rows (`precompute="auto"` becomes False
 there, line 1922). The two forms make the same coordinate updates in exact arithmetic except for their gap-safe screening:
@@ -334,7 +339,10 @@ def cv_mse(stats: ScaledStats, grid: np.ndarray, fit_intercept: bool, max_iter: 
         A = test.G + test.n * np.outer(dx, dx)
         b = test.q + (test.n * dy) * dx
         c = float(test.yy + test.n * dy * dy)
-        sse = np.einsum("ij,ij->j", coefs, A @ coefs) - 2.0 * (b @ coefs) + c
+        own = np.einsum(
+            "ji,ji->i", coefs, np.einsum("jk,ki->ji", A, coefs)
+        )  # w'Aw per penalty, no BLAS (see the module)
+        sse = own - 2.0 * np.einsum("j,ji->i", b, coefs) + c
         mse[k] = sse / test.n
     return mse
 
@@ -373,7 +381,7 @@ def lassocv_fit(
     if coefs is None or not np.isfinite(coefs).all():
         return None
     w = np.ascontiguousarray(coefs[:, 0])
-    intercept = float(stats.ybar - stats.zbar @ w) if fit_intercept else 0.0
+    intercept = float(stats.ybar - np.einsum("j,j->", stats.zbar, w)) if fit_intercept else 0.0
     return LinearFit(w, intercept, alpha)
 
 

@@ -454,6 +454,24 @@ def test_the_fit_reads_the_estimators_settings_and_hands_back_what_it_cant_honou
     assert abs(pe - pm) <= LASSO_TOL
 
 
+def test_the_held_out_errors_and_the_fit_are_the_same_at_any_blas_thread_count():
+    """The held-out errors are einsum loops, not a threaded GEMM, whose bits move with the thread count and reach the
+    choice; scikit-learn's kernel on p-vectors doesn't thread. p 247, as LEAR's design."""
+    rng = np.random.default_rng(15)
+    n, p = 728, 247
+    x = rng.normal(size=(n, p)) @ (np.eye(p) + 0.3 * rng.normal(size=(p, p)) / np.sqrt(p)) * 5 + 20
+    y = 50 + x @ (rng.normal(size=p) * (rng.random(p) < 0.1)) * 0.3 + rng.normal(size=n) * 5
+    stats, _ = engine_stats(x, y, np.arange(n), np.ones(p, dtype=bool))
+    grid = _cv_stats.alpha_grid(stats.q, n)
+    out = []
+    for threads in (1, 4):
+        with threadpool_limits(threads):
+            out.append((_cv_stats.cv_mse(stats, grid, True, MAX_ITER), _cv_stats.lassocv_fit(stats)))
+    assert out[0][0].tobytes() == out[1][0].tobytes()
+    assert out[0][1].alpha_ == out[1][1].alpha_ and out[0][1].coef_.tobytes() == out[1][1].coef_.tobytes()
+    assert out[0][1].intercept_ == out[1][1].intercept_
+
+
 def test_cancellation_in_a_fold_and_a_constant_target_hand_back():
     """A column that barely varies on a training part far from the span's shift, and a target constant on ρ (which
     `standard_stats` lets through with the scale 1.0), raise `StatsFallback("cancellation")`: the engine sends them back."""
