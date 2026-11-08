@@ -308,9 +308,10 @@ class PanelReport:                          # What run(data={zone: frame}) retur
     def summary(self) -> pd.DataFrame: ...           # one row per (zone, model)
     def forecast_counts(self) -> pd.DataFrame: ...   # one row per (zone, model)
     def log_gain(self, benchmark: str, by: Sequence[str] = ("zone", "target", "horizon"),
-                 models: Optional[Sequence[str]] = None, cells: bool = False) -> pd.DataFrame: ...
+                 models: Optional[Sequence[str]] = None, cells: bool = False,
+                 common: bool = True) -> pd.DataFrame: ...   # common: every model on the same keys and cells
     def cells_lost(self, benchmark: str, by: Sequence[str] = ("zone", "target", "horizon"),
-                   models: Optional[Sequence[str]] = None) -> pd.DataFrame: ...
+                   models: Optional[Sequence[str]] = None, common: bool = True) -> pd.DataFrame: ...
 ```
 
 ### Windows

@@ -5,6 +5,7 @@ share there, each cell weighs the same, and a cell lost is one with a negative g
 """
 
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -145,3 +146,61 @@ def test_what_the_log_gain_refuses(panel):
         panel.log_gain("TSO", by=("zone", "year"))
     with pytest.raises(ValueError, match="at least one zone"):
         PanelReport({})
+
+
+def test_models_are_scored_on_the_same_cells_and_keys_by_default():
+    # B has no forecast in PT and A misses two keys in PL: by default both are scored on the keys all three share.
+    zones = {
+        "PL": EvaluationReport(
+            {"TSO": records(1, 1.0, 20.0), "A": records(2, 1.0, holes={(0, 3), (5, 4)}), "B": records(3, 1.0)},
+            [MAEEvaluator()],
+        ),
+        "FI": EvaluationReport(
+            {"TSO": records(4, 0.4, 8.0), "A": records(5, 0.4), "B": records(6, 0.4)}, [MAEEvaluator()]
+        ),
+        "PT": EvaluationReport({"TSO": records(7, 2.5, 50.0), "A": records(8, 2.5), "B": []}, [MAEEvaluator()]),
+    }
+    panel = PanelReport(zones, target="max")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # nothing to warn about: every model on the same cells
+        table = panel.log_gain("TSO", by=("zone",)).set_index("model")
+    assert table.loc["A", "cells"] == table.loc["B", "cells"] == 2
+    assert table.loc["A", "empty"] == table.loc["B", "empty"] == 1
+    assert table.loc["A", "forecasts"] == table.loc["B", "forecasts"] == 22 + 24
+    cells = panel.log_gain("TSO", by=("zone",), cells=True)
+    pl = cells[cells["zone"] == "PL"].set_index("model")
+    assert pl.loc["A", "forecasts"] == pl.loc["B", "forecasts"] == 22  # B on A's keys too
+    keys = ["run_date", "target_date", "hour", "horizon"]
+    frames = {name: pd.DataFrame(list(ref.iter_records())) for name, ref in zones["PL"].refs.items()}
+    on_keys = frames["B"].merge(frames["A"][keys], on=keys)
+    assert pl.loc["B", "mae"] == pytest.approx((on_keys["prediction"] - on_keys["actual"]).abs().mean(), abs=1e-12)
+
+    with pytest.warns(UserWarning, match="different cells"):
+        own = panel.log_gain("TSO", by=("zone",), common=False)
+    assert own.attrs["unequal_cells"] == {"B": [("PT",)]}
+    assert own.set_index("model").loc["A", "cells"] == 3 and own.set_index("model").loc["B", "cells"] == 2
+    with pytest.warns(UserWarning, match="different cells"):
+        lost = panel.cells_lost("TSO", by=("zone",), common=False)
+        mine = panel.log_gain("TSO", by=("zone",), common=False, cells=True)
+    assert len(lost) == ((mine["forecasts"] > 0) & (mine["log_gain"] < 0)).sum() == own["cells_lost"].sum()
+
+
+def test_a_cell_with_a_zero_mae_is_a_win_a_loss_or_a_tie():
+    perfect = [dict(r, prediction=r["actual"]) for r in records(2, 1.0)]
+    zones = {
+        "PL": EvaluationReport(
+            {"TSO": records(1, 1.0, 20.0), "oracle": perfect, "A": records(3, 1.0)}, [MAEEvaluator()]
+        )
+    }
+    panel = PanelReport(zones, target="max")
+    with pytest.warns(UserWarning, match="infinite"):
+        won = panel.log_gain("TSO", by=("zone",), models=["oracle"]).iloc[0]
+    assert won["log_gain"] == math.inf and won["cells"] == 1 and won["cells_lost"] == 0 and won["empty"] == 0
+    with pytest.warns(UserWarning, match="infinite"):
+        lost = panel.log_gain("oracle", by=("zone",), models=["A"]).iloc[0]
+    assert lost["log_gain"] == -math.inf and lost["cells"] == 1 and lost["cells_lost"] == 1
+    with pytest.warns(UserWarning, match="infinite"):
+        assert len(panel.cells_lost("oracle", by=("zone",), models=["A"])) == 1
+    twins = PanelReport({"PL": EvaluationReport({"x": perfect, "y": perfect}, [MAEEvaluator()])})
+    tie = twins.log_gain("x", by=("zone",)).iloc[0]
+    assert tie["log_gain"] == 0.0 and tie["cells"] == 1 and tie["cells_lost"] == 0

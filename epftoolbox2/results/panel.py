@@ -10,6 +10,7 @@ run of that zone's frame alone gives a plain model. The panel puts them side by 
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -22,8 +23,9 @@ from .report import EvaluationReport
 CELL_KEYS = ("zone", "target", "horizon", "hour")
 DEFAULT_CELLS = ("zone", "target", "horizon")
 
-# The columns of `log_gain(cells=True)`.
+# The columns of `log_gain(cells=True)` after the cell's keys, and of `log_gain()`.
 CELL_COLUMNS = ["model", "benchmark", "forecasts", "mae", "mae_benchmark", "log_gain"]
+SUMMARY_COLUMNS = ["model", "benchmark", "log_gain", "cells", "cells_lost", "empty", "forecasts", "min_cell_forecasts"]
 
 
 class PanelReport:
@@ -128,30 +130,42 @@ class PanelReport:
         by: Sequence[str] = DEFAULT_CELLS,
         models: Optional[Sequence[str]] = None,
         cells: bool = False,
+        common: bool = True,
     ) -> pd.DataFrame:
         """The log gain of each model over `benchmark`: the mean over cells of 100 ln(MAE of the benchmark / MAE of the model).
 
         A cell is one value of each key of `by` (`zone`, `target`, `horizon`, `hour`), such as a market's daily maximum at one
-        horizon, and is scored on its own common keys: the forecasts (run date, target date, hour, horizon) that the model and
-        the benchmark both hold with a finite prediction and actual there. So a model is never scored on forecasts the
-        benchmark lacks, and each cell weighs the same however many forecasts it has. A cell where either has none is left
-        out and counted as `empty`. `by=("zone", "target")` pools the horizons of a market and target, as the week-ahead studies
-        report it.
+        horizon, and each cell weighs the same however many forecasts it has. `by=("zone", "target")` pools the horizons of a
+        market and target, as the week-ahead studies report it.
+
+        `common=True` (the default) scores every model on the same forecasts: the keys (zone, target, run date, target date,
+        hour, horizon) at which the benchmark and every model listed (`models`, or all but the benchmark) hold a finite
+        prediction and actual, so every model is averaged over the same cells, those with at least one such key. Leaving a model
+        out of `models` can then add keys and cells to the others. `common=False` scores each model on the keys it shares with
+        the benchmark alone, and its own cells; where the models' cells then differ, their means are over different cells, which
+        warns and lists, per model, the cells it lacks in `attrs["unequal_cells"]`.
+
+        A cell where the model has a zero MAE and the benchmark doesn't is a win, +inf; one where the benchmark's is zero and the
+        model's isn't is lost, -inf; both zero is a tie, 0. Such cells count as scored, and the mean is then infinite (or NaN
+        with both), which warns.
 
         Returns one row per model (the benchmark left out): `model`, `benchmark`, `log_gain` (the mean), `cells` (scored),
-        `cells_lost` (cells with a negative gain), `empty`, `forecasts` (summed over cells), and the smallest number of
-        forecasts in a cell, `min_cell_forecasts`. With `cells=True`, one row per (model, cell) instead: the keys of `by`,
-        `model`, `benchmark`, `forecasts`, `mae`, `mae_benchmark` and `log_gain`.
+        `cells_lost` (cells with a negative gain), `empty` (cells some listed model or the benchmark has forecasts in where this
+        model is not scored: with `common=True` the cells where any of them lacks every common key, the same for each model;
+        with `common=False` those where it shares no forecast with the benchmark), `forecasts` (summed over its scored cells)
+        and `min_cell_forecasts`, the fewest in a scored cell. With `cells=True`, one row per (model, cell) instead, every
+        cell any of them has forecasts in: the keys of `by`, `model`, `benchmark`, `forecasts` (0 where not scored), `mae`,
+        `mae_benchmark` and `log_gain` (NaN where not scored). `attrs` holds `by` and `common`.
         """
         cell_keys = _check_cells(by)
         names = self._models(benchmark, models)
-        table = self._cell_table(benchmark, names, cell_keys)
+        table = self._cell_table(benchmark, names, cell_keys, common)
         if cells:
             return table
         rows = []
         for name in names:
             mine = table[table["model"] == name]
-            scored = mine[np.isfinite(mine["log_gain"].to_numpy(dtype=float))]
+            scored = mine[mine["forecasts"] > 0]
             rows.append(
                 {
                     "model": name,
@@ -164,31 +178,26 @@ class PanelReport:
                     "min_cell_forecasts": int(scored["forecasts"].min()) if len(scored) else 0,
                 }
             )
-        out = pd.DataFrame(
-            rows,
-            columns=[
-                "model",
-                "benchmark",
-                "log_gain",
-                "cells",
-                "cells_lost",
-                "empty",
-                "forecasts",
-                "min_cell_forecasts",
-            ],
-        )
-        out.attrs["by"] = cell_keys
+        out = pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
+        out.attrs.update(table.attrs)
         return out
 
     def cells_lost(
-        self, benchmark: str, by: Sequence[str] = DEFAULT_CELLS, models: Optional[Sequence[str]] = None
+        self,
+        benchmark: str,
+        by: Sequence[str] = DEFAULT_CELLS,
+        models: Optional[Sequence[str]] = None,
+        common: bool = True,
     ) -> pd.DataFrame:
-        """The cells of `log_gain` where `benchmark` has the lower MAE: one row per (model, cell lost), the keys of `by`, `model`,
-        `benchmark`, `forecasts`, `mae`, `mae_benchmark`, `log_gain`. `log_gain(...)["cells_lost"]` counts them per model."""
+        """The cells of `log_gain` (scored as it scores them, `common` included) where `benchmark` has the lower MAE: one row per
+        (model, cell lost), the keys of `by`, `model`, `benchmark`, `forecasts`, `mae`, `mae_benchmark`, `log_gain`.
+        `log_gain(...)["cells_lost"]` counts them per model."""
         cell_keys = _check_cells(by)
-        table = self._cell_table(benchmark, self._models(benchmark, models), cell_keys)
-        lost = table[table["log_gain"].to_numpy(dtype=float) < 0]
-        return lost.reset_index(drop=True)
+        table = self._cell_table(benchmark, self._models(benchmark, models), cell_keys, common)
+        lost = table[(table["forecasts"] > 0).to_numpy() & (table["log_gain"].to_numpy(dtype=float) < 0)]
+        out = lost.reset_index(drop=True)
+        out.attrs.update(table.attrs)
+        return out
 
     def _models(self, benchmark: str, models: Optional[Sequence[str]]) -> List[str]:
         known = list(dict.fromkeys(name for _, _, report in self._parts for name in report.refs))
@@ -200,36 +209,52 @@ class PanelReport:
             raise ValueError(f"Unknown model(s) {unknown}; the panel's models are {known}")
         return [name for name in chosen if name != benchmark]
 
-    def _cell_table(self, benchmark: str, models: Sequence[str], cell_keys: Tuple[str, ...]) -> pd.DataFrame:
-        """One row per (model, cell): the cell's keys, then `CELL_COLUMNS`, cells in sorted order. A cell is any value of the
-        keys some model or the benchmark has a finite error in."""
+    def _cell_table(
+        self, benchmark: str, models: Sequence[str], cell_keys: Tuple[str, ...], common: bool
+    ) -> pd.DataFrame:
+        """One row per (model, cell), cells in sorted order: the cell's keys, then `CELL_COLUMNS`. A cell is any value of the keys
+        some listed model or the benchmark has a finite error in. Each model is scored on the keys every listed model and the
+        benchmark share (`common`), or on those it shares with the benchmark."""
         errors = self._errors([benchmark, *models])
         keys = ["zone", "target", *FORECAST_KEYS]
         values = errors[["prediction", "actual"]].to_numpy(dtype=float)
         errors = errors.assign(error=np.abs(values[:, 0] - values[:, 1]), target=errors["target"].fillna(""))
         errors = errors[np.isfinite(errors["error"].to_numpy(dtype=float))]
-        bench = errors[errors["model"] == benchmark][[*keys, "error"]].rename(columns={"error": "benchmark_error"})
-        cells_of = sorted(set(errors[list(cell_keys)].itertuples(index=False, name=None)), key=_sortable)
+        try:
+            wide = errors.set_index([*keys, "model"])["error"].unstack("model")
+        except ValueError as exc:  # a model's frame holding one key twice
+            raise ValueError(f"log_gain: a model has a forecast key twice in one zone: {exc}") from None
+        wide = wide.reindex(columns=[benchmark, *models]).sort_index()
+        cells_of = sorted(
+            set(wide.index.to_frame(index=False)[list(cell_keys)].itertuples(index=False, name=None)), key=_sortable
+        )
         place = {cell: i for i, cell in enumerate(cells_of)}
-        rows = []
-        for name in models:
-            mine = errors[errors["model"] == name][[*keys, "error"]]
-            joined = mine.merge(bench, on=keys, how="inner", validate="one_to_one")
-            cell_of = np.array(
-                [place[cell] for cell in joined[list(cell_keys)].itertuples(index=False, name=None)], dtype=np.int64
-            )
-            # Each cell's sums in key order, so a table is the same however the records were written.
-            joined = joined.assign(_cell=cell_of).sort_values(["_cell", *keys], kind="stable")
-            cell_of = joined["_cell"].to_numpy()
-            mine_errors = joined["error"].to_numpy(dtype=float)
-            bench_errors = joined["benchmark_error"].to_numpy(dtype=float)
-            bounds = np.searchsorted(cell_of, np.arange(len(cells_of) + 1))
+        frame = wide.index.to_frame(index=False)
+        cell_of = np.array(
+            [place[cell] for cell in frame[list(cell_keys)].itertuples(index=False, name=None)], dtype=np.int64
+        )
+        # Each cell's sums in key order (the index is sorted), so a table is the same however the records were written.
+        order = np.argsort(cell_of, kind="stable")
+        cell_of = cell_of[order]
+        bounds = np.searchsorted(cell_of, np.arange(len(cells_of) + 1))
+        found = np.isfinite(wide.to_numpy(dtype=float)[order])
+        bench_errors = wide[benchmark].to_numpy(dtype=float)[order]
+        shared = found.all(axis=1)
+        rows, infinite = [], False
+        scored_cells: Dict[str, set] = {}
+        for j, name in enumerate(models, start=1):
+            mine_errors = wide[name].to_numpy(dtype=float)[order]
+            usable = shared if common else found[:, 0] & found[:, j]
             for i, cell in enumerate(cells_of):
                 lo, hi = int(bounds[i]), int(bounds[i + 1])
-                n = hi - lo
-                mae = float(np.mean(mine_errors[lo:hi])) if n else math.nan
-                mae_b = float(np.mean(bench_errors[lo:hi])) if n else math.nan
-                gain = 100.0 * math.log(mae_b / mae) if n and mae > 0 and mae_b > 0 else math.nan
+                take = np.nonzero(usable[lo:hi])[0] + lo
+                n = len(take)
+                mae = float(np.mean(mine_errors[take])) if n else math.nan
+                mae_b = float(np.mean(bench_errors[take])) if n else math.nan
+                gain = _gain(mae_b, mae) if n else math.nan
+                infinite = infinite or (n > 0 and not math.isfinite(gain))
+                if n:
+                    scored_cells.setdefault(name, set()).add(cell)
                 rows.append(
                     {
                         **dict(zip(cell_keys, cell)),
@@ -241,7 +266,44 @@ class PanelReport:
                         "log_gain": gain,
                     }
                 )
-        return pd.DataFrame(rows, columns=[*cell_keys, *CELL_COLUMNS])
+        table = pd.DataFrame(rows, columns=[*cell_keys, *CELL_COLUMNS])
+        table.attrs.update(by=cell_keys, common=common)
+        if infinite:
+            warnings.warn(
+                "log_gain: a cell where the model's or the benchmark's MAE is zero has an infinite gain (a perfect forecast: "
+                "+inf a win, -inf a loss), so its model's mean is infinite. log_gain(..., cells=True) shows which.",
+                UserWarning,
+                stacklevel=3,
+            )
+        union = set().union(*scored_cells.values()) if scored_cells else set()
+        lacking = {
+            name: sorted(union - scored_cells.get(name, set()), key=_sortable)
+            for name in models
+            if scored_cells.get(name, set()) != union
+        }
+        if lacking and not common:
+            table.attrs["unequal_cells"] = lacking
+            shown = "; ".join(f"{name}: {len(cells)} of {len(union)}" for name, cells in lacking.items())
+            warnings.warn(
+                f"log_gain(common=False): the models are averaged over different cells (cells lacking: {shown}), so their "
+                "means aren't comparable; attrs['unequal_cells'] lists them. The default common=True scores every model on the "
+                "same keys and cells.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return table
+
+
+def _gain(mae_benchmark: float, mae: float) -> float:
+    """100 ln(MAE of the benchmark / MAE of the model), with a zero MAE defined: +inf (the model's alone), -inf (the
+    benchmark's alone), 0 (both)."""
+    if mae == 0 and mae_benchmark == 0:
+        return 0.0
+    if mae == 0:
+        return math.inf
+    if mae_benchmark == 0:
+        return -math.inf
+    return 100.0 * math.log(mae_benchmark / mae)
 
 
 def _check_cells(by: Sequence[str]) -> Tuple[str, ...]:

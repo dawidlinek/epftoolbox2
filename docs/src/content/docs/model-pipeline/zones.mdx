@@ -68,14 +68,19 @@ judged on the earlier clock on its issue row too: stricter than needed, never lo
 |---|---|
 | `zones` | zone -> its `EvaluationReport`, whose every table and comparison is that zone's alone |
 | `summary()`, `forecast_counts()` | each zone's table, one row per (zone, model), `zone` (and `target`) first |
-| `log_gain(benchmark, by=("zone", "target", "horizon"))` | per model the mean over cells of 100 ln(MAE of the benchmark / MAE of the model), with `cells`, `cells_lost`, `forecasts` and `min_cell_forecasts`; `cells=True` gives one row per cell |
-| `cells_lost(benchmark, by=...)` | the cells where the benchmark has the lower MAE |
+| `log_gain(benchmark, by=("zone", "target", "horizon"), common=True)` | per model the mean over cells of 100 ln(MAE of the benchmark / MAE of the model), with `cells`, `cells_lost`, `empty`, `forecasts` and `min_cell_forecasts`; `cells=True` gives one row per cell |
+| `cells_lost(benchmark, by=..., common=True)` | the cells where the benchmark has the lower MAE |
 | `PanelReport.concat([...])` | the panels of several runs, such as a daily minimum and maximum: `log_gain` can then cut by `target` |
 
-A cell of `log_gain` is one value of each key of `by` (`zone`, `target`, `horizon`, `hour`) and is scored on its own common keys: the
-forecasts the model and the benchmark both hold with a finite prediction and actual in it, so a model is never scored on forecasts the
-benchmark lacks, and each cell weighs the same however many forecasts it has. A week-ahead study of markets reports
-`by=("zone", "target")`, each market's statistic pooled over its horizons:
+A cell of `log_gain` is one value of each key of `by` (`zone`, `target`, `horizon`, `hour`), and each cell weighs the same however
+many forecasts it has. By default (`common=True`) every model is scored on the same forecasts: the keys at which the benchmark and every
+model listed hold a finite prediction and actual, so every model's mean is over the same cells, those with at least one such key, and a
+model whose run failed in a zone takes that zone out for all of them (`empty` counts such cells). Leaving a model out of `models=` can
+then give the others more keys. `common=False` scores each model on the keys it shares with the benchmark alone and on its own cells,
+and warns, with the cells each lacks in `attrs["unequal_cells"]`, when those differ: means over different cells don't compare. A cell
+where the model's MAE is zero and the benchmark's isn't is a win, `+inf`; the other way round a loss, `-inf`; both zero a tie, 0; such
+a mean is infinite, with a warning. A week-ahead study of markets reports `by=("zone", "target")`, each market's statistic pooled over
+its horizons:
 
 ```python
 from epftoolbox2.results import PanelReport
