@@ -215,11 +215,16 @@ def test_the_scaled_sums_are_gram_stats_of_the_scaled_rows(scale_binary):
         assert stats.yy == pytest.approx(g.yy, rel=1e-13)
         assert np.abs(stats.zbar - g.xbar).max() <= 1e-14
         assert abs(stats.ybar - g.ybar) <= 1e-14
-        # The issue row: the scaler's formula on the fit's parameters, so within what their last-bit differences carry.
+        # The issue row: centred as G and q are, on the shift and u/r, where the scaler centres on its rounded mean; so within
+        # an ulp of the mean (over the scale) plus what the parameters' last-bit differences carry.
         model_mean = np.array([mean_std(x[:, k])[0] if params.scaled[k] else 0.0 for k in range(x.shape[1])])
         model_scale = np.array([mean_std(x[:, k])[1] if params.scaled[k] else 1.0 for k in range(x.shape[1])])
         z = params.transform(x0)
-        carried = (np.abs(params.mean - model_mean) + np.abs(z) * np.abs(params.scale - model_scale)) / model_scale
+        carried = (
+            np.abs(params.mean - model_mean)
+            + np.spacing(np.abs(model_mean))
+            + np.abs(z) * np.abs(params.scale - model_scale)
+        ) / model_scale
         assert (np.abs(z - z0) <= carried + 2 * np.spacing(np.abs(z0))).all()
         # The inverse is the scaler's formula on the fit's parameters: bitwise with the same ones, and against the model path's
         # within 1 ulp beyond what the parameters' own last-bit differences carry.
@@ -399,6 +404,26 @@ def test_fewer_than_three_rows_raise():
     raw = SpanSums(x, np.array([1.0, 2.0, 4.0])).over(np.arange(2), np.arange(2))
     with pytest.raises(ValueError, match="at least 3 rows"):
         _stats.standard_stats(raw, (x[:2], np.array([1.0, 2.0])), None)
+
+
+def test_the_issue_row_is_centred_as_the_sums_are():
+    """A column 50,000 ± 5e-5 (and ± 5e-7) that carries the signal, n 1,449: centring the issue row on the rounded mean would
+    add |β|·½ ulp(μ) (here 6e-7 and 1.1e-4 EUR/MWh); centred as (x - c) - u/r it is the model path's to 1e-13."""
+    rng = np.random.default_rng(21)
+    for spread in (5e-5, 5e-7):
+        n = 1449
+        g = rng.normal(size=n + 1)
+        x = np.column_stack([rng.normal(size=n + 1) * 8 + 50, 50_000 + spread * g, rng.normal(size=n + 1) * 3 + 10])
+        y = 50 + 0.5 * x[:, 0] + 20 * g + rng.normal(size=n + 1) * 2
+        x, y, x0 = x[:-1], y[:-1], x[-1:]
+        mask = np.ones(3, dtype=bool)
+        stats, params = stats_of(x, y, np.arange(n), mask)
+        model = OLSModel([], fit_intercept=True)
+        pm, _, _ = model_path(model, x, y, x0, mask)
+        pe, fe = engine_path(model, stats, params, x0)
+        assert abs(pe - pm) <= 1e-13
+        rounded = params.inverse(float((((x0 - params.mean) / params.scale) @ fe.coef_)[0] + fe.intercept_))
+        assert abs(rounded - pm) > OLS_TOL  # the case is one where the centring matters
 
 
 # --- OLS -----------------------------------------------------------------------------------------------------------------

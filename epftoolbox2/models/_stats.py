@@ -102,6 +102,10 @@ class StandardParams(NamedTuple):
     `mean`/`scale` are the centre and divisor of each column (0.0 and 1.0 where the column isn't scaled, the scaler's mean and
     1.0 where it is constant); `scaled` the columns the scaler scales (its mask, or every column with `scale_binary`);
     `constant` the columns constant on the fit's rows (their centred training values are 0); `ymean`/`yscale` the target's.
+    `shift`/`offset` split the centre as the sums hold it, the span's shift c and u/r (mean = fl(c + u/r)): a row is centred
+    as (x - c) - u/r, which is how G and q are centred, not on the rounded mean, whose half ulp a coefficient would multiply
+    (on a column of 50,000 ± 5e-5 that alone moved a forecast by 1.2e-8). A constant column has its `mean_std` mean as the
+    shift and offset 0, an unscaled one 0 and 0.
     """
 
     mean: np.ndarray
@@ -110,11 +114,14 @@ class StandardParams(NamedTuple):
     constant: np.ndarray
     ymean: float
     yscale: float
+    shift: np.ndarray
+    offset: np.ndarray
 
     def transform(self, x) -> np.ndarray:
-        """Rows `x` (k, p) as the scaler transforms its test rows: (x - mean) / scale per column (an unscaled column as it is)."""
+        """Rows `x` (k, p) as the scaler transforms its test rows: ((x - shift) - offset) / scale per column, the centring of
+        G and q (an unscaled column as it is, a constant one as `(x - mean) / 1.0`, bitwise the scaler's)."""
         x = np.asarray(x, dtype=np.float64)
-        return (x - self.mean) / self.scale
+        return ((x - self.shift) - self.offset) / self.scale
 
     def transform_training(self, x) -> np.ndarray:
         """Training rows `x` (r, p) as `fit_transform` returns them: a constant scaled column exactly 0.0 (NaN stays NaN)."""
@@ -239,7 +246,8 @@ def standard_stats(
     cyy = syy - sy * sy / r
     square = np.diag(S).copy()
     centred = np.diag(C).copy()
-    mean = shift + u / r
+    offset = u / r
+    mean = shift + offset
     var = centred / (r - 1)
 
     constant = np.zeros(p, dtype=bool)
@@ -279,6 +287,7 @@ def standard_stats(
         raise StatsFallback("cancellation", f"target: S/(S - u²/r) above {CANCELLATION_MAX:g}")
 
     sigma = np.where(scaled & ~constant, np.sqrt(np.where(var > 0, var, 1.0)), 1.0)
+    varying = scaled & ~constant
     params = StandardParams(
         mean=np.where(scaled, mean, 0.0),
         scale=sigma,
@@ -286,6 +295,8 @@ def standard_stats(
         constant=constant,
         ymean=ymean,
         yscale=ystd,
+        shift=np.where(varying, shift, np.where(scaled, mean, 0.0)),
+        offset=np.where(varying, offset, 0.0),
     )
 
     # Scaled space: a scaled column has mean 0 exactly, an unscaled one its mean on ρ (a constant one the value itself).
