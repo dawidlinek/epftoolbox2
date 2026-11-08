@@ -749,6 +749,16 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        {
+            "name": "binary_mask",
+            "description": (
+                "Which rows decide the binary 0/1 columns left unscaled: empty for the default (the test's first day, a "
+                "refit's own rows), fit for each fit's own rows (no forecast then depends on the test start)"
+            ),
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
     ],
     "LassoCVModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "LassoCV", "kind": "text"},
@@ -802,6 +812,16 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "description": (
                 "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month, auto "
                 "a window of up to 84 days daily and a longer one weekly"
+            ),
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "binary_mask",
+            "description": (
+                "Which rows decide the binary 0/1 columns left unscaled: empty for the default (the test's first day, a "
+                "refit's own rows), fit for each fit's own rows (no forecast then depends on the test start)"
             ),
             "required": False,
             "default": None,
@@ -864,6 +884,16 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        {
+            "name": "binary_mask",
+            "description": (
+                "Which rows decide the binary 0/1 columns left unscaled: empty for the default (the test's first day, a "
+                "refit's own rows), fit for each fit's own rows (no forecast then depends on the test start)"
+            ),
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
     ],
     "LEARModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "LEAR", "kind": "text"},
@@ -918,6 +948,16 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "description": (
                 "Refit on a fixed calendar: empty fits every forecast, 7D once a week (Mondays), 1MS once a month, auto "
                 "a window of up to 84 days daily and a longer one weekly"
+            ),
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "binary_mask",
+            "description": (
+                "Which rows decide the binary 0/1 columns left unscaled: empty for the default (the test's first day, a "
+                "refit's own rows), fit for each fit's own rows (no forecast then depends on the test start)"
             ),
             "required": False,
             "default": None,
