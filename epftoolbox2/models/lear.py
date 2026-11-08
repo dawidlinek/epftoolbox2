@@ -24,9 +24,14 @@ class LEARModel(BaseModel):
     # A `criterion="cv"` instance needs the CV blocks too (`_cv_stats.block_stats`): `__setattr__` sets its own.
     _ENGINE_NEEDS = frozenset()
     # The farthest an issue row may be from its training rows for the engine to forecast it, in training standard deviations
-    # (`_stats.issue_distance`; `OLSModel._ENGINE_ISSUE_Z`): up to 9.2e-11 at 10 (2.7e-10 at 30, 8.8e-10 at 100) on the harshest
-    # designs of `engine_stats/far_sweep.py`, against the engine's 1e-9.
+    # along the eigenvectors of the active columns' Gram (`_stats.issue_distance`; `OLSModel._ENGINE_ISSUE_Z`), and the largest
+    # condition number of that Gram (`_stats.IssueMetric.condition`) the engine fits from the sums: the LARS solution's last
+    # bits follow it (1.6e-5 apart at 1e10, near-collinear columns both active), so a fit beyond it goes back to the model
+    # path (`ill_conditioned`). The worst kept gap is 3.5e-10 EUR/MWh (the re-review's pipeline with a pair 1e-3 of a standard
+    # deviation apart; 2.2e-10 over the 540 designs of `engine_stats/far_sweep2.py`, which keep every plain Lago-shaped DE fit:
+    # their conditions reach 2.4e5), against the engine's 1e-9.
     _ENGINE_ISSUE_Z = 10.0
+    _ENGINE_CONDITION_MAX = 1e6
 
     @property
     def _ENGINE_FROM_STATS(self) -> bool:

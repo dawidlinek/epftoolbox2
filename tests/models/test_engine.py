@@ -40,7 +40,7 @@ from tests.models.test_engine_groups import (
     with_aux,
     with_aux_column,
 )
-from tests.synthetic import PREDICTORS, make_market_data
+from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 PROVENANCE = ("package_version", "git_sha", "created_at", "updated_at", "record_schema", "kernels", "engine")
 PUBLISHED = {"price": Availability.published("13:00", 1)}
@@ -542,7 +542,8 @@ def test_an_issue_row_far_out_is_forecast_on_the_model_path(spring, tmp_path, fa
     """An issue row beyond its model's bound (OLS 30 and LEAR 10 training standard deviations, `_ENGINE_ISSUE_Z`; Ridge where
     RidgeCV's own rounding at the row exceeds its budget) is forecast on the model path, to the bit, counted as `far_issue`;
     the others stay within the tolerances. Before, rows 2e4 out were 1e-7 apart. A refit unit forecasts its near rows from
-    statistics and its far ones on the model path, each row decided on its own (so the same whichever rows a run has)."""
+    statistics and its far ones on the model path, each row decided on its own (so the same whichever rows a run has). Only the
+    columns a fit reads count: a LEAR that drops the outage column (its coefficient 0) forecasts that row from statistics."""
     names = [*PREDICTORS, "outage_d+1"]
     data = far_frame(spring, far, hours=range(12))
 
@@ -563,7 +564,10 @@ def test_an_issue_row_far_out_is_forecast_on_the_model_path(spring, tmp_path, fa
         engine = json.loads((tmp_path / "on" / f"{model.name}.manifest.json").read_text())["engine"]
         # Without refit the fits of 23 March train on 21 March's far rows, so their issue rows aren't far from them.
         far_days = ("2023-03-21", "2023-03-23") if model.refit else ("2023-03-21",)
-        far_keys = [k for k in on_records if k[0] in far_days and k[1] < 12]
+        # A fit that doesn't read the outage (LEAR's coefficient 0) isn't moved by it: that row isn't far for it.
+        far_keys = [
+            k for k in on_records if k[0] in far_days and k[1] < 12 and off_records[k]["coefficients"][-1] != 0.0
+        ]
         bitwise_far = sum(text(on_records[k]) == text(off_records[k]) for k in far_keys)
         assert bitwise_far == len(far_keys) or (isinstance(model, RidgeModel) and far < 1e3), (model.name, engine)
         # Ridge at 50 standard deviations: within RidgeCV's rounding budget, so most of its far rows from statistics.
@@ -573,6 +577,58 @@ def test_an_issue_row_far_out_is_forecast_on_the_model_path(spring, tmp_path, fa
         near = [k for k in on_records if k not in far_keys]
         assert sum(text(on_records[k]) != text(off_records[k]) for k in near) > len(near) // 2, model.name
         assert engine["max_issue_z"] <= model._ENGINE_ISSUE_Z
+
+
+def with_second_load(data, ratio, seed):
+    """`load2_d+1`: `load_d+1` plus noise of `ratio` of its standard deviation (a second forecast of the same load), and the
+    price of the next day carrying that noise, so that a fit needs both columns."""
+    data = data.copy()
+    sd = data["load_d+1"].std()
+    noise = pd.Series(np.random.default_rng(seed).normal(0, ratio * sd, len(data)), index=data.index)
+    data["load2_d+1"] = data["load_d+1"] + noise
+    data["price"] = data["price"] + 3.0 * calendar_shift(noise, -1).fillna(0.0).to_numpy() / (ratio * sd)
+    return data
+
+
+def test_an_ill_conditioned_lear_fit_goes_back_to_the_model_path(spring, tmp_path):
+    """Two near-collinear inputs (the second 1e-4 of the first's standard deviation apart) that a LEAR fit keeps both of: its
+    active columns' Gram is ill-conditioned (`_ENGINE_CONDITION_MAX`), so the fit goes back to the model path
+    (`ill_conditioned`), to the bit. Before, LEAR fitted it from the sums, 3e-8 EUR/MWh from engine off at ordinary rows."""
+    data = with_second_load(spring, 1e-4, 93)
+    names = [*PREDICTORS, "load2_d+1"]
+
+    def models():
+        return [lear(names, 56, name="lear"), lear(names, 56, criterion="aic", name="lear_aic")]
+
+    run_both(build(models), data, tmp_path, test=("2023-03-20", "2023-03-23"), horizon=1)
+    compare(tmp_path / "off", tmp_path / "on", models())
+    for model in models():
+        engine = json.loads((tmp_path / "on" / f"{model.name}.manifest.json").read_text())["engine"]
+        assert engine["fallbacks"].get("ill_conditioned", 0) > 0, (model.name, engine)
+
+
+def test_an_issue_row_far_out_along_two_columns_difference_goes_back(spring, tmp_path):
+    """Two near-collinear inputs (5e-3 of a standard deviation apart) and issue rows whose difference is 300 of its own training
+    standard deviations out while each column is within 8 of its own: far in the fit's metric (`_stats.issue_distance`, along
+    the Gram's eigenvectors), so forecast on the model path, to the bit. Before, the distance was per column and OLS 3e-8 apart
+    from engine off there."""
+    data = with_second_load(spring, 5e-3, 94)
+    sd = data["load_d+1"].std() * 5e-3
+    far_days = np.asarray(data.index.date).astype(str) == "2023-03-21"  # later fits train on its rows
+    data.loc[far_days, "load2_d+1"] = data.loc[far_days, "load_d+1"] + 300 * sd
+    names = [*PREDICTORS, "load2_d+1"]
+
+    def models():
+        return [OLSModel(names, 56, name="ols"), lear(names, 56, name="lear")]
+
+    run_both(build(models), data, tmp_path, test=("2023-03-20", "2023-03-23"), horizon=1)
+    compare(tmp_path / "off", tmp_path / "on", models())
+    off_records = records_of(tmp_path / "off" / "ols.jsonl")
+    on_records = records_of(tmp_path / "on" / "ols.jsonl")
+    far = [k for k in on_records if k[0] == "2023-03-21"]
+    assert all(text(on_records[k]) == text(off_records[k]) for k in far)
+    engine = json.loads((tmp_path / "on" / "ols.manifest.json").read_text())["engine"]
+    assert engine["fallbacks"].get("far_issue") == len(far) and engine["fits"] > 0, engine
 
 
 def test_sums_past_float64s_range_go_back_to_the_model_path(spring, tmp_path):

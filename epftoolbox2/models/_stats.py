@@ -452,9 +452,10 @@ class LinearFit:
     """A linear fit from statistics: `predict(X) = X @ coef_ + intercept_`, as the scikit-learn estimators it stands for.
 
     `alpha_` is the chosen penalty of a Ridge fit (None for OLS). `rounding` (Ridge) holds per column the scale of the model
-    path's own rounding at α* in target units per unit of |z - z̄| of a row (`issue_rounding_ok`), None for OLS."""
+    path's own rounding at α* in target units per unit of |z - z̄| of a row (`issue_rounding_ok`), None for OLS. `centred`:
+    whether the fit has an intercept, so that a row is measured from the training means (`issue_metric`), not from 0."""
 
-    __slots__ = ("coef_", "intercept_", "alpha_", "rounding")
+    __slots__ = ("coef_", "intercept_", "alpha_", "rounding", "centred")
 
     def __init__(
         self,
@@ -462,11 +463,13 @@ class LinearFit:
         intercept: float = 0.0,
         alpha: Optional[float] = None,
         rounding: Optional[np.ndarray] = None,
+        centred: bool = True,
     ):
         self.coef_ = np.asarray(coef, dtype=np.float64)
         self.intercept_ = float(intercept)
         self.alpha_ = alpha
         self.rounding = rounding
+        self.centred = bool(centred)
 
     def predict(self, X) -> np.ndarray:
         X = np.asarray(X, dtype=np.float64)
@@ -537,20 +540,65 @@ def ols_fit(
     if w is None:
         return None
     intercept = float(stats.ybar - stats.zbar @ w) if fit_intercept else 0.0
-    return LinearFit(w, intercept)
+    return LinearFit(w, intercept, centred=fit_intercept)
 
 
-def issue_distance(stats: ScaledStats, z: np.ndarray) -> float:
-    """How far an issue row (`z`, scaled as the fit's rows, one row) is from the fit's training rows: the largest
-    |z_j - z̄_j| / sd_j over the columns that vary on them (sd_j = sqrt(G_jj / (n - 1)), 1 on a scaled column), in training
-    standard deviations; 0.0 with none. A function of the fit and the row alone."""
-    spread = np.diag(stats.G)
-    live = spread > 0.0
-    if not live.any():
+class IssueMetric(NamedTuple):
+    """The metric of a fit an issue row's distance from its training rows is measured in (`issue_metric`): the fit's active
+    columns (a coefficient other than 0), the centre of a row on them (z̄ with an intercept, 0 without), sqrt((n - 1) / M_jj)
+    of each (M the Gram of the active columns, centred with an intercept, uncentred without), the eigenvectors of M,
+    sqrt((n - 1) / λ_k) of each (inf for an eigenvalue not above λ_max·eps·p, a direction the training rows don't spread
+    along), and λ_max / λ_min (inf where singular, 1.0 with fewer than two columns)."""
+
+    columns: np.ndarray
+    centre: np.ndarray
+    column_scale: np.ndarray
+    vectors: np.ndarray
+    scale: np.ndarray
+    condition: float
+
+
+def issue_metric(stats: ScaledStats, fitted) -> IssueMetric:
+    """The fit's `IssueMetric`, from its scaled sums and its coefficients (`coef_` of a `LinearFit`, `w` of LEAR's fit): the
+    directions the forecast reads, and how far the training rows spread along each. A function of the fit alone."""
+    coef = np.asarray(fitted.coef_ if hasattr(fitted, "coef_") else fitted.w, dtype=np.float64).reshape(-1)
+    columns = np.flatnonzero(coef != 0.0)
+    centred = getattr(fitted, "centred", True)
+    if columns.size == 0:
+        empty = np.zeros(0)
+        return IssueMetric(columns, empty, empty, np.zeros((0, 0)), empty, 1.0)
+    M = stats.G if centred else stats.uncentred()[0]
+    Ma = np.ascontiguousarray(M[np.ix_(columns, columns)])
+    diagonal = np.diag(Ma)
+    column_scale = np.where(diagonal > 0.0, np.sqrt((stats.n - 1) / np.where(diagonal > 0.0, diagonal, 1.0)), np.inf)
+    lam, vectors = np.linalg.eigh(Ma)
+    top = float(lam.max())
+    spread = lam > top * EPS * columns.size
+    scale = np.where(spread, np.sqrt((stats.n - 1) / np.where(spread, lam, 1.0)), np.inf)
+    condition = (top / float(lam.min()) if spread.all() else np.inf) if columns.size > 1 else 1.0
+    centre = stats.zbar[columns] if centred else np.zeros(columns.size)
+    return IssueMetric(columns, centre, column_scale, vectors, scale, condition)
+
+
+def issue_distance(metric: IssueMetric, z: np.ndarray) -> float:
+    """How far an issue row (`z`, scaled as the fit's rows, one row) is from the fit's training rows in the fit's own metric
+    (`issue_metric`), in training standard deviations: the larger of the row's largest coordinate (from its centre) along an
+    active column, |z_j - z̄_j| / sd_j, and along an eigenvector of the active columns' Gram, |v_kᵀ(z - z̄)| sqrt((n - 1) /
+    λ_k). The first is each column's own distance (an eigenvector of nearly equal eigenvalues can spread a column over
+    several); the second finds a row out along the difference of two near-collinear columns, by that difference's own
+    spread, however close to their training values each column is. A function of the fit and the row alone; 0.0 with no
+    active column."""
+    if metric.columns.size == 0:
         return 0.0
-    row = np.asarray(z, dtype=np.float64).reshape(-1)
-    distance = np.abs(row[live] - stats.zbar[live]) / np.sqrt(spread[live] / (stats.n - 1))
-    return float(distance.max())
+    row = np.asarray(z, dtype=np.float64).reshape(-1)[metric.columns] - metric.centre
+    along = np.abs(metric.vectors.T @ row)
+    own = np.abs(row)
+    return float(
+        max(
+            np.where(own > 0.0, own * metric.column_scale, 0.0).max(),
+            np.where(along > 0.0, along * metric.scale, 0.0).max(),
+        )
+    )
 
 
 def issue_rounding_ok(fitted, stats: ScaledStats, z: np.ndarray, rounding_max: float = RIDGE_ROUNDING_MAX) -> bool:
@@ -624,7 +672,7 @@ def ridge_fit(
     # The same measure at any row x: eps · Σ_j |x_j - z̄_j| Σ_k |Zc_kj| |yc_k| · yscale / α* (at a training row, its own term of
     # `ridgecv_rounding`), for an issue row far outside the training rows (`issue_rounding_ok`).
     rounding = EPS * (np.abs(Zc).T @ np.abs(yc)) * (stats.yscale / best_alpha)
-    return LinearFit(w, intercept, best_alpha, rounding)
+    return LinearFit(w, intercept, best_alpha, rounding, centred=fit_intercept)
 
 
 __all__ = [
@@ -638,7 +686,9 @@ __all__ = [
     "StatsFallback",
     "cholesky_solve",
     "estimator_params",
+    "IssueMetric",
     "issue_distance",
+    "issue_metric",
     "issue_rounding_ok",
     "ols_fit",
     "ridge_fit",

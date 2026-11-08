@@ -22,11 +22,12 @@ scaler and `_fit_predict` / `_fit_model`:
 A fit of no column, one with fewer than `_stats.MIN_ROWS` rows in ρ, one whose sums overflow float64 (`_sums.SumsOverflow`) or
 that `standard_stats` can't scale (`StatsFallback`: cancellation, overflow), one `_fit_stats` declines (None: OLS's rank and
 conditioning guards, Ridge's n <= p and rounding budget, an estimator that isn't the one the statistics reproduce) or raises a
-ValueError on is **handed back**: the model path fits it there, on the same values, to the bit. So is the forecast of an issue
-row too far from the fit's training rows (`far_issue`): beyond its model's `_ENGINE_ISSUE_Z` training standard deviations
-(`_stats.issue_distance`: OLS 30, LEAR 10), or where RidgeCV's own rounding at that row exceeds its budget
-(`_stats.issue_rounding_ok`), since an extrapolation multiplies the last bits in which the two paths' coefficients differ; a
-refit unit forecasts its other rows from statistics. Each hand-back is decided from the fit's own rows and span, and the issue
+ValueError on, and one whose active columns' Gram is too ill-conditioned for its class (`_ENGINE_CONDITION_MAX`, LEAR) is
+**handed back**: the model path fits it there, on the same values, to the bit. So is the forecast of an issue row too far from
+the fit's training rows (`far_issue`): beyond its model's `_ENGINE_ISSUE_Z` training standard deviations along the
+eigenvectors of the fit's Gram (`_stats.issue_distance`: OLS 30, LEAR 10), or where RidgeCV's own rounding at that row exceeds
+its budget (`_stats.issue_rounding_ok`), since an extrapolation multiplies the last bits in which the two paths' coefficients
+differ; a refit unit forecasts its other rows from statistics. Each hand-back is decided from the fit's own rows and span, and the issue
 row's alone, so it is the same in any group and whichever rows a unit forecasts.
 
 Every element of the sums is a function of the two columns' values in ρ and of the span (exact integer slices, `_sums`), and
@@ -47,7 +48,7 @@ from threadpoolctl import threadpool_limits
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
 from . import _worker as worker
-from ._stats import MIN_ROWS, StatsFallback, issue_distance, issue_rounding_ok, standard_stats
+from ._stats import MIN_ROWS, StatsFallback, issue_distance, issue_metric, issue_rounding_ok, standard_stats
 from ._sums import SpanSums, SumsOverflow
 from ._worker import (
     StatsFit,
@@ -83,10 +84,12 @@ DOWNDATE_SHARE = 0.5
 ISSUE_Z_MAX = 10.0
 
 # Why a fit went back to the model path (`EngineCounts.fallbacks`): no column (the model path then skips, or forecasts as it
-# does); fewer than `MIN_ROWS` rows in ρ; sums past float64's range ("overflow", also `StatsFallback`'s) or `StatsFallback`'s
+# does); an active Gram whose condition number is above the model's `_ENGINE_CONDITION_MAX` (LEAR, `ILL_CONDITIONED`);
+# fewer than `MIN_ROWS` rows in ρ; sums past float64's range ("overflow", also `StatsFallback`'s) or `StatsFallback`'s
 # other reason ("cancellation"); `_fit_stats` returned None; `_fit_stats` raised a ValueError. And per issue row: one beyond its
 # model's bound (`FAR_ISSUE`, counted per row; the fit forecasts its other rows).
 NO_COLUMNS = "no_columns"
+ILL_CONDITIONED = "ill_conditioned"
 FEW_ROWS = "few_rows"
 OVERFLOW = "overflow"
 DECLINED = "declined"
@@ -140,7 +143,7 @@ class EngineCounts:
     """What one model's fits from shared statistics did, for the manifest's provenance (never compared): `fits` made from the
     statistics (that forecast at least one row), `fallbacks` handed back to the model path by reason (fits, and issue rows for
     `FAR_ISSUE`), and the largest distance of an issue row the engine forecast from its training values (`max_issue_z`, in
-    training standard deviations, `_stats.issue_distance`)."""
+    training standard deviations along the eigenvectors of its fit's Gram, `_stats.issue_distance`)."""
 
     __slots__ = ("fits", "fallbacks", "max_issue_z")
 
@@ -314,12 +317,16 @@ class EngineFits:
         if fitted is None:
             return self._back(DECLINED)
         bound = getattr(self.model, "_ENGINE_ISSUE_Z", ISSUE_Z_MAX)
+        condition_max = getattr(self.model, "_ENGINE_CONDITION_MAX", None)
+        metric = issue_metric(stats, fitted) if bound < np.inf or condition_max is not None else None
+        if condition_max is not None and not metric.condition <= condition_max:
+            return self._back(ILL_CONDITIONED)
         out: List[Optional[Tuple[float, list]]] = []
         for row in range(fit.test.shape[0]):
             # One row at a time, as the model path forecasts (decision 16 of the step 3 spec). Whether a row is too far out is
             # decided from the fit and that row alone, so the same whichever other rows a unit forecasts.
             z = params.transform(fit.test[row : row + 1])
-            distance = issue_distance(stats, z)
+            distance = 0.0 if metric is None else issue_distance(metric, z)
             if not (distance <= bound and issue_rounding_ok(fitted, stats, z)):
                 self.counts.fallbacks[FAR_ISSUE] += 1
                 out.append(None)
