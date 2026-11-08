@@ -53,14 +53,14 @@ class ModelPipeline:
         engine: str = "off",                               # "on": engine-capable models run in engine groups, same numbers
     ): ...
 
-    def add_model(self, model: BaseModel) -> "ModelPipeline": ...
+    def add_model(self, model: Union[BaseModel, PooledModel]) -> "ModelPipeline": ...
     def add_ensemble(self, ensemble: Ensemble) -> "ModelPipeline": ...  # Members are resolved when the pipeline runs
     def add_evaluator(self, *evaluators: Evaluator) -> "ModelPipeline": ...  # One or several; chainable
     def add_exporter(self, exporter: Exporter) -> "ModelPipeline": ...
 
     def run(
         self,
-        data: pd.DataFrame,              # Input DataFrame
+        data: Union[pd.DataFrame, Mapping[str, pd.DataFrame]],  # Input DataFrame, or {zone: frame}: a run over zones
         test_start: str = None,           # Test period start
         test_end: str = None,             # Test period end
         target: str = "price",            # Target column
@@ -76,7 +76,7 @@ class ModelPipeline:
         issue_days: Optional[Sequence[str]] = None,  # Only these weekdays, e.g. ["friday"]; any case, all seven = every day
         save_format: str = "jsonl",       # "jsonl" or "parquet": <name>.jsonl or the directory <name>.parquet in save_dir
         save_coefficients: bool = True,   # False writes coefficients as []; recorded in the manifest, compared on resume
-    ) -> EvaluationReport: ...
+    ) -> EvaluationReport: ...            # A PanelReport for a run over zones
 
     def report(                           # Report from the results a run wrote to save_dir, JSONL or Parquet
         self,
@@ -86,17 +86,17 @@ class ModelPipeline:
         horizon: Optional[int] = None,         # As in run; neither: what the manifests record (7 without one)
         freq: Optional[str] = None,            # As in run; None: what the manifests (else the records) record, "1h" if none
         forecast_only: bool = False,
-        data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns
+        data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns; {zone: frame} for zone folders
         allow_missing: bool = False,           # else FileNotFoundError when a model has no results
         validation: Union[Tuple[Any, Any], str, None] = None,  # What run was told; each must be what the manifests record
         test: Optional[Tuple[Any, Any]] = None,  # None of the windows: every window the manifests record
         horizons: Optional[Sequence[int]] = None,  # As in run; only records of these horizons are read
         issue_days: Optional[Sequence[str]] = None,  # As in run; None reads them from the manifests
-    ) -> EvaluationReport: ...
+    ) -> EvaluationReport: ...            # A PanelReport for a save_dir of zone folders
 
     def verify(                           # Leakage probe and positive control on sampled issue days
         self,
-        data: pd.DataFrame,               # The models' input frame, or source data with rebuild
+        data: Union[pd.DataFrame, Mapping[str, pd.DataFrame]],  # The models' input frame, source data with rebuild, or {zone: frame}
         test_start: str,                  # First issue day to sample from
         test_end: str,                    # Last issue day to sample from
         target: str = "price",            # Target column
@@ -291,6 +291,27 @@ class EvaluationReport:
 ```
 
 See [Comparing Models](/epftoolbox2/model-pipeline/comparing-models/). Every method keeps to the report's window, see [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/).
+
+### PanelReport
+
+```python
+class PanelReport:                          # What run(data={zone: frame}) returns: one EvaluationReport per zone
+    def __init__(self, zones: Mapping[str, EvaluationReport], target: Optional[str] = None): ...
+
+    zones: Dict[str, EvaluationReport]      # zone -> its report
+    reports: Dict[Tuple[str, Optional[str]], EvaluationReport]  # (zone, target) -> its report
+    targets: List[Optional[str]]
+
+    @classmethod
+    def concat(cls, panels: Iterable["PanelReport"]) -> "PanelReport": ...  # several targets in one panel
+
+    def summary(self) -> pd.DataFrame: ...           # one row per (zone, model)
+    def forecast_counts(self) -> pd.DataFrame: ...   # one row per (zone, model)
+    def log_gain(self, benchmark: str, by: Sequence[str] = ("zone", "target", "horizon"),
+                 models: Optional[Sequence[str]] = None, cells: bool = False) -> pd.DataFrame: ...
+    def cells_lost(self, benchmark: str, by: Sequence[str] = ("zone", "target", "horizon"),
+                   models: Optional[Sequence[str]] = None) -> pd.DataFrame: ...
+```
 
 ### Windows
 
@@ -542,6 +563,11 @@ class LEARModel(BaseModel):                 # Lasso, penalty by AIC/BIC on the L
 class NaiveModel(BaseModel):                # one column's value on the issue row, no fit
     def __init__(self, predictors: Union[List, Callable], name: str = "Naive", *,
                  known_only: bool = True): ...
+
+class PooledModel:                          # one fit over the zones of run(data={zone: frame})
+    def __init__(self, model: BaseModel, *, over: Union[str, Sequence[str]] = ("zone",),
+                 zone_feature: Optional[str] = "onehot", missing: str = "raise",
+                 name: Optional[str] = None): ...
 ```
 
 With `ModelPipeline(engine="on")` these four run in engine groups (`BaseModel._engine_capable()`) and `NaiveModel` on its own, with the same numbers (see [Many Models: the Engine](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine)). `training_window` of `OLSModel`, `LassoCVModel`, `RidgeModel` and `LEARModel` is days from 1 (an int, default `365`; `LEARModel`'s `[56, 84, 728, "expanding"]`), `"expanding"`, or a list of them such as `[56, 84, 728, "expanding"]` whose windows are fitted separately and averaged inside the model; anything else raises (see [Training Windows](/epftoolbox2/model-pipeline/training-windows/)). `ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance. `fit_intercept` is keyword-only and scikit-learn's; a set value is saved and compared on resume, the default isn't written, so results and files made before it keep their manifests. `RidgeModel`'s `alphas` is the grid of penalties (`None`: `np.logspace(-3, 4, 36)`); its manifest holds the resolved grid, its YAML writes `alphas` only when set, a penalty below 1e-6 raises, and a fit needs at least 3 training rows. `LEARModel`'s `criterion` is `"bic"`, `"aic"` or `"cv"` (old `LassoLarsCV`, five blocked folds, the path's coefficients with no refit) and its `solver` `"lars"` (the exact Lasso at the chosen penalty) or `"cd"` (Lago's coordinate descent, at most 2500 sweeps), `"cv"` with `"lars"` only; both are always written to YAML and the manifest, which also records the kernels' backend as provenance (`kernels`); `LEARModel.lago(exogenous)` takes the exogenous series in the order of the dataset's file (see [LEARModel](/epftoolbox2/models/lear/)). `NaiveModel` takes a list of one name (or a function of `ctx` returning one), forecasts its value on the row of the issue day and has no coefficients; with `known_only` and an information set a value its rule puts after the issue time is no forecast, counted as `not_published` (see [Week-ahead forecasting](/epftoolbox2/model-pipeline/week-ahead/)). It has no `training_window`, `scaler`, `newest_target`, `refit` or `binary_mask`: setting `training_window`, `newest_target`, `refit` or `binary_mask` raises. `binary_mask` of the other four says which training rows decide the binary 0/1 columns a scaler leaves unscaled: `None` (the default) the window's first day without `refit` and each unit's rows with it, `"first_day"` the first by name (it raises with `refit`), `"fit"` each fit's own rows, so that no forecast depends on `test_start`; `"fit"` without `refit` is recorded in the manifest's `training_cut`, and YAML writes it only when set (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start)).
