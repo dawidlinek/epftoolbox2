@@ -69,6 +69,7 @@ from .context import (
     PredictorPlan,
     _Cells,
     build_plan,
+    list_hash,
     mask_digest,
     takes_ctx,
     warn_never_published_in,
@@ -83,6 +84,7 @@ from ._worker import (
     issue_row,
     matching_digest,
     matching_rows,
+    skip_record,
     training_row_days,
     training_rows,
 )
@@ -500,184 +502,201 @@ class BaseModel(ABC):
         stored_windows = None
 
         kernels = self._kernel_backend  # before any pool forks: numba compiles once, here
-        store = ResultStore(save_to, test_start=test_start) if save_to else None
-        if store and data.index.tz is not None and zone_name(data.index.tz) is None:
-            warnings.warn(
-                f"{self.name}: the data's time zone {data.index.tz!r} has no name that reads back, so a report() from the files in "
-                f"{store.path.parent} won't know which periods a date has on the clock: it plans every period of every day and "
-                "judges a whole day by its records. Give the index a named zone, such as tz_convert('Europe/Warsaw').",
-                UserWarning,
-                stacklevel=2,
-            )
-        if store:
-            frame_hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
-            manifest = build_manifest(
-                model=self,
-                data=data,
-                used_columns=used_columns,
-                expanded=expanded,
-                target=target,
-                horizon=horizon,
-                horizons=horizons,
-                freq=freq,
-                test_start=test_start,
-                test_end=test_end,
-                information_set=information_set,
-                predictor_function=None if plan is None else plan.function_record(),
-                predictor_lists=None if plan is None else plan.manifest_lists(masks if windows else {TEST: masks}),
-                availability=self._manifest_availability(information_set, availability, listing, window_listings),
-                windows=windows,
-                binary_masks=self._fixed_mask_digests(plan, windows, masks, horizons),
-                read_columns=() if plan is None else sorted(plan.queried),
-                frame_hashes=frame_hashes,
-                training_cut=self._training_cut(rules, target, freq),
-                issue_days=weekdays,
-                vintages=vintages,
-                kernels=kernels,
-            )
-
-            def check_stored():
-                check_stored_lists(
-                    manifest_path(store.path),
-                    manifest,
-                    store.iter_lines(
-                        cols=[
-                            "hour",
-                            "horizon",
-                            "run_date",
-                            "predictor_list",
-                            "matching_days",
-                            "window",
-                            "actual",
-                            "refit_anchor",
-                        ]
-                    ),
-                    self._stored_forecast_lookup(plan, masks, windows, weekdays),
-                    allow_mismatch=allow_manifest_mismatch,
-                    model_name=self.name,
-                    stored_actual=None if windows is None else self._stored_actual_lookup(first_day),
-                )
-
-            if plan is not None and windows is None:
-                check_stored()
-            check_and_write(
-                manifest_path(store.path),
-                manifest,
-                has_existing_results=store.path.exists() and store.path.stat().st_size > 0,
-                allow_mismatch=allow_manifest_mismatch,
-                require_manifest=require_manifest,
-                model_name=self.name,
-                frame_hashes=frame_hashes,
-                # A plain run of fixed lists has nothing per record to compare, except a refit's anchors.
-                check_stored=check_stored if windows is not None or (plan is None and self.refit is not None) else None,
-            )
-            if availability != "none" and manifest.availability is not None:
-                listing = manifest.availability["listing"]  # with what earlier runs listed for other test periods
-                window_listings = manifest.availability.get("windows", window_listings)
-            vintages = manifest.vintages  # with what earlier runs read for other test periods
-            stored_windows = None if manifest.windows is None else RunWindows.from_dict(manifest.windows)
-        matching_lists = None
-        if plan is not None and plan.uses_matching:
-            matching_lists = self._matching_lists(plan)
-            absent = {(period, first_day.toordinal() + day) for period, day in absent_slots}
-            counts = self._matching_day_counts(plan, target, absent)
-            warn_about_thin(
-                training_day_rows(self.name, self._matching_uses(plan, counts), matching_lists), stacklevel=2
-            )
-        pending = store.get_missing(all_tasks) if store else all_tasks
-        unpublished = self._unpublished(data, rules, freq, expanded, plan, test_days, run_days, pending)
-
-        skipped: Counter = Counter()
-        window_skipped: Dict[str, Counter] = {} if windows is None else {name: Counter() for name, _ in windows.periods}
-        skip_examples: Dict[str, str] = {}
-        tasks = []
-        for task in pending:
-            if (task[0], task[2]) in absent_slots:
-                skipped[SKIP_MISSING_TEST_ROW] += 1
-                if window_days is not None:
-                    window_skipped[window_days[task[2]][0]][SKIP_MISSING_TEST_ROW] += 1
-                skip_examples.setdefault(SKIP_MISSING_TEST_ROW, f"period {task[0]} on {test_days[task[2]]}")
-            elif task in unpublished:
-                skipped[SKIP_NOT_PUBLISHED] += 1
-                if window_days is not None:
-                    window_skipped[window_days[task[2]][0]][SKIP_NOT_PUBLISHED] += 1
-                skip_examples.setdefault(
-                    SKIP_NOT_PUBLISHED, f"period {task[0]}, horizon {task[1]}, run date {test_days[task[2]]}"
-                )
-            else:
-                tasks.append(task)
-
-        in_memory = None if save_to else []
+        # Held until the run is over, manifest included: a second writer of these results raises (`ResultStore`).
+        store = ResultStore(save_to, test_start=test_start, lock=True) if save_to else None
         try:
-            if tasks:
-                self._run_tasks(
-                    tasks,
-                    horizons,
-                    test_start,
-                    n_days,
-                    store,
-                    in_memory,
-                    skipped,
-                    skip_examples,
-                    plan,
-                    masks,
-                    window_days,
-                    window_skipped,
-                    run_positions,
-                    None if weekdays is None else [test_days[day] for day in run_days],
-                )
-        finally:
-            if store:
-                store.flush()
-            self._cleanup()
-        if store:  # not after a crash: what it skipped so far is no count of anything
-            record_skips(manifest_path(store.path), manifest, {TEST: skipped} if windows is None else window_skipped)
-
-        if not pending:
-            print(f"All {len(all_tasks)} tasks completed")
-        produced = len(all_tasks) - len(store.get_missing(all_tasks)) if store else len(in_memory)
-        self._report_counts(len(all_tasks), produced, skipped, skip_examples)
-
-        ref = ModelResultRef(
-            name=self.name,
-            path=store.path if store else None,
-            count=len(all_tasks),
-            test_start=test_start,
-            test_end=test_end,
-            horizon=horizon,
-            freq=self._freq,
-            _results=in_memory,
-            produced=produced,
-            skipped=dict(skipped),
-            predictor_lists=None if plan is None else plan.describe(),
-            availability_listing=listing,
-            windows=windows,
-            matching_lists=matching_lists,
-            zone=data.index.tz,
-            horizons=None if every_horizon(horizon, horizons) else horizons,
-            issue_days=weekdays,
-            vintages=vintages,
-        )
-        if store:
-            warn_off_the_clock({self.name: ref}, stacklevel=2)
-        if windows is not None:
-            ref.by_window = split_by_window(
-                ref,
-                windows,
-                calendar,
-                skipped=window_skipped,
-                predictor_lists=None if plan is None else self._window_lists(plan, windows),
-                listings=window_listings,
-                target_before=(stored_windows or windows).target_before,
-            )
-            empty = [name for name, part in ref.by_window.items() if part.produced == 0]
-            if empty:
+            if store and data.index.tz is not None and zone_name(data.index.tz) is None:
                 warnings.warn(
-                    f"{self.name}: no forecasts in the {' and '.join(empty)} window of this run. See forecast_counts().",
+                    f"{self.name}: the data's time zone {data.index.tz!r} has no name that reads back, so a report() from the files in "
+                    f"{store.path.parent} won't know which periods a date has on the clock: it plans every period of every day and "
+                    "judges a whole day by its records. Give the index a named zone, such as tz_convert('Europe/Warsaw').",
                     UserWarning,
                     stacklevel=2,
                 )
-        return ref
+            if store:
+                frame_hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
+                manifest = build_manifest(
+                    model=self,
+                    data=data,
+                    used_columns=used_columns,
+                    expanded=expanded,
+                    target=target,
+                    horizon=horizon,
+                    horizons=horizons,
+                    freq=freq,
+                    test_start=test_start,
+                    test_end=test_end,
+                    information_set=information_set,
+                    predictor_function=None if plan is None else plan.function_record(),
+                    predictor_lists=None if plan is None else plan.manifest_lists(masks if windows else {TEST: masks}),
+                    availability=self._manifest_availability(information_set, availability, listing, window_listings),
+                    windows=windows,
+                    binary_masks=self._fixed_mask_digests(plan, windows, masks, horizons),
+                    read_columns=() if plan is None else sorted(plan.queried),
+                    frame_hashes=frame_hashes,
+                    training_cut=self._training_cut(rules, target, freq),
+                    issue_days=weekdays,
+                    vintages=vintages,
+                    kernels=kernels,
+                )
+
+                def check_stored():
+                    check_stored_lists(
+                        manifest_path(store.path),
+                        manifest,
+                        store.iter_lines(
+                            cols=[
+                                "hour",
+                                "horizon",
+                                "run_date",
+                                "predictor_list",
+                                "matching_days",
+                                "window",
+                                "actual",
+                                "refit_anchor",
+                            ]
+                        ),
+                        self._stored_forecast_lookup(plan, masks, windows, weekdays),
+                        allow_mismatch=allow_manifest_mismatch,
+                        model_name=self.name,
+                        stored_actual=None if windows is None else self._stored_actual_lookup(first_day),
+                    )
+
+                if plan is not None and windows is None:
+                    check_stored()
+                check_and_write(
+                    manifest_path(store.path),
+                    manifest,
+                    has_existing_results=store.has_results(),
+                    allow_mismatch=allow_manifest_mismatch,
+                    require_manifest=require_manifest,
+                    model_name=self.name,
+                    frame_hashes=frame_hashes,
+                    # A plain run of fixed lists has nothing per record to compare, except a refit's anchors.
+                    check_stored=check_stored
+                    if windows is not None or (plan is None and self.refit is not None)
+                    else None,
+                )
+                if availability != "none" and manifest.availability is not None:
+                    listing = manifest.availability["listing"]  # with what earlier runs listed for other test periods
+                    window_listings = manifest.availability.get("windows", window_listings)
+                vintages = manifest.vintages  # with what earlier runs read for other test periods
+                stored_windows = None if manifest.windows is None else RunWindows.from_dict(manifest.windows)
+            matching_lists = None
+            if plan is not None and plan.uses_matching:
+                matching_lists = self._matching_lists(plan)
+                absent = {(period, first_day.toordinal() + day) for period, day in absent_slots}
+                counts = self._matching_day_counts(plan, target, absent)
+                warn_about_thin(
+                    training_day_rows(self.name, self._matching_uses(plan, counts), matching_lists), stacklevel=2
+                )
+            pending = store.get_missing(all_tasks) if store else all_tasks
+            unpublished = self._unpublished(data, rules, freq, expanded, plan, test_days, run_days, pending)
+
+            skipped: Counter = Counter()
+            window_skipped: Dict[str, Counter] = (
+                {} if windows is None else {name: Counter() for name, _ in windows.periods}
+            )
+            skip_examples: Dict[str, str] = {}
+            save_skip = self._skip_writer(store, first_day, run_positions, plan, expanded)
+            tasks = []
+            for task in pending:
+                if (task[0], task[2]) in absent_slots:
+                    skipped[SKIP_MISSING_TEST_ROW] += 1
+                    if window_days is not None:
+                        window_skipped[window_days[task[2]][0]][SKIP_MISSING_TEST_ROW] += 1
+                    skip_examples.setdefault(SKIP_MISSING_TEST_ROW, f"period {task[0]} on {test_days[task[2]]}")
+                    if save_skip:
+                        save_skip(task, SKIP_MISSING_TEST_ROW)
+                elif task in unpublished:
+                    skipped[SKIP_NOT_PUBLISHED] += 1
+                    if window_days is not None:
+                        window_skipped[window_days[task[2]][0]][SKIP_NOT_PUBLISHED] += 1
+                    skip_examples.setdefault(
+                        SKIP_NOT_PUBLISHED, f"period {task[0]}, horizon {task[1]}, run date {test_days[task[2]]}"
+                    )
+                    if save_skip:
+                        save_skip(task, SKIP_NOT_PUBLISHED)
+                else:
+                    tasks.append(task)
+
+            in_memory = None if save_to else []
+            try:
+                if tasks:
+                    self._run_tasks(
+                        tasks,
+                        horizons,
+                        test_start,
+                        n_days,
+                        store,
+                        in_memory,
+                        skipped,
+                        skip_examples,
+                        plan,
+                        masks,
+                        window_days,
+                        window_skipped,
+                        run_positions,
+                        None if weekdays is None else [test_days[day] for day in run_days],
+                        save_skip,
+                    )
+            finally:
+                if store:
+                    store.flush()
+                self._cleanup()
+            if store:  # not after a crash: what it skipped so far is no count of anything
+                record_skips(
+                    manifest_path(store.path), manifest, {TEST: skipped} if windows is None else window_skipped
+                )
+
+            if not pending:
+                print(f"All {len(all_tasks)} tasks completed")
+            produced = len(all_tasks) - len(store.get_missing(all_tasks)) if store else len(in_memory)
+            self._report_counts(len(all_tasks), produced, skipped, skip_examples)
+
+            ref = ModelResultRef(
+                name=self.name,
+                path=store.path if store else None,
+                count=len(all_tasks),
+                test_start=test_start,
+                test_end=test_end,
+                horizon=horizon,
+                freq=self._freq,
+                _results=in_memory,
+                produced=produced,
+                skipped=dict(skipped),
+                predictor_lists=None if plan is None else plan.describe(),
+                availability_listing=listing,
+                windows=windows,
+                matching_lists=matching_lists,
+                zone=data.index.tz,
+                horizons=None if every_horizon(horizon, horizons) else horizons,
+                issue_days=weekdays,
+                vintages=vintages,
+            )
+            if store:
+                warn_off_the_clock({self.name: ref}, stacklevel=2)
+            if windows is not None:
+                ref.by_window = split_by_window(
+                    ref,
+                    windows,
+                    calendar,
+                    skipped=window_skipped,
+                    predictor_lists=None if plan is None else self._window_lists(plan, windows),
+                    listings=window_listings,
+                    target_before=(stored_windows or windows).target_before,
+                )
+                empty = [name for name, part in ref.by_window.items() if part.produced == 0]
+                if empty:
+                    warnings.warn(
+                        f"{self.name}: no forecasts in the {' and '.join(empty)} window of this run. See forecast_counts().",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+            return ref
+        finally:
+            if store:
+                store.close()
 
     def _cut_rules(
         self, information_set: Optional["InformationSet"], cut_rules: Optional["InformationSet"]
@@ -956,6 +975,7 @@ class BaseModel(ABC):
         window_skipped=None,
         run_positions=None,
         newest_days=None,
+        save_skip=None,
     ) -> None:
         # Targets for every horizon from 1 to the largest, whatever is planned: the worker reads the column of `hz - 1`.
         hour_arrays = self._build_hour_arrays(max(horizons))
@@ -1003,6 +1023,9 @@ class BaseModel(ABC):
                     "first_ordinal": self._first_ordinal,
                     "ids": plan.matching_ids,
                 }
+        else:
+            # Each record's `list_hash`: the hash a predictor function returning the (period, horizon)'s list gets.
+            config["fixed_list_hashes"] = {key: list_hash(names) for key, names in expanded_preds.items()}
         if run_positions is not None:
             config["run_days"] = run_positions
         if self._fits_nothing:
@@ -1066,7 +1089,50 @@ class BaseModel(ABC):
                             window_skipped[window_days[day][0]][reason] += 1
                         where = f"period {hour}, horizon {hz}, run date {first_day + datetime.timedelta(days=day)}"
                         skip_examples.setdefault(reason, f"{where}: {detail}" if detail else where)
+                        if save_skip:
+                            save_skip((hour, hz, day), outcome)
                     progress.advance(task_id, len({t[2] for t in tasks_by_day[job]}))
+
+    def _skip_writer(
+        self,
+        store: Optional[ResultStore],
+        first_day: datetime.date,
+        run_positions: Optional[Dict[int, tuple]],
+        plan: Optional[PredictorPlan],
+        expanded: Dict[Tuple[int, int], List[str]],
+    ) -> Optional[Callable[[tuple, str], None]]:
+        """What writes the skip record of a task (`_worker.skip_record`) into `store`, from the task and its skip reason (with its
+        detail after ": "); None without a store. A task's window, day and list are read as the worker reads them
+        (`run_positions`, the plan's assignment, or a fixed list's hash), its `actual` from the row it would have been issued from
+        (null without one), and its `refit_anchor` is the block's anchor with `refit`, as its forecast's record has it, else its
+        run date. Records held in memory get none: they are the forecasts alone."""
+        if store is None:
+            return None
+        fixed = None if plan is not None else {key: list_hash(names) for key, names in expanded.items()}
+        block = self._refit_block
+        targets: Dict[Tuple[int, int], np.ndarray] = {}
+
+        def save_skip(task: tuple, outcome: str) -> None:
+            hour, hz, day = task
+            window, day_in_window, position = (None, day, day) if run_positions is None else run_positions[day]
+            run_date = first_day + datetime.timedelta(days=day)
+            row = issue_row(self._hour_days[hour], self._offset + day)
+            actual = None
+            if row is not None:
+                column = targets.get((hour, hz))
+                if column is None:  # as the worker reads it: the period's frame's target column, as float64
+                    column = self._hour_data[hour][f"{self._target}_d+{hz}"].to_numpy(dtype=np.float64)
+                    targets[(hour, hz)] = column
+                actual = float(column[row])
+            hashed = fixed[(hour, hz)] if plan is None else plan.hashes[int(plan.assignment[(hour, hz)][position])]
+            anchor = run_date if block is None else refit_anchor(run_date, block)
+            store.save_skip(
+                skip_record(
+                    run_date, hour, hz, day_in_window, actual, self._freq, window, outcome, hashed, anchor.isoformat()
+                )
+            )
+
+        return save_skip
 
     def _report_counts(self, planned: int, produced: int, skipped: Counter, examples: Dict[str, str]) -> None:
         """Make a shortfall of forecasts loud: a warning with the reasons, an error if nothing was produced."""

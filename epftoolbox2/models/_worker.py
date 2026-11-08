@@ -9,6 +9,7 @@ import traceback
 import numpy as np
 from threadpoolctl import ThreadpoolController
 
+from ..results.store import with_status
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
 from ._calendar import FitUnit, member_window, refit_anchor, training_span
@@ -219,9 +220,25 @@ def _fit_one_numpy(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
     record.update(extra)
     if window is not None:
         record["window"] = window
+    # Each forecast is its own fit: its anchor is its issue day.
+    with_status(record, list_hash=_list_hash_of(cfg, hour, hz, list_id), refit_anchor=record["run_date"])
     if members is not None:
         return _combined(record, [prediction for prediction, _, _ in outcomes])
     return record
+
+
+def _list_hash_of(cfg: Dict, hour: int, hz: int, list_id: Optional[int]) -> str:
+    """The `list_hash` of a record: a predictor function's list's (`config["list_hashes"]`, what `predictor_list` holds), or a
+    fixed list's of its (period, horizon), the hash a function returning that list gets (`config["fixed_list_hashes"]`, or from
+    the list itself for a worker set up without them)."""
+    if list_id is not None:
+        return cfg["list_hashes"][list_id]
+    fixed = cfg.get("fixed_list_hashes")
+    if fixed is None:
+        from .context import list_hash  # it imports this module
+
+        return list_hash(_W_EXPANDED_PREDS[(hour, hz)])
+    return fixed[(hour, hz)]
 
 
 def _fit_member(
@@ -363,7 +380,41 @@ def _row_value(hour: int, hz: int, day_in_test: int) -> Union[Dict, str]:
         record["predictor_list"] = cfg["list_hashes"][list_id]
     if window is not None:
         record["window"] = window
-    return record
+    return with_status(record, list_hash=_list_hash_of(cfg, hour, hz, list_id), refit_anchor=record["run_date"])
+
+
+def skip_record(
+    run_date: datetime.date,
+    hour: int,
+    hz: int,
+    day_in_test: int,
+    actual: Optional[float],
+    freq: str,
+    window: Optional[str],
+    outcome: str,
+    list_hash: str,
+    refit_anchor: str,
+) -> Dict:
+    """The record of a key that has no forecast (a skip record): the key fields a forecast's record has, in its order,
+    `prediction` null, `actual` the issue row's target (null without the row), `coefficients` empty, then the skip reason as
+    `status`, the forecast's `list_hash` and `refit_anchor`, `revision`, and `detail`, the text after the reason's ": " (such as
+    "window 56"), when there is one. `BaseModel.run` writes them, for skips decided in the parent and in a worker alike."""
+    status, _, detail = outcome.partition(": ")
+    record = {
+        "run_date": run_date.isoformat(),
+        "target_date": (run_date + datetime.timedelta(days=hz)).isoformat(),
+        "run_weekday": run_date.weekday(),
+        "hour": hour,
+        "horizon": hz,
+        "day_in_test": day_in_test,
+        "prediction": None,
+        "actual": actual,
+        "coefficients": [],
+        "freq": freq,
+    }
+    if window is not None:
+        record["window"] = window
+    return with_status(record, status, list_hash, refit_anchor, detail or None)
 
 
 def _run_task(task: tuple) -> Union[Dict, str]:
@@ -543,7 +594,7 @@ def _fit_unit(unit: FitUnit, tasks: List[tuple]) -> List[Tuple[tuple, Union[Dict
             record["matching_days"] = matching_days
         if window is not None:
             record["window"] = window
-        outcomes.append((task, record))
+        outcomes.append((task, with_status(record, list_hash=_list_hash_of(cfg, hour, hz, unit.list_id))))
     return outcomes
 
 

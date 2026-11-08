@@ -396,7 +396,7 @@ def test_a_fixed_list_s_column_that_starts_on_the_third_day_is_scaled_from_there
 
 def stored(path):
     with open(path) as lines:
-        return by_key(json.loads(line) for line in lines if line.strip())
+        return by_key(r for r in map(json.loads, filter(str.strip, lines)) if r["status"] == "ok")  # not skip records
 
 
 def cut_short(path, before="2023-03-08"):

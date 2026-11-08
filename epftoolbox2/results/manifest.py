@@ -99,6 +99,7 @@ from .._date_utils import zone_name
 from ..models._calendar import issue_day_names, mask_members, resolve_issue_days
 from ..logging import get_logger
 from .availability import LISTING_TIMES, merge_listings
+from .store import RECORD_SCHEMA
 from .vintages import merge_vintages
 from .windows import TEST, RunWindows, mask_key
 
@@ -114,7 +115,9 @@ ENSEMBLE_KIND = "ensemble"
 
 # Who wrote a manifest and when, which says nothing about the results it describes. `kernels` is the backend of the LEAR
 # kernels (`models._lars._kernels`), or the backends, whose two agree within 1e-9, not to the bit: a mixed file warns on resume.
-_PROVENANCE_FIELDS = ("package_version", "git_sha", "created_at", "updated_at", "kernels")
+# `record_schema` is the version of the records the writing run appended (`results.store.RECORD_SCHEMA`): 2 from D4's keys on,
+# absent before them; a file can mix them, and reads as one.
+_PROVENANCE_FIELDS = ("package_version", "git_sha", "created_at", "updated_at", "kernels", "record_schema")
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -231,6 +234,9 @@ class Manifest:
     # a resume ran on another; None (and no key) for a model without them. Provenance: never compared, and a resume warns while
     # the file holds forecasts of another backend than its own.
     kernels: Optional[Union[str, List[str]]] = None
+    # The record schema of the records the last run wrote (`results.store.RECORD_SCHEMA`); None (and no key) before it.
+    # Provenance: never compared.
+    record_schema: Optional[int] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -272,6 +278,8 @@ class Manifest:
             del out["vintages"]
         if out["kernels"] is None:  # a model that fits with no LEAR kernel
             del out["kernels"]
+        if out["record_schema"] is None:  # written before record schemas
+            del out["record_schema"]
         return out
 
     @classmethod
@@ -492,6 +500,7 @@ def build_manifest(
         issue_days=issue_day_names(issue_days),
         vintages=vintages,
         kernels=kernels,
+        record_schema=RECORD_SCHEMA,
     )
 
 

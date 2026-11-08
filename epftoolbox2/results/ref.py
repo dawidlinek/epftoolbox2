@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-import json
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 import warnings
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
+from .store import OK_ONLY, STATUS_OK, iter_file_records, read_records
 from .windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
+
+# What `_on_the_clock` reads of a record.
+_CLOCK_FIELDS = ("hour", "run_date", "target_date", "freq")
 
 
 @dataclass
@@ -75,7 +78,8 @@ class ModelResultRef:
     vintages: Optional[List[Dict]] = None
 
     def iter_records(self, cols: Optional[List[str]] = None) -> Iterator[Dict]:
-        """The records of this ref, wherever they live.
+        """The forecasts of this ref, wherever they live: records with `status` "ok" or without one, a skip record never, and from
+        a file one per key (`results.store.read_records`: the highest revision, the first forecast).
 
         A resumed JSONL can hold rows from an earlier run with a wider or different test window (its rows are never
         deleted), and a run with validation holds both windows, so each ref keeps to its own. Refs built from plain result
@@ -85,13 +89,21 @@ class ModelResultRef:
         holds the old count in the file. A record of a slot the clock doesn't have is left out, and so is one of a horizon
         `horizons` doesn't list or issued on a weekday `issue_days` doesn't list (see the class docstring).
         """
-        on_the_clock = self._on_the_clock()
-        return (read for read, r in self._records(cols) if on_the_clock is None or on_the_clock(r))
+        return (read for read, _ in self._records(cols, clock=self._on_the_clock()))
 
     def off_the_clock(self) -> int:
-        """How many records of this ref are of a slot the clock doesn't have, which `iter_records` leaves out."""
+        """How many records of this ref are of a slot the clock doesn't have, which `iter_records` leaves out. Reads what the
+        clock needs of each record, never its coefficients."""
         on_the_clock = self._on_the_clock()
-        return 0 if on_the_clock is None else sum(1 for r, _ in self._records(None) if not on_the_clock(r))
+        if on_the_clock is None:
+            return 0
+        return sum(1 for r, _ in self._records(list(_CLOCK_FIELDS)) if not on_the_clock(r))
+
+    def first_record(self, cols: Optional[List[str]] = None) -> Optional[Dict]:
+        """The first forecast of this ref in file order, as `iter_records` reads it, without reading the rest of the file: for
+        what every record of a file shares, such as `freq`. None if it has none."""
+        read = next(self._records(cols, clock=self._on_the_clock(), first=True), None)
+        return None if read is None else read[0]
 
     def _on_the_clock(self) -> Optional[Callable[[Dict], bool]]:
         if self.zone is None:
@@ -109,8 +121,18 @@ class ModelResultRef:
 
         return on_the_clock
 
-    def _records(self, cols: Optional[List[str]]) -> Iterator[Tuple[Dict, Dict]]:
-        """(the record as read, the whole record) of each record of this ref's dates and window."""
+    def _records(
+        self,
+        cols: Optional[List[str]],
+        statuses: Optional[Iterable[str]] = OK_ONLY,
+        clock: Optional[Callable[[Dict], bool]] = None,
+        first: bool = False,
+    ) -> Iterator[Tuple[Dict, Dict]]:
+        """(the record as read, the whole record; the record as read again when `cols` are given) of each record of this ref's
+        dates and window, and on the clock if `clock` (`_on_the_clock`) is given: a file's forecasts (`read_records`: one record a
+        key, the highest revision, the first forecast; status "ok", or none) unless told other `statuses` (None for every key's),
+        and the forecasts of results held in memory as they are. `first` reads a file's lines in order without the per-key rule, for
+        a caller that stops at the first (`first_record`)."""
         filter_dates = bool(self.test_start and self.test_end)
         window_start = date.fromisoformat(self.test_start) if self.window is not None and self.test_start else None
         horizons = None if self.horizons is None else frozenset(self.horizons)
@@ -130,17 +152,28 @@ class ModelResultRef:
         if self.path is not None:
             path = Path(self.path)
             if path.exists():
-                with open(path) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            r = json.loads(line)
-                            if keep(r):
-                                yield self._as_read(r, cols, window_start), r
+
+                def read(r: Dict) -> Optional[Tuple[Dict, Dict]]:
+                    if not keep(r) or (clock is not None and not clock(r)):
+                        return None
+                    as_read = self._as_read(r, cols, window_start)
+                    return as_read, (r if cols is None else as_read)  # a file's whole records aren't held
+
+                if not first:
+                    yield from read_records(path, statuses, read)
+                    return
+                wanted = None if statuses is None else frozenset(statuses)
+                for r in iter_file_records(path):
+                    if wanted is None or r.get("status", STATUS_OK) in wanted:
+                        out = read(r)
+                        if out is not None:
+                            yield out
         else:
+            wanted = None if statuses is None else frozenset(statuses)
             for r in self._results or []:
-                if keep(r):
-                    yield self._as_read(r, cols, window_start), r
+                if (wanted is None or r.get("status", STATUS_OK) in wanted) and keep(r):
+                    if clock is None or clock(r):
+                        yield self._as_read(r, cols, window_start), r
 
     @staticmethod
     def _as_read(r: Dict, cols: Optional[List[str]], window_start: Optional[date]) -> Dict:

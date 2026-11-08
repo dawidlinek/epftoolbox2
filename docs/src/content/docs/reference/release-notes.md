@@ -9,6 +9,24 @@ Notes for changes that need something from you. The full list of changes of a re
 
 ### Breaking changes
 
+- **A results file holds skip records, and every record ends with `status`, `list_hash`, `refit_anchor` and `revision`.** A key a
+  run can't forecast is now a line too, with its reason as `status` (`"missing_test_predictors"`, `"not_published"`, ...), `prediction`
+  null, the `actual` of its issue row and `detail` where the reason has one; a forecast has `status` `"ok"`, the hash of its predictor
+  list (fixed lists too), the date of its fit (its run date without `refit`) and `revision` 1, after the keys it had, which keep their
+  order and values. A script that reads the JSONL lines itself must keep the records with `status` `"ok"` or none.
+  - **Nothing the library reads moves.** Tables, `forecast_counts()`, ensembles, exporters and resuming read the forecasts alone, so
+    their numbers are bit for bit as before, and files written before resume and report as they did. A skipped key is tried again by
+    every run, as before, and gets a new skip record only when its reason changed. Records held in memory are the forecasts alone.
+    Manifests add `record_schema: 2`, provenance like `git_sha`, never compared. About 90 bytes more per record (60 with `refit`).
+  - **One forecast per key.** A forecast repeated in a file with the same numbers is read once, with a warning, where a table used to
+    count it twice; a key with two different forecasts raises `ValueError` naming the file and a key, in every table, ensemble and
+    resume. The highest `revision` of a key wins, and a run writes at it.
+  - **A half-written last line no longer stops a resume.** Reading skips it with a warning, and the next run cuts it off (a warning
+    names its bytes) before appending; a damaged line before the last raises `ValueError` with its number.
+  - **One writer per results file.** A run holds `<model>.lock` next to `<model>.jsonl` while it writes, and a second run into the
+    same model's results raises `ResultsLockedError` naming it; where the file system refuses locks (an NFS mount without a lock
+    daemon, say) the run warns and goes on, whatever the installed filelock.
+  See [Incremental Training](/epftoolbox2/model-pipeline/caching/#results-file-format).
 - **The week-ahead load forecast's rule follows each market's own week.** The built-in rule of `load_forecast_daily_min`/`_max`
   (ENTSO-E A31) read the delivery week in Brussels dates, while A31 holds one value per local date of each market's Monday-to-Sunday
   week. It is now `Availability.weekly("friday", "10:00", week_zone="data")`: the week of the data's local dates, published on

@@ -3,7 +3,6 @@ from typing import Callable, List, Optional, Sequence, Tuple, Union, Dict, Any
 from pathlib import Path
 import copy
 import importlib
-import json
 import warnings
 import pandas as pd
 import yaml
@@ -46,6 +45,7 @@ from ..results.manifest import (
 from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
+from ..results.store import read_records
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
 from ..results.vintages import read_vintages
 from ..verification import VerifyReport, sample_issue_days, verify_model
@@ -404,8 +404,7 @@ class ModelPipeline:
         """The freq the records of results with no manifest carry, or None if they carry none; records of several raise."""
         if not path.exists():
             return None
-        with open(path) as lines:
-            freqs = {json.loads(line).get("freq") for line in lines if line.strip()} - {None}
+        freqs = {r.get("freq") for r in read_records(path, statuses=None)} - {None}  # a half-written last line warns
         if len(freqs) > 1:
             raise ValueError(
                 f"The results of {name!r} in {path} hold records of several frequencies ({sorted(freqs)}): their periods are "

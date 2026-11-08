@@ -62,7 +62,7 @@ def in_process(df):
 
 def from_cli(tmp_path):
     lines = (tmp_path / "out" / "ols.jsonl").read_text().splitlines()
-    return keyed(json.loads(line) for line in lines)
+    return keyed(r for r in map(json.loads, lines) if r["status"] == "ok")  # not the skip records
 
 
 def test_csv_round_trip_keeps_the_local_time_zone_and_exact_values(tmp_path, local_data):

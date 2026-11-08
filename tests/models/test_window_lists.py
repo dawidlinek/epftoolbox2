@@ -409,7 +409,9 @@ def test_a_predictor_function_s_members_are_its_single_window_models(tmp_path):
         OLSModel(function, training_window=member, name="m").run(data, "2023-03-24", "2023-03-29", horizon=2)._results
         for member in members
     ]
-    check_members([json.loads(line) for line in lines(path)], singles, members)
+    check_members(
+        [r for r in map(json.loads, lines(path)) if r["status"] == "ok"], singles, members
+    )  # not skip records
     assert listed.produced > 0
     manifest = json.loads(manifest_path(path).read_text())
     keys = {key for entry in manifest["predictor_lists"] for key in entry["binary_masks"]}
