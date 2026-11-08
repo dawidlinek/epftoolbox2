@@ -1,3 +1,4 @@
+import re
 import time
 from email.utils import parsedate_to_datetime
 from typing import Dict, List, Optional
@@ -9,7 +10,7 @@ from epftoolbox2.logging import get_logger
 from .base import DataSource
 
 MARKET_ZONE = "Europe/Warsaw"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # The 15-minute tables stamp a row with the END of its period (`dtime` local, `dtime_utc` UTC; `period` and `period_utc`
 # give the start and the end). The index of the frame is the period START, like every other source. `pdgsz` is hourly
@@ -104,21 +105,23 @@ class PseSource(DataSource):
     - ``rce-pln``: ``rce_pln``, the market energy price (RCE) of the prosumer net-billing scheme in PLN/MWh. It is
       another series than the SDAC price (correlation 0.98, mean absolute difference 43 PLN/MWh in a comparison): do not use it
       as the day-ahead price.
-    - ``pdgsz``: ``usage_fcst``, PSE's recommended-usage code of each hour. The table keeps every version of an hour;
-      the source takes the **first** one, by its UTC publication stamp, because a later version may be written on the
-      delivery day.
+    - ``pdgsz``: ``usage_fcst``, PSE's recommended-usage code of each hour. The table keeps every version of an hour
+      with its UTC stamp; the source takes, per hour, the latest version stamped at or before ``pdgsz_cutoff`` on the
+      day before the delivery day (Warsaw time), and an hour with none is NaN. Until about spring 2025 the table holds
+      one version per hour, written on the delivery day itself, so those hours are all NaN under any cutoff on D-1.
     - ``przeplywy-mocy``: one column per cross-border section, ``flow_de_pl``, ``flow_pl_de``, ... (see
       ``FLOW_COLUMNS``).
 
     PSE's ``publication_ts`` is a stamp of the last write of a row, not of its first publication (rows reloaded in
-    bulk carry the reload time), so the source does not use it, except to order the versions of ``pdgsz``. What was
+    bulk carry the reload time), so the source does not use it, except for the versions of ``pdgsz``, which are
+    stamped one by one. What was
     known when is in the built-in rules of ``InformationSet`` (``source_rules``), see the documentation page.
 
     History starts in June 2024 for load, SDAC, RCE and generation, a month earlier or later for other tables; an
     earlier range returns no rows (a warning is logged), and rows PSE has not published yet are NaN.
 
     Example:
-        >>> source = PseSource(datasets=["kse-load", "csdac-pln"], prefix="pse")
+        >>> source = PseSource(datasets=["kse-load", "csdac-pln"])
         >>> df = source.fetch(pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2025-01-08", tz="UTC"))
         >>> # columns: pse_load_actual, pse_load_fcst, pse_csdac_pln
     """
@@ -136,18 +139,25 @@ class PseSource(DataSource):
         self,
         datasets: Optional[List[str]] = None,
         columns: Optional[List[str]] = None,
-        prefix: str = "",
+        prefix: str = "pse",
+        pdgsz_cutoff: str = "19:00",
     ):
         """
         Args:
             datasets: Datasets to load, from ``DATASET_COLUMNS`` (default: ``kse-load`` and ``csdac-pln``).
             columns: Columns to keep (default: every column of the datasets, for ``his-wlk-cal`` ``demand``,
                 ``wi``, ``pv`` and ``jg``). A column of a dataset that is not in ``datasets`` raises.
-            prefix: Prefix for the column names, ``{prefix}_{column}`` (default: none).
+            prefix: Prefix for the column names, ``{prefix}_{column}`` (default: ``"pse"``). Keep one: PSE's
+                ``load_actual`` and ``load_fcst`` would otherwise take the ENTSO-E rules of the same names outside a
+                ``Workflow``.
+            pdgsz_cutoff: ``"HH:MM"`` in Europe/Warsaw on the day before the delivery day: ``pdgsz`` keeps the latest
+                version of each hour stamped at or before it (default ``"19:00"``, after the latest first version
+                seen). The availability rule of ``usage_fcst`` is published at this time on D-1.
         """
         self.datasets = list(datasets) if datasets is not None else list(DEFAULT_DATASETS)
         self.columns = list(columns) if columns is not None else None
         self.prefix = prefix
+        self.pdgsz_cutoff = pdgsz_cutoff
 
         self.session = requests.Session()
         self.logger = get_logger(__name__)
@@ -163,6 +173,8 @@ class PseSource(DataSource):
     def _validate_config(self) -> bool:
         if not self.datasets:
             raise ValueError("PseSource needs at least one dataset")
+        if not isinstance(self.pdgsz_cutoff, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", self.pdgsz_cutoff):
+            raise ValueError(f"pdgsz_cutoff must be a time 'HH:MM', got {self.pdgsz_cutoff!r}")
         unknown = [d for d in self.datasets if d not in DATASET_COLUMNS]
         if unknown:
             raise ValueError(f"Unknown PSE dataset(s) {unknown}. Available: {sorted(DATASET_COLUMNS)}")
@@ -201,6 +213,7 @@ class PseSource(DataSource):
             "datasets": list(self.datasets),
             "columns": [c for d in self.datasets for c in self._columns_of(d)],
             "prefix": self.prefix,
+            "pdgsz_cutoff": self.pdgsz_cutoff,
             "schema_version": SCHEMA_VERSION,
         }
 
@@ -349,14 +362,25 @@ class PseSource(DataSource):
         return self._finish("przeplywy-mocy", wide, [self._named(c) for c in columns])
 
     def _parse_hourly(self, dataset: str, df: pd.DataFrame, instants: pd.Series, columns: List[str]) -> pd.DataFrame:
-        """pdgsz: one row per hour and version. Keep each hour's first version (by its UTC publication stamp) and
-        repeat the hour over its four quarter-hours."""
-        for field in ("publication_ts_utc", *columns):
+        """pdgsz: one row per hour and version. Per hour keep the latest version stamped (UTC) at or before `pdgsz_cutoff`
+        on the day before its business date, in Warsaw time; an hour with none is NaN. Each hour is repeated over its
+        four quarter-hours."""
+        for field in ("publication_ts_utc", "business_date", *columns):
             if field not in df.columns:
                 raise PseApiError(f"PSE [{dataset}]: field {field!r} missing: {sorted(df.columns)}")
-        df = df.assign(hour=instants, stamp=pd.to_datetime(df["publication_ts_utc"], utc=True, format="mixed"))
-        first = df.sort_values(["hour", "stamp"], kind="stable").drop_duplicates("hour", keep="first")
-        hourly = first.set_index("hour")[columns].apply(pd.to_numeric, errors="coerce")
+        stamp = pd.to_datetime(df["publication_ts_utc"], utc=True, format="mixed")
+        days = pd.to_datetime(df["business_date"]) - pd.Timedelta(days=1)
+        # An ambiguous or skipped local time takes the earlier instant, the stricter cutoff.
+        cutoffs = {
+            day: (day + pd.Timedelta(hours=int(self.pdgsz_cutoff[:2]), minutes=int(self.pdgsz_cutoff[3:])))
+            .tz_localize(MARKET_ZONE, ambiguous=True, nonexistent="shift_backward")
+            .tz_convert("UTC")
+            for day in days.unique()
+        }
+        df = df.assign(hour=instants, stamp=stamp, ok=stamp <= days.map(cutoffs))
+        hours = pd.Index(sorted(df["hour"].unique()), name="hour")
+        known = df[df["ok"]].sort_values(["hour", "stamp"], kind="stable").drop_duplicates("hour", keep="last")
+        hourly = known.set_index("hour")[columns].apply(pd.to_numeric, errors="coerce").reindex(hours)
         quarters = [hourly.set_axis(hourly.index + k * QUARTER) for k in range(4)]
         return self._finish(dataset, pd.concat(quarters), [self._named(c) for c in columns])
 

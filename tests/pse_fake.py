@@ -81,8 +81,19 @@ def quarter_rows(slug: str, day: str, series: Optional[pd.DataFrame] = None) -> 
     return rows
 
 
-def pdgsz_rows(day: str, versions=(("2026-03-27 15:35:48.250", 1), ("2026-03-28 18:49:24.203", 2))) -> list:
-    """Hourly rows with one row per version, listed newest version first. A version's `usage_fcst` is its number."""
+def day_before(day: str) -> str:
+    return (pd.Timestamp(day) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def pdgsz_rows(day: str, versions=None) -> list:
+    """Hourly rows with one row per version, listed newest version first. A version's `usage_fcst` is its number and
+    `versions` are (local stamp, number); the default has two versions on D-1 (15:40, 18:30) and one on D (08:00)."""
+    if versions is None:
+        versions = (
+            (f"{day_before(day)} 15:40:00.000", 1),
+            (f"{day_before(day)} 18:30:00.000", 2),
+            (f"{day} 08:00:00.000", 3),
+        )
     rows = []
     for start in local_day_starts(day, "1h"):
         for written, number in versions:
@@ -105,9 +116,9 @@ def pdgsz_rows(day: str, versions=(("2026-03-27 15:35:48.250", 1), ("2026-03-28 
     return rows
 
 
-def table(slug: str, days, series: Optional[pd.DataFrame] = None) -> list:
+def table(slug: str, days, series: Optional[pd.DataFrame] = None, versions=None) -> list:
     if slug == "pdgsz":
-        return [row for day in days for row in pdgsz_rows(day)]
+        return [row for day in days for row in pdgsz_rows(day, versions)]
     return [row for day in days for row in quarter_rows(slug, day, series)]
 
 
@@ -149,6 +160,7 @@ def answer(body=None, status=200, headers=None, text=""):
 
 
 def make_source(tables, dataset_names, monkeypatch=None, **kwargs):
+    kwargs.setdefault("prefix", "")  # the columns by PSE's names; the default prefix is tested on its own
     source = PseSource(datasets=dataset_names, **kwargs)
     source.session.get = FakeApi(tables)
     source.logger = Mock()

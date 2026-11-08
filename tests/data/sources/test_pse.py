@@ -23,7 +23,6 @@ from tests.pse_fake import (
     answer,
     local_day_starts,
     make_source,
-    pdgsz_rows,
     quarter_rows,
     signal,
     table,
@@ -293,50 +292,76 @@ def test_flows_become_one_column_per_section_and_unknown_sections_are_left_out_w
     assert "XX-PL" in source.logger.warning.call_args.args[0]
 
 
-def test_pdgsz_takes_the_first_version_of_each_hour_over_its_quarters():
-    """The table lists every version. The first one by its UTC stamp is what an issue before the later ones could see."""
-    tables = {"pdgsz": table("pdgsz", ["2026-06-10"])}
-    source = make_source(tables, ["pdgsz"])
+def pdgsz_source(day, versions, **kwargs):
+    return make_source({"pdgsz": table("pdgsz", [day], versions=versions)}, ["pdgsz"], **kwargs)
 
-    df = source.fetch(utc("2026-06-09 22:00"), utc("2026-06-10 22:00"))
 
-    assert list(df.columns) == ["usage_fcst"] and len(df) == 96
-    assert (df["usage_fcst"] == 1.0).all()  # version 1 was written 2026-03-27, version 2 on the 28th
+def day_range(day):
+    hours = local_day_starts(day, "1h")
+    return hours[0], hours[-1] + pd.Timedelta(hours=1)
+
+
+def test_pdgsz_takes_the_latest_version_stamped_by_the_cutoff_on_the_day_before():
+    """Versions 1 (D-1 15:40), 2 (D-1 17:00), 3 (D-1 18:30) and 4 (D 08:00, the active one): the cutoff picks neither the
+    first nor the active version but the last one stamped at or before it."""
+    versions = (
+        ("2026-06-09 15:40:00.000", 1),
+        ("2026-06-09 17:00:00.000", 2),
+        ("2026-06-09 18:30:00.000", 3),
+        ("2026-06-10 08:00:00.000", 4),
+    )
+    got = {}
+    for cutoff in ("15:00", "15:40", "16:59", "17:00", "19:00", "23:59"):
+        df = pdgsz_source("2026-06-10", versions, pdgsz_cutoff=cutoff).fetch(*day_range("2026-06-10"))
+        assert len(df) == 96  # every hour over its four quarters, with or without a value
+        got[cutoff] = set(df["usage_fcst"].dropna()), int(df["usage_fcst"].isna().sum())
+
+    assert got == {
+        "15:00": (set(), 96),  # nothing yet: NaN, not the first version
+        "15:40": ({1.0}, 0),  # the stamp itself is at the cutoff
+        "16:59": ({1.0}, 0),
+        "17:00": ({2.0}, 0),
+        "19:00": ({3.0}, 0),
+        "23:59": ({3.0}, 0),  # D-1 only: the version of D 08:00 is never read
+    }
+
+
+def test_a_version_stamped_one_second_after_the_cutoff_is_excluded():
+    versions = (
+        ("2026-06-09 18:00:00.000", 1),
+        ("2026-06-09 19:00:00.000", 2),
+        ("2026-06-09 19:00:01.000", 3),
+    )
+    df = pdgsz_source("2026-06-10", versions).fetch(*day_range("2026-06-10"))
+    assert set(df["usage_fcst"]) == {2.0}
+
+    early = pdgsz_source("2026-06-10", versions, pdgsz_cutoff="18:59").fetch(*day_range("2026-06-10"))
+    assert set(early["usage_fcst"]) == {1.0}
+
+
+def test_a_single_version_written_on_the_delivery_day_is_nan_under_any_cutoff_on_the_day_before():
+    """The 2024 to spring 2025 regime: one version per hour, stamped about 22:35 on the delivery day."""
+    versions = (("2025-01-15 22:35:00.000", 1),)
+    for cutoff in ("00:00", "19:00", "23:59"):
+        df = pdgsz_source("2025-01-15", versions, pdgsz_cutoff=cutoff).fetch(*day_range("2025-01-15"))
+        assert len(df) == 96 and df["usage_fcst"].isna().all()
 
 
 @pytest.mark.parametrize("day, quarters", [(SPRING, 92), (AUTUMN, 100)])
 def test_pdgsz_on_a_dst_day_has_23_or_25_hours_of_four_quarters(day, quarters):
-    source = make_source({"pdgsz": table("pdgsz", [day])}, ["pdgsz"])
-
-    start, end = local_day_starts(day, "1h")[0], local_day_starts(day, "1h")[-1] + pd.Timedelta(hours=1)
-    df = source.fetch(start, end)
+    """The default versions: two on D-1 (15:40, 18:30) and the active one on D at 08:00, so the cutoff 19:00 gives 2."""
+    df = pdgsz_source(day, None).fetch(*day_range(day))
 
     assert len(df) == quarters
     assert (np.diff(df.index.asi8) == pd.Timedelta(minutes=15).value).all()
-    assert df["usage_fcst"].notna().all()
+    assert (df["usage_fcst"] == 2.0).all()
 
 
-def test_pdgsz_orders_versions_by_utc_stamp_not_by_the_ambiguous_local_one():
-    """On 2026-10-25 02:30 happens twice. Version A is written at 02:30 CEST (00:30Z), B at 02:10 CET (01:10Z): by the local
-    strings B comes first, in elapsed time A does."""
-    row = pdgsz_rows(AUTUMN, versions=(("2026-10-24 10:00:00.000", 9),))[0]
-    a = {
-        **row,
-        "usage_fcst": 1,
-        "valid_from_ts": "2026-10-25 02:30:00.000",
-        "publication_ts_utc": "2026-10-25 00:30:00.000",
-    }
-    b = {
-        **row,
-        "usage_fcst": 2,
-        "valid_from_ts": "2026-10-25 02:10:00.000",
-        "publication_ts_utc": "2026-10-25 01:10:00.000",
-    }
-    source = make_source({"pdgsz": [b, a]}, ["pdgsz"])
-
-    df = source.fetch(utc("2026-10-24 22:00"), utc("2026-10-24 23:00"))
-
-    assert (df["usage_fcst"] == 1.0).all()
+def test_the_cutoff_is_read_in_warsaw_time_on_the_day_before_a_dst_day():
+    """D-1 of the spring switch day is 2026-03-28 (CET, UTC+1): 18:30 local is 17:30Z."""
+    versions = (("2026-03-28 18:30:00.000", 1), ("2026-03-28 19:30:00.000", 2))
+    df = pdgsz_source(SPRING, versions, pdgsz_cutoff="19:00").fetch(*day_range(SPRING))
+    assert set(df["usage_fcst"]) == {1.0}
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +383,25 @@ def test_pdgsz_orders_versions_by_utc_stamp_not_by_the_ambiguous_local_one():
 def test_invalid_configuration_raises(kwargs, message):
     with pytest.raises(ValueError, match=message):
         PseSource(**kwargs)
+
+
+@pytest.mark.parametrize("cutoff", ["19", "7:00", "24:00", "19:60", "", None, 19])
+def test_a_bad_pdgsz_cutoff_raises(cutoff):
+    with pytest.raises(ValueError, match="pdgsz_cutoff"):
+        PseSource(pdgsz_cutoff=cutoff)
+
+
+def test_the_cutoff_is_part_of_the_cache_key():
+    assert PseSource(pdgsz_cutoff="19:00").get_cache_config() != PseSource(pdgsz_cutoff="18:00").get_cache_config()
+    assert PseSource().get_cache_config()["pdgsz_cutoff"] == "19:00"
+
+
+def test_every_column_is_prefixed_by_default():
+    columns = [c for d in DATASET_COLUMNS for c in PseSource(datasets=[d]).output_columns()]
+    assert len(columns) == sum(len(v) for v in DATASET_COLUMNS.values()) - 13  # his-wlk-cal: 4 by default
+    assert all(c.startswith("pse_") for c in columns)
+    assert PseSource().output_columns() == ["pse_load_actual", "pse_load_fcst", "pse_csdac_pln"]
+    assert PseSource().prefix == "pse"
 
 
 def test_columns_prefix_and_the_default_datasets():
@@ -427,7 +471,7 @@ LIVE_DATASETS = ["kse-load", "his-wlk-cal", "csdac-pln", "rce-pln", "pdgsz", "pr
     [("2025-10-26", 100, "2025-10-25 22:00"), ("2026-03-29", 92, "2026-03-28 23:00")],
 )
 def test_live_dst_days_have_92_or_100_quarters_of_every_dataset(day, quarters, first_utc):
-    source = PseSource(datasets=LIVE_DATASETS)
+    source = PseSource(datasets=LIVE_DATASETS, prefix="")
     start = utc(first_utc)
 
     df = source.fetch(start, start + pd.Timedelta(minutes=15 * quarters))
@@ -443,7 +487,7 @@ def test_live_dst_days_have_92_or_100_quarters_of_every_dataset(day, quarters, f
 
 @pytest.mark.integration
 def test_live_the_index_is_the_start_of_the_period_pse_stamps_with_its_end():
-    source = PseSource(datasets=["csdac-pln"])
+    source = PseSource(datasets=["csdac-pln"], prefix="")
     raw = source._request_table("csdac-pln", pd.Timestamp("2026-03-29"), pd.Timestamp("2026-03-29"))
     first, last = raw[0], raw[-1]
 
@@ -458,7 +502,7 @@ def test_live_the_index_is_the_start_of_the_period_pse_stamps_with_its_end():
 
 @pytest.mark.integration
 def test_live_a_range_before_the_history_is_empty_and_a_year_pages_through_nextlink():
-    source = PseSource(datasets=["csdac-pln"])
+    source = PseSource(datasets=["csdac-pln"], prefix="")
 
     assert source.fetch(utc("2020-01-01"), utc("2020-01-03")).empty
     year = source.fetch(utc("2025-01-01"), utc("2026-01-01"))
