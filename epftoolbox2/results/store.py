@@ -495,6 +495,8 @@ class _Store:
         return (base + datetime.timedelta(days=day_in_test)).isoformat()
 
     def is_done(self, hour: int, horizon: int, day_in_test: int) -> bool:
+        """Whether the key's forecast is on file. A saved record counts once it is written, which the store's thread (or
+        `StoreWriter`) does a moment after `save()`: call `flush()` first to ask about what this store saved."""
         return (hour, horizon, self._run_date(day_in_test)) in self._completed
 
     def get_missing(self, all_tasks: List[tuple]) -> List[tuple]:
@@ -558,10 +560,18 @@ class _Store:
             release()
 
     def _raise_error(self) -> None:
-        """Raise what failed while this store's records were written in the background, once."""
-        error, self._error = self._error, None
-        if error is not None:
-            raise error
+        """Raise what failed while this store's records were written in the background, every time: a store stops writing
+        after its first failed write (it can have left half a line or half a catalog line, which nothing may be appended
+        after), so each later `save`, `flush` and `close` raises it, and what it hasn't written stays pending for the next
+        run, whose writer cuts the half-written tail before it appends."""
+        if self._error is not None:
+            raise self._error
+
+    def _failed(self, exc: BaseException) -> None:
+        """Stop writing: keep the first failure for `_raise_error`, and have the tail checked before any later append."""
+        with self._lock:
+            self._error = self._error or exc
+            self._tail_checked = False
 
     # What a format defines.
     def _repair_tail(self) -> None:  # pragma: no cover (abstract)
@@ -761,12 +771,15 @@ class ResultStore(_Store):
 
     def _write_or_keep_error(self, items: List[Dict]) -> None:
         """`_write_batch` on the store's own thread: what fails is kept for `flush()` to raise, and the records are lost (their
-        keys stay pending), so a failed write never passes for a written one."""
+        keys stay pending), so a failed write never passes for a written one. After a failure nothing more is written (a short
+        write leaves half a line, which a later batch would turn into a damaged middle line): the records queued meanwhile
+        stay pending too."""
+        if self._error is not None:
+            return
         try:
             self._write_batch(items)
         except BaseException as exc:
-            with self._lock:
-                self._error = self._error or exc
+            self._failed(exc)
 
 
 # How many files a `StoreWriter` has open at once, at most: a JSONL batch or a Parquet part is written with its file open and
@@ -919,17 +932,18 @@ class StoreWriter:
                     self._buffered_rows -= sum(item[1] for item in taken)
                 if not store._buffered():
                     self._dirty.pop(id(store), None)
-            if taken:
+            if taken and store._error is None:  # a store whose write failed writes nothing more (`_Store._failed`)
                 try:
                     store._write(taken)
                 except BaseException as exc:
                     self._fail(store, exc, now)
 
     def _fail(self, store: _Store, exc: BaseException, now: float) -> None:
-        """Keep `exc` for the store's next `save`, `flush` or `close` to raise, and drop what it still buffers: it is not
-        written, its keys stay pending, and it is not retried for ever. Called with the store's I/O lock held."""
+        """Keep `exc` for every later `save`, `flush` and `close` of the store to raise, and drop what it still buffers: it is
+        not written, its keys stay pending, and the store writes nothing more (a half-written line or catalog line stays last,
+        for the next writer to cut). Called with the store's I/O lock held."""
+        store._failed(exc)
         with self._cond:
-            store._error = store._error or exc
             dropped = store._take(now, True)
             if store.save_format == "parquet" and dropped:
                 self._buffered_rows -= sum(item[1] for item in dropped)

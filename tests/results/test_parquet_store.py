@@ -1190,6 +1190,116 @@ def test_a_jsonl_write_that_fails_is_raised_and_its_keys_stay_pending(tmp_path, 
         writer.close()
 
 
+def short_write_once(monkeypatch, fmt):
+    """The first write of a batch (JSONL) or of a catalog line (Parquet) is cut short by a full disk, leaving half a line;
+    every write after it succeeds (the space came back)."""
+    state = {"failed": False}
+    if fmt == "jsonl":
+        original = ResultStore._write_batch
+
+        def short_once(self, items):
+            if state["failed"]:
+                return original(self, items)
+            state["failed"] = True
+            if not self._tail_checked:
+                self._cut_tail()
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(items[0])[:40])
+            raise OSError(errno.ENOSPC, "No space left on device (injected)")
+
+        monkeypatch.setattr(ResultStore, "_write_batch", short_once)
+    else:
+        original = parquet_store._append_entry
+
+        def short_once(directory, entry):
+            if state["failed"]:
+                return original(directory, entry)
+            state["failed"] = True
+            with open(Path(directory) / CATALOG, "ab") as f:
+                f.write(parquet_store._catalog_line(entry)[:40])
+            raise OSError(errno.ENOSPC, "No space left on device (injected)")
+
+        monkeypatch.setattr(parquet_store, "_append_entry", short_once)
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+def test_a_store_stops_writing_after_a_short_write(tmp_path, monkeypatch, fmt):
+    """The review's `short_write.py`: after a write cut short, nothing more is glued onto the half line (that made a damaged
+    middle line, on which every read and resume raised): the store raises from then on, the file reads (the half line skipped
+    with a warning), every record committed before is reachable, and the next writer cuts the half line and writes the rest."""
+    monkeypatch.setenv("PARQUET_ROWS_PER_PART", "1")
+    path = tmp_path / f"m.{fmt}"
+    first = open_store(path, test_start="2024-01-01", lock=True)
+    for hour in range(3):
+        first.save(record(hour=hour, run_date="2024-01-01"))
+    first.close()
+    with monkeypatch.context() as patch:
+        short_write_once(patch, fmt)
+        store = (
+            ResultStore(path, test_start="2024-01-01", lock=True, batch_size=1)
+            if fmt == "jsonl"
+            else open_store(path, test_start="2024-01-01", lock=True)
+        )
+        later = [record(hour=hour, run_date="2024-01-02") for hour in range(3)]
+        with pytest.raises(OSError, match="injected"):
+            for r in later:  # a burst queued before the failure is seen
+                store.save(dict(r))
+            time.sleep(0.3)
+            store.save(record(hour=9, run_date="2024-01-02"))  # a failed store refuses what comes after
+        with pytest.raises(OSError, match="injected"):
+            store.close()
+        with pytest.warns(UserWarning, match="not a whole"):
+            assert sorted((r["run_date"], r["hour"]) for r in read_records(path)) == [
+                ("2024-01-01", h) for h in range(3)
+            ]
+    with pytest.warns(UserWarning, match="cut off its last"):
+        resumed = open_store(path, test_start="2024-01-01", lock=True)
+    assert [resumed.is_done(h, 1, 1) for h in range(3)] == [False] * 3 and resumed.is_done(0, 1, 0)
+    for r in later:
+        resumed.save(dict(r))
+    resumed.close()
+    fresh = open_store(tmp_path / "fresh" / f"m.{fmt}", lock=True)
+    for r in [record(hour=h, run_date="2024-01-01") for h in range(3)] + later:
+        fresh.save(dict(r))
+    fresh.close()
+    assert stored_lines(path) == stored_lines(tmp_path / "fresh" / f"m.{fmt}")
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+def test_a_writer_writes_nothing_more_of_a_store_whose_write_failed(tmp_path, monkeypatch, fmt):
+    """A record that reached a `StoreWriter` after its store's write failed (a save that passed its check a moment before the
+    failure was recorded) is never appended after the half-written line."""
+    path = tmp_path / f"m.{fmt}"
+    with StoreWriter() as writer:
+        store = writer.open(path, test_start="2024-01-01", lock=True)
+        with monkeypatch.context() as patch:
+            short_write_once(patch, fmt)
+            store.save(record(hour=0, run_date="2024-01-01"))
+            with pytest.raises(OSError, match="injected"):
+                store.flush()
+        late = record(hour=1, run_date="2024-01-01")
+        writer._submit(store, late, store._validate(late))
+        with pytest.raises(OSError, match="injected"):
+            store.close()
+    with pytest.warns(UserWarning, match="not a whole"):
+        assert list(read_records(path)) == []
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+def test_a_run_with_a_short_write_raises_and_resumes_to_a_fresh_run(tmp_path, monkeypatch, fmt):
+    monkeypatch.setenv("PARQUET_ROWS_PER_PART", "20")
+    with monkeypatch.context() as patch:
+        short_write_once(patch, fmt)
+        with pytest.raises(OSError, match="injected"):
+            run(tmp_path / "failed", save_format=fmt)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the half line, cut
+        resumed = run(tmp_path / "failed", save_format=fmt)
+    fresh = run(tmp_path / "fresh", save_format=fmt)
+    assert stored_lines(tmp_path / "failed" / f"ols.{fmt}") == stored_lines(tmp_path / "fresh" / f"ols.{fmt}")
+    assert_same_tables(tables(resumed), tables(fresh))
+
+
 def test_a_torn_catalog_line_is_cut_before_the_first_part_without_the_lock(tmp_path):
     """The review's `torn_nolock.py`: a writer opened without the lock (the default of `ParquetResultStore`, `open_store` and
     `StoreWriter.open`) cuts a catalog line a crash left half-written before it appends, as a JSONL store does, instead of
