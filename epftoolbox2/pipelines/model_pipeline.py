@@ -279,6 +279,7 @@ class ModelPipeline:
         self._check_evaluators_for(freq)
         if not forecast_only:
             self._check_benchmarks()
+            self._check_source_columns(data)
         windows, test_start, test_end = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
         self._check_ensembles(save_dir)
         self._refuse_top_without_validation(self.ensembles, windows)
@@ -525,7 +526,8 @@ class ModelPipeline:
         `horizon` nor `horizons`, the report plans what the manifests record (7 without one), and models run with different
         horizons raise. Only records
         of the horizons planned are read, so `horizon=3` of a horizon-7 run is horizons 1 to 3 alone. Raises FileNotFoundError if a
-        model has no results file, unless `allow_missing` is set. `data` is only needed by exporters that join source columns.
+        model has no results file, unless `allow_missing` is set. `data` is only needed by exporters that join source columns
+        (`CsvExporter(extra_columns=)`) and evaluators that read them (`ScaledMAEEvaluator`), which raise without it.
 
         `issue_days` are the weekdays to report, as in `run`; if not given, the manifests say which the models were run on, and
         models run on different ones raise `ValueError`, as they would be compared on different forecasts. Only records issued on
@@ -575,6 +577,8 @@ class ModelPipeline:
                 )
         freq = self._stored_freq(save_dir, paths, freq) or freq or "1h"
         self._check_evaluators_for(freq)
+        if not forecast_only:
+            self._check_source_columns(data, required=True)
         if horizon is None and horizons is None:
             horizons = self._stored_horizons(save_dir, paths)
         horizon, horizons = resolve_horizons(horizon, horizons, 7)
@@ -1067,6 +1071,28 @@ class ModelPipeline:
             raise ValueError(
                 "EconomicEvaluator schedules a trading strategy over the periods of a day, and with freq='1D' a day has "
                 "one forecast. Remove it from this pipeline, or score an hourly run of the same models."
+            )
+
+    def _check_source_columns(self, data: Optional[pd.DataFrame], required: bool = False) -> None:
+        """An evaluator that reads columns of the data (`ScaledMAEEvaluator`) would only fail at the first table, after every
+        fit: a column the data lacks raises here, and so does no data at all where it is `required` (a report from files)."""
+        readers = [e for e in self.evaluators if getattr(e, "source_columns", ())]
+        if not readers:
+            return
+        columns = list(dict.fromkeys(c for e in readers for c in e.source_columns))
+        names = [f"{type(e).__name__}({', '.join(map(repr, e.source_columns))})" for e in readers]
+        if data is None:
+            if required:
+                raise ValueError(
+                    f"{', '.join(names)} read {columns} from the data the models ran on: pass data=... to report() (the "
+                    "frame of the run; a Workflow passes its data pipeline's)."
+                )
+            return
+        missing = [c for c in columns if c not in data.columns]
+        if missing:
+            raise ValueError(
+                f"{', '.join(names)} read the column(s) {missing}, which the data doesn't have (it has {len(data.columns)} "
+                "columns). Fix the column name or add it to the data; nothing was fitted."
             )
 
     def _check_benchmarks(self) -> None:
