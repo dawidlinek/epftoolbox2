@@ -263,9 +263,11 @@ class ResultStore:
     Reading results back for evaluation must filter to the current run's window (`EvaluationReport`
     does this using each ref's own `test_start`/`test_end`); this store does not do it for you.
 
-    A key is done when the file has a forecast for it (`read_records`: status "ok", or no status). A key a run skipped has a skip
-    record (`save_skip`), is retried by the next run as before, and gets another skip record only when the reason changed, so
-    repeated resumes don't grow the file. `iter_lines` gives the forecasts alone unless told other statuses.
+    A key is done when its chosen record under the readers' rule (`read_records`: the highest revision, a forecast over skip
+    records within it) is a forecast (status "ok", or no status). A key a run skipped has a skip record (`save_skip`), is retried by
+    the next run as before, and gets another skip record only when the reason changed, so repeated resumes don't grow the file.
+    What is written for a key whose records reach a higher revision than 1 gets that revision, so a reader takes it. `iter_lines`
+    gives the forecasts alone unless told other statuses.
 
     With `lock=True` (what `BaseModel.run` opens) the store holds `<name>.lock` next to the file until `close()`, and a second
     writer raises `ResultsLockedError` naming it; a file system that refuses locks warns and the run goes on. A last line a crash
@@ -281,6 +283,7 @@ class ResultStore:
         self._lock = Lock()
         self._completed: Set[tuple] = set()
         self._latest: Dict[tuple, str] = {}  # key without a forecast -> the status of its newest skip record
+        self._revisions: Dict[tuple, int] = {}  # key -> its highest revision on file, where that isn't 1
         self._batch_size = batch_size
         self._tail_checked = False
 
@@ -303,9 +306,13 @@ class ResultStore:
         return self.path.with_name(f"{self.path.stem}.lock")
 
     def save(self, result: Dict) -> None:
+        """Queue a record for writing. A key with a record of a higher revision than 1 on file gets that revision, so that what is
+        written is what a reader takes (`read_records`: the highest revision wins)."""
         key = (result["hour"], result["horizon"], result["run_date"])
-        if result.get("status", STATUS_OK) == STATUS_OK:
-            with self._lock:
+        with self._lock:
+            if key in self._revisions:
+                result["revision"] = self._revisions[key]
+            if result.get("status", STATUS_OK) == STATUS_OK:
                 self._completed.add(key)
         self._write_queue.put(result)
 
@@ -318,6 +325,8 @@ class ResultStore:
             if key in self._completed or self._latest.get(key) == status:
                 return False
             self._latest[key] = status
+            if key in self._revisions:
+                record["revision"] = self._revisions[key]
         self._write_queue.put(record)
         return True
 
@@ -364,7 +373,9 @@ class ResultStore:
         return read_records(self.path, statuses, transform)
 
     def _load_existing(self) -> None:
-        for r in self.iter_lines(cols=[*_KEY_FIELDS, "status"], statuses=None):
+        """Each key's chosen record under the readers' rule (`read_records`): done if it is a forecast, else its status, and its
+        revision where that isn't 1."""
+        for r in self.iter_lines(cols=[*_KEY_FIELDS, "status", "revision"], statuses=None):
             if None in (r.get("hour"), r.get("horizon"), r.get("run_date")):
                 continue
             key = (r["hour"], r["horizon"], r["run_date"])
@@ -373,6 +384,9 @@ class ResultStore:
                 self._completed.add(key)
             else:
                 self._latest[key] = status
+            revision = r.get("revision", BACKTEST_REVISION)
+            if revision != BACKTEST_REVISION:
+                self._revisions[key] = revision
 
     def _acquire_file_lock(self):
         """The lock of this results file, held; None (with a warning) where the file system refuses locks."""

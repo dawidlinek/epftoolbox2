@@ -507,6 +507,32 @@ def test_the_highest_revision_wins_wherever_it_stands(tmp_path):
     assert [store.is_done(hour, 1, 0) for hour in range(4)] == [True] * 4
 
 
+def test_a_forecast_of_a_key_at_revision_2_is_written_at_revision_2_and_read(tmp_path):
+    """A forecast at revision 1 and a skip record at revision 2: the key is the skip's, so not done. The resume's forecast is
+    written at revision 2, where a reader takes it, and the next resume writes nothing; `produced` is what the tables count."""
+    data = market()
+    model = OLSModel(PREDICTORS, 45, name="ols")
+    run(data, model, tmp_path)
+    path = tmp_path / "ols.jsonl"
+    stored = records(path)
+    later = {**stored[3], "prediction": None, "coefficients": [], "status": "fit_error", "revision": 2}
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(later) + "\n")
+    key = (stored[3]["hour"], stored[3]["horizon"], DAY)
+    assert key not in {(r["hour"], r["horizon"], r["run_date"]) for r in read_records(path)}
+
+    resumed = run(data, model, tmp_path)
+    added = records(path)[len(stored) + 1 :]
+    assert [(r["hour"], r["horizon"], r["status"], r["revision"]) for r in added] == [(*key[:2], "ok", 2)]
+    assert added[0]["prediction"] == stored[3]["prediction"]  # the same fit, at the key's revision
+    ref = resumed.refs["ols"]
+    assert ref.produced == sum(1 for _ in ref.iter_records()) == 48
+    assert resumed.summary().set_index("model").loc["ols", "forecasts"] == 48
+    size = path.stat().st_size
+    run(data, model, tmp_path)
+    assert path.stat().st_size == size
+
+
 def test_the_first_pass_reads_a_line_s_key_as_json_does(tmp_path):
     """The first pass of `read_records` reads key, revision and status off the line without parsing it: other spacing and key
     order, a quoted "status" or "revision" inside a string, and values not as the store writes them give what JSON gives."""
