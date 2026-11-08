@@ -220,6 +220,7 @@ class EvaluationReport:
     def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
     def availability(self) -> pd.DataFrame: ...     # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
     def vintages(self) -> pd.DataFrame: ...         # model, predictor, series, class, ctx
+    def provenance(self) -> pd.DataFrame: ...       # model, family, licence, licence_url, commercial_use, revenue_cap, attribution, weights, sha256, runtime, corpus, corpus_end, released, validation_verdict, test_verdict
     def training_days(self) -> pd.DataFrame: ...    # model, list, predictors, forecasts, periods, horizons, smallest_days, median_days, largest_days, thin_forecasts
     def choices(self) -> pd.DataFrame: ...          # ensemble, segment, chosen, k, validation_mae, validation_forecasts, validation_share, validation_start, validation_end, test_start, test_end; attrs: member_mae, k_mae, limited_by
     def by_hour(self) -> pd.DataFrame: ...
@@ -569,6 +570,30 @@ class Use:                                  # What the function may return inste
 ```
 
 `PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, `ModelResultRef.availability_listing` holds the rows behind `report.availability()`, `ModelResultRef.vintages` those behind `report.vintages()` (None when no input has a class), and `ModelResultRef.matching_lists` the hash and number of predictors of each `train_on="matching"` list, which `report.training_days()` reads the records for. `ModelResultRef.zone` is the data's time zone, which says what periods a date has on the clock (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned)). `ModelResultRef.horizon` is the largest horizon of a run and `ModelResultRef.horizons` the ones it lists, None for every one from 1 to `horizon`; only records of those horizons are read (see [Horizons](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)). `ModelResultRef.issue_days` is the weekdays a run issued on, as `date.weekday()` numbers (Monday is 0), None for every day; only records issued on them (their `run_weekday`) are read (see [Weekdays](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)).
+
+### Model cards
+
+A family that needs an extra or pretrained weights declares a card as its `_card` (see
+[Licences and Weights](/epftoolbox2/models/licences-and-weights/)); `model.card` reads it, None for a core model.
+
+```python
+from epftoolbox2.models import ModelCard, WeightsRef
+
+class WeightsRef:                           # frozen dataclass
+    def __init__(self, repo: str, revision: str, files: Mapping[str, Optional[str]],  # file -> sha256, None: recorded at the first fetch
+                 bytes: Optional[int] = None): ...
+
+class ModelCard:                            # frozen dataclass
+    def __init__(self, family: str, extra: Optional[str], licence: str, licence_url: str, commercial_use: bool,
+                 revenue_cap: Optional[str], attribution: Optional[str], weights: Optional[WeightsRef],
+                 runtime: Tuple[str, ...],          # "pkg==1.2.3", "pkg>=1,<2", "pkg@<commit>" or a bare name
+                 corpus: str, corpus_end: Optional[date], released: Optional[date],
+                 stated_verdict: Optional[str] = None): ...  # overrides the verdict by dates, with its reason
+```
+
+The pre-flight raises `MissingWeightsError` (`epftoolbox2.models._weights`) when weights are among its problems, else
+`MissingExtraError` (`epftoolbox2._extras`); both are `ImportError`s. `ModelResultRef.provenance` holds a carded model's `card`,
+`runtime` and `weights`, which `report.provenance()` shows.
 
 `BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`. And `frame_hashes`, what one `ModelPipeline.run` call shares between its models so that it hashes each column once. And `cut_rules`, an information set a model with `newest_target="published"` reads its newest targets from when `information_set` isn't given, without checking anything with it: the leakage probe runs models so. And `horizons`, `issue_days` and `save_coefficients`, as in `ModelPipeline.run`; its `horizon` defaults to 7 too, and its `save_to` names the format, `<name>.jsonl` or `<name>.parquet`. And `checked`, what `ModelPipeline` found when it checked the model's inputs before any model ran: a run it was found for uses it instead of checking again, and any other run checks its inputs itself. `leakage_probe` and `positive_control` take `horizon` (default 1) or `horizons` the same way. Their `freq`, and `BaseModel.run()`'s, takes `"1D"` as `ModelPipeline.run()`'s does, see [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames).
 

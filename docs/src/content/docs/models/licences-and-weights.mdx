@@ -1,0 +1,167 @@
+---
+title: Licences and Weights
+description: Model cards of the families that need an extra or pretrained weights, the pre-flight before any fit, fetching weights with epf weights, the contamination verdict and report.provenance()
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The core models (OLS, LassoCV, Ridge, LEAR, Naive) need nothing beyond the core install and train on your data only. A model family
+that needs an optional dependency (an *extra*, such as `epftoolbox2[tabpfn]`) or pretrained weights declares a **model card**: its
+licence, whether commercial use is allowed, a revenue cap, the attribution a publication owes, what its weights were trained on and
+until when, the runtime packages its numbers depend on, and the weight files with their sha256. The card does four things:
+
+- **The pre-flight.** `ModelPipeline.run`, each `Workflow` array task and `epf run` check every model before the first one runs:
+  the extra installed, the runtime packages within the card's pins, the weights found and hashed. Every problem of every model
+  comes back in one error, before any data is fetched in a workflow or any model fits, so a long run never stops halfway.
+- **Weights never download during a run.** `epf weights fetch` downloads them once, on a machine with network, into a cache
+  every later run reads offline.
+- **The manifest** records the card, the runtime versions and the weights' hashes; a resume with another runtime version or other
+  weights is refused.
+- **Every report** says what each model is under: `report.provenance()`, a "Model provenance" block in the terminal exporter,
+  `provenance.csv` next to the `CsvExporter` file and a "Provenance" sheet in the `ExcelExporter` workbook.
+
+A core model has no card, and none of this changes anything of its runs, files or reports. No family shipped in this release
+has a card yet: the in-context, foundation and neural-network families of the next releases bring theirs, and a family of your own
+can declare one ([below](#declaring-a-card)).
+
+## Fetching weights
+
+```bash
+epf weights fetch mypackage.models:MyFamilyModel        # the card's repository, revision and files
+epf weights fetch mypackage.models:MyFamilyModel --size small --accept 'CC-BY-NC-4.0'
+epf weights fetch all                                    # every registered family with weights
+epf weights list                                         # what is in the cache: files, size, licence, fetch time
+epf weights verify                                       # re-hash every file against its fetch record
+```
+
+`fetch` shows the licence, the size, the repository, the revision and the destination, downloads the card's files from Hugging
+Face (`huggingface_hub`, installed by the family's extra) and checks each file's sha256 against the card:
+
+- **A licence with restrictions needs `--accept`.** Weights that may not be used commercially, or whose licence loses its rights
+  above a revenue, are fetched only with `--accept <licence>` naming the card's licence exactly: fetching
+  is the act of accepting it, and only you can do that. The library never accepts a gated repository's terms either: log in with
+  your own Hugging Face account and accept them on the website first.
+- **Files upstream replaced are refused.** A file whose sha256 differs from the card's means the repository changed (a history
+  squash, new weights under the old name). Nothing is recorded and no run uses the files. Fetch again with `--revision <rev>`
+  given explicitly to accept them: the new hashes are recorded, and every run warns that they are not the reference weights.
+- **The cache** is `EPFTOOLBOX2_WEIGHTS_DIR`, or `~/.cache/epftoolbox2/weights` without it, one directory per repository and
+  revision (`<cache>/<owner>/<name>/<revision>/`) holding the files and `epftoolbox2-weights.json`, the record of the fetch:
+  each file's sha256 and size, the licence and the one accepted, the time. On a cluster, fetch on the login node into a cache on
+  shared storage and point every job at it with `EPFTOOLBOX2_WEIGHTS_DIR`.
+
+A registered class is named by its name (`COMPONENT_REGISTRY`), a class of your own by `module:Class`, and `--size` picks one
+of a class's sizes.
+
+### Your own weights
+
+A family with weights takes `weights="/path/to/file-or-dir"`: used as given, hashed and recorded. Files whose hashes differ from
+the card's are *not the reference weights*: the pre-flight warns, and the manifest and `report.provenance()` record what was
+used.
+
+<Aside type="caution">
+A run, `verify()` and `report()` never download anything. A family's adapter loads its weights with `HF_HUB_OFFLINE=1` and
+`TRANSFORMERS_OFFLINE=1` set (and put back afterwards) and passes only local paths, so a package that would fetch weights by itself
+fails instead of downloading silently, for instance once per task of a SLURM array, or under a licence nobody accepted.
+</Aside>
+
+## The pre-flight
+
+A missing extra, a runtime package outside the card's pins (a pinned version or a commit of a package installed from its
+repository), and weights that are missing or changed since they were fetched are all reported together:
+
+```text
+2 problems found before any model ran (nothing was fitted; ...):
+  - MyFamilyModel 'a', MyFamilyModel 'b': needs torch>=2.9, installed: torch 2.8.0: pip install 'torch>=2.9'
+  - MyFamilyModel 'a', MyFamilyModel 'b': no weights for my-org/my-fm@v1.0 in ~/.cache/epftoolbox2/weights/my-org/my-fm/v1.0
+    (no epftoolbox2-weights.json there): run `epf weights fetch mypackage.models:MyFamilyModel` on a machine with network, ...
+```
+
+The error is `MissingWeightsError` when weights are among the problems, else `MissingExtraError`; both are `ImportError`s. A
+`Workflow` array task checks its own models only, before its data pipeline runs: a task of core models runs whatever another task
+lacks. Each weight file is hashed once per process (the hash is kept by path, size and modification time), so a loop of a
+thousand variants of one family costs one hash. `epftoolbox2.verify()` prints the extras installed and the weights in the cache.
+
+## Contamination verdicts
+
+Pretrained weights may have seen the period you test on. The verdict of each window of a run (validation, test) is computed from
+the card and the window's first issue day:
+
+| Verdict | When |
+|---------|------|
+| `clean` | the corpus ends before the window's first issue day, or the family trains on the run's data only |
+| `clean (released before)` | the corpus's end is undocumented and the weights were released before that day |
+| `possibly contaminated` | otherwise: the corpus ends on or after that day, or nothing says when it ends and the release is later |
+| the card's own | a card may state its verdict with its reason, such as `clean (synthetic)` for weights trained on synthetic priors only |
+
+A verdict never blocks a run, and neither does a licence: both are printed in every report, so a reader of your numbers knows.
+
+## In the report
+
+```python
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline.load("pipeline.yaml")
+report = pipeline.report("results", test_start="2025-01-01", test_end="2025-12-31")
+provenance = report.provenance()
+```
+
+One row per model with a card (an empty table, with the same columns, when no model has one):
+
+| Column | What it holds |
+|--------|---------------|
+| `model`, `family` | the model's name and its family (`my-fm`) |
+| `licence`, `licence_url` | the licence of the weights and where to read it |
+| `commercial_use`, `revenue_cap` | False for a non-commercial licence; the revenue above which the licence gives no rights |
+| `attribution` | what a publication must credit |
+| `weights`, `sha256` | `repo@revision` of the cache, or the path given as `weights=`; the first 12 hex digits of each file's hash |
+| `runtime` | each runtime package's version (and commit), then the settings a resume compares (`device=cpu, threads_per_fit=1`) |
+| `corpus`, `corpus_end`, `released` | what the weights were trained on, its last day, the weights' release |
+| `validation_verdict`, `test_verdict` | the verdict of each window of the run; empty for a window the run has not |
+
+`report.validation.provenance()` gives the same table. A report built from `save_dir` reads the manifests.
+
+## Resuming
+
+The manifest of a carded model has three keys a core model's lacks:
+
+- `card`, provenance: the card with the verdict of each window. Never compared, so a new release that rewords a licence resumes.
+- `runtime`, compared: each runtime package's version, and its VCS commit for a package installed from a repository (in the
+  research behind this library, one foundation model's release and its repository head moved single hours by up to 161 EUR/MWh),
+  with the family's own settings that change numbers, such as the device type, the dtype and the threads per fit.
+- `weights`, compared: each weight file's sha256. Where the files were found is recorded and not compared, as it differs
+  between machines that hold the same files.
+
+A change of any compared entry raises `ManifestMismatchError` naming it (`runtime.packages.torch: '2.9.0' (existing results) vs
+'2.10.0' (this run)`), and `allow_manifest_mismatch=True` overrides it, as for every compared field. See
+[Incremental Training](/epftoolbox2/model-pipeline/caching/).
+
+## Declaring a card
+
+A family of your own declares its card as the class attribute `_card`; one with several sizes lists them in `_card_variants`
+(size -> card), which `epf weights fetch ... --size` picks from. A carded family sets `_engine_ok = False` too, so the
+[engine](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine) never takes it, and returns the settings that change its
+numbers from `_runtime_fields()`.
+
+```python
+from datetime import date
+
+from epftoolbox2.models import ModelCard, WeightsRef
+
+card = ModelCard(
+    family="my-fm",
+    extra=None,                          # the extra its fit needs (one of epftoolbox2._extras.EXTRAS), None for none
+    licence="Apache-2.0",
+    licence_url="https://www.apache.org/licenses/LICENSE-2.0",
+    commercial_use=True,
+    revenue_cap=None,
+    attribution=None,
+    weights=WeightsRef("my-org/my-fm", "v1.0", {"model.safetensors": None}),  # sha256 None: recorded at the first fetch
+    runtime=("torch>=2.9",),             # pins: "pkg==1.2.3", "pkg>=1,<2", "pkg@<commit>", or a bare name
+    corpus="public load and price series of 2015-2021",
+    corpus_end=date(2021, 12, 31),
+    released=date(2024, 5, 1),
+)
+```
+
+The extra must be one the library declares (`epftoolbox2._extras.EXTRAS`), or the pre-flight raises `ValueError`. The corpus
+`"the run's data"` marks a family trained on the run's data only, whose verdict is always `clean`.

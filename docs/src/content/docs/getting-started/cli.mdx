@@ -248,6 +248,29 @@ epf results verify results                 # catalogs, part checksums, orphans, 
 
 ---
 
+## `epf weights`: Fetch, list and verify model weights
+
+The pretrained weights of a family with a model card (see [Licences and Weights](/epftoolbox2/models/licences-and-weights/)). A
+run never downloads: this command is the one that does, into the cache `EPFTOOLBOX2_WEIGHTS_DIR` (default
+`~/.cache/epftoolbox2/weights`), which every run then reads offline.
+
+```bash
+epf weights fetch mypackage.models:MyFamilyModel --accept 'CC-BY-NC-4.0'
+epf weights list
+epf weights verify
+```
+
+| Action | What it does |
+|--------|--------------|
+| `fetch MODEL` | Shows the licence, size, repository, revision and destination, downloads the card's files from Hugging Face and checks each sha256 against the card. `MODEL` is a registered model class, `module:Class` for one of your own, or `all` (every registered class whose card has weights). Exits with code 1 when a fetch is refused |
+| `fetch ... --size SIZE` | One of the class's sizes (`_card_variants`) |
+| `fetch ... --accept LICENCE` | Accepts the licence the card names: needed for a non-commercial or revenue-capped one, refused without it before anything downloads. Repeat it for `all` |
+| `fetch ... --revision REV` | Another revision than the card's, or the card's given explicitly: files whose sha256 differs from the card's are then recorded (runs warn: not the reference weights) instead of refused |
+| `list` | What the cache holds: repository and revision, family, files, size, licence (and whether it was accepted), fetch time |
+| `verify` | Re-hashes every file the cache recorded and compares it with its fetch; exits with code 1 when a file changed or is missing |
+
+---
+
 ## `epf validate`: Validate any pipeline YAML
 
 Load and parse a YAML file, instantiate all components, and report errors. Without running anything.
