@@ -491,6 +491,10 @@ class TrainingRows:
     first_day: Optional[str] = None
     members: Tuple[Tuple[int, Optional[str]], ...] = ()
 
+    def __post_init__(self):
+        # Pairs as tuples, however given (a list of lists reads the same), so the rows compare and hash by value.
+        object.__setattr__(self, "members", tuple(tuple(member) for member in self.members))
+
     def predictor_days(self, horizon: int, lag: int = 0, window: Optional[int] = None) -> range:
         """The row days, relative to D, of the training rows at `horizon`, of a fit made `lag` days before D (its refit day), of
         `window` days (the model's if not given)."""
@@ -1479,9 +1483,13 @@ class InformationSet:
         """`_late_of`, kept by everything it is computed from (`_VERDICTS`): the column as resolved (its rule included), the
         role, the periods reading it, the row's day, the step, the clock's inputs (`clock_key`), and for a rule over time the
         training rows and each horizon's periods. So the models of a sweep reading one column on the same days judge it once."""
-        if _VERDICTS_KEPT <= 0:
-            return self._late_of(col, role, rows, row_day, step, clock(), training_rows, horizons)
         key = (clock_key, repr(col), role, rows, row_day, step, training_rows, horizons)
+        try:
+            hash(key)
+        except TypeError:  # rows given in a form that can't be a key: judged as they are, and nothing kept
+            key = None
+        if _VERDICTS_KEPT <= 0 or key is None:
+            return self._late_of(col, role, rows, row_day, step, clock(), training_rows, horizons)
         with _VERDICTS_LOCK:
             found = _VERDICTS.get(key)
         if found is None:

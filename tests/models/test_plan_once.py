@@ -450,3 +450,22 @@ def test_a_check_at_raise_refuses_alike_with_verdicts_kept(frames, monkeypatch):
             information_set("2023-03-10").check(expanded, "price", "1h", data.index, "2023-03-24", "2023-03-26")
         messages.append(str(raised.value))
     assert messages[0] == messages[1] == messages[2] and "load_d+2" in messages[0]
+
+
+def test_training_rows_given_as_lists_are_judged_with_verdicts_kept(frames, monkeypatch):
+    """`TrainingRows(members=[...])` given as lists, as `check(..., training_rows=)` accepts them, is the rows of tuples, and a
+    check of a rule over time judges it with verdicts kept as without (it raised `TypeError` when kept by it)."""
+    data = frames[("1h", "spring")]
+    rows = TrainingRows(28, members=[[28, "7D"], (14, None)], first_day=str(data.index[0].date()))
+    assert rows == TrainingRows(28, members=((28, "7D"), (14, None)), first_day=rows.first_day) and hash(rows)
+    expanded = {(p, 1): ["settle_d-1", "load_d+1"] for p in range(24)}
+    out = {}
+    for on in (False, True, True):
+        if len(out) < 2:
+            sharing(monkeypatch, on)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out[len(out)] = late_uses(
+                information_set("2023-03-10"), data, expanded, issue_days=["2023-03-24"], training_rows=rows
+            )
+    assert out[0] == out[1] == out[2] and any("settle_d-1" in use for use in out[0])
