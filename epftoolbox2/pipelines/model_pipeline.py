@@ -247,9 +247,10 @@ class ModelPipeline:
         days_argument = {} if weekdays is None else {"issue_days": issue_day_names(weekdays)}
         level = self.availability
         # Check every model's inputs before running any, so a bad predictor in the last model fails in seconds. A
-        # predictor function is planned here, once, and the run uses that plan.
+        # predictor function is planned here, once, and the run uses that plan; each run uses its check, too.
         info = self.information_set
         plans: Dict[str, PredictorPlan] = {}
+        checks: Dict[str, Any] = {}
         listings: Dict[str, List[Dict]] = {}
         for model in self.models:
             plan = model._plan_predictors(
@@ -265,7 +266,7 @@ class ModelPipeline:
                 horizons=horizons,
                 weekdays=weekdays,
             )
-            model._check_inputs(
+            checks[model.name] = model._checked_inputs(
                 data,
                 target,
                 horizon,
@@ -279,7 +280,7 @@ class ModelPipeline:
                 horizons=horizons,
                 weekdays=weekdays,
             )
-            listings[model.name] = model._availability_listing
+            listings[model.name] = checks[model.name].listing
             if plan is not None:
                 plans[model.name] = plan
         warn_about(listings, stacklevel=3)  # once, for every model, and before the hours a run can take
@@ -308,6 +309,7 @@ class ModelPipeline:
                 **horizon_arguments(horizon, horizons),
                 **days_argument,
                 **planned,
+                checked=checks.pop(model.name),
             )
             refs[model.name] = ref
 
