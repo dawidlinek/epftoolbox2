@@ -121,6 +121,9 @@ _PROVENANCE_FIELDS = ("package_version", "git_sha", "created_at", "updated_at", 
 # `save_format` is "parquet" for results in a Parquet directory (no key for JSONL); a run in the other format is refused before
 # the manifest is read (`results.store.check_no_other_format`), and `epf results convert` rewrites it.
 _PROVENANCE_FIELDS += ("save_format",)
+# `engine`: what an engine group's fits from shared statistics did in the last run that fitted any (`record_engine`): how many,
+# how many went back to the model path and why, and how far out the issue rows were. Says nothing about the configuration.
+_PROVENANCE_FIELDS += ("engine",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -141,6 +144,9 @@ _COMPARED_FIELDS = (
 # False for results written with `save_coefficients=False` (no key otherwise): a resume with the other setting would mix records
 # with and without coefficients, and an empty list can't be told from a training window list's.
 _COMPARED_FIELDS += ("save_coefficients",)
+# The numeric path of the fits, "engine-1" for an engine group's fits from shared statistics (`models._engine_worker`), no key
+# for the model path: the two agree within the engine's tolerances, not to the bit, so one file never mixes them.
+_COMPARED_FIELDS += ("fit_path",)
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -248,6 +254,12 @@ class Manifest:
     # False for records written with `save_coefficients=False` (`coefficients: []`); None (and no key) with their coefficients.
     # Compared on resume.
     save_coefficients: Optional[bool] = None
+    # "engine-1" for fits from shared statistics in an engine group (`ModelPipeline(engine="on")`), None (and no key) for the
+    # model path. Compared on resume: switching refuses (`allow_manifest_mismatch=True` overrides).
+    fit_path: Optional[str] = None
+    # Provenance of the fits from shared statistics of the last run that made any (`models._engine_worker.EngineCounts`):
+    # {"fits", "fallbacks": {reason: count}, "max_issue_z", "far_issue_rows"}; None (and no key) otherwise. Never compared.
+    engine: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -262,6 +274,11 @@ class Manifest:
                 note = _OLD_RESULTS_NOTE if name == "training_cut" and theirs is None else ""
                 if name == "save_coefficients":
                     note = " (None: records with their coefficients; False: written with save_coefficients=False)"
+                if name == "fit_path":
+                    note = (
+                        " (None: the model path, engine off or a model the engine fits on it; 'engine-1': fits from shared "
+                        "statistics, ModelPipeline(engine='on'); they agree within the engine's tolerances, not to the bit)"
+                    )
                 out.append(f"{name}: {theirs!r} (existing results) vs {mine!r} (this run){note}")
         return out
 
@@ -297,6 +314,10 @@ class Manifest:
             del out["save_format"]
         if out["save_coefficients"] is None:  # coefficients written
             del out["save_coefficients"]
+        if out["fit_path"] is None:  # the model path
+            del out["fit_path"]
+        if out["engine"] is None:  # no fit from shared statistics
+            del out["engine"]
         return out
 
     @classmethod
@@ -446,6 +467,7 @@ def build_manifest(
     issue_days: Optional[Sequence[int]] = None,
     vintages: Optional[List[Dict[str, Any]]] = None,
     kernels: Optional[str] = None,
+    fit_path: Optional[str] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -476,7 +498,8 @@ def build_manifest(
     `horizon` is the largest horizon and `horizons` the ones planned, recorded only when they aren't every one from 1 to it.
     `issue_days` are the weekdays issued on (`date.weekday()` numbers), recorded by name, and only when they aren't every day.
     `vintages` are the rows of `results.vintages.vintage_rows`, recorded as they are. `kernels` is the backend of the LEAR
-    kernels the model fits with (`BaseModel._kernel_backend`), None for a model without them.
+    kernels the model fits with (`BaseModel._kernel_backend`), None for a model without them. `fit_path` is the numeric path of
+    the fits ("engine-1" in an engine group whose fits come from shared statistics, None for the model path).
     """
     now = datetime.now(timezone.utc).isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
@@ -518,6 +541,7 @@ def build_manifest(
         vintages=vintages,
         kernels=kernels,
         record_schema=RECORD_SCHEMA,
+        fit_path=fit_path,
     )
 
 
@@ -605,6 +629,16 @@ def record_skips(path: Path, manifest: Manifest, skipped: Mapping[str, Mapping[s
     kept = {window: kept[window] for window in sorted(kept)} or None
     if kept != manifest.skipped:
         manifest.skipped = kept
+        manifest.write(path)
+
+
+def record_engine(path: Path, manifest: Manifest, counts: Dict[str, Any]) -> None:
+    """Write what a run's fits from shared statistics did (`models._engine_worker.EngineCounts.to_dict`) into its manifest's
+    provenance, replacing an earlier run's; a run that fitted nothing from statistics leaves what is on file."""
+    if not (counts.get("fits") or counts.get("fallbacks")):
+        return
+    if counts != manifest.engine:
+        manifest.engine = dict(counts)
         manifest.write(path)
 
 
@@ -727,6 +761,7 @@ def check_and_write(
         manifest.kernels = _kernels_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.created_at = existing.created_at  # keep the first run's provenance
         manifest.skipped = existing.skipped  # until this run finishes and says otherwise: it may not
+        manifest.engine = existing.engine  # the same: until this run's fits from shared statistics are counted
         if existing.data_unverified or (
             has_existing_results and _accepted_other_data(existing, manifest, data_diffs, frame_hashes)
         ):
@@ -1130,5 +1165,6 @@ __all__ = [
     "read_skipped",
     "read_windows",
     "read_zone",
+    "record_engine",
     "record_skips",
 ]

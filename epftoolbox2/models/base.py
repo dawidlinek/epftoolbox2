@@ -701,6 +701,7 @@ class BaseModel(ABC):
         periods: Optional["_Periods"] = None,
         save_coefficients: bool = True,
         writer: Optional[StoreWriter] = None,
+        fit_path: Optional[str] = None,
     ) -> "_RunState":
         """Everything of `run` before the pool, for its arguments: the windows, the plan (or its check), the inputs' check
         (`checked` if it was found for this run, else `_check_inputs`), the period frames (`periods` if given: read once by
@@ -708,7 +709,7 @@ class BaseModel(ABC):
         the skips decided here (`missing_test_row`, `not_published`), whose skip records go to the store at once. The store
         stays open in the state (`_RunState.close`), and is closed here if this raises. `writer` is a `StoreWriter` the store is
         opened on, shared with other models' stores (an engine group, `models/_engine.py`); without it the store writes on its
-        own thread.
+        own thread. `fit_path` is the manifest's (an engine group's fits from shared statistics; None: the model path).
 
         Called by `run`: each stacklevel here counts `run`'s frame, so a warning is attributed where it was when `run` was one
         function (to the caller of `run`, mostly)."""
@@ -920,6 +921,7 @@ class BaseModel(ABC):
                     issue_days=weekdays,
                     vintages=vintages,
                     kernels=kernels,
+                    fit_path=fit_path,
                 )
 
                 def check_stored():
