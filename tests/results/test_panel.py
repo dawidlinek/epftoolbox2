@@ -5,7 +5,6 @@ share there, each cell weighs the same, and a cell lost is one with a negative g
 """
 
 import math
-import warnings
 
 import numpy as np
 import pandas as pd

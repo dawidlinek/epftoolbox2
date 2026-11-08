@@ -2218,7 +2218,9 @@ def test_issue_timezone_data_refuses_a_frame_in_utc_or_at_a_fixed_offset():
     UTC, 14:00 in Warsaw in summer, and accept what a Warsaw noon doesn't know. It is refused, as a naive index is."""
     import datetime as dt
 
-    frame = make_market_data(start="2023-05-01", days=40, tz="Europe/Warsaw", horizon=2, seed=3).drop(columns=["price_d-1"])
+    frame = make_market_data(start="2023-05-01", days=40, tz="Europe/Warsaw", horizon=2, seed=3).drop(
+        columns=["price_d-1"]
+    )
     rules = {"load": Availability.published("13:00", 0, timezone="Europe/Warsaw")}
     for zone in ("UTC", "Etc/GMT-1", dt.timezone(dt.timedelta(hours=2))):
         moved = frame.tz_convert(zone)
