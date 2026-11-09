@@ -36,7 +36,7 @@ try:
 except ImportError:  # pragma: no cover - the core-only CI job has no torch
     raise MissingExtraError("epftoolbox2.nets", "torch") from None
 
-__all__ = ["MLP", "Dropout", "Linear", "seed_counters", "counter_uniform", "pcg_hash", "ACTIVATIONS"]
+__all__ = ["MLP", "Activation", "Dropout", "Linear", "seed_counters", "counter_uniform", "pcg_hash", "ACTIVATIONS"]
 
 _M32 = 0xFFFFFFFF
 # Knuth's multiplicative constant: a stream's tag is spread by it before it is added to the member's key (stk.py's net_uniform).
@@ -46,16 +46,17 @@ INIT_TAG = 50_000_000
 # A Dropout's stream at a training step is tag step * DROPOUT_LAYERS + its number (stk.py: `rng * 8 + k`).
 DROPOUT_LAYERS = 8
 
+# The activations of `Activation` and `MLP`, each as torch.nn's module of that name computes it (default parameters).
 ACTIVATIONS = {
-    "relu": nn.ReLU,
-    "gelu": nn.GELU,
-    "tanh": nn.Tanh,
-    "sigmoid": nn.Sigmoid,
-    "softplus": nn.Softplus,
-    "elu": nn.ELU,
-    "selu": nn.SELU,
-    "silu": nn.SiLU,
-    "leaky_relu": nn.LeakyReLU,
+    "relu": torch.relu,
+    "gelu": nn.functional.gelu,
+    "tanh": torch.tanh,
+    "sigmoid": torch.sigmoid,
+    "softplus": nn.functional.softplus,
+    "elu": nn.functional.elu,
+    "selu": nn.functional.selu,
+    "silu": nn.functional.silu,
+    "leaky_relu": nn.functional.leaky_relu,
 }
 
 
@@ -145,6 +146,29 @@ class Linear(nn.Module):
         return f"in_features={self.in_features}, out_features={self.out_features}"
 
 
+class Activation(nn.Module):
+    """An elementwise activation by name (`ACTIVATIONS`), as torch.nn's module of that name computes it. Stacked members
+    (`stacked = True`, set by the trainer) on the CPU take it slot by slot on fresh copies: over the whole stacked tensor a
+    vectorised kernel gives the elements of its tail, which belong to the last slot, the scalar path, and for sigmoid, silu,
+    elu or softplus other last bits than the member alone gets (`_define_stacked_activation`). On a GPU it runs over the
+    stack as it is."""
+
+    def __init__(self, name: str = "relu"):
+        super().__init__()
+        if name not in ACTIVATIONS:
+            raise ValueError(f"Activation({name!r}): use one of {sorted(ACTIVATIONS)}")
+        self.name = name
+        self.stacked = False
+
+    def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+        if self.stacked and x.device.type == "cpu":
+            return _stacked_activation(x, self.name)
+        return ACTIVATIONS[self.name](x)  # a GPU's elementwise kernels compute every element alike
+
+    def extra_repr(self) -> str:
+        return self.name
+
+
 class Dropout(nn.Module):
     """Dropout whose mask is a hash of (member key, training step, layer, element), not a draw from a generator.
 
@@ -198,7 +222,7 @@ def set_dropout_step(module: "nn.Module", step: int) -> None:
 
 
 class MLP(nn.Module):
-    """A fully connected network: `Linear`, activation and (when `dropout` > 0) `Dropout` for each hidden width, then a
+    """A fully connected network: `Linear`, `Activation` and (when `dropout` > 0) `Dropout` for each hidden width, then a
     `Linear` to `n_outputs`. With `hidden=(256, 128)`, `dropout=0.1` and an output per period of the day it is the Lago-style
     DNN of the research."""
 
@@ -221,7 +245,7 @@ class MLP(nn.Module):
             raise ValueError(f"MLP(hidden) needs positive widths, got {list(hidden)}")
         layers, width = [], int(n_inputs)
         for h in widths:
-            layers += [Linear(width, h), ACTIVATIONS[activation]()]
+            layers += [Linear(width, h), Activation(activation)]
             if dropout > 0:
                 layers.append(Dropout(dropout))
             width = h
@@ -290,3 +314,37 @@ def _define_stacked_linear():
 
 
 _stacked_linear = _define_stacked_linear()
+
+
+def _define_stacked_activation():
+    """`epftoolbox2::stacked_activation(x, name)`: under vmap the activation of every slot in one call: on the CPU slot by slot
+    on fresh copies (the product by 1.0, exact, hands each slot's backward a fresh copy of its gradient too), on a GPU, whose
+    elementwise kernels compute every element alike, over the whole stack."""
+    existing = getattr(getattr(torch.ops, "epftoolbox2", None), "stacked_activation", None)
+    if existing is not None:
+        return existing
+
+    @torch.library.custom_op("epftoolbox2::stacked_activation", mutates_args=())
+    def stacked_activation(x: torch.Tensor, name: str) -> torch.Tensor:
+        return ACTIVATIONS[name](x)
+
+    @stacked_activation.register_fake
+    def _(x, name):
+        return torch.empty_like(x)
+
+    def batched(info, in_dims, x, name):
+        fn = ACTIVATIONS[name]
+        if in_dims[0] is None:  # the same tensor for every slot
+            return fn(x), None
+        x = x.movedim(in_dims[0], 0)
+        if x.device.type == "cpu":
+            out = torch.stack([fn(_fresh(slot)) * 1.0 for slot in x.unbind(0)])
+        else:
+            out = fn(x)
+        return out, 0
+
+    stacked_activation.register_vmap(batched)
+    return stacked_activation
+
+
+_stacked_activation = _define_stacked_activation()
