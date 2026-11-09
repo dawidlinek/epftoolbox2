@@ -34,6 +34,7 @@ from ..models._engine import (
     run_arguments,
     run_group,
 )
+from ..models._torch.groups import check_settings as check_stack_settings
 from ..models._torch.groups import run_stack_group, stack_groups
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model, grouped_table
@@ -255,8 +256,9 @@ class ModelPipeline:
     (`stack="vmap"`, or "auto" on a GPU) and that share a stack key (the module and its parameters but `dropout`, output,
     training window, refit, loss, batch size, epochs, patience, early stopping, weight decay, device, `tf32`, `pad_to`) are
     trained together, in stacks of `pad_to` members on one device: speed only, each forecast is its model's alone to the bit
-    (`models/_torch/groups.py`, the docs page on neural networks). The environment variable `TORCH_STACKS=off` runs each on
-    its own.
+    (`models/_torch/groups.py`, the docs page on neural networks). On a CPU only `nets.MLP` models (the MLP presets) with the
+    "l1" or "mse" loss stack. The environment variable `TORCH_STACKS=off` runs each on its own, and `TORCH_STACKS=check` also
+    trains a sample of the stacked calls alone and records the comparison (`stack_check` in the manifest).
     """
 
     def __init__(
@@ -405,6 +407,7 @@ class ModelPipeline:
         own clock. Exporters export one report, so a run over zones refuses them: export `report.zones[zone]`. See the docs page
         Several Zones.
         """
+        check_stack_settings()  # TORCH_STACKS and TORCH_STACK_MEMBERS, before any model writes
         if isinstance(data, Mapping):
             return self._run_zones(
                 data,
