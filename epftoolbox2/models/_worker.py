@@ -1292,7 +1292,13 @@ def _fit_pooled_unit(
     width = _unit_width(cfg, unit, anchor)
     predictors = unit_list(cfg, inputs.expanded, unit)
 
-    parts_x, parts_y, parts_key = [], [], []
+    # The stacked rows exist once (W = 728 days of 96 periods and 200 columns are 107 MB a copy): a first pass reads each
+    # period's rows, which of them are kept (every input and the target finite) and which columns are binary, and lets go of
+    # them; a second places each period's kept rows straight into the stack. Which columns are binary is read from every row
+    # before any filter, as a period unit reads it: a column is binary in the stack exactly when it is in each period's rows.
+    spans, kept_rows, keys = [], [], []
+    scalable_mask = np.zeros(len(predictors), dtype=bool)
+    total = 0
     for period in range(periods):
         arrays = inputs.hour_arrays[period]
         days = arrays["days"]
@@ -1300,27 +1306,39 @@ def _fit_pooled_unit(
             rows = training_rows(days, anchor, width, hz)
         else:
             rows = training_rows(days, anchor, width, hz, int(newest[period]))
-        parts_x.append(pooled_values(arrays, predictors, rows, period))
-        parts_y.append(arrays["y"][rows][:, hz - 1])
-        parts_key.append(days[rows].astype(np.int64) * periods + period)
-    # By date, then period; a repeated hour's two rows in their order (a stable sort).
-    order = np.argsort(np.concatenate(parts_key), kind="stable")
-    train_x = np.concatenate(parts_x)[order]
-    train_y = np.concatenate(parts_y)[order]
-    groups = (np.concatenate(parts_key)[order] % periods).astype(np.int64)
+        values = pooled_values(arrays, predictors, rows, period)
+        kept = finite_rows(values, arrays["y"][rows][:, hz - 1])
+        scalable_mask |= StandardScaler.get_scalable_mask(values)
+        total += len(values)
+        del values
+        spans.append(rows)
+        kept_rows.append(kept)
+        keys.append(days[rows][kept].astype(np.int64) * periods + period)
 
     outcomes, issued = _issued(inputs, tasks)
 
     def skip_all(reason: str) -> List[Tuple[tuple, Union[Dict, str]]]:
         return outcomes + [(task, reason) for task, _ in issued]
 
-    if train_x.shape[0] == 0:
+    if total == 0:
         return skip_all(SKIP_TOO_FEW_ROWS)
-    scalable_mask = StandardScaler.get_scalable_mask(train_x)
-    finite = finite_rows(train_x, train_y)
-    if not finite.any():
+    keys = np.concatenate(keys)
+    if not len(keys):
         return skip_all(SKIP_NO_FINITE_TRAINING_ROWS)
-    train_x, train_y, groups = train_x[finite], train_y[finite], groups[finite]
+    # By date, then period; a repeated hour's two rows in their order (a stable sort).
+    order = np.argsort(keys, kind="stable")
+    position = np.empty(len(keys), dtype=np.int64)
+    position[order] = np.arange(len(keys))
+    train_x = np.empty((len(keys), len(predictors)))
+    train_y = np.empty(len(keys))
+    start = 0
+    for period, (rows, kept) in enumerate(zip(spans, kept_rows)):
+        arrays = inputs.hour_arrays[period]
+        at = position[start : start + int(kept.sum())]
+        train_x[at] = pooled_values(arrays, predictors, rows, period)[kept]
+        train_y[at] = arrays["y"][rows][kept, hz - 1]
+        start += len(at)
+    groups = (keys[order] % periods).astype(np.int64)
     per_period = units["target_transform"] == PER_PERIOD
     # A period with no training row is skipped whatever the transform, so the forecast keys don't depend on it.
     trained = np.isin(np.arange(periods), groups)
@@ -1357,9 +1375,11 @@ def _fit_pooled_unit(
         raise RuntimeError(f"a block call of {len(call_rows)} rows for a nominal length of {length}")
     call = np.vstack(values + [values[0]] * (length - len(values)))
     scaler = make_scaler(cfg.get("scaler", "standard"))
+    # Every scaler copies its input, which isn't read again: let go of it as soon as the scaled copy exists.
     fit_x, _, call_x = scaler.fit_transform(
-        train_x.copy(), np.zeros(len(train_x)), call, scalable_mask=scalable_mask, columns=predictors
+        train_x, np.zeros(len(train_x)), call, scalable_mask=scalable_mask, columns=predictors
     )
+    del train_x
     target_groups = groups if per_period else np.zeros(len(groups), dtype=np.int64)
     target = MultiTargetAsinh().fit_groups(train_y, target_groups, periods if per_period else 1)
     try:
