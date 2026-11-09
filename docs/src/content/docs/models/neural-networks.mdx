@@ -416,9 +416,10 @@ Here the models of each width are one group, their 4 seeds of every weekly fit t
 - **Who runs alone**: a model whose key no other model of the run has, a loop (`stack="auto"` on a CPU: a loop's arithmetic
   isn't a stack's, so stacking it would move its numbers), a `forecast_only` run, and a subclass that changes how a fit is made
   or read. `TORCH_STACKS=off`, an environment variable read when a run runs, runs every model on its own.
-- **`pad_to` on a GPU.** A stack is as fast as its size allows: on an H100 a stack of 256 trains 256 networks in about the time
-  one takes. Alone, a fit's 4 seeds fill 4 of its `pad_to` slots and the rest are padding; in a loop the stacks are full. Set
-  `pad_to` for the loop (256 is a good size for these networks), and keep it: it is compared when a run resumes.
+- **`pad_to` on a GPU.** A step of a stack costs far less than its networks one by one: the trainer ran 67 networks per second
+  (256-128, 50 epochs of 1,456-day windows) in stacks of 256 on an H100, 75 in stacks of 2,048. Alone, a fit's 4 seeds fill 4
+  of its `pad_to` slots and the rest is padding; in a loop the stacks are full. Set `pad_to` for the loop (256 suits these
+  networks), and keep it: it is compared when a run resumes.
 - **On a CPU** a stack does one product per network, so stacking a loop buys little there: `stack="auto"` (a loop of
   single-thread fits in a pool of processes) is the fast way, and it runs each model alone.
 - **Failures stay where they were.** A network that diverged makes its own fit's forecasts `fit_error`s, as alone, and moves no

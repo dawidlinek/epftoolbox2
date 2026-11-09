@@ -322,7 +322,7 @@ def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, cas
     elif case == "named_blocks":
         models = [
             TorchModel(module=Blocks, inputs=BLOCKS, name=f"b{i}", **{**FAST, "lr": lr})
-            for i, lr in enumerate([1e-2, 3e-3, 2e-2])
+            for i, lr in enumerate([1e-2, 3e-3, 1e-2])
         ]
     elif case == "jobs_of_one_member":  # a job per fit unit, a window list's units of a block together
         monkeypatch.setenv(groups.STACK_MEMBERS_VAR, "1")
