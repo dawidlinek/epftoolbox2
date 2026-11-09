@@ -86,9 +86,12 @@ inputs only, never dates or targets, and its outputs are in the scaled target sp
 - **Scaling.** The inputs are standardised, binary columns kept, on each fit's own rows (each window of a list on its own); the
   target of each output goes through its own Invariant, `asinh((y - median) / MAD)`, and back.
 - **Seeds and their mean.** Network s of a fit is seeded by a hash of `random_state`, the fit (period, horizon, refit day,
-  predictor list, window) and s; never by the model's name, its place in a pipeline, the process or the shard. A forecast is the
-  mean of its networks' forecasts in EUR/MWh. A network that diverged (no finite early-stopping loss) makes every forecast of
-  its fit a `fit_error`, counted in `forecast_counts()`, never a mean of the others.
+  window, and for a predictor function the content of its list, never the number its plan gave it) and s; never by the model's
+  name, its place in a pipeline, the process, the shard, or the days, windows or weekdays a run holds. A forecast is the mean of
+  its networks' forecasts in EUR/MWh. A network that diverged (no finite early-stopping loss) makes every forecast of its fit a
+  `fit_error`, counted in `forecast_counts()`, never a mean of the others.
+- **Early stopping** holds out a random share of each fit's training dates: a date's rows go together, so both rows of a repeated
+  autumn hour are on the same side.
 - **Shapes.** The steps of an epoch come from the days of a full window, so a fit at the start of the data trains as many steps
   as a later one; a day model predicts every issue day of its refit block in one call of the block's length, so a forecast is
   the same alone, in its block and after a resume.
@@ -172,10 +175,11 @@ models:
 Loading a file whose `module_hash` isn't the module's warns that the forecasts will differ from the saved run's (the file, or a
 layer it defines next to the module, or the package's version changed), and a run that resumes over its results refuses
 ([Incremental Training](/epftoolbox2/model-pipeline/caching/)). `save()` raises for a class defined in the script being run
-(`__main__`) or inside a function, which a later load can't import; such a model still runs. `MLPHourlyModel` and `MLPDailyModel`
-save their architecture (`hidden`, `dropout`, `activation`); their manifest records the hash of `epftoolbox2/nets.py` and the
-library's version. Without torch installed, every one of them builds, saves and loads, and `run()` names the extra to install
-before any model fits.
+(`__main__`) or inside a function, which a later load can't import; such a model still runs, also after the cell that defines it
+runs again (a resume compares its source's hash). `MLPHourlyModel` and `MLPDailyModel` save their architecture (`hidden`,
+`dropout`, `activation`) and no `module_hash`: a preset is checked by its manifest alone, which records the hash of
+`epftoolbox2/nets.py` and the library's version, so a resume after either changed refuses, and loading its file doesn't warn.
+Without torch installed, every one of them builds, saves and loads, and `run()` names the extra to install before any model fits.
 
 ## MLPHourlyModel and MLPDailyModel
 
@@ -343,8 +347,16 @@ that product ("no kernel image is available") and the fit runs on the CPU. The c
 process that starts the worker pool never initialises CUDA and its forked workers can still use the GPU. torch's version, the
 device type, dtype, `tf32`, the thread count, the stack and its size are recorded in the manifest and compared on resume, and on
 a CPU the kernels torch runs (`torch.backends.cpu.get_cpu_capability()`, such as `AVX512` or `AVX2`: torch picks the best the
-machine has, and AVX2 against the generic kernels moved a forecast by 1e-6), so a resume on another kind of CPU is refused too.
-On a GPU, bits are not known to hold across GPU models.
+machine has, and AVX2 against the generic kernels moved a forecast by 1e-6), so a resume on another kind of CPU is refused too;
+on a GPU its compute capability (`cuda_capability`, such as `9.0`). The device's model (`device_name`, the GPU's or the CPU's) is
+recorded, and a resume on another only warns: bits are not known to hold across GPU models.
+
+<Aside type="caution">
+The library doesn't switch on torch's deterministic algorithms. A module of your own whose backward on CUDA uses atomic adds
+(`scatter_add`, `index_add`, an embedding's backward, `index_put` with accumulation) gives other numbers from run to run on a GPU.
+`pipeline.verify(...)` runs the issue day twice and reports such a model as `inconclusive` (nondeterministic); verify it on the
+CPU (`verify(..., device="cpu")`), or keep to layers whose backward has no atomics (the `epftoolbox2.nets` layers have none).
+</Aside>
 
 <Aside type="note">
 The trainer is a port of the research's stacked trainer, and on the research's own inputs (the DE benchmark, LEAR features,
