@@ -24,9 +24,10 @@ with its skip counts as the reason, so no model wins by leaving out its hard day
 Parallel workers (`epf tune search.py --workers N`, or a SLURM array of the same script) share the trials through `storage`,
 Optuna's journal file. Studies: `epftoolbox2_search` (rung 0) and `epftoolbox2_search:rung<r>`. The process that creates a
 study sets it up (settings, warm-start trials, the promoted trials) and the others wait for it; a process that joins a study
-made with other settings or data raises. A worker killed during a trial leaves it running in the journal, and the others wait
-for it at the end of the rung: `epf tune search.py --requeue` (with no worker running) marks such trials interrupted, their
-slots are proposed again (rung 0) or their settings enqueued again (later rungs).
+made with other settings or data, or whose `make` builds another model from a finished trial's settings, raises. A worker killed
+during a trial leaves it running in the journal, and the others wait for it at the end of the rung, naming it now and then:
+`epf tune --requeue JOURNAL` (`requeue`, with no worker running) marks such trials interrupted and puts them back (a later
+rung's with its parent's settings, a warm-start trial with its own; another rung-0 slot is proposed again).
 """
 
 from __future__ import annotations
