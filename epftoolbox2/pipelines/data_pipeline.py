@@ -63,6 +63,8 @@ COMPONENT_REGISTRY = {
         "DailyStatsTransformer": "epftoolbox2.data.transformers.daily_stats",
         "LambdaTransformer": "epftoolbox2.data.transformers.lambda_transformer",
         "ImputeTransformer": "epftoolbox2.data.transformers.impute",
+        "SolarGeometryTransformer": "epftoolbox2.data.transformers.solar_geometry",
+        "RollingStatsTransformer": "epftoolbox2.data.transformers.rolling_stats",
     },
     "validators": {
         "EdaValidator": "epftoolbox2.data.validators.eda",

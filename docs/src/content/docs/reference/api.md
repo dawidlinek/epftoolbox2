@@ -494,6 +494,21 @@ class DailyStatsTransformer(Transformer):
                  stats: List[str] = ["min", "max", "mean", "last"], freq: str = "1h"): ...
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 
+class SolarGeometryTransformer(Transformer):
+    def __init__(self, locations,  # (lat, lon) or a list of them; a weighted mean when several
+                 weights=None, freq: str = "1h",  # values at the row's instant plus half of freq
+                 prefix: str = "", night_below: float = -0.05,
+                 algorithm: str = "meeus"): ...  # "meeus" | "spencer"
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...  # sun_elevation, sun_sin_elevation, clear_sky_ghi, is_night
+
+class RollingStatsTransformer(Transformer):
+    def __init__(self, column: str, window_days: int = 365,
+                 stat: str = "max",  # "min" | "max" | "mean"
+                 lag_days: int = 1,
+                 min_days: Optional[int] = None,  # None = window_days: every day of the window complete
+                 freq: str = "1h"): ...  # {column}_roll{W}{stat}_d-{lag}
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
+
 class ImputeTransformer(Transformer):
     def __init__(self, columns: Union[str, List[str], None] = None,  # at least one column is required
                  method: str = "ffill",  # "ffill" | "previous_day" | "previous_week"

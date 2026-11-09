@@ -9,6 +9,8 @@ from .daily_profile import DailyProfileTransformer
 from .daily_stats import DailyStatsTransformer
 from .lambda_transformer import LambdaTransformer
 from .impute import ImputeTransformer
+from .solar_geometry import SolarGeometryTransformer
+from .rolling_stats import RollingStatsTransformer
 
 __all__ = [
     "Transformer",
@@ -20,4 +22,6 @@ __all__ = [
     "DailyStatsTransformer",
     "LambdaTransformer",
     "ImputeTransformer",
+    "SolarGeometryTransformer",
+    "RollingStatsTransformer",
 ]

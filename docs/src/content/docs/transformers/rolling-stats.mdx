@@ -1,0 +1,76 @@
+---
+title: RollingStatsTransformer
+description: A statistic of a column's complete days over a window of local days ending some days before the row's, such as a capacity proxy
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Adds `{column}_roll{W}{stat}_d-{lag}`: on every row of local day D, the `stat` of the column's day statistics over the `W`
+local days from D - lag - W + 1 to D - lag. Each day's statistic is the `stat` of the column over that day, the minimum, the
+maximum or the mean, and so is the window's of the days' statistics. Its main use is a capacity proxy for a generation
+target: the largest hourly generation of the last year, known when the forecast is issued.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import RollingStatsTransformer
+
+# The renewables study's capacity proxy: the largest hourly solar generation over the 365 days ending D-1
+df = RollingStatsTransformer("generation_solar", window_days=365, stat="max", lag_days=1).transform(df)
+# generation_solar_roll365max_d-1
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `column` | str | required | The column to summarise |
+| `window_days` | int | `365` | Local days in the window, at least 1 |
+| `stat` | str | `"max"` | `"min"`, `"max"` or `"mean"`, taken over each day and then over the window's days |
+| `lag_days` | int | `1` | Days from the row's day back to the window's newest day, 0 or more. With 0 the name has no `_d-0` |
+| `min_days` | int or None | `None` | The fewest complete days a window needs for a value, 1 to `window_days`; `None` is `window_days`, every day of it |
+| `freq` | str | `"1h"` | Slot length of the data, which decides when a day is complete |
+
+## Complete Days, Whole Windows
+
+A day counts only when every slot it has holds a value, 23, 24 or 25 hours (92, 96 or 100 quarter-hours) on a
+time-zone-aware index, one row on a daily frame, as in [`DailyStatsTransformer`](/epftoolbox2/transformers/daily-stats/).
+A window needs `min_days` days that count, by default all of them: a window that reaches back before the frame's first day,
+or holds a day with a missing value or with no rows, is NaN, and a model skips the forecasts that read it, counted as
+`missing_test_predictors` (or drops the training rows). So with `window_days=365, lag_days=1` the first 365 days of the frame
+have no value (start the data a year before the first training row), and one missing hour takes the value of the 365 windows
+it falls in rather than giving a "365-day" maximum of what is left. A smaller `min_days` leaves the missing days out of the
+windows they fall in: the renewables study's proxy took `min_days=60` (pandas' `min_periods`), so it had a value 60 days
+into its data. Windows are of local calendar days, so the statistic of a day after a clock change is that of its 23 or 25
+hours.
+
+```python
+from epftoolbox2.data.transformers import RollingStatsTransformer
+
+# The study's proxy, to reproduce it: a value from 60 complete days on, missing days left out
+df = RollingStatsTransformer("generation_solar", window_days=365, stat="max", lag_days=1, min_days=60).transform(df)
+```
+
+## Information Set
+
+The window ends on D - `lag_days` and never reads a later day. The
+[information set](/epftoolbox2/model-pipeline/information-set/#rolling-statistics) judges the column by the rule of the column
+it was built from, at the last slot of the window's newest day, as it judges a day aggregate of that day:
+
+- A realised series needs `lag_days=1`. With the built-in rule of `generation_*` (realised 1 h after its hour), the last hour
+  of D-1 is out at 01:00 on D, so `generation_solar_roll365max_d-1` is known at an 11:45 issue, and
+  `generation_solar_roll365max` (`lag_days=0`, the window ending D) is late at every period: its newest day ends at 24:00
+  on D.
+- A day-ahead series may end on D: the prices of D are out at 13:00 on D-1, so `price_roll7max` is known on D.
+- Under [rules over time](/epftoolbox2/model-pipeline/information-set/#rules-over-time) an older day of a window can be out
+  after its newest (a lag that shortened, a gap), and the column is known only when every day of the window is.
+
+Used as `normalise_by`, the issue row's value scales the forecast and each training row's divides its target, so a proxy
+known at the issue is also known on every training row, which is older. See
+[Generation Targets](/epftoolbox2/model-pipeline/generation/).
+
+<Aside type="caution">
+  A window that ends on D summarises values the issue time doesn't know, whatever the row's own hour. Matched as a plain
+  column by a pattern such as `generation_*`, it would be judged at its row's hour and pass for the early periods: the
+  information set reads the `_roll{W}{stat}` name and never does that.
+</Aside>
