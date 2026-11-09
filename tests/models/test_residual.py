@@ -223,6 +223,23 @@ def test_a_forecast_is_the_base_s_plus_each_period_s_median_residual_for_a_learn
     assert checked == len(records) > 600
 
 
+def test_actual_is_the_target_to_the_bit_however_far_the_base_is(market):
+    """`actual` is the period's target itself, never `(y - b) + b`, which loses bits where the base is far from the target: a
+    `NaiveModel` base forecasting the load (about 1000) for a price of about 60."""
+    model = residual(base_model=NaiveModel(["load_d+{horizon}"], name="naive"))
+    records = run(model, market).refs["residual"]._results
+    local = pd.DatetimeIndex(market.index.tz_localize(None))
+    targets = {}
+    for hz in (1, 2):
+        values = _calendar_target(market, hz)
+        for row, (stamp, value) in enumerate(zip(local, values)):
+            targets[(stamp.date().isoformat(), stamp.hour, hz)] = (
+                value  # the date's last row of the hour: the issue row
+            )
+    assert records and all(r["base_prediction"] > 500 for r in records)
+    assert all(np.array_equal(r["actual"], targets[key], equal_nan=True) for key, r in keyed(records).items())
+
+
 def check_out_of_sample(model_cls, data, tmp_path):
     """The learner's rows against residuals built by hand from the base's stored out-of-sample records: every training row is
     dated at or before its unit's anchor - 1 - h (its target at or before the cut, the anchor - 1), its `base_fc_d+h` is the
