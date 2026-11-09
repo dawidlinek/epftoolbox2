@@ -118,6 +118,19 @@ from ..information_set import (
     rule_dict,
 )
 from ._cards import ModelCard, Problem, card_problems, run_provenance
+from ._units import (
+    DAY,
+    PERIOD,
+    POOLED,
+    UNIT_METHODS,
+    check_day_level,
+    check_lists_by_period,
+    check_plan_for_units,
+    check_unit_settings,
+    unit_kind,
+    units_config,
+    without_feature,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -402,8 +415,11 @@ class _RunState:
 
 def _predicts_blocks(model: "BaseModel") -> bool:
     """Whether a model whose class defines `_predict_block` predicts each refit unit's block in one call (`_worker.block_calls`:
-    with `refit`, `block_predict` True and `_predict_block` defined where `_predict_fitted` is). What `verify` reads as
-    `_predicts_together` (`BaseModel.__init_subclass__`)."""
+    with `refit`, `block_predict` True and `_predict_block` defined where `_predict_fitted` is), or a day or pooled model has
+    `refit` (`models._units`: such a unit always predicts its block in one call). What `verify` reads as `_predicts_together`
+    (`BaseModel.__init_subclass__`)."""
+    if model._unit_kind != PERIOD:
+        return model.refit is not None
     return block_calls(model)
 
 
@@ -431,6 +447,10 @@ class BaseModel(ABC):
     _card: Optional[ModelCard] = None
     # False on a family the engine must never take, whatever methods it defines: `_engine_capable` reads it first.
     _engine_ok: bool = True
+    # What one fit on the refit calendar holds (`models._units`): `"period"`, every core model's, one period's rows and target;
+    # `"day"`, local dates as rows and the P periods of the target day as outputs (`_fit_days`, `_predict_days`); `"pooled"`, the
+    # (date, period) rows of every period and one output (`_fit_model`, `_predict_block`). Day and pooled units need `refit`.
+    _unit_kind: str = PERIOD
 
     @property
     def card(self) -> Optional[ModelCard]:
@@ -466,13 +486,12 @@ class BaseModel(ABC):
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        if getattr(cls, "_predict_block", None) is None:
+        blocks = getattr(cls, "_predict_block", None) is not None
+        # A day or pooled unit predicts its block in one call too: the same hooks, without `block_predict` for a day class.
+        if not blocks and getattr(cls, "_unit_kind", PERIOD) == PERIOD:
             return
-        for name, default in (
-            ("block_predict", True),
-            ("_predicts_together", property(_predicts_blocks)),
-            ("_co_batch_items", _block_co_batch_items),
-        ):
+        hooks = [("_predicts_together", property(_predicts_blocks)), ("_co_batch_items", _block_co_batch_items)]
+        for name, default in ([("block_predict", True)] if blocks else []) + hooks:
             if not hasattr(cls, name):
                 setattr(cls, name, default)
 
@@ -565,7 +584,15 @@ class BaseModel(ABC):
         elif key == "refit":
             value = check_refit(value)
             check_binary_mask(getattr(self, "binary_mask", None), value)  # whichever of the two is set second raises
-            if value is not None and not self._can_refit():
+            if value is not None and self._unit_kind != PERIOD and not self._can_refit(self._unit_kind):
+                methods = UNIT_METHODS[unit_kind(self)]
+                owners = {name: getattr(self._owner_or_none(name), "__name__", None) for name in methods}
+                raise ValueError(
+                    f"{type(self).__name__} fits {self._unit_kind} units, from {' and '.join(methods)}, which one class "
+                    f"other than BaseModel must define, and they are {owners}: a subclass that overrides one of them must "
+                    "override all of them"
+                )
+            if value is not None and self._unit_kind == PERIOD and not self._can_refit():
                 owners = {name: self._owner_of(name).__name__ for name in _REFIT_METHODS}
                 raise ValueError(
                     f"{type(self).__name__} can't refit on a calendar (refit={value!r}): its `_fit_predict` is "
@@ -582,11 +609,22 @@ class BaseModel(ABC):
         return next(klass for klass in cls.__mro__ if name in vars(klass))
 
     @classmethod
-    def _can_refit(cls) -> bool:
+    def _owner_or_none(cls, name: str) -> Optional[type]:
+        """The class of the method resolution order that defines `name`, None if none does."""
+        return next((klass for klass in cls.__mro__ if name in vars(klass)), None)
+
+    @classmethod
+    def _can_refit(cls, kind: Optional[str] = None) -> bool:
         """Whether the model fits once and forecasts from the fit (`_fit_model`, `_predict_fitted`), which `refit` needs, and
         that fit is the one `refit=None` makes: one class (not BaseModel) defines all three of `_fit_predict`, `_fit_model` and
         `_predict_fitted`. A subclass of OLSModel that overrides `_fit_predict` alone would be refitted with OLS, and one that
-        overrides the other two alone would refit with its own estimator while `refit=None` fits OLS."""
+        overrides the other two alone would refit with its own estimator while `refit=None` fits OLS.
+
+        `kind` `"day"` or `"pooled"` asks the same of that unit's methods (`_units.UNIT_METHODS`: `_fit_days` and `_predict_days`,
+        or `_fit_model` and `_predict_block`)."""
+        if kind is not None and kind != PERIOD:
+            owners = {cls._owner_or_none(name) for name in UNIT_METHODS[kind]}
+            return len(owners) == 1 and None not in owners and BaseModel not in owners
         owners = {cls._owner_of(name) for name in _REFIT_METHODS}
         return len(owners) == 1 and BaseModel not in owners
 
@@ -598,12 +636,14 @@ class BaseModel(ABC):
         `train_on="matching"` list, the run isn't `forecast_only`, and its class keeps BaseModel's `run`, `_execute`,
         `_run_tasks` and `_build_hour_arrays`, which a group does in their place, and the instance sets none of them itself.
         OLS, Ridge, LassoCV and LEAR are. A class with `_engine_ok = False` (every carded family) never is, read first, so a
-        `_fit_stats` it gains later can't make it capable by accident."""
+        `_fit_stats` it gains later can't make it capable by accident; nor is a model of day or pooled units (`_unit_kind`),
+        whose fits the engine's statistics of one period's rows don't make."""
         owners = {
             next((klass for klass in type(self).__mro__ if name in vars(klass)), None) for name in _ENGINE_METHODS
         }
         return (
             self._engine_ok
+            and self._unit_kind == PERIOD
             and len(owners) == 1
             and None not in owners
             and BaseModel not in owners
@@ -1577,6 +1617,10 @@ class BaseModel(ABC):
             config["run_days"] = state.run_positions
         if self._fits_nothing:
             config["fits"] = False  # each task reads its issue row alone (`_worker._row_value`)
+        units = units_config(self, self._periods_per_day)
+        if units is not None:
+            # Day or pooled units (`_worker._run_unit`): their kind, the periods of a day and the target transform.
+            config["units"] = units
         if self.binary_mask == MASK_FIT and self.refit is None:
             # Each fit reads its mask from its own span's rows (`_worker._fit_member`); `scalable_masks` is empty. A refit unit
             # always does (`_worker._fit_unit`).
@@ -1693,6 +1737,11 @@ class BaseModel(ABC):
     ) -> Dict[Tuple[int, int], List[str]]:
         """Check the data contract before any fit and return the expanded predictors per (period, horizon).
 
+        A model of day or pooled units (`_unit_kind`, `models._units`) is also held to what its units need, before any fit:
+        `refit`, one list for every period of a horizon (a predictor function's for every period of an issue day), no
+        `train_on="matching"` list; a day unit's predictors one value per local date on every date its fits train on
+        (`_check_day_level`), a pooled unit's virtual `period` left out of the frame's and the information set's checks.
+
         `horizon` is the largest horizon and `horizons` the ones planned, every one from 1 to `horizon` if not given (see
         `run`). Targets, and the names refused as inputs, go up to `horizon` whatever is planned.
 
@@ -1733,8 +1782,12 @@ class BaseModel(ABC):
             self._cut_rules(information_set, cut_rules),
             issued,
         )
+        kind = unit_kind(self)
         if self._ctx_fn is None:  # a predictor function's lists are known after its plan, below
             fixed = self._precompute_expanded_predictors(horizons)
+            if kind != PERIOD:
+                check_unit_settings(self, data, fixed.values())
+                check_lists_by_period(self.name, horizons, self._periods_per_day, fixed=fixed)
             self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest, _names_of(fixed))
         # A model that fits nothing has no training target to check.
         check_target = self.newest_target == "d-1" and not self._fits_nothing
@@ -1757,6 +1810,10 @@ class BaseModel(ABC):
                     shared=shared,
                 )
             expanded = plan.names_by_pair()
+            if kind != PERIOD:
+                check_unit_settings(self, data)
+                check_plan_for_units(self, plan)
+                check_lists_by_period(self.name, horizons, self._periods_per_day, plan=plan)
             self._check_reaches_back(
                 data, test_start, test_end, windows, weekdays, horizons, newest, _names_of(expanded)
             )
@@ -1769,6 +1826,8 @@ class BaseModel(ABC):
                 self.name,
                 stacklevel=stacklevel,
             )
+            if kind == DAY:
+                self._check_day_level(data, freq, test_start, test_end, windows, weekdays, horizons, newest)
             if information_set is not None and availability == "raise":
                 plan.check(target, self.name)
             elif information_set is not None and availability == "warn":
@@ -1779,7 +1838,9 @@ class BaseModel(ABC):
             return expanded
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest, shared)
         expanded = fixed
-        self._used_predictors = _contract.check_predictors(data, expanded, target, horizon)
+        # What the frame's and the information set's checks read: a pooled unit's lists without the virtual `period`.
+        checked = expanded if kind != POOLED else without_feature(expanded)
+        self._used_predictors = _contract.check_predictors(data, checked, target, horizon)
         _contract.warn_about_a_midnight_stamp(
             data.index,
             freq,
@@ -1788,6 +1849,8 @@ class BaseModel(ABC):
             self.name,
             stacklevel=stacklevel,
         )
+        if kind == DAY:
+            self._check_day_level(data, freq, test_start, test_end, windows, weekdays, horizons, newest)
         days = None if windows is None else windows.issue_days(weekdays)
         if days is None and weekdays is not None and test_start is not None and test_end is not None:
             days = [day.isoformat() for day in listed_days(_test_days(test_start, test_end), weekdays)]
@@ -1800,7 +1863,7 @@ class BaseModel(ABC):
             check, late_uses = self._issue_time_checks(information_set)
         if information_set is not None and availability == "raise":
             check(
-                expanded,
+                checked,
                 target,
                 freq,
                 data.index,
@@ -1813,11 +1876,11 @@ class BaseModel(ABC):
             )
             if on_anchors:
                 self._target_on_anchors(
-                    information_set.check, expanded, target, freq, data.index, test_start, test_end, days, window
+                    information_set.check, checked, target, freq, data.index, test_start, test_end, days, window
                 )
         elif information_set is not None and availability == "warn":
             uses = late_uses(
-                expanded,
+                checked,
                 target,
                 freq,
                 data.index,
@@ -1830,13 +1893,13 @@ class BaseModel(ABC):
             )
             if on_anchors:
                 uses += self._target_on_anchors(
-                    information_set.late_uses, expanded, target, freq, data.index, test_start, test_end, days, window
+                    information_set.late_uses, checked, target, freq, data.index, test_start, test_end, days, window
                 )
             self._availability_listing = listing_rows(uses)
             for name, (start, end) in windows.periods if windows is not None else ():
                 listed = None if weekdays is None else RunWindows.fixed(None, (start, end)).issue_days(weekdays)
                 uses = late_uses(
-                    expanded,
+                    checked,
                     target,
                     freq,
                     data.index,
@@ -1849,7 +1912,7 @@ class BaseModel(ABC):
                 )
                 if on_anchors:
                     uses += self._target_on_anchors(
-                        information_set.late_uses, expanded, target, freq, data.index, start, end, listed, window
+                        information_set.late_uses, checked, target, freq, data.index, start, end, listed, window
                     )
                 self._window_listings[name] = listing_rows(uses)
         return expanded
@@ -1995,6 +2058,52 @@ class BaseModel(ABC):
                 f"the frame starts on {starts}: that block would train on fewer days. Start the frame on {needed} or earlier, or "
                 "the test later."
             )
+
+    def _check_day_level(
+        self,
+        data: pd.DataFrame,
+        freq: str,
+        test_start: Optional[str],
+        test_end: Optional[str],
+        windows: Optional[RunWindows],
+        weekdays: Optional[Sequence[int]],
+        horizons: Sequence[int],
+        newest: Optional[NewestTargets],
+    ) -> None:
+        """A ValueError (`_units.check_day_level`) if a predictor of a day unit holds two finite values on one local date its
+        fits train on: from the earliest first date of `training_span(a, W, h, k)` over the run's anchors, windows and horizons
+        (k the largest of a period's on the anchor under `"published"`; an `"expanding"` window from the frame's first date) to
+        the latest last one, or every date of the frame without a test period (`verify` checks each model so first).
+
+        Not the issue dates: a probe of `verify` perturbs what is unknown, or fresh, at the issue time cell by cell, which the
+        issue date's and the later dates' rows hold, and a check there would refuse the probe's own run. The dates a fit trains
+        on are D - 1 or earlier and stay as they are, so the probes see what the run sees. A column that changes with the period
+        is caught on any of them."""
+        names = list(self._used_predictors)
+        if windows is None and (test_start is None or test_end is None):
+            check_day_level(data, names, freq, self.name)
+            return
+        if windows is not None:
+            issued = windows.issue_days(weekdays)
+        else:
+            issued = [day.isoformat() for day in listed_days(_test_days(test_start, test_end), weekdays)]
+        if not issued or not len(data.index):
+            return
+        frame_first = _contract.wall_clock(data.index).min().date().toordinal()
+        firsts, lasts = [], []
+        for member, rule in zip(self._members, self._refit_rules):
+            anchors = np.array([day.toordinal() for day in refit_anchors(issued, rule)], dtype=np.int64)
+            k = -1
+            if newest is not None:
+                k = np.max(
+                    [np.atleast_1d(newest.at(period, anchors)) for period in range(self._periods_per_day)], axis=0
+                )
+            for horizon in horizons:
+                last = np.minimum(anchors + k - int(horizon), anchors - 1)
+                lasts.append(int(last.max()))
+                firsts.append(frame_first if member == EXPANDING else int((last - member + 1).min()))
+        span = (datetime.date.fromordinal(min(firsts)), datetime.date.fromordinal(max(lasts)))
+        check_day_level(data, names, freq, self.name, span)
 
     def _target_on_anchors(
         self,
@@ -2743,3 +2852,16 @@ class BaseModel(ABC):
         them. Called once per forecast, never on several rows at once: a product of a block of rows can differ from that of one
         row in the last bits, and a forecast must not depend on which others share its fit."""
         raise NotImplementedError(f"{type(self).__name__} has no _predict_fitted: it runs with refit=None only")
+
+    def _fit_days(self, x: np.ndarray, y: np.ndarray, y_mask: np.ndarray) -> Any:
+        """The fit of a day unit (`_unit_kind = "day"`, `models._units`): `x` (dates, inputs) the scaled day-level inputs of its
+        training dates, `y` (dates, P) the targets of the P periods of each date's target day through each period's Invariant
+        (`scalers.target.MultiTargetAsinh`), NaN where `y_mask` is False (a slot the clock skips, the repeated autumn hour, a
+        missing value, a target not yet published by the issue time). Returns the fit `_predict_days` reads."""
+        raise NotImplementedError(f"{type(self).__name__} has no _fit_days: it fits no day units")
+
+    def _predict_days(self, fitted: Any, rows: np.ndarray) -> np.ndarray:
+        """The forecasts of a day unit's call, (rows, P) in the transformed target units, from `fitted` (`_fit_days`) and the
+        scaled inputs `rows` (rows, inputs): the issue dates of every day of the unit's block the frame has, padded to the rule's
+        nominal length with copies of the first. A row's forecasts must not depend on the call's other rows."""
+        raise NotImplementedError(f"{type(self).__name__} has no _predict_days: it fits no day units")
