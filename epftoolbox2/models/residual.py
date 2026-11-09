@@ -9,8 +9,9 @@ the base's out-of-sample residuals, 4 % better than LEAR's window average on DE 
    whatever `issue_days` says: the learner trains on every date's rows.
 2. **The learner** trains, per refit unit, on the rows of the issue days in its span whose base forecast exists, with the
    target `y - base forecast` (the base's own record for that row's period, horizon and issue day: an out-of-sample forecast,
-   never a fitted value), each period's residuals through their own Invariant (`ztree.py:97-105`); a forecast is the issue day's
-   base forecast plus the learner's prediction mapped back. A row dated D' at horizon h has the target of D' + h, and the
+   never a fitted value), each period's residuals through their own Invariant (`ztree.py:97-105`; a pooled learner's
+   `target_transform` says, "none" the raw residuals); a forecast is the issue day's base forecast plus the learner's
+   prediction mapped back. A row dated D' at horizon h has the target of D' + h, and the
    learner's span (`training_span`) ends where its cut does, so a base forecast enters a learner row only with a target known by
    then.
 

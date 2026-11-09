@@ -38,6 +38,7 @@ from tests.synthetic import calendar_shift, make_market_data
 
 WINDOW = 28
 HOURS = (0, 8, 12, 18)
+TRANSFORMS = ("per_period", "pooled", "none")
 
 
 def slot(hour, freq="1h"):
@@ -115,7 +116,8 @@ def _seen(model, rows):
 
 class DayRidge(BaseModel):
     """A ridge per output on its valid slots, with an intercept, on the scaled inputs and the targets through each period's
-    Invariant: P per-period ridges with the same penalty, rows and inputs. Each call's rows are kept in `calls`."""
+    Invariant (or raw, `target_transform="none"`): P per-period ridges with the same penalty, rows and inputs. Each call's
+    rows are kept in `calls`."""
 
     _unit_kind = "day"
     calls: list = []
@@ -126,6 +128,7 @@ class DayRidge(BaseModel):
         training_window=WINDOW,
         *,
         alpha=1.0,
+        target_transform="per_period",
         by_length=0.0,
         by_call=0.0,
         by_rows=0.0,
@@ -134,13 +137,20 @@ class DayRidge(BaseModel):
         kw.setdefault("refit", "7D")
         super().__init__(predictors, training_window, **kw)
         self.alpha = alpha
+        self.target_transform = target_transform
         self.by_length = by_length
         self.by_call = by_call
         self.by_rows = by_rows
 
     @property
     def _model_kwargs(self):
-        return {"alpha": self.alpha, "by_length": self.by_length, "by_call": self.by_call, "by_rows": self.by_rows}
+        return {
+            "alpha": self.alpha,
+            "target_transform": self.target_transform,
+            "by_length": self.by_length,
+            "by_call": self.by_call,
+            "by_rows": self.by_rows,
+        }
 
     def _fit_predict(self, train_x, train_y, test_x):
         raise NotImplementedError("a day unit fits through _fit_days")
@@ -478,11 +488,22 @@ def invariant(values):
     return z, scaler
 
 
-def day_reference(data, issue, horizon, predictors=DAY_PREDICTORS, alpha=1.0, window=WINDOW, refit="7D", newest=None):
+def day_reference(
+    data,
+    issue,
+    horizon,
+    predictors=DAY_PREDICTORS,
+    alpha=1.0,
+    window=WINDOW,
+    refit="7D",
+    newest=None,
+    transform="per_period",
+):
     """period -> the forecast of (period, horizon, issue) by hand: the dates of the span of its anchor, the inputs scaled over
     the dates with every input and a target of some period, binary columns (read on every date of the span) kept, and for each
-    period its own ridge on the dates where its target is, on its Invariant (sklearn's Ridge, not the model's). `newest`
-    (period -> k) ends the span at the anchor + max k - h, and a period's slots after the anchor + its k - h are no target."""
+    period its own ridge on the dates where its target is, on its Invariant, or on the raw target with `transform="none"`
+    (sklearn's Ridge, not the model's). `newest` (period -> k) ends the span at the anchor + max k - h, and a period's slots
+    after the anchor + its k - h are no target."""
     from sklearn.linear_model import Ridge
 
     names = [name.format(horizon=horizon) for name in predictors]
@@ -502,6 +523,10 @@ def day_reference(data, issue, horizon, predictors=DAY_PREDICTORS, alpha=1.0, wi
     for period in range(24):
         rows = np.isfinite(ys[keep, period])
         if not rows.any():
+            continue
+        if transform == "none":
+            fitted = Ridge(alpha=alpha).fit(fit_x[rows], ys[keep][rows, period])
+            out[period] = float(fitted.predict(test_x)[0])
             continue
         z, scaler = invariant(ys[keep][rows, period])
         fitted = Ridge(alpha=alpha).fit(fit_x[rows], z)
@@ -566,6 +591,43 @@ def test_on_switch_days_a_masked_slot_drops_that_slot_alone(frame_name, issues, 
     assert worst < 1e-10, worst
     if frame_name == "autumn":
         assert np.isnan(records[("2023-10-27", 2, 2)]["actual"])  # the repeated hour's target
+
+
+@pytest.mark.parametrize(
+    "frame_name, issues",
+    [("plain", ("2023-03-20", "2023-03-23", "2023-03-26")), ("market", ("2023-03-24", "2023-03-26", "2023-03-29"))],
+)
+def test_a_day_unit_with_target_transform_none_fits_the_raw_targets_by_hand(frame_name, issues, request):
+    """`target_transform="none"`: each period's ridge fits its raw targets on the same dates and inputs (the masked slots of
+    the spring switch included) and its prediction is the forecast, to 1e-10 of the hand fit; the targets `_fit_days` gets are
+    the slots' own values, NaN where masked, and every forecast moves against the per-period Invariant's."""
+    data = request.getfixturevalue(frame_name)
+    seen = []
+    real = DayRidge._fit_days
+
+    def spy(self, x, y, y_mask):
+        seen.append((y.copy(), y_mask.copy()))
+        return real(self, x, y, y_mask)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(DayRidge, "_fit_days", spy)
+        records = by_key(DayRidge(target_transform="none").run(data, issues[0], issues[-1], horizon=2)._results)
+    worst = 0.0
+    for issue in issues:
+        for hz in (1, 2):
+            reference = day_reference(data, issue, hz, transform="none")
+            assert reference
+            for period, value in reference.items():
+                key = (issue, period, hz)
+                if key in records:
+                    worst = max(worst, abs(records[key]["prediction"] - value))
+    assert worst < 1e-10, worst
+    # The raw targets: prices, never asinh values (whose magnitude stays below ~10 here).
+    for y, mask in seen:
+        assert np.isnan(y[~mask]).all() and np.nanmax(np.abs(y)) > 20
+    invariant_run = by_key(DayRidge().run(data, issues[0], issues[-1], horizon=2)._results)
+    assert invariant_run.keys() == records.keys()
+    assert all(invariant_run[key]["prediction"] != records[key]["prediction"] for key in records)
 
 
 def test_the_issue_calendar_s_counts_at_an_hour_and_a_quarter_hour_for_both_kinds():
@@ -654,7 +716,8 @@ def pooled_reference(
     """period -> the forecast of (period, horizon, issue) by hand: every row of every hour dated in the span of its anchor, by
     date then hour (both rows of a repeated hour), its own row's inputs and the hour as `period`, the inputs scaled over the
     rows with every input and a target (binary columns, read on every row of the span, kept), the targets through each hour's
-    Invariant (or one over every row), one least-squares fit, and each hour's forecast from its last row of the issue date."""
+    Invariant (or one over every row, or as they are with `transform="none"`), one least-squares fit, and each hour's forecast
+    from its last row of the issue date."""
     names = [name.format(horizon=horizon) for name in predictors]
     local = data.index.tz_localize(None)
     dates, hours = local.normalize(), np.asarray(local.hour)
@@ -682,6 +745,9 @@ def pooled_reference(
     fit_x, _, test_x = StandardScaler().fit_transform(
         xs[keep], np.zeros(int(keep.sum())), x[issued], scalable_mask=mask
     )
+    if transform == "none":
+        beta = np.linalg.lstsq(np.column_stack([np.ones(len(fit_x)), fit_x]), ys[keep], rcond=None)[0]
+        return {int(p): float(row @ beta[1:] + beta[0]) for p, row in zip(periods, test_x)}
     z = np.empty(int(keep.sum()))
     scalers = {}
     for group in range(24) if transform == "per_period" else [None]:
@@ -694,11 +760,11 @@ def pooled_reference(
     }
 
 
-@pytest.mark.parametrize("transform", ["per_period", "pooled"])
+@pytest.mark.parametrize("transform", TRANSFORMS)
 def test_a_pooled_unit_is_one_fit_over_every_period_s_rows_by_hand(market, transform):
     """Each predictor on its period's own row (`price_d-1` that hour's price), `period` the hour, every period's rows of the
-    span stacked, one fit; each forecast mapped back with its hour's Invariant or the pooled one: to 1e-10 of the hand fit,
-    across the spring switch."""
+    span stacked, one fit; each forecast mapped back with its hour's Invariant or the pooled one, or the fit's own on the raw
+    targets: to 1e-10 of the hand fit, across the spring switch. Each other transform moves every forecast."""
     stacked = []
     real = PooledOLS._fit_model
 
@@ -718,12 +784,12 @@ def test_a_pooled_unit_is_one_fit_over_every_period_s_rows_by_hand(market, trans
                 if (issue.isoformat(), period, hz) in records:
                     worst = max(worst, abs(records[(issue.isoformat(), period, hz)]["prediction"] - value))
     assert worst < 1e-10, worst
-    other = by_key(
-        PooledOLS(target_transform="pooled" if transform == "per_period" else "per_period")
-        .run(market, *WEEK, horizon=2)
-        ._results
-    )
-    assert all(other[key]["prediction"] != records[key]["prediction"] for key in records)
+    for other_transform in TRANSFORMS:
+        if other_transform == transform:
+            continue
+        other = by_key(PooledOLS(target_transform=other_transform).run(market, *WEEK, horizon=2)._results)
+        assert other.keys() == records.keys()
+        assert all(other[key]["prediction"] != records[key]["prediction"] for key in records), other_transform
 
 
 # ---------------------------------------------------------------------------
@@ -995,8 +1061,10 @@ def test_a_function_returning_the_fixed_list_is_the_fixed_list(market, kind):
 def test_the_manifest_records_the_unit_kind_and_target_transform_and_a_resume_compares_them(market, tmp_path):
     for model, kind, transform in (
         (DayRidge(), "day", "per_period"),
+        (DayRidge(target_transform="none"), "day", "none"),
         (PooledOLS(), "pooled", "per_period"),
         (PooledOLS(target_transform="pooled"), "pooled", "pooled"),
+        (PooledOLS(target_transform="none"), "pooled", "none"),
     ):
         save = tmp_path / f"{kind}-{transform}" / "m.jsonl"
         model.run(market, WEEK[0], WEEK[0], horizon=1, save_to=str(save))
@@ -1015,6 +1083,33 @@ def test_the_manifest_records_the_unit_kind_and_target_transform_and_a_resume_co
             DayRidge().run(market, WEEK[0], WEEK[0], horizon=1, save_to=str(save))
     manifest_path(save).write_text(json.dumps(stored))
     DayRidge().run(market, WEEK[0], WEEK[0], horizon=1, save_to=str(save))  # the same: resumes
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_resume_with_another_target_transform_refuses_and_the_same_resumes(market, tmp_path, kind):
+    """A run into results made with another `target_transform` raises `ManifestMismatchError` naming it, before any fit, either
+    way between the default and "none"; the same transform resumes."""
+    model = KINDS[kind]
+    for first, second in (("per_period", "none"), ("none", "per_period")):
+        save = tmp_path / first / "m.jsonl"
+        model(target_transform=first).run(market, WEEK[1], WEEK[1], horizon=1, save_to=str(save))
+        written = lines(save)
+        model.calls.clear()
+        with pytest.raises(ManifestMismatchError, match=f"target_transform: '{first}' \\(existing results\\)"):
+            model(target_transform=second).run(market, WEEK[0], WEEK[1], horizon=1, save_to=str(save))
+        assert model.calls == [] and lines(save) == written
+        model(target_transform=first).run(market, WEEK[0], WEEK[1], horizon=1, save_to=str(save))
+        assert len(lines(save)) == 7 * 24 - 2
+
+
+def test_what_target_transform_a_unit_refuses(market):
+    """A value outside per_period, pooled and none, or "pooled" for a day unit (one transform over every period's rows is a
+    pooled unit's), raises when the run starts, before any fit."""
+    with pytest.raises(ValueError, match=r"target_transform must be one of \['per_period', 'pooled', 'none'\]"):
+        PooledOLS(target_transform="raw").run(market, *WEEK, horizon=1)
+    with pytest.raises(ValueError, match="a day unit fits each period of the day as an output of its own"):
+        DayRidge(target_transform="pooled").run(market, *WEEK, horizon=1)
+    assert DayRidge.calls == [] and PooledOLS.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -1041,6 +1136,17 @@ def test_verify_is_ok_with_its_control_rerun_co_batch_and_cut_frame(market, kind
     if kind == "day":  # the call's second column is D-1's 08:00 price, unknown on the block's rows from D+2 on
         with pytest.raises(AssertionError):
             suite.check_verify(lambda name: make(name, by_call=1e-3), market, VERIFY_INFO, [WEEK[0]])
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_verify_is_ok_with_its_control_for_target_transform_none(market, kind):
+    """`target_transform="none"`: no forecast moves under the probe, every one under the control, two runs agree, noise in the
+    call's other days moves nothing and the cut frame gives the same bits, on a block's middle and spring day."""
+
+    def make(name, **params):
+        return KINDS[kind](name=name, target_transform="none", **params)
+
+    suite.check_verify(make, market, VERIFY_INFO, ["2023-03-22", WEEK[1]], items=6)
 
 
 @pytest.fixture
@@ -1190,10 +1296,9 @@ def test_a_period_with_no_training_target_is_skipped_whatever_the_target_transfo
     target transform, and the keys of the run don't depend on the transform."""
     data = market.copy()
     data.loc[data.index.hour == 5, "price"] = np.nan
-    transforms = ["per_period", "pooled"] if model is PooledOLS else ["per_period"]
+    transforms = TRANSFORMS if model is PooledOLS else ["per_period", "none"]
     for transform in transforms:
-        settings = {"target_transform": transform} if model is PooledOLS else {}
-        ref = model(**settings).run(data, "2023-04-03", "2023-04-05", horizon=1)
+        ref = model(target_transform=transform).run(data, "2023-04-03", "2023-04-05", horizon=1)
         assert len(ref._results) == 69 and ref.skipped == {"no_finite_training_rows": 3}, transform
         assert 5 not in {r["hour"] for r in ref._results}
 
