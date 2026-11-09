@@ -787,6 +787,23 @@ def test_a_lear_subclass_sets_its_own_near_twin_bound():
         assert model._ENGINE_NEAR_TWIN == 1e-5 == LassoCVModel([], 28)._ENGINE_NEAR_TWIN
 
 
+def test_a_zone_run_checks_its_engine_fits(tmp_path, monkeypatch, every_fit_checked):
+    """A run over zones (one frame per zone) takes `engine="check"` as a single frame's run does: each zone's models from
+    statistics, every fit checked (`engine_check`), and the records those of `"on"`."""
+    from tests.models import test_pooled
+
+    monkeypatch.setattr("epftoolbox2.models._pooled.ProcessPoolExecutor", test_pooled.InProcessPool)
+    monkeypatch.setattr(_engine, "ProcessPoolExecutor", InProcessPool)
+    frames = {zone: test_pooled.hourly(zone, seed=i) for i, zone in enumerate(test_pooled.ZONES)}
+    for engine in ("on", "check"):
+        pipeline = ModelPipeline(engine=engine).add_model(LEARModel(test_pooled.PREDICTORS, 30, name="lear"))
+        pipeline.run(frames, test=test_pooled.HOURLY_TEST, horizon=1, save_dir=str(tmp_path / engine))
+    for zone in test_pooled.ZONES:
+        stored = manifest(tmp_path / "check" / zone, "lear")
+        assert stored["fit_path"] == "engine-1" and stored["engine_check"]["fits"] == stored["engine"]["fits"] > 0, zone
+        assert lines(tmp_path / "on" / zone / "lear.jsonl") == lines(tmp_path / "check" / zone / "lear.jsonl"), zone
+
+
 def test_check_in_yaml_and_a_workflow(tmp_path):
     """`engine: check` reads and writes back, in a pipeline file and in a workflow's `model_pipeline`."""
     pipeline = ModelPipeline(engine="check").add_model(OLSModel(PREDICTORS, 28, name="ols"))
