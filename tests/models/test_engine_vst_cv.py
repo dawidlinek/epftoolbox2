@@ -622,7 +622,8 @@ def test_check_keeps_the_engines_records_and_counts_a_sample(spring, tmp_path, i
         if model.name == "naive":
             assert sample is None
             continue
-        assert set(sample) == {"fits", "max_abs", "max_rel", "other_choice"}
+        assert set(sample) == {"fits", "max_abs", "max_rel", "other_choice", "nonfinite", "model_path_errors"}
+        assert sample["nonfinite"] == 0 and sample["model_path_errors"] == 0
         assert 0 < sample["fits"] < check["engine"]["fits"] / 3, (model.name, sample, check["engine"])
         assert sample["max_abs"] <= TOLERANCE[test_engine.cls_of(model)] and sample["other_choice"] == 0
         assert 0.0 <= sample["max_rel"] <= sample["max_abs"]
@@ -663,6 +664,74 @@ def test_check_warns_about_a_model_over_its_tolerance(spring, tmp_path, in_proce
     sample = manifest(tmp_path / "check", "mutant")["engine_check"]
     assert sample["fits"] == manifest(tmp_path / "check", "mutant")["engine"]["fits"] and sample["max_abs"] > 1e-8
     assert manifest(tmp_path / "check", "ols")["engine_check"]["max_abs"] <= 1e-8
+
+
+def test_a_check_gap_that_isnt_finite_is_counted_and_warned_about():
+    """A NaN on one side is the largest gap of all: a later finite pair or a merge in either order can't hide it (`nonfinite`),
+    and the check warns about the model, whatever its finite gaps."""
+    import math
+
+    one = _engine_worker.EngineCounts(check=True)
+    one.checked([(50.0, math.nan), (50.0, 50.5)], other_choice=False)
+    assert one.check_dict()["nonfinite"] == 1 and one.check_dict()["max_abs"] == 0.5
+    a, b = _engine_worker.EngineCounts(check=True), _engine_worker.EngineCounts(check=True)
+    a.checked([(50.0, math.nan)], False)
+    b.checked([(50.0, 50.5)], False)
+    for first, second in ((a, b), (b, a)):
+        total = _engine_worker.EngineCounts()
+        total.add(first)
+        total.add(second)
+        assert total.check_dict()["nonfinite"] == 1 and total.check_dict()["max_abs"] == 0.5
+    small = _engine_worker.EngineCounts(check=True)
+    small.checked([(50.0, math.inf), (50.0, 50.0)], False)
+    with pytest.warns(UserWarning, match=r"^ols: engine check: .* and 1 not finite"):
+        _engine._warn_over_tolerance(OLSModel(PREDICTORS, 28, name="ols"), small.check_dict())
+
+
+class PathRaises(LassoCVModel):
+    """LassoCV whose model-path fit raises (as scikit-learn does on a degenerate fold), while its fits from statistics run."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        raise ValueError("planted: the model path refuses this fit")
+
+    def _fit_model(self, train_x, train_y):
+        raise ValueError("planted: the model path refuses this fit")
+
+    def _predict_fitted(self, fitted, test_x):
+        return super()._predict_fitted(fitted, test_x)
+
+    def _fit_stats(self, stats):
+        return super()._fit_stats(stats)
+
+
+def test_check_counts_a_fit_the_model_path_refuses(spring, tmp_path, in_process, every_fit_checked):
+    """A sampled fit the engine forecasts but the model path can't fit (with engine off it would be a fit_error skip, so the
+    forecast counts differ): `engine_check.model_path_errors` counts it, and the check warns."""
+    with pytest.warns(
+        UserWarning, match=r"^refuses: engine check: \d+ of \d+ fits checked were forecast .* model path raises"
+    ):
+        run_check(spring, tmp_path / "check", models=lambda: [PathRaises(PREDICTORS, 28, cv=3, name="refuses")])
+    stored = manifest(tmp_path / "check", "refuses")
+    assert stored["engine_check"]["model_path_errors"] == stored["engine"]["fits"] > 0
+
+
+def test_a_lear_subclass_sets_its_own_near_twin_bound():
+    """`_ENGINE_NEAR_TWIN` set on a LEAR subclass's class wins over the criterion's default, as on a LassoCV subclass; LEAR
+    itself has 1e-6 with "cv" and none with an information criterion, also after the criterion changes."""
+
+    class WiderLear(LEARModel):
+        _ENGINE_NEAR_TWIN = 1e-4
+
+    class WiderLasso(LassoCVModel):
+        _ENGINE_NEAR_TWIN = 1e-4
+
+    assert WiderLear([], 28, criterion="cv")._ENGINE_NEAR_TWIN == 1e-4 == WiderLasso([], 28)._ENGINE_NEAR_TWIN
+    model = LEARModel([], 28)
+    assert model._ENGINE_NEAR_TWIN is None
+    model.criterion = "cv"
+    assert model._ENGINE_NEAR_TWIN == 1e-6
+    model.criterion = "aic"
+    assert model._ENGINE_NEAR_TWIN is None
 
 
 def test_check_in_yaml_and_a_workflow(tmp_path):

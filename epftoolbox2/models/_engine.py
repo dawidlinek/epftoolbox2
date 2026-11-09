@@ -241,16 +241,28 @@ def run_group(
 
 
 def _warn_over_tolerance(model: BaseModel, check: Optional[Dict[str, Any]]) -> None:
-    """`engine="check"`'s warning: the model's largest gap between the engine and the model path above its class's tolerance."""
-    tolerance = tolerance_of(model)
-    if check is None or tolerance is None or not check["fits"] or check["max_abs"] <= tolerance:
+    """`engine="check"`'s warnings about a model: its largest gap between the engine and the model path above its class's
+    tolerance or not finite (a NaN or inf forecast on one side), or a fit the engine forecast that the model path couldn't fit
+    (its forecast counts would differ)."""
+    if check is None or not check["fits"]:
         return
-    warnings.warn(
-        f"{model.name}: engine check: forecasts from shared statistics are up to {check['max_abs']:.3g} from the model "
-        f"path's in {check['fits']} fits checked, above the {tolerance:g} of its class "
-        f"({check['other_choice']} chose another kink or penalty); its results use the engine's",
-        stacklevel=3,
-    )
+    tolerance = tolerance_of(model)
+    nonfinite = check.get("nonfinite", 0)
+    if tolerance is not None and (nonfinite or check["max_abs"] > tolerance):
+        gaps = f"up to {check['max_abs']:.3g}" + (f" and {nonfinite} not finite" if nonfinite else "")
+        warnings.warn(
+            f"{model.name}: engine check: forecasts from shared statistics are {gaps} from the model path's in "
+            f"{check['fits']} fits checked, above the {tolerance:g} of its class ({check['other_choice']} chose another "
+            "kink or penalty); its results use the engine's",
+            stacklevel=3,
+        )
+    if check.get("model_path_errors"):
+        warnings.warn(
+            f"{model.name}: engine check: {check['model_path_errors']} of {check['fits']} fits checked were forecast from "
+            "shared statistics where the model path raises (a fit_error there): with engine off those forecasts would be "
+            "skips; its results use the engine's",
+            stacklevel=3,
+        )
 
 
 def mask_readers(models: Sequence[BaseModel], columns: Dict[str, Sequence[str]]) -> set:

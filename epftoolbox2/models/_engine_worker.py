@@ -239,9 +239,22 @@ class EngineCounts:
     `FAR_ISSUE`), and the largest distance of an issue row the engine forecast from its training values (`max_issue_z`, in
     training standard deviations along the eigenvectors of its fit's Gram, `_stats.issue_distance`). With `check`
     (`engine="check"`), the fits also run on the model path (`check_fits`), the largest absolute and relative gaps of their
-    forecasts (`check_abs`, `check_rel`) and how many of them chose another kink or penalty (`other_choice`)."""
+    forecasts (`check_abs`, `check_rel`, finite gaps), how many forecasts' gaps weren't finite (`nonfinite`: one side NaN or
+    inf, the largest gap of all, which no later gap and no merge can hide), how many of the fits chose another kink or penalty
+    (`other_choice`), and how many fits the engine forecast that the model path couldn't fit (`model_path_errors`: its
+    ValueError, a fit_error there, so the forecast counts would differ)."""
 
-    __slots__ = ("fits", "fallbacks", "max_issue_z", "check_fits", "check_abs", "check_rel", "other_choice")
+    __slots__ = (
+        "fits",
+        "fallbacks",
+        "max_issue_z",
+        "check_fits",
+        "check_abs",
+        "check_rel",
+        "other_choice",
+        "nonfinite",
+        "model_path_errors",
+    )
 
     def __init__(self, check: bool = False):
         self.fits = 0
@@ -251,6 +264,8 @@ class EngineCounts:
         self.check_abs = 0.0
         self.check_rel = 0.0
         self.other_choice = 0
+        self.nonfinite = 0
+        self.model_path_errors = 0
 
     def __bool__(self) -> bool:
         return bool(self.fits or self.fallbacks or self.check_fits)
@@ -264,6 +279,8 @@ class EngineCounts:
             self.check_abs = max(self.check_abs, other.check_abs)
             self.check_rel = max(self.check_rel, other.check_rel)
             self.other_choice += other.other_choice
+            self.nonfinite += other.nonfinite
+            self.model_path_errors += other.model_path_errors
 
     def issue(self, z: float) -> None:
         self.max_issue_z = max(self.max_issue_z, z)
@@ -274,12 +291,17 @@ class EngineCounts:
         self.other_choice += bool(other_choice)
         for mine, theirs in pairs:
             gap = abs(mine - theirs)
-            if not gap <= self.check_abs:  # a NaN gap is the largest
-                self.check_abs = gap
+            if not math.isfinite(gap):  # NaN or inf on one side: counted, never compared away
+                self.nonfinite += 1
+                continue
+            self.check_abs = max(self.check_abs, gap)
             size = max(abs(mine), abs(theirs))
-            rel = gap / size if size > 0 else (0.0 if gap == 0 else math.inf)
-            if not rel <= self.check_rel:
-                self.check_rel = rel
+            self.check_rel = max(self.check_rel, gap / size if size > 0 else 0.0)
+
+    def model_path_error(self) -> None:
+        """A checked fit the model path raised a ValueError on (it would skip it as a fit_error) and the engine forecast."""
+        self.check_fits = (self.check_fits or 0) + 1
+        self.model_path_errors += 1
 
     def to_dict(self) -> Dict:
         return {
@@ -297,6 +319,8 @@ class EngineCounts:
             "max_abs": float(self.check_abs),
             "max_rel": float(self.check_rel),
             "other_choice": int(self.other_choice),
+            "nonfinite": int(self.nonfinite),
+            "model_path_errors": int(self.model_path_errors),
         }
 
 
@@ -677,7 +701,7 @@ class EngineFits:
     def _check(self, fit: StatsFit, fitted, out: List[Optional[Tuple[float, list]]]) -> None:
         """The fit on the model path as well (its scaler and `_fit_model` on the same values, each row through
         `_predict_fitted`), counted against the engine's forecasts (`EngineCounts.checked`); one the model path can't fit
-        (a ValueError, its fit_error) isn't counted."""
+        (a ValueError, its fit_error, where the engine forecast) is counted as such (`model_path_errors`)."""
         names = [str(name) for name in self.spans.names(fit.period)[fit.columns]]
         scaler = make_scaler(self.inputs.inputs.config.get("scaler", "standard"))
         x, y, test = scaler.fit_transform(
@@ -686,6 +710,7 @@ class EngineFits:
         try:
             own = self.model._fit_model(x, y)
         except ValueError:
+            self.counts.model_path_error()
             return
         pairs = []
         for row, made in enumerate(out):
