@@ -66,8 +66,10 @@ The fits (`LinearFit` for OLS and Ridge; LEAR's `LearFit` from `ScaledStats.gram
   hands back at most 0.5 % more rows than the distance bound (Lago DE 2.6 % and 0.9 % of OLS's forecasts against 2.5 % and
   0.4 %). Any budget up to 5.8e-9 holds 5e-9 in every set. Without the step's accurate residual (a float64 one) the guard
   measures noise and kept forecasts 1.2e-8 off: hence the error-free path. The step and the guard's terms cost one accurate
-  residual and two triangular solves per fit, O(p²) (with long double 0.6 ms at p 247 against 0.66 ms for the factorisation,
-  the error-free path about four times that), and a triangular solve per issue row.
+  residual and two triangular solves per fit, O(p²) in operations but about the factorisation's own time, since the
+  long-double product isn't BLAS (0.6 to 1.0 ms at p 247 against 0.7 ms; 25 to 30 us at p 13 to 30, where the 10,000 OLS
+  variants of step 5l took 0.5 % more core-seconds), the error-free residual some more (2.3 against 1.9 ms per fit at p 247),
+  and a triangular solve per issue row.
 - **Ridge**, n > p (scikit-learn's `svd` mode): `RidgeCV(alphas, fit_intercept, cv=None)`'s leave-one-out error, computed from
   the eigendecomposition G = VΛV' (or of A) and the scaled rows (`ScaledStats.rows`, which Ridge alone needs): with U = Z_c V,
   the fit at α is U(V'q/(λ + α)), each row's leverage Σ_k U_ik²/(λ_k + α) plus 1/n for the unpenalised intercept, and its
