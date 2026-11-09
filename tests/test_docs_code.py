@@ -38,6 +38,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from epftoolbox2._extras import EXTRAS, MissingExtraError, has_extra
+
 from tests.live import (
     DATA_END,
     DATA_START,
@@ -237,6 +239,12 @@ def dotted(node):
     return None
 
 
+def extra_missing(exc: MissingExtraError) -> bool:
+    """Whether the extra a `MissingExtraError` names is one of `EXTRAS` and isn't installed here."""
+    names = [name.strip() for name in exc.extra.split(",")]
+    return all(name in EXTRAS for name in names) and not all(has_extra(name) for name in names)
+
+
 def is_epf(obj) -> bool:
     return getattr(obj, "__module__", "").startswith("epftoolbox2") or (
         inspect.ismodule(obj) and obj.__name__.startswith("epftoolbox2")
@@ -268,6 +276,13 @@ class PageChecker:
                 continue
             try:
                 exec(compile(ast.Module(body=[node], type_ignores=[]), where, "exec"), self.namespace)
+            except MissingExtraError as exc:
+                if not extra_missing(exc):
+                    self.problems.append(
+                        f"line {node.lineno}: `{ast.unparse(node)}` fails: {type(exc).__name__}: {exc}"
+                    )
+                # Else the module needs an extra this environment lacks (`epftoolbox2.nets` without torch): its names stay
+                # unresolved, so the block's calls to them go unchecked here, and the job that installs the extra checks them.
             except Exception as exc:  # ImportError, AttributeError, or anything the import itself raises
                 self.problems.append(f"line {node.lineno}: `{ast.unparse(node)}` fails: {type(exc).__name__}: {exc}")
 
@@ -634,6 +649,21 @@ def test_the_checker_flags_a_wrong_block(code, expected):
 @pytest.mark.parametrize("code", LET_THROUGH)
 def test_the_checker_accepts_a_right_block(code):
     assert check_source(PageChecker(), code, "snippet") == []
+
+
+def test_a_module_of_a_missing_extra_is_left_to_the_job_that_installs_it(monkeypatch):
+    """Without torch, `epftoolbox2.nets` raises MissingExtraError: not a problem of the block, whose calls to its names go
+    unchecked here (the torch-extra job checks them); with torch, a wrong call to them is flagged."""
+    code = "from epftoolbox2.nets import MLP\nMLP(n_inputs=3, n_outputs=1, bogus=1)"
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "torch", None)
+        patch.delitem(sys.modules, "epftoolbox2.nets", raising=False)
+        assert check_source(PageChecker(), code, "snippet") == []
+        patch.setitem(EXTRAS, "torch", ("json",))  # the extra counts as installed: then the failed import is a problem
+        patch.delitem(sys.modules, "epftoolbox2.nets", raising=False)
+        assert any("MissingExtraError" in p for p in check_source(PageChecker(), code, "snippet"))
+    if has_extra("torch"):
+        assert any("bogus" in p for p in check_source(PageChecker(), code, "snippet"))
 
 
 def test_blocks_of_a_page_share_their_imports_and_variables():
