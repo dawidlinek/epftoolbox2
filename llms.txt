@@ -25,7 +25,7 @@ Rules to know before using the library:
 - **YAML.** `DataPipeline`, `ModelPipeline` and `Workflow` have `save(path)` and `load(path)`. `save()` writes the ENTSO-E key as `${ENTSOE_API_KEY}` and `load()` expands it from the environment. Pass `include_secrets=True` only for files you never commit. Callable predictors cannot be saved (`save()` raises `TypeError`), so use `{horizon}` templates; a module-level function of `ctx` is saved by its import path. An unregistered class name raises on load.
 - **Custom components** must be registered in `COMPONENT_REGISTRY` to load from YAML, see the Extending page.
 - **Extras and weights.** A family that needs an extra or pretrained weights has a model card; `run()` and `verify()` check every model's extra, runtime packages and weights before any fit, and never downloads: fetch weights first with `epf weights fetch <Model>` (`--accept <licence>` for a non-commercial or revenue-capped one). `report.provenance()` gives each such model's licence, weights and contamination verdict per window.
-- **Examples.** Runnable scripts are in `examples/` and need `ENTSOE_API_KEY` in the environment, except `lear_lago.py` (LEAR on the Lago benchmark, downloaded from Zenodo) and `mlp_search.py` (a random search of `MLPDailyModel`s averaged by `AverageEnsemble(top=4)`, on the same benchmark; `[torch]` extra). Each has a `main()` that takes its date ranges and, if it writes files, an output directory. Worked snippets are on the two Examples pages.
+- **Examples.** Runnable scripts are in `examples/` and need `ENTSOE_API_KEY` in the environment, except `lear_lago.py` (LEAR on the Lago benchmark, downloaded from Zenodo) `mlp_search.py` (a random search of `MLPDailyModel`s averaged by `AverageEnsemble(top=4)`, on the same benchmark; `[torch]` extra) and `chained_solar_price.py` (a solar forecast chained into a price forecast through `ForecastSource`, from Energy-Charts and Open-Meteo). Each has a `main()` that takes its date ranges and, if it writes files, an output directory. Worked snippets are on the two Examples pages.
 
 ## Getting started
 
@@ -146,7 +146,7 @@ Rules to know before using the library:
 
 ## Optional
 
-- [examples/](examples/): runnable scripts for a data pipeline, a model pipeline, a full workflow, a YAML workflow, forecast-only mode and 15-minute forecasting
+- [examples/](examples/): runnable scripts for a data pipeline, a model pipeline, a full workflow, a YAML workflow, forecast-only mode, 15-minute forecasting and a solar forecast chained into a price forecast
 - [experiment.yaml](experiment.yaml): a `Workflow` file that points at the two pipeline files below
 - [data_pipeline.yaml](data_pipeline.yaml): a saved `DataPipeline` with ENTSO-E, Open-Meteo and calendar sources
 - [model_pipeline.yaml](model_pipeline.yaml): a saved `ModelPipeline` with models and evaluators

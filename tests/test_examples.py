@@ -12,6 +12,7 @@ the same keys, no unexpected missing forecasts, a passing information-set check 
 
 import datetime as dt
 import importlib.util
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -271,3 +272,158 @@ def test_mlp_search(keyless_live_dir, monkeypatch, information_set_checks):
     assert sorted(p.name for p in (keyless_live_dir / "results_mlp_search").glob("*.jsonl")) == sorted(
         f"{name}.jsonl" for name in models
     )
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# examples/chained_solar_price.py, offline: its two keyless sources answer from a synthetic market
+# ---------------------------------------------------------------------------------------------------------------------
+
+CHAIN_DATA = ("2021-12-01", "2024-03-05")
+# The price test, and the solar test from a price training window (364 days and the issue day) before it to its last day.
+CHAIN_PRICE = ("2024-02-26", "2024-03-03")
+CHAIN_SOLAR = ("2023-02-26", "2024-03-03")
+
+
+def synthetic_market() -> pd.DataFrame:
+    """Hourly UTC series of a sunny market, seeded: the sine of the sun's elevation at (51, 10), daily cloud cover, solar
+    generation growing with its capacity, the TSO's forecast of it, ICON-like radiation and cloud cover for the same hour a
+    day later (as `OpenMeteoSource(horizon=1)` emits it), a load forecast and a price that falls with solar generation."""
+    import numpy as np
+
+    from epftoolbox2.data.transformers import SolarGeometryTransformer
+
+    rng = np.random.default_rng(7)
+    index = pd.date_range(CHAIN_DATA[0], pd.Timestamp(CHAIN_DATA[1]) + pd.Timedelta(days=2), freq="1h", tz="UTC")
+    sun = (
+        SolarGeometryTransformer([(51.0, 10.0)]).transform(pd.DataFrame(index=index))["sun_sin_elevation"].clip(lower=0)
+    )
+    days = (index - index[0]).days.to_numpy()
+    daily = np.zeros(days.max() + 1)
+    for i in range(1, len(daily)):
+        daily[i] = 0.7 * daily[i - 1] + rng.normal(0, 0.25)
+    cloud = np.clip(0.5 + daily[days] + rng.normal(0, 0.05, len(index)), 0, 1)
+    capacity = 40_000 + 15_000 * days / days.max()
+    solar = capacity * 0.75 * sun.to_numpy() * (1 - 0.6 * cloud) * (1 + rng.normal(0, 0.05, len(index)))
+    solar = np.clip(solar, 0, None)
+    hour = index.tz_convert("Europe/Berlin").hour.to_numpy()
+    weekend = index.tz_convert("Europe/Berlin").dayofweek.to_numpy() >= 5
+    load = 55_000 + 8_000 * np.sin(2 * np.pi * (hour - 8) / 24) - 6_000 * weekend + rng.normal(0, 800, len(index))
+    noise = np.zeros(len(index))
+    for i in range(1, len(index)):
+        noise[i] = 0.8 * noise[i - 1] + rng.normal(0, 6)
+    frame = pd.DataFrame(
+        {
+            "ec_actual_solar": solar,
+            "ec_solar_forecast_day_ahead": solar * (1 + rng.normal(0, 0.1, len(index))),
+            "ec_load_forecast_day_ahead": load,
+            "ec_price_day_ahead": 90 + 0.002 * (load - 55_000) - 0.0012 * solar + noise,
+            "de_shortwave_radiation_d+1": 1000 * sun.to_numpy() * (1 - 0.7 * cloud + rng.normal(0, 0.08, len(index))),
+            "de_cloud_cover_d+1": 100 * np.clip(cloud + rng.normal(0, 0.1, len(index)), 0, 1),
+        },
+        index=index,
+    )
+    # Row t holds the forecast for the same hour a day later.
+    frame[["de_shortwave_radiation_d+1", "de_cloud_cover_d+1"]] = frame[
+        ["de_shortwave_radiation_d+1", "de_cloud_cover_d+1"]
+    ].shift(-24)
+    return frame
+
+
+@pytest.fixture
+def synthetic_sources(monkeypatch, no_network):
+    """EnergyChartsSource and OpenMeteoSource answer from `synthetic_market()` with the columns their settings ask for, in
+    [start, end) and UTC, as their `fetch` does; anything that reaches for the network fails the test (`no_network`)."""
+    from epftoolbox2.data.sources import EnergyChartsSource, OpenMeteoSource
+
+    market = synthetic_market()
+
+    def energy_charts(self, start, end):
+        names = []
+        if "power" in self.type:
+            names += [f"actual_{series}" for series in self.power]
+        if "forecast" in self.type:
+            names += [
+                "load_forecast_day_ahead" if p == "load" else f"{p}_forecast_day_ahead" for p in self.production_types
+            ]
+        if "price" in self.type:
+            names.append("price_day_ahead")
+        return market.loc[(market.index >= start) & (market.index < end), [f"{self.prefix}_{n}" for n in names]]
+
+    def open_meteo(self, start, end):
+        names = [f"{self.prefix}_{column}_d+{self.horizon}" for column in self.columns]
+        return market.loc[(market.index >= start) & (market.index < end), names]
+
+    monkeypatch.setattr(EnergyChartsSource, "fetch", energy_charts)
+    monkeypatch.setattr(OpenMeteoSource, "fetch", open_meteo)
+
+
+def test_chained_solar_price(keyless_live_dir, monkeypatch, information_set_checks, synthetic_sources):
+    """Both stages end to end on a synthetic market, without a key or a network: the solar run covers the price model's
+    training rows, the price model reads the solar run's stored forecasts back at their target instants, both price models
+    forecast the same keys, and neither stage reads anything after its issue time."""
+    from epftoolbox2.models._calendar import IssueCalendar
+
+    example = load_example("chained_solar_price.py", monkeypatch)
+
+    solar, price = example.main(
+        data_start=CHAIN_DATA[0],
+        data_end=CHAIN_DATA[1],
+        solar_test=CHAIN_SOLAR,
+        price_test=CHAIN_PRICE,
+        output_dir=keyless_live_dir,
+    )
+
+    solar_planned = IssueCalendar("1h", "Europe/Berlin", [1]).count(
+        dt.date.fromisoformat(CHAIN_SOLAR[0]), dt.date.fromisoformat(CHAIN_SOLAR[1])
+    )
+    assert_forecasts(solar, ["solar_ridge", "tso_of_d"], solar_planned)
+    predictions = solar.predictions()
+    ridge = predictions[predictions["model"] == "solar_ridge"]
+    assert (ridge["prediction"] >= 0).all() and (ridge["prediction"] > 0).any()
+    assert (ridge["prediction"] == 0).mean() > 0.3  # the hours the sun is down: 0 with no fit (zero_when)
+
+    price_planned = 7 * 24  # a week of February, no switch
+    assert_forecasts(price, ["price_base", "price_solar"], price_planned)
+    assert_metrics(price, ["price_base", "price_solar"], price_planned)
+    assert price.availability().empty
+    tested = price.tests(benchmark="price_base", lag=6)
+    assert list(tested["model"]) == ["price_solar"] and tested["p_value"].between(0, 1).all()
+    # The fitted models' checks (the NaiveModel benchmark skips a value not out by the issue time instead)
+    assert_information_set_checked(
+        information_set_checks, ["solar_ridge", "price_base", "price_solar"], zone="Europe/Berlin"
+    )
+
+    # The chained column on the price frame is the solar run's forecast for that hour, issued the day before.
+    frame = price.source_data
+    assert_data_frame(
+        frame,
+        [
+            "ec_price_day_ahead",
+            "ec_price_day_ahead_d-6",
+            "solar_fc",
+            "solar_fc_d+1",
+            "solar_fc_day_mean_d+1",
+            "is_sunday_d+1",
+        ],
+        "Europe/Berlin",
+        dt.date.fromisoformat(CHAIN_DATA[0]),
+        dt.date.fromisoformat(CHAIN_DATA[1]),
+    )
+    stored = ridge.set_index(["target_date", "hour"])["prediction"]
+    hours = frame.loc["2024-03-01", "solar_fc"]
+    assert len(hours) == 24
+    for stamp, value in hours.items():
+        assert value == stored[(stamp.date().isoformat(), stamp.hour)]
+    assert (frame.loc["2024-02-29", "solar_fc_d+1"].to_numpy() == hours.to_numpy()).all()
+
+    assert_csv(keyless_live_dir / "chained_solar_price.csv", ["price_base", "price_solar"], price_planned)
+    assert sorted(p.name for p in (keyless_live_dir / "runs" / "solar").glob("*.jsonl")) == [
+        "solar_ridge.jsonl",
+        "tso_of_d.jsonl",
+    ]
+    assert sorted(p.name for p in (keyless_live_dir / "runs" / "price").glob("*.jsonl")) == [
+        "price_base.jsonl",
+        "price_solar.jsonl",
+    ]
+    manifest = json.loads((keyless_live_dir / "runs" / "price" / "price_solar.manifest.json").read_text())
+    assert set(manifest["chained_inputs"]) == {"solar_fc", "solar_fc_day_mean"}
