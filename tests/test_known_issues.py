@@ -122,3 +122,52 @@ def test_a_plain_run_resumed_over_an_earlier_start_equals_the_fresh_run(monkeypa
 
     assert len(fresh) > 0
     assert resumed == fresh, f"{len(set(resumed) ^ set(fresh)) // 2} of {len(fresh)} records differ from the fresh run"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="a 'published' row model's last issue days train on targets after test_end, which data_columns_hash doesn't cover",
+)
+def test_a_resume_over_another_target_after_test_end_refuses(monkeypatch, tmp_path):
+    """`newest_target="published"` issued at 14:00, when the prices of D+1 are out: at h=2 the newest training target of the
+    last issue day is the price of the day after `test_end` (k = 1), which the manifest's `data_columns_hash` (rows up to
+    `test_end`) doesn't cover. A resume over a frame whose price of that day moved by 50 is accepted, and its last day's 24
+    forecasts at h=2 are not what a fresh run gives. Correct is a refusal (`ManifestMismatchError`). A model that reads history
+    hashes what it reads after `test_end` (`Manifest.history_ahead`)."""
+    import json
+
+    from epftoolbox2.models import OLSModel
+    from epftoolbox2.pipelines import ModelPipeline
+    from epftoolbox2.results.manifest import ManifestMismatchError
+    from tests.models.test_newest_target import InProcessPool
+    from tests.synthetic import PREDICTORS, make_market_data
+
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
+    frame = make_market_data(start="2023-01-01", days=120, horizon=2)
+    rules = {name: Availability.published("10:00", 7) for name in ("load", "wind")}
+    rules.update(is_weekend=Availability.static(), is_weekday=Availability.static())
+    info = InformationSet("14:00", rules=rules)
+
+    def pipeline():
+        out = ModelPipeline(information_set=info)
+        out.add_model(OLSModel(PREDICTORS, 28, newest_target="published", name="OLS"))
+        return out
+
+    test = ("2023-03-01", "2023-03-10")
+    pipeline().run(frame, *test, horizon=2, save_dir=tmp_path)
+    path = ModelPipeline.results_path(tmp_path, type("Ref", (), {"name": "OLS"}), "jsonl")
+
+    def last_day(record):
+        return record["run_date"] == test[1] and record["horizon"] == 2
+
+    path.write_text("".join(f"{line}\n" for line in path.read_text().splitlines() if not last_day(json.loads(line))))
+    changed = frame.copy()
+    changed.loc["2023-03-11", "price"] += 50.0
+    try:
+        pipeline().run(changed, *test, horizon=2, save_dir=tmp_path)
+    except ManifestMismatchError:
+        return
+    raise AssertionError("the resume over another price of the day after test_end was accepted")
