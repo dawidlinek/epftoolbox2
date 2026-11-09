@@ -1,0 +1,123 @@
+---
+title: Neural Networks
+description: The [torch] extra, the networks of epftoolbox2.nets (MLP, the counter-based Dropout and Linear), the module contract, and what the library's trainer guarantees about seeds, stacks, threads and TF32
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The neural-network families train their networks with the library's own trainer: the library owns the training rows and their
+cut, the scaling, the loss, Adam, the early-stopping days, the seeds and the shapes, so a forecast is the same alone, in a stack
+of other networks and after a resume. This page covers what is there now: the `[torch]` extra, the networks of `epftoolbox2.nets`,
+the contract a network of your own follows, and the trainer's rules. The model classes that use them (`TorchModel`,
+`MLPHourlyModel`, `MLPDailyModel`) come in a later release.
+
+## Installing torch
+
+```bash
+pip install 'epftoolbox2[torch]'
+```
+
+installs torch, from PyPI. On Linux, PyPI's torch is the CUDA build (several GB); for a machine without a GPU, install the CPU
+wheel first and then the extra:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install 'epftoolbox2[torch]'
+```
+
+and for a GPU, the wheel of your CUDA version (`cu126` here; a GPU that today's wheels have no kernels for, such as compute
+capability 6.1, falls back to the CPU, see [Device](#device)):
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu126
+```
+
+In a checkout of this repository, `uv sync --extra torch` takes torch from PyTorch's CPU index, as `uv.lock` records it. The extra
+covers Python 3.11 to 3.15, free-threaded 3.14t included. Nothing in the core imports torch: `import epftoolbox2` works without it,
+and `epftoolbox2.nets` without it raises `MissingExtraError` naming the install line.
+
+## The networks
+
+```python
+import torch
+from epftoolbox2.nets import MLP
+
+net = MLP(n_inputs=247, n_outputs=24, hidden=[256, 128], dropout=0.1, activation="relu")
+out = net(torch.zeros(64, 247))  # (64, 24)
+```
+
+| Class | Parameters | What it is |
+|---|---|---|
+| `MLP` | `n_inputs`, `n_outputs`, `hidden=(256, 128)`, `dropout=0.0`, `activation="relu"` | For each hidden width a `Linear`, the activation and, when `dropout` > 0, a `Dropout`; then a `Linear` to the outputs. With an output per period of the day it is the Lago-style DNN. `activation` is one of `relu`, `gelu`, `tanh`, `sigmoid`, `softplus`, `elu`, `selu`, `silu`, `leaky_relu` |
+| `Dropout` | `p=0.1` | Dropout whose mask is a hash of the member's key, the training step, the layer's number and the element: no draw from torch's generator. Identity in eval mode |
+| `Linear` | `in_features`, `out_features` | `x @ weight + bias`, `weight` of shape (in, out), its initial values drawn from the member's key (uniform in ±1/√in, `torch.nn.Linear`'s distribution) |
+
+`Dropout` and `Linear` exist for stacking. The trainer can train the members of a fit (seeds, learning rates) one after another
+or together as one stack (`torch.func.vmap`) padded to a fixed size; in a stack, `torch.nn.Dropout` draws one mask for the whole
+stack, so a member's mask would depend on its place in it, and the trainer refuses it there (and batch norm, which updates
+running statistics in place). `Linear` makes the stacked products the same in any slot and gives each member weights that depend
+on its key alone. Outside the trainer a `Dropout` repeats its mask until its `step` buffer changes (`layer.step.fill_(k)`).
+
+### A network of your own
+
+A network is any `torch.nn.Module` with `__init__(n_inputs, n_outputs, **params)` and `forward(x)`, `x` of shape (batch,
+n_inputs) to (batch, n_outputs). It sees scaled inputs and returns outputs in the scaled target space; it never sees dates, rows
+or targets. Use the layers of `epftoolbox2.nets` where you want dropout in a stack:
+
+```python
+import torch
+from epftoolbox2 import nets
+
+
+class ResidualMLP(torch.nn.Module):
+    def __init__(self, n_inputs, n_outputs, width=256, depth=3, dropout=0.1):
+        super().__init__()
+        self.inp = nets.Linear(n_inputs, width)
+        self.blocks = torch.nn.ModuleList(nets.Linear(width, width) for _ in range(depth))
+        self.drop = torch.nn.ModuleList(nets.Dropout(dropout) for _ in range(depth))
+        self.out = nets.Linear(width, n_outputs)
+
+    def forward(self, x):
+        h = torch.relu(self.inp(x))
+        for block, drop in zip(self.blocks, self.drop):
+            h = h + drop(torch.relu(block(h)))
+        return self.out(h)
+```
+
+Layers from `torch.nn` work too: in a stack their initial weights come from torch's generator seeded by the member, and in the
+loop any layer works, `torch.nn.Dropout` and batch norm included.
+
+## The trainer's rules
+
+- **Seeds.** Every random choice of a member comes from its own key (a hash of the model's `random_state` and the fit it belongs
+  to: period, horizon, refit date, seed number): its early-stopping days, the order of its rows in each epoch, its initial
+  weights and its dropout masks. They don't depend on the model's name, on the other members or on the process.
+- **Early stopping** holds out a random share of the member's own training days (`early_stopping=0.2`), never a day outside its
+  training window and never the validation period; the best weights on them are restored.
+- **Fixed shapes.** The steps of an epoch come from the rows of a full training window (a member with fewer rows wraps around its
+  own order), the early-stopping rows are padded to their count in a full window, and a stack is padded to a fixed size with
+  dummy members. Then a member is bitwise the same alone, in a stack of 16 or 256, in any order and with other learning rates in
+  the stack. Unpadded stacks moved forecasts by up to 7.3 EUR/MWh in the research.
+- **Loop or stack.** `stack="auto"` trains one member after another on a CPU (a pool of single-thread fits is the fast way there)
+  and padded stacks on a GPU. The two do different arithmetic, so the choice is part of a model's configuration.
+- **Threads change numbers.** A product's last bits depend on how many threads compute it, so the same loop on 1 and 8 threads gave
+  forecasts up to 8.5 EUR/MWh apart. Each worker process pins torch's threads when it starts (setting `OMP_NUM_THREADS` after the
+  fork is too late), and the thread count per fit is recorded in the manifest; a resume with another count is refused. A stack on
+  the CPU runs on one thread, so it is the same at any count.
+- **TF32 off by default, scoped.** TF32 matrix products are faster on recent GPUs and change the numbers (by up to 0.07 EUR/MWh
+  for a foundation model in the research). The library turns it off for each fit unless the model sets `tf32=True`, and puts back
+  the flags (`torch.backends.cuda.matmul.allow_tf32`, `torch.backends.cudnn.allow_tf32`, `torch.set_float32_matmul_precision`) and
+  the thread count when the fit ends, also after an error, so one model's settings never reach the next.
+
+### Device
+
+`device="auto"` uses the GPU when a 1×1 matrix product runs on it, and the CPU otherwise: a GPU torch has no kernels for fails
+that product ("no kernel image is available") and the fit runs on the CPU. The check runs in a short-lived subprocess, so the
+process that starts the worker pool never initialises CUDA and its forked workers can still use the GPU. The device type, dtype,
+`tf32`, the thread count, the stack and its size are recorded in the manifest and compared on resume; on a GPU, bits are not known
+to hold across GPU models.
+
+<Aside type="note">
+The trainer is a port of the research's stacked trainer, and on the research's own inputs (the DE benchmark, LEAR features,
+1456-day windows, 256-128 networks) it gives that trainer's forecasts to the bit on the CPU.
+</Aside>

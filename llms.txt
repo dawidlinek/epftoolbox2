@@ -104,6 +104,7 @@ Rules to know before using the library:
 - [NaiveModel](docs/src/content/docs/models/naive.mdx): one column's value on the issue row, such as a published forecast taken as a benchmark; with an information set, no forecast where the value wasn't out at the issue time
 - [PooledModel](docs/src/content/docs/models/pooled.md): one fit over the zones of a run of several markets, each zone's rows scaled within its own fit, `over=("zone", "horizon")`, a one-hot zone, every zone's training rows judged at the earliest issue of the day
 - [Scalers and VSTs](docs/src/content/docs/models/scalers.mdx): standard scaling and variance-stabilising transformations (asinh, mirror-log, polynomial, N-PIT) for spiky prices
+- [Neural Networks](docs/src/content/docs/models/neural-networks.mdx): the `[torch]` extra (CPU and CUDA install lines), `epftoolbox2.nets` (`MLP`, the counter-based `Dropout` and `Linear`), the contract of a network of your own, and the trainer's rules: per-member seeds, early stopping on the member's own training days, padded stacks bitwise the same as alone, threads pinned and recorded, TF32 off and scoped
 - [Licences and Weights](docs/src/content/docs/models/licences-and-weights.mdx): model cards of families that need an extra or pretrained weights, the pre-flight before any fit, `epf weights fetch` (never during a run; `--accept` for restricted licences), runtime and weight hashes compared on resume, contamination verdicts and `report.provenance()`
 
 ## Evaluators
