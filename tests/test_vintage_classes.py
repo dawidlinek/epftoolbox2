@@ -195,7 +195,11 @@ def test_the_built_in_rules_carry_their_classes_and_a_rule_of_yours_has_none():
     revised += ["generation_*_forecast", "generation_*"]
     assert {name: rules[name].vintage for name in revised} == dict.fromkeys(revised, "latest_revision")
     assert rules["price"].vintage == "snapshot"
-    assert {rule.vintage for rule in rules.values() if rule.kind == "static"} == {None}
+    # Static rules have no class, but the installed capacity's: A68's archive holds its newest revision (7e, decision 8).
+    assert {
+        rule.vintage for name, rule in rules.items() if rule.kind == "static" and name != "installed_capacity_*"
+    } == {None}
+    assert rules["installed_capacity_*"].vintage == "latest_revision"
     assert ASSUMPTIONS["entsoe_a69_by_10"][1].vintage == "latest_revision"
     weather = OpenMeteoSource(latitude=52.2, longitude=21.0, prefix="warsaw", columns=["temperature_2m"], timezone=PL)
     found = source_rules([EntsoeSource("PL", "key", ["load"]), weather, EpftoolboxBenchmarkSource("PJM")])
