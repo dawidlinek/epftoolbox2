@@ -82,7 +82,7 @@ def target_relative(name: str, period: int, horizon: int, freq: str, clock: _Iss
         return "?"  # a `_sNN` slot on hourly data doesn't say how long a slot is
     days = clock.offset[used]
     minute = clock.row_minutes(np.array([period]), step)[0]  # a daily row's is the time it is stamped at
-    start, end = _delivered_span(col, days, np.full(len(days), minute), step, clock.ctx)
+    start, end = _delivered_span(col, days, np.full(len(days), minute), step, clock.ctx, daily=clock.anchor is not None)
     target = (days + horizon) * 1440.0
     counts = Counter(zip((start - target).tolist(), (end - target).tolist()))
     (first, last), common = counts.most_common(1)[0]

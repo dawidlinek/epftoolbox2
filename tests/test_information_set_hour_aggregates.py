@@ -16,7 +16,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.data.transformers import DailyStatsTransformer, LagTransformer, PeriodStatsTransformer
+from epftoolbox2.data.transformers import (
+    DailyStatsTransformer,
+    LagTransformer,
+    PeriodStatsTransformer,
+    ResampleTransformer,
+)
 from epftoolbox2.information_set import (
     _STEP_MINUTES,
     Availability,
@@ -209,6 +214,36 @@ def test_under_rules_over_time_an_hour_aggregate_waits_for_every_slot_of_its_hou
     assert verdicts(info, "x_d+1", index, "15min", ["2024-01-09"])[23, 0] == 330
 
 
+def test_on_a_daily_row_an_hour_aggregate_is_judged_over_its_whole_date():
+    """Look-ahead. A daily frame of hour aggregates (`ResampleTransformer("1D", agg="max")` of `load_actual_hour_mean`) holds
+    every hour of D on its noon-stamped row: realised 1 h after its slot, it is known at 01:00 on D+1 like the day's maximum,
+    refused at 11:45 and perturbed on D. Judged at the stamp's hour it passed (known 01:00 on D, the stamp being midnight), and
+    `verify` couldn't see it. On a Helsinki daily frame under a Brussels rule, `px_hour_mean_d+1` is refused like `px_d+1`."""
+    index = pd.date_range("2024-01-01", periods=96 * 30, freq="15min", tz="Europe/Warsaw")
+    frame = pd.DataFrame({"load_actual": np.random.default_rng(0).normal(100, 10, len(index))}, index=index)
+    frame = PeriodStatsTransformer("load_actual").transform(frame)
+    frame = DailyStatsTransformer("load_actual", stats=["max"], freq="15min").transform(frame)
+    daily = ResampleTransformer("1D", agg="max").transform(frame)
+    info = InformationSet(*ISSUE, rules={"load_actual*": Availability.realised("1h")})
+    names = ["load_actual_hour_mean", "load_actual_hour_dev", "load_actual_day_max", "load_actual_hour_mean_d-1"]
+    found, unknown = info.violations({(0, 1): names}, "price", "1D", daily.index, "2024-01-10", "2024-01-12")
+    assert unknown == set()
+    assert {v.predictor for v in found} == {"load_actual_hour_mean", "load_actual_hour_dev", "load_actual_day_max"}
+    known = verdicts(info, "load_actual_hour_mean", daily.index, "1D", ["2024-01-10"])
+    assert (known == verdicts(info, "load_actual_day_max", daily.index, "1D", ["2024-01-10"])).all()
+    assert (known == 25 * 60).all()
+    perturbed, _, _ = perturb_unknown(daily, "2024-01-10", info, freq="1D")
+    on_day = np.asarray(daily.index.tz_localize(None).normalize() == pd.Timestamp("2024-01-10"))
+    changed = (perturbed != daily).loc[on_day]
+    assert changed[["load_actual_hour_mean", "load_actual_hour_dev", "load_actual_day_max"]].all().all()
+
+    helsinki = pd.date_range("2024-01-01", periods=40, freq="D", tz="Europe/Helsinki")
+    published = InformationSet(*ISSUE, rules={"px*": Availability.published("13:00", 1, "Europe/Brussels")})
+    names = ["px_d+1", "px_hour_mean_d+1", "px_d+1_hour_mean", "px_hour_mean"]
+    found, _ = published.violations({(0, 1): names}, "price", "1D", helsinki, "2024-01-20", "2024-01-22")
+    assert {v.predictor for v in found} == {"px_d+1", "px_hour_mean_d+1", "px_d+1_hour_mean"}
+
+
 def test_delivered_span_of_an_hour_aggregate_is_its_hour():
     ctx = _Context(day=pd.Timestamp("2024-01-10"), data_zone="Europe/Warsaw")
     info = InformationSet(rules={"x": Availability.static()})
@@ -217,6 +252,10 @@ def test_delivered_span_of_an_hour_aggregate_is_its_hour():
     assert list(start) == [600.0, 600.0] and list(end) == [645.0, 645.0]
     start, end = _delivered_span(info.resolve("x_hour_dev_d-1"), day, minute, 15, ctx)
     assert list(start) == [600.0 - 1440, 600.0 - 1440] and list(end) == [645.0 - 1440, 645.0 - 1440]
+    # On a daily row (step 60, stamped at noon) its whole date, as a day aggregate's.
+    start, end = _delivered_span(info.resolve("x_hour_mean"), day[:1], np.array([720.0]), 60, ctx, daily=True)
+    assert (list(start), list(end)) == ([0.0], [1380.0])
+    assert _delivered_span(info.resolve("x_day_max"), day[:1], np.array([720.0]), 60, ctx) == (start, end)
 
 
 # --------------------------------------------------------------------------- known answer from the data itself

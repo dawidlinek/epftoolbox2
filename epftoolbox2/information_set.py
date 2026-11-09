@@ -3581,6 +3581,7 @@ def _available_array(
     plain `published` or `weekly` one is read at that date's last slot, or at the stamp if it is later, so a date spanning two
     of the rule's delivery days isn't read on the earlier. One with an `h`, `min` or `s` shift is an hourly slot, `x_h-1` the hour before the stamp. This
     holds for the column named alone; what a profile or a day aggregate is built from is read at its slot, as on hourly rows.
+    An hour aggregate on a daily row is read as a day aggregate: the row stands for its whole date, not the stamp's hour.
 
     A rule with a validity period, or a `RuleChain`, holds for the values whose day is in its period: the day the value is
     delivered (a date of the rule's zone, or of `day_zone`, for `published`, of its week's zone for `weekly`, of the data's
@@ -3589,7 +3590,9 @@ def _available_array(
     no period is read as it always was.
     """
     if col.built_from is not None:
-        if col.hour_aggregate:
+        if col.hour_aggregate and not daily:
+            # On a daily row an hour aggregate is read as a day aggregate below: the row stands for its whole date (a
+            # resample's maximum of the hour means holds every hour of it), so the date's last slot, not the stamp's hour.
             return _hour_aggregate_available(col, rule, day, minute, step, ctx, first, issue_day)
         # A profile column holds, on every row of a local day, the column it was built from at its slot of that day:
         # `x_h05_d-1` on row D is `x` at 05:00 on D-1 (the shifts after the slot pick the day, and none of them is a
@@ -3894,7 +3897,7 @@ def _shifted_day(
 
 
 def _delivered_span(
-    col: ResolvedColumn, day: np.ndarray, minute: np.ndarray, step: int, ctx: _Context
+    col: ResolvedColumn, day: np.ndarray, minute: np.ndarray, step: int, ctx: _Context, daily: bool = False
 ) -> Tuple[np.ndarray, np.ndarray]:
     """The first and last slot the value of `col` at the row (`day`, `minute`) was delivered in, as wall-clock minutes
     after midnight of `ctx.day`. `col` needs no rule: this is what its name says, read the way `_available_array` reads it.
@@ -3902,14 +3905,15 @@ def _delivered_span(
     A plain column is delivered in one slot, the row's with its shifts applied. A profile holds the column it was built
     from at its slot, on the day the shifts after the slot reach, and a day aggregate that column over every slot of that
     day, so `x_day_max_d-1` runs from 00:00 to the last slot of D-1 on 23-, 24- and 25-hour days alike, and an aggregate
-    of an hour lag (`x_h-12_day_max`) over two days. An hour aggregate holds it over every slot of the hour the row lands in.
+    of an hour lag (`x_h-12_day_max`) over two days. An hour aggregate holds it over every slot of the hour the row lands in,
+    or on a daily row (`daily`) over every slot of its date, as `_available_array` reads it there.
     """
     day, minute = np.asarray(day), np.asarray(minute, dtype=float)
     later = np.zeros(len(day), dtype=bool)  # no rows, only (day, period): read as the row the model forecasts from
     if col.built_from is None:
         wall = _shifted_wall(col.shifts, day, minute, later, ctx)
         return wall, wall
-    if col.hour_aggregate:
+    if col.hour_aggregate and not daily:
         # Every slot of the hour the row lands in, the first to the last.
         reached, last, _ = _hour_last_slot(col.shifts, day, minute, later, step, ctx)
         start, _ = _delivered_span(col.built_from, reached, last - (60.0 - step), step, ctx)
