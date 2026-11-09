@@ -723,7 +723,7 @@ def test_day_units_and_history_models_refuse_them_before_any_fit(spring, key, va
         ReadsHistory(PREDICTORS, training_window=30, **{key: value}).run(spring, "2023-04-10", "2023-04-10", horizon=1)
 
 
-def test_a_residual_model_and_a_pooled_model_refuse_them(spring):
+def test_a_residual_model_and_a_pooled_model_refuse_them(spring, tmp_path):
     learner = OLSModel(PREDICTORS, bounds=(0, None))
     with pytest.raises(ValueError, match="per-row target"):
         ResidualModel(OLSModel(PREDICTORS), learner)
@@ -731,9 +731,10 @@ def test_a_residual_model_and_a_pooled_model_refuse_them(spring):
     residual = ResidualModel(OLSModel(PREDICTORS, bounds=(0, None)), learner)  # the base's own run applies its bounds
     with pytest.raises(ValueError, match="per-row target"):
         residual.bounds = (0, None)
-    learner.zero_when = "flag"  # after the learner was given: refused at the run, before any fit
+    learner.zero_when = "flag"  # after the learner was given: refused at the run, before the base runs
     with pytest.raises(ValueError, match="per-row target"):
-        residual.run(spring, "2023-04-10", "2023-04-10", horizon=1)
+        residual.run(spring, "2023-04-10", "2023-04-10", horizon=1, save_to=str(tmp_path / "residual.jsonl"))
+    assert list(tmp_path.iterdir()) == []
     with pytest.raises(ValueError, match="per-row target"):
         PooledModel(OLSModel(PREDICTORS, normalise_by=SCALE))
 
