@@ -500,6 +500,8 @@ def _job_failed(
 # structures by (place, inputs, outputs) (`_structure_of`).
 _S_MODELS: List[Tuple[str, TaskInputs]] = []
 _S_STRUCTURES: Dict[tuple, Optional[tuple]] = {}
+# The places of models whose members' modules were built with other structures in one stack (`trainer.StructureMismatch`).
+_S_UNSTACKABLE: set = set()
 
 
 class StackTaskFailed(TaskFailed):
@@ -531,6 +533,7 @@ def _stack_load(hour_arrays: Dict, models: Sequence[tuple]) -> None:
     """Load a chunk's models into this process: each rebuilt as a pool's worker rebuilds it (`_worker.task_inputs`)."""
     global _S_MODELS
     _S_STRUCTURES.clear()
+    _S_UNSTACKABLE.clear()
     _S_MODELS = [
         (name, task_inputs(hour_arrays, expanded, config, model_cls, model_kwargs))
         for name, expanded, config, model_cls, model_kwargs in models
@@ -893,7 +896,9 @@ def _structure_of(place: int, factory: Any, n_inputs: int, n_outputs: int) -> Op
     """`_structure` of a model's module for this many inputs and outputs, built once per chunk in this process on the CPU (a
     generator of its own, one thread), as `TorchModel._check_buildable` builds it; None when it depends on torch's generator,
     built twice under other seeds (a random projection or permutation kept as a plain attribute, not a buffer): vmap would run
-    every slot with the first slot's, so such a module's calls train alone."""
+    every slot with the first slot's, so such a module's calls train alone. A cheap first filter: a coarse draw (a coin) can
+    agree under both seeds, and `trainer._StackFit` compares every member's module as built with the first's
+    (`StructureMismatch`), the exact check."""
     key = (place, n_inputs, n_outputs)
     if key not in _S_STRUCTURES:
         import torch
@@ -964,7 +969,7 @@ def _train(session: _Session, requests: List[_Request]) -> None:
             structure = _structure_of(call["place"], call["factory"], prepared.x.shape[1], prepared.y.shape[1])
         except Exception:
             structure = None  # its own fit raises what building it raises
-        if structure is None:  # built from torch's generator (`_structure_of`), or not built at all: alone
+        if structure is None or call["place"] in _S_UNSTACKABLE:  # built from torch's generator, or not built: alone
             request.solo = True
             session.alone += 1
             continue
@@ -1000,6 +1005,16 @@ def _train(session: _Session, requests: List[_Request]) -> None:
                 continue
             try:
                 fit, seconds = _train_stack(chunk, pad, tf32, torch, trainer, torch_scope, THREADS_PER_FIT)
+            except trainer.StructureMismatch as exc:
+                # Modules of one model built with other structures (an attribute drawn from torch's generator at build that
+                # the two-seed probe missed): the models involved train alone from here on, and this stack's calls now.
+                for j in (0, *exc.slots):
+                    _S_UNSTACKABLE.add(chunk[j][0].payload["place"])
+                alone = {id(request): request for request, _, _ in chunk}
+                for request in alone.values():
+                    request.solo = True
+                session.alone += len(alone)
+                continue
             except Exception as exc:
                 fallen = {id(request): request for request, _, _ in chunk}
                 for request in fallen.values():  # trained alone below: its own errors, if it has any, are its own
@@ -1172,7 +1187,7 @@ def _train_stack(chunk, pad, tf32, torch, trainer, torch_scope, threads):
     with torch_scope(first.device, tf32=tf32, threads=threads) as device:
         data = trainer.tensors(np.concatenate(xs), np.concatenate(ys), np.concatenate(masks), device, settings["dtype"])
         with torch.enable_grad(), trainer._stack_threads(device):
-            fit = trainer._StackFit(factories, members, pad, data, shapes, settings)
+            fit = trainer._StackFit(factories, members, pad, data, shapes, settings, structure=_structure)
         trainer._sync(device)
     return fit, time.perf_counter() - started
 

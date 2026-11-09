@@ -431,7 +431,9 @@ Here the models of each width are one group, their 4 seeds of every weekly fit t
   stack's), a `forecast_only` run, and a subclass that changes how a fit is made or read. A module whose structure is drawn
   from torch's generator when it is built (a random projection or permutation kept as a plain attribute rather than a
   buffer, which vmap would run with the first slot's for every slot) is found by building it under two seeds, and its fits
-  train alone in their job. `TORCH_STACKS=off`, an environment variable read when a run runs, runs every model on its own.
+  train alone in their job. A draw both seeds happen to agree on (a coin tossed at build) is found when a stack is built:
+  each network's module is compared with the first's, and if any differs that stack's fits train alone, and the models'
+  later fits too. `TORCH_STACKS=off`, an environment variable read when a run runs, runs every model on its own.
 - **`TORCH_STACKS=check`** stacks as `on` does and also trains about one stacked fit in 50 alone (chosen by a hash of its
   seeds, so the same fits whatever the loop), comparing failures, best epochs and forecasts bit for bit. Each model's
   manifest records `stack_check` (fits checked, how many differed, the largest difference in the scaled space), and a model

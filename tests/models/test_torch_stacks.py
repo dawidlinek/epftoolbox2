@@ -193,6 +193,21 @@ class Perm(torch.nn.Module):
         return self.net(x[..., self.perm])
 
 
+class Coin(torch.nn.Module):
+    """A coin tossed when it is built, kept as a plain attribute: the same under the probe's two seeds (no flip under 0 and
+    1) but not under every member's own build seed, so only the exact check of a stack's members (`trainer._StackFit`'s
+    `structure`) keeps them apart."""
+
+    def __init__(self, n_inputs, n_outputs):
+        super().__init__()
+        self.flip = bool(torch.rand(()) < 0.3)
+        self.net = torch.nn.Sequential(nets.Linear(n_inputs, 6), nets.Activation("relu"), nets.Linear(6, n_outputs))
+
+    def forward(self, x):
+        out = self.net(x)
+        return -out if self.flip else out
+
+
 class Blocks(torch.nn.Module):
     """Named blocks, one layer each, then a head: of `nets` layers and exact operations, so it stacks."""
 
@@ -468,9 +483,10 @@ def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, cas
     elif case == "attributes_drawn_at_build":  # vouched for, keyed together, but each call trained alone in the job
         models = [
             TorchModel(module=module, predictors=DAY, name=f"{module.__name__}{i}", random_state=i, **FAST)
-            for module in (RandProj, Perm)
+            for module in (RandProj, Perm, Coin)
             for i in range(2)
         ]
+        assert groups._structure_of(-1, lambda: Coin(7, 24), 7, 24) is not None  # the probe's seeds agree on its coin
     else:
         models = [
             TorchModel(
@@ -488,8 +504,15 @@ def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, cas
     own = alone(models, market, monkeypatch, test=test, horizon=horizon)
     together = records(run_pipeline(models, market, test=test, horizon=horizon))
     same(own, together)
-    if case in ("sigmoid_on_a_cpu", "attributes_drawn_at_build"):
-        assert not stacks and groups.STATS["alone"] == (0 if case == "sigmoid_on_a_cpu" else 4 * 2)  # models, horizons
+    if case == "sigmoid_on_a_cpu":
+        assert not stacks and groups.STATS["alone"] == 0
+    elif case == "attributes_drawn_at_build":
+        # RandProj's and Perm's calls alone by the probe (models, horizons); Coin's by the exact check where a stack's members'
+        # coins differ (counted as alone, not as fallbacks), the others in a stack of equal coins (`same` above).
+        stacked = sum(len(stack) for stack in stacks) // 2  # calls of two seeds
+        assert all(name.startswith("Coin") for stack in stacks for name in stack)
+        assert groups.STATS["alone"] == 4 * 2 + 2 * 2 - stacked and stacked < 2 * 2
+        assert {groups._S_MODELS[place][0] for place in groups._S_UNSTACKABLE} == {"Coin0", "Coin1"}
     else:
         assert stacks and (case == "jobs_of_one_member" or any(len(set(stack)) > 1 for stack in stacks))
     if case == "row_targets":  # the targets took effect: forecasts of 0 on weekends, and r1's are its own scaled ones
@@ -722,6 +745,7 @@ def test_calls_share_a_stack_s_rows_only_where_inputs_targets_and_mask_are_equal
     from epftoolbox2.models._torch import trainer
 
     groups._S_STRUCTURES.clear()  # place 0 is this test's model
+    groups._S_UNSTACKABLE.clear()
     rng = np.random.default_rng(5)
     x = rng.normal(size=(40, 5))
     y = rng.normal(size=(40, 2))
@@ -747,6 +771,7 @@ def test_calls_share_a_stack_s_rows_only_where_inputs_targets_and_mask_are_equal
         requests.append(groups._Request(groups._FIT, (i,), payload))
     groups._train(groups._Session([]), requests)
     groups._S_STRUCTURES.clear()
+    groups._S_UNSTACKABLE.clear()
     rows = rng.normal(size=(3, 5))
     for request, (target, kept) in zip(requests, calls):
         result, device = request.result

@@ -661,13 +661,33 @@ class _LoopFit:
             return self.module(self.inputs(rows[0])).to(torch.float64).cpu().numpy()[None]
 
 
+class StructureMismatch(ValueError):
+    """A stack's members whose modules aren't of one structure (`_StackFit`'s `structure`): vmap runs the first slot's module
+    code for every slot, so they can't share a stack. `slots` are the real slots whose structure isn't the first's."""
+
+    def __init__(self, slots: Sequence[int]):
+        super().__init__(f"the modules of slots {list(slots)} aren't of the first slot's structure")
+        self.slots = list(slots)
+
+
 class _StackFit:
     """The members of one stack together, padded to `pad` slots: vmap over their stacked modules. `module_factory` is one
     factory for every member, or a list of one per member of `chunk` (a torch stack of several models, `_torch.groups`:
     modules of one structure, which may differ in their buffers, such as a `nets.Dropout`'s rate); a dummy is built by the
-    first member's."""
+    first member's. With `structure` (a function of a module, `_torch.groups._structure`), the members' modules as built
+    are compared with the first's and `StructureMismatch` raised for any other: a module that draws a plain attribute from
+    torch's generator when it is built (each member's seeded by its own key) may differ from member to member."""
 
-    def __init__(self, module_factory, chunk: List[_Member], pad: int, data, shapes: _Shapes, s: Dict[str, Any]):
+    def __init__(
+        self,
+        module_factory,
+        chunk: List[_Member],
+        pad: int,
+        data,
+        shapes: _Shapes,
+        s: Dict[str, Any],
+        structure: Optional[Callable[[Any], Any]] = None,
+    ):
         X, Y, M = data
         device = s["device"]
         self.real = len(chunk)
@@ -692,6 +712,11 @@ class _StackFit:
             modules = [first_module] + [
                 _build(factory, member, device, s["dtype"]) for factory, member in zip(factories[1:], slots[1:])
             ]
+            if structure is not None:
+                expected = structure(first_module)
+                other = [j for j in range(1, len(chunk)) if structure(modules[j]) != expected]
+                if other:
+                    raise StructureMismatch(other)
             params, buffers = stack_module_state(modules)
             del modules
         del first_module
