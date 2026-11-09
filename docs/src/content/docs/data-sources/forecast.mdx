@@ -1,0 +1,137 @@
+---
+title: ForecastSource
+description: Another pipeline's stored forecasts as a data column, known from that pipeline's issue time
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`ForecastSource` reads the forecasts a `ModelPipeline` stored in its `save_dir` and returns them as one column of a data
+pipeline, so that a downstream model lists them like any other input: a solar forecast as an input of a price model, an hourly
+forecast as the base of a 15-minute one. Chaining goes through the data; nothing hides a chain inside a model. The
+[Chaining](/epftoolbox2/model-pipeline/chaining/) page shows a whole two-stage run and the checks that travel down the chain.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.sources import EntsoeSource, ForecastSource
+from epftoolbox2.data.transformers import LagTransformer, TimezoneTransformer
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+
+data = (
+    DataPipeline(timezone="Europe/Berlin")
+    .add_source(EntsoeSource("DE_LU", api_key="your-key", type=["price"]))
+    # The forecasts of the model "solar_ridge" that a pipeline stored in runs/solar, at horizon 1
+    .add_source(ForecastSource("runs/solar", model="solar_ridge", column="solar_fc", horizon=1))
+    .add_transformer(TimezoneTransformer())
+    .add_transformer(LagTransformer(["solar_fc"], [-1], "day"))  # solar_fc_d+1: the forecast for D+1 issued on D
+)
+df = data.run("2024-01-01", "2024-12-31")
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
+# Outside a Workflow, tell the information set about the sources: only it knows when solar_fc is out.
+pipeline.information_set = pipeline.information_set.with_source_rules(data.sources)
+```
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | str | Yes | - | The upstream run's `save_dir`. Relative to the working directory, or in YAML to the file. |
+| `model` | str | Yes | - | The upstream model's name (or an ensemble's), as `ModelPipeline` names its results: `<name>.jsonl` or `<name>.parquet` |
+| `column` | str | Yes | - | The name of the column it emits |
+| `horizon` | int | No | `1` | Which upstream horizon to read: days between the forecast's issue day and its target day |
+| `available` | str | No | `None` | A later time than the upstream's issue time at which its forecasts are known, `"HH:MM"` in the upstream's issue zone (for forecasts revised after it). Never an earlier one: that raises |
+
+`fetch(start, end)` returns the rows in **[start, end)** with a UTC index, one column of float values.
+
+## What the Column Holds
+
+The value at instant t is the upstream's forecast **for t**, issued `horizon` local days before t's date. The dates are those of
+the upstream's data zone (its manifest's `data_timezone`), whatever zone the downstream frame is in:
+
+- Each record goes to the slot `hour` of its `target_date` by the clock of the upstream's data zone: 13:00 on the target date at
+  hourly frequency, 13:15 for period 53 at 15 minutes.
+- A slot the clock skips (02:00 on the day it goes forward) has no record and no row. A slot it repeats (02:00 on the day it goes
+  back) has its value on **both** of its rows: the forecast is for the wall-clock slot, and either row may be read.
+- A daily upstream (`freq="1D"`) puts its value at the time of day its rows were stamped at, which its manifest records as
+  `daily_stamp` (`"12:00"` for a frame cut with `at_time("12:00")`).
+- Lag it like any other column: on the row of D, `solar_fc_d+1` is the forecast for D+1 issued on D, and `solar_fc` the forecast
+  for D issued on D-1. Another upstream horizon is another source with another column name:
+  `ForecastSource("runs/solar", model="solar_ridge", column="solar_fc2", horizon=2)`.
+- `ResampleTransformer` puts an hourly chained forecast on a 15-minute grid, and `DailyStatsTransformer` makes its day statistics,
+  as for any column.
+
+Only forecasts (records with status `ok`) are read, the highest revision of each key, from JSONL or Parquet results alike: both give
+the same frame, bit for bit.
+
+## When It Is Known
+
+The upstream's manifest says when its forecasts were issued, so `with_source_rules` gives the column the rule
+
+```python
+from epftoolbox2.information_set import Availability
+
+Availability.published("09:30", days_before=1, timezone="Europe/Brussels", day_zone="Europe/Helsinki", vintage="snapshot")
+```
+
+for a horizon-1 source of an upstream issued at 09:30 Brussels on a Helsinki frame: the issue time (or `available`) in the upstream's
+issue zone, `horizon` days before the delivery day, a **date of the upstream's data zone** (`day_zone`). The day zone matters where
+the two clocks differ: Helsinki's 00:00 of D+1 is Brussels' 23:00 of D, and the forecast for it was issued on D, not on D-1; read in
+Brussels dates it would pass a day early. See [Information Set](/epftoolbox2/model-pipeline/information-set/#delivery-days-of-another-zone).
+
+<Aside type="caution">
+  A chained column has no built-in rule: only `with_source_rules` knows it. A `Workflow` applies it; a model run outside one needs
+  `information_set.with_source_rules(data_pipeline.sources)`. Without it the column has no rule: refused at
+  `availability="raise"` with `unknown="raise"`, listed as `no rule` at `"warn"`, and its coverage and its upstream's own inputs are
+  not checked.
+</Aside>
+
+The upstream must have run with an issue time (`ModelPipeline(issue_time=...)`), else nothing says when its forecasts were known and
+the source raises. An upstream ensemble reads its issue time from its members' manifests, which agree.
+
+## Checks Down the Chain
+
+A downstream model that reads the column is checked for two more things before any fit (see
+[Chaining](/epftoolbox2/model-pipeline/chaining/)):
+
+- **Coverage.** Rows its fits read where the chained predictor has no value drop out of training silently. They are counted and
+  warned about at every level, `"none"` included, naming the first and last dates and the day the upstream must start from; at
+  `availability="raise"` they are refused.
+- **Late upstream.** If the upstream (any member of an upstream ensemble) listed inputs as late or without a rule, or ran at
+  `availability="none"`, every use of its column is listed as `late upstream` at `"warn"` and refused at `"raise"`.
+
+The downstream's manifest records each chained column's upstream (`chained_inputs`), and a resume refuses another upstream model,
+horizon, issue time or zone, data zone or `available`.
+
+## Caching
+
+The source has no per-source cache (`get_cache_config()` returns `None`): the upstream's results grow as its pipeline runs, and a
+cache would serve stale forecasts. The single-file cache (`DataPipeline.run(..., cache="file.parquet")`) fingerprints the upstream's
+content through `content_digest()` (its manifest's digest and its results' size and modification time, or a Parquet catalog's hash),
+so it fetches again after the upstream changed and reuses the file otherwise.
+
+## What It Refuses
+
+| Upstream | Raises |
+|----------|--------|
+| No manifest next to the results | `UpstreamError`: run the upstream with `save_dir` |
+| Run without an issue time | `UpstreamError`: nothing says when its forecasts were known |
+| Index without a named zone | `UpstreamError`: its periods can't be placed in time |
+| `freq="1D"` without `daily_stamp` in its manifest | `UpstreamError`: run it again into the same `save_dir` (a resume forecasts nothing new and records it) |
+| A record with `issued_at` (live results) | `UpstreamError`: which revision a chained value may use depends on when it was issued |
+| No forecast of `horizon` | `UpstreamError` naming the horizons it has |
+| `available` before its issue time | `UpstreamError` |
+
+`UpstreamError` is a `ValueError`. A range with no forecast of the upstream returns an empty frame with a warning.
+
+## YAML
+
+```yaml
+sources:
+- class: ForecastSource
+  params:
+    path: ../runs/solar      # relative to this file
+    model: solar_ridge
+    column: solar_fc
+    horizon: 1
+```
