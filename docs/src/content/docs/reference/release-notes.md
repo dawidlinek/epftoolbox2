@@ -301,6 +301,15 @@ an issue day it didn't sample.
   `base_fc_hHH_d+{horizon}`), and `presets.tree_predictors` gives the research's inputs. On the research's DE_LU and AT years a LEAR-BIC
   base with boosted residuals was about 4 % below LEAR's window average. A base that is a `ResidualModel`, a `PooledModel` or reads
   series is refused. Nothing of a model without it moves. See [Residual Model](/epftoolbox2/models/residual/).
+- **Torch stacks: the networks of an `add_model` loop trained together.** `ModelPipeline.run` trains the torch models of a run
+  whose fits are stacks on their device (`stack="vmap"`, or `"auto"` on a GPU) and that share a stack key (the module and its
+  parameters but `dropout`, `output`, training window, refit, loss, batch size, epochs, patience, early stopping, weight decay,
+  device, `tf32`, `pad_to`) in stacks of `pad_to` networks on one device, after the engine groups and whatever `engine`. Speed
+  only: each model's records and manifest are its own run's to the bit, alone, in any loop, order or `models_per_task` split and
+  after a resume; a network that diverged makes its own fit's forecasts `fit_error`s and moves no other. Nothing moves for a model
+  whose fits are a loop (`stack="auto"` on a CPU, the default there) or whose key is its own. `TORCH_STACKS=off` runs each model
+  on its own; `TORCH_STACK_MEMBERS` sets the networks a job holds at least. See
+  [Neural Networks](/epftoolbox2/models/neural-networks/#many-networks-at-once-torch-stacks).
 - **`TorchModel`, `MLPHourlyModel` and `MLPDailyModel`: neural networks on the library's trainer.** `TorchModel(module, ...)` trains
   a `torch.nn.Module` class of your own (flat predictors or named blocks), with one output per period (`output="period"`) or a day of
   outputs on day-level predictors (`output="day"`); `MLPHourlyModel` and `MLPDailyModel` are its presets with `epftoolbox2.nets.MLP`.

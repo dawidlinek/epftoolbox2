@@ -376,3 +376,58 @@ CPU (`verify(..., device="cpu")`), or keep to layers whose backward has no atomi
 The trainer is a port of the research's stacked trainer, and on the research's own inputs (the DE benchmark, LEAR features,
 1456-day windows, 256-128 networks) it gives that trainer's forecasts to the bit on the CPU.
 </Aside>
+
+## Many networks at once: torch stacks
+
+A loop of `add_model` calls (a search, plan section 3.12) trains its networks together. `ModelPipeline.run` puts the torch
+models of a run whose fits are stacks on their device (`stack="vmap"`, or `"auto"` on a GPU) and that share a **stack key** in
+one group, and trains their networks in stacks of `pad_to` members on one device: each network on its own rows, with its own
+seeds, learning rate and dropout rate. It is speed only: every forecast, record and manifest is the one the model gives alone,
+to the bit, whatever the other models of the loop, their order or how they are split over array tasks
+(`models_per_task`), and after a resume.
+
+```python
+import random
+
+from epftoolbox2.models import TorchModel
+from epftoolbox2.nets import MLP
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.presets import lear_predictors
+
+lear_x = lear_predictors(["load_forecast"])
+pipeline = ModelPipeline()
+rng = random.Random(0)
+for i in range(48):
+    pipeline.add_model(TorchModel(module=MLP, output="day", predictors=lear_x, training_window=728, refit="7D",
+                                  module_params={"hidden": rng.choice([[256, 128], [512, 256], [1024, 512]]),
+                                                 "dropout": round(rng.uniform(0, 0.5), 2)},
+                                  lr=round(10 ** rng.uniform(-4, -3.5), 6), seeds=4, device="cuda", pad_to=256,
+                                  name=f"mlp_{i:02d}"))
+```
+
+Here the models of each width are one group, their 4 seeds of every weekly fit trained 256 at a time.
+
+- **The key**: the module (its import path, or a notebook class's own token, so only models of the same class object of the
+  session stack together) and its hash, `module_params` but `dropout` (the defaults filled in), `output`, `training_window`,
+  `refit`, `loss`, `batch_size`, `max_epochs`, `patience`, `early_stopping`, `weight_decay`, the device, `tf32` and `pad_to`.
+  Models that differ in anything else (`lr`, `dropout`, `seeds`, `random_state`, the predictors, the scaler) share stacks. A
+  stack also holds networks of one structure only: two widths, a dropout of 0 (no `Dropout` layer) or another number of inputs
+  are other stacks of the group.
+- **Who runs alone**: a model whose key no other model of the run has, a loop (`stack="auto"` on a CPU: a loop's arithmetic
+  isn't a stack's, so stacking it would move its numbers), a `forecast_only` run, and a subclass that changes how a fit is made
+  or read. `TORCH_STACKS=off`, an environment variable read when a run runs, runs every model on its own.
+- **`pad_to` on a GPU.** A stack is as fast as its size allows: on an H100 a stack of 256 trains 256 networks in about the time
+  one takes. Alone, a fit's 4 seeds fill 4 of its `pad_to` slots and the rest are padding; in a loop the stacks are full. Set
+  `pad_to` for the loop (256 is a good size for these networks), and keep it: it is compared when a run resumes.
+- **On a CPU** a stack does one product per network, so stacking a loop buys little there: `stack="auto"` (a loop of
+  single-thread fits in a pool of processes) is the fast way, and it runs each model alone.
+- **Failures stay where they were.** A network that diverged makes its own fit's forecasts `fit_error`s, as alone, and moves no
+  other network of its stack. A stack that raises (out of GPU memory, say) is trained again fit by fit, as each model alone. A
+  fit that raises stops the group as it stops a model's own run, with a `RuntimeError` naming the model; what came back is saved
+  and a later run resumes.
+
+How it runs: the group reads the data once, as an [engine group](/epftoolbox2/model-pipeline/engine/) does (chunks of at most
+`ENGINE_MAX_MODELS` models and `ENGINE_MAX_COLUMNS` columns), and runs jobs of a few refit blocks of every model in
+`MAX_PROCESSES` worker processes (one on a GPU). A job holds at least `TORCH_STACK_MEMBERS` networks (by default one stack, up
+to four where every process still has a job); its fits are prepared as each model's own run prepares them, then trained
+together, members of one learning rate in the same stacks, since a stack trains until its last member stops.
