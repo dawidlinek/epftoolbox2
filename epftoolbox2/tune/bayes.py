@@ -41,6 +41,7 @@ import math
 import os
 import socket
 import time
+import types
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -385,12 +386,36 @@ class _Score:
     model: Optional[str] = None  # `model_fingerprint` of the model `make` built
 
 
+def _code_parts(code: types.CodeType) -> Tuple[Any, ...]:
+    """A code object's bytecode, names and constants, nested functions' code included: what it does, without its source."""
+
+    def constant(c: Any) -> Any:
+        if isinstance(c, types.CodeType):
+            return _code_parts(c)
+        if isinstance(c, frozenset):  # `x in {"a", "b"}`: its order follows the hash seed of the process
+            return ("frozenset", tuple(sorted(repr(item) for item in c)))
+        return repr(c)
+
+    return (code.co_code, code.co_names, tuple(constant(c) for c in code.co_consts))
+
+
+def _code_digest(fn: Any) -> str:
+    """A hash of what a function does: its source (`inspect.getsource`, read again from the file), else its bytecode with its
+    constants (a list it returns, the code of a function inside it). A global it reads but doesn't define is not part of it."""
+    target = getattr(fn, "func", fn)  # a functools.partial's function
+    try:
+        text = inspect.getsource(target)
+    except (OSError, TypeError):
+        code = getattr(target, "__code__", None)
+        text = repr(_code_parts(code)) if code is not None else f"{type(target).__module__}:{type(target).__qualname__}"
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
 def _described(value: Any) -> Any:
     """A value of a model's settings as JSON can hold it, a function by its import path and the hash of its code."""
     if callable(value) and not isinstance(value, type):
-        code = getattr(value, "__code__", None)
-        digest = hashlib.sha256(code.co_code).hexdigest()[:12] if code is not None else ""
-        return f"{getattr(value, '__module__', '')}:{getattr(value, '__qualname__', repr(value))}#{digest}"
+        name = getattr(value, "__qualname__", None) or type(value).__qualname__
+        return f"{getattr(value, '__module__', '')}:{name}#{_code_digest(value)}"
     if isinstance(value, type):
         return f"{value.__module__}:{value.__qualname__}"
     return repr(value)
@@ -399,15 +424,18 @@ def _described(value: Any) -> Any:
 def model_fingerprint(model: Any) -> str:
     """What a search compares to know that `make` builds the model it scored: a hash of the model's class and its settings as
     a pipeline saves them (`ModelPipeline.to_dict`), or its public attributes where a setting can't be saved (a predictor
-    function defined in the script)."""
+    function defined in the script), and of the code of its predictor function (its source, which a pipeline saves only by
+    import path). An edit inside the function changes it; a global list the function reads but doesn't define does not."""
     from ..pipelines.model_pipeline import ModelPipeline
 
     try:
         params = ModelPipeline()._serialize_component(model)["params"]
     except (TypeError, ValueError):
         params = {key: value for key, value in vars(model).items() if not key.startswith("_")}
-        if getattr(model, "_ctx_fn", None) is not None:
-            params["predictors"] = model._ctx_fn
+    for attribute in ("_ctx_fn", "_predictors_fn"):  # a function of ctx, or of (horizon) / (horizon, hour)
+        function = getattr(model, attribute, None)
+        if function is not None:
+            params[attribute] = _described(function)
     text = json.dumps(
         {"class": f"{type(model).__module__}:{type(model).__qualname__}", "params": params},
         sort_keys=True,

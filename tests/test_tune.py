@@ -578,6 +578,50 @@ def test_a_resume_with_another_make_is_refused(df, tmp_path):
         loaded.best(1, make=edited)
 
 
+def test_the_fingerprint_sees_edits_inside_predictor_functions(tmp_path, monkeypatch):
+    """A function of the script edited between runs, one of an importable module edited and reloaded, and one with no source
+    (compiled from text) whose constants changed: each changes the fingerprint. A global it reads but doesn't define is not
+    seen (the documented limit)."""
+
+    def with_wind(ctx):
+        return ["load_d+{horizon}", "wind_d+{horizon}"]
+
+    first = bayes.model_fingerprint(OLSModel(with_wind, training_window=28, name="ols"))
+
+    def with_wind(ctx):  # noqa: F811 (edited between runs: wind swapped for solar)
+        return ["load_d+{horizon}", "solar_d+{horizon}"]
+
+    assert bayes.model_fingerprint(OLSModel(with_wind, training_window=28, name="ols")) != first
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setitem(sys.modules, "searched_lists", None)
+    del sys.modules["searched_lists"]  # gone again after the test (monkeypatch restores its absence)
+    module = tmp_path / "searched_lists.py"
+    module.write_text("def fn(ctx):\n    return ['load_d+{horizon}', 'wind_d+{horizon}']\n")
+    import importlib
+
+    import searched_lists
+
+    before = bayes.model_fingerprint(OLSModel(searched_lists.fn, training_window=28, name="ols"))
+    module.write_text("def fn(ctx):\n    return ['load_d+{horizon}']\n")
+    importlib.invalidate_caches()
+    importlib.reload(searched_lists)
+    assert bayes.model_fingerprint(OLSModel(searched_lists.fn, training_window=28, name="ols")) != before
+    compiled = {}
+    for listed in ("['load_d+{horizon}', 'wind_d+{horizon}']", "['load_d+{horizon}', 'solar_d+{horizon}']"):
+        namespace = {}
+        exec(compile(f"def fn(ctx):\n    return {listed}\n", "<generated>", "exec"), namespace)
+        compiled[listed] = bayes.model_fingerprint(OLSModel(namespace["fn"], training_window=28, name="ols"))
+    assert len(set(compiled.values())) == 2
+    held = ["load_d+{horizon}"]
+
+    def from_global(ctx):
+        return list(held)
+
+    unseen = bayes.model_fingerprint(OLSModel(from_global, training_window=28, name="ols"))
+    held.append("wind_d+{horizon}")
+    assert bayes.model_fingerprint(OLSModel(from_global, training_window=28, name="ols")) == unseen
+
+
 @pytest.mark.parametrize(
     "change, message",
     [
