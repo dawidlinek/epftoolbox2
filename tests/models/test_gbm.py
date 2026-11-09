@@ -238,7 +238,7 @@ def test_without_its_package_a_model_saves_and_loads_and_a_fit_names_the_extra(c
     (loaded,) = ModelPipeline.load(path).models
     assert type(loaded) is cls and loaded._model_kwargs == model._model_kwargs
     with pytest.raises(MissingExtraError, match=rf"pip install 'epftoolbox2\[{package}\]'"):
-        model._fit_model(np.zeros((3, 5)), np.zeros(3))
+        model._fit_model(np.arange(15.0).reshape(3, 5), np.arange(3.0))
     suite.check_preflight_without_extra(lambda name, **p: cls(INPUTS, name=name, **p), monkeypatch, market, TEST)
 
 
@@ -282,7 +282,7 @@ def test_every_fit_and_prediction_runs_inside_the_thread_scope(cls, monkeypatch)
     model = cls(INPUTS, threads=3)
     monkeypatch.setattr(gbm, "_thread_scope", Scope)
     monkeypatch.setattr(model, "_estimator", lambda: events.append(("build", None)) or Estimator())
-    fitted = model._fit_model(np.zeros((4, 5)), np.zeros(4))
+    fitted = model._fit_model(np.arange(20.0).reshape(4, 5), np.arange(4.0))
     predictions, coefficients = model._predict_block(fitted, np.zeros((2, 5)))
     assert predictions.dtype == np.float64 and coefficients == [[], []]
     assert model._predict_fitted(fitted, np.zeros(5)) == (0.0, [])
@@ -300,32 +300,89 @@ def test_every_fit_and_prediction_runs_inside_the_thread_scope(cls, monkeypatch)
     ]
 
 
-def test_a_missing_xgboost_resolves_to_the_distribution_that_provides_the_module(monkeypatch):
-    """`xgboost-cpu` (XGBoost's CPU-only build) installs the `xgboost` module under another distribution name: the pin
-    `xgboost>=2.1` and the manifest's key `xgboost` take its version, so the pre-flight passes and a resume compares it."""
+class FakeDistribution:
+    """What `importlib.metadata.distribution` gives for an installed distribution, as far as the cards read it."""
 
-    class Distribution:
-        version = "3.4.1"
+    def __init__(self, version):
+        self.version = version
 
-        @staticmethod
-        def read_text(name):
-            return None
+    def read_text(self, name):
+        return None
 
+
+def installed_as(monkeypatch, fakes):
+    """`importlib.metadata.distribution` with the distributions of `fakes` (name -> version, None for not installed) in place of
+    the real ones; every other name as it is."""
     real = importlib.metadata.distribution
 
     def distribution(name):
-        if name == "xgboost":
-            raise importlib.metadata.PackageNotFoundError(name)
-        return Distribution() if name == "xgboost-cpu" else real(name)
+        if name in fakes:
+            if fakes[name] is None:
+                raise importlib.metadata.PackageNotFoundError(name)
+            return FakeDistribution(fakes[name])
+        return real(name)
 
     monkeypatch.setattr(importlib.metadata, "distribution", distribution)
-    monkeypatch.setattr(importlib.metadata, "packages_distributions", lambda: {"xgboost": ["xgboost-cpu"]})
-    assert _cards.installed_distribution("xgboost") == ("3.4.1", None)
-    assert _cards.runtime_versions(gbm.XGBOOST_CARD) == {"xgboost": "3.4.1"}
+
+
+def test_xgboost_cpu_stands_in_for_xgboost_and_is_recorded_as_such(monkeypatch):
+    """`xgboost-cpu` (XGBoost's CPU-only build, `RUNTIME_ALIASES`) installs the `xgboost` module under another name: the pin
+    `xgboost>=2.1` takes its version and the pre-flight passes, and the manifest records it under `xgboost` with the build named,
+    so a resume over the full build's results refuses (the builds' forecasts differ)."""
+    installed_as(monkeypatch, {"xgboost": None, "xgboost-cpu": "3.4.1"})
     monkeypatch.setattr(_cards, "has_extra", lambda name: True)
+    assert _cards.runtime_providers("xgboost") == ["xgboost-cpu"]
+    assert _cards.installed_distribution("xgboost") == ("3.4.1", None)
+    assert _cards.runtime_versions(gbm.XGBOOST_CARD) == {"xgboost": "3.4.1 (xgboost-cpu)"}
     assert not [problem for problem in XGBoostModel(INPUTS)._preflight({}) if problem.kind == "runtime"]
-    monkeypatch.setattr(importlib.metadata, "packages_distributions", lambda: {})
-    assert _cards.installed_distribution("xgboost") is None
+    installed_as(monkeypatch, {"xgboost": "3.4.1", "xgboost-cpu": None})
+    assert _cards.runtime_versions(gbm.XGBOOST_CARD) == {"xgboost": "3.4.1"}
+
+
+def test_both_xgboost_builds_installed_refuse_before_any_fit(monkeypatch):
+    """With the full build and `xgboost-cpu` installed together, one overwrote the other's module and which one runs is unknown:
+    the pre-flight refuses."""
+    installed_as(monkeypatch, {"xgboost": "3.4.1", "xgboost-cpu": "3.4.1"})
+    monkeypatch.setattr(_cards, "has_extra", lambda name: True)
+    (problem,) = [problem for problem in XGBoostModel(INPUTS)._preflight({}) if problem.kind == "runtime"]
+    assert (
+        "xgboost and xgboost-cpu are both installed" in problem.message and "uninstall all but one" in problem.message
+    )
+    with pytest.raises(MissingExtraError, match="xgboost and xgboost-cpu are both installed"):
+        _cards.preflight([XGBoostModel(INPUTS)])
+    assert _cards.runtime_versions(gbm.XGBOOST_CARD) == {"xgboost": "3.4.1 (xgboost + xgboost-cpu)"}
+
+
+def test_a_look_alike_module_of_another_distribution_stands_in_for_nothing(monkeypatch):
+    """Only the alias table names stand-ins: a distribution that provides a module of a pin's name (a look-alike `lightgbm` or
+    `torch`) is never looked up, so a runtime that isn't installed stays not installed."""
+    installed_as(monkeypatch, {"lightgbm": None, "torch": None, "lightgbm-lookalike": "4.7.0", "not-torch": "2.9.0"})
+    monkeypatch.setattr(
+        importlib.metadata,
+        "packages_distributions",
+        lambda: {"lightgbm": ["lightgbm-lookalike"], "torch": ["not-torch"]},
+    )
+    monkeypatch.setattr(_cards, "has_extra", lambda name: True)
+    assert _cards.installed_distribution("lightgbm") is None and _cards.installed_distribution("torch") is None
+    assert _cards.runtime_versions(gbm.LIGHTGBM_CARD) == {"lightgbm": None}
+    (problem,) = LightGBMModel(INPUTS)._preflight({})
+    assert problem.kind == "runtime" and "which is not installed" in problem.message
+
+
+def test_a_resume_across_xgboost_builds_refuses(market, tmp_path, monkeypatch):
+    """Results made with the full XGBoost build refuse a resume with `xgboost-cpu` (and the other way round), naming the
+    runtime entry, before any fit."""
+    pytest.importorskip("xgboost")
+    make = lambda: XGBoostModel(INPUTS, training_window=28, n_estimators=10, name="tree")  # noqa: E731
+    run(make(), market, save_dir=tmp_path)
+    version = importlib.metadata.version("xgboost")
+    installed_as(monkeypatch, {"xgboost": None, "xgboost-cpu": version})
+    monkeypatch.setattr(gbm._BoostedTrees, "_fit_model", lambda *a: pytest.fail("a fit ran"))
+    with pytest.raises(ManifestMismatchError) as refused:
+        run(make(), market, save_dir=tmp_path)
+    assert f"runtime.packages.xgboost: '{version}' (existing results) vs '{version} (xgboost-cpu)' (this run)" in str(
+        refused.value
+    )
 
 
 @pytest.mark.parametrize("free_threaded, version", [(True, (3, 14)), (False, (3, 15)), (False, (3, 12))])
@@ -615,12 +672,55 @@ def test_package_errors_stop_the_run_and_data_errors_stay_value_errors(family, m
         monkeypatch.setattr(model, "_estimator", lambda raised=raised: Failing(raised))
         expected = RuntimeError if isinstance(raised, error) else ValueError
         with pytest.raises(expected, match="device out of memory" if expected is RuntimeError else "the data"):
-            model._fit_model(np.zeros((3, 5)), np.zeros(3))
+            model._fit_model(np.arange(15.0).reshape(3, 5), np.arange(3.0))
         with pytest.raises(expected):
             model._predict_block(Failing(raised), np.zeros((2, 5)))
     bad = {"lightgbm": {"num_leaves": 1}, "xgboost": {"subsample": 1.5}, "catboost": {"depth": 99}}[package]
     with pytest.raises(RuntimeError, match=f"{type(model).__name__}: {package} failed"):
         run(make(**bad), market)
+
+
+@pytest.mark.parametrize("objective", ["l1", "l2"])
+def test_catboost_predicts_a_constant_where_it_refuses_degenerate_data(objective):
+    """CatBoost refuses a target with no spread, inputs with none and a single row (`CatBoostError`), where LightGBM and
+    XGBoost fit: the model predicts the target's value, or the loss's optimum (median for l1, mean for l2), without calling
+    CatBoost; other data reaches CatBoost (and a genuine CatBoost error still stops the run, tested above)."""
+    model = CatBoostModel(INPUTS, objective=objective)
+    rng = np.random.default_rng(0)
+    y = rng.normal(size=50)
+    optimum = float(np.median(y)) if objective == "l1" else float(np.mean(y))
+    cases = [
+        (rng.normal(size=(50, 4)), np.full(50, 7.5), 7.5),  # a target with no spread
+        (np.ones((50, 4)), y, optimum),  # inputs with none
+        (rng.normal(size=(1, 4)), np.array([3.25]), 3.25),  # one row
+    ]
+    for x, target, expected in cases:
+        assert model._degenerate(x, target) == expected
+        fitted = model._fit_model(x, target)
+        assert model._predict_block(fitted, np.zeros((3, 4)))[0].tolist() == [expected] * 3
+        assert model._predict_fitted(fitted, np.zeros(4)) == (expected, [])
+    assert model._degenerate(rng.normal(size=(50, 4)), y) is None
+    assert LightGBMModel(INPUTS)._degenerate(np.ones((50, 4)), y) is None  # the others fit such data themselves
+
+
+def test_catboost_each_period_forecasts_zero_where_a_period_s_targets_are_all_zero(market):
+    """`periods="each"` on a frame whose 03:00 price is 0 every day (a generation target's night): that period's fits see a
+    target with no spread, which CatBoost refuses, and forecast 0; every other period's forecasts are the run's on the frame
+    as it was, to the bit."""
+    pytest.importorskip("catboost")
+    _, small = FAMILIES["catboost"]
+    zeroed = market.copy()
+    zeroed.loc[zeroed.index.hour == 3, "price"] = 0.0
+
+    def make():
+        return CatBoostModel(EACH_INPUTS, training_window=28, periods="each", name="tree", **small)
+
+    before = keyed(records(make(), market))
+    after = keyed(records(make(), zeroed))
+    assert after.keys() == before.keys()
+    night = [key for key in after if key[1] == 3]
+    assert night and all(after[key]["prediction"] == 0.0 for key in night)
+    assert all(after[key] == before[key] for key in after if key[1] != 3)
 
 
 def test_xgboost_on_a_gpu_must_have_fitted_on_one(monkeypatch):

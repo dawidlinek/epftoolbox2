@@ -24,7 +24,8 @@ on which fits a run makes. LightGBM runs with `deterministic=True` and `force_ro
 
 Errors: a package's own error (`XGBoostError`, which is a ValueError, `LightGBMError`, `CatBoostError`: bad settings, a GPU
 out of memory or without kernels) is raised as a RuntimeError, which stops the run, never a `fit_error` skip that would leave
-some windows silently without forecasts. XGBoost's device is checked after each fit: asked for a GPU, a fit that XGBoost moved
+some windows silently without forecasts. Data that is only degenerate is no error: CatBoost, which refuses a target or inputs
+with no spread and a single row, predicts a constant there (`_degenerate`), as LightGBM and XGBoost do. XGBoost's device is checked after each fit: asked for a GPU, a fit that XGBoost moved
 to the CPU (no visible GPU, a build without CUDA) raises, so a manifest never records "cuda" for CPU forecasts.
 """
 
@@ -157,6 +158,17 @@ def _package_errors(model: "_BoostedTrees"):
         ) from error
 
 
+class _Constant:
+    """A fit that predicts one value for every row: what a tree learns from training data with nothing to split on (CatBoost
+    refuses such data, where LightGBM and XGBoost predict the constant)."""
+
+    def __init__(self, value: float):
+        self.value = float(value)
+
+    def predict(self, rows: np.ndarray) -> np.ndarray:
+        return np.full(len(rows), self.value, dtype=np.float64)
+
+
 def _thread_scope(threads: int):
     """A scope with OpenMP at `threads` threads in this thread, put back on exit."""
     from threadpoolctl import threadpool_limits
@@ -245,7 +257,15 @@ class _BoostedTrees(BaseModel):
     def _check_fitted(self, fitted: Any) -> None:
         """What a fit must have done (XGBoost: run on the device asked for); nothing here."""
 
+    def _degenerate(self, train_x: np.ndarray, train_y: np.ndarray) -> Optional[float]:
+        """The constant a fit on these rows predicts where the package refuses them although they are only degenerate (CatBoost:
+        a target with no spread, inputs with none, a single row); None to fit. The packages that fit them need none."""
+        return None
+
     def _fit_model(self, train_x: np.ndarray, train_y: np.ndarray) -> Any:
+        constant = self._degenerate(train_x, train_y)
+        if constant is not None:
+            return _Constant(constant)
         # Built (the package and its OpenMP runtime loaded) before the scope: `threadpool_limits` limits only what is loaded.
         estimator = self._estimator()
         with _package_errors(self), _thread_scope(self.threads):
@@ -589,6 +609,21 @@ class CatBoostModel(_BoostedTrees):
 
     def _error_types(self) -> Tuple[type, ...]:
         return _error_class("catboost", "CatBoostError")
+
+    def _degenerate(self, train_x: np.ndarray, train_y: np.ndarray) -> Optional[float]:
+        """CatBoost refuses training data that is only degenerate, where LightGBM and XGBoost fit: a target with no spread
+        (a night period of a solar target, all 0) predicts that value, as theirs do; inputs that are all constant, or a single
+        row, predict the loss's optimum, the median (`l1`) or the mean (`l2`) of the targets (the two packages differ there:
+        their first trees still take a step). A genuine CatBoost error still stops the run."""
+        y = np.asarray(train_y, dtype=np.float64)
+        if not len(y):
+            return None
+        if np.all(y == y[0]):
+            return float(y[0])
+        x = np.asarray(train_x, dtype=np.float64).reshape(len(y), -1)
+        if len(y) == 1 or bool(np.all(x == x[0], axis=None)):
+            return float(np.median(y)) if self.objective == "l1" else float(np.mean(y))
+        return None
 
     def _preflight(self, seen: Optional[Dict] = None) -> List[Any]:
         """The card's checks; where catboost is missing on Python 3.15 or a free-threaded build, the hint says that it has no
