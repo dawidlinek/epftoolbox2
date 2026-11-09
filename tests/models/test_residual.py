@@ -506,17 +506,20 @@ def test_verify_is_ok_through_both_stages_and_finds_a_leak_in_either(market):
     """`verify` with its control, rerun, co-batch and cut-frame checks: ok on a block's first, middle and last (spring) day. A
     base reading a value unknown at the issue time is a leak through the residual model's forecasts, and so is a learner."""
 
+    # Every probe runs both stages: a weekly base and the days the warm-ups and blocks of these issue days read keep it short.
     def make(name, **params):
-        return residual(name, learner=PooledLS(LEARNER_INPUTS + [DAY_LEVEL]), **params)
+        return residual(name, learner=PooledLS(LEARNER_INPUTS + [DAY_LEVEL]), base_model=base(refit="7D"), **params)
 
-    # The days the warm-ups and blocks of these issue days read, and no more: every probe runs both stages.
-    data = market.loc["2023-01-25":"2023-03-31"]
+    data = market.loc["2023-01-15":"2023-03-31"]
     suite.check_verify(make, data, INFO, ["2023-03-20", "2023-03-22", "2023-03-26"], items=6)
     late = dict(RULES, wind=Availability.published("23:00", 1))  # wind_d+1 published on D at 23:00, after the issue
     without_wind = [name for name in BASE_INPUTS if not name.startswith("wind")]
     for leaky in (  # wind read by the base alone, then by the learner alone
-        residual(learner=PooledLS([name for name in LEARNER_INPUTS if not name.startswith("wind")])),
-        residual(base_model=OLSModel(without_wind, training_window=21, name="ols")),
+        residual(
+            learner=PooledLS([name for name in LEARNER_INPUTS if not name.startswith("wind")]),
+            base_model=base(refit="7D"),
+        ),
+        residual(base_model=OLSModel(without_wind, training_window=21, refit="7D", name="ols")),
     ):
         report = ModelPipeline(information_set=InformationSet(rules=late)).add_model(leaky)
         found = report.verify(data, "2023-03-20", "2023-03-20", horizon=1, days=1, positive_control=False, rerun=False)
