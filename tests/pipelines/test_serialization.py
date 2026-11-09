@@ -786,7 +786,7 @@ class TestModelPipelineParameterFidelity:
                 ),
                 ResidualModel(
                     RidgeModel(["price_d-1"], training_window=40, alphas=[2.0], name="b"),
-                    HistGBModel(["price_d-1", "base_fc_h05_d+{horizon}"], max_iter=12, name="l"),
+                    HistGBModel(["price_d-1", "base_fc_h05_d+{horizon}"], max_iter=12),  # its name isn't written
                     name="Res2",
                 ),
             ],

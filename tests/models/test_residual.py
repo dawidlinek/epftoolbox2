@@ -11,16 +11,28 @@ import datetime
 import json
 import math
 import os
+import warnings
 from concurrent.futures import Future
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator
 from epftoolbox2.information_set import Availability, InformationSet
-from epftoolbox2.models import HistGBModel, NaiveModel, OLSModel, PooledModel, ResidualModel
+from epftoolbox2.models import (
+    HistGBModel,
+    LassoCVModel,
+    LEARModel,
+    ModelCard,
+    NaiveModel,
+    OLSModel,
+    PooledModel,
+    ResidualModel,
+    RidgeModel,
+)
 from epftoolbox2.models._calendar import refit_anchor
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.models.base import BaseModel
@@ -406,9 +418,13 @@ def test_base_by_name_resolves_to_a_copy_of_an_earlier_model(market, tmp_path, r
     loaded = ModelPipeline.load(path)
     assert keyed(loaded.run(market, *TEST, horizon=2).refs["residual"]._results) == keyed(a)
     sliced = ModelPipeline().add_model(base()).add_model(ResidualModel("ols", PooledLS(), training_window=28))
-    sliced._resolve_bases()  # what a Workflow array task does before it takes its slice of the models
+    sliced._resolve_bases()  # what a Workflow array task does before it takes its slice of the models, and marks it
     sliced.models = sliced.models[1:]
+    sliced._bases_from_the_whole_list = True
     assert keyed(sliced.run(market, *TEST, horizon=2).refs["residual"]._results) == keyed(a)
+    # Bound in one pipeline, the model runs in no other without that name: a stale binding would run a base nobody named.
+    with pytest.raises(ValueError, match="names no model"):
+        ModelPipeline().add_model(sliced.models[0]).run(market, *TEST, horizon=2)
     with pytest.raises(ValueError, match="is added after it"):
         ModelPipeline().add_model(ResidualModel("ols", PooledLS())).add_model(base()).run(market, *TEST, horizon=2)
     with pytest.raises(ValueError, match="names no model"):
@@ -455,9 +471,19 @@ def test_a_resume_continues_the_base_from_its_file_and_a_changed_base_refuses(ma
         run(changed, market, save_dir=resumed)
     for name in ("residual.base.jsonl", "residual.base.manifest.json"):
         (resumed / name).unlink()
-    with pytest.raises(ManifestMismatchError, match="model_params") as refused:
+    # Refused before the base runs: nothing is written, and the model's own configuration still resumes afterwards.
+    with pytest.raises(ManifestMismatchError, match="Nothing was run or written") as refused:
         run(residual(base_model=base(training_window=14)), market, save_dir=resumed)
-    assert "  - residual:" in str(refused.value)
+    assert "  - model_params:" in str(refused.value)
+    assert not (resumed / "residual.base.jsonl").exists()
+    run(residual(), market, save_dir=resumed)
+    assert lines(resumed / "residual.base.jsonl") == lines(fresh / "residual.base.jsonl")
+    # The base's configuration as its manifest recorded it (`residual.base_manifest`) is compared after its run.
+    path = manifest_path(resumed / "residual.jsonl")
+    manifest = json.loads(path.read_text())
+    path.write_text(json.dumps({**manifest, "residual": {"base_manifest": "another base"}}))
+    with pytest.raises(ManifestMismatchError, match="  - residual:"):
+        run(residual(), market, save_dir=resumed)
 
 
 def test_the_adapter_suite(market, tmp_path, monkeypatch, registered):
@@ -483,7 +509,9 @@ def test_verify_is_ok_through_both_stages_and_finds_a_leak_in_either(market):
     def make(name, **params):
         return residual(name, learner=PooledLS(LEARNER_INPUTS + [DAY_LEVEL]), **params)
 
-    suite.check_verify(make, market, INFO, ["2023-03-20", "2023-03-22", "2023-03-26"], items=6)
+    # The days the warm-ups and blocks of these issue days read, and no more: every probe runs both stages.
+    data = market.loc["2023-01-25":"2023-03-31"]
+    suite.check_verify(make, data, INFO, ["2023-03-20", "2023-03-22", "2023-03-26"], items=6)
     late = dict(RULES, wind=Availability.published("23:00", 1))  # wind_d+1 published on D at 23:00, after the issue
     without_wind = [name for name in BASE_INPUTS if not name.startswith("wind")]
     for leaky in (  # wind read by the base alone, then by the learner alone
@@ -491,7 +519,7 @@ def test_verify_is_ok_through_both_stages_and_finds_a_leak_in_either(market):
         residual(base_model=OLSModel(without_wind, training_window=21, name="ols")),
     ):
         report = ModelPipeline(information_set=InformationSet(rules=late)).add_model(leaky)
-        found = report.verify(market, "2023-03-20", "2023-03-20", horizon=1, days=1)
+        found = report.verify(data, "2023-03-20", "2023-03-20", horizon=1, days=1, positive_control=False, rerun=False)
         assert found.table().iloc[0]["status"] == "leak", found.table().to_dict("records")
 
 
@@ -513,6 +541,264 @@ def test_with_validation_each_window_is_a_plain_run_over_it(market):
             if r["window"] == name
         }
         assert windowed == alone
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Warm-up forms, refusals, the base's masks and DST
+# ---------------------------------------------------------------------------------------------------------------------------
+
+
+def test_a_dated_warmup_makes_no_forecast_depend_on_the_test_start_and_an_int_one_refuses_another(market, tmp_path):
+    """`warmup="2023-02-01"` starts the base on that date whatever the run's days: two runs from 13 and from 20 March agree on
+    their common keys to the bit, an expanding learner and a base with first-day masks included. `warmup=14` starts it 14 days
+    before the first issue day, so the manifest's `residual` field records that start and a resume from another refuses."""
+    dated = dict(training_window="expanding", warmup="2023-02-01")
+    early = keyed(run(residual(**dated), market, ("2023-03-13", "2023-03-26")).refs["residual"]._results)
+    late = keyed(run(residual(**dated), market, ("2023-03-20", "2023-03-26")).refs["residual"]._results)
+    same = [key for key in late if {**late[key], "day_in_test": 0} == {**early[key], "day_in_test": 0}]
+    assert late and len(same) == len(late)  # `day_in_test` counts from each run's own start
+    assert warm_start(residual(**dated), market) == datetime.date(2023, 2, 1)
+    days = dict(training_window="expanding", warmup=14)
+    run(residual(**days), market, ("2023-03-20", "2023-03-26"), save_dir=tmp_path)
+    assert json.loads(manifest_path(tmp_path / "residual.jsonl").read_text())["residual"]["base_start"] == "2023-03-06"
+    with pytest.raises(ManifestMismatchError, match="residual.base_start"):
+        run(residual(**days), market, ("2023-03-13", "2023-03-26"), save_dir=tmp_path)
+    with pytest.raises(ValueError, match="after the first issue day"):
+        warm_start(residual(warmup="2023-03-20"), market)
+
+
+def test_an_expanding_base_needs_a_warmup(market):
+    """An expanding base's first fits train on a handful of rows, which every later learner fit would include: refused
+    without `warmup=`, run with one."""
+    expanding = base(training_window="expanding")
+    with pytest.raises(ValueError, match="an expanding base"):
+        run(residual(base_model=expanding), market)
+    assert warm_start(residual(base_model=expanding, warmup="2023-02-01"), market) == datetime.date(2023, 2, 1)
+
+
+def test_base_prediction_is_the_pipeline_s_own_base_records_where_no_mask_reads_a_first_day(market):
+    """The base copy starts at the warm-up, so a base that reads its binary-column masks on its run's first day (refit=None,
+    binary_mask=None) can give other forecasts than the same model run beside it: such a base warns. A refit base and one with
+    `binary_mask="fit"` give `base_prediction` equal to the pipeline's own base records on every shared key."""
+    for settings in ({"refit": "7D"}, {"binary_mask": "fit"}):
+        pipeline = (
+            ModelPipeline().add_model(base(**settings)).add_model(ResidualModel("ols", PooledLS(), training_window=28))
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)  # no warning about the base's masks
+            report = pipeline.run(market, *TEST, horizon=2)
+        own = keyed(report.refs["ols"]._results)
+        corrected = keyed(report.refs["residual"]._results)
+        assert corrected and all(r["base_prediction"] == own[key]["prediction"] for key, r in corrected.items())
+    with pytest.warns(UserWarning, match="binary_mask='fit'"):
+        run(residual(), market)
+
+
+def test_base_forecasts_of_a_spring_switch_s_skipped_hour_take_two_issue_days_per_horizon(market):
+    """`base_fc_h02_d+{horizon}` has no value where the base has no 02:00 forecast: issued the day before the switch's target
+    day (02:00 isn't on its clock) and on the switch day itself (no 02:00 row to issue from). A list naming it forecasts
+    nothing those days, so the residual model skips 2 issue days x 23 periods per horizon that its base forecasts."""
+    learner = PooledLS(LEARNER_INPUTS + ["base_fc_h02_d+{horizon}"])
+    pipeline = ModelPipeline().add_model(base()).add_model(ResidualModel("ols", learner, training_window=28))
+    report = pipeline.run(market, "2023-03-20", "2023-03-26", horizon=2)
+    counts = report.forecast_counts().set_index("model")
+    assert counts.loc["ols", "missing"] == 0
+    assert report.refs["residual"].skipped == {"missing_test_predictors": 2 * 23 * 2}
+    skipped = set(keyed(report.refs["ols"]._results)) - set(keyed(report.refs["residual"]._results))
+    assert sorted({(day, horizon) for day, _, horizon in skipped}) == [
+        ("2023-03-24", 2),
+        ("2023-03-25", 1),
+        ("2023-03-26", 1),
+        ("2023-03-26", 2),
+    ]
+
+
+def test_a_direct_run_into_parquet_is_refused(market, tmp_path):
+    with pytest.raises(ValueError, match="base_prediction"):
+        residual().run(market, *TEST, horizon=2, save_to=str(tmp_path / "residual.parquet"))
+    assert not list(tmp_path.iterdir())
+
+
+def test_results_convert_to_parquet_refuses_a_residual_model_s_before_converting_anything(market, tmp_path):
+    from epftoolbox2.results.parquet_store import convert
+
+    pipeline = ModelPipeline().add_model(base()).add_model(ResidualModel("ols", PooledLS(), training_window=28))
+    pipeline.run(market, *TEST, horizon=2, save_dir=tmp_path)
+    before = sorted(path.name for path in tmp_path.iterdir())
+    with pytest.raises(ValueError, match="ResidualModel results"):
+        convert(tmp_path, "parquet")
+    assert sorted(path.name for path in tmp_path.iterdir()) == before
+
+
+def _workflow(tmp_path, models, save_format="jsonl", index=None):
+    from epftoolbox2.pipelines.workflow import Workflow
+
+    config = {
+        "environment": {} if index is None else {"model_index": index},
+        "data_pipeline": {"start": "2023-01-01", "end": "2023-04-20", "sources": []},
+        "model_pipeline": {
+            "test_start": "2023-03-13",
+            "test_end": "2023-03-14",
+            "horizon": 1,
+            "save_dir": str(tmp_path / "runs"),
+            "save_format": save_format,
+            "models": models,
+        },
+    }
+    path = tmp_path / f"workflow_{save_format}_{index}.yaml"
+    path.write_text(yaml.safe_dump(config))
+    return Workflow.load(path)
+
+
+WORKFLOW_MODELS = [
+    {"class": "OLSModel", "params": {"predictors": BASE_INPUTS, "training_window": 21, "name": "ols"}},
+    {
+        "class": "ResidualModel",
+        "params": {
+            "base": "ols",
+            "learner": {"class": "HistGBModel", "params": {"predictors": LEARNER_INPUTS, "max_iter": 5}},
+            "training_window": 28,
+        },
+    },
+]
+
+
+def test_a_workflow_array_task_runs_a_residual_model_whose_base_is_another_task_s(market, tmp_path, monkeypatch):
+    """Task 1 of an array of one model a task holds the ResidualModel alone; its base="ols" names task 0's model, which the
+    Workflow resolves on the whole list before it takes the slice. A Parquet run, and a base named nowhere, are refused before
+    the data pipeline runs, also in a task holding the base alone."""
+    from epftoolbox2.pipelines.workflow import Workflow
+
+    fetched = []
+    monkeypatch.setattr(Workflow, "_run_data", lambda self, dp=None: fetched.append(1) or market)
+    _workflow(tmp_path, WORKFLOW_MODELS, index=1).run()
+    assert lines(tmp_path / "runs" / "residual.jsonl") and fetched == [1]
+    fetched.clear()
+    for index in (None, 0):
+        with pytest.raises(ValueError, match="base_prediction"):
+            _workflow(tmp_path, WORKFLOW_MODELS, "parquet", index).run()
+    typo = [WORKFLOW_MODELS[0], {**WORKFLOW_MODELS[1], "params": {**WORKFLOW_MODELS[1]["params"], "base": "olss"}}]
+    for index in (None, 0, 1):
+        with pytest.raises(ValueError, match="names no model"):
+            _workflow(tmp_path, typo, index=index).run()
+    assert fetched == []
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Construction, YAML, provenance, explain
+# ---------------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "learner",
+    [
+        lambda: HistGBModel(LEARNER_INPUTS),
+        lambda: OLSModel(["load_d+{horizon}", "price_d-1", "base_fc_d+{horizon}"]),
+        lambda: RidgeModel(["load_d+{horizon}", "price_d-1", "base_fc_d+{horizon}"]),
+        lambda: LassoCVModel(["load_d+{horizon}", "price_d-1", "base_fc_d+{horizon}"]),
+        lambda: LEARModel(["load_d+{horizon}", "price_d-1", "base_fc_d+{horizon}"]),
+    ],
+)
+def test_no_warning_for_a_learner_at_its_class_s_defaults_nor_on_load(learner, tmp_path, registered):
+    """A learner left at its class's own `training_window` and `refit` (`OLSModel`'s refit is BaseModel's; LEAR's windows a
+    list) warns of nothing, and its YAML leaves out the learner's window, refit and name, which this model replaces, so a load
+    warns of nothing either."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        model = ResidualModel(base(), learner(), training_window=28)
+        path = tmp_path / "pipeline.yaml"
+        ModelPipeline().add_model(model).save(path)
+        loaded = ModelPipeline.load(path).models[0]
+    saved = yaml.safe_load(path.read_text())["models"][0]["params"]["learner"]["params"]
+    assert not {"training_window", "refit", "name"} & set(saved)
+    assert loaded._model_kwargs == model._model_kwargs
+
+
+def test_construction_errors_name_the_model_and_a_pooled_base_says_why():
+    with pytest.raises(TypeError, match=r"ResidualModel\('mine'\): learner must be a model"):
+        ResidualModel(base(), "hgb", name="mine")
+    with pytest.raises(ValueError, match=r"ResidualModel\('mine'\): warmup"):
+        ResidualModel(base(), PooledLS(), warmup=0, name="mine")
+    with pytest.raises(ValueError, match="a PooledModel can't be a base"):
+        ResidualModel(PooledModel(base(refit="7D")), PooledLS())
+    with pytest.raises(ValueError, match="a PooledModel can't be a base"):
+        ModelPipeline().add_model(PooledModel(base(refit="7D"), name="p")).add_model(
+            ResidualModel("p", PooledLS())
+        )._check_model_names()
+    assert (
+        repr(ResidualModel(base("o"), PooledLS()))
+        == "ResidualModel(base=OLSModel('o'), learner=PooledLS('ls'), name='residual')"
+    )
+    assert repr(ResidualModel("o", PooledLS())) == "ResidualModel(base='o', learner=PooledLS('ls'), name='residual')"
+    with pytest.raises(ValueError):
+        parse_base_name("base_fc_h5_d+1", "1h")
+
+
+def test_a_model_under_an_unlisted_parameter_isn_t_saved(tmp_path):
+    """A model-valued attribute that its class doesn't list in `_NESTED_MODELS` raises at save time: a load couldn't rebuild
+    it. A PooledModel saves its model as before."""
+    model = base()
+    model.helper = OLSModel(BASE_INPUTS, name="helper")
+    with pytest.raises(TypeError, match="_NESTED_MODELS"):
+        ModelPipeline().add_model(model).save(tmp_path / "bad.yaml")
+    pooled = PooledModel(base(refit="7D"), over=("zone", "horizon"), name="p")
+    ModelPipeline().add_model(pooled).save(tmp_path / "pooled.yaml")
+    again = ModelPipeline.load(tmp_path / "pooled.yaml").models[0]
+    assert (type(again.model), again.over, again.name) == (OLSModel, pooled.over, "p")
+
+
+FAKE_CARD = ModelCard(
+    family="fake-base",
+    extra=None,
+    licence="Fake-1.0",
+    licence_url="https://example.invalid/fake",
+    commercial_use=False,
+    revenue_cap=None,
+    attribution="Fake Labs",
+    weights=None,
+    runtime=("numpy",),
+    corpus="undocumented",
+    corpus_end=datetime.date(2023, 3, 1),
+    released=datetime.date(2022, 1, 1),
+)
+
+
+class CardedOLS(OLSModel):
+    """OLS with a card of its own: a carded base, whose card a residual model's provenance shows."""
+
+    _card = FAKE_CARD
+    _engine_ok = False
+
+
+def test_the_provenance_shows_the_base_s_card_judged_from_its_first_issue_day(market, tmp_path):
+    """A residual model over an OLS learner (no card) shows its base's card as a row of its own, `<name>.base`, in memory and
+    from the files; its verdict is judged from the base's first issue day (11 February), the warm-up's: a corpus ending on 1
+    March, before the test, reaches the base forecasts the learner trains on."""
+    learner = OLSModel(["load_d+{horizon}", "price_d-1", "base_fc_d+{horizon}"])
+    model = ResidualModel(CardedOLS(BASE_INPUTS, training_window=21, name="b"), learner, training_window=28)
+    pipeline = ModelPipeline().add_model(model)
+    reports = [pipeline.run(market, *TEST, horizon=2, save_dir=tmp_path)]
+    reports.append(pipeline.report(tmp_path, *TEST, horizon=2))
+    for report in reports:
+        table = report.provenance()
+        assert table["model"].tolist() == ["residual.base"], table
+        row = table.iloc[0]
+        assert (row["family"], row["licence"], row["test_verdict"]) == (
+            "fake-base",
+            "Fake-1.0",
+            "possibly contaminated",
+        )
+
+
+def test_explain_shows_the_base_s_forecasts_as_such_and_the_base_s_inputs(market):
+    pipeline = ModelPipeline().add_model(base()).add_model(ResidualModel("ols", PooledLS(), training_window=28))
+    out = pipeline.explain(market, "residual", test=TEST, horizon=1, hour=8, echo=False)
+    table = out["predictors"].set_index("predictor")
+    assert table.loc["base_fc_d+1", "status"] == "base forecast"
+    assert (
+        "not in data" not in table.loc[[name for name in table.index if name.startswith("base_fc")], "status"].tolist()
+    )
+    assert out["base_predictors"]["predictor"].tolist() == [name.replace("{horizon}", "1") for name in BASE_INPUTS]
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -679,8 +965,23 @@ def test_residual_metrics_match_golden(monkeypatch):
     assert actual.keys() == expected.keys()
     for model, values in expected.items():
         assert actual[model]["forecasts"] == values["forecasts"], f"{model}: number of forecasts changed"
-        if model == "Residual" and _sklearn_version() != release:
-            continue  # HGB's numbers are scikit-learn's of one release
-        for key, value in values.items():
-            if key != "forecasts":
-                assert actual[model][key] == pytest.approx(value, rel=GOLDEN_RTOL), f"{model} {key}"
+    for key, value in expected["OLS"].items():
+        assert actual["OLS"][key] == pytest.approx(value, rel=GOLDEN_RTOL), f"OLS {key}"
+    if _sklearn_version() != release:
+        pytest.skip(
+            f"the residual model's golden metrics are scikit-learn {release}'s and this is {_sklearn_version()}: HGB's "
+            "numbers move between releases (the counts and the base's metrics were compared)"
+        )
+    for key, value in expected["Residual"].items():
+        assert actual["Residual"][key] == pytest.approx(value, rel=GOLDEN_RTOL), f"Residual {key}"
+
+
+def test_the_residual_golden_is_of_the_lock_s_scikit_learn():
+    """The release the golden file was written with is the one `uv.lock` pins, so the locked CI cells compare it (the others
+    skip its HGB numbers, visibly). Moving the lock's scikit-learn means writing the file again."""
+    import re
+
+    lock = (Path(__file__).parent.parent.parent / "uv.lock").read_text()
+    pinned = re.search(r'\[\[package\]\]\nname = "scikit-learn"\nversion = "([^"]+)"', lock)
+    assert pinned is not None, "no scikit-learn in uv.lock"
+    assert json.loads(GOLDEN_FILE.read_text())["scikit-learn"] == pinned.group(1)
