@@ -331,61 +331,41 @@ def train_members(
     in); `nominal_rows` is the training rows of a full window (default: the most any member has), which fixes the steps per
     epoch and the early-stopping rows, so pass it for a member to be the same whatever it trains with. See the module
     docstring for the rest."""
-    if dtype not in DTYPES:
-        raise ValueError(f"dtype={dtype!r}: use one of {DTYPES}")
-    if not members:
-        raise ValueError("train_members needs at least one member")
-    if not 0.0 <= float(early_stopping) < 1.0:
-        raise ValueError(f"early_stopping={early_stopping!r}: a share of the training rows in [0, 1)")
-    if int(max_epochs) < 1 or int(batch_size) < 1 or int(patience) < 1:
-        raise ValueError("max_epochs, batch_size and patience must be at least 1")
-    resolved = resolve_device(device)
-    kind = resolve_stack(stack, resolved)
-    pad = resolve_pad(kind, pad_to)
-    torch_dtype = getattr(torch, dtype)
-    loss_fn = resolve_loss(loss)
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
-    if x.ndim != 2 or y.ndim != 2 or len(x) != len(y):
-        raise ValueError(
-            f"x must be (rows, inputs) and y (rows, outputs) with the same rows, got {x.shape} and {y.shape}"
-        )
-    mask = np.isfinite(y) if y_mask is None else (np.asarray(y_mask, dtype=bool) & np.isfinite(y))
-    if mask.shape != y.shape:
-        raise ValueError(f"y_mask has shape {mask.shape}, y {y.shape}")
-
-    plan = _plan(members, len(x), float(early_stopping), float(lr), nominal_rows, int(batch_size), mask)
-    shapes = plan[1]
-    used = np.unique(np.concatenate([np.concatenate([m.fit, m.val]) for m in plan[0]]))
-    if not np.isfinite(x[used]).all():
-        raise ValueError("x has a value that is not finite on a training row of a member")
-
-    X = torch.as_tensor(x, dtype=torch_dtype, device=resolved)
-    Y = torch.as_tensor(np.where(mask, y, 0.0), dtype=torch_dtype, device=resolved)
-    M = torch.as_tensor(mask, device=resolved)
-    data = (X, Y, M)
-    settings = dict(
-        loss_fn=loss_fn,
-        max_epochs=int(max_epochs),
-        patience=int(patience),
-        early=float(early_stopping) > 0,
-        weight_decay=float(weight_decay),
-        inputs=_inputs(blocks),
-        device=resolved,
-        dtype=torch_dtype,
+    prepared = prepare_members(
+        x,
+        y,
+        y_mask,
+        members,
+        loss=loss,
+        lr=lr,
+        max_epochs=max_epochs,
+        patience=patience,
+        batch_size=batch_size,
+        early_stopping=early_stopping,
+        weight_decay=weight_decay,
+        stack=stack,
+        pad_to=pad_to,
+        device=device,
+        dtype=dtype,
+        nominal_rows=nominal_rows,
+        blocks=blocks,
     )
+    planned, shapes, kind, pad = prepared.members, prepared.shapes, prepared.kind, prepared.pad
+    x, resolved, settings = prepared.x, prepared.device, prepared.settings
+    torch_dtype = settings["dtype"]
+    data = tensors(prepared.x, prepared.y, prepared.mask, resolved, torch_dtype)
     started = time.perf_counter()
     with torch.enable_grad():
         if kind == "loop":
-            fits = [_LoopFit(module_factory, member, data, shapes, settings) for member in plan[0]]
+            fits = [_LoopFit(module_factory, member, data, shapes, settings) for member in planned]
         else:
             fits = []
             with _stack_threads(resolved):
-                for start in range(0, len(plan[0]), pad):
-                    fits.append(_StackFit(module_factory, plan[0][start : start + pad], pad, data, shapes, settings))
+                for start in range(0, len(planned), pad):
+                    fits.append(_StackFit(module_factory, planned[start : start + pad], pad, data, shapes, settings))
     _sync(resolved)
     seconds = time.perf_counter() - started
-    n_members = len(plan[0])
+    n_members = len(planned)
     best_epoch = np.concatenate([f.best_epoch for f in fits])[:n_members]
     failed = np.concatenate([f.failed for f in fits])[:n_members]
     stats = {
@@ -419,6 +399,94 @@ def train_members(
         return out
 
     return TrainResult(predict=predict, best_epoch=best_epoch, failed=failed, stats=stats)
+
+
+@dataclass
+class Prepared:
+    """One `train_members` call, checked and planned, before any torch work: each member's fit and early-stopping rows
+    (`_Member`, rows of this call's `x`), the shapes, the arrays as the trainer reads them (`x`, `y` float64, `mask` the slots
+    with a finite target), the stack ("loop" or "vmap"), its size, the resolved device and the settings of a fit (the loss
+    function, epochs, patience, early stopping, weight decay, the blocks' views, device and torch dtype). A torch stack of
+    several models (`_torch.groups`) trains the members of several calls from theirs in one `_StackFit`."""
+
+    members: List[_Member]
+    shapes: _Shapes
+    x: np.ndarray
+    y: np.ndarray
+    mask: np.ndarray
+    kind: str
+    pad: Optional[int]
+    device: Any
+    settings: Dict[str, Any]
+
+
+def prepare_members(
+    x: np.ndarray,
+    y: np.ndarray,
+    y_mask: Optional[np.ndarray],
+    members: Sequence[MemberSpec],
+    *,
+    loss: Union[str, Callable] = "l1",
+    lr: float = 3e-4,
+    max_epochs: int = 300,
+    patience: int = 20,
+    batch_size: int = 64,
+    early_stopping: float = 0.2,
+    weight_decay: float = 0.0,
+    stack: str = "loop",
+    pad_to: Optional[int] = None,
+    device: Any = "cpu",
+    dtype: str = "float32",
+    nominal_rows: Optional[int] = None,
+    blocks: Optional[Dict[str, slice]] = None,
+) -> Prepared:
+    """What `train_members` checks and plans before it trains (it raises what this raises): see `Prepared`."""
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype={dtype!r}: use one of {DTYPES}")
+    if not members:
+        raise ValueError("train_members needs at least one member")
+    if not 0.0 <= float(early_stopping) < 1.0:
+        raise ValueError(f"early_stopping={early_stopping!r}: a share of the training rows in [0, 1)")
+    if int(max_epochs) < 1 or int(batch_size) < 1 or int(patience) < 1:
+        raise ValueError("max_epochs, batch_size and patience must be at least 1")
+    resolved = resolve_device(device)
+    kind = resolve_stack(stack, resolved)
+    pad = resolve_pad(kind, pad_to)
+    torch_dtype = getattr(torch, dtype)
+    loss_fn = resolve_loss(loss)
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if x.ndim != 2 or y.ndim != 2 or len(x) != len(y):
+        raise ValueError(
+            f"x must be (rows, inputs) and y (rows, outputs) with the same rows, got {x.shape} and {y.shape}"
+        )
+    mask = np.isfinite(y) if y_mask is None else (np.asarray(y_mask, dtype=bool) & np.isfinite(y))
+    if mask.shape != y.shape:
+        raise ValueError(f"y_mask has shape {mask.shape}, y {y.shape}")
+
+    planned, shapes = _plan(members, len(x), float(early_stopping), float(lr), nominal_rows, int(batch_size), mask)
+    used = np.unique(np.concatenate([np.concatenate([m.fit, m.val]) for m in planned]))
+    if not np.isfinite(x[used]).all():
+        raise ValueError("x has a value that is not finite on a training row of a member")
+    settings = dict(
+        loss_fn=loss_fn,
+        max_epochs=int(max_epochs),
+        patience=int(patience),
+        early=float(early_stopping) > 0,
+        weight_decay=float(weight_decay),
+        inputs=_inputs(blocks),
+        device=resolved,
+        dtype=torch_dtype,
+    )
+    return Prepared(planned, shapes, x, y, mask, kind, pad, resolved, settings)
+
+
+def tensors(x: np.ndarray, y: np.ndarray, mask: np.ndarray, device, dtype) -> Tuple[Any, Any, Any]:
+    """(X, Y, M) on the device, as a fit reads them: x and y in `dtype` (a slot without a target holds 0), the mask as bool."""
+    X = torch.as_tensor(x, dtype=dtype, device=device)
+    Y = torch.as_tensor(np.where(mask, y, 0.0), dtype=dtype, device=device)
+    M = torch.as_tensor(mask, device=device)
+    return X, Y, M
 
 
 def _plan(members, n_rows, early, lr, nominal_rows, batch, mask) -> Tuple[List[_Member], _Shapes]:
@@ -543,7 +611,10 @@ class _LoopFit:
 
 
 class _StackFit:
-    """The members of one stack together, padded to `pad` slots: vmap over their stacked modules."""
+    """The members of one stack together, padded to `pad` slots: vmap over their stacked modules. `module_factory` is one
+    factory for every member, or a list of one per member of `chunk` (a torch stack of several models, `_torch.groups`:
+    modules of one structure, which may differ in their buffers, such as a `nets.Dropout`'s rate); a dummy is built by the
+    first member's."""
 
     def __init__(self, module_factory, chunk: List[_Member], pad: int, data, shapes: _Shapes, s: Dict[str, Any]):
         X, Y, M = data
@@ -554,7 +625,11 @@ class _StackFit:
             _Member(_DUMMY_KEY + j, stream_key(_DUMMY_KEY + j), first.lr, first.fit, first.val)
             for j in range(pad - len(chunk))
         ]
-        modules = [_build(module_factory, member, device, s["dtype"]) for member in slots]
+        factories = list(module_factory) if isinstance(module_factory, (list, tuple)) else [module_factory] * len(chunk)
+        if len(factories) != len(chunk):
+            raise ValueError(f"{len(factories)} module factories for a stack of {len(chunk)} members")
+        factories += [factories[0]] * (pad - len(chunk))
+        modules = [_build(factory, member, device, s["dtype"]) for factory, member in zip(factories, slots)]
         check_vmappable(modules[0])
         base = copy.deepcopy(modules[0])
         for sub in base.modules():
@@ -647,6 +722,11 @@ class _StackFit:
         """rows (real members, m, k), padded to the stack's slots with copies of the first member's."""
         if rows.shape[0] < self.slots:
             rows = torch.cat([rows, rows[:1].expand(self.slots - rows.shape[0], *rows.shape[1:])])
+        return self.run_slots(rows)[: self.real]
+
+    def run_slots(self, rows: "torch.Tensor") -> np.ndarray:
+        """Every slot's forecasts of its own rows, (slots, m, k) in, (slots, m, outputs) float64 out: a slot's are its own
+        whatever the other slots hold (one product per slot on the CPU, one batched product of fixed shape on a GPU)."""
         with torch.no_grad(), _stack_threads(rows.device):
             out = self.forward(self.params, self.buffers, rows.contiguous())
-        return out[: self.real].to(torch.float64).cpu().numpy()
+        return out.to(torch.float64).cpu().numpy()
