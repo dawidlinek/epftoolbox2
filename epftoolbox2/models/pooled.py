@@ -68,6 +68,9 @@ class PooledModel:
     earliest issue instant of its day over the zones, so `ModelPipeline` judges every zone's training rows as of it.
     """
 
+    # Read by `ModelPipeline` when it saves and loads: the parameter that holds a model, saved as {class, params}.
+    _NESTED_MODELS = ("model",)
+
     def __init__(
         self,
         model: BaseModel,

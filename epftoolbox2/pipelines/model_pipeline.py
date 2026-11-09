@@ -34,7 +34,7 @@ from ..models._engine import (
     run_group,
 )
 from ..models.context import PredictorPlan, importable_path, load_function
-from ..models.explain import explain_model
+from ..models.explain import explain_model, grouped_table
 from ..models.pooled import PooledModel, check_pooled_model
 from ..models.residual import ResidualModel
 from ..models._pooled import (
@@ -1712,12 +1712,37 @@ class ModelPipeline:
         chosen = self._select_models([model])[0]
         if isinstance(chosen, PooledModel):
             chosen = chosen.model  # its predictors and rules in one zone's frame: what each zone's member reads
+        if isinstance(chosen, ResidualModel):
+            self._resolve_bases()  # a base="name" before the copy: the copy keeps what it names
         chosen = copy.deepcopy(chosen)  # planning leaves state on a model; this is only a look
         if test is not None:
             test = (resolve_date(test[0]), resolve_date(test[1]))
-        return explain_model(
-            chosen, data, self._information_set_for(data), test, horizon, hour, target, freq, echo, horizons=horizons
-        )
+        info = self._information_set_for(data)
+        if isinstance(chosen, ResidualModel):
+            return self._explain_residual(chosen, data, info, test, horizon, hour, target, freq, echo, horizons)
+        return explain_model(chosen, data, info, test, horizon, hour, target, freq, echo, horizons=horizons)
+
+    def _explain_residual(self, model, data, info, test, horizon, hour, target, freq, echo, horizons):
+        """`explain` of a `ResidualModel`: its learner's predictors, the base's forecasts among them shown as such (known at the
+        issue time by construction, never the frame's), and the base's own predictors (`base_predictors`, `base_grouped`)."""
+        from ..models.residual import is_base_name
+
+        out = explain_model(model, data, info, test, horizon, hour, target, freq, False, horizons=horizons)
+        table = out["predictors"].copy()
+        on = table["predictor"].map(is_base_name)
+        table.loc[on, ["rule", "known", "status"]] = ["the base's forecast, issued on D", "D", "base forecast"]
+        out["predictors"], out["grouped"] = table, grouped_table(table)
+        base = model._base_model()
+        found = explain_model(base, data, info, test, horizon, hour, target, freq, False, horizons=horizons)
+        out["base_predictors"], out["base_grouped"] = found["predictors"], found["grouped"]
+        if echo:
+            print(
+                f"{model.name}: horizon {horizon}, period {hour}; the learner's inputs (base_fc_* are its base's forecasts)"
+            )
+            print(out["grouped"].to_string(index=False))
+            print(f"{base.name}: the base's inputs")
+            print(out["base_grouped"].to_string(index=False))
+        return out
 
     def _select_models(self, names: Optional[Sequence[str]]) -> List[BaseModel]:
         if names is None:
@@ -1762,21 +1787,36 @@ class ModelPipeline:
 
     def _resolve_bases(self) -> None:
         """Give each `ResidualModel` with `base="name"` the model of that name added before it (`bind_base`; it runs a copy). A
-        model whose name is in the list after it, or nowhere, raises, unless it was resolved before (a `Workflow` array task
-        resolves on the whole list, then runs its slice)."""
+        name added after it, or of no model of the list, raises; so does a ResidualModel bound in another pipeline. The one
+        exception is a `Workflow` array task's slice (`_bases_from_the_whole_list`, set by the Workflow), whose models were
+        resolved on the whole list before it was sliced: there a bound base whose model is in another task's slice stays."""
         for place, model in enumerate(self.models):
             if not isinstance(model, ResidualModel) or not isinstance(model.base, str):
                 continue
             earlier = {other.name: other for other in self.models[:place]}
             if model.base in earlier:
                 model.bind_base(earlier[model.base])
-            elif model._named_base is None:
+            elif not (getattr(self, "_bases_from_the_whole_list", False) and model._named_base is not None):
                 later = [other.name for other in self.models[place + 1 :]]
                 raise ValueError(
                     f"{model.name}: base={model.base!r} "
                     + ("is added after it" if model.base in later else "names no model of this pipeline")
-                    + f": a ResidualModel's base is a model added before it, or a model itself. Models: {[m.name for m in self.models]}"
+                    + ": a ResidualModel's base is a model added before it, or a model itself. Models: "
+                    + str([m.name for m in self.models])
                 )
+
+    def _check_residual_models(self, save_format: str) -> None:
+        """What a run refuses of its `ResidualModel`s before anything else, the data pipeline of a `Workflow` included: each
+        `base="name"` (`_check_model_names`, which resolves them) and results in another format than JSONL, whose schema has no
+        column for `base_prediction`. For every model of the list, so a Workflow array task refuses even where its own slice
+        holds the base alone."""
+        self._check_model_names()
+        residual = [m.name for m in self.models if isinstance(m, ResidualModel)]
+        if residual and save_format != "jsonl":
+            raise ValueError(
+                f"{', '.join(residual)}: a ResidualModel's records hold `base_prediction`, which the {save_format} results "
+                "schema has no column for: run with save_format='jsonl' (model_pipeline.save_format in a Workflow)"
+            )
 
     def _check_model_names(self) -> None:
         """Every model's and ensemble's name, and the file of each `ResidualModel`'s base, once; and each `base="name"` resolved
@@ -1853,26 +1893,15 @@ class ModelPipeline:
             "A function of `ctx` at the top level of a module can be saved, by its import path."
         )
 
-    def _serialize_component(self, component: Any) -> Dict[str, Any]:
+    def _serialize_component(self, component: Any, omit: Sequence[str] = ()) -> Dict[str, Any]:
+        """A component as `{class, params}`: its public attributes (but `omit`), each through `_serialize_param`."""
         class_name = type(component).__name__
-        if isinstance(component, PooledModel):
-            # The pooled model is written inside, as any model is; `over` as a list, every setting written.
-            return {
-                "class": class_name,
-                "params": {
-                    "model": self._serialize_component(component.model),
-                    "over": list(component.over),
-                    "zone_feature": component.zone_feature,
-                    "missing": component.missing,
-                    "name": component.name,
-                },
-            }
         self._check_predictors_can_be_saved(component)
         label = f"{class_name}({component.name!r})" if isinstance(component, BaseModel) else class_name
         params = {
-            key: self._serialize_param(value, f"{label}.{key}")
+            key: self._serialize_param(component, key, value, f"{label}.{key}")
             for key, value in getattr(component, "__dict__", {}).items()
-            if not key.startswith("_")
+            if not key.startswith("_") and key not in omit
         }
         if getattr(component, "_ctx_fn", None) is not None:
             params["predictors"] = {"function": importable_path(component._ctx_fn, label)}
@@ -1882,11 +1911,20 @@ class ModelPipeline:
                     del params[key]  # written only when set, so files saved before it existed don't move
         return {"class": class_name, "params": params}
 
-    def _serialize_param(self, value: Any, where: str) -> Any:
-        """One parameter of a component as YAML: a component inside it (a model inside a `ResidualModel`, a strategy inside
-        an evaluator) as `{class, params}`, anything else as a plain value (`to_yaml_value`, which raises for what YAML can't
-        hold)."""
-        if isinstance(value, (BaseModel, PooledModel)) or type(value).__name__ in COMPONENT_REGISTRY["strategies"]:
+    def _serialize_param(self, owner: Any, key: str, value: Any, where: str) -> Any:
+        """One parameter `key` of the component `owner` as YAML, the one place a parameter's kind is decided: a model inside it as
+        `{class, params}` where its class lists `key` in `_NESTED_MODELS` (`ResidualModel`'s base and learner,
+        `PooledModel`'s model; what `_load_component` rebuilds), less what its `_NESTED_OMIT` leaves out of that model; a
+        strategy inside an evaluator the same; anything else a plain value (`to_yaml_value`, which raises for what YAML can't
+        hold). A model under a key the class doesn't list raises: a load couldn't rebuild it."""
+        if isinstance(value, (BaseModel, PooledModel)):
+            if key not in getattr(type(owner), "_NESTED_MODELS", ()):
+                raise TypeError(
+                    f"Cannot save {where}: it is a model ({type(value).__name__}), and {type(owner).__name__} doesn't list "
+                    f"{key!r} in its _NESTED_MODELS, so a load couldn't rebuild it"
+                )
+            return self._serialize_component(value, omit=getattr(type(owner), "_NESTED_OMIT", {}).get(key, ()))
+        if type(value).__name__ in COMPONENT_REGISTRY["strategies"]:
             return self._serialize_component(value)
         return to_yaml_value(value, where)
 
@@ -1922,11 +1960,10 @@ class ModelPipeline:
             params["strategy"] = cls._load_component("strategies", params["strategy"])
         if component_type == "models" and isinstance(params.get("predictors"), dict):
             params["predictors"] = cls._load_predictor_function(class_name, params["predictors"])
-        if component_type == "models" and class_name == "PooledModel" and isinstance(params.get("model"), dict):
-            params["model"] = cls._load_component("models", params["model"])
         module = importlib.import_module(COMPONENT_REGISTRY[component_type][class_name])
         component_class = getattr(module, class_name)
-        # A model inside a model (`ResidualModel`'s base and learner), saved as {class, params}; a name stays a name.
+        # A model inside a model (`PooledModel`'s model, `ResidualModel`'s base and learner), saved as {class, params}; a name
+        # stays a name.
         for key in getattr(component_class, "_NESTED_MODELS", ()):
             if isinstance(params.get(key), dict):
                 params[key] = cls._load_component("models", params[key])

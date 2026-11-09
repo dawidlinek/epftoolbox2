@@ -278,6 +278,7 @@ class Workflow:
         if isinstance(self.model_index, int) and not all_models:
             mp._resolve_bases()  # a ResidualModel's base="name" is a model of the whole list, maybe of another task's slice
             mp.models = self._block_of(mp.models)
+            mp._bases_from_the_whole_list = True
         return mp
 
     def _save_dir(self) -> Optional[Path]:
@@ -312,6 +313,11 @@ class Workflow:
         mp = self._build_model_pipeline()
         # This task's models' extras, runtime packages and weights, before the data is fetched (`models._cards.preflight`).
         preflight(mp.models)
+        # A ResidualModel's base="name" and results format, over every model of the pipeline, before the data is fetched: an
+        # array task's slice may hold the base alone.
+        (self._build_model_pipeline(all_models=True) if array_task else mp)._check_residual_models(
+            self.model_save_format
+        )
         if array_task:
             # Better now than when `epf report` runs, after every task has.
             self._build_model_pipeline(all_models=True)._check_before_any_fit(
