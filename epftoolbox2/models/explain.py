@@ -153,26 +153,51 @@ def history_table(
     horizon: int,
     freq: str,
 ) -> pd.DataFrame:
-    """One row per series of a sequence model's forecasts at `horizon` on the issue days `days`, from the history accessor
-    (`models._history.history_batch`): its role, rule and vintage class, how many steps it reads (T, or T + S for a known-ahead
-    series, S over the days), its newest step known at the issue time relative to D (its range over the days), and `ok`, `late`
-    or `late on 3 of 10 days`."""
+    """One row per series of a sequence model's forecasts at `horizon` on the issue days `days`, from the history accessor's cuts
+    (`models._history.history_batch(arrays=False)`): its role, rule and vintage class, how many steps it reads (T, or T + S for
+    a known-ahead series, S over the days), its newest step known at the issue time relative to D (the target's: its cut; the
+    range over the days), and `ok`, `late` or `late on 3 of 10 days`. A series without a rule is `no rule`, as a predictor is,
+    and with a target without one the others can't be cut (`not cut`); without an information set every row is `no issue
+    time`."""
+
+    def blank(name: str, status: str) -> tuple:
+        return (name, spec.role_of(name), _DASH, _DASH, _DASH, _DASH, status)
+
     if info is None:
-        rows = [(name, spec.role_of(name), _DASH, _DASH, _DASH, _DASH, "no issue time") for name in spec.names]
+        return pd.DataFrame([blank(name, "no issue time") for name in spec.names], columns=SERIES_COLUMNS)
+    step = _STEP_MINUTES[freq]
+    ruleless = {name for name in spec.names if info.in_data_zone(data.index)._resolve_for(name, step).rule is None}
+    if spec.target in ruleless:
+        rows = [
+            blank(name, "no rule" if name in ruleless else "not cut (the target has no rule)") for name in spec.names
+        ]
         return pd.DataFrame(rows, columns=SERIES_COLUMNS)
-    batch = history_batch(spec, data, days, info, freq, horizon)
+    kept = HistorySpec(
+        spec.context,
+        tuple(name for name in spec.known_ahead if name not in ruleless),
+        tuple(name for name in spec.past if name not in ruleless),
+        spec.target,
+        spec.accepts_missing,
+        spec.newest_target,
+    )
+    batch = history_batch(kept, data, days, info, freq, horizon, arrays=False)
     late = batch.late()
     ahead = sorted({item.steps_ahead for item in batch.items})
+    found = {series.name: series for series in batch.series}
     rows = []
-    for series in batch.series:
+    for name in spec.names:
+        if name in ruleless:
+            rows.append(blank(name, "no rule"))
+            continue
+        series = found[name]
         steps = str(batch.steps)
-        if series.name in spec.known_ahead and ahead:
+        if name in spec.known_ahead and ahead:
             steps = f"{batch.steps} + {ahead[0] if len(ahead) == 1 else f'{ahead[0]}…{ahead[-1]}'}"
-        count = len(late.get(series.name, []))
+        count = len(late.get(name, []))
         status = "late" if count == len(batch.items) else f"late on {count} of {len(batch.items)} days"
         status = "ok" if not count else status
-        newest = newest_label(item.newest_minutes[series.name] for item in batch.items) if batch.items else _DASH
-        rows.append((series.name, series.role, series.rule, series.vintage, steps, newest, status))
+        newest = newest_label(item.newest_minutes[name] for item in batch.items) if batch.items else _DASH
+        rows.append((name, series.role, series.rule, series.vintage, steps, newest, status))
     return pd.DataFrame(rows, columns=SERIES_COLUMNS)
 
 
