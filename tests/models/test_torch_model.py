@@ -348,40 +348,84 @@ def test_a_module_reloaded_since_builds_its_new_class_and_the_old_model_its_old(
         old._model_kwargs["module"] == "<unsaved>user_nets_reload:Net"
     )  # its class is no longer what the path imports
     assert old.module_hash != new.module_hash
-    built = {m.name: TorchModel(predictors=[], **m._model_kwargs)._module_class()(3, 1).version for m in (new, old)}
+    with warnings.catch_warnings():
+        warnings.simplefilter(
+            "error"
+        )  # the old model's workers keep its hash: no "changed" warning for the edited file
+        built = {m.name: TorchModel(predictors=[], **m._model_kwargs)._module_class()(3, 1).version for m in (new, old)}
     assert built == {"new": 2, "old": 1}
     # Only `<unsaved>` keys read the registry: a class registered under an import path never stands in for what it imports.
     monkeypatch.setitem(tm._UNIMPORTABLE, "epftoolbox2.nets:MLP", FlatNet)
     assert tm._resolve_module("epftoolbox2.nets:MLP", "test") is nets.MLP
 
 
-def test_a_notebook_cell_run_again_resumes(market, tmp_path):
-    """The cell that defines a `__main__` class runs again (a new class of the same name and source), then the run resumes
-    into its save_dir: the same key, the same source hash, so no manifest mismatch."""
-    namespace = {"__name__": "__main__", "torch": torch, "nets": nets}
-    cell = textwrap.dedent(
-        """
-        class CellNet(torch.nn.Module):
-            def __init__(self, n_inputs, n_outputs):
-                super().__init__()
-                self.l = nets.Linear(n_inputs, n_outputs)
+NOTEBOOK_CELL = textwrap.dedent(
+    """
+    class CellNet(torch.nn.Module):
+        def __init__(self, n_inputs, n_outputs):
+            super().__init__()
+            self.l = nets.Linear(n_inputs, n_outputs)
 
-            def forward(self, x):
-                return self.l(x)
-        """
+        def forward(self, x):
+            return self.l(x)
+    """
+)
+
+
+@pytest.fixture
+def kernel(monkeypatch):
+    """A Jupyter kernel's `__main__`: a module with no file, each cell compiled under a name whose source `linecache` holds (as
+    IPython keeps it). `run_cell(n, source)` runs a cell and returns its `CellNet`; with `kept=False` its source isn't kept."""
+    import linecache
+    import types
+
+    main = types.ModuleType("__main__")
+    main.__dict__.update(torch=torch, nets=nets)
+    monkeypatch.setitem(sys.modules, "__main__", main)
+
+    def run_cell(n, source, kept=True):
+        filename = f"/tmp/ipykernel_4242/{n}.py" if kept else "<string>"
+        if kept:
+            monkeypatch.setitem(linecache.cache, filename, (len(source), None, source.splitlines(True), filename))
+        exec(compile(source, filename, "exec"), main.__dict__)
+        return main.CellNet
+
+    return run_cell
+
+
+def test_a_notebook_class_is_hashed_by_its_cell_s_source(kernel):
+    """`__main__` has no file in a kernel: the hash reads each method's source through `linecache`, so the same cell run again
+    hashes alike and a changed one differently (both hashed the name before review 6l, and a resume mixed two networks); a
+    class whose source isn't kept gets a hash of its own, with a warning."""
+    first = tm.module_source_hash(kernel(1, NOTEBOOK_CELL))
+    again = tm.module_source_hash(kernel(2, NOTEBOOK_CELL))
+    changed = tm.module_source_hash(kernel(3, NOTEBOOK_CELL.replace("return self.l(x)", "return 3.0 * self.l(x)")))
+    assert first == again != changed
+    lost = kernel(4, NOTEBOOK_CELL, kept=False)
+    with pytest.warns(UserWarning, match="can't be read"):
+        model = TorchModel(module=lost, predictors=DAY, **FAST)
+    assert model.module_hash.startswith("unsourced-") and model.module_hash != tm.module_source_hash(
+        kernel(5, NOTEBOOK_CELL, kept=False)
     )
+
+
+def test_a_notebook_cell_run_again_resumes_and_a_changed_one_refuses(market, tmp_path, kernel):
+    """The cell that defines a `__main__` class runs again (a new class of the same name and source): the run resumes into its
+    save_dir to the bit. A cell that changes the class refuses the resume (`module_hash`), never mixing two networks."""
     save_dir = tmp_path / "nb"
-    exec(cell, namespace)
-    first = TorchModel(module=namespace["CellNet"], predictors=DAY, name="t", **FAST)
+    first = TorchModel(module=kernel(1, NOTEBOOK_CELL), predictors=DAY, name="t", **FAST)
     ModelPipeline().add_model(first).run(market, "2023-03-20", "2023-03-21", horizon=1, save_dir=save_dir)
-    exec(cell, namespace)
-    again = TorchModel(module=namespace["CellNet"], predictors=DAY, name="t", **FAST)
+    again = TorchModel(module=kernel(2, NOTEBOOK_CELL), predictors=DAY, name="t", **FAST)
     assert again.module is not first.module and again._model_kwargs == first._model_kwargs
     results = ModelPipeline.results_path(save_dir, again, "jsonl")
     before = lines(results)
     results.write_text("".join(f"{line}\n" for line in before[::2]))  # cut short
     ModelPipeline().add_model(again).run(market, "2023-03-20", "2023-03-21", horizon=1, save_dir=save_dir)
     assert lines(results) == before
+    edited = NOTEBOOK_CELL.replace("return self.l(x)", "return 3.0 * self.l(x) + 1.0")
+    changed = TorchModel(module=kernel(3, edited), predictors=DAY, name="t", **FAST)
+    with pytest.raises(ManifestMismatchError, match="module_hash"):
+        ModelPipeline().add_model(changed).run(market, "2023-03-20", "2023-03-21", horizon=1, save_dir=save_dir)
 
 
 # --- 3. YAML round trip and a changed module (prototype) ------------------------------------------------------------------
@@ -441,9 +485,10 @@ def test_the_module_hash_is_of_its_whole_file_and_its_package_version(tmp_path, 
         module = __import__(f"user_nets_{i}")
         assert tm.module_source_hash(module.Net) == hashes[-1]  # the same once imported
     assert hashes[0] != hashes[1]
-    before = tm.module_source_hash(nets.MLP)
+    before = tm.module_source_hash("epftoolbox2.nets:MLP")
+    assert before == tm.module_source_hash(nets.MLP)  # by path or by class, the same file
     monkeypatch.setattr(tm, "_distribution_version", lambda top: "epftoolbox2 99.0")
-    assert tm.module_source_hash(nets.MLP) != before
+    assert tm.module_source_hash("epftoolbox2.nets:MLP") != before  # (a class keeps the hash it was first given)
 
 
 # --- 4. the day-level refusal (prototype) --------------------------------------------------------------------------------

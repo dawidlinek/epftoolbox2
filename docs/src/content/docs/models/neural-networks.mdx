@@ -178,8 +178,12 @@ models:
 Loading a file whose `module_hash` isn't the module's warns that the forecasts will differ from the saved run's (the file, or a
 layer it defines next to the module, or the package's version changed), and a run that resumes over its results refuses
 ([Incremental Training](/epftoolbox2/model-pipeline/caching/)). `save()` raises for a class defined in the script being run
-(`__main__`) or inside a function, which a later load can't import; such a model still runs, also after the cell that defines it
-runs again (a resume compares its source's hash). `MLPHourlyModel` and `MLPDailyModel` save their architecture (`hidden`,
+(`__main__`) or inside a function, which a later load can't import; such a model still runs. In a notebook its hash is of the
+source of each method (and of its notebook base classes) as the kernel keeps each cell's: the same cell run again resumes, a
+changed one refuses the resume. A class whose source isn't kept anywhere (defined with `exec`) warns: its hash is its own, so a
+run of it resumes only in the process and with the class object that made it. Two pipelines running at once in one process,
+in threads, with two classes of the same name defined in `__main__`, can give each other's class to their workers: run them
+one after the other. `MLPHourlyModel` and `MLPDailyModel` save their architecture (`hidden`,
 `dropout`, `activation`) and no `module_hash`: a preset is checked by its manifest alone, which records the hash of
 `epftoolbox2/nets.py` and the library's version, so a resume after either changed refuses, and loading its file doesn't warn.
 Without torch installed, every one of them builds, saves and loads, and `run()` names the extra to install before any model fits.

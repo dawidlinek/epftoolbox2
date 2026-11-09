@@ -57,7 +57,9 @@ import os
 import re
 import sys
 import threading
+import uuid
 import warnings
+import weakref
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -174,15 +176,30 @@ def _file_digest(path: str) -> Optional[str]:
     return found
 
 
+# Each class's hash, computed once (`module_source_hash`): a class object's code doesn't change unless its module is reloaded,
+# which makes another class object, so a model holding a class keeps the hash it was built with, also in its forked workers
+# after the file was edited (a model built before a reload no longer warns there that its module changed).
+_CLASS_HASHES: "weakref.WeakKeyDictionary[type, str]" = weakref.WeakKeyDictionary()
+
+
 def module_source_hash(module: Union[str, type]) -> str:
-    """A hash (16 hex digits) of the source file that defines the module class and of the version of the package it comes
-    from: a change to the class, or to a layer it uses from the same file, or a new release of its package changes it. Found
-    without importing the module when it isn't imported yet (`importlib.util.find_spec`). A class with no file (typed into an
-    interpreter) is hashed by its source, or its name."""
+    """A hash (16 hex digits) of the module class's source and of the version of the package it comes from: a change to the
+    class, or a new release of its package, changes it.
+
+    The source is the file that defines the class when its methods were compiled from it (so a change to a layer it uses from
+    the same file shows too), found without importing the module when it isn't imported yet (`importlib.util.find_spec`).
+    A class whose methods were compiled elsewhere (a Jupyter cell: `__main__` has no file, and IPython keeps each cell's source
+    in `linecache`; code run with `exec`) is hashed by the source of every function it and its bases from the same module
+    define, read through `linecache`, with its plain class attributes. A class none of whose sources can be read gets a hash of
+    its own, never one another class shares: a run of it can't resume after the class is defined again or in another process.
+    Computed once per class object."""
     if inspect.isclass(module):
-        name, qualname = module.__module__, module.__qualname__
-    else:
-        name, _, qualname = str(module).removeprefix(_UNSAVED).partition(":")
+        found = _CLASS_HASHES.get(module)
+        if found is None:
+            found = _class_hash(module)
+            _CLASS_HASHES[module] = found
+        return found
+    name, _, qualname = str(module).removeprefix(_UNSAVED).partition(":")
     loaded = sys.modules.get(name)
     path = getattr(loaded, "__file__", None)
     if path is None and loaded is None:
@@ -192,15 +209,66 @@ def module_source_hash(module: Union[str, type]) -> str:
             spec = None
         path = getattr(spec, "origin", None)
     source = _file_digest(path) if path else None
-    if source is None and inspect.isclass(module):
-        try:
-            source = hashlib.sha256(inspect.getsource(module).encode()).hexdigest()
-        except (OSError, TypeError):
-            source = None
-    payload = json.dumps(
-        ["epftoolbox2-module-1", source or f"{name}:{qualname}", _distribution_version(name.split(".")[0])]
-    )
+    return _digest(source or f"{name}:{qualname}", name, {})
+
+
+def _digest(source: str, name: str, attributes: Dict[str, str]) -> str:
+    payload = json.dumps(["epftoolbox2-module-2", source, _distribution_version(name.split(".")[0]), attributes])
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+_PLAIN = (int, float, str, bool, type(None))
+# The hash of a class none of whose sources can be read starts so, then 6 random hex digits.
+_UNSOURCED = "unsourced-"
+
+
+def _own_family(cls: type) -> List[type]:
+    """`cls` and its bases defined in the same module (a notebook's `__main__` classes), in method resolution order."""
+    return [klass for klass in cls.__mro__ if klass is cls or klass.__module__ == cls.__module__]
+
+
+def _functions(klass: type) -> List[Tuple[str, Any]]:
+    """(name, function) of every function `klass` defines: methods, static and class methods, properties' accessors."""
+    out = []
+    for name, value in sorted(vars(klass).items()):
+        if isinstance(value, (staticmethod, classmethod)):
+            value = value.__func__
+        if isinstance(value, property):
+            out.extend(
+                (f"{name}.{part}", getattr(value, part)) for part in ("fget", "fset", "fdel") if getattr(value, part)
+            )
+        elif inspect.isfunction(value):
+            out.append((name, value))
+    return out
+
+
+def _class_hash(cls: type) -> str:
+    family = _own_family(cls)
+    attributes = {
+        f"{klass.__qualname__}.{name}": repr(value)
+        for klass in family
+        for name, value in sorted(vars(klass).items())
+        if not name.startswith("__") and isinstance(value, _PLAIN)
+    }
+    functions = [(f"{klass.__qualname__}.{name}", function) for klass in family for name, function in _functions(klass)]
+    path = getattr(sys.modules.get(cls.__module__), "__file__", None)
+    compiled_from = {function.__code__.co_filename for _, function in functions}
+    if path and compiled_from <= {path, os.path.abspath(path)}:
+        source = _file_digest(path)
+        if source is not None:
+            return _digest(source, cls.__module__, attributes)
+    sources = []
+    for name, function in functions:
+        try:
+            sources.append(f"{name}\n{inspect.getsource(function)}")
+        except (OSError, TypeError):
+            sources = []
+            break
+    if not sources:
+        # No source to tell this class from another of its name: a hash of its own (a resume refuses, never mixes).
+        return f"{_UNSOURCED}{uuid.uuid4().hex[:6]}"
+    bases = [f"{base.__module__}:{base.__qualname__}" for base in cls.__mro__ if base not in family]
+    return _digest(hashlib.sha256("\n".join(sources + bases).encode()).hexdigest(), cls.__module__, attributes)
 
 
 def _check_contract(cls: type, blocks: bool, module_params: Dict[str, Any], where: str) -> None:
@@ -499,7 +567,8 @@ class TorchModel(BaseModel):
         self.random_state = int(random_state)
 
     def __setattr__(self, key, value):
-        # The unit kind follows `output`; both checked before anything is set, so a refused value leaves the model as it was.
+        # The unit kind follows `output`, set only once `output` itself was (a preset's is read-only and refuses it), so a
+        # refused value leaves the model as it was.
         if key == "output":
             if value not in OUTPUTS:
                 raise ValueError(f"output must be one of {list(OUTPUTS)}, got {value!r}")
@@ -526,6 +595,14 @@ class TorchModel(BaseModel):
 
     def _checked_hash(self, saved: Optional[str], where: str) -> str:
         current = module_source_hash(self._module_spec()[0])
+        if current.startswith(_UNSOURCED) and saved is None:
+            warnings.warn(
+                f"{where}: the source of {self._module_ref()} can't be read (a class defined by exec, or typed into an "
+                "interpreter that keeps no source), so a run of it can't resume after the class is defined again or in "
+                "another process: its manifest records a hash of this class object alone",
+                UserWarning,
+                stacklevel=3,
+            )
         if saved is not None and str(saved) != current:
             warnings.warn(
                 f"{where}: the module {self._module_ref()} changed since this configuration was saved (module_hash "
