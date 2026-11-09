@@ -192,7 +192,7 @@ For a predictor function it shows [the distinct lists first](/epftoolbox2/model-
 | `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00 Brussels for the whole following Monday-to-Sunday week of the data's local dates, each market's own (a bound `EntsoeSource` names its market's zone, see below) | `latest_revision` |
 | `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) | `latest_revision` |
 | `generation_*` (A75 actual generation) | 1h after the end of the delivery period | `latest_revision` |
-| `installed_capacity_*` (A68 installed capacity per production type; a prefixed `EntsoeSource`'s through `with_source_rules`) | published 00:00 seven days before the delivery day, both of the data's zone: one value a year, due a week before the year begins (Art. 14(1)(a)), so exact for 1 January and early enough for every other day; a lead of up to 7 days (`_d+7`) is known, a longer one can reach next year's value and is late | `latest_revision` |
+| `installed_capacity_*` (A68 installed capacity per production type; an `EntsoeSource`'s, prefixed or not, through `with_source_rules` in its market's dates and clock) | published 00:00 seven days before the delivery day, both of the data's zone (an `EntsoeSource`'s of its market's zone, so a frame west of the market, UTC or New York, doesn't read 1 January a day early): one value a year, due a week before the year begins (Art. 14(1)(a)), so exact for 1 January and early enough for every other day; a lead of up to 7 days (`_d+7`) is known, a longer one can reach next year's value and is late | `latest_revision` |
 | `PseSource` columns (`pse_*`) | `load_fcst` 10:00 Warsaw on D-1, the prices (`csdac_pln`, `rce_pln`) 15:00 on D-1, `usage_fcst` at the source's `pdgsz_cutoff` on D-1; `load_actual`, `his-wlk-cal` and `flow_*` columns 13:00 on D+1 (see [PseSource](/epftoolbox2/data-sources/pse/#availability-rules)) | `snapshot` for the prices and `usage_fcst`, `last_write_stamp` for the rest |
 | Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static, known in advance | none |
 | [`SolarGeometryTransformer`](/epftoolbox2/transformers/solar-geometry/) columns (`sun_elevation`, `sun_sin_elevation`, `clear_sky_ghi`, `is_night`; a prefixed transformer's `<prefix>_sun_elevation` and so on through `with_source_rules`) | static: a function of the row's instant, known in advance at any shift. Exact names, so a series of yours named `sun_...` or `..._is_night` gets no rule from them | none |
@@ -234,7 +234,7 @@ one calendar day back. There is no built-in default rule for weather columns, a 
 name alone doesn't say whether it's a forecast or an observed value. A `DataPipeline`'s sources refine the
 check: `with_source_rules()` (called automatically by `Workflow`, with the data pipeline's transformers too) teaches it about a
 `CalendarSource(prefix=...)` (the calendar's own columns under its prefix), overrides the default week-ahead rule for an
-`EntsoeSource`'s own columns, gives a prefixed `EntsoeSource`'s `installed_capacity_*` the built-in rule, and assigns a rule to
+`EntsoeSource`'s own columns, gives an `EntsoeSource`'s `installed_capacity_*` the built-in rule in its market's zone, and assigns a rule to
 exactly the columns an `OpenMeteoSource`, an `EpftoolboxBenchmarkSource` or a prefixed `SolarGeometryTransformer` emits:
 
 - An `EntsoeSource` with `"load"` in `type` gets its own `load_forecast_daily_min`/`_max` rule (prefixed the

@@ -657,7 +657,8 @@ _A31 = Availability.weekly("friday", "10:00", note=_A31_NOTE, vintage=_REVISED, 
 # Art. 14(1)(a)), so every row of year Y holds a value out before Y began. Read as out at 00:00 seven days before each of its
 # dates, both of the data's zone (timezone None): so for 1 January on its deadline, early enough for every other day of the
 # year, and a lead of more than 7 days (`installed_capacity_solar_d+8`), which can reach next year's value before it is due, is
-# late. The archive holds the newest revision of it.
+# late. The archive holds the newest revision of it. An `EntsoeSource` with the type gets the same rule in its market's zone
+# (`_capacity_rule`), so a frame west of the market (UTC, New York) doesn't read the market's 1 January a day early.
 _CAPACITY = Availability.published(
     "00:00",
     7,
@@ -873,6 +874,11 @@ def _built_in_rules() -> Dict[str, Availability]:
     return rules
 
 
+def _capacity_rule(zone: str) -> Availability:
+    """`_CAPACITY` with its dates and its 00:00 in `zone`, the market's."""
+    return replace(_CAPACITY, timezone=zone)
+
+
 def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     """Rules for the columns a DataPipeline's sources emit, following their prefixes and column choices; and of a
     `SolarGeometryTransformer` among them, its own column names (prefixed ones included), which `Workflow` passes too."""
@@ -896,8 +902,9 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
         elif isinstance(source, EntsoeSource):
             prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
             rules.update(_entsoe_price_rules(source, prefix))
-            if prefix and "installed_capacity" in source.type:
-                rules[f"{prefix}installed_capacity_*"] = _CAPACITY
+            if "installed_capacity" in source.type:
+                # The year's value is stamped at the market's 1 January (`_daily_zone`, as the A31 rule's week): its dates.
+                rules[f"{prefix}installed_capacity_*"] = _capacity_rule(source._daily_zone())
             if "load" not in source.type:
                 continue
             # A31 week-ahead daily values are stamped at the market's own local midnight (EntsoeSource's

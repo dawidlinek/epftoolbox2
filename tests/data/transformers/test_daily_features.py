@@ -209,3 +209,10 @@ def test_daily_stats_of_a_daily_frame_count_the_switch_day_as_complete(start):
     df = pd.DataFrame({"price": np.arange(7, dtype=float)}, index=index)
     out = DailyStatsTransformer(columns="price", stats=["max", "last"], freq="1D").transform(df)
     assert out["price_day_max"].tolist() == df["price"].tolist() == out["price_day_last"].tolist()
+
+
+@pytest.mark.parametrize("freq", ["15min", "30min"])
+def test_daily_stats_refuse_rows_further_apart_than_freq(freq):
+    """Hourly rows read with a shorter `freq` made every day incomplete: all NaN, silently."""
+    with pytest.raises(ValueError, match="no two rows are closer"):
+        DailyStatsTransformer(columns="price", freq=freq).transform(local_frame("2024-01-01", "2024-01-04"))

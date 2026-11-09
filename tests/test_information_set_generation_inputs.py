@@ -143,9 +143,38 @@ def test_a_prefixed_entsoe_source_s_capacity_gets_the_rule_from_its_source():
     info = InformationSet().with_source_rules([prefixed])
     assert info.resolve("pl_installed_capacity_solar_d+1").rule.kind == "published"
     assert InformationSet().resolve("pl_installed_capacity_solar").rule is None  # outside a source-aware run, no rule
-    # A source without the type, or without a prefix, adds nothing.
-    assert "installed_capacity_*" not in source_rules([EntsoeSource("PL", "key", type=["installed_capacity"])])
+    # Without a prefix the source's rule replaces the built-in one, in its market's dates; without the type it adds nothing.
+    plain = EntsoeSource("PL", "key", type=["installed_capacity"])
+    assert source_rules([plain])["installed_capacity_*"].timezone == plain._daily_zone()
     assert not any("capacity" in k for k in source_rules([EntsoeSource("PL", "key", type=["price"], prefix="pl")]))
+
+
+@pytest.mark.parametrize("prefix", ["", "pl"])
+@pytest.mark.parametrize("zone", ["UTC", "America/New_York"])
+def test_an_entsoe_source_s_capacity_is_read_on_its_market_s_dates(zone, prefix):
+    """A68 for year Y is due at 00:00 on 25 December of Y-1 on the market's clock. On a frame west of the market (UTC, New
+    York) the hours of 24 December from 23:00 UTC (18:00 in New York) are 1 January in Warsaw: their `_d+7` reads next
+    year's value a day before it is due. The rule in data-zone dates (no source) let 1 and 6 of them through; the
+    `EntsoeSource`'s rule reads the dates on its market's clock (`_daily_zone`), so none passes before it is due."""
+    source = EntsoeSource("PL", "key", type=["installed_capacity"], prefix=prefix)
+    rule = source_rules([source])[f"{prefix}_installed_capacity_*" if prefix else "installed_capacity_*"]
+    assert rule.timezone == source._daily_zone() and rule.vintage == "latest_revision"
+    info = InformationSet("11:45", "Europe/Brussels").with_source_rules([source])
+    index = pd.date_range("2024-12-01", "2025-01-20", freq="h", tz=zone, inclusive="left")
+    market = source._daily_zone()
+    early = []
+    for k in (7, 8):
+        name = f"{prefix}_installed_capacity_solar_d+{k}" if prefix else f"installed_capacity_solar_d+{k}"
+        for run_day in pd.date_range("2024-12-22", "2024-12-27"):
+            day = str(run_day.date())
+            flagged = {v.period for v in info.violations(expand([name], horizon=1), "price", "1h", index, day, day)[0]}
+            issue = pd.Timestamp(f"{day} 11:45", tz="Europe/Brussels")
+            for period in range(24):
+                instant = (run_day + pd.Timedelta(days=k, hours=period)).tz_localize(zone)
+                due = pd.Timestamp(f"{instant.tz_convert(market).year - 1}-12-25 00:00", tz=market)
+                if issue < due and period not in flagged:
+                    early.append((name, day, period))
+    assert early == []
 
 
 # ---------------------------------------------------------------------------

@@ -279,8 +279,10 @@ zone, with the vintage class `latest_revision`: A68 is due one week before the e
 every row of a year holds a value published before that year began, a lead of up to 7 days (`installed_capacity_solar_d+7`)
 is known, and a longer lead, which on a day in late December reads next year's value before it is due, is refused at
 `availability="raise"` and listed at `"warn"`. The API serves the newest revision of each year's value, which may have been
-revised after the forecast it feeds was issued. A prefixed source's columns (`pl_installed_capacity_solar`) get the same rule through
-`with_source_rules` (every `Workflow`). For a capacity that follows growth within the year, see the capacity proxy of
+revised after the forecast it feeds was issued. Through `with_source_rules` (every `Workflow`) the source's columns, prefixed
+(`pl_installed_capacity_solar`) or not, get the same rule in the dates and clock of its market's zone (`_daily_zone`, as the
+week-ahead load's week): the year's value is stamped at the market's 1 January, so on a frame west of the market (UTC, New York)
+the hours of 24 December that are already 1 January there don't read next year's value a day before it is due. For a capacity that follows growth within the year, see the capacity proxy of
 [Generation Targets](/epftoolbox2/model-pipeline/generation/).
 
 ### Combining zones with `prefix`

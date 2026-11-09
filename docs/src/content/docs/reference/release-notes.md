@@ -115,7 +115,8 @@ an issue day it didn't sample.
 - **`DailyStatsTransformer(freq="1D")` on a daily frame keeps the day of the spring switch.** A frame of one row a day counted its
   slots in hours, so the 23-hour day had none, its one row read as an incomplete day and got NaN in every statistic (and
   `DailyProfileTransformer(freq="1D")` warned of it). A slot of a day or more is now one per date, whatever its length. Hourly and
-  15-minute frames are bit for bit as before.
+  15-minute frames are bit for bit as before. A `freq` shorter than the rows' spacing (hourly rows with `freq="15min"`), which
+  made every day incomplete and every statistic NaN without a word, now raises `ValueError`.
 - **A `Workflow` file's inline sources read a relative path from the file's directory.** `data_pipeline: sources:` in a Workflow
   YAML resolved `file_path` (or `path`) against the working directory, while the same source in a data pipeline file, and the model
   pipeline's `save_dir`, were read from the YAML's directory. They are all the YAML's now: a workflow run from another directory
@@ -235,7 +236,7 @@ an issue day it didn't sample.
   further apart than `freq`. The information set gives the four solar columns static rules by their exact names (a prefixed
   transformer's through `with_source_rules`, which a `Workflow` now calls with its data pipeline's transformers too), and
   `installed_capacity_*` a rule that knows a date's value at 00:00 seven days before it, in the data's zone (`latest_revision`; a
-  prefixed `EntsoeSource`'s through `with_source_rules`): A68 is due a week before its year, so a lead of up to 7 days is known
+  an `EntsoeSource`'s through `with_source_rules`, in its market's zone): A68 is due a week before its year, so a lead of up to 7 days is known
   and a longer one, which can reach next year's value, is late. Those columns had no rule: a model that read them was refused at
   `"raise"` with `unknown="raise"` and listed as `no rule` at `"warn"`. A rolling column is judged by the rule of the column it was
   built from at the last slot of its window's newest day, and under rules over time when every day of the window is. See
