@@ -78,10 +78,13 @@ def check(
     rows: Optional[TrainingRows],
     freq: str = "1h",
     every_period: bool = False,
+    kept: Optional[Dict[int, np.ndarray]] = None,
 ) -> ChainedCheck:
     """Coverage and late-upstream checks of the chained predictors in `lists` ((period, horizon) -> names a model reads) on the
     frame `data` at `freq`, for a run issued on `issue_days` (None: no coverage can be told) whose fits read `rows`, of the periods
-    whose lists hold a predictor, or of every period (`every_period`: a model of day or pooled units, whose fit reads them all)."""
+    whose lists hold a predictor, or of every period (`every_period`: a model of day or pooled units, whose fit reads them all).
+    `kept` (horizon -> a mask of the frame's rows) leaves out of the coverage the rows a model drops at that horizon whatever
+    the upstream holds (a `ShapeModel`'s rows whose target date isn't native); None counts every row its fits read."""
     if information_set is None or not information_set.chained_inputs():
         return ChainedCheck()
     information_set.refuse_rules_on_chained_columns()  # a rule added after `with_source_rules` would be ignored
@@ -105,7 +108,7 @@ def check(
         dates = _row_dates(data.index)
         periods = None if every_period else _row_periods(data.index, freq)
         for name, use in sorted(uses.items()):
-            found = coverage(data, name, use, dates, periods, issue_days, rows)
+            found = coverage(data, name, use, dates, periods, issue_days, rows, kept)
             record[use.chained.column]["coverage"][name] = found
             if found["uncovered"]:
                 holes.setdefault(use.chained.column, []).append((name, found))
@@ -138,6 +141,7 @@ def coverage(
     periods: Optional[np.ndarray],
     issue_days: Sequence[datetime.date],
     rows: TrainingRows,
+    kept: Optional[Dict[int, np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """How many rows the fits read (at each horizon, on the dates `read_dates` gives, of the periods whose lists hold `name`
     there, every period with `periods` None) hold no value of `name`, less those that can't hold one whatever the upstream does
@@ -149,6 +153,8 @@ def coverage(
         at = np.isin(dates, read_dates(rows, issue_days, [hz]))
         if periods is not None:
             at &= np.isin(periods, sorted({period for period, h in use.cells if h == hz}))
+        if kept is not None and hz in kept:
+            at &= kept[hz]  # rows the model drops at this horizon whatever the upstream holds
         on |= at
     values = data[name].to_numpy(dtype=np.float64) if name in data.columns else np.full(len(data.index), np.nan)
     hole = on & np.isnan(values)
