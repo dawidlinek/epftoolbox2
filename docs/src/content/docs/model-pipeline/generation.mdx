@@ -34,7 +34,8 @@ data = (
     .add_transformer(TimezoneTransformer())
     .add_transformer(ResampleTransformer(freq="1h"))
     .add_transformer(SolarGeometryTransformer(locations=[(51.0, 10.0)]))
-    .add_transformer(RollingStatsTransformer("generation_solar", window_days=365, stat="max", lag_days=1))
+    # A value where 300 of the 365 days are complete; the default needs every one, and a missing hour takes a year of values
+    .add_transformer(RollingStatsTransformer("generation_solar", window_days=365, stat="max", lag_days=1, min_days=300))
     .add_transformer(LagTransformer(columns=["clear_sky_ghi", "is_night"], lags=[-1], freq="day"))
 )
 df = data.run("2022-01-01", "2024-12-31")  # a year before the first training row, for the proxy's window
@@ -61,6 +62,37 @@ The TSO's A69 forecast for D+1 (`generation_solar_forecast_d+1`) is published at
 refused; the benchmark above is its forecast of D, out on D-1. To score the D+1 forecast as a post-gate benchmark, run at
 `"warn"`, which lists it as late.
 
+Open-Meteo's radiation is the mean of the hour before its timestamp: `de_shortwave_radiation_d+1` on the row of 10:00 is 09:00
+to 10:00 of D+1, while the row's target is the hour from 10:00 and `clear_sky_ghi` is the sun at 10:30. The model above learns
+across that hour's offset. A lead of an hour (`LagTransformer(columns=["de_shortwave_radiation_d+1"], lags=[-1], freq="hour")`,
+`de_shortwave_radiation_d+1_h+1`) aligns them, but on the row of 23:00 it reads the next day's row, from the next day's run, which
+the information set refuses at an 11:45 issue: leave that hour to the unshifted column.
+
+### Several zones
+
+`with_source_rules` gives a prefixed `EntsoeSource` (`prefix="at"`) rules for its prices of the EXAA and Swiss auctions, its
+week-ahead load and its installed capacity, but not for `at_price`, `at_load_actual`, `at_generation_solar` and the rest, which
+the built-in rules name unprefixed. A model that reads them is refused at `"raise"` with `unknown="raise"`, and lists them as `no
+rule` at `"warn"`. Give them the built-in rules under the prefix:
+
+```python
+from epftoolbox2.information_set import Availability, InformationSet
+
+revised = "latest_revision"
+info = InformationSet(
+    "11:45",
+    "Europe/Brussels",
+    rules={
+        "at_price": Availability.published("13:00", 1, vintage="snapshot"),
+        "at_load_actual": Availability.realised("1h", vintage=revised),
+        "at_load_forecast": Availability.published("10:00", 1, vintage=revised),
+        # The forecasts' pattern before the actuals': the first pattern that matches a column is its rule.
+        "at_generation_*_forecast": Availability.published("18:00", 1, vintage=revised),
+        "at_generation_*": Availability.realised("1h", vintage=revised),
+    },
+)
+```
+
 ## The Inputs
 
 - **Solar geometry.** [`SolarGeometryTransformer`](/epftoolbox2/transformers/solar-geometry/) adds the sun's elevation, its sine,
@@ -70,7 +102,9 @@ refused; the benchmark above is its forecast of D, out on D-1. To score the D+1 
 - **A capacity proxy.** [`RollingStatsTransformer`](/epftoolbox2/transformers/rolling-stats/) with `stat="max"` and
   `lag_days=1` gives the largest hourly generation of the year to D-1, `generation_solar_roll365max_d-1`, the renewables study's
   proxy. It rises with the capacity when a clear hour sets a new maximum and falls only a year after the capacity does, but it
-  is known at the issue and needs no other source.
+  is known at the issue and needs no other source. A window has a value only where `min_days` of its days are complete, all of
+  them by default, so a missing hour of actual generation leaves the windows it falls in without one: the forecasts that read
+  them are skipped and counted. `min_days=300` tolerates a few such days; the study used 60.
   The information set judges it at the end of D-1 by the rule of `generation_*`, and refuses the window ending on D
   (`lag_days=0`), whose last hour is out after midnight.
 - **The installed capacity.** `EntsoeSource(type=["installed_capacity"])` gives `installed_capacity_<type>`, one value a year

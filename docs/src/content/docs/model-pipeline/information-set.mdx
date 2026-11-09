@@ -572,7 +572,9 @@ D's prices at 13:00 on D-1.
 Under [rules over time](#rules-over-time) an older day can be out after the newest (a lag that shortened, a day no rule holds
 for): the column is then known when every slot of every day of its window is. A key of `rules=` that matches the rolling column's
 own name replaces the timing of the column it was built from, as for a day aggregate. `explain` shows the window's whole span,
-`T-366 00:00 … T-2 23:00` for the proxy at horizon 1.
+`T-366 00:00 … T-2 23:00` for the proxy at horizon 1. A column of yours named like one (`load_roll24mean`, a rolling mean of 24
+hours) is read as one, a window of 24 days ending on its row's day, so it is never called known earlier than it is but may be
+called late: rename it.
 
 ---
 
