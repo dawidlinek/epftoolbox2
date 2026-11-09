@@ -545,10 +545,10 @@ def test_a_vst_forecast_where_the_inverse_is_steep_goes_back(monkeypatch):
     assert out[1] is not None and not counts.fallbacks
 
 
-def test_near_twin_columns_send_a_lassocv_or_cv_fit_back():
-    """A column and a copy of it plus noise of 1e-5 of its sd (1 - |cos| about 5e-11): LassoCV and LEAR "cv" hand the fit
-    back (`near_twin`); LEAR with BIC keeps it (its refit's active Gram has its own bound), and an exact copy (a twin, which
-    LEAR drops) or the one-hot pair of every design sends nothing back."""
+def test_near_twin_columns_send_a_lassocv_or_lear_fit_back():
+    """A column and a copy of it plus noise of 1e-5 of its sd (1 - |cos| about 5e-11): LassoCV and LEAR, "cv" and BIC, hand
+    the fit back (`near_twin`); an exact copy (a twin, which LEAR drops) or the one-hot pair of every design sends nothing
+    back."""
     rng = np.random.default_rng(12)
     x, y, mask = market_design(rng, 200)
     near = np.column_stack([x, x[:, 0] + 1e-5 * x[:, 0].std() * rng.normal(size=len(x))])
@@ -558,7 +558,7 @@ def test_near_twin_columns_send_a_lassocv_or_cv_fit_back():
     for model, backs in (
         (LassoCVModel([], 28), True),
         (LEARModel([], 28, criterion="cv", scaler="standard"), True),
-        (LEARModel([], 28, scaler="standard"), False),
+        (LEARModel([], 28, scaler="standard"), True),
     ):
         for design, twin in ((near, True), (exact, False)):
             out, counts, _ = engine_on_arrays(model, design, y, mask, tests)
@@ -568,7 +568,61 @@ def test_near_twin_columns_send_a_lassocv_or_cv_fit_back():
                 twin,
                 counts.fallbacks,
             )
-    assert _engine_worker.fit_path_of(LEARModel([], 28, criterion="cv")) and LEARModel([], 28)._ENGINE_NEAR_TWIN is None
+    assert _engine_worker.fit_path_of(LEARModel([], 28, criterion="cv")) and LEARModel([], 28)._ENGINE_NEAR_TWIN == 1e-5
+
+
+def review_design(seed=101, trial=36):
+    """The 5j review's near-twin design (`scratchpad/review5j/repro_trial.py`, replayed from its seed): Gaussian columns, a
+    near twin of the first (noise 3e-3 of its sd, 1 - |cos| 4.5e-6) whose difference the target reads, n 728, p 4; and issue
+    rows with that difference k of its sds out, by k."""
+    rng = np.random.default_rng(seed)
+    ks = [2, 3, 4, 5, 6, 7, 8, 9, 9.5, 10, 11]
+    for _ in range(trial + 1):
+        n = int(rng.choice([56, 91, 364, 728]))
+        p = int(min(rng.choice([3, 5, 10, 15, 25]), n - 8))
+        base = rng.normal(0, 1, (n + 1, p))
+        for j in range(1, p, 3):
+            base[:, j] = base[:, j - 1] + rng.choice([0.05, 0.3, 1.0]) * base[:, j]
+        scale = 10.0 ** rng.uniform(-2, 4, p)
+        mean = rng.normal(0, 1, p) * scale * rng.choice([0.0, 1.0, 50.0])
+        x = base * scale + mean
+        y = 50 + (base @ rng.normal(0, 1, p)) * 10 + rng.normal(0, 5, n + 1)
+        ratio = float(rng.choice([1e-2, 3e-3, 1e-3, 3e-4]))
+        sd = x[:n, 0].std(ddof=1)
+        e = rng.normal(0, ratio * sd, n + 1)
+        y = y + 3.0 * e / (ratio * sd)
+        x = np.column_stack([x, x[:, 0] + e])
+        issue = x[n].copy()
+        x, y = x[:n], y[:n]
+        d = x[:, -1] - x[:, 0]
+        rows = {0: issue.copy()}
+        for k in ks:
+            for s in (-1.0, 1.0):
+                r = issue.copy()
+                r[-1] = r[0] + d.mean() + s * k * d.std(ddof=1)
+                rows[s * k] = r
+        for _ in ks:  # the review's single-column rows: drawn, not used, to keep its random stream
+            rng.integers(0, x.shape[1])
+            rng.choice([-1.0, 1.0])
+    return x, y, rows
+
+
+def test_the_reviews_near_twin_design_is_handed_back_or_within_1e_8():
+    """The review's design, where every other bound passes at the row 8 of the pair's sds out (distance 9.66, slope 2.92 times
+    the median, condition 6.7e5) and the engine's LEAR (asinh, BIC) forecast was 1.4e-8 from the model path's: now the fit
+    goes back to the model path (its pair is a near twin), or every forecast it keeps is within LEAR's 1e-8."""
+    x, y, rows = review_design()
+    assert x.shape == (728, 4)
+    tests = np.array([rows[0], rows[-8.0], rows[8.0], rows[-7.0]])
+    mask = np.ones(x.shape[1], dtype=bool)
+    model = LEARModel([], 28)
+    off, _ = model_path_on_arrays(model, x, y, mask, tests)
+    out, counts, _ = engine_on_arrays(model, x, y, mask, tests)
+    if out is None:
+        assert counts.fallbacks == {"near_twin": 1}
+    else:
+        for made, theirs in zip(out, off):
+            assert made is None or abs(made[0] - theirs) <= 1e-8
 
 
 def test_a_cv_fit_of_fewer_rows_than_folds_goes_back():
@@ -716,8 +770,8 @@ def test_check_counts_a_fit_the_model_path_refuses(spring, tmp_path, in_process,
 
 
 def test_a_lear_subclass_sets_its_own_near_twin_bound():
-    """`_ENGINE_NEAR_TWIN` set on a LEAR subclass's class wins over the criterion's default, as on a LassoCV subclass; LEAR
-    itself has 1e-6 with "cv" and none with an information criterion, also after the criterion changes."""
+    """`_ENGINE_NEAR_TWIN` set on a LEAR subclass's class wins over LEAR's, as on a LassoCV subclass, with any criterion; LEAR
+    itself has 1e-5 with every criterion, also after the criterion changes."""
 
     class WiderLear(LEARModel):
         _ENGINE_NEAR_TWIN = 1e-4
@@ -726,12 +780,11 @@ def test_a_lear_subclass_sets_its_own_near_twin_bound():
         _ENGINE_NEAR_TWIN = 1e-4
 
     assert WiderLear([], 28, criterion="cv")._ENGINE_NEAR_TWIN == 1e-4 == WiderLasso([], 28)._ENGINE_NEAR_TWIN
+    assert WiderLear([], 28)._ENGINE_NEAR_TWIN == 1e-4
     model = LEARModel([], 28)
-    assert model._ENGINE_NEAR_TWIN is None
-    model.criterion = "cv"
-    assert model._ENGINE_NEAR_TWIN == 1e-6
-    model.criterion = "aic"
-    assert model._ENGINE_NEAR_TWIN is None
+    for criterion in ("bic", "cv", "aic"):
+        model.criterion = criterion
+        assert model._ENGINE_NEAR_TWIN == 1e-5 == LassoCVModel([], 28)._ENGINE_NEAR_TWIN
 
 
 def test_check_in_yaml_and_a_workflow(tmp_path):

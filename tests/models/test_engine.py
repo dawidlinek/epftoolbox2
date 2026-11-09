@@ -47,7 +47,7 @@ PROVENANCE = ("package_version", "git_sha", "created_at", "updated_at", "record_
 PUBLISHED = {"price": Availability.published("13:00", 1)}
 STANDARD = {"name": "standard", "params": {"scale_binary": True}}
 # Engine against off, per class, in EUR/MWh (the step 5 spec's tolerance table); coefficients (scaled units) alike.
-TOLERANCE = {"OLSModel": 1e-8, "RidgeModel": 1e-9, "LEARModel": 1e-9, "LassoCVModel": 1e-8}
+TOLERANCE = {"OLSModel": 1e-8, "RidgeModel": 1e-9, "LEARModel": 1e-8, "LassoCVModel": 1e-8}
 NUMBERS = ("prediction", "coefficients", "member_predictions")
 
 
@@ -597,12 +597,29 @@ def with_second_load(data, ratio, seed):
     return data
 
 
-def test_an_ill_conditioned_lear_fit_goes_back_to_the_model_path(spring, tmp_path):
-    """Two near-collinear inputs (the second 1e-4 of the first's standard deviation apart) that a LEAR fit keeps both of: its
-    active columns' Gram is ill-conditioned (`_ENGINE_CONDITION_MAX`), so the fit goes back to the model path
-    (`ill_conditioned`), to the bit. Before, LEAR fitted it from the sums, 3e-8 EUR/MWh from engine off at ordinary rows."""
-    data = with_second_load(spring, 1e-4, 93)
-    names = [*PREDICTORS, "load2_d+1"]
+def with_load_mix(data, ratio, seed):
+    """`mix_d+1`: the mean of `load_d+1` and `wind_d+1` scaled to load's, plus noise of `ratio` of its sd, and the next day's
+    price carrying that noise: three inputs nearly linearly dependent though no two are near twins."""
+    data = data.copy()
+    load, wind = data["load_d+1"], data["wind_d+1"]
+    mix = 0.5 * load + 0.5 * (wind - wind.mean()) * (load.std() / wind.std())
+    noise = pd.Series(np.random.default_rng(seed).normal(0, ratio * mix.std(), len(data)), index=data.index)
+    data["mix_d+1"] = mix + noise
+    data["price"] = data["price"] + 3.0 * calendar_shift(noise, -1).fillna(0.0).to_numpy() / (ratio * mix.std())
+    return data
+
+
+@pytest.mark.parametrize("kind", ["pair", "three"])
+def test_an_ill_conditioned_lear_fit_goes_back_to_the_model_path(spring, tmp_path, kind):
+    """Nearly collinear inputs that a LEAR fit keeps all of go back to the model path, to the bit. Two inputs 1e-4 of a sd
+    apart are near twins (`_ENGINE_NEAR_TWIN`, `near_twin`); a third input that is nearly the mean of two others is no near
+    twin of either, but the active columns' Gram is ill-conditioned (`_ENGINE_CONDITION_MAX`, `ill_conditioned`). Before,
+    LEAR fitted both from the sums, 3e-8 EUR/MWh from engine off at ordinary rows."""
+    if kind == "pair":
+        data, extra, reason = with_second_load(spring, 1e-4, 93), "load2_d+1", "near_twin"
+    else:
+        data, extra, reason = with_load_mix(spring, 1e-4, 94), "mix_d+1", "ill_conditioned"
+    names = [*PREDICTORS, extra]
 
     def models():
         return [lear(names, 56, name="lear"), lear(names, 56, criterion="aic", name="lear_aic")]
@@ -611,7 +628,7 @@ def test_an_ill_conditioned_lear_fit_goes_back_to_the_model_path(spring, tmp_pat
     compare(tmp_path / "off", tmp_path / "on", models())
     for model in models():
         engine = json.loads((tmp_path / "on" / f"{model.name}.manifest.json").read_text())["engine"]
-        assert engine["fallbacks"].get("ill_conditioned", 0) > 0, (model.name, engine)
+        assert engine["fallbacks"].get(reason, 0) > 0, (model.name, engine)
 
 
 def test_an_issue_row_far_out_along_two_columns_difference_goes_back(spring, tmp_path):

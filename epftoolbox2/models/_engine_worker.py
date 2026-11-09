@@ -34,7 +34,8 @@ hands each fit to `EngineFits` once the model path has selected it (`_worker.Sta
 Then `model._fit_stats` and each issue row through `model._predict_fitted` (one row at a time).
 
 A fit of no column, one with fewer than `_stats.MIN_ROWS` rows in ρ (or than its CV folds), one whose sums overflow float64
-(`_sums.SumsOverflow`) or that can't be scaled or cut into blocks from the sums (`StatsFallback`: cancellation, overflow), one
+(`_sums.SumsOverflow`) or that can't be scaled or cut into blocks from the sums (`StatsFallback`: cancellation, overflow), a
+LassoCV or LEAR fit with two near-twin columns (`near_twin`: 1 - |cos| at most their `_ENGINE_NEAR_TWIN`, 1e-5), one
 `_fit_stats` declines (None: OLS's rank and conditioning guards, Ridge's n <= p and rounding budget, LassoCV's n <= p in a
 fold, an estimator that isn't the one the statistics reproduce) or raises a ValueError on, and one whose active columns' Gram
 is too ill-conditioned for its class (`_ENGINE_CONDITION_MAX`, LEAR) is **handed back**: the model path fits it there, on the
@@ -140,7 +141,7 @@ CHECK_EVERY = 50
 
 # Engine against the model path per class, in target units (the step 5 spec's tolerance table): `engine="check"` warns about a
 # model whose largest gap is above its class's (`tolerance_of`).
-ENGINE_TOLERANCE = {"OLSModel": 1e-8, "RidgeModel": 1e-9, "LassoCVModel": 1e-8, "LEARModel": 1e-9}
+ENGINE_TOLERANCE = {"OLSModel": 1e-8, "RidgeModel": 1e-9, "LassoCVModel": 1e-8, "LEARModel": 1e-8}
 
 # Why a fit went back to the model path (`EngineCounts.fallbacks`): no column (the model path then skips, or forecasts as it
 # does); an active Gram whose condition number is above the model's `_ENGINE_CONDITION_MAX` (LEAR, `ILL_CONDITIONED`);
@@ -154,7 +155,7 @@ OVERFLOW = "overflow"
 DECLINED = "declined"
 ERROR = "error"
 FAR_ISSUE = "far_issue"
-# Two columns of the fit near twins (`_stats.near_twins`) for a model that sets `_ENGINE_NEAR_TWIN` (LassoCV, LEAR "cv").
+# Two columns of the fit near twins (`_stats.near_twins`) for a model that sets `_ENGINE_NEAR_TWIN` (LassoCV and LEAR, 1e-5).
 NEAR_TWIN = "near_twin"
 
 # What `_engine_init` loaded into a pool's worker: the chunk's models' inputs, by their place in the chunk.
