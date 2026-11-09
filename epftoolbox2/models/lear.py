@@ -60,6 +60,9 @@ class LEARModel(BaseModel):
         newest_target: str = "d-1",
         refit: Optional[str] = None,
         binary_mask: Optional[str] = None,
+        normalise_by: Optional[str] = None,
+        bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        zero_when: Optional[str] = None,
     ):
         """LEAR: per period a Lasso whose penalty is chosen on every fit in two stages, from the centred sums of the scaled
         training rows alone (`models._lars.lear_fit`, scikit-learn 0.24.2's rules, which Lago et al. ran).
@@ -100,6 +103,9 @@ class LEARModel(BaseModel):
             newest_target=newest_target,
             refit=refit,
             binary_mask=binary_mask,
+            normalise_by=normalise_by,
+            bounds=bounds,
+            zero_when=zero_when,
         )
         self.criterion = criterion  # checked in __setattr__
         self.solver = solver

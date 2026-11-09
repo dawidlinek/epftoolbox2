@@ -380,6 +380,8 @@ class TorchModel(BaseModel):
         random_state: The base seed of every member's seed.
         newest_target, binary_mask, scaler: As for every model; the scaler standardises the inputs ("standard"; "period"
             output takes only that, since it fits its target's Invariant itself).
+        normalise_by, bounds, zero_when: A per-row target, as for every model (see `BaseModel`), with `output="period"`;
+            a model of `output="day"` refuses them before any fit.
         name: The model's name.
         module_hash: The hash a saved file holds (`module_hash`); a different one warns that the module changed.
     """
@@ -426,6 +428,9 @@ class TorchModel(BaseModel):
         scaler: ScalerSpec = "standard",
         name: str = "torch",
         module_hash: Optional[str] = None,
+        normalise_by: Optional[str] = None,
+        bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        zero_when: Optional[str] = None,
     ):
         where = f"TorchModel({name!r})"
         flat = self._flatten(predictors, inputs, where)
@@ -451,6 +456,9 @@ class TorchModel(BaseModel):
             binary_mask=binary_mask,
             scaler=scaler,
             name=name,
+            normalise_by=normalise_by,
+            bounds=bounds,
+            zero_when=zero_when,
         )
         self.output = output
         self.inputs = None if inputs is None else {str(block): list(names) for block, names in inputs.items()}

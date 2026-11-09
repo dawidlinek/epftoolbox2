@@ -63,8 +63,9 @@ class PooledModel:
         name: The name of the pooled model, which names its results in each zone; the inner model's name if not given.
 
     Refused in this step: a predictor function of `ctx`, a list of training windows, `newest_target="published"` (each zone
-    issues on its own clock, and one fit serves them all), `NaiveModel`, which fits nothing, and a model of day or pooled
-    units (`_unit_kind`, `models._units`), which fits every period of a day at once. A shared fit is made by the
+    issues on its own clock, and one fit serves them all), `NaiveModel`, which fits nothing, a model of day or pooled
+    units (`_unit_kind`, `models._units`), which fits every period of a day at once, and a per-row target (`normalise_by`,
+    `bounds`, `zero_when`). A shared fit is made by the
     earliest issue instant of its day over the zones, so `ModelPipeline` judges every zone's training rows as of it.
     """
 
@@ -148,6 +149,12 @@ def check_pooled_model(model: Any) -> None:
         )
     if len(model._members) > 1:
         raise ValueError(f"{what}: a list of training windows can't be pooled in this step; pool each window's model.")
+    given = [key for key in ("normalise_by", "bounds", "zero_when") if getattr(model, key, None) is not None]
+    if given:
+        raise ValueError(
+            f"{what}: {', '.join(given)} (a per-row target) can't be pooled over zones in this step: a pooled fit reads each "
+            "zone's rows itself. Run the model in each zone."
+        )
     if model.newest_target != "d-1":
         raise ValueError(
             f"{what}: newest_target={model.newest_target!r} is refused for a pooled model: each zone issues on its own clock, "

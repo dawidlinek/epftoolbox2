@@ -262,6 +262,11 @@ class ResidualModel(BaseModel):
             raise ValueError(
                 f"{where}: the learner fits on the refit calendar: give refit ('7D' weekly, '1D' every day)"
             )
+        elif key in ("normalise_by", "bounds", "zero_when") and value is not None:
+            raise ValueError(
+                f"{where}: {key} (a per-row target) isn't supported for a ResidualModel in this step: its forecast is the "
+                "learner's plus the base's, made after the learner's fit. Give it to the base, whose own run applies it."
+            )
         super().__setattr__(key, value)
 
     @staticmethod
@@ -299,6 +304,12 @@ class ResidualModel(BaseModel):
             raise ValueError(
                 f"{where}: {type(learner).__name__} isn't supported as a learner in this step (the learner runs in the "
                 "ResidualModel's pool, without its own executor config and torch threads): use HistGBModel or a linear model"
+            )
+        given = [key for key in ("normalise_by", "bounds", "zero_when") if getattr(learner, key, None) is not None]
+        if given:
+            raise ValueError(
+                f"{where}: the learner has {', '.join(given)} (a per-row target), which a ResidualModel doesn't apply in this "
+                "step: its forecast is the learner's plus the base's. Give it to the base, whose own run applies it."
             )
         kind = unit_kind(learner)
         if kind == DAY:
@@ -609,6 +620,8 @@ class ResidualModel(BaseModel):
         manifest hashes), and what either uses late is listed for this model."""
         if plan is not None:
             raise ValueError(f"{self.name}: the learner's predictors are a list; a ResidualModel takes no plan")
+        # Again at the run: a learner given a per-row target after it was set would otherwise be run without it.
+        self._check_learner(self.learner, f"ResidualModel({self.name!r})")
         self._set_freq(freq)
         planned = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
         self._check_base_names(data, freq, planned)
@@ -694,6 +707,8 @@ class ResidualModel(BaseModel):
                 f"{self.name}: a ResidualModel's records hold `base_prediction`, which the Parquet results schema has no "
                 "column for: write its results as JSONL (save_format='jsonl')"
             )
+        # Before the base runs: a learner given a per-row target after it was set would otherwise be run without it.
+        self._check_learner(self.learner, f"ResidualModel({self.name!r})")
         span = self._issue_span(test_start, test_end, windows, forecast_only)
         if span is None:
             raise ValueError("test_start and test_end are required unless forecast_only=True")
