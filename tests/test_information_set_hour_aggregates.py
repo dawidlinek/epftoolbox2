@@ -76,28 +76,36 @@ def test_hour_aggregate_names():
 
 
 @pytest.mark.parametrize("freq", ["1h", "15min"])
-def test_every_name_a_daily_or_hour_transformer_emits_is_read_as_built_from_its_column(freq):
-    """The patterns are built from the transformers' own statistics (`DailyStatsTransformer`'s and `PeriodStatsTransformer`'s
-    `STATS`), so a statistic added to one is read as an aggregate: every column the profile, day and hour transformers emit,
-    with every statistic, resolves as built from the column it summarises, never as a column of its own."""
-    from epftoolbox2.data.transformers import DailyProfileTransformer
+def test_every_name_a_daily_hour_or_rolling_transformer_emits_is_read_as_built_from_its_column(freq):
+    """The patterns are built from the transformers' own statistics (`DailyStatsTransformer`'s, `PeriodStatsTransformer`'s and
+    `RollingStatsTransformer`'s `STATS`), so a statistic added to one is read as an aggregate: every column the profile, day,
+    hour and rolling transformers emit, with every statistic (and a rolling window with and without its lag), resolves as built
+    from the column it summarises, never as a column of its own."""
+    from epftoolbox2.data.transformers import DailyProfileTransformer, RollingStatsTransformer
     from epftoolbox2.data.transformers.daily_stats import STATS as DAY_STATS
     from epftoolbox2.data.transformers.period_stats import STATS as HOUR_STATS
+    from epftoolbox2.data.transformers.rolling_stats import STATS as ROLLING_STATS
 
     index = pd.date_range("2024-01-01", periods=96 * 3, freq="15min", tz="Europe/Warsaw")
     if freq == "1h":
         index = index[index.minute == 0]
     data = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
-    emitted = []
-    for transformer in (
+    transformers = [
         DailyProfileTransformer("load_actual", freq=freq),
         DailyStatsTransformer("load_actual", stats=list(DAY_STATS), freq=freq),
         PeriodStatsTransformer("load_actual", stats=list(HOUR_STATS), freq=freq),
-    ):
+    ]
+    transformers += [
+        RollingStatsTransformer("load_actual", window_days=2, stat=stat, lag_days=lag, freq=freq)
+        for stat in ROLLING_STATS
+        for lag in (0, 1)
+    ]
+    emitted = []
+    for transformer in transformers:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             emitted += list(transformer.transform(data).columns.drop("load_actual"))
-    assert len(emitted) == 1440 // _STEP_MINUTES[freq] + len(DAY_STATS) + len(HOUR_STATS)
+    assert len(emitted) == 1440 // _STEP_MINUTES[freq] + len(DAY_STATS) + len(HOUR_STATS) + 2 * len(ROLLING_STATS)
     info = InformationSet(*ISSUE, rules={"load_actual": Availability.realised("1h")})
     for name in emitted:
         for shift in ("", "_d-1"):

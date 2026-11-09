@@ -38,6 +38,7 @@ import pandas as pd
 from ._date_utils import daily_anchor, zone_name
 from .data.transformers.daily_stats import STATS as _DAY_STATS
 from .data.transformers.period_stats import STATS as _HOUR_STATS
+from .data.transformers.rolling_stats import STATS as _ROLLING_STATS
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -82,7 +83,7 @@ _DAY_AGGREGATE = re.compile(rf"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:{'|'.join(
 _HOUR_AGGREGATE = re.compile(rf"^(?P<column>.+)_hour_(?:{'|'.join(map(re.escape, _HOUR_STATS))})$")
 # RollingStatsTransformer's names without their lag (`data.transformers.rolling_stats`): `x_roll365max` is a statistic of x's day
 # statistics over the 365 local days ending on the row's day; its `_d-1` moves the whole window a day back.
-_ROLLING = re.compile(r"^(?P<column>.+)_roll(?P<days>[1-9][0-9]*)(?:min|max|mean)$")
+_ROLLING = re.compile(rf"^(?P<column>.+)_roll(?P<days>[1-9][0-9]*)(?:{'|'.join(map(re.escape, _ROLLING_STATS))})$")
 
 
 # The note of a use that is late on a training row, not on the issue day's.
