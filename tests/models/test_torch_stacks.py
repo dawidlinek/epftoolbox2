@@ -310,6 +310,7 @@ def test_a_model_alone_equals_it_in_a_48_model_loop_shuffled_and_in_shards(marke
         "jobs_of_one_member",
         "inputs_of_every_horizon",
         "attributes_of_the_module",
+        "row_targets",
     ],
 )
 def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, case):
@@ -327,6 +328,15 @@ def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, cas
     elif case == "jobs_of_one_member":  # a job per fit unit, a window list's units of a block together
         monkeypatch.setenv(groups.STACK_MEMBERS_VAR, "1")
         models = loop_of(3, training_window=[21, 28])
+    elif case == "row_targets":  # each model's own per-row target (step 7c) in stacks shared with models of none
+        row_targets = [
+            {},
+            {"normalise_by": "load_d+{horizon}"},
+            {"normalise_by": "load_d+{horizon}", "bounds": (0.0, 0.08)},
+            {"zero_when": "is_weekend_d+{horizon}", "bounds": (None, 60.0)},
+        ]
+        models = [hourly(f"r{i}", lr=1e-2, random_state=i, **target) for i, target in enumerate(row_targets)]
+        assert len({groups.stack_key(model) for model in models}) == 1
     elif case == "inputs_of_every_horizon":  # the same inputs (and rows) for both horizons, other targets, in one stack
         models = [daily(f"m{i}", predictors=DAY[:4], seeds=1, dropout=d) for i, d in enumerate([0.1, 0.2, 0.3])]
     else:
@@ -343,6 +353,9 @@ def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, cas
     together = records(run_pipeline(models, market, test=test, horizon=horizon))
     same(own, together)
     assert stacks and (case == "jobs_of_one_member" or any(len(set(stack)) > 1 for stack in stacks))
+    if case == "row_targets":  # the targets took effect: forecasts of 0 on weekends, and r1's are its own scaled ones
+        assert any(r["prediction"] == 0.0 and r.get("detail") == "zero_when" for r in own["r3"].values())
+        assert any(own["r1"][key]["prediction"] != own["r0"][key]["prediction"] for key in own["r0"])
 
 
 def test_a_pool_of_forked_processes_gives_each_model_s_own_records(market, monkeypatch):

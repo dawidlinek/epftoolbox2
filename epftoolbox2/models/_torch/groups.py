@@ -30,8 +30,9 @@ as the job comes back.
 **Why the bits hold.** A member's numbers depend on its own inputs, key, learning rate, buffers and on the stack's shapes alone
 (`trainer` module docstring): on the CPU each slot's products are its own (`nets._per_slot_linear`, one thread), on a GPU one
 batched product of a fixed shape computes every slot alike, so neither the other slots nor their order move a bit, and the
-shapes are the member's own call's (`trainer.prepare_members`). The unit runs the worker's code, so its rows, scaling, seeds,
-records and skips are those of the model's own run. A call the trainer refuses gets the error its own run would raise
+shapes are the member's own call's (`trainer.prepare_members`). The unit runs the worker's code on its model's own inputs, so
+its rows, scaling, per-row target (`normalise_by`, `bounds`, `zero_when`: its model's `config["row_target"]`), seeds, records
+and skips are those of the model's own run. A call the trainer refuses gets the error its own run would raise
 (`prepare_members`'s), and a stack that raises is trained again call by call, as each model alone (`_train`'s solo calls). A
 diverged member is `failed` in its own slot: its fit's forecasts are fit errors, as alone, and no other member moves.
 
