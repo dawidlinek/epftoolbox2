@@ -68,6 +68,7 @@ with the research's defaults (`ztree.py`):
 | `name` | str | `"hgb"` | Display name |
 | `scaler` | scaler spec | `INVARIANT_TARGET` | Keyword-only. The predictors as they are and the target as epftoolbox's Invariant (`{"name": "asinh", "params": {"apply_to": "target", "standardise": False}}`); a pooled fit gives each period's target its own Invariant whatever this says |
 | `newest_target`, `binary_mask` | | `"d-1"`, `None` | Keyword-only, as for every model ([Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/)) |
+| `normalise_by`, `bounds`, `zero_when` | | `None` | Keyword-only. A per-row target, as for every model, with either `periods`: a pooled fit divides each row's target by its own period row's scale ([Generation targets](/epftoolbox2/models/common-parameters/#generation-targets)). A `ResidualModel` refuses them, on itself and on its learner: give them to its base |
 
 ## What a run does
 

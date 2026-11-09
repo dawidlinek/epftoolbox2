@@ -196,6 +196,19 @@ an issue day it didn't sample.
 
 ### New
 
+- **Generation targets: `normalise_by`, `bounds` and `zero_when` on every model that fits period or pooled units.**
+  `normalise_by="capacity_d+{horizon}"` divides each training row's target by its value of the column (a row without a positive one
+  drops out) and multiplies the forecast by the issue row's (a forecast without one is `missing_test_predictors`); `bounds=(low,
+  high)` clips the forecast after that, in multiples of the scale with `normalise_by` (the renewables study's `(0, 1.05)`), in
+  target units without, either side `None`; `zero_when="is_night_d+{horizon}"` makes a forecast 0 with no fit where the issue
+  row's value is 1, its record `coefficients` `[]` and `detail` `"zero_when"`, decided after every other skip, so the keys are those
+  of the model without it. They are model parameters, so a benchmark beside the model stays as published; `NaiveModel` takes
+  `bounds` alone. The columns are inputs the model reads, never regressors: judged by the information set on the issue row and, for
+  a rule over time, on the training rows (listed at `"warn"`, refused at `"raise"`), perturbed by `verify`, hashed in the manifest,
+  whose `model_params` record the three where set (compared on resume), and listed by `explain()`. A model with any of them never
+  runs in an engine group. Day units, models that read series, `ResidualModel` (give them to its base) and `PooledModel` refuse
+  them. With all three `None`, the default, no record, manifest or table moves. See [Common
+  Parameters](/epftoolbox2/models/common-parameters/#generation-targets).
 - **What a sequence model reads, cut by the information set (internal).** The foundation models to come read series, not lagged
   columns: `epftoolbox2.models._history` gives each forecast the target's context of a fixed number of steps in physical time,
   ending at its newest value known at the issue time (at the end of D-1 at the latest under `newest_target="d-1"`, the default),
