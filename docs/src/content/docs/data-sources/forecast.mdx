@@ -38,9 +38,10 @@ pipeline.information_set = pipeline.information_set.with_source_rules(data.sourc
 |-----------|------|----------|---------|-------------|
 | `path` | str | Yes | - | The upstream run's `save_dir`. Relative to the working directory, or in YAML (a pipeline file or a `Workflow`'s inline sources) to the file; `~` is your home. |
 | `model` | str | Yes | - | The upstream model's name (or an ensemble's), as `ModelPipeline` names its results: `<name>.jsonl` or `<name>.parquet` |
-| `column` | str | Yes | - | The name of the column it emits |
+| `column` | str | Yes | - | The name of the column it emits (with `agg`, the start of its name) |
 | `horizon` | int | No | `1` | Which upstream horizon to read: days between the forecast's issue day and its target day |
 | `available` | str | No | `None` | A later time than the upstream's issue time at which its forecasts are known, `"HH:MM"` in the upstream's issue zone (for forecasts revised after it). Never an earlier one: that raises |
+| `agg` | str | No | `None` | A day statistic of the forecasts instead of the forecasts: `"min"`, `"max"`, `"mean"` or `"peak"` (08:00 to 19:59), emitted as `{column}_day_{agg}`. See [A Day Statistic](#a-day-statistic-agg) |
 
 `fetch(start, end)` returns the rows in **[start, end)** with a UTC index, one column of float values.
 
@@ -63,6 +64,39 @@ the upstream's data zone (its manifest's `data_timezone`), whatever zone the dow
 
 Only forecasts (records with status `ok`) are read, the highest revision of each key, from JSONL or Parquet results alike: both give
 the same frame, bit for bit.
+
+## A Day Statistic: `agg`
+
+With `agg` the source emits `{column}_day_{agg}` instead of the forecasts: the minimum, maximum, mean or peak mean (08:00 to 19:59)
+of the forecasts of each target date, on every row of that date. It is what
+[`DailyStatsTransformer`](/epftoolbox2/transformers/daily-stats/) makes of the plain column in the upstream's data zone, bit for bit,
+so the daily maximum of an hourly or 15-minute price forecast is one source:
+
+```python
+from epftoolbox2.data.sources import ForecastSource
+from epftoolbox2.data.transformers import LagTransformer, TimezoneTransformer
+from epftoolbox2.pipelines import DataPipeline
+
+data = (
+    DataPipeline(timezone="Europe/Berlin")
+    .add_source(ForecastSource("runs/price", model="lear", column="price_fc", horizon=1, agg="max"))
+    .add_transformer(TimezoneTransformer())
+    .add_transformer(LagTransformer(["price_fc_day_max"], [-1], "day"))  # the maximum forecast for D+1, issued on D
+)
+```
+
+- **Whole dates only.** A date with a slot that has no forecast, or a forecast that is missing, gets NaN on all of its rows. A run
+  plans no forecast for a slot its issue day's clock lacks, so the date after a spring switch (`horizon` days after it) has no
+  02:00 forecast and its statistic is NaN; the downstream's coverage check knows that no upstream can fill it and doesn't count it.
+- **Dates of the upstream's data zone.** The statistic is over the upstream's target date, whatever zone the downstream frame is in.
+  On a frame in another zone it is the same on the rows of that date, which are not the frame's local day: a Helsinki date runs from
+  23:00 to 23:00 Warsaw time. `DailyStatsTransformer` after the plain column summarises the frame's own days instead.
+- **Taken before the range is cut.** `fetch(start, end)` returns the statistic of whole dates on the rows of `[start, end)`, so a
+  range that starts inside a date holds the same values as a longer one.
+- **Known when its forecasts are.** Every forecast of a target date is issued at the same instant, so their statistic is known
+  exactly then: its column has the same rule as the forecasts, under its own name (`price_fc_day_max`), and a rule naming it is
+  refused like one naming the plain column.
+- A daily upstream (`freq="1D"`) has one forecast a date, so `agg` is refused there (`UpstreamError`).
 
 ## When It Is Known
 
@@ -113,7 +147,8 @@ A downstream model that reads the column is checked for two more things before a
   describes. Run the upstream at `availability="raise"` with the default
   `unknown="raise"`, into a fresh `save_dir` when its information set changes.
 
-The downstream's manifest records each chained column's upstream (`chained_inputs`, the upstream by its absolute path), and a resume
+The downstream's manifest records each chained column's upstream (`chained_inputs`, the upstream by its absolute path, and `agg`
+where set), and a resume
 refuses another upstream model, horizon, issue time or zone, data zone or `available`.
 
 ## Caching
@@ -135,6 +170,7 @@ so it fetches again after the upstream changed and reuses the file otherwise.
 | A record with `issued_at` (live results) | `UpstreamError`: which revision a chained value may use depends on when it was issued |
 | No forecast of `horizon` | `UpstreamError` naming the horizons it has |
 | `available` before its issue time | `UpstreamError` |
+| `agg` with `freq="1D"` | `UpstreamError`: read it without `agg` |
 
 `UpstreamError` is a `ValueError`. A range with no forecast of the upstream returns an empty frame with a warning.
 
