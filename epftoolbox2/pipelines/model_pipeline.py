@@ -75,7 +75,7 @@ from ..results.manifest import (
 from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.panel import PanelReport
 from ..results.report import EvaluationReport
-from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
+from ..results.ref import ModelResultRef, issued_mae, split_by_window, warn_off_the_clock
 from ..results.store import (
     DEFAULT_SAVE_FORMAT,
     SAVE_FORMATS,
@@ -220,6 +220,45 @@ COMPONENT_REGISTRY = {
         "TerminalExporter": "epftoolbox2.exporters.terminal",
     },
 }
+
+
+def search_choices(refs: Mapping[str, ModelResultRef], test: Optional[Tuple[str, str]]) -> Dict[str, List[Dict]]:
+    """The rows of `report.choices()` of the models a search chose (`tune.SearchResult.best`, whose ref's provenance holds
+    `search`), keyed `{search}:{model}`: the search's validation numbers, and the model's MAE on the `test` period of the run,
+    from every forecast it has there (every horizon it made), so a report of any part of the run shows the same."""
+    out: Dict[str, List[Dict]] = {}
+    for name, ref in refs.items():
+        search = (ref.provenance or {}).get("search")
+        if not search:
+            continue
+        whole = replace(
+            ref,
+            test_start=test[0] if test else "",
+            test_end=test[1] if test else "",
+            window=TEST if ref.windows is not None else None,
+            target_before=None,
+            by_window=None,
+            horizons=None,
+            issue_days=None,
+        )
+        test_mae = issued_mae(whole.iter_records(cols=["run_date", "prediction", "actual"]), test) if test else None
+        out[f"{search.get('search')}:{name}"] = [
+            {
+                "chooser": search.get("search"),
+                "segment": 0,
+                "chosen": [name],
+                "k": 1,
+                "validation_mae": search.get("validation_mae"),
+                "validation_forecasts": search.get("validation_forecasts"),
+                "validation_share": search.get("validation_share"),
+                "validation": tuple(search.get("validation") or (None, None)),
+                "test": None if not test else tuple(test),
+                "candidates": search.get("candidates"),
+                "test_mae": test_mae,
+                "search": dict(search),
+            }
+        ]
+    return out
 
 
 def _carded(models: Sequence[Any]) -> List[Any]:
@@ -594,6 +633,8 @@ class ModelPipeline:
                 provenance=None if frame_hashes is None else frame_hashes.provenance,
             )
             refs.update(computed)
+        if not forecast_only:
+            choices.update(search_choices(refs, windows.test if windows is not None else (test_start, test_end)))
 
         evaluators = [] if forecast_only else self.evaluators
         report = EvaluationReport(refs, evaluators, source_data=data, choices=choices)
@@ -899,6 +940,10 @@ class ModelPipeline:
                     provenance=None if first is None else first.provenance,
                 )
                 zone_refs.update(computed)
+            if not forecast_only:
+                choices.update(
+                    search_choices(zone_refs, windows.test if windows is not None else (test_start, test_end))
+                )
             reports[zone] = EvaluationReport(zone_refs, evaluators, source_data=frames[zone], choices=choices)
         return PanelReport(reports, target=target)
 
@@ -1255,6 +1300,14 @@ class ModelPipeline:
             )
         warn_about({name: ref.availability_listing for name, ref in refs.items()}, stacklevel=3)
 
+        if not forecast_only:
+            # The test period on file, whichever part of it this report names, as the ensembles' rows have it.
+            test_period = stored.test if stored is not None else (test_start, test_end)
+            choices.update(
+                search_choices(
+                    {model.name: refs[model.name] for model in self.models if model.name in refs}, test_period
+                )
+            )
         report = EvaluationReport(refs, [] if forecast_only else self.evaluators, source_data=data, choices=choices)
         warn_about_thin(rows_of_refs(refs), stacklevel=2)  # on the whole file: a report holds one window
         if not forecast_only:

@@ -181,10 +181,13 @@ def test_a_space_is_checked_when_built(space, message):
         BayesSearch(make, space)
 
 
-def test_rung_seeds_raise_for_a_model_without_seeds_before_the_dear_rungs(df):
-    """OLS has no seeds: a later rung's seeds fail the first trial, before rung 0 is spent."""
+def test_rung_seeds_raise_for_a_model_without_seeds_before_the_dear_rungs(df, monkeypatch):
+    """OLS has no seeds: a later rung's seeds fail the first trial before it runs, not after rung 0 is spent."""
+    runs = []
+    monkeypatch.setattr(ModelPipeline, "run", lambda self, *a, **k: runs.append(1))
     with pytest.raises(ValueError, match="rungs\\[1\\] sets seeds=3, and OLSModel has no seeds parameter"):
         search(rungs=[{"every_nth_day": 4}, {"every_nth_day": 1, "seeds": 3}]).run(df, horizon=1, validation=V)
+    assert runs == []
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -252,6 +255,51 @@ def test_a_subset_under_its_min_size_fails_without_a_run(df, monkeypatch):
     small = table["drivers"].map(len) < 2
     assert small.any() and table.loc[small, "error"].str.contains("min_size=2").all()
     assert len(runs) == (~small).sum()
+
+
+class FakeReport:
+    """What `score_ref` reads of a run's validation report."""
+
+    def __init__(self, records, planned, skipped=None):
+        self._records = records
+        self._counts = {"model": "m", "planned": planned, "produced": len(records), "missing": planned - len(records)}
+        self._counts.update(skipped or {})
+
+    def forecast_counts(self):
+        return pd.DataFrame([self._counts])
+
+    @property
+    def refs(self):
+        records = self._records
+
+        class Ref:
+            def iter_records(self, cols=None):
+                return iter(records)
+
+        return {"m": Ref()}
+
+
+def test_a_score_counts_every_planned_key_but_those_with_no_row():
+    records = [{"prediction": 1.0, "actual": 2.0}, {"prediction": 3.0, "actual": float("nan")}]
+    assert bayes.score_ref(FakeReport(records, 3, {"missing_test_row": 1}), "m") == bayes._Score(1.0, 1, 3, None)
+    lacking = bayes.score_ref(FakeReport(records, 3, {"missing_test_predictors": 1}), "m")
+    assert lacking.mae is None and "missing_test_predictors" in lacking.error
+    nan = bayes.score_ref(FakeReport([{"prediction": float("nan"), "actual": 1.0}], 1), "m")
+    assert nan.mae is None and "not finite" in nan.error
+    assert (
+        bayes.score_ref(FakeReport([{"prediction": 1.0, "actual": float("nan")}], 1), "m").error
+        == "no forecast has an actual"
+    )
+
+
+def test_a_score_is_the_same_whatever_order_the_pool_finished_in():
+    rng = np.random.default_rng(1)
+    records = [{"prediction": float(p), "actual": float(a)} for p, a in rng.normal(50, 30, (2000, 2))]
+    scores = set()
+    for seed in range(20):
+        order = np.random.default_rng(seed).permutation(len(records))
+        scores.add(bayes.score_ref(FakeReport([records[i] for i in order], len(records)), "m").mae)
+    assert len(scores) == 1
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -605,6 +653,15 @@ def test_a_chosen_models_manifest_and_report_say_where_it_was_chosen(df, tmp_pat
             assert row.gap == pytest.approx(row.test_mae - row.validation_mae, abs=1e-12)
             assert (row.validation_start, row.validation_end, row.test_start, row.test_end) == (*V, *T)
     assert report.provenance().empty  # no card: nothing new in the licence table
+    # every report of the run shows the same rows: of one window, of fewer horizons, aggregated
+    whole = report.choices()
+    for other in (
+        pipeline.report(tmp_path / "run", horizon=1, validation=V),
+        pipeline.report(tmp_path / "run", horizon=1, test=T),
+        report.aggregate("1D", agg="mean"),
+    ):
+        pd.testing.assert_frame_equal(other.choices(), whole)
+    assert whole.attrs["search"]["ols_bayes_00"]["trial"] == result.ranking()[0]
 
 
 def test_ensemble_choices_show_their_candidates_and_gap(df):

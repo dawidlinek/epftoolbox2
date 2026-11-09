@@ -291,8 +291,9 @@ def test_a_resume_with_another_value_raises_and_the_other_days_stay_out_of_the_r
     assert days == {"2023-03-14", "2023-03-18", "2023-03-22", "2023-03-26", "2023-03-30"}
     assert len({r["run_date"] for r in stored(tmp_path / "m.jsonl")}) == 20  # the file keeps the other days' records
     counts = report.forecast_counts().iloc[0]
-    assert counts["planned"] == counts["produced"]
+    assert counts["planned"] == counts["produced"] == len(list(report.refs["m"].iter_records()))
     again = built(ols()).report(tmp_path, horizon=1)
+    assert again.forecast_counts().to_dict("records") == report.forecast_counts().to_dict("records")
     assert lines(again.refs["m"].iter_records()) == lines(report.refs["m"].iter_records())
 
 
@@ -300,6 +301,10 @@ def test_the_same_value_resumes(df, tmp_path):
     first = built(ols()).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path), validation_every=3)
     second = built(ols()).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path), validation_every=3)
     assert lines(first.validation.refs["m"].iter_records()) == lines(second.validation.refs["m"].iter_records())
+    assert read_windows(manifest_path(tmp_path / "m.jsonl")).validation_every == 3  # kept by the resume
+    test_alone = built(ols()).run(df, test=T, horizon=1, save_dir=str(tmp_path))  # a run of the test window alone
+    assert read_windows(manifest_path(tmp_path / "m.jsonl")).validation_every == 3  # keeps the validation on file
+    assert lines(test_alone.refs["m"].iter_records()) == lines(first.refs["m"].iter_records())
 
 
 def test_parquet_results_read_the_kept_days_alone(df, tmp_path):

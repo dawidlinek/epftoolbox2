@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
@@ -151,8 +150,6 @@ class EvaluationReport:
         self._read_frames: Dict[str, Tuple[tuple, pd.DataFrame]] = {}
         self._validation = validation
         self._choices = dict(choices or {})
-        # The test report this one is the validation window of, for the test side of `choices()`.
-        self._test_report: Optional["EvaluationReport"] = None
 
         validation_refs: Dict[str, ModelResultRef] = {}
         for name, v in results_or_refs.items():
@@ -184,7 +181,6 @@ class EvaluationReport:
             self._validation = EvaluationReport(
                 validation_refs, evaluators, source_data=source_data, choices=self._choices
             )
-            self._validation._test_report = self
 
     @property
     def window(self) -> str:
@@ -1242,96 +1238,52 @@ class EvaluationReport:
         rung's keys with an actual), `validation_share` (those keys as a share of the ones the fullest member holds; of the
         rung's planned keys for a search), `validation_start`, `validation_end`, `test_start`, `test_end` (the test period
         served), `candidates` (how many there were to choose from: the ensemble's members scored, the search's trials),
-        `test_mae` (the MAE of the ensemble or model on the test period served, over its forecasts there with an actual) and
-        `gap` (`test_mae - validation_mae`: how much worse the choice did on days it wasn't chosen on). With no test period
-        known yet the test columns are empty, `segment` is 0, and `report.windows.segments` is empty.
+        `test_mae` (the MAE of the ensemble or model on the test period served, over its forecasts there with an actual, every
+        horizon the run made, as an exact sum) and `gap` (`test_mae - validation_mae`: how much worse the choice did on days it
+        wasn't chosen on). With no test period known yet the test columns are empty, `segment` is 0, and
+        `report.windows.segments` is empty. The rows are made when the run or `ModelPipeline.report` computes the ensembles,
+        from everything on file, so a report of either window, of fewer horizons or an `aggregate()` shows the same table.
 
         `df.attrs` holds, per ensemble and segment, `member_mae` (each member's MAE on those keys), `k_mae` (with
         `top="validation"`, the MAE of the average of the best k members) and `limited_by` (the members whose holes cut the keys,
         with how many forecasts each lacks), and `search`, per model a search chose, its provenance (the result file, trial,
-        rank, rung). A report of either window shows the same table.
+        rank, rung).
         """
         rows = []
         member_mae: Dict[str, Dict[int, Dict[str, float]]] = {}
         k_mae: Dict[str, Dict[int, Dict[str, float]]] = {}
         limited_by: Dict[str, Dict[int, Dict[str, int]]] = {}
         searched: Dict[str, Dict[str, Any]] = {}
-        test_refs = self._test_refs()
         for ensemble, chosen in self._choices.items():
             for row in chosen:
                 test = row["test"] or (None, None)
-                test_mae = self._mae_over(test_refs.get(ensemble), *test)
+                test_mae = row.get("test_mae")
+                test_mae = np.nan if test_mae is None else test_mae
+                validation_mae = np.nan if row["validation_mae"] is None else row["validation_mae"]
                 rows.append(
                     {
-                        "ensemble": ensemble,
+                        "ensemble": row.get("chooser", ensemble),
                         **{key: row[key] for key in ("segment", "chosen", "k")},
                         **{key: row[key] for key in ("validation_mae", "validation_forecasts", "validation_share")},
                         "validation_start": row["validation"][0],
                         "validation_end": row["validation"][1],
                         "test_start": test[0],
                         "test_end": test[1],
-                        "candidates": len(row["member_mae"]),
+                        "candidates": row["candidates"] if "candidates" in row else len(row["member_mae"]),
                         "test_mae": test_mae,
-                        "gap": test_mae - row["validation_mae"],
+                        "gap": test_mae - validation_mae,
                     }
                 )
+                if "search" in row:  # a model a search chose
+                    searched[row["chosen"][0]] = dict(row["search"])
+                    continue
                 member_mae.setdefault(ensemble, {})[row["segment"]] = row["member_mae"]
                 limited_by.setdefault(ensemble, {})[row["segment"]] = row["limited_by"]
                 if "k_mae" in row:
                     k_mae.setdefault(ensemble, {})[row["segment"]] = row["k_mae"]
-        for name, ref in self.refs.items():
-            search = (ref.provenance or {}).get("search")
-            if not search:
-                continue
-            test_ref = test_refs.get(name)
-            test = (None, None) if test_ref is None else (test_ref.test_start or None, test_ref.test_end or None)
-            test_mae = self._mae_over(test_ref, *test)
-            validation_mae = search.get("validation_mae")
-            rows.append(
-                {
-                    "ensemble": search.get("search"),
-                    "segment": 0,
-                    "chosen": [name],
-                    "k": 1,
-                    "validation_mae": validation_mae,
-                    "validation_forecasts": search.get("validation_forecasts"),
-                    "validation_share": search.get("validation_share"),
-                    "validation_start": (search.get("validation") or [None, None])[0],
-                    "validation_end": (search.get("validation") or [None, None])[1],
-                    "test_start": test[0],
-                    "test_end": test[1],
-                    "candidates": search.get("candidates"),
-                    "test_mae": test_mae,
-                    "gap": np.nan if validation_mae is None else test_mae - validation_mae,
-                }
-            )
-            searched[name] = dict(search)
         table = pd.DataFrame(rows, columns=CHOICE_COLUMNS)
         table.attrs.update(member_mae=member_mae, k_mae=k_mae, limited_by=limited_by, search=searched)
         return table
-
-    def _test_refs(self) -> Dict[str, ModelResultRef]:
-        """The refs of the test window this report has, or is the validation window of; empty without one."""
-        if self.window == TEST:
-            return self.refs
-        return {} if self._test_report is None else self._test_report.refs
-
-    def _mae_over(self, ref: Optional[ModelResultRef], start: Optional[str], end: Optional[str]) -> float:
-        """The MAE of a ref's forecasts issued from `start` to `end` with a finite prediction and actual; NaN without any."""
-        if ref is None or not start or not end:
-            return np.nan
-        errors = [
-            abs(r["prediction"] - r["actual"])
-            for r in ref.iter_records(cols=["run_date", "prediction", "actual"])
-            if start <= r["run_date"] <= end
-            and r.get("prediction") is not None
-            and r.get("actual") is not None
-            and np.isfinite(r["prediction"])
-            and np.isfinite(r["actual"])
-        ]
-        return (
-            math.fsum(errors) / len(errors) if errors else np.nan
-        )  # exact: the same whatever order the records are in
 
     def _result_freqs(self) -> Dict[str, str]:
         """The frequency each model's results were produced at, for the models that have results.

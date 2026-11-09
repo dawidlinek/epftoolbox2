@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
@@ -295,6 +296,23 @@ class ModelResultRef:
             if r["day_in_test"] != day_in_window:
                 r = {**r, "day_in_test": day_in_window}
         return {k: r[k] for k in cols if k in r} if cols else r
+
+
+def issued_mae(records: Iterable[Dict], period: Optional[Sequence[str]]) -> Optional[float]:
+    """The MAE of the records issued from `period[0]` to `period[1]` with a finite prediction and actual, as an exact sum (the
+    same whatever order the records are in); None without a period or such a record. What `choices()` shows as `test_mae`."""
+    if not period:
+        return None
+    start, end = period
+    errors = []
+    for r in records:
+        if not start <= r["run_date"] <= end:
+            continue
+        prediction, actual = r.get("prediction"), r.get("actual")
+        if prediction is None or actual is None or not (math.isfinite(prediction) and math.isfinite(actual)):
+            continue
+        errors.append(abs(prediction - actual))
+    return math.fsum(errors) / len(errors) if errors else None
 
 
 def _run_weekday(r: Dict) -> int:
