@@ -48,7 +48,7 @@ from .._date_utils import resolve_date
 from ..results.availability import merge_listings
 from ..results.manifest import ManifestMismatchError, _block_params, configuration_digest, manifest_path
 from ..results.store import is_parquet_path, outside_stacklevel
-from . import _contract
+from . import _contract, _row_target
 from ._cards import read_provenance, run_provenance
 from ._history import reads_history
 from ._calendar import (
@@ -262,10 +262,11 @@ class ResidualModel(BaseModel):
             raise ValueError(
                 f"{where}: the learner fits on the refit calendar: give refit ('7D' weekly, '1D' every day)"
             )
-        elif key in ("normalise_by", "bounds", "zero_when") and value is not None:
+        elif key in _row_target.PARAMETERS and value is not None:
             raise ValueError(
-                f"{where}: {key} (a per-row target) isn't supported for a ResidualModel in this step: its forecast is the "
-                "learner's plus the base's, made after the learner's fit. Give it to the base, whose own run applies it."
+                f"{where}: {key} (a per-row target) isn't supported on a ResidualModel in this step: its forecast is the "
+                "learner's plus the base's, made after the learner's fit, which a per-row target would have to divide, clip or "
+                "replace as a whole"
             )
         super().__setattr__(key, value)
 
@@ -305,11 +306,12 @@ class ResidualModel(BaseModel):
                 f"{where}: {type(learner).__name__} isn't supported as a learner in this step (the learner runs in the "
                 "ResidualModel's pool, without its own executor config and torch threads): use HistGBModel or a linear model"
             )
-        given = [key for key in ("normalise_by", "bounds", "zero_when") if getattr(learner, key, None) is not None]
+        given = [key for key in _row_target.PARAMETERS if getattr(learner, key, None) is not None]
         if given:
             raise ValueError(
-                f"{where}: the learner has {', '.join(given)} (a per-row target), which a ResidualModel doesn't apply in this "
-                "step: its forecast is the learner's plus the base's. Give it to the base, whose own run applies it."
+                f"{where}: the learner has {', '.join(given)} (a per-row target), which isn't supported on a ResidualModel in "
+                "this step: its forecast is the learner's plus the base's, which a per-row target of the learner's alone "
+                "wouldn't divide, clip or replace"
             )
         kind = unit_kind(learner)
         if kind == DAY:

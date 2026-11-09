@@ -68,6 +68,7 @@ import numpy as np
 from .._extras import has_extra
 from ..scalers.registry import ScalerSpec, scaler_spec
 from ..scalers.target import MultiTargetAsinh
+from . import _row_target
 from ._calendar import EXPANDING, unit_seed
 from ._cards import RUN_DATA, ModelCard
 from ._units import DAY, PERIOD
@@ -80,6 +81,9 @@ OUTPUTS = ("period", "day")
 _DAY_NEEDS_REFIT = (
     'output="day" fits one network per refit day for every issue day of its block, so it needs refit= ("7D" weekly, '
     '"1D" every issue day); refit=None is for output="period"'
+)
+_DAY_NO_ROW_TARGET = (
+    'output="day" fits every period of a date at once, so it takes no per-row target ({key}); use output="period"'
 )
 LOSS_NAMES = ("l1", "mse")
 _LOSS_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*\Z")
@@ -600,11 +604,16 @@ class TorchModel(BaseModel):
                 raise ValueError(f"output must be one of {list(OUTPUTS)}, got {value!r}")
             if value == "day" and "refit" in self.__dict__ and self.refit is None:
                 raise ValueError(_DAY_NEEDS_REFIT)
+            given = [key for key in _row_target.PARAMETERS if self.__dict__.get(key) is not None]
+            if value == "day" and given:
+                raise ValueError(_DAY_NO_ROW_TARGET.format(key=", ".join(given)))
             super().__setattr__(key, value)
             super().__setattr__("_unit_kind", DAY if value == "day" else PERIOD)
             return
         if key == "refit" and value is None and self.__dict__.get("_unit_kind") == DAY:
             raise ValueError(_DAY_NEEDS_REFIT)  # when built (BaseModel sets refit) or set later
+        if key in _row_target.PARAMETERS and value is not None and self.__dict__.get("_unit_kind") == DAY:
+            raise ValueError(_DAY_NO_ROW_TARGET.format(key=key))  # when built or set later
         super().__setattr__(key, value)
 
     @staticmethod

@@ -17,6 +17,7 @@ under the model's keys `(hour, horizon, run_date)`, and each zone's manifest rec
 
 from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
+from . import _row_target
 from .base import BaseModel
 
 ZONE = "zone"
@@ -149,7 +150,7 @@ def check_pooled_model(model: Any) -> None:
         )
     if len(model._members) > 1:
         raise ValueError(f"{what}: a list of training windows can't be pooled in this step; pool each window's model.")
-    given = [key for key in ("normalise_by", "bounds", "zero_when") if getattr(model, key, None) is not None]
+    given = [key for key in _row_target.PARAMETERS if getattr(model, key, None) is not None]
     if given:
         raise ValueError(
             f"{what}: {', '.join(given)} (a per-row target) can't be pooled over zones in this step: a pooled fit reads each "
