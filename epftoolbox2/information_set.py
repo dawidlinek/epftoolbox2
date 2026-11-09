@@ -851,6 +851,7 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     from .data.sources.calendar import CalendarSource
     from .data.sources.energy_charts import EnergyChartsSource
     from .data.sources.entsoe import EntsoeSource
+    from .data.sources.forecast import ForecastSource
     from .data.sources.open_meteo import OpenMeteoSource
     from .data.sources.pse import PseSource
 
@@ -890,6 +891,10 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
                 rules[name] = rule
         elif isinstance(source, PseSource):
             rules.update(_pse_rules(source))
+        elif isinstance(source, ForecastSource):
+            # Another pipeline's forecasts: known at its issue time on the day `horizon` before their target date, a date of its
+            # data zone (`day_zone`), whatever the zone of the frame they are read on.
+            rules[source.column] = source.availability()
         elif isinstance(source, EpftoolboxBenchmarkSource):
             # The files are local wall-clock time, and `index_timezone` only labels that clock (one hour off the true
             # instants in summer). So a row's delivery day is the day on that same clock: the file's 23:00 on D is
@@ -908,6 +913,62 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
                     "10:00", 1, timezone=zone, note="day-ahead forecast of the benchmark files, available on d-1"
                 )
     return rules
+
+
+@dataclass(frozen=True)
+class ChainedInput:
+    """A column read from another pipeline's stored forecasts (`ForecastSource`), as `InformationSet.with_source_rules` registers
+    it: what the downstream's checks (`models._chained`) and manifest (`chained_inputs`) read of its upstream.
+
+    `late` are the inputs the upstream's leaf models listed as late or without a rule, `unchecked` the leaf models that ran at
+    level "none": either makes every downstream use of the column a `late upstream` one. `digest` is the upstream manifest's
+    `manifest_digest`."""
+
+    column: str
+    path: str
+    model: str
+    horizon: int
+    issue_time: str
+    issue_timezone: str
+    data_timezone: str
+    available: Optional[str]
+    digest: str
+    late: Tuple[str, ...] = ()
+    unchecked: Tuple[str, ...] = ()
+    freq: str = "1h"
+
+    @property
+    def late_upstream(self) -> bool:
+        """Whether nothing vouches for the upstream's inputs at its issue time: some were late, or it didn't look."""
+        return bool(self.late or self.unchecked)
+
+    def record(self) -> Dict[str, Any]:
+        """What a downstream manifest records of it (`chained_inputs[column]`), coverage aside."""
+        return {
+            "path": self.path,
+            "model": self.model,
+            "horizon": self.horizon,
+            "issue_time": self.issue_time,
+            "issue_timezone": self.issue_timezone,
+            "data_timezone": self.data_timezone,
+            "available": self.available,
+            "digest": self.digest,
+        }
+
+    def describe(self) -> str:
+        """`model`'s forecasts at `horizon` in `path`, for a table's rule column."""
+        return f"forecasts of {self.model} (horizon {self.horizon}) in {self.path}"
+
+
+def chained_sources(sources: Iterable[Any]) -> Dict[str, ChainedInput]:
+    """Column -> its `ChainedInput`, for the `ForecastSource`s among `sources`."""
+    from .data.sources.forecast import ForecastSource
+
+    out: Dict[str, ChainedInput] = {}
+    for source in sources:
+        if isinstance(source, ForecastSource):
+            out[source.column] = source.chained_input()
+    return out
 
 
 _PSE_ZONE = "Europe/Warsaw"
@@ -1217,16 +1278,36 @@ class InformationSet:
         self.use_defaults = use_defaults
         self._source_rules: Dict[str, Rule] = {}
         self._source_zones: Dict[str, str] = {}
+        self._chained: Dict[str, ChainedInput] = {}
 
     # -- configuration --------------------------------------------------------
 
     def with_source_rules(self, sources: Iterable[Any]) -> "InformationSet":
-        """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables)."""
+        """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables), and, of a `ForecastSource`,
+        its upstream (`chained_inputs`)."""
         sources = list(sources)
         out = self.copy()
         out._source_rules = {**self._source_rules, **{k: _as_rule(v) for k, v in source_rules(sources).items()}}
         out._source_zones = {**self._source_zones, **_source_market_zones(sources)}
+        out._chained = {**self._chained, **chained_sources(sources)}
         return out
+
+    def chained_inputs(self) -> Dict[str, ChainedInput]:
+        """Column -> its upstream, for each column read from another pipeline's stored forecasts (`ForecastSource`), as
+        `with_source_rules` found them."""
+        return dict(self._chained)
+
+    def chained_of(self, name: str) -> Optional[ChainedInput]:
+        """The upstream of the chained column a predictor name reads (`solar_fc_d+1`, `solar_fc_h05_d-1`,
+        `solar_fc_day_max`), through its shifts and what it was built from; None for any other column."""
+        if not self._chained:
+            return None
+        chain = parse_predictor(name)
+        for candidate, _ in chain:
+            if candidate in self._chained:
+                return self._chained[candidate]
+        built = _built_from_name(chain[-1][0])
+        return None if built is None else self.chained_of(built)
 
     def copy(self) -> "InformationSet":
         out = InformationSet(
@@ -1239,6 +1320,7 @@ class InformationSet:
         )
         out._source_rules = dict(self._source_rules)
         out._source_zones = dict(self._source_zones)
+        out._chained = dict(self._chained)
         return out
 
     def in_data_zone(self, index: pd.DatetimeIndex) -> "InformationSet":

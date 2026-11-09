@@ -52,6 +52,7 @@ COMPONENT_REGISTRY = {
         "EpftoolboxBenchmarkSource": "epftoolbox2.data.sources.benchmark",
         "PseSource": "epftoolbox2.data.sources.pse",
         "EnergyChartsSource": "epftoolbox2.data.sources.energy_charts",
+        "ForecastSource": "epftoolbox2.data.sources.forecast",
     },
     "transformers": {
         "TimezoneTransformer": "epftoolbox2.data.transformers.timezone",
@@ -776,6 +777,11 @@ def _component_fingerprint(component: Any) -> Dict[str, Any]:
         fingerprint["market_timezone"] = market_timezone
     if isinstance(component, DataSource):
         fingerprint["cache_config"] = _fingerprint_value(component.get_cache_config())
+        # What a source reads that its parameters don't say (`DataSource.content_digest`): another pipeline's results, say.
+        # No key for a source that has none, so every other fingerprint is what it was.
+        content = component.content_digest()
+        if content is not None:
+            fingerprint["content"] = content
     return fingerprint
 
 

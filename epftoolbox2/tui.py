@@ -609,6 +609,43 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "ForecastSource": [
+        {
+            "name": "path",
+            "description": "The upstream run's save_dir (its results and manifests)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "model",
+            "description": "The upstream model's (or ensemble's) name",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "column",
+            "description": "Name of the column it emits (lag it like any other: <column>_d+1)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "horizon",
+            "description": "Which upstream horizon to read (days between issue day and target day)",
+            "required": False,
+            "default": 1,
+            "kind": "int",
+        },
+        {
+            "name": "available",
+            "description": "A later time its forecasts are known at (HH:MM, upstream issue zone); blank = its issue time",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+    ],
     "EnergyChartsSource": [
         {
             "name": "country",
@@ -2162,6 +2199,7 @@ _SOURCES = [
     "EpftoolboxBenchmarkSource",
     "PseSource",
     "EnergyChartsSource",
+    "ForecastSource",
 ]
 _TRANSFORMERS = [
     "TimezoneTransformer",
