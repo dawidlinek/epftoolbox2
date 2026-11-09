@@ -372,6 +372,16 @@ def test_a_score_counts_every_planned_key_but_those_with_no_row():
     )
 
 
+def test_a_score_leaves_out_the_targets_after_through():
+    """A forecast for a day after the validation end is made and counted, never scored: its actual is the test period's."""
+    records = [
+        {"target_date": "2023-04-02", "prediction": 1.0, "actual": 2.0},
+        {"target_date": "2023-04-03", "prediction": 1.0, "actual": 1e6},
+    ]
+    assert bayes.score_ref(FakeReport(records, 2), "m", through="2023-04-02") == bayes._Score(1.0, 1, 2, None)
+    assert bayes.score_ref(FakeReport(records, 2), "m").mae > 1e5
+
+
 def test_a_score_is_the_same_whatever_order_the_pool_finished_in():
     rng = np.random.default_rng(1)
     records = [{"prediction": float(p), "actual": float(a)} for p, a in rng.normal(50, 30, (2000, 2))]
