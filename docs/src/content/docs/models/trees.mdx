@@ -1,0 +1,208 @@
+---
+title: Gradient-Boosted Trees
+description: LightGBMModel, XGBoostModel and CatBoostModel, gradient-boosted trees pooled over the periods of a day or fitted per period, each package an extra of its own; threads, devices and versions recorded and compared on resume; also as ResidualModel learners
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`LightGBMModel`, `XGBoostModel` and `CatBoostModel` fit gradient-boosted trees of
+[LightGBM](https://lightgbm.readthedocs.io/), [XGBoost](https://xgboost.readthedocs.io/) and
+[CatBoost](https://catboost.ai/) on the refit calendar. By default one tree model is fitted per horizon and refit day over the
+pooled (date, period) rows of every period of the day, the research's "global" rows; `periods="each"` fits one per period, as
+the linear models do. The rows, targets and calendar are those of [`HistGBModel`](/epftoolbox2/models/residual/#histgbmodel)
+(scikit-learn's histogram gradient boosting); only the package differs.
+
+On LEAR-style hourly inputs plain boosting is not a strong model: on the research's recent DE_LU and AT years the LightGBM global
+model (squared error, 728-day window, refitted daily) had a test MAE of 22.89 and 18.91 EUR/MWh, 6 to 10 % worse than LEAR's window
+average (20.89, 17.78). Absolute error with an expanding window, the defaults here, was better on the test year in 5 of 5 settings:
+21.55 and 18.37 refitted daily, 21.85 and 18.56 refitted every 7 days (the library's weekly refits fall on Mondays of a fixed
+calendar, not on the research's 7-day cadence from the test start, so expect differences of about that size). Trees do best as
+the learner of a [`ResidualModel`](/epftoolbox2/models/residual/), correcting a linear base's forecasts.
+
+## Installing
+
+Each package is an extra of its own, imported when a model first fits: the classes import, save to YAML and load without it, and
+a run's pre-flight names a missing one before any model fits.
+
+```bash
+pip install 'epftoolbox2[lightgbm]'    # LightGBMModel
+pip install 'epftoolbox2[xgboost]'     # XGBoostModel
+pip install 'epftoolbox2[catboost]'    # CatBoostModel
+pip install 'epftoolbox2[gbm]'         # LightGBM and XGBoost
+```
+
+- **LightGBM** (MIT) and **XGBoost** (Apache-2.0) install on Python 3.11 to 3.15, free-threaded 3.14t included. XGBoost's releases
+  from 3.3 need Python 3.12 (3.11 gets 3.2), and its Linux wheel pulls NVIDIA's NCCL (about 300 MB), which only multi-GPU training
+  uses. For the CPU, `pip install epftoolbox2 xgboost-cpu` instead of the extra installs XGBoost's CPU-only build (Linux and
+  Windows, Python 3.12+, no NCCL, no `device="cuda"`): it provides the same `xgboost` module, but **its forecasts differ** from
+  the full build's at the same version (its column sampling does: at `colsample_bytree=0.5` every one of 4,000 forecasts of a
+  synthetic problem with a target of about unit scale moved, by up to 1.39), so pick one build per study. The manifest records it as `xgboost: "3.4.1 (xgboost-cpu)"`, so a
+  resume across builds refuses, and with both installed (one overwrote the other's module) the pre-flight refuses.
+- **CatBoost** (Apache-2.0) has no wheels for Python 3.15 or for free-threaded builds (3.14t). On 3.15 the extra installs
+  nothing; on 3.14t pip tries to build CatBoost from source, which fails (no dependency marker tells a free-threaded build from
+  3.14). Use a 3.11 to 3.14 build with the GIL for `CatBoostModel`; elsewhere its pre-flight says so.
+
+## Basic Usage
+
+```python
+from epftoolbox2.models import CatBoostModel, LightGBMModel, XGBoostModel
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.presets import tree_predictors
+
+inputs = tree_predictors(["load_forecast"])  # LEAR's inputs, the period, the period's own price and load lags: 183 names
+
+pipeline = (
+    ModelPipeline(issue_time="11:45")
+    .add_model(LightGBMModel(inputs, name="lgbm"))  # L1, expanding, refitted weekly on Mondays
+    .add_model(XGBoostModel(inputs, name="xgb"))
+    .add_model(CatBoostModel(inputs, name="catboost"))
+)
+report = pipeline.run(df, test=("2025-10-01", "2026-09-30"), horizon=1, save_dir="runs/trees")
+```
+
+With `periods="pooled"` each predictor is read on the row's own period (`price_d-1` is that period's price, `price_h05_d-1` the
+date's 05:00 price), so one list serves every period, and `"period"` (0 to 23 hourly) is a feature where the list names it.
+[`presets.tree_predictors`](/epftoolbox2/model-pipeline/presets/) gives the research's rows; see
+[Day and pooled units](/epftoolbox2/reference/extending/#day-and-pooled-units) for how a pooled fit's rows are built.
+
+## Parameters
+
+Every class takes, in this order, `predictors`, `training_window`, `refit`, `periods` and `objective`, then its package's own
+settings, then `random_state`, `threads` (and XGBoost's `device`) and `name`; `scaler`, `newest_target`, `binary_mask`,
+`normalise_by`, `bounds` and `zero_when` are keyword-only.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `predictors` | list | Required | Full names, `{horizon}` allowed, saved verbatim. A ResidualModel learner's list may name the base's forecasts |
+| `training_window` | int or `"expanding"` | `"expanding"` | Days of rows, or every row from the frame's first date (validation picked the wrong window for LightGBM in 15 of 16 cases) |
+| `refit` | str | `"7D"` | The refit calendar: `"7D"` on Mondays, `"1D"` every day, `"1MS"` monthly. A pooled fit needs one |
+| `periods` | str | `"pooled"` | `"pooled"`: one fit over the (date, period) rows of every period, each period's target through its own Invariant; `"each"`: one fit per period. Fixed once the model is made |
+| `objective` | str | `"l1"` | `"l1"` (absolute error) or `"l2"` (squared error): LightGBM's `l1`/`l2`, XGBoost's `reg:absoluteerror`/`reg:squarederror`, CatBoost's `MAE`/`RMSE` |
+| `random_state` | int | `0` | The seed of every fit (row and column samples), the same in each, so a forecast doesn't depend on which other fits a run makes |
+| `threads` | int | `1` | OpenMP threads (CatBoost's `thread_count`) of one fit; more than one is refused where workers fork (Linux, macOS); recorded and compared on resume (see [Threads](#threads-and-determinism)) |
+| `scaler` | scaler spec | `INVARIANT_TARGET` | Keyword-only. The predictors as they are (a tree splits on order) and the target as epftoolbox's Invariant; a pooled fit gives each period's target its own Invariant whatever this says |
+| `newest_target`, `binary_mask` | | `"d-1"`, `None` | Keyword-only, as for every model ([Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/)) |
+| `normalise_by`, `bounds`, `zero_when` | | `None` | Keyword-only. A per-row target, as for every model, with either `periods`: a pooled fit divides each row's target by its own period row's scale ([Generation targets](/epftoolbox2/models/common-parameters/#generation-targets)). Not on a `ResidualModel`'s learner in this step |
+
+`LightGBMModel` (`name="lgbm"`), LightGBM's
+[`LGBMRegressor`](https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMRegressor.html) with `deterministic=True` and
+`force_row_wise=True` on every fit:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `n_estimators` | `500` | Boosting rounds |
+| `learning_rate` | `0.05` | Learning rate |
+| `num_leaves` | `31` | Leaves per tree |
+| `min_child_samples` | `20` | Rows per leaf at least |
+| `subsample`, `subsample_freq` | `0.8`, `1` | The share of the rows each tree samples, every `subsample_freq` trees |
+| `colsample_bytree` | `0.5` | The share of the predictors each tree samples |
+| `reg_lambda` | `1.0` | L2 penalty of the leaf values |
+
+`XGBoostModel` (`name="xgb"`), XGBoost's
+[`XGBRegressor`](https://xgboost.readthedocs.io/en/stable/python/python_api.html#xgboost.XGBRegressor) with `tree_method="hist"`:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `n_estimators` | `500` | Boosting rounds |
+| `learning_rate` | `0.05` | Learning rate |
+| `max_depth` | `6` | Depth of a tree at most |
+| `subsample` | `0.8` | The share of the rows each tree samples |
+| `colsample_bytree` | `0.5` | The share of the predictors each tree samples |
+| `min_child_weight` | `5.0` | Hessian weight per leaf at least |
+| `reg_lambda` | `1.0` | L2 penalty of the leaf values |
+| `device` | `"cpu"` | `"cpu"`, or a CUDA GPU: `"cuda"`, `"cuda:1"`. CPU and GPU forecasts differ (3.849 against 3.878 MAE on Lago's DE in the research), so the device (with the GPU's index) is compared on resume and the GPU's model name recorded; a GPU fit that XGBoost moves to the CPU stops the run; on a GPU a run takes one process unless `MAX_PROCESSES` says otherwise. The library's checks ran on the CPU |
+
+`CatBoostModel` (`name="catboost"`), CatBoost's
+[`CatBoostRegressor`](https://catboost.ai/docs/en/concepts/python-reference_catboostregressor), silent and writing no files
+(`allow_writing_files=False`):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `iterations` | `1000` | Boosting rounds |
+| `learning_rate` | `0.05` | Learning rate |
+| `depth` | `8` | Depth of a (symmetric) tree |
+| `l2_leaf_reg` | `5.0` | L2 penalty of the leaf values |
+
+The defaults are the research's (`zoo_classic`'s `ztree.py`). Records are those of every model: one per (period, horizon, run
+date), `coefficients` `[]`.
+
+## Threads and determinism
+
+A fit and its predictions run on `threads` OpenMP threads, one by default: the scope is set around the fit alone and put back
+after it, and the count is given to the package (`n_jobs`, `thread_count`). Each task of a run's pool otherwise holds OpenMP at
+one thread, which XGBoost would keep to whatever `n_jobs` says. One thread a fit is also the fast way: a run starts one process
+per usable CPU (`MAX_PROCESSES`), each fitting its own units.
+
+`threads > 1` is refused before any fit (`ValueError`) wherever the library forks its workers, which is every run on Linux and
+macOS, `MAX_PROCESSES=1` included: GNU OpenMP can't run a parallel region on several threads in a forked child of a process that
+ran one (see the caution below). It runs where workers are spawned (Windows), with as many processes as the usable CPUs hold fits
+of `threads` threads (`THREADS_PER_PROCESS` counted too) unless `MAX_PROCESSES` says otherwise; XGBoost on a GPU takes one
+process.
+
+The seed is the same in every fit and LightGBM runs deterministic and row-wise, so with a fixed thread count a forecast is the
+same bits alone, in a loop of other models, across `models_per_task` shards, after a resume, in one worker or twelve, and in the
+process that runs the pipeline or in a forked worker; `engine="on"` runs them on their own path. The manifest's `runtime`
+records the package's version and `threads_per_fit` (and XGBoost's `device` type, with the GPU's model name as `device_name`), and
+a resume with another version, thread count or device refuses (`ManifestMismatchError`, naming `model_params`, where `threads`
+and `device` are too, the GPU's index included, and the `runtime` entry; `allow_manifest_mismatch=True` overrides): a release
+moves a tree's numbers, and CPU and GPU forecasts differ. Another GPU model only warns (`runtime.device_name`), as for the
+neural networks. On the research's DE_LU rows the three packages gave the same bits at 8 threads as at one (408 forecasts each),
+and on Lago's DE rows LightGBM at 1, 4 and 16 threads and XGBoost at 1 and 16.
+
+A package's own error (`XGBoostError`, `LightGBMError`, `CatBoostError`: settings it refuses, a GPU out of memory or without
+kernels for its architecture) stops the run with a `RuntimeError`, never a `fit_error` skip that would leave windows without
+forecasts. Training data that is only degenerate is no error: where CatBoost refuses a target with no spread (a night period of a
+generation target with `periods="each"`, all 0), inputs with none or a single row, `CatBoostModel` predicts the target's value,
+or the median (`l1`) or mean (`l2`) of the targets, as LightGBM and XGBoost fit such data themselves. Asked for a GPU, an XGBoost fit that XGBoost moved to the CPU (no visible GPU, a build without CUDA) stops the run too,
+so a manifest never says `cuda` for CPU forecasts.
+
+<Aside type="caution">
+  GNU OpenMP can't run a parallel region on several threads in a forked child of a process that ran one: the child hangs. Any
+  OpenMP code on several threads in the process that runs a pipeline sets it up: scikit-learn's `HistGradientBoostingRegressor`
+  (which ships the same OpenMP runtime as XGBoost), XGBoost (even at `n_jobs=1`, unless OpenMP is held at one thread) or LightGBM,
+  fitted in your notebook or script before the run. That is why `threads > 1` is refused where workers fork; with one thread a
+  fit forms no team and nothing hangs. CatBoost runs its own thread pool, which forks safely.
+</Aside>
+
+## As ResidualModel learners
+
+Each class is a learner of [`ResidualModel`](/epftoolbox2/models/residual/), with the base's forecasts in its list:
+
+```python
+from epftoolbox2.models import LEARModel, LightGBMModel, ResidualModel
+from epftoolbox2.presets import lear_predictors, tree_predictors
+
+base = LEARModel(lear_predictors(["load_forecast"]), training_window=728, binary_mask="fit", name="lear")
+base_forecasts = [f"base_fc_h{h:02d}_d+{{horizon}}" for h in range(24)] + ["base_fc_d+{horizon}"]
+hybrid = ResidualModel(base, LightGBMModel(tree_predictors(["load_forecast"]) + base_forecasts), warmup="2024-10-01",
+                       name="lear_lgbm")
+```
+
+The residual model's card, runtime and pre-flight are its learner's, and its learner stage runs with the learner's processes
+(fewer for `threads > 1`). The research's hybrid used scikit-learn's HGB (`learhgb`); a LightGBM learner was not measured there.
+
+## Card and provenance
+
+`model.card` (licence MIT for LightGBM, Apache-2.0 for XGBoost and CatBoost, trained on the run's data, so `clean` in every window)
+is in the manifest and in `report.provenance()`, with the package's version; see
+[Licences and Weights](/epftoolbox2/models/licences-and-weights/).
+
+## Reproducing the research's LightGBM global
+
+`lgbm_global` of the research (`recent`: `gbm.py --mode global --window 728 --recal 1 --target asinh --obj l2`, lightgbm 4.7.0,
+DE_LU and AT HONEST, validation 2024-10-02 to 2025-09-30 and test 2025-10-01 to 2026-09-30) was checked outside CI
+(`epftoolbox2-research/library_check_step6/gbm/`) with
+`LightGBMModel(tree_predictors(["load_forecast"]), training_window=728, refit="1D", objective="l2")`:
+
+- **On the research's rows** (B1): the research's frame (`presets.tree_predictors(["load_forecast"])`, 183 inputs in the
+  research's column order) and 8 refits per market over both years, each issue day run on its own: every forecast equals the
+  research script's `fit_block` rerun on lightgbm 4.7.0 to the bit (192 of 192 per market), and the stored forecasts within their
+  CSV rounding (5e-5).
+- **Over the two years** (B2), 728 daily fits per market: validation and test MAE 19.6726 and 22.8881 (DE_LU), 17.3634 and
+  18.9094 (AT), the research's own to 15 significant digits (the step-6 table's 22.89 and 18.91), every one of the 8,736 and
+  8,760 forecasts made and within the CSV rounding.
+- **Cost**: the 728 daily fits of 17,472 rows took 1.7 (DE_LU) and 1.5 (AT) core-hours, about 3 minutes on 32 processes of a shared
+  128-core machine. On the research's speed problem (Lago's DE, the 4-year window: 34,752 rows of 258 inputs, squared error) a
+  pooled LightGBM fit took 15.7, 6.0 and 5.4 s at 1, 4 and 16 threads there, the research script's own estimator 15.4, 5.8 and
+  5.3 s on the same machine (the research measured 3.78 and 3.05 s at 4 and 16 threads on another); XGBoost 25.7 and 4.7 s at 1
+  and 16 threads, CatBoost (1,000 trees of depth 8) 206 and 22 s.

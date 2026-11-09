@@ -12,6 +12,9 @@ from typing import Dict, List, Optional, Tuple
 EXTRAS: Dict[str, Tuple[str, ...]] = {
     "fast": ("numba",),
     "torch": ("torch",),
+    "lightgbm": ("lightgbm",),
+    "xgboost": ("xgboost",),
+    "catboost": ("catboost",),
 }
 
 

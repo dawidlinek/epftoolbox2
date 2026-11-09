@@ -10,9 +10,11 @@ from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.ensembles import AverageEnsemble
 from epftoolbox2.models import (
+    CatBoostModel,
     HistGBModel,
     LassoCVModel,
     LEARModel,
+    LightGBMModel,
     MLPDailyModel,
     MLPHourlyModel,
     NaiveModel,
@@ -21,6 +23,7 @@ from epftoolbox2.models import (
     ResidualModel,
     RidgeModel,
     TorchModel,
+    XGBoostModel,
 )
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.evaluators import (
@@ -820,6 +823,39 @@ class TestModelPipelineParameterFidelity:
                     max_features=0.8,
                     random_state=3,
                     name="H",
+                ),
+                # The trees build, save and load without their packages (imported by the first fit).
+                LightGBMModel(
+                    ["price_d-1", "period"],
+                    training_window=56,
+                    refit="1D",
+                    objective="l2",
+                    n_estimators=99,
+                    learning_rate=0.1,
+                    num_leaves=15,
+                    min_child_samples=7,
+                    subsample=0.7,
+                    subsample_freq=2,
+                    colsample_bytree=0.8,
+                    reg_lambda=0.5,
+                    random_state=3,
+                    threads=2,
+                    name="LG",
+                ),
+                XGBoostModel(
+                    ["price_d-1"],
+                    periods="each",
+                    n_estimators=50,
+                    max_depth=4,
+                    subsample=0.9,
+                    colsample_bytree=0.7,
+                    min_child_weight=2.0,
+                    reg_lambda=3.0,
+                    device="cuda:1",
+                    name="XG",
+                ),
+                CatBoostModel(
+                    ["price_d-1", "period"], iterations=200, depth=6, l2_leaf_reg=3.0, random_state=5, name="CB"
                 ),
                 # A base by name, and a base and learner nested in it.
                 ResidualModel(

@@ -95,12 +95,12 @@ def tree_predictors(
     freq: str = "1h",
     calendar_prefix: str = "",
 ) -> list[str]:
-    """Inputs of a tree pooled over the periods of a day (`HistGBModel(periods="pooled")`), the research's "global" rows
-    (`zoo_classic`'s `ztree.py`): every name of `lear_predictors` (the day's slot prices, slot values of each exogenous series and
-    weekday dummies, the same on every row of a date), then `"period"` (the row's period, 0 to P-1), then the row's own period
-    of the same blocks: the price of d-1, d-2, d-3 and d-7 (`price`, `price_d-1`, `price_d-2`, `price_d-6`) and each exogenous
-    series for d, d-1 and d-7 (`x_d+{horizon}`, `x`, `x_d-6`). With hourly data and one exogenous series that is
-    175 + 1 + 7 = 183 inputs, in the research's column order.
+    """Inputs of a tree pooled over the periods of a day (`periods="pooled"`: `HistGBModel`, `LightGBMModel`, `XGBoostModel`,
+    `CatBoostModel`), the research's "global" rows (`zoo_classic`'s `ztree.py`): every name of `lear_predictors` (the day's
+    slot prices, slot values of each exogenous series and weekday dummies, the same on every row of a date), then `"period"`
+    (the row's period, 0 to P-1), then the row's own period of the same blocks: the price of d-1, d-2, d-3 and d-7 (`price`,
+    `price_d-1`, `price_d-2`, `price_d-6`) and each exogenous series for d, d-1 and d-7 (`x_d+{horizon}`, `x`, `x_d-6`). With
+    hourly data and one exogenous series that is 175 + 1 + 7 = 183 inputs, in the research's column order.
 
     A `ResidualModel` learner adds its base's forecasts after them: `[f"base_fc_h{h:02d}_d+{{horizon}}" for h in range(24)]`
     (the target day's, day-level) and `"base_fc_d+{horizon}"` (the row's own period), as the research's rows have them.

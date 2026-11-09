@@ -10,6 +10,7 @@ from .pooled import PooledModel
 from .torch_model import TorchModel
 from .mlp import MLPDailyModel, MLPHourlyModel
 from .hgb import HistGBModel
+from .gbm import CatBoostModel, LightGBMModel, XGBoostModel
 from .residual import ResidualModel
 
 __all__ = [
@@ -24,6 +25,9 @@ __all__ = [
     "MLPHourlyModel",
     "MLPDailyModel",
     "HistGBModel",
+    "LightGBMModel",
+    "XGBoostModel",
+    "CatBoostModel",
     "ResidualModel",
     "PredictorContext",
     "PredictorPlan",
