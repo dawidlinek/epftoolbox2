@@ -11,6 +11,10 @@ Fast and offline (part of CI). Every ```python block in README.md and docs/src/c
 The class stubs in reference/api.md are not code to run: they are checked against the real signatures instead
 (every real parameter documented, in the real order, with the real literal defaults).
 
+An epftoolbox2 import that raises MissingExtraError for an extra this environment lacks (`epftoolbox2.nets` without torch) is
+not a problem of the block: its names stay unresolved and its calls unchecked here, and the CI job that installs the extra
+(`torch-extra`) checks them.
+
 A block that is deliberately not runnable Python opts out with a meta string on its fence, which Starlight ignores
 when it renders the block:
 

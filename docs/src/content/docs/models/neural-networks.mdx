@@ -48,21 +48,26 @@ out = net(torch.zeros(64, 247))  # (64, 24)
 
 | Class | Parameters | What it is |
 |---|---|---|
-| `MLP` | `n_inputs`, `n_outputs`, `hidden=(256, 128)`, `dropout=0.0`, `activation="relu"` | For each hidden width a `Linear`, the activation and, when `dropout` > 0, a `Dropout`; then a `Linear` to the outputs. With an output per period of the day it is the Lago-style DNN. `activation` is one of `relu`, `gelu`, `tanh`, `sigmoid`, `softplus`, `elu`, `selu`, `silu`, `leaky_relu` |
+| `MLP` | `n_inputs`, `n_outputs`, `hidden=(256, 128)`, `dropout=0.0`, `activation="relu"` | For each hidden width a `Linear`, an `Activation` and, when `dropout` > 0, a `Dropout`; then a `Linear` to the outputs. With an output per period of the day it is the Lago-style DNN |
+| `Activation` | `name="relu"` | An elementwise activation by name, as `torch.nn`'s module of that name computes it: `relu`, `gelu`, `tanh`, `sigmoid`, `softplus`, `elu`, `selu`, `silu`, `leaky_relu` |
 | `Dropout` | `p=0.1` | Dropout whose mask is a hash of the member's key, the training step, the layer's number and the element: no draw from torch's generator. Identity in eval mode |
 | `Linear` | `in_features`, `out_features` | `x @ weight + bias`, `weight` of shape (in, out), its initial values drawn from the member's key (uniform in ±1/√in, `torch.nn.Linear`'s distribution) |
 
-`Dropout` and `Linear` exist for stacking. The trainer can train the members of a fit (seeds, learning rates) one after another
-or together as one stack (`torch.func.vmap`) padded to a fixed size; in a stack, `torch.nn.Dropout` draws one mask for the whole
-stack, so a member's mask would depend on its place in it, and the trainer refuses it there (and batch norm, which updates
-running statistics in place). `Linear` makes the stacked products the same in any slot and gives each member weights that depend
-on its key alone. Outside the trainer a `Dropout` repeats its mask until its `step` buffer changes (`layer.step.fill_(k)`).
+`Dropout`, `Linear` and `Activation` exist for stacking. The trainer can train the members of a fit (seeds, learning rates) one
+after another or together as one stack (`torch.func.vmap`) padded to a fixed size; in a stack, `torch.nn.Dropout` draws one mask
+for the whole stack, so a member's mask would depend on its place in it, and the trainer refuses it there (and batch norm, which
+updates running statistics in place). `Linear` makes the stacked products the same in any slot and gives each member weights
+that depend on its key alone. `Activation` does the same for an activation on a CPU: over a whole stack, a vectorised kernel
+computes the elements at the tensor's end, which belong to the last member, another way, and `sigmoid`, `silu`, `elu` or
+`softplus` give that member other last bits. Outside the trainer a `Dropout` repeats its mask until its `step` buffer changes
+(`layer.step.fill_(k)`).
 
 ### A network of your own
 
 A network is any `torch.nn.Module` with `__init__(n_inputs, n_outputs, **params)` and `forward(x)`, `x` of shape (batch,
 n_inputs) to (batch, n_outputs). It sees scaled inputs and returns outputs in the scaled target space; it never sees dates, rows
-or targets. Use the layers of `epftoolbox2.nets` where you want dropout in a stack:
+or targets. Use the layers of `epftoolbox2.nets` where you want dropout in a stack, and `nets.Activation` for an activation other
+than `relu` (`torch.relu`, sums and products give every element the same bits however a kernel takes them):
 
 ```python
 import torch
@@ -93,17 +98,23 @@ loop any layer works, `torch.nn.Dropout` and batch norm included.
   to: period, horizon, refit date, seed number): its early-stopping days, the order of its rows in each epoch, its initial
   weights and its dropout masks. They don't depend on the model's name, on the other members or on the process.
 - **Early stopping** holds out a random share of the member's own training days (`early_stopping=0.2`), never a day outside its
-  training window and never the validation period; the best weights on them are restored.
+  training window and never the validation period; the best weights on them are restored. A member whose loss on them is never
+  finite (it diverged from the start) has no trained weights to restore: it counts as failed and forecasts nothing, rather
+  than forecasting from its untrained ones.
 - **Fixed shapes.** The steps of an epoch come from the rows of a full training window (a member with fewer rows wraps around its
   own order), the early-stopping rows are padded to their count in a full window, and a stack is padded to a fixed size with
   dummy members. Then a member is bitwise the same alone, in a stack of 16 or 256, in any order and with other learning rates in
-  the stack. Unpadded stacks moved forecasts by up to 7.3 EUR/MWh in the research.
+  the stack, for a network made of `epftoolbox2.nets` layers and operations exact in every element (sums, products,
+  `torch.relu`). Unpadded stacks moved forecasts by up to 7.3 EUR/MWh in the research.
 - **Loop or stack.** `stack="auto"` trains one member after another on a CPU (a pool of single-thread fits is the fast way there)
   and padded stacks on a GPU. The two do different arithmetic, so the choice is part of a model's configuration.
 - **Threads change numbers.** A product's last bits depend on how many threads compute it, so the same loop on 1 and 8 threads gave
-  forecasts up to 8.5 EUR/MWh apart. Each worker process pins torch's threads when it starts (setting `OMP_NUM_THREADS` after the
-  fork is too late), and the thread count per fit is recorded in the manifest; a resume with another count is refused. A stack on
-  the CPU runs on one thread, so it is the same at any count.
+  forecasts up to 8.5 EUR/MWh apart. Each worker process pins torch's threads when it starts, its OpenMP threads and the MKL
+  torch bundles alike (setting `OMP_NUM_THREADS` after the fork is too late, and a worker would keep its parent's count), and the
+  thread count per fit is recorded in the manifest; a resume with another count is refused. Where the pool forks its workers
+  (Linux and macOS) torch runs on one thread per worker, and more is refused: GNU OpenMP in a forked process hangs once its
+  parent has run parallel torch work. Use more processes (`MAX_PROCESSES`) instead, the fast way on a CPU anyway. A stack on the
+  CPU runs on one thread, so it is the same at any count.
 - **TF32 off by default, scoped.** TF32 matrix products are faster on recent GPUs and change the numbers (by up to 0.07 EUR/MWh
   for a foundation model in the research). The library turns it off for each fit unless the model sets `tf32=True`, and puts back
   the flags (`torch.backends.cuda.matmul.allow_tf32`, `torch.backends.cudnn.allow_tf32`, `torch.set_float32_matmul_precision`) and
@@ -113,9 +124,11 @@ loop any layer works, `torch.nn.Dropout` and batch norm included.
 
 `device="auto"` uses the GPU when a 1×1 matrix product runs on it, and the CPU otherwise: a GPU torch has no kernels for fails
 that product ("no kernel image is available") and the fit runs on the CPU. The check runs in a short-lived subprocess, so the
-process that starts the worker pool never initialises CUDA and its forked workers can still use the GPU. The device type, dtype,
-`tf32`, the thread count, the stack and its size are recorded in the manifest and compared on resume; on a GPU, bits are not known
-to hold across GPU models.
+process that starts the worker pool never initialises CUDA and its forked workers can still use the GPU. torch's version, the
+device type, dtype, `tf32`, the thread count, the stack and its size are recorded in the manifest and compared on resume, and on
+a CPU the kernels torch runs (`torch.backends.cpu.get_cpu_capability()`, such as `AVX512` or `AVX2`: torch picks the best the
+machine has, and AVX2 against the generic kernels moved a forecast by 1e-6), so a resume on another kind of CPU is refused too.
+On a GPU, bits are not known to hold across GPU models.
 
 <Aside type="note">
 The trainer is a port of the research's stacked trainer, and on the research's own inputs (the DE benchmark, LEAR features,

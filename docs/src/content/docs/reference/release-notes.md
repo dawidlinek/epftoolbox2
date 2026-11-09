@@ -198,11 +198,12 @@ an issue day it didn't sample.
 
 - **The `[torch]` extra and `epftoolbox2.nets`.** `pip install 'epftoolbox2[torch]'` installs torch (`uv.lock` takes it from
   PyTorch's CPU index); `epftoolbox2.nets` has `MLP(n_inputs, n_outputs, hidden=(256, 128), dropout=0.0, activation="relu")`, a
-  counter-based `Dropout(p)` (its mask a hash of the member's key, the step, the layer and the element) and `Linear(in_features,
-  out_features)`, the layers the neural-network families to come stack. Their trainer is in place: members of a fit in a loop or
-  in padded stacks, each member's numbers its own (alone, in a stack of any size or order, with other learning rates), early
-  stopping on a random share of the member's own training days with the best weights restored, TF32 off and torch's threads set
-  for each fit and put back after it, torch's threads pinned in each worker process. Nothing of the core imports torch, and no
+  counter-based `Dropout(p)` (its mask a hash of the member's key, the step, the layer and the element), `Linear(in_features,
+  out_features)` and `Activation(name)`, the layers the neural-network families to come stack. Their trainer is in place: members
+  of a fit in a loop or in padded stacks, each member's numbers its own (alone, in a stack of any size or order, with other
+  learning rates), early stopping on a random share of the member's own training days with the best weights restored (a member
+  that never had a finite loss there counts as failed), TF32 off and torch's threads set for each fit and put back after it,
+  torch's threads (and its bundled MKL's) pinned in each worker process, one per worker where the pool forks. Nothing of the core imports torch, and no
   record, manifest or table of a core model moves. See [Neural Networks](/epftoolbox2/models/neural-networks/).
 - **`verify` checks determinism and what else is in a forecast's call.** `ModelPipeline.verify(..., rerun=None, co_batch=None,
   device=None)`: the rerun runs each sampled issue day twice first, each run from other seeds of the global generators, and a
