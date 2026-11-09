@@ -838,6 +838,10 @@ def test_a_torch_day_model_refuses_them_and_a_period_one_is_its_run_on_y_over_c(
     with pytest.raises(ValueError, match="takes no per-row target"):
         period.output = "day"
     assert period.output == "period"
+    day = TorchModel("epftoolbox2.nets:MLP", predictors=["load_d+{horizon}"], output="day")
+    with pytest.raises(ValueError, match="takes no per-row target"):
+        day.normalise_by = SCALE
+    assert day.normalise_by is None
     pytest.importorskip("torch")
     D = "2023-04-10"
 
