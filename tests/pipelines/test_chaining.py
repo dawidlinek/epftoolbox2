@@ -313,7 +313,9 @@ def test_coverage_counts_the_periods_whose_lists_read_the_column(shared, tmp_pat
     with pytest.warns(UserWarning, match="have no value of load_fc"):
         every_hour.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "every"))
     found = json.loads((tmp_path / "every" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc"]
-    expected, _ = independent_count(data, "load_fc_d+1", "2023-03-05", "2023-04-12")  # the night rows, but 02:00 of 03-25
+    expected, _ = independent_count(
+        data, "load_fc_d+1", "2023-03-05", "2023-04-12"
+    )  # the night rows, but 02:00 of 03-25
     assert found["coverage"]["load_fc_d+1"]["uncovered"] == expected == 39 * 9 - 2  # and no 02:00 on 03-26
 
 
