@@ -1957,10 +1957,17 @@ class BaseModel(ABC):
         reads (`_used_predictors`: the manifest hashes them, `report.vintages()` lists them, `verify` perturbs them), and with
         an information set a series late on an issue day of the run (a known-ahead one not known through the target day, a past
         one not as far as the target's context) is refused at availability "raise" and listed at "warn", one row per series
-        (`results.availability.history_rows`), from the accessor's cuts alone. Nothing for any other model."""
+        (`results.availability.history_rows`), from the accessor's cuts alone. A spec whose `newest_target` isn't the model's
+        is refused: `verify` holds the model to its own. Nothing for any other model."""
         spec = history_spec_of(self, target)
         if spec is None:
             return
+        if spec.newest_target != self.newest_target:
+            raise ValueError(
+                f"{self.name}: its history is cut with newest_target={spec.newest_target!r} and the model has "
+                f"newest_target={self.newest_target!r}: `verify` holds it to the model's, so `_history_spec` must give the "
+                "model's newest_target"
+            )
         self._used_predictors = list(dict.fromkeys([*self._used_predictors, *spec.past, *spec.known_ahead]))
         if information_set is None or availability == "none" or test_start is None or test_end is None:
             return
