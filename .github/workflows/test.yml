@@ -128,8 +128,8 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
-    - name: Install dependencies with the torch extra
-      run: uv sync --locked --extra dev --extra torch
+    - name: Install dependencies with the torch extra (and tune, for the search's torch test)
+      run: uv sync --locked --extra dev --extra torch --extra tune
 
     - name: Check that torch imports and is the CPU build (the torch tests would skip without it)
       run: uv run python -c "import torch; print('torch', torch.__version__); assert not torch.backends.cuda.is_built()"
@@ -176,8 +176,8 @@ jobs:
   tune-extra:
     # The [tune] extra (Optuna): tune.BayesSearch's tests (tests/test_tune.py: the cut before the first trial, the same table
     # twice with one worker, successive halving's promotions, two worker processes on one journal through `epf tune`,
-    # warm starts, best() and its provenance), and the rest of the suite with Optuna installed. The test job above installs
-    # no extra, so there these tests skip. 3.14t is the free-threaded build.
+    # requeue, warm starts, best() and its provenance) and validation_every's. Optuna changes nothing else, so the rest of
+    # the suite runs in the other jobs; the torch job installs it too for the search's torch test. 3.14t is free-threaded.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -199,8 +199,8 @@ jobs:
     - name: Check that optuna imports (the tune tests would skip without it)
       run: uv run python -c "import optuna; print('optuna', optuna.__version__)"
 
-    - name: Run tests
-      run: uv run pytest -m "not integration" -n auto --dist worksteal -q
+    - name: Run the search's tests
+      run: uv run pytest tests/test_tune.py tests/pipelines/test_validation_every.py -n auto --dist worksteal -q
 
   newest-dependencies:
     # The other jobs install the versions in uv.lock, so a release that breaks the library (pandas 3.1 did)

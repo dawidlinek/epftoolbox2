@@ -214,7 +214,7 @@ further back), so windows would compare on different terms. A refit model's run 
   and their scores and forecast counts, the trials each rung promoted, and what `best()` chose. `SearchResult.load(path, make=...)`
   reads it back; `best()` of a loaded result needs `make`, and raises if `make` builds another model from a trial's settings than
   the one the search scored (each trial records a fingerprint of it: the class and its settings as a pipeline saves them). A
-  `best()` after `save()` adds its choice to the file.
+  `best()` after `save()` adds its choice to the file; a loaded result's `best()` leaves the file as it is.
 
 <Aside type="caution">
   With one worker and a fixed `seed` a search gives the same table twice: the sampler of trial i is seeded from (`seed`, i).
@@ -229,9 +229,9 @@ A model from `best()` carries where it came from: its manifest records `search` 
 the trial, its rank, the rung, the validation period and MAE, and the number of candidates) as provenance, never compared, and
 `report.choices()` has a row for it next to the ensembles' rows, also in a report from the files:
 
-| ensemble | chosen | k | validation_mae | candidates | test_mae | gap |
-|---|---|---|---|---|---|---|
-| `mlp_bayes` | `[mlp_bayes_00]` | 1 | the trial's, on its rung's days | the search's trials | the model's on the test period | `test_mae - validation_mae` |
+| ensemble | kind | chosen | k | validation_mae | candidates | test_mae | gap |
+|---|---|---|---|---|---|---|---|
+| `mlp_bayes` | search | `[mlp_bayes_00]` | 1 | the trial's, on its rung's days | the search's trials | the model's on the test period | `test_mae - validation_mae` |
 
 The provenance also holds what the search scored (target, horizons, freq): a run that forecasts something else warns, since the
 gap would compare two kinds of forecast. A run whose test period starts on or before the search's `data_through` (its

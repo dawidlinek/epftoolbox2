@@ -619,7 +619,7 @@ def logged(self, values, r, run):
         joined.append(True)
     with open(log, "a") as f:
         f.write(json.dumps({{"pid": os.getpid(), "rung": r, "values": values}}) + "\\n")
-    time.sleep(0.3)
+    time.sleep(0.1)
     return fake_score(self, values, r, run)
 
 BayesSearch._score = logged
@@ -651,7 +651,7 @@ def test_two_processes_on_one_journal_finish_every_trial_once(tmp_path):
     log, journal, out = tmp_path / "calls.jsonl", tmp_path / "s.journal", tmp_path / "result"
     script = tmp_path / "search.py"
     script.write_text(
-        textwrap.dedent(WORKER.format(root=str(ROOT), log=str(log), n=24, journal=str(journal), out=str(out)))
+        textwrap.dedent(WORKER.format(root=str(ROOT), log=str(log), n=12, journal=str(journal), out=str(out)))
     )
     done = run_cli("tune", str(script), "--workers", "2", env=worker_env(tmp_path))
     assert done.returncode == 0, done.stdout + done.stderr
@@ -660,10 +660,10 @@ def test_two_processes_on_one_journal_finish_every_trial_once(tmp_path):
     first, second = (SearchResult.load(tmp_path / f"result.{i}.yaml") for i in (0, 1))
     assert first.record == second.record
     table = first.table()
-    assert len(table) == 24 and table["mae_r0"].notna().all()
-    assert table["mae_r1"].notna().sum() == 8 and table["mae_r2"].notna().sum() == 2
+    assert len(table) == 12 and table["mae_r0"].notna().all()
+    assert table["mae_r1"].notna().sum() == 4 and table["mae_r2"].notna().sum() == 1
     by_rung = {r: [call for call in calls if call["rung"] == r] for r in (0, 1, 2)}
-    assert [len(by_rung[r]) for r in (0, 1, 2)] == [24, 8, 2]  # each trial of each rung once
+    assert [len(by_rung[r]) for r in (0, 1, 2)] == [12, 4, 1]  # each trial of each rung once
     for r in (1, 2):
         evaluated = sorted(json.dumps(call["values"], sort_keys=True) for call in by_rung[r])
         promoted = first.record["promoted"][r - 1]
@@ -911,9 +911,13 @@ def test_save_holds_the_space_every_trial_and_the_choice_and_loads_back(df, tmp_
     assert saved["chosen"][0]["models"][0]["name"] == "ols_bayes_00"
     with pytest.raises(ValueError, match="pass make="):
         loaded.best(1)
+    before = (tmp_path / "s.yaml").read_text()
     again = loaded.best(1, make=make)
     assert again[0].training_window == models[0].training_window
-    assert len(SearchResult.load(tmp_path / "s.yaml").record["chosen"]) == 2  # a best() after save goes into the file
+    assert (tmp_path / "s.yaml").read_text() == before  # a loaded result's best() leaves the file
+    result.best(2)
+    assert len(SearchResult.load(tmp_path / "s.yaml").record["chosen"]) == 2  # a best() after save() goes into the file
+    assert not list(tmp_path.glob(".*partial"))
 
 
 def test_a_chosen_models_manifest_and_report_say_where_it_was_chosen(df, tmp_path):

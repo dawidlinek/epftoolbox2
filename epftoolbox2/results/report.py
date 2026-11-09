@@ -100,6 +100,7 @@ _TEST_ALPHA = 0.05
 # The columns of `EvaluationReport.choices()`.
 CHOICE_COLUMNS = [
     "ensemble",
+    "kind",
     "segment",
     "chosen",
     "k",
@@ -1230,7 +1231,8 @@ class EvaluationReport:
         chose (`tune.SearchResult.best`), one row each. Empty, with the same columns, when nothing chose anything: a plain
         average chooses nothing.
 
-        Columns: `ensemble` (the ensemble, or for a model a search chose, the search: `{name}_bayes`), `segment` (its place in
+        Columns: `ensemble` (the ensemble, or for a model a search chose, the search: `{name}_bayes`), `kind` ("ensemble", one
+        row per test period served, or "search", one row per model chosen), `segment` (its place in
         `report.windows.segments`; 0 for a search), `chosen` (the members kept, in member order; the model of a search), `k`,
         `validation_mae` (of the average of `chosen`; a search's model's at the rung it was ranked on),
         `validation_forecasts` (how many it was scored on: for an ensemble the keys every member holds with a finite
@@ -1263,6 +1265,7 @@ class EvaluationReport:
                 rows.append(
                     {
                         "ensemble": row.get("chooser", ensemble),
+                        "kind": "search" if "search" in row else "ensemble",
                         **{key: row[key] for key in ("segment", "chosen", "k")},
                         **{key: row[key] for key in ("validation_mae", "validation_forecasts", "validation_share")},
                         "validation_start": row["validation"][0],

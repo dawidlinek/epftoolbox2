@@ -38,6 +38,7 @@ import inspect
 import json
 import math
 import os
+import socket
 import time
 import warnings
 from dataclasses import dataclass
@@ -495,7 +496,8 @@ class BayesSearch:
         rungs: The rungs of successive halving, cheapest first: `{"every_nth_day": k}` scores on every k-th validation issue
             day (`ModelPipeline.run(validation_every=k)`), with `"seeds": s` in place of the model's `seeds` (a model
             without that parameter raises). None is one rung on every day with the model as built.
-        keep: The share of a rung's scored trials that goes on to the next rung (the best, at least one).
+        keep: The share of a rung's trials that goes on to the next rung: of the trials it tried (scored or failed), at least
+            one, the best by validation MAE among those it scored (100 trials and 1/3: 33, even if some failed).
         warm_start: A saved result (`SearchResult.save`) or a `SearchResult`: its trials that reached its last rung, best
             first, are the first trials of this search (those this space can hold), as last year's best starting this year's.
         storage: A journal file (Optuna's `JournalFileBackend`) that workers in other processes share and a rerun resumes;
@@ -1210,6 +1212,7 @@ class SearchResult:
         self.path: Optional[Path] = None
         self._space = _Space.from_record(record["search"]["space"])
         self._handed_out: List[Dict[str, Any]] = []  # the provenance of best()'s models, given the file when saved
+        self._saved = False  # whether this object wrote `path`: only then does a later best() add its choice to the file
 
     @property
     def name(self) -> Optional[str]:
@@ -1380,22 +1383,24 @@ class SearchResult:
             models.append(model)
             chosen.append({"name": model.name, "trial": number})
         self._record["chosen"].append({"k": k, "seeds": seeds, "models": chosen})
-        if self.path is not None:
+        if self._saved:
             self.save(self.path)
         return models
 
     def save(self, path: Union[str, Path]) -> None:
         """Write the record as YAML (written in full before the file is replaced). Models `best()` gave before get the file in
-        their provenance, and a later `best()` adds its choice to the file."""
+        their provenance, and a later `best()` of this object adds its choice to the file (one of a loaded result doesn't)."""
         from ..pipelines._yaml import dump_yaml
 
         path = Path(path)
         text = dump_yaml(self._record)
         path.parent.mkdir(parents=True, exist_ok=True)
-        partial = path.with_name(f".{path.name}.{os.getpid()}.partial")
+        # Of this host and process: workers on other machines saving the same file through a shared file system don't collide.
+        partial = path.with_name(f".{path.name}.{socket.gethostname()}.{os.getpid()}.partial")
         partial.write_text(text)
         os.replace(partial, path)
         self.path = path
+        self._saved = True
         for provenance in self._handed_out:
             provenance["file"] = str(path)
 
