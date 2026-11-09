@@ -174,12 +174,14 @@ def run_pipeline(models, data, test=TEST, horizon=2, **kwargs):
 
 
 def records(report):
-    """Each model's records by key, every field of each."""
-    return {
-        name: {(r["run_date"], r["hour"], r["horizon"]): r for r in ref._results}
-        for name, ref in report.refs.items()
-        if ref._results is not None
-    }
+    """Each model's records by key, every field of each; a key twice is an error (a forecast made twice)."""
+    out = {}
+    for name, ref in report.refs.items():
+        if ref._results is None:
+            continue
+        out[name] = {(r["run_date"], r["hour"], r["horizon"]): r for r in ref._results}
+        assert len(out[name]) == len(ref._results), f"{name}: a key forecast twice"
+    return out
 
 
 def alone(models, data, monkeypatch, **kwargs):
@@ -325,8 +327,8 @@ def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, cas
     elif case == "jobs_of_one_member":  # a job per fit unit, a window list's units of a block together
         monkeypatch.setenv(groups.STACK_MEMBERS_VAR, "1")
         models = loop_of(3, training_window=[21, 28])
-    elif case == "inputs_of_every_horizon":  # the same inputs (and rows) for both horizons, other targets
-        models = loop_of(4, make=lambda name, **params: daily(name, predictors=DAY[:4], **params))
+    elif case == "inputs_of_every_horizon":  # the same inputs (and rows) for both horizons, other targets, in one stack
+        models = [daily(f"m{i}", predictors=DAY[:4], seeds=1, dropout=d) for i, d in enumerate([0.1, 0.2, 0.3])]
     else:
         models = [
             TorchModel(
@@ -540,6 +542,47 @@ def test_on_gpu_a_model_alone_equals_it_in_a_loop_and_shuffled(market, monkeypat
     same(own, records(run_pipeline(models, market)))
     shuffled = models[::-1]
     same(own, records(run_pipeline(shuffled, market)))
+
+
+def test_calls_share_a_stack_s_rows_only_where_inputs_targets_and_mask_are_equal():
+    """Four calls with the same inputs in one stack: two alike (their rows shared), one of other targets and one of another
+    mask, each trained as alone, to the bit (a call that read another's targets or mask would not be)."""
+    from epftoolbox2.models._torch import trainer
+
+    rng = np.random.default_rng(5)
+    x = rng.normal(size=(40, 5))
+    y = rng.normal(size=(40, 2))
+    mask = np.ones((40, 2), dtype=bool)
+    other_mask = mask.copy()
+    other_mask[::3, 1] = False
+    model = daily("m")
+    settings = dict(
+        loss="l1", lr=1e-2, max_epochs=3, patience=2, batch_size=8, early_stopping=0.25, weight_decay=0.0, stack="vmap",
+        pad_to=4, dtype="float32", nominal_rows=40, blocks=None,
+    )  # fmt: skip
+
+    def factory():
+        return nets.MLP(5, 2, hidden=(4,))
+
+    calls = [(y, mask), (y + 1.0, mask), (y, other_mask), (y, mask)]
+    requests = []
+    for i, (target, kept) in enumerate(calls):
+        members = [trainer.MemberSpec(seed_key=1000 + i, train_rows=np.arange(40))]
+        payload = dict(
+            place=0, model=model, factory=factory, x=x, y=target, y_mask=kept, members=members, settings=settings
+        )
+        requests.append(groups._Request(groups._FIT, (i,), payload))
+    groups._train(groups._Session([]), requests)
+    rows = rng.normal(size=(3, 5))
+    for request, (target, kept) in zip(requests, calls):
+        result, device = request.result
+        ((fit, slot),) = result.slots
+        assert len({id(r.result[0].slots[0][0]) for r in requests}) == 1  # one stack
+        alone = trainer.train_members(factory, x, target, kept, request.payload["members"], device=device, **settings)
+        assert np.array_equal(alone.stats["best_val"], result.stats["best_val"])
+        block = np.broadcast_to(rows, (fit.slots, *rows.shape)).copy()
+        stacked = fit.run_slots(torch.as_tensor(block, dtype=torch.float32))[slot]
+        assert np.array_equal(alone.predict(rows)[0], stacked)
 
 
 def test_jobs_are_cut_at_whole_units_in_block_order():
