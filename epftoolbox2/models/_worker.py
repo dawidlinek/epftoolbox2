@@ -66,6 +66,9 @@ SKIP_MISSING_TEST_ROW = "missing_test_row"
 # A model that forecasts a published value (`NaiveModel`, `known_only`) whose value its rule puts after the issue time: the
 # forecast didn't exist yet. Decided in the parent, before any task runs (`BaseModel._unpublished`).
 SKIP_NOT_PUBLISHED = "not_published"
+# A model with `normalise_by` whose issue row's scale is zero or negative: nothing to multiply the forecast by
+# (`models._row_target`); a missing one is `missing_test_predictors`.
+SKIP_NON_POSITIVE_SCALE = "non_positive_scale"
 
 # In `PredictorPlan.day_lists`, next to list ids: a day no matching forecast of that (period, horizon) reads, and a day
 # the function returned a list on that no forecast uses, which matches nothing.
@@ -537,6 +540,16 @@ def _fit_one_numpy(
     return record
 
 
+def _scale_skip(value: float) -> Optional[str]:
+    """The skip reason of an issue row whose `normalise_by` value is `value`: `missing_test_predictors` for a missing (or
+    infinite) one, `non_positive_scale` for one at or below 0; None for a usable one."""
+    if not np.isfinite(value):
+        return SKIP_MISSING_TEST_PREDICTORS
+    if value <= 0:
+        return SKIP_NON_POSITIVE_SCALE
+    return None
+
+
 def _list_hash_of(cfg: Dict, expanded: Dict, hour: int, hz: int, list_id: Optional[int]) -> str:
     """The `list_hash` of a record: a predictor function's list's (`config["list_hashes"]`, what `predictor_list` holds), or a
     fixed list's of its (period, horizon), the hash a function returning that list gets (`config["fixed_list_hashes"]`, or from
@@ -572,10 +585,11 @@ def _fit_member(
     with the task's newest target. `model` fits it (`_fit_predict`): the task's own, from its inputs, never one of the process's.
 
     A per-row target (`config["row_target"]`, `models._row_target`) divides each training row's target by its `normalise_by`
-    value, drops a row whose value is missing or not positive with the rows of missing values, skips a forecast whose issue row
-    has none as `missing_test_predictors`, and multiplies the forecast by the issue row's value, then clips it to `bounds`. After
-    every skip, where the fit would be, `zero_when`'s 1 on the issue row is a forecast of 0 with no fit (detail `"zero_when"`)
-    and a missing value `missing_test_predictors`. Without one every step is as it was.
+    value, drops a row whose value is missing or not positive with the rows of missing values, and multiplies the forecast by
+    the issue row's value, then clips it to `bounds`. After the skips of the training rows and of the issue row's inputs,
+    `zero_when`'s 1 on the issue row is a forecast of 0 with no fit (detail `"zero_when"`) and a missing value
+    `missing_test_predictors`; then an issue row's scale that is missing is `missing_test_predictors` and one not positive
+    `non_positive_scale`. Without one every step is as it was.
 
     `scalable_mask` None (`binary_mask="fit"`) is read here from those rows in the list's columns, before the matching and the
     finite filters, as `_fit_unit` reads a refit unit's: which columns are binary is then a function of this fit's span alone.
@@ -634,22 +648,23 @@ def _fit_member(
 
     if not np.isfinite(test_x).all():
         return SKIP_MISSING_TEST_PREDICTORS
-    issue_scale = None
-    if scale_at is not None:
-        issue_scale = float(arrays["x"][test, scale_at])
-        if not usable_scale(issue_scale):
-            return SKIP_MISSING_TEST_PREDICTORS
 
     extra = {}
     if matching_days is not None:
         extra["training_days"] = int(np.unique(train_days[finite]).size)
         extra["matching_days"] = matching_days
+    issue_scale = None
     if row_target is not None:
         zero = zero_outcome(arrays, row_target, hz, test)
         if zero is None:
             return SKIP_MISSING_TEST_PREDICTORS
         if zero:
-            return 0.0, [], extra, ZERO_WHEN  # no fit: `zero_when` says the forecast is 0
+            return 0.0, [], extra, ZERO_WHEN  # no fit: `zero_when` says the forecast is 0, whatever its scale
+        if scale_at is not None:
+            issue_scale = float(arrays["x"][test, scale_at])
+            skipped = _scale_skip(issue_scale)
+            if skipped is not None:
+                return skipped
         if engine is not None:
             raise RuntimeError("a model with a per-row target runs on the model path: no engine fits it")
     if engine is not None:
@@ -737,6 +752,8 @@ def _row_value(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskInputs
         return SKIP_MISSING_TEST_PREDICTORS
     row_target = cfg.get("row_target")
     if row_target is not None:
+        if row_target["scale"] is not None or row_target["zero"] is not None:  # refused before any task runs
+            raise RuntimeError("a model that fits nothing takes bounds alone of a per-row target")
         value = scaled_back(row_target, value, None)
 
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
@@ -868,9 +885,9 @@ def _fit_unit(
     missing input are skipped as one at a time.
 
     A per-row target (`models._row_target`) is applied as `_fit_member` applies it: the training rows' targets divided by their
-    scale, each forecast's skips (a missing or non-positive scale, a missing `zero_when`) and `zero_when`'s forecasts of 0 decided
-    per task, the others fitted together, scaled back by their own issue row's value and clipped; a unit whose forecasts are all
-    0 makes no fit.
+    scale, each forecast's `zero_when` (a forecast of 0, or a missing value's skip) and then its scale's skips (missing or not
+    positive) decided per task, the others fitted together, scaled back by their own issue row's value and clipped; a unit
+    whose forecasts are all 0 makes no fit, so a fit that would fail leaves them 0.
     """
     inputs = _inputs_of(inputs)
     cfg = inputs.config
@@ -937,16 +954,20 @@ def _fit_unit(
         elif row_target is None:
             forecast.append((task, test))
         else:
-            if scale_at is not None:
-                scales[test] = float(arrays["x"][test, scale_at])
-                if not usable_scale(scales[test]):
-                    outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
-                    continue
             zero = zero_outcome(arrays, row_target, hz, test)
             if zero is None:
                 outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
-            else:
-                (zeros if zero else forecast).append((task, test))
+                continue
+            if zero:  # a forecast of 0, whatever its scale
+                zeros.append((task, test))
+                continue
+            if scale_at is not None:
+                scales[test] = float(arrays["x"][test, scale_at])
+                skipped = _scale_skip(scales[test])
+                if skipped is not None:
+                    outcomes.append((task, skipped))
+                    continue
+            forecast.append((task, test))
     extra = None
     if matching_days is not None:
         extra = {"training_days": int(np.unique(train_days[finite]).size), "matching_days": matching_days}
@@ -1563,19 +1584,21 @@ def _fit_pooled_unit(
             forecast.append((task, test))
         else:
             own = inputs.hour_arrays[task[0]]
-            scale_at = scale_column(own, row_target, hz)
-            if scale_at is not None:
-                scales[(task[0], test)] = float(own["x"][test, scale_at])
-                if not usable_scale(scales[(task[0], test)]):
-                    outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
-                    continue
             zero = zero_outcome(own, row_target, hz, test)
             if zero is None:
                 outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
-            elif zero:  # no fit: `zero_when` says the forecast is 0
+                continue
+            if zero:  # no fit: `zero_when` says the forecast is 0, whatever its scale
                 outcomes.append((task, _unit_record(inputs, unit, task, test, 0.0, [], newest, ZERO_WHEN)))
-            else:
-                forecast.append((task, test))
+                continue
+            scale_at = scale_column(own, row_target, hz)
+            if scale_at is not None:
+                scales[(task[0], test)] = float(own["x"][test, scale_at])
+                skipped = _scale_skip(scales[(task[0], test)])
+                if skipped is not None:
+                    outcomes.append((task, skipped))
+                    continue
+            forecast.append((task, test))
     if not forecast:
         return outcomes
 
