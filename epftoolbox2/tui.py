@@ -647,10 +647,11 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "agg",
-            "description": "A day statistic instead, <column>_day_<agg>: min, max, mean or peak; blank = the forecasts",
+            "description": "A day statistic of the forecasts instead, emitted as <column>_day_<agg> (none = the forecasts)",
             "required": False,
-            "default": None,
-            "kind": "text",
+            "default": "none",
+            "kind": "select",
+            "choices": ["none", "min", "max", "mean", "peak"],
         },
     ],
     "EnergyChartsSource": [

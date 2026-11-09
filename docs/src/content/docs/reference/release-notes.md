@@ -232,14 +232,17 @@ an issue day it didn't sample.
   the shape of a day-ahead forecast is known with it, that of a realised series only after its hour. `_day_peak` is judged at the
   day's last slot like `_day_max`. Both are in YAML and the TUI. See [PeriodStatsTransformer](/epftoolbox2/transformers/period-stats/)
   and [Information Set](/epftoolbox2/model-pipeline/information-set/#hour-aggregates). `DailyStatsTransformer`'s default statistics,
-  and every existing verdict, are as before; a saved data pipeline now writes `peak_hours` for it.
+  and every existing verdict, are as before; a saved data pipeline writes `peak_hours` only when it isn't `(8, 20)`, so files saved now load in earlier versions.
+  `DailyStatsTransformer` now refuses an index with a timestamp twice (a duplicated row could make a day with a missing slot look
+  complete).
 - **`ForecastSource(agg=)`: a day statistic of another pipeline's forecasts.** With `agg="min"`, `"max"`, `"mean"` or `"peak"` the
   source emits `{column}_day_{agg}`, the statistic of the forecasts of each target date of the upstream's data zone on every row of
   the date, bit for bit what `DailyStatsTransformer` makes of the plain column in that zone, taken over whole dates before the range
   is cut; a date with a missing forecast is NaN. Its column takes the source's rule under its own name: all forecasts of a date are
   issued at one instant, so the statistic is known exactly when the latest of them is, in every zone. The downstream's coverage
   check doesn't count the dates no upstream can complete (the day after a spring switch has no 02:00 forecast at horizon 1), and
-  its manifest's `chained_inputs` records `agg`. A daily upstream is refused. See
+  its manifest's `chained_inputs` records `agg` and each coverage entry `let_off`, the rows left out. A daily upstream is refused.
+  A saved pipeline writes `agg` only when set. See
   [ForecastSource](/epftoolbox2/data-sources/forecast/#a-day-statistic-agg).
 - **Generation targets: `normalise_by`, `bounds` and `zero_when` on every model that fits period or pooled units.**
   `normalise_by="capacity_d+{horizon}"` divides each training row's target by its value of the column (a row without a positive one

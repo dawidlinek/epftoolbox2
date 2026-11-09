@@ -29,7 +29,7 @@ df = DailyStatsTransformer(columns="load_forecast", stats=["peak"], freq="15min"
 | `columns` | str \| List[str] | required | Column name(s) to summarise |
 | `stats` | List[str] | `["min", "max", "mean", "last"]` | Statistics to add: any of these and `"peak"` |
 | `freq` | str | `"1h"` | Slot length of the data, used to decide whether a day is complete |
-| `peak_hours` | Tuple[int, int] | `(8, 20)` | Local hours of the peak block, the end left out: `(8, 20)` is 08:00 to 19:59. Only for `"peak"`; another value without it raises |
+| `peak_hours` | Tuple[int, int] | `(8, 20)` | Local hours of the peak block, the end left out: `(8, 20)` is 08:00 to 19:59. Only for `"peak"`; another value without it raises. YAML writes it only when not `(8, 20)` |
 
 ## Peak
 

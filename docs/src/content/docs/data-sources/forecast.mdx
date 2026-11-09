@@ -41,7 +41,7 @@ pipeline.information_set = pipeline.information_set.with_source_rules(data.sourc
 | `column` | str | Yes | - | The name of the column it emits (with `agg`, the start of its name) |
 | `horizon` | int | No | `1` | Which upstream horizon to read: days between the forecast's issue day and its target day |
 | `available` | str | No | `None` | A later time than the upstream's issue time at which its forecasts are known, `"HH:MM"` in the upstream's issue zone (for forecasts revised after it). Never an earlier one: that raises |
-| `agg` | str | No | `None` | A day statistic of the forecasts instead of the forecasts: `"min"`, `"max"`, `"mean"` or `"peak"` (08:00 to 19:59), emitted as `{column}_day_{agg}`. See [A Day Statistic](#a-day-statistic-agg) |
+| `agg` | str | No | `None` | A day statistic of the forecasts instead of the forecasts: `"min"`, `"max"`, `"mean"` or `"peak"` (08:00 to 19:59), emitted as `{column}_day_{agg}`; `None` or `"none"` emits the forecasts. YAML writes it only when set. See [A Day Statistic](#a-day-statistic-agg) |
 
 `fetch(start, end)` returns the rows in **[start, end)** with a UTC index, one column of float values.
 

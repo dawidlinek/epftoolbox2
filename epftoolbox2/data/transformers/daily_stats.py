@@ -47,6 +47,9 @@ class DailyStatsTransformer(Transformer):
         >>> df = DailyStatsTransformer(columns="price", stats=["min", "max", "peak"]).transform(df)
     """
 
+    # Parameters a saved pipeline writes only when not at these values, so files saved now load in versions from before them.
+    _WRITTEN_WHEN_SET = {"peak_hours": PEAK_HOURS}
+
     def __init__(
         self,
         columns: str | list[str],

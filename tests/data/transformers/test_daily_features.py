@@ -218,6 +218,24 @@ def test_daily_peak_hours_are_checked(kwargs, match):
         DailyStatsTransformer(columns="price", **kwargs)
 
 
+def test_peak_hours_are_written_only_when_set_and_a_file_without_them_loads(tmp_path):
+    """A pipeline saved now with the default block loads in a version from before `peak_hours`, and one written then loads now."""
+    DataPipeline().add_transformer(DailyStatsTransformer(columns="price", stats=["min", "peak"])).save(
+        tmp_path / "a.yaml"
+    )
+    assert "peak_hours" not in (tmp_path / "a.yaml").read_text()
+    DataPipeline().add_transformer(DailyStatsTransformer("price", ["peak"], peak_hours=(7, 19))).save(
+        tmp_path / "b.yaml"
+    )
+    assert "peak_hours" in (tmp_path / "b.yaml").read_text()
+    old = tmp_path / "old.yaml"
+    old.write_text(
+        "transformers:\n- class: DailyStatsTransformer\n  params:\n    columns: [x]\n    stats: [min, max]\n"
+    )
+    loaded = DataPipeline.load(old).transformers[0]
+    assert (loaded.stats, loaded.peak_hours) == (["min", "max"], (8, 20))
+
+
 def test_daily_peak_block_is_the_report_s():
     from epftoolbox2.data.transformers._daily import PEAK_HOURS
     from epftoolbox2.results.breakdowns import PEAK_HOURS as REPORT_PEAK_HOURS

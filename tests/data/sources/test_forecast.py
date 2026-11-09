@@ -576,5 +576,11 @@ def test_agg_round_trips_through_yaml_and_is_in_the_pipeline_cache_s_fingerprint
     pipeline.save(tmp_path / "data.yaml")
     loaded = DataPipeline.load(tmp_path / "data.yaml").sources[0]
     assert (loaded.agg, loaded.output_column) == ("mean", "x_day_mean")
-    plain = _component_fingerprint(ForecastSource(str(tmp_path / "runs"), "up", "x"))
-    assert _component_fingerprint(loaded)["params"]["agg"] == "mean" and plain["params"]["agg"] is None
+    plain = ForecastSource(str(tmp_path / "runs"), "up", "x")
+    assert _component_fingerprint(loaded)["params"]["agg"] == "mean"
+    # Written only when set: a file saved without it loads in versions from before agg, and 7a's fingerprints don't move.
+    assert "agg" not in _component_fingerprint(plain)["params"]
+    DataPipeline(timezone="Europe/Warsaw").add_source(plain).save(tmp_path / "plain.yaml")
+    assert "agg:" not in (tmp_path / "plain.yaml").read_text()
+    assert DataPipeline.load(tmp_path / "plain.yaml").sources[0].agg is None
+    assert ForecastSource(str(tmp_path / "runs"), "up", "x", agg="None").agg is None  # the TUI's "none"

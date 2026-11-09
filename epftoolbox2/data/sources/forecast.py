@@ -136,8 +136,11 @@ class ForecastSource(DataSource):
         horizon: Which of the upstream's horizons to read, in days between issue day and target day.
         available: A later time than the upstream's issue time at which its forecasts are known ("HH:MM", upstream issue zone).
         agg: A day statistic of the forecasts instead of the forecasts, emitted as `{column}_day_{agg}`: "min", "max",
-            "mean" or "peak" (the mean from 08:00 to 19:59). None (the default) emits the forecasts as `column`.
+            "mean" or "peak" (the mean from 08:00 to 19:59). None (the default, or "none") emits the forecasts as `column`.
     """
+
+    # Parameters a saved pipeline writes only when set, so files saved now load in versions from before them.
+    _WRITTEN_WHEN_SET = {"agg": None}
 
     def __init__(
         self,
@@ -166,6 +169,8 @@ class ForecastSource(DataSource):
         if isinstance(self.horizon, bool) or not isinstance(self.horizon, (int, np.integer)) or self.horizon < 1:
             raise ValueError(f"ForecastSource: horizon must be a positive integer, got {self.horizon!r}")
         self.horizon = int(self.horizon)
+        if isinstance(self.agg, str) and self.agg.lower() == "none":
+            self.agg = None  # the TUI's choice for none
         if self.agg is not None and self.agg not in AGGREGATES:
             raise ValueError(f"ForecastSource: agg must be None or one of {list(AGGREGATES)}, got {self.agg!r}")
         if self.available is not None:
