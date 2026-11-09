@@ -173,8 +173,8 @@ def test_day_peak_is_judged_at_the_day_s_last_slot_not_at_the_peak_s():
     assert (verdicts(info, "load_actual_day_peak", index, "1h", ["2024-01-10"]) == 25 * 60).all()
 
 
-def test_rules_over_time_read_every_slot_of_the_hour():
-    """A rule that holds from D on: an hour aggregate of D-1 is never known (no rule holds for its slots), of D as the plain
+def test_an_hour_aggregate_no_rule_holds_for_is_never_known():
+    """A rule that holds from D on: an hour aggregate of D-1 is never known (no rule holds for its slots), one of D as the
     rule says, at the hour's last slot."""
     index = quarter_hours()
     rule = Availability.realised("1h").during(valid_from="2024-01-10")
@@ -182,6 +182,31 @@ def test_rules_over_time_read_every_slot_of_the_hour():
     known = verdicts(info, "x_hour_mean", index, "15min", ["2024-01-10"])[:, 0]
     assert known[40] == 12 * 60 and known[0] == 2 * 60
     assert np.isinf(verdicts(info, "x_hour_mean_d-1", index, "15min", ["2024-01-10"])).all()
+
+
+def test_under_rules_over_time_an_hour_aggregate_waits_for_every_slot_of_its_hour():
+    """In Kolkata (UTC+05:30) the hour from 05:00 spans two UTC days: 05:00 and 05:15 are delivered on the UTC day before,
+    05:30 and 05:45 on the next. Under a rule whose lag shortened at that UTC midnight, the hour's first slots come out after
+    its last one, so the aggregate is known when every slot is: the latest of the plain column's verdicts over its hour, on
+    every period of every issue day. Read at the last slot alone it would pass at a 12:00 issue on 2024-01-09 (06:30Z),
+    though 05:00 of 2024-01-10 is out only at 10:00Z."""
+    index = pd.date_range("2024-01-01", periods=96 * 20, freq="15min", tz="Asia/Kolkata")
+    rules = [
+        Availability.published("10:00", 0, timezone="UTC").during(valid_until="2024-01-09"),
+        Availability.published("00:00", 1, timezone="UTC").during(valid_from="2024-01-10"),
+    ]
+    info = InformationSet("12:00", "Asia/Kolkata", rules={"x": rules})
+    days = ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11"]
+    for shift in ("", "_d+1", "_d-1"):
+        plain = verdicts(info, f"x{shift}", index, "15min", days)
+        latest = plain.reshape(24, 4, len(days)).max(axis=1).repeat(4, axis=0)
+        for stat in ("mean", "dev"):
+            assert np.array_equal(verdicts(info, f"x_hour_{stat}{shift}", index, "15min", days), latest), (stat, shift)
+    # Minutes since midnight of D in Kolkata (18:30Z the day before): 10:00Z on D is 930, after the 12:00 issue (720), at
+    # 05:00 to 05:45; the last slot alone is out at 00:00Z on D, 330.
+    late = verdicts(info, "x_hour_mean_d+1", index, "15min", ["2024-01-09"])[20:24, 0]
+    assert (late == 930).all()
+    assert verdicts(info, "x_d+1", index, "15min", ["2024-01-09"])[23, 0] == 330
 
 
 def test_delivered_span_of_an_hour_aggregate_is_its_hour():
