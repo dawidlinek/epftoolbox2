@@ -844,7 +844,7 @@ class BayesSearch:
             return _Score(None, error=reason)
         rung = self._rungs[r]
         model, fingerprint = self._model(values, rung.seeds, f"rungs[{r}]")
-        short = _reach_problem(model, run.frame, run.validation[0], run.horizons)
+        short = _reach_problem(model, run)
         if short is not None:
             raise ValueError(f"The trial of the settings {values}: {short}")
         if r == 0:  # every rung's seeds against this model, before the dear rungs run
@@ -1149,41 +1149,81 @@ def requeue(journal: Union[str, Path]) -> Dict[str, Any]:
     return {"requeued": requeued, "notes": notes}
 
 
-def _reach_problem(model: Any, frame: pd.DataFrame, first_day: str, horizons: Sequence[int]) -> Optional[str]:
+def _reach_problem(model: Any, run: "_Run") -> Optional[str]:
     """Why the frame is too short for a model of `refit=None` (a run checks a refit model's itself, `_check_reaches_back`):
-    the first validation forecasts train on the rows of their window, back to `training_span`'s first row (the newest target
-    on D-1), and a predictor's day lag reads that many days before it. A frame starting later trains them on fewer days
-    than the window says, silently, so the windows of a search would compare on different terms. None if it reaches."""
-    from ..models._calendar import EXPANDING, training_span
+    each validation forecast (period p, horizon h, issue day D) trains on the rows of `training_span(D, W, h, k)`, k the newest
+    target its model trains on (D-1, or with `newest_target="published"` what the information set says is published by the
+    issue time, which can be older), and each predictor of its list with a day lag reads that many days before its row; the
+    lists are the model's own, a predictor function's as planned for the validation days. A frame starting after the
+    earliest day so read trains some forecasts on fewer days than the window says, silently, so the windows of a search would
+    compare on different terms. None if it reaches."""
+    from ..models._calendar import EXPANDING
     from ..models._contract import wall_clock
     from ..models.base import _days_back
+    from ..pipelines.model_pipeline import ModelPipeline
 
+    frame = run.frame
     if getattr(model, "refit", None) is not None or not len(frame.index):
         return None
-    widths = [m for m in getattr(model, "_members", ()) if m != EXPANDING and isinstance(m, (int, np.integer))]
+    widths = [int(m) for m in getattr(model, "_members", ()) if m != EXPANDING and isinstance(m, (int, np.integer))]
     if not widths:
         return None
-    day = pd.Timestamp(first_day).date().toordinal()
-    first_row, width, horizon = min(
-        (int(training_span(day, int(w), int(h), -1)[0]), int(w), int(h)) for w in widths for h in horizons
+    model._set_freq(run.freq)
+    first, last = (pd.Timestamp(day).date() for day in run.validation)
+    days = [first + pd.Timedelta(days=d).to_pytimedelta() for d in range((last - first).days + 1)]
+    pipeline = ModelPipeline(**run.pipeline)
+    info = pipeline._information_set_for(frame)
+    horizon = max(run.horizons)
+    newest = model._newest_targets(frame, run.target, horizon, run.freq, info, days)  # None with "d-1": k = -1
+    plan = model._plan_predictors(
+        frame,
+        run.target,
+        horizon,
+        run.freq,
+        info,
+        first.isoformat(),
+        last.isoformat(),
+        warn_unpublished=False,
+        availability=pipeline.availability,
+        horizons=run.horizons,
     )
-    predictors = getattr(model, "predictors", None)
-    names = [
-        name.replace("{horizon}", str(h))
-        for name in (predictors if isinstance(predictors, list) else [])
-        for h in horizons
-    ]
-    lag, lagged = _days_back(name for name in names if isinstance(name, str))
-    needed = pd.Timestamp.fromordinal(first_row - lag).date()
+    if plan is None:
+        expanded = model._precompute_expanded_predictors(run.horizons)
+        lags = {key: _days_back(names) for key, names in expanded.items()}
+
+        def lag_of(period: int, h: int, position: int) -> Tuple[int, Optional[str]]:
+            return lags[(period, h)]
+    else:
+        list_lags = [_days_back(names) for names in plan.lists]
+
+        def lag_of(period: int, h: int, position: int) -> Tuple[int, Optional[str]]:
+            ids = plan.assignment.get((period, h))
+            list_id = -1 if ids is None else int(ids[position])
+            return (0, None) if list_id < 0 else list_lags[list_id]
+
+    worst = None  # (the day the frame must start on, issue day, horizon, window, first row, lag, lagged)
+    for position, day in enumerate(days):
+        ordinal = day.toordinal()
+        for period in range(model._periods_per_day):
+            k = -1 if newest is None else int(newest.k[period, position])
+            for h in run.horizons:
+                lag, lagged = lag_of(period, int(h), position)
+                last_row = min(ordinal + k - int(h), ordinal - 1)
+                for width in widths:
+                    first_row = last_row - width + 1
+                    found = (first_row - lag, day, int(h), width, first_row, lag, lagged)
+                    if worst is None or found[0] < worst[0]:
+                        worst = found
+    needed, day, h, width, first_row, lag, lagged = worst
     starts = wall_clock(frame.index).min().date()
-    if starts <= needed:
+    if starts.toordinal() <= needed:
         return None
     back = "" if not lag else f", and its {lagged} reads {lag} day{'s' if lag > 1 else ''} before that"
     return (
-        f"{model.name}'s training window of {width} days at horizon {horizon} trains the first validation forecast "
-        f"({pd.Timestamp(first_day).date()}) on rows from {pd.Timestamp.fromordinal(first_row).date()}{back}, but the frame "
-        f"starts on {starts}: it would train on fewer days than its window says. Start the frame on {needed} or earlier, or "
-        "search smaller windows."
+        f"{model.name}'s training window of {width} days at horizon {h} trains the forecast issued on {day} on rows from "
+        f"{pd.Timestamp.fromordinal(first_row).date()}{back}, but the frame starts on {starts}: it would train on fewer days "
+        f"than its window says. Start the frame on {pd.Timestamp.fromordinal(needed).date()} or earlier, or search smaller "
+        "windows."
     )
 
 

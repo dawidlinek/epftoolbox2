@@ -24,6 +24,7 @@ from threadpoolctl import threadpool_limits
 from epftoolbox2 import cli
 from epftoolbox2._extras import MissingExtraError
 from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import OLSModel
 from epftoolbox2.models._calendar import IssueCalendar
 from epftoolbox2.models._worker import _worker_init
@@ -31,7 +32,7 @@ from epftoolbox2.pipelines import ModelPipeline, Workflow
 from epftoolbox2.results.manifest import manifest_path
 from epftoolbox2.tune import BayesSearch, SearchResult, Subset
 from epftoolbox2.tune import bayes
-from tests.synthetic import make_market_data
+from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
 
 ROOT = Path(__file__).resolve().parents[1]
 V = ("2023-03-20", "2023-04-02")
@@ -167,6 +168,67 @@ def test_a_frame_too_short_for_a_trials_window_stops_the_search(df):
         ValueError, match="and its price_d-1 reads 1 day before that, but the frame starts on 2023-02-20"
     ):
         lagged.run(short, horizon=1, validation=V)
+
+
+def test_a_target_published_late_reads_further_back(monkeypatch):
+    """`newest_target="published"` with the price known 48 hours after it: a forecast trains on rows ending days before D-1,
+    so a frame long enough with the price out after an hour is too short, and the search names the day it must start on."""
+    full = make_market_data(start="2022-12-01", days=140, horizon=2, noise=5.0, seed=3)
+    frame = full[full.index.tz_localize(None).normalize() >= pd.Timestamp("2023-02-17")]
+    validation = ("2023-03-20", "2023-03-26")
+
+    def rules(lag):
+        return InformationSet("11:45", "Europe/Warsaw", rules={
+            "load": Availability.published("10:00", 7), "wind": Availability.published("10:00", 7),
+            "is_weekend": Availability.static(), "is_weekday": Availability.static(),
+            "price": Availability.realised(lag)})  # fmt: skip
+
+    published = BayesSearch(
+        lambda p: OLSModel(PREDICTORS, training_window=p["w"], newest_target="published", name="m"),
+        {"w": [28]},
+        n_trials=1,
+        rungs=[{"every_nth_day": 7}],
+    )
+    table = published.run(frame, horizon=2, validation=validation, information_set=rules("1h")).table()
+    assert table["validation_mae"].notna().all()
+    with pytest.raises(ValueError, match="Start the frame on 2023-02-16 or earlier"):
+        published.run(frame, horizon=2, validation=validation, information_set=rules("48h"))
+
+
+def with_week_lag(start):
+    """The frame from `start`, with the price of a week before built from the frame itself: missing on its first 7 days."""
+    frame = make_market_data(start="2022-11-01", days=200, horizon=2, noise=5.0, seed=3)
+    frame = frame[frame.index.tz_localize(None).normalize() >= pd.Timestamp(start)].copy()
+    frame["price_d-7"] = calendar_shift(frame["price"], -7)
+    return frame
+
+
+WEEK_LAGGED = PREDICTORS + ["price_d-7"]
+
+
+def week_lagged(ctx):
+    return list(WEEK_LAGGED)
+
+
+@pytest.mark.parametrize("predictors", [WEEK_LAGGED, week_lagged], ids=["list", "function"])
+def test_a_lag_in_the_planned_lists_reads_further_back(predictors):
+    """The day lag of a predictor function's lists counts as a fixed list's does: read from its plan."""
+    searching = BayesSearch(
+        lambda p: OLSModel(predictors, training_window=p["w"], name="m"),
+        {"w": [28]},
+        n_trials=1,
+        rungs=[{"every_nth_day": 7}],
+    )
+    validation = ("2023-03-20", "2023-03-26")
+    # the latest start the check lets through gives the long frame's scores to the bit
+    reaching = searching.run(with_week_lag("2023-02-11"), horizon=2, validation=validation).table()
+    longer = searching.run(with_week_lag("2022-12-01"), horizon=2, validation=validation).table()
+    assert reaching["validation_mae"].notna().all()
+    pd.testing.assert_frame_equal(reaching, longer, check_exact=True)
+    with pytest.raises(
+        ValueError, match="price_d-7 reads 7 days before that.*Start the frame on 2023-02-11 or earlier"
+    ):
+        searching.run(with_week_lag("2023-02-12"), horizon=2, validation=validation)
 
 
 @pytest.mark.parametrize(

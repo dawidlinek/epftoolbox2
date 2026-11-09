@@ -196,9 +196,11 @@ failed fit, ...) or forecasts a value that isn't finite gets no score and fails 
 `error`, so no setting wins by leaving out its hard days. A trial whose `make` or run raises stops the search, the trial
 recorded as failed with the error. The MAE is over the keys with an actual, as an exact sum.
 
-A frame too short for a trial's window stops the search with `ValueError`, naming the day the frame must start on: the first
-validation forecasts of a `refit=None` model would train on fewer days than its window says (and a predictor's day lag reads
-further back), so windows would compare on different terms. A refit model's run checks the same itself.
+A frame too short for a trial's window stops the search with `ValueError`, naming the day the frame must start on: some
+validation forecasts of a `refit=None` model would train on fewer days than its window says, so windows would compare on
+different terms. The check takes each forecast's newest training target (older than D-1 with `newest_target="published"` and a
+target published late) and the day lags of the lists it uses (a predictor function's as planned). A refit model's run checks the
+same itself.
 
 ### The result
 
