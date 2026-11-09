@@ -18,9 +18,13 @@ epoch and the masks of every `nets.Dropout` (counter-based hashes, stk.py's `net
 around the member's build (and, in the loop, its training) for any other layer. The shapes are fixed by the configuration, not by
 the other members: `steps_per_epoch` from the nominal training rows (`nominal_rows`, the rows of a full window: a member with
 fewer rows wraps around its own order, so every step is a full batch), the validation rows padded to the nominal count, and a
-stack padded to `pad_to` members with dummies (copies of its first member with other keys, results discarded). Then a member
-is bitwise the same alone, in a stack of 4 or 16 or in any order (`nn/REPORT.md` section 5: unpadded stacks drifted by 2.39
-EUR/MWh with TF32, 7.29 without).
+stack padded to `pad_to` members with dummies (copies of its first member with other keys, results discarded). `nominal_rows`
+may be left out only when every member has the same number of rows (else `ValueError`). Then a member is bitwise the same
+alone, in a stack of 4 or 16 or in any order (`nn/REPORT.md` section 5: unpadded stacks drifted by 2.39 EUR/MWh with TF32, 7.29
+without), for a module made of `nets` layers (`Linear`, `Activation`, `Dropout`) and of operations exact in every element
+(sums, products, `relu`, gathers). On a CPU an elementwise function that isn't exact in every element (`torch.sigmoid`,
+`exp`, ...) applied by the module itself to the stacked tensor can give the last slot other last bits: a vectorised kernel
+takes the tensor's tail, which belongs to the last slot, by its scalar path. `nets.Activation` takes it slot by slot.
 
 **Two ways to train them** (`stack`), which differ in arithmetic and so in numbers, recorded in the manifest:
 - "loop": one member at a time with its own module. Any module works, `torch.nn.Dropout` and batch norm too.
@@ -28,17 +32,21 @@ EUR/MWh with TF32, 7.29 without).
   learning rate per member and exact freezing of stopped members. A stack has `pad_to` slots (`runtime.DEFAULT_PAD` unless set).
   `torch.nn.Dropout`, batch norm and any random operation in `forward` are refused: their numbers would depend on the stack.
   `nets.Linear` runs as one `baddbmm` over the stack on a GPU and as one product per slot on fresh copies on the CPU, stk.py's
-  arithmetic either way and the same in any slot (a CPU's batched product isn't: `nets._per_slot_linear`); on the CPU a stack
-  runs on one intra-op thread, so it is also the same at any thread count.
+  arithmetic either way and the same in any slot (a CPU's batched product isn't: `nets._per_slot_linear`), and
+  `nets.Activation` per slot on the CPU too; on the CPU a stack runs on one intra-op thread, so it is also the same at any
+  thread count.
 "auto" is the loop on a CPU, a stack on a GPU (decision 18).
 
 **Early stopping**: each epoch ends with the member's loss on its early-stopping rows (in eval mode); a member whose loss didn't
 improve for `patience` epochs stops (its weights then never move again) and its best weights are restored. With
-`early_stopping=0` every member trains `max_epochs` and keeps its last weights. Losses: "l1", "mse", a "package.module:function"
+`early_stopping=0` every member trains `max_epochs` and keeps its last weights. A member whose early-stopping loss is never
+finite (it diverged from the start) has no trained weights: `TrainResult.failed` marks it (and one whose restored weights
+aren't finite), its `best_epoch` is 0 and `predict` gives it NaN, for the caller to skip as a `fit_error`. Losses: "l1", "mse", a "package.module:function"
 or a callable, elementwise `(prediction, target) -> loss` in the scaled space; the library masks the slots without a target and
 takes each member's mean over its batch (stk.py's `mean` over rows and outputs).
 
-The caller owns the device, TF32 and thread scope (`runtime.torch_scope`) and the threads of the process.
+The caller owns the device, TF32 and thread scope (`runtime.torch_scope`) and the threads of the process; a loop's products move
+with the thread count, so predictions run in the scope of the fit.
 """
 
 import contextlib
@@ -106,11 +114,15 @@ class MemberSpec:
 class TrainResult:
     """`predict(x)`: (members, rows, outputs) float64 forecasts in the scaled target space, from each member's restored weights;
     `x` is (rows, k) for every member or (members, rows, k), one block per member. `best_epoch` per member (1-based; the last
-    epoch without early stopping) and `stats` (epochs trained and best early-stopping loss per member, the stack, its size,
-    the number of stacks, steps per epoch, early-stopping rows, nominal rows, seconds)."""
+    epoch without early stopping; 0 when no epoch gave a finite early-stopping loss). `failed` per member: no epoch gave a
+    finite early-stopping loss (it diverged from the start), or its restored weights aren't finite. A failed member has no
+    trained weights to forecast from: `predict` gives it NaN, and a caller skips it (a `fit_error`), never averaging it in.
+    `stats`: epochs trained and best early-stopping loss per member, the stack, its size, the number of stacks, steps per
+    epoch, early-stopping rows, nominal rows, seconds."""
 
     predict: Callable[[np.ndarray], np.ndarray]
     best_epoch: np.ndarray
+    failed: np.ndarray
     stats: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -254,11 +266,11 @@ def _stack_threads(device):
     """A stack on the CPU runs on one intra-op thread: its products are one per slot (`nets._per_slot_linear`, so a member is the
     same in any slot), and a product's bits move with its thread count, so one thread makes a stack the same at any count.
     On a GPU nothing changes."""
-    if torch.device(device).type != "cpu" or torch.get_num_threads() == 1:
+    if torch.device(device).type != "cpu":
         yield
         return
     saved = torch.get_num_threads()
-    torch.set_num_threads(1)
+    torch.set_num_threads(1)  # always: get_num_threads() reads OpenMP alone, the call sets the bundled MKL too
     try:
         yield
     finally:
@@ -353,6 +365,7 @@ def train_members(
     seconds = time.perf_counter() - started
     n_members = len(plan[0])
     best_epoch = np.concatenate([f.best_epoch for f in fits])[:n_members]
+    failed = np.concatenate([f.failed for f in fits])[:n_members]
     stats = {
         "epochs": np.concatenate([f.epochs for f in fits])[:n_members],
         "best_val": np.concatenate([f.best_val for f in fits])[:n_members],
@@ -379,9 +392,11 @@ def train_members(
             block = np.array(rows[done : done + take], dtype=np.float64)
             out.append(f.predict(torch.as_tensor(block, dtype=torch_dtype, device=resolved)))
             done += take
-        return np.concatenate(out)
+        out = np.concatenate(out)
+        out[failed] = np.nan
+        return out
 
-    return TrainResult(predict=predict, best_epoch=best_epoch, stats=stats)
+    return TrainResult(predict=predict, best_epoch=best_epoch, failed=failed, stats=stats)
 
 
 def _plan(members, n_rows, early, lr, nominal_rows, batch, mask) -> Tuple[List[_Member], _Shapes]:
@@ -402,7 +417,13 @@ def _plan(members, n_rows, early, lr, nominal_rows, batch, mask) -> Tuple[List[_
                 "training rows or set early_stopping=0"
             )
         out.append(_Member(key, stream_key(key), lr if spec.lr is None else float(spec.lr), fit, val))
-    largest = max(len(m.fit) + len(m.val) for m in out)
+    counts = {len(m.fit) + len(m.val) for m in out}
+    largest = max(counts)
+    if nominal_rows is None and len(counts) > 1:
+        raise ValueError(
+            f"members have {sorted(counts)} training rows: give nominal_rows (the rows of a full training window), else a "
+            "member's steps per epoch and early-stopping rows would depend on the largest member it trains with"
+        )
     nominal = largest if nominal_rows is None else int(nominal_rows)
     if nominal < largest:
         raise ValueError(f"nominal_rows={nominal_rows} is below the {largest} training rows of a member")
@@ -442,7 +463,7 @@ class _LoopFit:
             # The best state is the module's state_dict (its parameters and saved buffers, a batch norm's running statistics
             # too); nets.Dropout's buffers aren't saved, so a restore leaves them.
             best = {k: v.detach().clone() for k, v in module.state_dict().items()}
-            best_loss, bad, best_epoch, epoch = math.inf, 0, s["max_epochs"], 0
+            best_loss, bad, best_epoch, epoch = math.inf, 0, 0, 0
             for epoch in range(1, s["max_epochs"] + 1):
                 module.train()
                 order = fit[_row_orders(stream, epoch, fit[None, :], fit_mask)[0]]
@@ -474,10 +495,14 @@ class _LoopFit:
                         break
             if s["early"]:
                 module.load_state_dict(best)
+            else:
+                best_epoch = epoch
         module.eval()
+        finite = all(bool(torch.isfinite(p).all()) for p in module.parameters())
         self.best_epoch = np.array([best_epoch])
         self.epochs = np.array([epoch])
         self.best_val = np.array([best_loss if s["early"] else math.nan])
+        self.failed = np.array([not finite or (s["early"] and not math.isfinite(best_loss))])
 
     def predict(self, rows: "torch.Tensor") -> np.ndarray:
         with torch.random.fork_rng(devices=self.devices), torch.no_grad():
@@ -501,7 +526,7 @@ class _StackFit:
         check_vmappable(modules[0])
         base = copy.deepcopy(modules[0])
         for sub in base.modules():
-            if isinstance(sub, nets.Linear):
+            if isinstance(sub, (nets.Linear, nets.Activation)):
                 sub.stacked = True
         params, buffers = stack_module_state(modules)
         del modules
@@ -535,7 +560,7 @@ class _StackFit:
         bad = torch.zeros(S, dtype=torch.long, device=device)
         active = torch.ones(S, dtype=torch.bool, device=device)
         epochs = torch.zeros(S, dtype=torch.long, device=device)
-        best_epoch = torch.full((S,), s["max_epochs"], dtype=torch.long, device=device)
+        best_epoch = torch.zeros(S, dtype=torch.long, device=device)
         for epoch in range(1, s["max_epochs"] + 1):
             base.train()
             epochs += active.long()
@@ -571,13 +596,20 @@ class _StackFit:
             if s["early"]:
                 for name in trained:
                     params[name].copy_(best[name])
+            else:
+                best_epoch = epochs.clone()
             for p in params.values():
                 p.requires_grad_(False)
+            finite = torch.ones(S, dtype=torch.bool, device=device)
+            for p in params.values():
+                finite &= torch.isfinite(p).reshape(S, -1).all(1)
+            failed = ~finite | (~torch.isfinite(best_loss) if s["early"] else torch.zeros_like(finite))
         base.eval()
         self.slots = S
         self.best_epoch = best_epoch.cpu().numpy()[: self.real]
         self.epochs = epochs.cpu().numpy()[: self.real]
         self.best_val = (best_loss.cpu().numpy() if s["early"] else np.full(S, math.nan))[: self.real]
+        self.failed = failed.cpu().numpy()[: self.real]
 
     def predict(self, rows: "torch.Tensor") -> np.ndarray:
         """rows (real members, m, k), padded to the stack's slots with copies of the first member's."""
