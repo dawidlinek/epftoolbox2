@@ -281,13 +281,13 @@ Runs a Python script that runs a `BayesSearch` with `storage=` (a journal file) 
 
 ```bash
 epf tune search.py --workers 16
-epf tune search.py --requeue       # with no worker running: the trials a killed worker left running are redone by the next run
+epf tune --requeue runs/search.journal   # with no worker running: put back the trials killed workers left running
 ```
 
 | Flag | What it does |
 |------|--------------|
 | `--workers N` | N processes run the whole script (default 1): the search, then what follows it, such as `result.save`, which writes the same file from each. `MAX_PROCESSES`, if not set, is the usable CPUs divided by N for each worker's model runs. Exits with code 1 if a worker failed |
-| `--requeue` | Runs the script once to mark the trials left running in its journal as interrupted, and exits: the next run proposes their rung-0 slots again and runs a later rung's trials again |
+| `--requeue JOURNAL...` | Instead of running a script, with no worker running: marks the trials left running in each journal file interrupted and puts them back (a later rung's trial with its parent's settings, a warm-start trial with its own; any other rung-0 slot is proposed again), and sets up a later rung whose creator was killed before it did. Reads no data, so it covers every search of a script. Exits with code 2 for a file that isn't a search's journal |
 
 ---
 

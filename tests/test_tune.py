@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 from threadpoolctl import threadpool_limits
 
+from epftoolbox2 import cli
 from epftoolbox2._extras import MissingExtraError
 from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.models import OLSModel
@@ -67,7 +68,6 @@ def single_process(monkeypatch):
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
     monkeypatch.setenv(bayes.ENV_POLL, "0.05")
     monkeypatch.delenv(bayes.ENV_WORKERS, raising=False)
-    monkeypatch.delenv(bayes.ENV_REQUEUE, raising=False)
     monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
     with threadpool_limits(limits=1):  # what a pool's worker runs on: a fit's bits depend on its BLAS threads
         yield
@@ -608,12 +608,9 @@ def test_two_processes_on_one_journal_finish_every_trial_once(tmp_path):
 
 
 def test_requeue_marks_a_dead_workers_trial_and_a_rerun_redoes_its_slot(df, monkeypatch, tmp_path):
-    monkeypatch.setattr(BayesSearch, "_score", fake_score)
-    journal = tmp_path / "s.journal"
-    searcher = fake_search(n_trials=6, storage=journal, rungs=None)
-    # A worker killed during trial 2: the trials before it finished, it stays running.
     import optuna
 
+    journal = tmp_path / "s.journal"
     calls = {"n": 0}
 
     def dies(self, values, r, run):
@@ -624,17 +621,15 @@ def test_requeue_marks_a_dead_workers_trial_and_a_rerun_redoes_its_slot(df, monk
 
     monkeypatch.setattr(BayesSearch, "_score", dies)
     with pytest.raises(KeyboardInterrupt):
-        searcher.run(df, horizon=1, validation=V)
-    storage = searcher._storage()
+        fake_search(n_trials=6, storage=journal, rungs=None).run(df, horizon=1, validation=V)
+    storage = BayesSearch(make, SPACE, storage=journal)._storage()
     study = optuna.load_study(study_name=bayes.STUDY, storage=storage)
     interrupted = [t for t in study.get_trials() if t.user_attrs.get("interrupted")]
     assert len(interrupted) == 1  # a KeyboardInterrupt marks its trial itself
-    # A trial left running by a process that was killed outright: what --requeue is for.
+    # A trial left running by a process killed outright between ask and suggest: what --requeue is for.
     stuck = study.ask()
-    monkeypatch.setenv(bayes.ENV_REQUEUE, "1")
-    with pytest.raises(SystemExit):
-        fake_search(n_trials=6, storage=journal, rungs=None).run(df, horizon=1, validation=V)
-    monkeypatch.delenv(bayes.ENV_REQUEUE)
+    done = bayes.requeue(journal)
+    assert done["requeued"] == [(bayes.STUDY, stuck.number)] and done["notes"] == []
     assert (
         optuna.load_study(study_name=bayes.STUDY, storage=storage).get_trials()[stuck.number].user_attrs["interrupted"]
     )
@@ -645,23 +640,134 @@ def test_requeue_marks_a_dead_workers_trial_and_a_rerun_redoes_its_slot(df, monk
     assert stuck.number not in table["trial"].tolist() and interrupted[0].number not in table["trial"].tolist()
 
 
-def test_epf_tune_requeue_runs_the_script_once_to_requeue(tmp_path):
-    journal, out = tmp_path / "s.journal", tmp_path / "result"
-    script = tmp_path / "search.py"
-    script.write_text(
-        textwrap.dedent(
-            WORKER.format(root=str(ROOT), log=str(tmp_path / "log"), n=4, journal=str(journal), out=str(out))
-        )
+class Killed(BaseException):
+    """A worker killed outright: no handler of the search runs."""
+
+
+def test_a_later_rungs_trial_killed_before_its_settings_is_requeued_with_its_parents(df, monkeypatch, tmp_path):
+    """Killed between a rung-1 trial's ask and its suggest: --requeue enqueues the parent's rung-0 settings (the trial has
+    none), and the rerun scores exactly the promoted trials' settings."""
+    journal = tmp_path / "s.journal"
+    settings = dict(n_trials=6, storage=journal, rungs=[{"every_nth_day": 4}, {"every_nth_day": 1}], keep=0.5)
+    monkeypatch.setattr(BayesSearch, "_score", fake_score)
+    real = bayes._Space.suggest
+
+    def suggest(self, trial):
+        if "trial" in trial.user_attrs:
+            raise Killed
+        return real(self, trial)
+
+    monkeypatch.setattr(bayes._Space, "suggest", suggest)
+    with pytest.raises(Killed):
+        fake_search(**settings).run(df, horizon=1, validation=V)
+    monkeypatch.setattr(bayes._Space, "suggest", real)
+    done = bayes.requeue(journal)
+    assert [name for name, _ in done["requeued"]] == [f"{bayes.STUDY}:rung1"]
+    seen = []
+    monkeypatch.setattr(BayesSearch, "_score", lambda self, values, r, run: seen.append((r, values)) or fake_score(self, values, r, run))  # fmt: skip
+    result = fake_search(**settings).run(df, horizon=1, validation=V)
+    promoted = result.record["promoted"][0]
+    expected = sorted(json.dumps(result.params(number), sort_keys=True) for number in promoted)
+    assert sorted(json.dumps(values, sort_keys=True) for r, values in seen if r == 1) == expected
+    assert result.table()["mae_r1"].notna().sum() == 3
+
+
+def test_an_interrupted_warm_start_trial_is_put_back(df, monkeypatch, tmp_path):
+    monkeypatch.setattr(BayesSearch, "_score", fake_score)
+    last_year = fake_search(n_trials=30).run(df, horizon=1, validation=V)
+    journal = tmp_path / "s.journal"
+
+    def dies_on_the_first(self, values, r, run):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(BayesSearch, "_score", dies_on_the_first)
+    with pytest.raises(KeyboardInterrupt):
+        fake_search(n_trials=10, warm_start=last_year, storage=journal).run(df, horizon=1, validation=V)
+    monkeypatch.setattr(BayesSearch, "_score", fake_score)
+    result = fake_search(n_trials=10, warm_start=last_year, storage=journal).run(df, horizon=1, validation=V)
+    warm = result.table()[lambda table: table["warm_start"]]
+    assert sorted(json.dumps(result.params(n), sort_keys=True) for n in warm["trial"]) == sorted(
+        json.dumps(last_year.params(n), sort_keys=True) for n in last_year.finalists()
     )
-    done = run_cli("tune", str(script), "--requeue", env=worker_env(tmp_path))
-    assert done.returncode == 0, done.stdout + done.stderr
-    assert "Requeued 0 interrupted trial(s)" in done.stdout
-    assert not (tmp_path / "result.0.yaml").exists()
+    assert warm["mae_r0"].notna().all() and len(result.table()) == 10
 
 
-def test_epf_tune_refuses_a_missing_script(tmp_path):
-    done = run_cli("tune", str(tmp_path / "nothing.py"), env=worker_env(tmp_path))
-    assert done.returncode == 2 and "No such script" in done.stdout
+def test_a_study_whose_creator_stopped_says_how_to_recover(df, monkeypatch, tmp_path):
+    import optuna
+
+    monkeypatch.setattr(BayesSearch, "_score", fake_score)
+    monkeypatch.setenv(bayes.ENV_SETUP_TIMEOUT, "0.2")
+    # rung 0 created and never set up: nothing ran
+    journal = tmp_path / "zero.journal"
+    optuna.create_study(storage=BayesSearch(make, SPACE, storage=journal)._storage(), study_name=bayes.STUDY)
+    with pytest.raises(TimeoutError, match="No trial ran: remove the journal file"):
+        fake_search(n_trials=4, storage=journal).run(df, horizon=1, validation=V)
+    assert "never set up" in bayes.requeue(journal)["notes"][0]
+    # rung 1 created by a worker killed before it enqueued the promoted trials
+    journal = tmp_path / "one.journal"
+    settings = dict(n_trials=6, storage=journal, rungs=[{"every_nth_day": 4}, {"every_nth_day": 1}], keep=0.5)
+    real = bayes._set_up_rung
+
+    def killed(*args, **kwargs):
+        raise Killed
+
+    monkeypatch.setattr(bayes, "_set_up_rung", killed)
+    with pytest.raises(Killed):
+        fake_search(**settings).run(df, horizon=1, validation=V)
+    monkeypatch.setattr(bayes, "_set_up_rung", real)
+    with pytest.raises(TimeoutError, match="epf tune --requeue"):
+        fake_search(**settings).run(df, horizon=1, validation=V)
+    assert bayes.requeue(journal)["notes"] == [f"Set up '{bayes.STUDY}:rung1', whose creator stopped before it did."]
+    result = fake_search(**settings).run(df, horizon=1, validation=V)
+    assert result.table()["mae_r1"].notna().sum() == 3
+
+
+def test_a_worker_waiting_on_a_rung_names_the_trials_it_waits_for(df, monkeypatch, tmp_path):
+    import optuna
+
+    monkeypatch.setattr(BayesSearch, "_score", fake_score)
+    monkeypatch.setenv(bayes.ENV_WAIT_NOTE, "0.05")
+    journal = tmp_path / "s.journal"
+    searcher = fake_search(n_trials=3, storage=journal, rungs=None)
+    searcher.run(df, horizon=1, validation=V)
+    storage = searcher._storage()
+    stuck = optuna.load_study(study_name=bayes.STUDY, storage=storage).ask()  # a trial of a worker that died, unmarked
+    storage.set_trial_user_attr(stuck._trial_id, "surplus", False)
+    looks = iter([False] * 5 + [True])
+    monkeypatch.setattr(BayesSearch, "_rung_done", lambda self, storage, r: next(looks))
+    with pytest.warns(
+        UserWarning, match=rf"Still waiting for trial\(s\) \[{stuck.number}\] of rung 0 .*epf tune --requeue"
+    ):
+        searcher._wait_for_rung(storage, 0)
+
+
+def test_epf_tune_requeue_reads_journals_alone(df, monkeypatch, tmp_path, capsys):
+    import optuna
+
+    monkeypatch.setattr(BayesSearch, "_score", fake_score)
+    journals = [tmp_path / "a.journal", tmp_path / "b.journal"]
+    for journal in journals:
+        fake_search(n_trials=3, storage=journal, rungs=None).run(df, horizon=1, validation=V)
+    stuck = optuna.load_study(
+        study_name=bayes.STUDY, storage=BayesSearch(make, SPACE, storage=journals[1])._storage()
+    ).ask()
+    monkeypatch.setattr(sys, "argv", ["epf", "tune", "--requeue", *map(str, journals)])
+    cli.main()
+    out = capsys.readouterr().out
+    assert "a.journal: 0 interrupted trial(s) put back (none)" in out
+    assert f"b.journal: 1 interrupted trial(s) put back ({bayes.STUDY} trial {stuck.number})" in out
+    monkeypatch.setattr(sys, "argv", ["epf", "tune", "--requeue", str(tmp_path / "nothing.journal")])
+    with pytest.raises(SystemExit) as exit_:
+        cli.main()
+    assert exit_.value.code == 2 and "No journal file" in capsys.readouterr().out
+
+
+def test_epf_tune_refuses_a_missing_script(tmp_path, monkeypatch, capsys):
+    for argv, message in (([str(tmp_path / "nothing.py")], "No such script"), ([], "needs a search script")):
+        monkeypatch.setattr(sys, "argv", ["epf", "tune", *argv])
+        with pytest.raises(SystemExit) as exit_:
+            cli.main()
+        assert exit_.value.code == 2 and message in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------------------------------------------------

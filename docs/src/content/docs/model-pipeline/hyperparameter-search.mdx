@@ -260,9 +260,13 @@ promoted trial runs once. Every worker waits at the end of a rung for the others
 A SLURM array of the same script works the same way, each task one worker (`#SBATCH --array=0-15`, `python search.py`): the
 journal file must be on a file system every task sees.
 
-A worker killed during a trial leaves the trial running in the journal, and the others wait for it at the end of the rung. With
-no worker running, `epf tune search.py --requeue` marks such trials interrupted and exits; the next run proposes their rung-0
-slots again and runs a later rung's trials again.
+A worker killed during a trial leaves the trial running in the journal, and the others wait for it at the end of the rung;
+every 15 minutes (`EPF_TUNE_WAIT_NOTE` seconds) they warn with the trials they wait for. Kill the workers, run
+`epf tune --requeue runs/search_mlp.journal` (journal files, any number; no data is read), and start them again: each trial left
+running is marked interrupted and put back, a later rung's with its parent's settings, a warm-start trial with its own, and any
+other rung-0 slot is proposed again. A trial stopped by Ctrl-C puts itself back. A worker killed while it set up a later rung
+leaves the others waiting for it: after 2 minutes (`EPF_TUNE_SETUP_TIMEOUT`) they stop and say so, and `--requeue` finishes the
+setup. Rung 0 never set up means no trial ran: remove the journal and start again.
 
 ## Smarter than random search
 

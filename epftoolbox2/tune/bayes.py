@@ -58,14 +58,15 @@ STUDY = "epftoolbox2_search"
 RESULT_KEY = "epftoolbox2_search"
 RESULT_VERSION = 1
 
-# Set by `epf tune` for the processes it starts: how many share the storage, and (alone) a run that only requeues.
+# Set by `epf tune` for the processes it starts: how many share the storage, and which one this is.
 ENV_WORKERS = "EPF_TUNE_WORKERS"
 ENV_WORKER = "EPF_TUNE_WORKER"
-ENV_REQUEUE = "EPF_TUNE_REQUEUE"
 # Seconds between two looks at the storage while waiting for other workers (a rung to finish, a study to be set up).
 ENV_POLL = "EPF_TUNE_POLL"
-# How long a process waits for the one that created a study to set it up, in seconds.
-SETUP_TIMEOUT = 600.0
+# Seconds a process waits for the one that created a study to set it up (which takes well under a second) before it says that
+# process must have stopped; and seconds between two notes naming the trials a rung still waits for.
+ENV_SETUP_TIMEOUT = "EPF_TUNE_SETUP_TIMEOUT"
+ENV_WAIT_NOTE = "EPF_TUNE_WAIT_NOTE"
 
 # Trial user attributes.
 _WARM = "warm_start"
@@ -409,6 +410,13 @@ def _poll() -> float:
         return 2.0
 
 
+def _seconds(name: str, default: float) -> float:
+    try:
+        return max(0.01, float(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
 def _workers() -> int:
     try:
         return max(1, int(os.environ.get(ENV_WORKERS, "1")))
@@ -440,6 +448,7 @@ class _Run:
     freq: str
     validation: Tuple[str, str]
     pipeline: Dict[str, Any]
+    storage: Any = None  # the search's Optuna storage, once open
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -571,19 +580,15 @@ class BayesSearch:
         run = _Run(frame, target, tuple(planned_horizons), freq, (start, end), pipeline)
         optuna = _optuna()
         with _quiet_optuna():
-            storage = self._storage()
-            if os.environ.get(ENV_REQUEUE) == "1":
-                found = self._requeue(storage)
-                print(f"Requeued {found} interrupted trial(s) in {self.storage}")
-                raise SystemExit(0)
+            storage = run.storage = self._storage()
             settings = self._settings(run)
             study = self._open(storage, STUDY, optuna.samplers.RandomSampler(seed=self.seed), settings, warm=True)
             self._check_models(storage)
             self._work_rung0(study, run)
             for r in range(1, len(self._rungs)):
-                self._wait(lambda: self._rung_done(storage, r - 1))
+                self._wait_for_rung(storage, r - 1)
                 self._work_rung(storage, r, run)
-            self._wait(lambda: self._rung_done(storage, len(self._rungs) - 1))
+            self._wait_for_rung(storage, len(self._rungs) - 1)
             return SearchResult(self._record(storage, settings), make=self.make)
 
     def _storage(self) -> Any:
@@ -631,9 +636,7 @@ class BayesSearch:
             )
         except optuna.exceptions.DuplicatedStudyError:
             study = optuna.load_study(study_name=name, storage=storage, sampler=sampler)
-            self._wait(
-                lambda: _READY in study.user_attrs, timeout=SETUP_TIMEOUT, what=f"the study {name!r} to be set up"
-            )
+            self._wait_for_setup(study, name)
             stored = study.user_attrs.get(_SETTINGS)
             if _canonical(stored) != _canonical(settings):
                 differ = sorted(
@@ -717,17 +720,9 @@ class BayesSearch:
             )
             leader = False
         if leader:
-            promoted = self._promote(storage, r - 1)
-            first = optuna.load_study(study_name=STUDY, storage=storage)
-            params = {t.number: t.params for t in first.get_trials(deepcopy=False)}
-            study.set_user_attr(_PROMOTED, promoted)
-            for number in promoted:
-                study.enqueue_trial(params[number], user_attrs={_PARENT: number})
-            study.set_user_attr(_READY, True)
+            _set_up_rung(storage, study, r, self.keep)
         else:
-            self._wait(
-                lambda: _READY in study.user_attrs, timeout=SETUP_TIMEOUT, what=f"the study {name!r} to be set up"
-            )
+            self._wait_for_setup(study, name)
         while True:
             trial = study.ask()
             if _PARENT not in trial.user_attrs:  # nothing left in the queue
@@ -745,9 +740,8 @@ class BayesSearch:
             trial.set_user_attr(_ERROR, f"{type(exc).__name__}: {exc}"[:1000])
             study.tell(trial, state=optuna.trial.TrialState.FAIL)
             raise
-        except BaseException:
-            trial.set_user_attr(_INTERRUPTED, True)
-            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+        except BaseException:  # a KeyboardInterrupt, a SystemExit: the trial runs again in the next run
+            _interrupt(run.storage, study, trial._trial_id)
             raise
         trial.set_user_attr(_FORECASTS, score.forecasts)
         trial.set_user_attr(_PLANNED, score.planned)
@@ -819,15 +813,7 @@ class BayesSearch:
                     )
 
     def _promote(self, storage: Any, r: int) -> List[int]:
-        """The rung-0 trial numbers that go on from rung `r`: the best `keep` share of those it scored, at least one."""
-        scored = _rung_results(storage, r)
-        evaluated = len(scored)
-        ranked = sorted(
-            ((value, number) for number, (value, _, _, _) in scored.items() if value is not None),
-            key=lambda pair: (pair[0], pair[1]),
-        )
-        count = max(1, math.floor(evaluated * self.keep + 1e-9))
-        return [number for _, number in ranked[:count]]
+        return _promote(storage, r, self.keep)
 
     def _rung_done(self, storage: Any, r: int) -> bool:
         optuna = _optuna()
@@ -847,34 +833,38 @@ class BayesSearch:
         }
         return set(study.user_attrs[_PROMOTED]) <= done
 
-    def _wait(
-        self, ready: Callable[[], bool], timeout: Optional[float] = None, what: str = "the other workers"
-    ) -> None:
+    def _wait_for_setup(self, study: Any, name: str) -> None:
+        """Wait for the process that created `study` to set it up; a TimeoutError saying how to recover if it stopped."""
+        timeout = _seconds(ENV_SETUP_TIMEOUT, 120.0)
         started = time.monotonic()
-        while not ready():
-            if timeout is not None and time.monotonic() - started > timeout:
+        while _READY not in study.user_attrs:
+            if time.monotonic() - started > timeout:
+                fix = (
+                    "No trial ran: remove the journal file and start the search again."
+                    if name == STUDY
+                    else f"Kill the workers, then run `epf tune --requeue {self.storage}`, which finishes its setup."
+                )
                 raise TimeoutError(
-                    f"Waited {timeout:.0f} s for {what} in {self.storage}: the process that created it may have stopped. "
-                    "Start the search again with another storage file."
+                    f"The study {name!r} in {self.storage} was created and not set up within {timeout:.0f} s: the process that "
+                    f"created it stopped before. {fix}"
                 )
             time.sleep(_poll())
 
-    def _requeue(self, storage: Any) -> int:
-        """Mark every running trial interrupted (with no worker running): its rung-0 slot is proposed again, a later rung's
-        trial enqueued again."""
-        optuna = _optuna()
-        found = 0
-        for name in optuna.get_all_study_names(storage):
-            if name != STUDY and not name.startswith(f"{STUDY}:rung"):
-                continue
-            study = optuna.load_study(study_name=name, storage=storage)
-            for t in study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.RUNNING,)):
-                storage.set_trial_user_attr(t._trial_id, _INTERRUPTED, True)
-                storage.set_trial_state_values(t._trial_id, optuna.trial.TrialState.FAIL)
-                if name != STUDY:
-                    study.enqueue_trial(t.params, user_attrs={_PARENT: t.user_attrs[_PARENT]})
-                found += 1
-        return found
+    def _wait_for_rung(self, storage: Any, r: int) -> None:
+        """Wait until every trial of rung `r` has finished, naming the ones still running now and then: a worker killed
+        during a trial leaves it running, and only `epf tune --requeue` (with no worker running) puts it back."""
+        every = _seconds(ENV_WAIT_NOTE, 900.0)
+        noted = time.monotonic()
+        while not self._rung_done(storage, r):
+            if time.monotonic() - noted > every:
+                noted = time.monotonic()
+                warnings.warn(
+                    f"Still waiting for trial(s) {_running(storage, r)} of rung {r} in {self.storage}. If no worker runs them "
+                    f"any more, kill the workers, then run `epf tune --requeue {self.storage}` and start them again.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            time.sleep(_poll())
 
     def _record(self, storage: Any, settings: Dict[str, Any]) -> Dict[str, Any]:
         """The result's record, from the storage once every rung has finished: the same in every worker."""
@@ -975,6 +965,106 @@ def _rung_results(storage: Any, r: int) -> Dict[int, Tuple[Optional[float], int,
             t.user_attrs.get(_ERROR),
         )
     return out
+
+
+def _rung_study(r: int) -> str:
+    return STUDY if r == 0 else f"{STUDY}:rung{r}"
+
+
+def _promote(storage: Any, r: int, keep: float) -> List[int]:
+    """The rung-0 trial numbers that go on from rung `r`: the best `keep` share of the trials it tried (scored or failed),
+    the best by validation MAE among those scored, ties by trial number; at least one."""
+    scored = _rung_results(storage, r)
+    ranked = sorted((value, number) for number, (value, _, _, _) in scored.items() if value is not None)
+    count = max(1, math.floor(len(scored) * keep + 1e-9))
+    return [number for _, number in ranked[:count]]
+
+
+def _set_up_rung(storage: Any, study: Any, r: int, keep: float) -> None:
+    """Rung `r`'s study set up: the trials rung r-1 promotes, each enqueued once with its rung-0 settings, then READY. Also
+    what `requeue` runs on a study whose creator stopped before it was set up: what is enqueued already isn't again."""
+    promoted = list(study.user_attrs.get(_PROMOTED) or _promote(storage, r - 1, keep))
+    params = _first_params(storage)
+    there = {t.user_attrs.get(_PARENT) for t in study.get_trials(deepcopy=False)}
+    if _PROMOTED not in study.user_attrs:
+        study.set_user_attr(_PROMOTED, promoted)
+    for number in promoted:
+        if number not in there:
+            study.enqueue_trial(params[number], user_attrs={_PARENT: number})
+    study.set_user_attr(_READY, True)
+
+
+def _first_params(storage: Any) -> Dict[int, Dict[str, Any]]:
+    """Rung-0 trial number -> the sampler's parameters of its settings (an enqueued trial's fixed ones if it ran no further)."""
+    optuna = _optuna()
+    study = optuna.load_study(study_name=STUDY, storage=storage)
+    return {
+        t.number: dict(t.params or t.system_attrs.get("fixed_params") or {}) for t in study.get_trials(deepcopy=False)
+    }
+
+
+def _running(storage: Any, r: int) -> List[int]:
+    """The trials of rung `r` still running, by rung-0 trial number."""
+    optuna = _optuna()
+    study = optuna.load_study(study_name=_rung_study(r), storage=storage)
+    return [
+        t.number if r == 0 else t.user_attrs.get(_PARENT)
+        for t in study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.RUNNING,))
+        if not _dropped(t)
+    ]
+
+
+def _interrupt(storage: Any, study: Any, trial_id: int) -> None:
+    """Mark a trial interrupted and put it back: a later rung's trial enqueued again with its parent's rung-0 settings (it may
+    have been killed before it suggested them), a warm-start trial with its settings; any other rung-0 trial frees its slot,
+    which the sampler proposes again."""
+    optuna = _optuna()
+    frozen = storage.get_trial(trial_id)
+    storage.set_trial_user_attr(trial_id, _INTERRUPTED, True)
+    if not frozen.state.is_finished():
+        storage.set_trial_state_values(trial_id, optuna.trial.TrialState.FAIL)
+    if frozen.user_attrs.get(_SURPLUS):
+        return
+    if study.study_name != STUDY:
+        parent = frozen.user_attrs.get(_PARENT)
+        if parent is not None:
+            study.enqueue_trial(_first_params(storage)[parent], user_attrs={_PARENT: parent})
+    elif frozen.user_attrs.get(_WARM):
+        study.enqueue_trial(dict(frozen.system_attrs.get("fixed_params") or frozen.params), user_attrs={_WARM: True})
+
+
+def requeue(journal: Union[str, Path]) -> Dict[str, Any]:
+    """What `epf tune --requeue JOURNAL` does, with no worker running: every trial left running in the journal's search is
+    marked interrupted and put back (`_interrupt`), and a later rung's study left unset by a killed worker is set up. Reads no
+    data. Returns {"requeued": [(study, trial number)], "notes": [...]}."""
+    optuna = _optuna()
+    path = Path(journal)
+    if not path.is_file():
+        raise FileNotFoundError(f"No journal file {path}")
+    from optuna.storages.journal import JournalFileBackend
+
+    storage = optuna.storages.JournalStorage(JournalFileBackend(str(path)))
+    requeued, notes = [], []
+    with _quiet_optuna():
+        names = optuna.get_all_study_names(storage)
+        if STUDY not in names:
+            raise ValueError(f"{path} holds no BayesSearch (no study {STUDY!r})")
+        first = optuna.load_study(study_name=STUDY, storage=storage)
+        if _READY not in first.user_attrs:
+            notes.append(f"Rung 0 was never set up, so no trial ran: remove {path} and start the search again.")
+            return {"requeued": requeued, "notes": notes}
+        keep = float(first.user_attrs[_SETTINGS]["keep"])
+        for name in sorted(names, key=lambda n: (n != STUDY, n)):
+            if name != STUDY and not name.startswith(f"{STUDY}:rung"):
+                continue
+            study = optuna.load_study(study_name=name, storage=storage)
+            for t in study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.RUNNING,)):
+                _interrupt(storage, study, t._trial_id)
+                requeued.append((name, t.number))
+            if _READY not in study.user_attrs:
+                _set_up_rung(storage, study, int(name.rsplit("rung", 1)[1]), keep)
+                notes.append(f"Set up {name!r}, whose creator stopped before it did.")
+    return {"requeued": requeued, "notes": notes}
 
 
 def cut_frame(data: pd.DataFrame, validation_end: Any) -> pd.DataFrame:
@@ -1236,4 +1326,4 @@ class SearchResult:
         return result
 
 
-__all__ = ["BayesSearch", "SearchResult", "Subset", "cut_frame", "score_ref"]
+__all__ = ["BayesSearch", "SearchResult", "Subset", "cut_frame", "requeue", "score_ref"]

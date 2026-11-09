@@ -255,12 +255,31 @@ def cmd_verify(args: argparse.Namespace) -> None:
 
 
 def cmd_tune(args: argparse.Namespace) -> None:
-    """Run a search script (`epftoolbox2.tune.BayesSearch` with `storage=`) in `--workers` processes that share its trials."""
+    """Run a search script (`epftoolbox2.tune.BayesSearch` with `storage=`) in `--workers` processes that share its trials, or
+    with `--requeue JOURNAL...` put back the trials killed workers left running in those journals."""
     import os
     import subprocess
 
+    plain = {"markup": False, "highlight": False, "soft_wrap": True}
+    if args.requeue:
+        from .tune.bayes import requeue
+
+        for journal in args.requeue:
+            try:
+                done = requeue(journal)
+            except (FileNotFoundError, ValueError) as exc:
+                console.print(f"[red]{escape(str(exc))}[/red]")
+                sys.exit(2)
+            shown = ", ".join(f"{name} trial {number}" for name, number in done["requeued"]) or "none"
+            console.print(f"{journal}: {len(done['requeued'])} interrupted trial(s) put back ({shown})", **plain)
+            for note in done["notes"]:
+                console.print(f"{journal}: {note}", **plain)
+        return
+    if args.script is None:
+        console.print("[red]epf tune needs a search script, or --requeue JOURNAL...[/red]")
+        sys.exit(2)
     from .models.base import _usable_cpu_count
-    from .tune.bayes import ENV_REQUEUE, ENV_WORKER, ENV_WORKERS
+    from .tune.bayes import ENV_WORKER, ENV_WORKERS
 
     script = Path(args.script)
     if not script.is_file():
@@ -271,10 +290,6 @@ def cmd_tune(args: argparse.Namespace) -> None:
         sys.exit(2)
     command = [sys.executable, str(script)]
     base = dict(os.environ)
-    if args.requeue:
-        # One process, before any worker runs: the search marks the trials left running as interrupted and exits.
-        result = subprocess.run(command, env={**base, ENV_REQUEUE: "1", ENV_WORKERS: "1", ENV_WORKER: "0"})
-        sys.exit(result.returncode)
     # The workers' model runs share the CPUs: each pool gets a share, unless MAX_PROCESSES says otherwise.
     if "MAX_PROCESSES" not in base:
         base["MAX_PROCESSES"] = str(max(1, _usable_cpu_count() // args.workers))
@@ -284,7 +299,6 @@ def cmd_tune(args: argparse.Namespace) -> None:
     ]
     codes = [worker.wait() for worker in workers]
     failed = [index for index, code in enumerate(codes) if code != 0]
-    plain = {"markup": False, "highlight": False, "soft_wrap": True}
     if failed:
         console.print(f"Worker(s) {failed} of {args.workers} failed (exit codes {[codes[i] for i in failed]})", **plain)
         sys.exit(1)
@@ -827,15 +841,20 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Start the script in N processes that share its BayesSearch's trials through the journal file of storage=. "
             "Each process runs the whole script: the search, then whatever follows (result.save writes the same file "
-            "from each). MAX_PROCESSES, if not set, is the usable CPUs divided by N for each worker's model runs."
+            "from each). MAX_PROCESSES, if not set, is the usable CPUs divided by N for each worker's model runs. "
+            "With --requeue JOURNAL..., put back the trials killed workers left running instead."
         ),
     )
-    tune_p.add_argument("script", metavar="search.py", help="Python script that runs a BayesSearch with storage=")
+    tune_p.add_argument(
+        "script", nargs="?", metavar="search.py", help="Python script that runs a BayesSearch with storage="
+    )
     tune_p.add_argument("--workers", type=int, default=1, metavar="N", help="Processes sharing the search (default 1)")
     tune_p.add_argument(
         "--requeue",
-        action="store_true",
-        help="With no worker running: mark the trials a killed worker left running as interrupted, so a rerun redoes them",
+        nargs="+",
+        metavar="JOURNAL",
+        help="With no worker running: put back the trials killed workers left running in these journal files (no data is "
+        "read), and finish a later rung's setup a killed worker left",
     )
 
     # -- validate --
