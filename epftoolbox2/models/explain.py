@@ -114,7 +114,7 @@ def _judge(
     info._check_source_zone(col, data.index)
     used = used & ~clock.skipped(np.array([period]), step)[0]  # a period the clocks skip has no row to judge
     if not used.any():
-        return col.rule.describe(), _DASH, "no row"
+        return _rule_label(name, col, info), _DASH, "no row"
     available = clock.available(col, np.array([period]), step)[0]
     if training_rows is not None and over_time(col.rule):
         known = _RowsKnown(col, np.array([period]), clock, step)
@@ -125,7 +125,13 @@ def _judge(
     known = clock.label(available[worst], int(np.flatnonzero(used)[worst]))
     late = int((excess > 0).sum())
     status = "ok" if not late else "late" if late == len(excess) else f"late on {late} of {len(excess)} days"
-    return col.rule.describe(), known, status
+    return _rule_label(name, col, info), known, status
+
+
+def _rule_label(name: str, col: Any, info: InformationSet) -> str:
+    """A column's rule as the table shows it, with the upstream of a column read from another pipeline's forecasts."""
+    chained = info.chained_of(name)
+    return col.rule.describe() if chained is None else f"{col.rule.describe()}; {chained.describe()}"
 
 
 def predictor_table(

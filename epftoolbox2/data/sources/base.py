@@ -65,3 +65,12 @@ class DataSource(ABC):
             also contains the source class and the package cache format version.
         """
         pass
+
+    def content_digest(self) -> Optional[str]:
+        """A hash of what the source reads that its parameters don't say, or ``None`` (the default) when they say it all.
+
+        A source that reads something which can change under the same parameters, such as another pipeline's results that
+        grow as it runs (``ForecastSource``), returns a hash of its current content here, so that the single-file pipeline
+        cache (``DataPipeline.run(..., cache="file.parquet")``) fetches again after it changed and reuses its file otherwise.
+        """
+        return None

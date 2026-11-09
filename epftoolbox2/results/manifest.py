@@ -88,6 +88,22 @@ manifests are as before.
 A model of day or pooled units (`models._units`) adds `unit_kind` ("day" or "pooled") and `target_transform` ("per_period" or
 "pooled"), both compared: a change of either moves every forecast. A period model, every core model, has neither key.
 
+A model that reads another pipeline's stored forecasts (`ForecastSource`, through `InformationSet.with_source_rules`) adds
+`chained_inputs`: for each such column, its upstream's path, model, horizon, issue time and zone, data zone, `available` and
+manifest digest, and `coverage`, the rows its fits read where a predictor built from it had no value. A resume compares the
+model, horizon, issue time and zone, data zone and `available` of each (`chained_differences`): another upstream issue time can
+leave the column's values as they were and still change when they were known. Another upstream digest only warns: a changed
+upstream changes the column, which `data_columns_hash` refuses. A model that reads no such column has no key.
+
+A daily run (`freq="1D"`) records `daily_stamp`, the time of day its rows are stamped at ("12:00"), provenance: a downstream
+`ForecastSource` places each forecast there. Other runs have no key.
+
+Resumed under another information set (other rules, or an earlier issue time), a run lists what the current rules say, and its
+`availability` keeps the earlier rows under `stored_under_other_rules`: the file holds records those rules judged, and a
+`ForecastSource` reading it treats the model as unchecked. A later issue time over an earlier listing that was empty at "warn" or
+"raise" leaves no mark. Resumed over records of a run that listed nothing (level "none") on days this run doesn't judge, the mark
+is `{"listing": [], "level": "none"}`. Every later resume keeps the mark; only fresh results lose it.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -108,12 +124,12 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Opt
 import numpy as np
 import pandas as pd
 
-from .._date_utils import zone_name
+from .._date_utils import daily_anchor, fmt_minutes, zone_name
 from ..models._calendar import issue_day_names, mask_members, resolve_issue_days
 from ..models._cards import manifest_fields, window_starts
 from ..logging import get_logger
 from .availability import LISTING_TIMES, merge_listings
-from .store import RECORD_SCHEMA
+from .store import RECORD_SCHEMA, outside_stacklevel
 from .vintages import merge_vintages
 from .windows import TEST, RunWindows, mask_key
 
@@ -154,6 +170,9 @@ _PROVENANCE_FIELDS += ("weights_history",)
 # `residual_base`: a `ResidualModel`'s base's card, runtime and weights, with its first issue day (the warm-up's), for
 # `report.provenance()`; the base's own manifest compares them, and this one's `residual` field its configuration.
 _PROVENANCE_FIELDS += ("residual_base",)
+# `daily_stamp`: a daily run's row time ("12:00"), where a downstream `ForecastSource` places its forecasts; the frame's hash
+# (`data_columns_hash`, of the instants) already refuses a resume on rows stamped elsewhere.
+_PROVENANCE_FIELDS += ("daily_stamp",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -399,6 +418,11 @@ class Manifest:
     # A model that reads history: [{"through": day, "columns", "hash"}] of what it reads after `test_end`; None (and no key)
     # otherwise.
     history_ahead: Optional[List[Dict[str, Any]]] = None
+    # A model reading another pipeline's stored forecasts: column -> its upstream (`ChainedInput.record()`) and "coverage"; None
+    # (and no key) otherwise. Its identity is compared on resume (`chained_differences`), its digest warns.
+    chained_inputs: Optional[Dict[str, Dict[str, Any]]] = None
+    # A daily run's row time, "HH:MM"; None (and no key) at any other freq. Provenance.
+    daily_stamp: Optional[str] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -480,6 +504,10 @@ class Manifest:
                 del out[name]
         if out["history_ahead"] is None:  # a model that reads no history
             del out["history_ahead"]
+        if out["chained_inputs"] is None:  # no column of another pipeline's forecasts
+            del out["chained_inputs"]
+        if out["daily_stamp"] is None:  # not a daily run
+            del out["daily_stamp"]
         return out
 
     @classmethod
@@ -654,6 +682,7 @@ def build_manifest(
     vintages: Optional[List[Dict[str, Any]]] = None,
     kernels: Optional[str] = None,
     fit_path: Optional[str] = None,
+    chained_inputs: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -687,6 +716,7 @@ def build_manifest(
     `vintages` are the rows of `results.vintages.vintage_rows`, recorded as they are. `kernels` is the backend of the LEAR
     kernels the model fits with (`BaseModel._kernel_backend`), None for a model without them. `fit_path` is the numeric path of
     the fits ("engine-2" in an engine group whose fits come from shared statistics, None for the model path).
+    `chained_inputs` are the model's chained columns as its input check found them (`models._chained`), None without any.
     """
     now = datetime.now(timezone.utc).isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
@@ -746,6 +776,8 @@ def build_manifest(
         pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
         residual=getattr(model, "_residual", None),  # a ResidualModel's base (`models.residual`)
         residual_base=getattr(model, "_residual_base", None),
+        chained_inputs=chained_inputs or None,
+        daily_stamp=fmt_minutes(daily_anchor(data.index)) if freq == "1D" and len(data.index) else None,
         **carded,
         **units,
     )
@@ -1011,11 +1043,13 @@ def check_and_write(
     manifest.save_coefficients = None if save_coefficients else False  # compared below, as the configuration is
     if path.exists():
         existing = _read_manifest_of_a_model(path, model_name)
+        run_span = _issue_span(manifest)  # this run's own issue days, before the manifest grows to cover the file
         data_diffs = _compare_data(existing, manifest, frame_hashes)
         skip = () if data_diffs is None else ("data_columns_hash", "history_ahead")
         diffs = [
             *(data_diffs or []),
             *manifest.differences(existing, skip=skip),
+            *chained_differences(existing.chained_inputs, manifest.chained_inputs),
             *unrecorded_masks(existing, manifest, has_existing_results),
         ]
         if diffs and not allow_mismatch:
@@ -1029,6 +1063,8 @@ def check_and_write(
             )
         if diffs:
             logger.warning(f"{model_name}: manifest mismatch at {path} overridden: {'; '.join(diffs)}")
+        else:
+            _warn_about_changed_upstreams(existing.chained_inputs, manifest.chained_inputs, model_name)
         if check_stored is not None:
             check_stored()
         manifest.kernels = _kernels_on_file(existing, manifest, model_name, path, has_existing_results)
@@ -1060,7 +1096,7 @@ def check_and_write(
             manifest.predictor_lists += list(kept.values())
         if manifest.binary_masks is not None and existing.binary_masks:
             manifest.binary_masks = {**existing.binary_masks, **manifest.binary_masks}
-        _keep_listing(existing, manifest)
+        _keep_listing(existing, manifest, has_existing_results, run_span)
         _keep_vintages(existing, manifest)
     elif has_existing_results:
         message = f"{model_name}: {path.parent} has results but no manifest ({path.name} not found)."
@@ -1075,6 +1111,55 @@ def check_and_write(
         manifest.data_unverified = True
         _mark_rows_unverified(manifest, model_name, path, "they have no manifest")
     manifest.write(path)
+
+
+# What a resume compares of each chained column (`information_set.ChainedInput.IDENTITY`).
+CHAINED_IDENTITY = ("model", "horizon", "issue_time", "issue_timezone", "data_timezone", "available")
+
+
+def chained_differences(
+    existing: Optional[Dict[str, Dict[str, Any]]], mine: Optional[Dict[str, Dict[str, Any]]]
+) -> List[str]:
+    """What refuses a resume in the chained columns of two manifests: a column chained in one and not the other, or another
+    model, horizon, issue time or zone, data zone or `available` of its upstream."""
+    existing, mine = existing or {}, mine or {}
+    out = []
+    for column in sorted(set(existing) | set(mine)):
+        theirs, ours = existing.get(column), mine.get(column)
+        if theirs is None or ours is None:
+            out.append(
+                f"chained_inputs.{column}: {None if theirs is None else _chain_label(theirs)} (existing results) vs "
+                f"{None if ours is None else _chain_label(ours)} (this run)"
+            )
+            continue
+        out.extend(
+            f"chained_inputs.{column}.{key}: {theirs.get(key)!r} (existing results) vs {ours.get(key)!r} (this run)"
+            for key in CHAINED_IDENTITY
+            if theirs.get(key) != ours.get(key)
+        )
+    return out
+
+
+def _warn_about_changed_upstreams(
+    existing: Optional[Dict[str, Dict[str, Any]]], mine: Optional[Dict[str, Dict[str, Any]]], model_name: str
+) -> None:
+    """A warning for each chained column whose upstream's manifest digest changed (rerun, extended, another level) under a
+    resume that goes on: where its forecasts moved, the data hash refused already; where they didn't, the stored forecasts
+    read the same values, from an upstream that is not quite the one they were made with."""
+    for column, ours in sorted((mine or {}).items()):
+        theirs = (existing or {}).get(column)
+        if theirs is not None and theirs.get("digest") != ours.get("digest"):
+            warnings.warn(
+                f"{model_name}: the upstream of {column} ({ours.get('model')} in {ours.get('path')}) changed since these results "
+                "were made (another manifest digest), though not on the rows they read: the data hash would refuse that. "
+                "The resume goes on.",
+                UserWarning,
+                stacklevel=outside_stacklevel(),
+            )
+
+
+def _chain_label(entry: Dict[str, Any]) -> str:
+    return f"{entry.get('model')!r} horizon {entry.get('horizon')} issued {entry.get('issue_time')} {entry.get('issue_timezone')}"
 
 
 def _earliest_base(existing: Optional[Dict[str, Any]], mine: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -1280,17 +1365,49 @@ def _keep_windows(existing: Manifest, manifest: Manifest, allow_mismatch: bool, 
     manifest.windows = run.keeping(on_file).to_dict()
 
 
-def _keep_listing(existing: Manifest, manifest: Manifest) -> None:
+# Under `availability`: what was listed of records a run resumed under other rules (another issue time, other rules, other
+# assumptions), {"listing": rows}. Its records stay in the file, judged by rules the manifest no longer holds, so nothing vouches
+# for them under the ones it does: a `ForecastSource` reading such results treats the model as unchecked. Kept by every later
+# resume, never compared.
+STORED_UNDER_OTHER_RULES = "stored_under_other_rules"
+
+
+def _keep_listing(
+    existing: Manifest,
+    manifest: Manifest,
+    has_existing_results: bool = True,
+    run_span: Optional[Tuple[str, str]] = None,
+) -> None:
     """Keep what an earlier run listed: its records stay in the file, and with them the reason to mention it.
 
     A run over a narrower test period adds its rows to the earlier ones. A run at level "none" looks at nothing, so it can't
     take anything back, and results that were flagged must not read as clean because of how they were last resumed. Rules that
-    changed leave nothing to keep: what the old ones said may no longer be true, and this run's rows are what the current ones
-    say. Without an information set there are no rules left to say otherwise. A listing made when the check compared
-    wall-clock times (no `"times"`) is kept no more than one made under other rules.
+    changed leave the listing to this run's rows, which are what the current rules say; the earlier rows go under
+    `STORED_UNDER_OTHER_RULES`, with which every later resume keeps the mark that the file holds records judged by other rules.
+    Without an information set there are no rules left to say otherwise. A listing made when the check compared wall-clock times
+    (no `"times"`) is replaced too, without the mark: its rules are the run's.
+
+    Two cases are clean without the mark: an earlier listing that was empty at "warn" or "raise" under the same rules but an
+    earlier issue time (what was known then is known later), and records of an earlier run that listed nothing (level "none", or
+    no information set) whose issue days this run's own (`run_span`, before the manifest grows) cover, since this run judged
+    those days. Records of such a run outside them are marked `{"listing": [], "level": "none"}`.
     """
-    if not existing.availability or manifest.information_set not in (None, existing.information_set):
+    if not existing.availability:
+        if manifest.availability is not None and has_existing_results and not _covers(run_span, _issue_span(existing)):
+            manifest.availability[STORED_UNDER_OTHER_RULES] = {"listing": [], "level": "none"}
         return
+    marked = existing.availability.get(STORED_UNDER_OTHER_RULES)
+    if manifest.information_set not in (None, existing.information_set):
+        if manifest.availability is not None and has_existing_results and not _issued_later_alone(existing, manifest):
+            earlier = (marked or {}).get("listing", [])
+            manifest.availability[STORED_UNDER_OTHER_RULES] = {
+                "listing": merge_listings(earlier, existing.availability.get("listing", []))
+            }
+        elif marked is not None and manifest.availability is not None:
+            manifest.availability[STORED_UNDER_OTHER_RULES] = marked
+        return
+    if marked is not None and manifest.availability is not None:
+        manifest.availability[STORED_UNDER_OTHER_RULES] = marked
     if existing.availability.get("times") != LISTING_TIMES:
         return  # listed on the wall clock: like rules that changed, it says nothing this run can vouch for
     earlier = existing.availability.get("windows")
@@ -1315,6 +1432,44 @@ def _keep_listing(existing: Manifest, manifest: Manifest) -> None:
             window: merge_listings(earlier.get(window, []), later.get(window, []))
             for window in sorted({*earlier, *later})
         }
+
+
+def _issue_span(manifest: Manifest) -> Optional[Tuple[str, str]]:
+    """The first and last issue day a manifest describes: its windows', else its test period; None if it says none."""
+    if manifest.windows:
+        windows = RunWindows.from_dict(manifest.windows)
+        return windows.first_day, windows.last_day
+    if manifest.test_start and manifest.test_end:
+        return str(manifest.test_start)[:10], str(manifest.test_end)[:10]
+    return None
+
+
+def _covers(span: Optional[Tuple[str, str]], other: Optional[Tuple[str, str]]) -> bool:
+    """Whether the issue days `span` holds every one of `other`'s; not when either is unknown."""
+    return span is not None and other is not None and span[0] <= other[0] and other[1] <= span[1]
+
+
+def _issued_later_alone(existing: Manifest, manifest: Manifest) -> bool:
+    """Whether an earlier listing still holds under this run's information set: it was made at "warn" or "raise" and listed
+    nothing, and the information set differs in nothing but a later (or the same) issue time on the same clock. Everything
+    known at the earlier time is known at the later one, so its records stay vouched for."""
+    earlier = existing.availability or {}
+    if earlier.get("level") not in ("warn", "raise") or earlier.get("listing"):
+        return False
+    if any(rows for rows in (earlier.get("windows") or {}).values()):
+        return False
+    old, new = existing.information_set or {}, manifest.information_set or {}
+    if {k: v for k, v in old.items() if k != "issue_time"} != {k: v for k, v in new.items() if k != "issue_time"}:
+        return False
+    try:
+        return _clock_minutes(new["issue_time"]) >= _clock_minutes(old["issue_time"])
+    except (KeyError, ValueError):
+        return False
+
+
+def _clock_minutes(text: str) -> int:
+    hours, minutes = str(text).split(":")[:2]
+    return int(hours) * 60 + int(minutes)
 
 
 def _keep_vintages(existing: Manifest, manifest: Manifest) -> None:

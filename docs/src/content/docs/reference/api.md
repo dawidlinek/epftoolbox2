@@ -439,6 +439,14 @@ class PseSource(DataSource):
     ): ...
     def output_columns(self) -> List[str]: ...
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), 15-minute grid
+
+class ForecastSource(DataSource):
+    def __init__(self, path: Any, model: str, column: str,
+                 horizon: int = 1,  # the upstream horizon read: days from issue day to target day
+                 available: Optional[str] = None): ...  # "HH:MM" in the upstream issue zone, not before its issue time
+    def availability(self, upstream: Optional[Upstream] = None) -> Availability: ...  # the rule with_source_rules gives
+    def content_digest(self) -> Optional[str]: ...  # the upstream's manifest digest and results identity
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), UTC, at target instants
 ```
 
 ---

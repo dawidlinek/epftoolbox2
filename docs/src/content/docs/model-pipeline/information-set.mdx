@@ -119,7 +119,9 @@ The table is empty, with the same columns, when there is nothing to list. Otherw
 - **the manifest** next to the results, under `availability`, with the level. So `ModelPipeline.report()` after array jobs, and
   a resumed run, show what the run listed, once. A resumed run lists what a fresh one does. A run over a narrower test period
   into the same directory keeps what was listed for the records it leaves out, unless the rules changed, in which case
-  this run's rows replace them. A run at level `"none"` lists nothing in its own report and writes nothing there, but leaves what
+  this run's rows replace them and the earlier ones go under `stored_under_other_rules` (kept by every later resume): the file
+  holds records judged by other rules, and a [`ForecastSource`](/epftoolbox2/data-sources/forecast/) reading it takes the model
+  as unchecked. A run at level `"none"` lists nothing in its own report and writes nothing there, but leaves what
   an earlier run wrote, unless the rules changed: results that were flagged don't read as clean because of how they were last
   resumed.
 
@@ -238,6 +240,13 @@ columns an `OpenMeteoSource` or an `EpftoolboxBenchmarkSource` emits:
   rather than of the data's, so it holds on a frame left in UTC too. A neighbouring area combined into another market's
   `DataPipeline` (e.g. `EntsoeSource("FI", ..., prefix="fi")` inside `DataPipeline(timezone="Europe/Warsaw")`) is read on
   the market's week, not Finland's own, matching where the value is stamped.
+- A [`ForecastSource`](/epftoolbox2/data-sources/forecast/) column, another pipeline's stored forecasts, gets
+  `published(issue time, days_before=horizon, timezone=issue zone, day_zone=data zone, vintage="snapshot")` from the
+  upstream's manifest, and `with_source_rules` registers its upstream (`InformationSet.chained_inputs()`), which the
+  downstream's input check reads for coverage and late upstream inputs: see [Chaining](/epftoolbox2/model-pipeline/chaining/).
+  Only this knows when such a column is out: outside a `Workflow`, pass `with_source_rules(data_pipeline.sources)`. Unlike every
+  other source rule it comes first: no rule, accepted assumption or pattern replaces it, for the column, its shifts, profiles and
+  day aggregates, and a rule in `rules=` that names it is refused (`InformationSetError`), as it would be ignored.
 - An `EpftoolboxBenchmarkSource` gets its rules on the files' own wall clock, its `index_timezone`: `price` published
   13:00 on D-1 and the two exogenous forecasts 10:00 on D-1. That index only labels the wall clock, one hour off the
   true instants in summer, so a Brussels rule would read the file's 23:00 on D as 00:00 on D+1 all summer.
@@ -286,6 +295,8 @@ pipeline = ModelPipeline(information_set=info)
     Availability.static()                                   # known in advance (calendar)
     Availability.realised(delay="1h")                        # known `delay` after the period ends
     Availability.published("13:00", days_before=1)           # published at a fixed local time, days_before delivery
+    Availability.published("09:30", 1, day_zone="Europe/Helsinki")  # the delivery day a Helsinki date, published
+                                                                # 09:30 Brussels: another zone's dates (below)
     Availability.daily_close("18:00")                        # published(time, days_before=0)
     Availability.weekly(weekday="friday", time="10:00")       # published once for the whole next week,
                                                                 # a week of `timezone`'s dates
@@ -374,7 +385,7 @@ info = InformationSet("11:45", "Europe/Warsaw", rules={
 ```
 
 - **Which rule.** A rule holds for the values whose day is in its period, both ends included: the day the value is delivered, a date
-  of the rule's `timezone` for `published`, of its week's zone for `weekly` (`week_zone`, else its `timezone`), and of the data's
+  of the rule's `timezone` for `published` (of `day_zone` where it is set), of its week's zone for `weekly` (`week_zone`, else its `timezone`), and of the data's
   zone for `realised`, `weather_run` and `static`. For
   `as_of` and `weather_cutoff` it is the day the value is read on, the issue day moved by a shift after a leading `_d+k`. So
   `sk_d-1` on 9 October holds 8 October's value, which the one-day rule describes.
@@ -427,6 +438,35 @@ error (`unknown="raise"`): a check that silently skipped columns it knows nothin
 cannot vouch for. Pass `unknown="warn"` to log instead, or `"ignore"` to skip silently once you've reviewed
 which columns that affects. With `availability="warn"` such a column is listed as `no rule` and is no error, whatever
 `unknown` says. `leakage_probe` and `verify` follow `unknown` at every level, because they can't perturb such a column.
+
+---
+
+## Delivery Days of Another Zone
+
+A `published` rule's delivery day is a date of its `timezone` by default: `published("13:00", 1)` is out at 13:00 Brussels on the
+Brussels date before the value's. Some values are delivered on the dates of another zone than the one they are published on. The
+forecasts of another pipeline are: a Helsinki model issued at 09:30 Brussels forecasts Helsinki's dates, and its forecast for
+Helsinki 00:00 of D+1 (Brussels 23:00 of D) was issued on D. Read in Brussels dates it would count as issued on D-1, a day early.
+`day_zone` names the zone whose dates are the delivery days:
+
+```python
+from epftoolbox2.information_set import Availability, InformationSet
+
+info = InformationSet("09:00", "Europe/Brussels", rules={
+    "helsinki_fc": Availability.published("09:30", 1, timezone="Europe/Brussels", day_zone="Europe/Helsinki"),
+    "my_series": Availability.published("10:00", 1, day_zone="data"),   # the data's own dates
+})
+```
+
+- **None** (the default, and every rule written before it): the delivery day is a date of `timezone`, as it always was.
+- **A zone's name**: a date of that zone. A [`ForecastSource`](/epftoolbox2/data-sources/forecast/) rule is so, with the upstream's
+  data zone.
+- **`"data"`**: a date of the data's zone. On a frame in another zone than the issue time's (left in UTC) the issue zone's date is
+  read too, and the later counts, so it is never early, as a weekly rule's `week_zone="data"` is.
+
+The publication instant stays `time` in `timezone`, on the date `days_before` before the delivery day. A validity period
+(`.during()`) holds for the delivery days of `day_zone`. `daily_close` takes it too; any other kind raises. YAML and manifests write
+`day_zone` only when it is set, so every file written before reads as it did.
 
 ---
 
@@ -525,8 +565,8 @@ issue can't read as known before it:
   rule's own zone, converted at the instant they denote on that day. A time the clocks repeat is read at its second
   occurrence and one they skip at the switch, so a rule never reads earlier than it may be: `as_of("02:30")` on
   2024-10-27 in Warsaw is 01:30Z. A `weather_cutoff` run is a UTC hour: its rule is in UTC, `timezone=None` means UTC
-  too, and any other zone raises. A `weekly` rule's week can be another zone's dates (`week_zone`), its publication time
-  staying in `timezone`.
+  too, and any other zone raises. A `weekly` rule's week can be another zone's dates (`week_zone`), and a `published` rule's
+  delivery day too (`day_zone`), the publication time staying in `timezone`.
 - **A period the clocks skip** (02:00 on the day they go forward) has no row, so it holds no value and gets no verdict:
   it is never late, `ctx.published()` is False there, and `explain` shows its status as `no row`.
 - **Delays and period lengths are elapsed time.** When Warsaw's clocks go forward, the hour starting at 01:00 ends at
@@ -700,3 +740,4 @@ epf model model_pipeline.yaml --data data.csv --test-start 2024-02-01 --test-end
 - [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/): `run()` parameters and the other pre-fit data checks
 - [ModelPipeline Serialization](/epftoolbox2/model-pipeline/serialization/): the full YAML format
 - [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/): `pipeline.verify()`, the probe on sampled issue days
+- [Chaining Pipelines](/epftoolbox2/model-pipeline/chaining/): another pipeline's forecasts as an input, known from its issue time

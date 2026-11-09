@@ -564,8 +564,16 @@ what is known:
 | A `weather_cutoff` run | Always UTC, which has no switch |
 | The row of a period the clock skips | No row, no value and no verdict: never late |
 | The row of a repeated hour | Its second occurrence, the row the forecast is made from |
+| A value's delivery day (`published`, `weekly`) | A date of the rule's `timezone`, or of `day_zone` (`week_zone`) where set, at the value's instant |
 
 Each reading is the one that can't make a value look known earlier than it is.
+
+A delivery day is a date of one zone, and two zones that switch on the same instant still disagree about the date for the hours
+between their midnights. Another pipeline's forecasts are for dates of its data zone, so a
+[`ForecastSource`](/epftoolbox2/data-sources/forecast/) column's rule reads them there (`day_zone`, see
+[Information Set](/epftoolbox2/model-pipeline/information-set/#delivery-days-of-another-zone)): on any frame, across both switches,
+a chained value is known exactly at its upstream's issue instant, and a slot the upstream's clock repeats carries its forecast on
+both of its rows.
 
 ## Checking it
 

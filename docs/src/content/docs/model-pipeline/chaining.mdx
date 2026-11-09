@@ -1,0 +1,128 @@
+---
+title: Chaining Pipelines
+description: One pipeline's out-of-sample forecasts as another's input, known from its issue time, with coverage and late-upstream checks
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A forecast can be another forecast's input: a solar generation forecast for a price model, an hourly price forecast for a
+15-minute shape model. In this library the chain goes through the data. The upstream pipeline stores its forecasts as usual
+(`save_dir`), a [`ForecastSource`](/epftoolbox2/data-sources/forecast/) reads them back as a column of the downstream's data, and
+the downstream model lists that column like any other. Every check that holds for a column holds for it: the issue-time check,
+`verify`, `explain`, the manifest.
+
+## A Two-Stage Run
+
+```python
+from epftoolbox2.data.sources import ForecastSource
+from epftoolbox2.data.transformers import LagTransformer, TimezoneTransformer
+from epftoolbox2.models import LEARModel, RidgeModel
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+
+# 1. Upstream: solar generation, issued at 09:30 Brussels, over the downstream's training years and its test year.
+solar = ModelPipeline(issue_time="09:30", issue_timezone="Europe/Brussels", availability="raise")
+solar.add_model(RidgeModel(["solar_a69_d+{horizon}", "clear_sky_d+{horizon}"], training_window=364, name="solar_ridge"))
+solar.run(solar_frame, test_start="2022-10-01", test_end="2024-12-31", target="solar_actual", horizon=1, save_dir="runs/solar")
+
+# 2. Downstream data: the stored forecasts as a column, lagged by local days.
+data = (
+    DataPipeline(timezone="Europe/Berlin")
+    .add_source(ForecastSource("runs/solar", model="solar_ridge", column="solar_fc", horizon=1))
+    .add_transformer(TimezoneTransformer())
+    .add_transformer(LagTransformer(["solar_fc"], [-1], "day"))
+)
+frame = data.run("2023-01-01", "2024-12-31")
+
+# 3. Downstream model: its information set knows the source, so it knows when solar_fc is out.
+price = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels", availability="raise")
+price.information_set = price.information_set.with_source_rules(data.sources)
+price.add_model(LEARModel(["price_d-1", "solar_fc_d+{horizon}"], training_window=364, name="LEAR_solar"))
+report = price.run(frame, test_start="2024-01-01", test_end="2024-12-31", horizon=1)
+```
+
+`solar_fc_d+1` on the row of D is the forecast for D+1 issued on D at 09:30, known before the 11:45 issue; `solar_fc_d+2` would be
+the one issued on D+1, refused. The rule is the source's whatever your rules, assumptions and patterns say (a rule naming the
+column is refused, as it would be ignored). In a `Workflow` file, the source's `path` is relative to that file. A `Workflow` calls `with_source_rules` itself; outside one, pass it as above, or the column has no
+rule (listed as `no rule` at `availability="warn"`, refused at `"raise"` with `unknown="raise"`).
+
+<Aside type="tip">
+  Run the upstream over the downstream's training years too, so that the downstream trains on the upstream's real out-of-sample
+  forecasts, the errors it will see in the test year. A downstream trained on actual generation and served forecasts learns the
+  wrong weight for its input.
+</Aside>
+
+## When a Chained Value Is Known
+
+The upstream's manifest records its issue time and zone and its data zone, and the column's rule is built from them:
+`Availability.published(issue_time, days_before=horizon, timezone=issue zone, day_zone=data zone)`. A forecast for an instant is
+known at the upstream's issue time on the day `horizon` days before that instant's date in the **upstream's data zone**. The
+downstream frame may be in another zone: a Helsinki upstream issued on Brussels time is known correctly on a Warsaw or UTC frame,
+cell by cell, both switches included. Its forecast for Helsinki 00:00 of D+1 (Brussels 23:00 of D) was issued on D, so a downstream
+issued at 09:00 on D can't read it, though the hour is still D in Brussels.
+
+`ForecastSource(..., available="10:15")` states a later time than the issue time, for an upstream whose forecasts are revised after
+it; never an earlier one. Results with live revisions (records with `issued_at`) are refused for now.
+
+## Coverage of the Training Rows
+
+Where the upstream started later than the downstream's training window reaches, stopped early, or skipped days, the downstream's
+fits read rows whose chained predictor has no value, and those rows drop out of training without a word in the counts of
+forecasts. Before any fit the downstream counts them, on the rows its fits read (every planned issue day's training span, from its
+refit day with `refit`, for each horizon and window, of the periods whose lists hold the predictor, every period for a model of
+day or pooled units), and warns once per chained column at every `availability` level, `"none"` included:
+
+```text
+price_m: rows its fits read have no value of solar_fc: solar_fc_d+1 on 360 of 935 rows, from 2023-03-05 to 2023-03-19. Those rows
+drop out of training. solar_fc holds the forecasts of solar_ridge (horizon 1) in /data/runs/solar; run solar_ridge so that it
+covers the issue days 2023-03-05 to 2023-03-19.
+```
+
+At `availability="raise"` the same is an `InformationSetError`. Rows that can't hold a value whatever the upstream does are not
+counted: a day shift that lands on the hour a spring switch skips, and the slot the upstream never plans (02:00 on the day after a
+switch at horizon 1, whose issue day has no 02:00). A predictor read only in some periods (a list of `(horizon, hour)`, say, that
+reads a daylight-only solar forecast in daylight hours) is counted in those periods alone. The counts go to the manifest,
+`chained_inputs[column]["coverage"]`, per predictor: rows read, rows without a value, the first and last of their dates, and the
+upstream issue days that would cover them (`run_from`, `run_to`).
+
+## An Upstream That Read Something Late
+
+A chain is as honest as its first stage. An upstream whose manifest lists inputs known after its own issue time or without a rule
+(its `availability="warn"` listing; for an ensemble, any member's) makes every downstream use of its column `late upstream`: listed
+in `report.availability()` with the upstream's late inputs in `note` at `"warn"`, refused at `"raise"`. So does one whose listing
+doesn't vouch for every forecast it stored:
+
+- it ran at `availability="none"`, and has no listing;
+- it ran at `"raise"` with `unknown="warn"` or `"ignore"`, which lets a column without a rule through unlisted;
+- it was resumed under another information set (other rules, or an earlier issue time): its manifest lists what the current rules
+  say and keeps the earlier rows under `stored_under_other_rules`, for the records the earlier rules judged. A later issue time
+  with the rules unchanged leaves no mark where the earlier run listed nothing at `"warn"` or `"raise"`: what was known then is
+  known later;
+- it holds forecasts of an earlier run at `availability="none"` on issue days no later run checked (a resume over part of its
+  windows, say), marked `{"listing": [], "level": "none"}`; a resume over every one of its days at `"warn"` or `"raise"` judges
+  them, and leaves no mark;
+- it was resumed over a mismatch or without a manifest (`data_unverified`, `training_cut` unverified);
+- it holds forecasts issued outside the test period its manifest describes, which no run it records checked.
+
+Run the upstream at `availability="raise"` with the default `unknown="raise"`, into a fresh `save_dir` whenever its information
+set changes: then its listing vouches for every forecast and its column passes. A mark is never taken back by a resume; a fresh
+run into a new `save_dir` (or with the old results removed) clears it.
+
+## Results and Resuming
+
+The downstream's manifest records, for each chained column it reads, the upstream's path, model, horizon, issue time and zone, data
+zone, `available` and manifest digest (`chained_inputs`). A resume compares them:
+
+- another upstream model, horizon, issue time or zone, data zone or `available` refuses (`ManifestMismatchError`): the column's
+  values can be the same while what they mean is not;
+- another digest (the upstream was run again, extended, or at another level) warns where the resume goes on: where its forecasts
+  moved on the rows the downstream reads, the data hash refuses anyway;
+- a column read as chained in one run and through a hand-written rule in the other refuses.
+
+`explain()` names a chained column's upstream in its rule column, and `verify()` perturbs it as of the upstream's issue time: a
+chained input read before its upstream issued it is a `leak`.
+
+## See Also
+
+- [ForecastSource](/epftoolbox2/data-sources/forecast/): parameters, placement, caching and what it refuses
+- [Information Set](/epftoolbox2/model-pipeline/information-set/#delivery-days-of-another-zone): `day_zone`
+- [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/)

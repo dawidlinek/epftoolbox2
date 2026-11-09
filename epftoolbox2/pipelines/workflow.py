@@ -255,7 +255,10 @@ class Workflow:
             dp = DataPipeline()
         for section in _DP_SECTIONS:
             if section in self._dp_inline:
-                components = [DataPipeline._load_component(section, c) for c in self._dp_inline[section]]
+                # A relative file path of an inline component is the YAML's, as `save_dir` and a pipeline file's are.
+                components = [
+                    DataPipeline._load_component(section, c, base_dir=self._yaml_dir) for c in self._dp_inline[section]
+                ]
                 setattr(dp, section, components)
         return dp
 

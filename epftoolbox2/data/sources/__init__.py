@@ -8,6 +8,7 @@ from .calendar import CalendarSource
 from .benchmark import EpftoolboxBenchmarkSource
 from .pse import PseSource
 from .energy_charts import EnergyChartsSource
+from .forecast import ForecastSource, UpstreamError
 
 __all__ = [
     "DataSource",
@@ -18,4 +19,6 @@ __all__ = [
     "EpftoolboxBenchmarkSource",
     "PseSource",
     "EnergyChartsSource",
+    "ForecastSource",
+    "UpstreamError",
 ]

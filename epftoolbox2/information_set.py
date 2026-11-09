@@ -169,7 +169,11 @@ class Availability:
         realised:    known `delay` after the end of the delivery period (actual load, generation).
         published:   published at `time` (in `timezone`) on the day `days_before` days before the delivery day
                      (day-ahead prices: 13:00, days_before=1; a daily close: its close time, days_before=0;
-                     a value known only after its delivery day: "00:00", days_before=-1).
+                     a value known only after its delivery day: "00:00", days_before=-1). The delivery day is a local
+                     date of `day_zone`: None, `timezone`'s; "data", the data's own (on a frame in another zone than the
+                     issue time's, the later of the data's date and the issue zone's, so it is never early); or a zone such
+                     as "Europe/Helsinki", the zone whose dates another pipeline's forecasts are for (`ForecastSource`).
+                     The publication instant stays `time` in `timezone`, on the date `days_before` before that day.
         weekly:      published on `weekday` at `time` (in `timezone`) for the whole following Monday-Sunday week
                      (week-ahead load). The week is one of local dates of `week_zone`: None, `timezone`'s; "data", the
                      data's own, so each market's Monday to Sunday on a frame in its zone (on a frame in another zone than
@@ -195,7 +199,7 @@ class Availability:
     "unknown"). It decides no number. `valid_from` and `valid_until` (ISO dates, both included; `.during()` sets them) say on
     which days the rule holds, for a lag that changed: a value whose day is outside the period isn't known by this rule, and a
     value no rule of its column holds for is never known. The day is the one the value is delivered on, a date of `timezone`
-    for `published`, of the week's zone (`week_zone`) for `weekly`, and of the data's zone for `realised`, `weather_run`
+    for `published` (of `day_zone` where it is set), of the week's zone (`week_zone`) for `weekly`, and of the data's zone for `realised`, `weather_run`
     and `static`; for `as_of` and `weather_cutoff` it is the day the value is read on (the issue day, moved by a shift after a leading `_d+k`). A column's
     rules over time are a list in `InformationSet(rules={name: [rule, rule]})`, with disjoint periods (`RuleChain`).
     """
@@ -211,6 +215,7 @@ class Availability:
     valid_from: Optional[str] = None
     valid_until: Optional[str] = None
     week_zone: Optional[str] = None
+    day_zone: Optional[str] = None
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -235,6 +240,11 @@ class Availability:
                 raise ValueError(f"week_zone is a weekly rule's, not a {self.kind} rule's: {self.week_zone!r}")
             if self.week_zone != DATA_ZONE:
                 _check_zone(self.week_zone)
+        if self.day_zone is not None:
+            if self.kind != "published":
+                raise ValueError(f"day_zone is a published rule's, not a {self.kind} rule's: {self.day_zone!r}")
+            if self.day_zone != DATA_ZONE:
+                _check_zone(self.day_zone)
         if self.vintage is not None and self.vintage not in VINTAGES:
             raise ValueError(f"Unknown vintage class {self.vintage!r}. Classes: {list(VINTAGES)}, or None")
         object.__setattr__(self, "valid_from", _iso_day(self.valid_from, "valid_from"))
@@ -258,15 +268,32 @@ class Availability:
         timezone: Optional[str] = "Europe/Brussels",
         note: str = "",
         vintage: Optional[str] = None,
+        day_zone: Optional[str] = None,
     ) -> "Availability":
-        return cls("published", time=time, days_before=int(days_before), timezone=timezone, note=note, vintage=vintage)
+        """Published at `time` in `timezone` on the date `days_before` before the delivery day, a local date of `day_zone`:
+        `timezone`'s with None, the data's own with "data", or a named zone's (another pipeline's data zone, `ForecastSource`)."""
+        return cls(
+            "published",
+            time=time,
+            days_before=int(days_before),
+            timezone=timezone,
+            note=note,
+            vintage=vintage,
+            day_zone=day_zone,
+        )
 
     @classmethod
     def daily_close(
-        cls, time: str, timezone: Optional[str] = "Europe/Brussels", note: str = "", vintage: Optional[str] = None
+        cls,
+        time: str,
+        timezone: Optional[str] = "Europe/Brussels",
+        note: str = "",
+        vintage: Optional[str] = None,
+        day_zone: Optional[str] = None,
     ) -> "Availability":
-        """A value for trading day X known at its close on X (e.g. fuel or carbon settlement prices)."""
-        return cls.published(time, days_before=0, timezone=timezone, note=note, vintage=vintage)
+        """A value for trading day X known at its close on X (e.g. fuel or carbon settlement prices); X a local date of
+        `day_zone` (`published`)."""
+        return cls.published(time, days_before=0, timezone=timezone, note=note, vintage=vintage, day_zone=day_zone)
 
     @classmethod
     def weekly(
@@ -344,6 +371,7 @@ class Availability:
         out.update({k: getattr(self, k) for k in keys})
         for name in (
             "week_zone",
+            "day_zone",
             "vintage",
             "valid_from",
             "valid_until",
@@ -380,11 +408,15 @@ class Availability:
         if self.kind == "realised":
             return f"known {self.delay} after the end of the period"
         if self.kind == "published":
+            # The delivery day's zone where it isn't `timezone`'s; nothing without one, so every description stays as it was.
+            days = {None: "", DATA_ZONE: " (delivery days of the data's local dates)"}.get(
+                self.day_zone, f" (delivery days of {self.day_zone} dates)"
+            )
             if self.days_before == 0:
-                return f"published {self.time}{zone} on the delivery day"
+                return f"published {self.time}{zone} on the delivery day{days}"
             if self.days_before > 0:
-                return f"published {self.time}{zone} on D-{self.days_before} of delivery"
-            return f"published {self.time}{zone} {-self.days_before} day(s) after delivery"
+                return f"published {self.time}{zone} on D-{self.days_before} of delivery{days}"
+            return f"published {self.time}{zone} {-self.days_before} day(s) after delivery{days}"
         if self.kind == "weekly":
             week = {None: "", DATA_ZONE: " of the data's local dates"}.get(
                 self.week_zone, f" of {self.week_zone} dates"
@@ -819,6 +851,7 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     from .data.sources.calendar import CalendarSource
     from .data.sources.energy_charts import EnergyChartsSource
     from .data.sources.entsoe import EntsoeSource
+    from .data.sources.forecast import ForecastSource
     from .data.sources.open_meteo import OpenMeteoSource
     from .data.sources.pse import PseSource
 
@@ -858,6 +891,10 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
                 rules[name] = rule
         elif isinstance(source, PseSource):
             rules.update(_pse_rules(source))
+        elif isinstance(source, ForecastSource):
+            # Another pipeline's forecasts: known at its issue time on the day `horizon` before their target date, a date of its
+            # data zone (`day_zone`), whatever the zone of the frame they are read on.
+            rules[source.column] = source.availability()
         elif isinstance(source, EpftoolboxBenchmarkSource):
             # The files are local wall-clock time, and `index_timezone` only labels that clock (one hour off the true
             # instants in summer). So a row's delivery day is the day on that same clock: the file's 23:00 on D is
@@ -876,6 +913,62 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
                     "10:00", 1, timezone=zone, note="day-ahead forecast of the benchmark files, available on d-1"
                 )
     return rules
+
+
+@dataclass(frozen=True)
+class ChainedInput:
+    """A column read from another pipeline's stored forecasts (`ForecastSource`), as `InformationSet.with_source_rules` registers
+    it: what the downstream's checks (`models._chained`) and manifest (`chained_inputs`) read of its upstream.
+
+    `late` are the inputs the upstream's leaf models listed as late or without a rule, `unchecked` the leaf models that ran at
+    level "none": either makes every downstream use of the column a `late upstream` one. `digest` is the upstream manifest's
+    `manifest_digest`."""
+
+    column: str
+    path: str
+    model: str
+    horizon: int
+    issue_time: str
+    issue_timezone: str
+    data_timezone: str
+    available: Optional[str]
+    digest: str
+    late: Tuple[str, ...] = ()
+    unchecked: Tuple[str, ...] = ()
+    freq: str = "1h"
+
+    @property
+    def late_upstream(self) -> bool:
+        """Whether nothing vouches for the upstream's inputs at its issue time: some were late, or it didn't look."""
+        return bool(self.late or self.unchecked)
+
+    def record(self) -> Dict[str, Any]:
+        """What a downstream manifest records of it (`chained_inputs[column]`), coverage aside."""
+        return {
+            "path": self.path,
+            "model": self.model,
+            "horizon": self.horizon,
+            "issue_time": self.issue_time,
+            "issue_timezone": self.issue_timezone,
+            "data_timezone": self.data_timezone,
+            "available": self.available,
+            "digest": self.digest,
+        }
+
+    def describe(self) -> str:
+        """`model`'s forecasts at `horizon` in `path`, for a table's rule column."""
+        return f"forecasts of {self.model} (horizon {self.horizon}) in {self.path}"
+
+
+def chained_sources(sources: Iterable[Any]) -> Dict[str, ChainedInput]:
+    """Column -> its `ChainedInput`, for the `ForecastSource`s among `sources`."""
+    from .data.sources.forecast import ForecastSource
+
+    out: Dict[str, ChainedInput] = {}
+    for source in sources:
+        if isinstance(source, ForecastSource):
+            out[source.column] = source.chained_input()
+    return out
 
 
 _PSE_ZONE = "Europe/Warsaw"
@@ -1185,16 +1278,54 @@ class InformationSet:
         self.use_defaults = use_defaults
         self._source_rules: Dict[str, Rule] = {}
         self._source_zones: Dict[str, str] = {}
+        self._chained: Dict[str, ChainedInput] = {}
 
     # -- configuration --------------------------------------------------------
 
     def with_source_rules(self, sources: Iterable[Any]) -> "InformationSet":
-        """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables)."""
+        """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables), and, of a `ForecastSource`,
+        its upstream (`chained_inputs`)."""
         sources = list(sources)
         out = self.copy()
         out._source_rules = {**self._source_rules, **{k: _as_rule(v) for k, v in source_rules(sources).items()}}
         out._source_zones = {**self._source_zones, **_source_market_zones(sources)}
+        out._chained = {**self._chained, **chained_sources(sources)}
+        out.refuse_rules_on_chained_columns()
         return out
+
+    def refuse_rules_on_chained_columns(self) -> None:
+        """`InformationSetError` for a rule in `rules` that names a chained column, through its shifts, profiles and day aggregates
+        (`load_fc`, `load_fc_d+1`, `load_fc_h05`, `load_fc_day_max_d+1`): its rule is its upstream's issue time, which `resolve`
+        puts above every rule, assumption and pattern, so such a rule would be silently ignored. A pattern that matches one
+        (`load_*`) is left alone: it holds for the other columns it matches."""
+        for key in self.rules:
+            if any(ch in key for ch in "*?["):
+                continue
+            chained = self.chained_of(key)
+            if chained is not None:
+                raise InformationSetError(
+                    f"rules={{{key!r}: ...}} names {chained.column!r} (or a column built from it), a column of "
+                    f"{chained.describe()}: its rule is the upstream's "
+                    f"({self._source_rules[chained.column].describe()}) and nothing replaces it. Remove the rule; "
+                    "ForecastSource(available='HH:MM') states a later time than the upstream's issue time."
+                )
+
+    def chained_inputs(self) -> Dict[str, ChainedInput]:
+        """Column -> its upstream, for each column read from another pipeline's stored forecasts (`ForecastSource`), as
+        `with_source_rules` found them."""
+        return dict(self._chained)
+
+    def chained_of(self, name: str) -> Optional[ChainedInput]:
+        """The upstream of the chained column a predictor name reads (`solar_fc_d+1`, `solar_fc_h05_d-1`,
+        `solar_fc_day_max`), through its shifts and what it was built from; None for any other column."""
+        if not self._chained:
+            return None
+        chain = parse_predictor(name)
+        for candidate, _ in chain:
+            if candidate in self._chained:
+                return self._chained[candidate]
+        built = _built_from_name(chain[-1][0])
+        return None if built is None else self.chained_of(built)
 
     def copy(self) -> "InformationSet":
         out = InformationSet(
@@ -1207,6 +1338,7 @@ class InformationSet:
         )
         out._source_rules = dict(self._source_rules)
         out._source_zones = dict(self._source_zones)
+        out._chained = dict(self._chained)
         return out
 
     def in_data_zone(self, index: pd.DatetimeIndex) -> "InformationSet":
@@ -1250,6 +1382,10 @@ class InformationSet:
         """Find the rule for a column: exact names from the full name down to the base, then glob patterns
         from the base up; layers in order rules > accepted assumptions > sources > defaults.
 
+        A column read from another pipeline's forecasts (`chained_inputs`), shifted or built from, takes its source's rule
+        before any layer: its availability is its upstream's issue time, which no rule, assumption or pattern can replace
+        (`refuse_rules_on_chained_columns` refuses a rule that names one).
+
         A DailyProfileTransformer or DailyStatsTransformer column first looks for a user's rule on its own name, which
         describes the series it was built from; otherwise it takes the whole resolution of the column it was built from,
         so `generation_solar_forecast_day_max` is judged by `generation_*_forecast`, not caught by `generation_*`. Either
@@ -1258,6 +1394,9 @@ class InformationSet:
         """
         chain = parse_predictor(name)
         base, shifts = chain[-1]
+        chained = self._chained_rule(name, chain)
+        if chained is not None:
+            return chained
         column = _built_from_name(base)
         if column is None:
             for layer, rules in self._layers():
@@ -1265,12 +1404,25 @@ class InformationSet:
                 if found is not None:
                     return found
             return ResolvedColumn(name, base, shifts, None)
+        if self._chained and self.chained_of(column) is not None:
+            # A profile or day aggregate of a chained column: its source's rule, read at its slot; no rule of its own.
+            source = self.resolve(column)
+            return ResolvedColumn(name, base, shifts, source.rule, source.key, source.layer, source)
         user = _find_rule(name, chain, self.rules, "rules")
         if user is not None and user.base != base:
             return user
         source = self.resolve(column)
         ruling = source if user is None else user
         return ResolvedColumn(name, base, shifts, ruling.rule, ruling.key, ruling.layer, source)
+
+    def _chained_rule(self, name: str, chain: List[Tuple[str, Tuple[Shift, ...]]]) -> Optional[ResolvedColumn]:
+        """The source rule of the chained column `name` reads through its shifts (the full name down to the base), or None."""
+        if not self._chained:
+            return None
+        for candidate, shifts in chain:
+            if candidate in self._chained and candidate in self._source_rules:
+                return ResolvedColumn(name, candidate, shifts, self._source_rules[candidate], candidate, "sources")
+        return None
 
     def _resolve_for(self, name: str, step: int) -> ResolvedColumn:
         """`resolve` for data with slots of `step` minutes.
@@ -3408,8 +3560,8 @@ def _available_array(
     holds for the column named alone; what a profile or a day aggregate is built from is read at its slot, as on hourly rows.
 
     A rule with a validity period, or a `RuleChain`, holds for the values whose day is in its period: the day the value is
-    delivered (a date of the rule's zone for `published`, of its week's zone for `weekly`, of the data's zone for `realised`,
-    `weather_run` and `static`), and for `as_of` and `weather_cutoff` the day it is read on. A value no rule holds for is never known: `inf`.
+    delivered (a date of the rule's zone, or of `day_zone`, for `published`, of its week's zone for `weekly`, of the data's
+    zone for `realised`, `weather_run` and `static`), and for `as_of` and `weather_cutoff` the day it is read on. A value no rule holds for is never known: `inf`.
     Each check, `ctx`, `explain`, the probes and `newest_targets` read through here, so they agree on every value. A rule with
     no period is read as it always was.
     """
@@ -3476,8 +3628,9 @@ def _over_time_available(
     """`_available_array` of a plain column under rules with validity periods: each holds for the values whose day is in its
     period, and a value none holds for is never known (`inf`). `slot` (wall-clock minutes) reads a published or weekly rule's
     value there, as an hourly slot at its second occurrence, for one slot of a daily row; the other kinds read the row as it is."""
-    # A week of the data's dates can be read in two zones (`_data_weeks`): each reading picks its rules, and the later counts.
-    data_week = any(one.kind == "weekly" and one.week_zone == DATA_ZONE for one in rules)
+    # A week (or delivery day) of the data's dates can be read in two zones (`_data_weeks`): each reading picks its rules, and
+    # the later counts.
+    data_week = any(_reads_data_dates(one) for one in rules)
     latest = None
     for week in _data_weeks(ctx) if data_week else (None,):
         out = np.full(len(day), np.inf)  # what no rule holds for is never known
@@ -3513,8 +3666,8 @@ def _rule_available(
 ) -> Any:
     """`_available_array` of a plain column (no profile, no day aggregate) under one rule, its validity period aside. With
     `with_day` also the day the period is read on, in days after `ctx.day`: the value's delivery day, or for `as_of` and
-    `weather_cutoff` the day it is read on. `data_week` reads a week of the data's dates in that one zone, not in each of
-    `_data_weeks`."""
+    `weather_cutoff` the day it is read on. `data_week` reads a week (or a delivery day) of the data's dates in that one zone,
+    not in each of `_data_weeks`."""
     if rule.kind == "static":
         known = np.full(len(day), -np.inf)
         return (known, _shifted_day(col.shifts, day, minute, first, ctx)) if with_day else known
@@ -3559,10 +3712,11 @@ def _rule_available(
     # The delivery day is a calendar day in the rule's own (market) zone, not in the data's: a value at
     # 23:00 UTC in winter (CET, UTC+1) delivers at 00:00 CET the next day, even though the data zone's own
     # wall clock hasn't crossed midnight yet. A weekly rule's week may be another zone's (`week_zone`): the built-in
-    # A31's is the data's, each market's Monday to Sunday, while it is published at 10:00 Brussels.
+    # A31's is the data's, each market's Monday to Sunday, while it is published at 10:00 Brussels. A published rule's delivery
+    # day may be too (`day_zone`): another pipeline's forecast is for a date of its data zone, issued on its issue zone's clock.
     zone = rule.timezone or ctx.data_zone
     known = delivery_day = None
-    for day_zone in _week_zones(rule, ctx, data_week) if rule.kind == "weekly" else (zone,):
+    for day_zone in _delivery_zones(rule, ctx, data_week):
         day_of = np.floor(_to_wall(point, day_zone, ctx, wall if day_zone == ctx.data_zone else None) / 1440.0)
         if rule.kind == "published":
             publication_day = day_of - rule.days_before
@@ -3573,7 +3727,7 @@ def _rule_available(
         reading = _to_instants(at, zone, ctx, _second(at))
         if known is None:
             known, delivery_day = reading, day_of
-        else:  # two readings of a week of the data's dates: the later counts, never an early one
+        else:  # two readings of a week (or day) of the data's dates: the later counts, never an early one
             later = reading > known
             known, delivery_day = np.where(later, reading, known), np.where(later, day_of, delivery_day)
     return (known, delivery_day) if with_day else known
@@ -3584,12 +3738,19 @@ def _rule_available(
 # ---------------------------------------------------------------------------
 
 
-def _week_zones(rule: Availability, ctx: _Context, data_week: Optional[str] = None) -> Tuple[str, ...]:
-    """The zones whose local dates a weekly rule's week is read in: `week_zone`, else the rule's own zone; for "data" those of
-    `_data_weeks`, or `data_week` alone."""
-    if rule.week_zone != DATA_ZONE:
-        return (rule.week_zone or rule.timezone or ctx.data_zone,)
+def _delivery_zones(rule: Availability, ctx: _Context, data_week: Optional[str] = None) -> Tuple[str, ...]:
+    """The zones whose local dates a rule's delivery day is read in: a weekly rule's week in `week_zone`, a published rule's day
+    in `day_zone`, else in the rule's own zone; for "data" those of `_data_weeks`, or `data_week` alone. The one place either is
+    read, so that a validity period's day is the same day."""
+    own = rule.week_zone if rule.kind == "weekly" else rule.day_zone
+    if own != DATA_ZONE:
+        return (own or rule.timezone or ctx.data_zone,)
     return (data_week,) if data_week is not None else _data_weeks(ctx)
+
+
+def _reads_data_dates(rule: Availability) -> bool:
+    """Whether a rule's delivery day is a date of the data's zone ("data" as `week_zone` or `day_zone`)."""
+    return DATA_ZONE in (rule.week_zone, rule.day_zone)
 
 
 def _data_weeks(ctx: _Context) -> Tuple[str, ...]:
@@ -3745,6 +3906,7 @@ __all__ = [
     "ASSUMPTIONS",
     "AVAILABILITY_LEVELS",
     "Availability",
+    "ChainedInput",
     "CoBatchResult",
     "ControlResult",
     "CutResult",

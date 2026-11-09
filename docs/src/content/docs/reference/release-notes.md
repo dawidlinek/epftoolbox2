@@ -112,6 +112,10 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **A `Workflow` file's inline sources read a relative path from the file's directory.** `data_pipeline: sources:` in a Workflow
+  YAML resolved `file_path` (or `path`) against the working directory, while the same source in a data pipeline file, and the model
+  pipeline's `save_dir`, were read from the YAML's directory. They are all the YAML's now: a workflow run from another directory
+  reads the same files.
 - **Pool workers no longer start idle BLAS threads.** Limiting a forked worker to one BLAS thread started OpenBLAS's thread pool
   again in it (OpenBLAS stops the pool before a fork and starts it when its thread count is set): one thread per CPU for numpy's
   OpenBLAS and as many for scipy's, each spinning for about a tenth of a second before it slept, in every worker of every pool. On
@@ -196,6 +200,28 @@ an issue day it didn't sample.
 
 ### New
 
+- **`ForecastSource`: another pipeline's stored forecasts as an input.** `ForecastSource(path, model, column, horizon=1,
+  available=None)` reads one horizon of the forecasts a `ModelPipeline` stored in `path` (JSONL or Parquet, bit for bit the same
+  frame) and puts each at its target instant, the slot of its target date in the upstream's data zone (both rows of a repeated autumn
+  slot, none of a skipped one; a daily run's value at its new `daily_stamp`, which every `freq="1D"` manifest records now, as
+  provenance). Lag it like any other column: `solar_fc_d+1` is the forecast for D+1 issued on D. `with_source_rules` (so every
+  `Workflow`) gives it the rule `published(issue time, days_before=horizon, timezone=issue zone, day_zone=data zone)` from the
+  upstream's manifest and registers its upstream (`InformationSet.chained_inputs()`); that rule comes before every rule, assumption
+  and pattern, and a rule naming the column is refused. A downstream model that reads it counts the rows its fits read (of the periods
+  that read it) without a value of it, warns once per column at every level and refuses at `"raise"`, naming the upstream issue days
+  that would cover them; an upstream that listed late inputs, or whose listing doesn't vouch for every forecast it stored (level
+  `"none"`, `"raise"` with `unknown` other than `"raise"`, resumed under other rules or unverified, forecasts outside the test period
+  it describes), makes its column `late upstream` (listed at `"warn"`, refused at `"raise"`). Its manifest records `chained_inputs`,
+  and a resume refuses another upstream model, horizon, issue time or zone, data zone or `available`. A resume under another
+  information set keeps the earlier listing under `availability["stored_under_other_rules"]`, for every model. The source refuses an upstream without an issue time or a named zone, live records (`issued_at`), and a horizon it
+  lacks (`UpstreamError`). It has no per-source cache; a new `DataSource.content_digest()` hook makes the single-file cache fetch
+  again after the upstream changed. See [ForecastSource](/epftoolbox2/data-sources/forecast/) and
+  [Chaining Pipelines](/epftoolbox2/model-pipeline/chaining/). No existing record, listing or table moves; only daily manifests gain
+  `daily_stamp`.
+- **`day_zone` on `Availability.published` and `daily_close`.** The delivery day as a date of another zone than `timezone`: a zone's
+  name, or `"data"` for the data's (the later of the data's and the issue zone's date on a frame in another zone), the publication
+  instant staying `time` in `timezone`; validity periods read the same day. `None`, the default, is every rule as it was, and YAML
+  writes it only when set. See [Information Set](/epftoolbox2/model-pipeline/information-set/#delivery-days-of-another-zone).
 - **Generation targets: `normalise_by`, `bounds` and `zero_when` on every model that fits period or pooled units.**
   `normalise_by="capacity_d+{horizon}"` divides each training row's target by its value of the column (a row without a positive one
   drops out) and multiplies the forecast by the issue row's (a forecast without one is `missing_test_predictors`, with one at or
