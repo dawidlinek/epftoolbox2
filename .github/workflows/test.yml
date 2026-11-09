@@ -176,7 +176,9 @@ jobs:
   newest-dependencies:
     # The other jobs install the versions in uv.lock, so a release that breaks the library (pandas 3.1 did)
     # stays invisible until someone upgrades. This job resolves the newest versions on every run; the upgraded
-    # lock is not committed.
+    # lock is not committed. It installs the tree extras too (3.14 with the GIL has wheels of all three), so a new
+    # LightGBM, XGBoost or CatBoost release that breaks a tree model shows here (their golden numbers, pinned to the
+    # lock's releases, skip by name).
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -191,7 +193,7 @@ jobs:
       run: uv lock --upgrade
 
     - name: Install dependencies
-      run: uv sync --extra dev
+      run: uv sync --extra dev --extra lightgbm --extra xgboost --extra catboost
 
     - name: Show the installed versions
       run: uv pip list
