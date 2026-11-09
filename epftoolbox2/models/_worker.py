@@ -174,8 +174,17 @@ def task_inputs(hour_arrays, expanded_preds, config, model_cls, model_kwargs) ->
 
 
 def _pool_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
-    """Initialiser of the worker pool: limit native threads, then load the data and the model."""
+    """Initialiser of the worker pool: limit native threads, then load the data and the model.
+
+    A torch family's config sets `torch_threads`: torch's intra-op threads are pinned to it and its inter-op threads to 1
+    (`_torch.runtime.pin_torch_threads`), after the BLAS and OpenMP limits, which reach torch's own OpenMP too. A thread count
+    changes a torch fit's numbers, and a forked worker inherits the parent's count, whatever the environment says. Without
+    it nothing imports torch."""
     _limit_native_threads()
+    if config.get("torch_threads"):
+        from ._torch.runtime import pin_torch_threads
+
+        pin_torch_threads(config["torch_threads"])
     _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs)
 
 
