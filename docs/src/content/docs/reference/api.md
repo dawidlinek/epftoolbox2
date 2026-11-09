@@ -445,7 +445,9 @@ class PseSource(DataSource):
 class ForecastSource(DataSource):
     def __init__(self, path: Any, model: str, column: str,
                  horizon: int = 1,  # the upstream horizon read: days from issue day to target day
-                 available: Optional[str] = None): ...  # "HH:MM" in the upstream issue zone, not before its issue time
+                 available: Optional[str] = None,  # "HH:MM" in the upstream issue zone, not before its issue time
+                 agg: Optional[str] = None): ...  # "min" | "max" | "mean" | "peak": emits {column}_day_{agg}
+    output_column: str  # column, or {column}_day_{agg}
     def availability(self, upstream: Optional[Upstream] = None) -> Availability: ...  # the rule with_source_rules gives
     def content_digest(self) -> Optional[str]: ...  # the upstream's manifest digest and results identity
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), UTC, at target instants
@@ -493,7 +495,16 @@ class DailyProfileTransformer(Transformer):
 
 class DailyStatsTransformer(Transformer):
     def __init__(self, columns: Union[str, List[str]],
-                 stats: List[str] = ["min", "max", "mean", "last"], freq: str = "1h"): ...
+                 stats: List[str] = ["min", "max", "mean", "last"],  # or "peak": the mean over peak_hours
+                 freq: str = "1h",
+                 peak_hours: Tuple[int, int] = (8, 20)): ...  # local hours, the end left out
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
+
+class PeriodStatsTransformer(Transformer):
+    def __init__(self, columns: Union[str, List[str]],
+                 period: str = "1h",  # names {column}_hour_mean, {column}_hour_dev
+                 stats: List[str] = ["mean", "dev"],
+                 freq: str = "15min"): ...  # must divide the period
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 
 class SolarGeometryTransformer(Transformer):

@@ -1,13 +1,14 @@
 ---
 title: DailyStatsTransformer
-description: Per local day minimum, maximum, mean and last value
+description: Per local day minimum, maximum, mean, last value and peak mean
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 Adds the minimum, maximum, mean and last value of each local day to every row of that day, as
 `{column}_day_min`, `{column}_day_max`, `{column}_day_mean` and `{column}_day_last`. The last value is the one in
-the last slot of the day (23:00 for hourly data).
+the last slot of the day (23:00 for hourly data). Asked for, `"peak"` adds `{column}_day_peak`, the mean over the slots of
+the peak hours, 08:00 to 19:59 by default.
 
 ## Basic Usage
 
@@ -16,6 +17,9 @@ from epftoolbox2.data.transformers import DailyStatsTransformer
 
 df = DailyStatsTransformer(columns="price", stats=["min", "max", "last"]).transform(df)
 # price_day_min, price_day_max, price_day_last
+
+df = DailyStatsTransformer(columns="load_forecast", stats=["peak"], freq="15min").transform(df)
+# load_forecast_day_peak: the mean from 08:00 to 19:59
 ```
 
 ## Parameters
@@ -23,14 +27,24 @@ df = DailyStatsTransformer(columns="price", stats=["min", "max", "last"]).transf
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `columns` | str \| List[str] | required | Column name(s) to summarise |
-| `stats` | List[str] | `["min", "max", "mean", "last"]` | Statistics to add |
+| `stats` | List[str] | `["min", "max", "mean", "last"]` | Statistics to add: any of these and `"peak"` |
 | `freq` | str | `"1h"` | Slot length of the data, used to decide whether a day is complete |
+| `peak_hours` | Tuple[int, int] | `(8, 20)` | Local hours of the peak block, the end left out: `(8, 20)` is 08:00 to 19:59. Only for `"peak"`; another value without it raises. YAML writes it only when not `(8, 20)` |
+
+## Peak
+
+`{column}_day_peak` is the mean over the slots whose local wall-clock hour is in `peak_hours`: 12 hours, or 48 quarter-hours, on
+every day, the DST days included, since no clock changes between 08:00 and 20:00. It is the block of
+[`report.aggregate("1D", agg="peak")`](/epftoolbox2/model-pipeline/results/#hourly-aggregates-shape-and-the-error-split), so a
+model forecasting the peak directly and the peak of an hourly model's forecasts score the same quantity. Like the other
+statistics it needs the whole day: a missing value at 03:00 makes the day's peak NaN too.
 
 ## Complete Days Only
 
 A day gets statistics only when every slot it has holds a value: 23, 24 or 25 hours on a time-zone-aware index
 (DST switch days), 24 after [`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/). Days with a
-missing value, and the partial days at either end of the data, get NaN rather than a statistic of part of the day.
+missing value, and the partial days at either end of the data, get NaN rather than a statistic of part of the day. An
+index with a timestamp twice raises: a duplicated row could make a day with a missing slot look complete.
 
 ## Information Set
 
@@ -50,7 +64,8 @@ NaN on all 24 rows, and on the day after the autumn switch it leaves out the sec
 The [information set](/epftoolbox2/model-pipeline/information-set/#day-aggregates) judges these columns at the last
 slot of the day they aggregate, not at the row's period, by the rule of the column they were built from. With the
 built-in rule that `load_actual` is realised 1 h after its hour and an 11:45 issue, `load_actual_day_max` is known on
-no row of D and `load_actual_day_max_d-1` on every one.
+no row of D and `load_actual_day_max_d-1` on every one. The peak too is judged at the day's last slot, not at 19:45: it
+is whole only with the whole day.
 
 <Aside type="note">
   The names use `_day_` so they don't collide with ENTSO-E's week-ahead `load_forecast_daily_min`/`_max`, which

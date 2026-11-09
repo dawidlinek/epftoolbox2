@@ -19,7 +19,7 @@ import pandas as pd
 import pytest
 
 from epftoolbox2.data.sources import DataSource, ForecastSource, UpstreamError
-from epftoolbox2.data.transformers import LagTransformer
+from epftoolbox2.data.transformers import DailyStatsTransformer, LagTransformer
 from epftoolbox2.models._calendar import clock_periods
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.pipelines.data_pipeline import COMPONENT_REGISTRY
@@ -454,3 +454,133 @@ def test_the_path_expands_home_and_the_upstream_is_recorded_by_its_absolute_path
     assert source.chained_input().path == str((tmp_path / "home" / "runs").resolve())
     monkeypatch.chdir(tmp_path / "home")
     assert ForecastSource("runs", "up", "x").chained_input().path == str((tmp_path / "home" / "runs").resolve())
+
+
+# --------------------------------------------------------------------------- agg: a day statistic of the forecasts (7d)
+
+AGGS = ["min", "max", "mean", "peak"]
+# Every level of every axis and every pair: (freq, zone, switch, agg), 14 cells; DST days in both freqs and every agg.
+AGG_GRID = [
+    ("1h", "Europe/Warsaw", "spring", "min"),
+    ("1h", "Europe/Helsinki", "autumn", "max"),
+    ("1h", "Europe/Lisbon", "spring", "mean"),
+    ("1h", "Europe/London", "autumn", "peak"),
+    ("1h", "UTC", "spring", "max"),
+    ("15min", "Europe/Warsaw", "autumn", "mean"),
+    ("15min", "Europe/Helsinki", "spring", "peak"),
+    ("15min", "Europe/Lisbon", "autumn", "min"),
+    ("15min", "Europe/London", "spring", "max"),
+    ("15min", "UTC", "autumn", "peak"),
+    ("1h", "Europe/Warsaw", "autumn", "peak"),
+    ("15min", "Europe/Warsaw", "spring", "min"),
+    ("1h", "Europe/Helsinki", "spring", "mean"),
+    ("15min", "Europe/Lisbon", "spring", "max"),
+]
+
+
+def through_daily_stats(source: ForecastSource, zone: str, freq: str, agg: str) -> pd.DataFrame:
+    """The source's forecasts in the upstream's zone, through `DailyStatsTransformer`: what `agg` must equal."""
+    local = everything(source).tz_convert(zone)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="DailyStatsTransformer: the index is UTC")
+        out = DailyStatsTransformer(columns=source.column, stats=[agg], freq=freq).transform(local)
+    return out[[f"{source.column}_day_{agg}"]]
+
+
+@pytest.mark.parametrize(("freq", "zone", "switch", "agg"), AGG_GRID)
+def test_agg_equals_the_source_through_daily_stats_bit_for_bit(tmp_path, freq, zone, switch, agg):
+    write_upstream(tmp_path, zone=zone, freq=freq, first=SWITCHES[switch])
+    for horizon in HORIZONS:
+        mine = everything(ForecastSource(tmp_path, "up", "x", horizon=horizon, agg=agg)).tz_convert(zone)
+        want = through_daily_stats(ForecastSource(tmp_path, "up", "x", horizon=horizon), zone, freq, agg)
+        assert list(mine.columns) == [f"x_day_{agg}"]
+        pd.testing.assert_frame_equal(mine, want, check_exact=True)
+        assert np.array_equal(mine.to_numpy().view(np.int64), want.to_numpy().view(np.int64))
+        # On every row of each target date, one value: the date's statistic of its forecasts.
+        dates = mine.index.tz_localize(None).normalize()
+        per_date = mine.groupby(dates)[f"x_day_{agg}"].nunique(dropna=False)
+        assert (per_date == 1).all() and mine.notna().all().all()
+        assert len(per_date) == DAYS
+
+
+def test_agg_of_an_incomplete_upstream_day_is_nan_on_that_day_alone(tmp_path):
+    records = write_upstream(tmp_path, first="2024-10-25", horizons=(1,))
+    holes = {("2024-10-26", 17), ("2024-10-28", 3)}  # a missing record, and one with no prediction
+    records = [r for r in records if (r["target_date"], r["hour"]) != ("2024-10-26", 17)]
+    for record in records:
+        if (record["target_date"], record["hour"]) in holes:
+            record["prediction"] = None
+    write_upstream(tmp_path, first="2024-10-25", horizons=(1,), records=records)
+    for agg in AGGS:
+        out = everything(ForecastSource(tmp_path, "up", "x", agg=agg))
+        dates = out.index.tz_convert("Europe/Warsaw").tz_localize(None).normalize()
+        empty = {str(day.date()) for day in dates[out[f"x_day_{agg}"].isna()]}
+        assert empty == {"2024-10-26", "2024-10-28"}, agg
+        assert out.loc[dates == pd.Timestamp("2024-10-27"), f"x_day_{agg}"].notna().sum() == 25  # the 25-hour day
+
+
+def test_agg_is_taken_over_whole_dates_before_the_range_is_cut(tmp_path):
+    write_upstream(tmp_path, first="2024-10-25", freq="15min")
+    source = ForecastSource(tmp_path, "up", "x", agg="max")
+    whole = everything(source)
+    start, end = pd.Timestamp("2024-10-26 07:15", tz="UTC"), pd.Timestamp("2024-10-27 05:00", tz="UTC")
+    part = source.fetch(start, end)
+    assert part.index.min() == start and part.index.max() < end and part.notna().all().all()
+    pd.testing.assert_frame_equal(part, whole[(whole.index >= start) & (whole.index < end)])
+
+
+def test_agg_of_a_daily_upstream_and_an_unknown_agg_are_refused(tmp_path):
+    write_upstream(tmp_path, freq="1D")
+    with pytest.raises(UpstreamError, match="read it without agg"):
+        everything(ForecastSource(tmp_path, "up", "x", agg="max"))
+    with pytest.raises(UpstreamError, match="read it without agg"):
+        ForecastSource(tmp_path, "up", "x", agg="max").availability()
+    for agg in ("last", "median", "spread", "MAX"):
+        with pytest.raises(ValueError, match="agg must be None or one of"):
+            ForecastSource(tmp_path, "up", "x", agg=agg)
+
+
+def test_agg_names_its_column_and_registers_its_rule_and_upstream_under_that_name(tmp_path):
+    from epftoolbox2.information_set import InformationSet, source_rules
+
+    write_upstream(tmp_path, zone="Europe/Helsinki")
+    plain = ForecastSource(tmp_path, "up", "x")
+    peak = ForecastSource(tmp_path, "up", "x", horizon=2, agg="peak")
+    assert (plain.output_column, peak.output_column) == ("x", "x_day_peak")
+    rules = source_rules([plain, peak])
+    assert set(rules) == {"x", "x_day_peak"}
+    assert (rules["x_day_peak"].days_before, rules["x_day_peak"].day_zone) == (2, "Europe/Helsinki")
+    info = InformationSet("11:45", "Europe/Brussels").with_source_rules([plain, peak])
+    chained = info.chained_inputs()
+    assert (chained["x"].agg, chained["x"].horizon) == (None, 1)
+    assert (chained["x_day_peak"].column, chained["x_day_peak"].agg, chained["x_day_peak"].horizon) == (
+        "x_day_peak",
+        "peak",
+        2,
+    )
+    assert "agg" not in chained["x"].record() and chained["x_day_peak"].record()["agg"] == "peak"
+    assert chained["x_day_peak"].describe().startswith("day peak of the forecasts of up (horizon 2)")
+    # The statistic's own name, its lags and its profiles are the agg source's, read from its rule, never the plain one's.
+    for name in ("x_day_peak", "x_day_peak_d+1", "x_day_peak_d-1", "x_day_peak_h05"):
+        assert info.chained_of(name).column == "x_day_peak", name
+    assert info.resolve("x_day_peak_d+1").rule == rules["x_day_peak"]
+
+
+def test_agg_round_trips_through_yaml_and_is_in_the_pipeline_cache_s_fingerprint(tmp_path):
+    from epftoolbox2.pipelines.data_pipeline import _component_fingerprint
+
+    write_upstream(tmp_path / "runs")
+    pipeline = DataPipeline(timezone="Europe/Warsaw").add_source(
+        ForecastSource(str(tmp_path / "runs"), "up", "x", agg="mean")
+    )
+    pipeline.save(tmp_path / "data.yaml")
+    loaded = DataPipeline.load(tmp_path / "data.yaml").sources[0]
+    assert (loaded.agg, loaded.output_column) == ("mean", "x_day_mean")
+    plain = ForecastSource(str(tmp_path / "runs"), "up", "x")
+    assert _component_fingerprint(loaded)["params"]["agg"] == "mean"
+    # Written only when set: a file saved without it loads in versions from before agg, and 7a's fingerprints don't move.
+    assert "agg" not in _component_fingerprint(plain)["params"]
+    DataPipeline(timezone="Europe/Warsaw").add_source(plain).save(tmp_path / "plain.yaml")
+    assert "agg:" not in (tmp_path / "plain.yaml").read_text()
+    assert DataPipeline.load(tmp_path / "plain.yaml").sources[0].agg is None
+    assert ForecastSource(str(tmp_path / "runs"), "up", "x", agg="None").agg is None  # the TUI's "none"

@@ -61,6 +61,7 @@ COMPONENT_REGISTRY = {
         "DSTNormalizeTransformer": "epftoolbox2.data.transformers.dst_normalize",
         "DailyProfileTransformer": "epftoolbox2.data.transformers.daily_profile",
         "DailyStatsTransformer": "epftoolbox2.data.transformers.daily_stats",
+        "PeriodStatsTransformer": "epftoolbox2.data.transformers.period_stats",
         "LambdaTransformer": "epftoolbox2.data.transformers.lambda_transformer",
         "ImputeTransformer": "epftoolbox2.data.transformers.impute",
         "SolarGeometryTransformer": "epftoolbox2.data.transformers.solar_geometry",
@@ -523,7 +524,7 @@ class DataPipeline:
         refs = getattr(component, "_yaml_refs", {})
         params = {}
         for key, value in vars(component).items():
-            if key.startswith("_") or key in _RUNTIME_ATTRIBUTES:
+            if key.startswith("_") or key in _RUNTIME_ATTRIBUTES or _left_at_default(component, key, value):
                 continue
             where = f"{class_name}.{key}"
             plain = to_yaml_value(value, where)
@@ -764,11 +765,21 @@ def _fingerprint_value(value: Any) -> Any:
     return repr(value)
 
 
+def _left_at_default(component: Any, key: str, value: Any) -> bool:
+    """Whether `key` is a parameter its class writes only when set (`_WRITTEN_WHEN_SET`, as `BaseModel`'s) and is at that
+    default: a file saved now then loads in versions from before the parameter, and a fingerprint stays what it was."""
+    written_when_set = getattr(type(component), "_WRITTEN_WHEN_SET", {})
+    return key in written_when_set and value == written_when_set[key]
+
+
 def _component_fingerprint(component: Any) -> Dict[str, Any]:
     params = {
         key: _fingerprint_value(value)
         for key, value in vars(component).items()
-        if not key.startswith("_") and key not in _RUNTIME_ATTRIBUTES and key not in _SECRET_ATTRIBUTES
+        if not key.startswith("_")
+        and key not in _RUNTIME_ATTRIBUTES
+        and key not in _SECRET_ATTRIBUTES
+        and not _left_at_default(component, key, value)
     }
     fingerprint = {"class": _qualified_name(component), "params": params}
     # A component may inherit its market zone from DataPipeline.timezone (a private attribute, so it is not in

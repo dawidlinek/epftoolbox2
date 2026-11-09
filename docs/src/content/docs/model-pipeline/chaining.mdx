@@ -79,10 +79,13 @@ covers the issue days 2023-03-05 to 2023-03-19.
 
 At `availability="raise"` the same is an `InformationSetError`. Rows that can't hold a value whatever the upstream does are not
 counted: a day shift that lands on the hour a spring switch skips, and the slot the upstream never plans (02:00 on the day after a
-switch at horizon 1, whose issue day has no 02:00). A predictor read only in some periods (a list of `(horizon, hour)`, say, that
+switch at horizon 1, whose issue day has no 02:00), and for a day statistic (`ForecastSource(agg="max")`) every row of that date,
+which is never whole. An hour aggregate of the column (`solar_fc_hour_mean_d-1`) is judged as the column at the same row
+(`solar_fc_d-1`), its hour being whole only with each slot; a profile, a day aggregate made by `DailyStatsTransformer` after the
+plain column and a rolling statistic of it are counted as they stand. A predictor read only in some periods (a list of `(horizon, hour)`, say, that
 reads a daylight-only solar forecast in daylight hours) is counted in those periods alone. The counts go to the manifest,
-`chained_inputs[column]["coverage"]`, per predictor: rows read, rows without a value, the first and last of their dates, and the
-upstream issue days that would cover them (`run_from`, `run_to`).
+`chained_inputs[column]["coverage"]`, per predictor: rows read, rows without a value, the rows without one left out so
+(`let_off`), the first and last of their dates, and the upstream issue days that would cover them (`run_from`, `run_to`).
 
 ## An Upstream That Read Something Late
 

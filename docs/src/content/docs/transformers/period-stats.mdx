@@ -1,0 +1,80 @@
+---
+title: PeriodStatsTransformer
+description: Per local hour mean of a column and each row's deviation from it
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Adds the mean of a column over each hour of 15-minute (or finer) data to every row of that hour, as `{column}_hour_mean`, and
+each row's deviation from it, `{column}_hour_dev` (the row's value minus the hour's mean). The mean is the hour's level, the
+deviations its shape within the hour: the quarter-hourly profile of a price or of a generation forecast around its hourly value.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import PeriodStatsTransformer
+
+df = PeriodStatsTransformer(columns="price", freq="15min").transform(df)
+# price_hour_mean, price_hour_dev
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `columns` | str \| List[str] | required | Column name(s) to summarise |
+| `period` | str | `"1h"` | The period of the statistics. Only `"1h"`, which the names say (`_hour_`) |
+| `stats` | List[str] | `["mean", "dev"]` | `"mean"` adds `{column}_hour_mean`, `"dev"` adds `{column}_hour_dev` |
+| `freq` | str | `"15min"` | Slot length of the data; it must divide the period (`"15min"`, `"30min"`, `"5min"`, `"1h"`) |
+
+The columns come in the order of `columns`, each with its statistics in the order of `stats`.
+
+## Whole Hours Only
+
+An hour gets statistics only when every one of its slots has a row and holds a value: four quarter-hours at 15 minutes. An
+hour with a missing value, and a partial hour at either end of the data, get NaN on every row, the deviations too.
+
+Hours are those of the local clock, each occurrence on its own:
+
+- The hour the clocks repeat in autumn (02:00 to 02:59 in Warsaw on the last Sunday of October) has eight rows: two hours of four,
+  the first occurrence's and the second's, each with its own mean.
+- The hour they skip in spring has no rows and no statistics; the hours before and after it are whole.
+- After [`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/) every hour of the naive wall clock has its slots.
+
+On hourly data (`freq="1h"`) the mean is the value itself and every deviation is 0.
+
+It raises rather than guess:
+
+- **Data coarser than `freq`.** Hourly data with the default `freq="15min"` has no hour of four slots, so every statistic would be
+  NaN: pass the data's own slot length.
+- **A timestamp twice.** A duplicated row could make an hour with a missing slot look whole.
+
+On a UTC index the hours are UTC hours, which in a zone half an hour off UTC (Asia/Kolkata) aren't the market's, and the
+transformer warns: run [`TimezoneTransformer`](/epftoolbox2/transformers/timezone/) first.
+
+## Information Set
+
+The statistics of an hour appear on the rows of that hour and use only that hour, never a later one. The
+[information set](/epftoolbox2/model-pipeline/information-set/#hour-aggregates) judges both columns at the **last slot of the
+hour**, by the rule of the column they were built from, whatever the row's own slot: the mean of 10:00 to 10:59 is known when the
+10:45 value is, and so is the deviation at 10:15, which holds that mean.
+
+- A day-ahead forecast or price of D is known as a whole, so its hour means and deviations are known with it: `price_hour_dev`
+  under `published("13:00", 1)` is known at 13:00 on D-1 on every row of D.
+- A realised series is known only after its hour: with `realised("1h")`, `load_actual_hour_mean` of the hour from 10:00 is known
+  at 12:00, so at an 11:45 issue it is refused from 10:00 on, where the plain column is refused only from 10:45.
+
+Lag the statistic like any other column (`price_hour_mean_d-1`, `solar_fc_hour_dev_d+1`):
+
+```python
+from epftoolbox2.data.transformers import LagTransformer, PeriodStatsTransformer
+
+df = PeriodStatsTransformer(columns=["price"], freq="15min").transform(df)
+df = LagTransformer(columns=["price_hour_mean", "price_hour_dev"], lags=[1, 7], freq="day").transform(df)
+# price_hour_mean_d-1, price_hour_dev_d-1, price_hour_mean_d-7, price_hour_dev_d-7
+```
+
+<Aside type="note">
+  `_hour_mean` and `_hour_dev` are names of their own: a column of yours that ends in them is read as an hour aggregate of what
+  comes before, as `_day_max` is read as a day aggregate.
+</Aside>

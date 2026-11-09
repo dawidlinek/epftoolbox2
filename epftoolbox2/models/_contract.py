@@ -257,7 +257,8 @@ def warn_about_a_midnight_stamp(
 
 
 def _counts_hours(name: Any) -> bool:
-    """Whether a column name shifts its row by hours, minutes or seconds (`x_h-1`), counted from a daily row's stamp."""
+    """Whether a column name shifts its row by hours, minutes or seconds (`x_h-1`), counted from a daily row's stamp. An hour
+    aggregate (`x_hour_mean`) isn't: on a daily row it is read over its whole date, whatever the stamp."""
     return isinstance(name, str) and any(shift.unit != "d" for shift in parse_predictor(name)[-1][1])
 
 

@@ -221,6 +221,19 @@ def independent_count(data, name, first_row, last_row):
     return int(missing.sum()), int(inside.sum())
 
 
+def independent_let_off(data, name, first_row, last_row):
+    """The rows `independent_count` leaves out: missing, but reading a wall time off the clock or a slot no forecast is planned
+    for."""
+    missing_all = int(
+        (
+            (data.index.tz_localize(None).normalize() >= pd.Timestamp(first_row))
+            & (data.index.tz_localize(None).normalize() <= pd.Timestamp(last_row))
+            & data[name].isna().to_numpy()
+        ).sum()
+    )
+    return missing_all - independent_count(data, name, first_row, last_row)[0]
+
+
 @pytest.mark.parametrize("availability", ["none", "warn"])
 def test_an_upstream_starting_mid_window_warns_with_its_counts_and_the_days_to_cover(shared, tmp_path, availability):
     source, data = shared["mid"], shared["mid_data"]
@@ -241,12 +254,14 @@ def test_an_upstream_starting_mid_window_warns_with_its_counts_and_the_days_to_c
     assert coverage["load_fc_d+1"] == {
         "read": read,
         "uncovered": expected,
+        "let_off": independent_let_off(data, "load_fc_d+1", "2023-03-05", "2023-04-12"),
         "first": "2023-03-05",
         "last": "2023-03-19",
         "run_from": "2023-03-05",
         "run_to": "2023-03-19",
     }
     assert expected == 15 * 24  # 15 whole days before the upstream's first forecast
+    assert coverage["load_fc_d+1"]["let_off"] == 1  # 03-25 02:00 reads 03-26 02:00, which the switch skips
     assert (coverage["load_fc_d-1"]["first"], coverage["load_fc_d-1"]["last"]) == ("2023-03-05", "2023-03-21")
     assert (coverage["load_fc_d-1"]["run_from"], coverage["load_fc_d-1"]["run_to"]) == ("2023-03-03", "2023-03-19")
 
@@ -267,6 +282,7 @@ def test_with_refit_the_rows_read_are_those_of_the_refit_days(shared, tmp_path):
     assert found["load_fc_d+1"] == {
         "read": read,
         "uncovered": expected,
+        "let_off": independent_let_off(data, "load_fc_d+1", "2023-03-03", "2023-04-08"),
         "first": "2023-03-03",
         "last": "2023-03-19",
         "run_from": "2023-03-03",
@@ -758,3 +774,177 @@ def test_a_workflow_runs_the_upstream_then_reads_it_back_with_its_rule(df, tmp_p
     entry = json.loads((tmp_path / "down" / "runs" / "m.manifest.json").read_text())["chained_inputs"]["load_fc"]
     assert entry["path"] == str((tmp_path / "up" / "runs").resolve()) and entry["issue_time"] == "09:30"
     assert entry["coverage"]["load_fc_d+1"]["uncovered"] == 0
+
+
+# -- a day statistic of the forecasts (ForecastSource(agg=), 7d) ------------------------------------------------------------
+
+
+def with_day_statistic(df, source):
+    """`df` with the source's day statistic at its rows (`{column}_day_{agg}`) and its day lags `_d+1`, `_d-1`."""
+    data = df.copy()
+    name = source.output_column
+    data[name] = source.fetch(*WIDE)[name].reindex(df.index.tz_convert("UTC")).to_numpy()
+    lagged = LagTransformer([name], [-1, 1], "day").transform(data[[name]])
+    for column in lagged.columns.drop(name):
+        data[column] = lagged[column]
+    return data
+
+
+@pytest.mark.parametrize("which", ["up", "mid"])
+def test_a_run_gives_each_target_date_one_run_date_per_horizon(shared, which):
+    """What a chained day statistic's rule rests on, read from the records a run stored: at each horizon every forecast of a
+    target date was issued on one day, `horizon` days before it, so the statistic of the date's forecasts is known at that one
+    issue instant (`test_a_chained_day_statistic_is_known_exactly_when_the_latest_of_its_forecasts_is` takes it from here)."""
+    import datetime
+
+    issued = {}
+    for line in (shared["root"] / which / "load_up.jsonl").read_text().splitlines():
+        record = json.loads(line)
+        if record.get("status", "ok") == "ok":
+            issued.setdefault((record["target_date"], record["horizon"]), set()).add(record["run_date"])
+    assert len(issued) > 60 and {horizon for _, horizon in issued} == {1, 2}
+    assert all(len(days) == 1 for days in issued.values())
+    for (target, horizon), (run,) in issued.items():
+        assert datetime.date.fromisoformat(target) - datetime.date.fromisoformat(run) == datetime.timedelta(
+            days=horizon
+        )
+
+
+def test_a_day_statistic_misses_the_day_after_a_spring_switch_without_a_coverage_warning(df, shared, tmp_path):
+    """No forecast of 02:00 on 2023-03-27 is planned at horizon 1 (the switch day, its issue day, has no 02:00), so that date is
+    never whole: its maximum is NaN on every row, which no rerun of the upstream fills. The downstream's fits read it (the rows
+    of the switch day hold `load_fc_day_max_d+1` of 03-27); they are let off, and a run at raise goes through."""
+    source = ForecastSource(str(shared["root"] / "up"), model="load_up", column="load_fc", agg="max")
+    data = with_day_statistic(df, source)
+    dates = data.index.tz_localize(None).normalize()
+    assert data.loc[dates == pd.Timestamp("2023-03-27"), "load_fc_day_max"].isna().all()
+    assert (
+        data.loc[(dates >= pd.Timestamp("2023-02-11")) & (dates != pd.Timestamp("2023-03-27")), "load_fc_day_max"]
+        .iloc[: 24 * 60]
+        .notna()
+        .all()
+    )
+    pipeline = downstream(PREDICTORS + ["load_fc_day_max_d+1"], INFO.with_source_rules([source]), window=45)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*have no value of")
+        pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
+    entry = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc_day_max"]
+    found = entry["coverage"]["load_fc_day_max_d+1"]
+    assert (entry["agg"], entry["horizon"], found["uncovered"]) == ("max", 1, 0)
+    # The trace of the exemption: every row of the switch day, which reads 03-27, and 03-25 02:00, which reads the hour the
+    # switch skips.
+    assert found["let_off"] == 23 + 1
+
+
+def test_a_day_statistic_of_an_upstream_starting_mid_window_counts_its_missing_days(df, shared, tmp_path):
+    """The `mid` upstream's first forecast is issued on 2023-03-20: the rows of 03-05 to 03-19 read dates it has no forecast
+    for, 15 days of 24 rows; the switch day's 23 rows read 03-27, which no upstream can complete, and are not counted."""
+    source = ForecastSource(str(shared["root"] / "mid"), model="load_up", column="load_fc", agg="max")
+    data = with_day_statistic(df, source)
+    pipeline = downstream(PREDICTORS + ["load_fc_day_max_d+1"], INFO.with_source_rules([source]), availability="warn")
+    with pytest.warns(UserWarning, match="rows its fits read have no value of load_fc_day_max"):
+        pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
+    found = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc_day_max"]
+    assert found["coverage"]["load_fc_day_max_d+1"]["uncovered"] == 15 * 24
+    assert (found["coverage"]["load_fc_day_max_d+1"]["first"], found["coverage"]["load_fc_day_max_d+1"]["last"]) == (
+        "2023-03-05",
+        "2023-03-19",
+    )
+    with pytest.raises(InformationSetError, match="have no value of load_fc_day_max"):
+        downstream(PREDICTORS + ["load_fc_day_max_d+1"], INFO.with_source_rules([source])).run(data, *TEST, horizon=1)
+
+
+def test_verify_is_ok_on_a_day_statistic_and_finds_the_leak_of_one_known_after_the_issue(df, shared):
+    """`verify` with its positive control on the chained day maximum; stated known at 12:30 (`available`), after the 11:45
+    issue, it is a leak and refused at raise."""
+    path = str(shared["root"] / "up")
+    source = ForecastSource(path, model="load_up", column="load_fc", agg="max")
+    data = with_day_statistic(df, source)
+    pipeline = downstream(PREDICTORS + ["load_fc_day_max_d+1"], INFO.with_source_rules([source]))
+    assert pipeline.verify(data, *TEST, horizon=1, days=2).table().set_index("model").loc["price_m", "status"] == "ok"
+    late = ForecastSource(path, model="load_up", column="load_fc", agg="max", available="12:30")
+    info = INFO.with_source_rules([late])
+    with pytest.raises(InformationSetError, match="load_fc_day_max_d\\+1"):
+        downstream(PREDICTORS + ["load_fc_day_max_d+1"], info).run(data, *TEST, horizon=1)
+    report = downstream(PREDICTORS + ["load_fc_day_max_d+1"], info, availability="warn").verify(
+        data, *TEST, horizon=1, days=2
+    )
+    assert report.table().set_index("model").loc["price_m", "status"] == "leak"
+
+
+# -- hour aggregates of a chained column (PeriodStatsTransformer, 7d) -------------------------------------------------------
+
+
+@pytest.mark.parametrize("shift", ["", "_d-1", "_d+1"])
+def test_an_hour_aggregate_of_a_chained_column_has_no_hole_where_the_upstream_plans_no_forecast(shift):
+    """A 15-minute upstream at horizon 1 plans no forecast of 02:00 to 02:45 on 2024-04-01 (its issue day, the spring switch,
+    has no 02:00), so the hour mean of that hour is NaN on its four rows, and on the rows its lags read it from. The coverage
+    check reads the column it was built from at the same row through the shifts after it (`x_d-1` for `x_hour_mean_d-1`) and
+    lets those rows off; a profile and a day aggregate are judged as they stand."""
+    from epftoolbox2.data.transformers import PeriodStatsTransformer
+    from epftoolbox2.information_set import ChainedInput
+    from epftoolbox2.models._chained import _off_the_clock
+
+    chained_x = ChainedInput("x", "/p", "up", 1, "11:45", "Europe/Brussels", ZONE, None, "d", freq="15min")
+    index = pd.date_range("2024-03-30", "2024-04-03", freq="15min", tz=ZONE, inclusive="left")
+    wall = index.tz_localize(None)
+    x = pd.Series(np.arange(len(index), dtype=float), index=index)
+    x[(wall.normalize() == pd.Timestamp("2024-04-01")) & (wall.hour == 2)] = np.nan  # what the source places
+    frame = PeriodStatsTransformer("x").transform(pd.DataFrame({"x": x}))
+    frame = LagTransformer(["x", "x_hour_mean", "x_hour_dev"], [1, -1], "day").transform(frame)
+    days = {"": 0, "_d-1": -1, "_d+1": 1}[shift]
+    read = wall.normalize() + pd.Timedelta(days=days)
+    inside = np.asarray(
+        (read >= pd.Timestamp("2024-03-30")) & (read <= pd.Timestamp("2024-04-02"))
+    )  # not the frame's edges
+    for name in (f"x{shift}", f"x_hour_mean{shift}", f"x_hour_dev{shift}"):
+        missing = frame[name].isna().to_numpy() & inside
+        off = _off_the_clock(frame.index, name, chained_x)
+        assert missing.any() and not (missing & ~off).any(), name
+    assert not _off_the_clock(frame.index, "x_h02_d-1", chained_x).any()
+    assert not _off_the_clock(frame.index, "x_day_max_d-1", chained_x).any()
+
+
+def test_a_rolling_statistic_of_a_chained_column_is_counted_as_it_stands():
+    """`x_roll7max_d-1` holds the maximum of the seven days ending D-1 of an hourly chained x whose upstream has a gap day
+    (2024-03-27, no forecast) and, on 2024-04-01, no 02:00 (its issue day is the spring switch). Its NaN rows come from whole
+    days of its window, which the row's own slot doesn't decide: no row is let off, not even 04-02 02:00, whose `x_d-1` slot
+    is the unplanned one (read row by row as `x_d-1` it was, though its window also holds the gap day). An hour aggregate on
+    the same frame still lets that row off."""
+    from epftoolbox2.data.transformers import PeriodStatsTransformer, RollingStatsTransformer
+    from epftoolbox2.information_set import ChainedInput
+    from epftoolbox2.models._chained import _off_the_clock
+
+    chained_x = ChainedInput("x", "/p", "up", 1, "11:45", "Europe/Brussels", ZONE, None, "d", freq="1h")
+    index = pd.date_range("2024-03-18", "2024-04-12", freq="1h", tz=ZONE, inclusive="left")
+    wall = index.tz_localize(None)
+    x = pd.Series(np.arange(len(index), dtype=float), index=index)
+    x[wall.normalize() == pd.Timestamp("2024-03-27")] = np.nan  # a gap day of the upstream
+    x[(wall.normalize() == pd.Timestamp("2024-04-01")) & (wall.hour == 2)] = np.nan  # the slot it never plans
+    frame = RollingStatsTransformer("x", window_days=7, stat="max", lag_days=1).transform(pd.DataFrame({"x": x}))
+    frame = PeriodStatsTransformer("x", freq="1h").transform(frame)
+    frame = LagTransformer(["x_hour_mean"], [1], "day").transform(frame)
+    row = pd.Timestamp("2024-04-02 02:00", tz=ZONE)
+    assert np.isnan(frame.loc[row, "x_roll7max_d-1"]) and np.isnan(frame.loc[row, "x_hour_mean_d-1"])
+    assert frame["x_roll7max_d-1"].isna().sum() > 7 * 24
+    assert not _off_the_clock(frame.index, "x_roll7max_d-1", chained_x).any()
+    assert _off_the_clock(frame.index[frame.index == row], "x_hour_mean_d-1", chained_x).all()
+
+
+def test_a_model_reading_an_hour_mean_of_a_chained_column_runs_at_raise(df, shared, tmp_path):
+    """End to end over the spring switch: `load_fc_hour_mean_d-1` of the hourly upstream reads the hour mean of 03-26 02:00
+    (no row) and of 03-27 02:00 (no forecast planned) and no other hole, so the run goes through at raise, with those rows
+    let off in its manifest."""
+    from epftoolbox2.data.transformers import PeriodStatsTransformer
+
+    source = shared["up"]
+    data = PeriodStatsTransformer("load_fc", freq="1h").transform(shared["up_data"].copy())
+    data = LagTransformer(["load_fc_hour_mean"], [1], "day").transform(data)
+    pipeline = downstream(PREDICTORS + ["load_fc_hour_mean_d-1"], INFO.with_source_rules([source]), window=45)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*have no value of")
+        pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
+    entry = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc"]
+    found = entry["coverage"]["load_fc_hour_mean_d-1"]
+    # 03-27 02:00 reads the hour the switch skips on 03-26, 03-28 02:00 the hour no forecast is planned for on 03-27.
+    assert found["uncovered"] == 0 and found["let_off"] == 2

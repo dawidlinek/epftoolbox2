@@ -7,6 +7,11 @@ import pandas as pd
 
 from ..._date_utils import is_utc_index as _is_utc
 
+# The peak block of `DailyStatsTransformer(stats=["peak"])` and `ForecastSource(agg="peak")`: 08:00 to 19:59 local time, the
+# block of `EvaluationReport.aggregate(agg="peak")` (`results.breakdowns.PEAK_HOURS`), the window of the resolution and
+# renewables studies.
+PEAK_HOURS = (8, 20)
+
 
 def parse_step(freq: str) -> pd.Timedelta:
     step = pd.Timedelta(freq)
@@ -43,10 +48,23 @@ def check_index(df: pd.DataFrame, who: str) -> pd.DatetimeIndex:
     return index
 
 
+def check_unique_index(index: pd.DatetimeIndex, who: str) -> None:
+    """Refuse an index with a timestamp twice: a period's rows would be counted twice and could pass for a missing one."""
+    if index.has_duplicates:
+        duplicated = index[index.duplicated()].unique()
+        raise ValueError(f"{who}: the index has {len(duplicated)} duplicate timestamp(s), e.g. {duplicated[0]}")
+
+
 def local_days(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     """Naive midnight of each row's local date."""
     wall = index.tz_localize(None) if index.tz is not None else index
     return wall.normalize()
+
+
+def wall_hours(index: pd.DatetimeIndex) -> np.ndarray:
+    """The local wall-clock hour of each row (0..23)."""
+    wall = index.tz_localize(None) if index.tz is not None else index
+    return np.asarray(wall.hour, dtype=int)
 
 
 def slot_of_day(index: pd.DatetimeIndex, step: pd.Timedelta, freq: str) -> np.ndarray:

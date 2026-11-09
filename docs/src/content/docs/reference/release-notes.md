@@ -254,6 +254,28 @@ an issue day it didn't sample.
   name, or `"data"` for the data's (the later of the data's and the issue zone's date on a frame in another zone), the publication
   instant staying `time` in `timezone`; validity periods read the same day. `None`, the default, is every rule as it was, and YAML
   writes it only when set. See [Information Set](/epftoolbox2/model-pipeline/information-set/#delivery-days-of-another-zone).
+- **Hour aggregates and the day's peak as inputs: `PeriodStatsTransformer` and `DailyStatsTransformer(stats=[..., "peak"])`.**
+  `PeriodStatsTransformer(columns, period="1h", stats=("mean", "dev"), freq="15min")` adds `{column}_hour_mean`, the mean over the
+  hour's slots on every row of the hour (NaN unless all are there), and `{column}_hour_dev`, the row's value less it; hours are the
+  local clock's, the repeated autumn hour two hours of four quarter-hours, the skipped spring hour none. `DailyStatsTransformer`
+  takes `"peak"` in `stats` for `{column}_day_peak`, the mean over `peak_hours=(8, 20)` (local, the end left out: the block of
+  `report.aggregate("1D", agg="peak")`), on whole days only. The information set judges an hour aggregate at the last slot of its
+  hour (10:45 for 10:00 to 11:00), in the occurrence of a repeated hour its row is in, by the rule of the column it was built from:
+  the shape of a day-ahead forecast is known with it, that of a realised series only after its hour. `_day_peak` is judged at the
+  day's last slot like `_day_max`. Both are in YAML and the TUI. See [PeriodStatsTransformer](/epftoolbox2/transformers/period-stats/)
+  and [Information Set](/epftoolbox2/model-pipeline/information-set/#hour-aggregates). `DailyStatsTransformer`'s default statistics,
+  and every existing verdict, are as before; a saved data pipeline writes `peak_hours` only when it isn't `(8, 20)`, so files saved now load in earlier versions.
+  `DailyStatsTransformer` now refuses an index with a timestamp twice (a duplicated row could make a day with a missing slot look
+  complete).
+- **`ForecastSource(agg=)`: a day statistic of another pipeline's forecasts.** With `agg="min"`, `"max"`, `"mean"` or `"peak"` the
+  source emits `{column}_day_{agg}`, the statistic of the forecasts of each target date of the upstream's data zone on every row of
+  the date, bit for bit what `DailyStatsTransformer` makes of the plain column in that zone, taken over whole dates before the range
+  is cut; a date with a missing forecast is NaN. Its column takes the source's rule under its own name: all forecasts of a date are
+  issued at one instant, so the statistic is known exactly when the latest of them is, in every zone. The downstream's coverage
+  check doesn't count the dates no upstream can complete (the day after a spring switch has no 02:00 forecast at horizon 1), and
+  its manifest's `chained_inputs` records `agg` and each coverage entry `let_off`, the rows left out. A daily upstream is refused.
+  A saved pipeline writes `agg` only when set. See
+  [ForecastSource](/epftoolbox2/data-sources/forecast/#a-day-statistic-agg).
 - **Hyper-parameter search: `run(validation_every=k)` and `tune.BayesSearch` (`[tune]` extra).** `ModelPipeline.run(...,
   validation_every=k)` issues on every k-th day of a fixed validation window, counted from its first day: each forecast is the full
   run's, bit for bit, the other days are neither forecast nor planned, the test window is never thinned, and the manifest records it

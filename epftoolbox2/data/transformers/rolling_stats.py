@@ -9,6 +9,8 @@ import pandas as pd
 from ._daily import check_index, check_new_columns, check_spacing, local_days, parse_step, slot_of_day, slots_in_day
 from .base import Transformer
 
+# What `stat` may name, `{column}_roll{W}{stat}`. The information set reads these names (`information_set._ROLLING` is built
+# from them).
 STATS = ("min", "max", "mean")
 
 

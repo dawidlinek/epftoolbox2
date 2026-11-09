@@ -36,8 +36,10 @@ from ..information_set import (
     ChainedInput,
     InformationSet,
     InformationSetError,
+    Shift,
     TrainingRows,
     _built_from_name,
+    _is_hour_aggregate,
     parse_predictor,
 )
 from ..results.availability import late_upstream_rows
@@ -139,8 +141,9 @@ def coverage(
 ) -> Dict[str, Any]:
     """How many rows the fits read (at each horizon, on the dates `read_dates` gives, of the periods whose lists hold `name`
     there, every period with `periods` None) hold no value of `name`, less those that can't hold one whatever the upstream does
-    (`_off_the_clock`): {"read", "uncovered", "first", "last", "run_from", "run_to"} (dates ISO, None with nothing uncovered).
-    `run_from` and `run_to` are the upstream issue days whose forecasts the first and last uncovered rows read."""
+    (`_off_the_clock`): {"read", "uncovered", "let_off", "first", "last", "run_from", "run_to"} (dates ISO, None with nothing
+    uncovered). `let_off` counts the rows without a value that were left out so; `run_from` and `run_to` are the upstream issue
+    days whose forecasts the first and last uncovered rows read."""
     on = np.zeros(len(dates), dtype=bool)
     for hz in use.horizons:
         at = np.isin(dates, read_dates(rows, issue_days, [hz]))
@@ -149,9 +152,10 @@ def coverage(
         on |= at
     values = data[name].to_numpy(dtype=np.float64) if name in data.columns else np.full(len(data.index), np.nan)
     hole = on & np.isnan(values)
-    hole[hole] = ~_off_the_clock(data.index[hole], name, use.chained)
+    off = _off_the_clock(data.index[hole], name, use.chained)
+    hole[hole] = ~off
     uncovered = np.flatnonzero(hole)
-    out: Dict[str, Any] = {"read": int(on.sum()), "uncovered": int(len(uncovered))}
+    out: Dict[str, Any] = {"read": int(on.sum()), "uncovered": int(len(uncovered)), "let_off": int(off.sum())}
     out.update(first=None, last=None, run_from=None, run_to=None)
     if len(uncovered):
         first, last = int(dates[uncovered].min()), int(dates[uncovered].max())
@@ -226,12 +230,21 @@ def _off_the_clock(index: pd.DatetimeIndex, name: str, chained: ChainedInput) ->
     """Which of these rows can't hold a value of `name` whatever the upstream holds, for a plain day shift of the chained column
     (`x`, `x_d+1`, `x_d-1`): the row reads a wall time its frame's clock skips (`x_d+1` at 02:00 the day before a spring
     switch), or a slot the upstream never plans, one its clock skips on the issue day it would be issued on (the forecast for
-    02:00 of the day after a switch at horizon 1). Every other name is judged as it stands: no row is let off."""
+    02:00 of the day after a switch at horizon 1); of a day statistic (`ForecastSource(agg=)`), every row of a date with such a
+    slot. An hour aggregate of the chained column (`x_hour_mean_d-1`) is judged one level down: the column it was built from,
+    read at the same row through the shifts after it (`x_d-1`), as an hour is whole only with each of its slots, which are the
+    row's own hour. A profile (another slot's value), a day aggregate (every slot of its date), a rolling statistic (every day of
+    its window), which the row's own slot doesn't decide, and every other name are judged as they stand: no row is let off."""
     out = np.zeros(len(index), dtype=bool)
     if not len(index) or getattr(index, "tz", None) is None:
         return out
     shifts = next((shifts for candidate, shifts in parse_predictor(name) if candidate == chained.column), None)
-    if shifts is None or any(shift.unit != "d" for shift in shifts):
+    if shifts is None:
+        base, outer = parse_predictor(name)[-1]
+        if not _is_hour_aggregate(base):
+            return out
+        return _off_the_clock(index, _built_from_name(base) + "".join(_suffix(shift) for shift in outer), chained)
+    if any(shift.unit != "d" for shift in shifts):
         return out
     days = sum(shift.offset for shift in shifts)
     read = shift_calendar_days(index, days) if days else index
@@ -246,9 +259,16 @@ def _off_the_clock(index: pd.DatetimeIndex, name: str, chained: ChainedInput) ->
         gaps = skipped_periods(day.date(), chained.freq, chained.data_timezone)
         if gaps:
             at = np.asarray(issued == day)
-            unplanned[at] = np.isin(periods[at], list(gaps))
+            # A day statistic (`ForecastSource(agg=)`) of a date with an unplanned slot is NaN on every row of it: the date is
+            # never whole.
+            unplanned[at] = True if chained.agg is not None else np.isin(periods[at], list(gaps))
     out[~np.asarray(read.isna())] = unplanned
     return out
+
+
+def _suffix(shift: Shift) -> str:
+    """A shift as its name writes it: `_d-1`, `_h+2`."""
+    return f"_{shift.unit}{'+' if shift.offset > 0 else '-'}{abs(shift.offset)}"
 
 
 def _rule_of(information_set: InformationSet, name: str) -> str:

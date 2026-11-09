@@ -167,7 +167,7 @@ At `"1D"` the header gives the time the rows are stamped at, `period 0 (12:00)`,
 of a noon row is `T-1 11:00` at horizon 1 (see [Daily Rows](#daily-rows)).
 
 `target-relative` reads the name the way the check does: a [profile](#profile-columns) at its slot, a [day
-aggregate](#day-aggregates) over the whole day, an hour lag in elapsed time. On a DST day labels stay wall-clock times and
+aggregate](#day-aggregates) over the whole day, an [hour aggregate](#hour-aggregates) over its hour, an hour lag in elapsed time. On a DST day labels stay wall-clock times and
 calendar days, and a day aggregate still ends at 23:00. An hour lag lands on another hour next to a switch, so across such a
 window the label is the usual one and says how many days differ: `T-2 12:00 (else on 1 of 4 days)`. `status` is `ok`,
 `late`, `late on 3 of 10 days`, `no rule`, `no issue time`, `not in data` or `no row` (a period no issue day of `test`
@@ -519,7 +519,7 @@ key on a shifted name (`x_h05_d+1`) describes that very column at its row, as fo
 ## Day Aggregates
 
 A [`DailyStatsTransformer`](/epftoolbox2/transformers/daily-stats/) column (`_day_min`, `_day_max`, `_day_mean`,
-`_day_last`) holds a statistic of its row's whole local day, the same value on every row of that day, so it is known
+`_day_last`, `_day_peak`) holds a statistic of its row's whole local day, the same value on every row of that day, so it is known
 only when the day's last slot is: 23:00 for hourly data and 23:45 for 15-minute data, on the 23- and 25-hour DST days
 as on any other. The check and the probe judge it at that slot, not at the row's period, and the shifts after it
 pick the day, as for profile columns: `load_actual_day_max_d-1` is the maximum of D-1, and
@@ -549,6 +549,12 @@ A profile or aggregate of an `OpenMeteoSource` column also gets that source's `r
 the market zone. A key that matches the derived name replaces the source's timing but not the zone check, which only a
 rule for the plain column itself lifts.
 
+The peak (`_day_peak`, the mean from 08:00 to 19:59) is judged at the day's last slot too, not at 19:45: it is NaN unless the whole
+day is there, so its value depends on the slots after the peak. A chained day statistic, `ForecastSource(agg=...)`'s
+`price_fc_day_max`, is no aggregate of the frame's day but a column of its own, the statistic of the upstream's target date: it
+takes the source's rule and is known exactly when the latest forecast of that date is, the issue instant they share (see
+[ForecastSource](/epftoolbox2/data-sources/forecast/#a-day-statistic-agg)).
+
 <Aside type="caution">
   The day's last slot can be delivered on the next day of the rule's zone. On an index at a true fixed offset
   (`Etc/GMT-1`) with Brussels rules, 23:00 is 00:00 CEST on D+1 in summer, so on summer days `price_day_max` of D is
@@ -575,6 +581,34 @@ own name replaces the timing of the column it was built from, as for a day aggre
 `T-366 00:00 … T-2 23:00` for the proxy at horizon 1. A column of yours named like one (`load_roll24mean`, a rolling mean of 24
 hours) is read as one, a window of 24 days ending on its row's day, so it is never called known earlier than it is but may be
 called late: rename it.
+
+---
+
+## Hour Aggregates
+
+A [`PeriodStatsTransformer`](/epftoolbox2/transformers/period-stats/) column holds a statistic of its row's hour: `_hour_mean`
+the mean of the column over the hour's slots, the same on every row of the hour, and `_hour_dev` the row's value less that
+mean. Either is known only when the hour's **last slot** is (10:45 for the hour from 10:00 on 15-minute data), whatever the row's
+slot: the deviation at 10:15 holds the mean, and the mean holds 10:45. The check and the probe judge it there, by the rule of the
+column it was built from (a key in `rules=` matching its own name first, as for a profile or a day aggregate), and the shifts
+after it pick the hour: `price_hour_mean_d-1` is the hour of D-1, `x_hour_mean_h-1` the hour of the row an elapsed hour earlier.
+
+So the quarter-hourly shape of a day-ahead forecast or price is known with it, and that of a realised series only after its hour:
+
+| Column | Rule | Known (row 10:15 of D) |
+|---|---|---|
+| `price_hour_dev` | `published("13:00", 1)` | D-1 13:00 |
+| `price_hour_dev_d+1` | `published("13:00", 1)` | D 13:00: late at an 11:45 issue |
+| `load_actual_hour_mean` | `realised("1h")` | D 12:00 (the 10:45 slot ends at 11:00, plus 1 h): late from the 10:00 hour on |
+| `load_actual` | `realised("1h")` | D 11:30, and late only from 10:45 |
+| `load_actual_hour_mean_d-1` | `realised("1h")` | D-1 12:00 |
+
+The hour the clocks repeat in autumn is two hours, one per occurrence, as the transformer makes them: the first occurrence's mean
+is known when its 02:45 is, the second's when the second 02:45 is, and the check reads the second, the row a model forecasts from.
+The hour the clocks skip has no rows and no verdict. Under [rules over time](#rules-over-time) an earlier slot can come later than
+the last, so the aggregate is known when every slot of its hour is. On a [daily row](#daily-rows) an hour aggregate is judged as a
+day aggregate, at the date's last slot: the row stands for its whole date, so `load_actual_hour_mean` after
+`ResampleTransformer("1D")` is known only after D, not at the stamp's hour.
 
 ---
 
@@ -623,7 +657,8 @@ rule reads a daily row like this, with the rule's own clock times and delays as 
 | `realised`, with no `h`, `min` or `s` shift | The value of its whole local date, known `delay` after that date ends |
 | `realised`, with an hour shift | That hour, counted back from the stamp |
 | `weather_run`, `as_of`, `weather_cutoff` | As on an hourly row, from the stamp |
-| A profile or a day aggregate | The column it was built from, at its slot or last slot, as on an hourly row |
+| A profile or a day aggregate | The column it was built from, at its slot or the day's last slot, as on an hourly row |
+| An hour aggregate | As a day aggregate, over its whole date (a resample's maximum of the hour means holds every hour), whatever shift follows it: stricter than needed for one that holds a single hour, such as `x_hour_mean_h-3` on a noon-stamped frame (09:00), refused where `x_h-3` passes |
 | A `_sNN` slot | Needs a rule of your own, as on hourly data |
 
 With `realised("1h")` and a noon stamp:

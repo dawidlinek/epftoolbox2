@@ -7,6 +7,7 @@ from .lag import LagTransformer
 from .dst_normalize import DSTNormalizeTransformer
 from .daily_profile import DailyProfileTransformer
 from .daily_stats import DailyStatsTransformer
+from .period_stats import PeriodStatsTransformer
 from .lambda_transformer import LambdaTransformer
 from .impute import ImputeTransformer
 from .solar_geometry import SolarGeometryTransformer
@@ -20,6 +21,7 @@ __all__ = [
     "DSTNormalizeTransformer",
     "DailyProfileTransformer",
     "DailyStatsTransformer",
+    "PeriodStatsTransformer",
     "LambdaTransformer",
     "ImputeTransformer",
     "SolarGeometryTransformer",
