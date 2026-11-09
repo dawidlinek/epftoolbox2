@@ -1,0 +1,267 @@
+---
+title: Hyper-parameter Search
+description: Choose settings on validation and never on test, with a random loop averaged (the default) or BayesSearch's proposals, successive halving on every k-th validation day and parallel workers
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Choosing a model's settings is a choice made once on the validation period and frozen for the test period, like choosing a
+window or the members of an ensemble (see [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/)). What a fit can
+choose from its own training window is not searched: the lambda of `LassoCVModel` or LEAR's criterion, a network's early stopping.
+
+What the research says about the value of a search: for MLPs, the top 4 configurations with 4 seeds each beat the single best
+configuration with 4 seeds (p .0001 on the DE benchmark), the top 8 or 16 were no better, and within the top 16 validation and
+test ranks barely agreed (rank correlation .05 to .33). For LightGBM, validation picked the wrong window in 15 of 16 cases. One
+validation year resolves differences of about 5 %, and most tuning gains are below that. So the default is a small search
+averaged, not a large search picked.
+
+## The default: a random loop averaged
+
+A loop of `add_model` calls with settings drawn from a seeded generator, and an `AverageEnsemble` of the best few on validation.
+Every model is an ordinary model with its full settings in the pipeline and its YAML, it runs on SLURM like any loop
+(`models_per_task`), and the networks of the loop train together in stacks (see [Neural Networks](/epftoolbox2/models/neural-networks/)).
+
+```python
+import random
+
+from epftoolbox2.ensembles import AverageEnsemble
+from epftoolbox2.models import MLPDailyModel
+from epftoolbox2.pipelines import ModelPipeline
+
+rng, names = random.Random(0), []
+pipeline = ModelPipeline(issue_time="11:45")
+for i in range(48):
+    name = f"mlp_{i:02d}"
+    pipeline.add_model(
+        MLPDailyModel(
+            predictors=lear_x,
+            hidden=rng.choice([[256, 128], [512, 256], [1024, 512]]),
+            dropout=round(rng.uniform(0, 0.5), 2),
+            lr=round(10 ** rng.uniform(-4, -3.5), 6),
+            training_window=728,
+            refit="7D",
+            seeds=4,
+            random_state=i,
+            name=name,
+        )
+    )
+    names.append(name)
+pipeline.add_ensemble(AverageEnsemble(members=names, top=4, by="validation", name="mlp_top4"))
+report = pipeline.run(df, validation=("2023-01-06", "2023-12-29"), test=("2024-01-05", "2025-12-26"), horizon=1)
+print(report.choices())  # the four chosen, their validation MAE, the 48 candidates and the validation-test gap
+```
+
+`examples/mlp_search.py` runs this search on the Lago et al. DE benchmark. With `validation="previous_year"` the ensemble chooses
+again for every test year.
+
+Rules for any search:
+
+- Search on validation only. The test period is for scoring the choice, once.
+- Average the top few rather than pick one, and keep several seeds inside each candidate.
+- Don't search what the evidence fixes: an expanding window for trees, a learning rate of 1e-4 to 3e-4 for MLPs.
+- Report the number of candidates and the gap between the chosen models' validation and test scores: `report.choices()` has both
+  (`candidates`, `test_mae`, `gap`).
+
+## Fewer validation days: `validation_every`
+
+`run(..., validation_every=k)` issues on every k-th day of the validation window alone, counted from its first day, which is
+always one. Each forecast on such a day is the one a run of every day gives it, bit for bit; the other days are neither forecast
+nor planned, so `forecast_counts()` shows nothing missing, and the report and the ensembles score the kept days.
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline().add_model(OLSModel(predictors=["load_forecast_d+1", "price_d-1"], training_window=364, name="OLS"))
+report = pipeline.run(df, validation=("2023-01-06", "2023-12-29"), horizon=1, validation_every=8)  # 45 of 358 days
+print(report.forecast_counts())
+```
+
+It is for the cheap looks of a search: an eighth of the days gives intervals about 2.8 times wider, so it can drop clearly weak
+settings, not rank close ones. The test window is never thinned. It takes a fixed `validation=(start, end)`, not
+`"previous_year"` (whose later years are served by test days) and not `issue_days` (both choose the days a run issues on); 0, a
+bool or a float raises. The manifest records it (only when it isn't 1, so every other manifest is as before), a report from the
+files reads it back, and a resume into results made with another value raises `ManifestMismatchError`
+(`allow_manifest_mismatch=True` goes on, and the records of the other days stay in the file, out of every report).
+
+## BayesSearch
+
+`epftoolbox2.tune.BayesSearch` (`pip install 'epftoolbox2[tune]'`, [Optuna](https://optuna.org) underneath) is the option for
+settings without in-fit selection and with four or more dimensions, networks and trees. It proposes the next settings from the
+trials so far, scores every trial first on a few validation days, and runs only the best on all of them. It reads the validation
+period alone and returns ordinary models, so the final pipeline still lists every model with its full settings. Whether it beats
+the random loop on electricity prices is untested.
+
+```python
+from epftoolbox2.ensembles import AverageEnsemble
+from epftoolbox2.models import MLPDailyModel
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.tune import BayesSearch
+
+
+def make(params):  # one ordinary model from the proposed settings
+    return MLPDailyModel(
+        predictors=lear_x,
+        hidden=params["hidden"],
+        dropout=params["dropout"],
+        lr=params["lr"],
+        training_window=params["window"],
+        refit="7D",
+        name="mlp",
+    )
+
+
+search = BayesSearch(
+    make,
+    space={
+        "hidden": [[256, 128], [512, 256], [1024, 512]],  # a choice
+        "dropout": (0.0, 0.5),  # a float range
+        "lr": (1e-4, 1e-3, "log"),  # a float range on a log scale
+        "window": [364, 728, 1092],
+    },
+    sampler="tpe",
+    n_trials=100,
+    seed=0,
+    rungs=[
+        {"every_nth_day": 8, "seeds": 1},  # a cheap first look at every trial
+        {"every_nth_day": 2, "seeds": 1},  # the best third goes on
+        {"every_nth_day": 1, "seeds": 3},  # the best third of those, at full cost
+    ],
+    keep=1 / 3,
+    warm_start="runs/search_mlp_2023.yaml",  # optional: start from last year's best
+    storage="runs/search_mlp.journal",  # shared by parallel workers, and resumed by a rerun
+)
+result = search.run(df, target="price", horizon=1, validation=("2024-01-05", "2024-12-27"), issue_time="11:45")
+print(result.table())  # every trial: settings, the rungs it reached, validation MAE
+result.save("runs/search_mlp_2024.yaml")  # the record: space, every trial and the choice
+
+pipeline = ModelPipeline(issue_time="11:45")
+models = result.best(4, seeds=4)  # ordinary MLPDailyModel objects, named mlp_bayes_00 ... mlp_bayes_03
+for model in models:
+    pipeline.add_model(model)
+pipeline.add_ensemble(AverageEnsemble(members=[model.name for model in models], name="mlp_bayes_top4"))
+report = pipeline.run(df, test=("2025-01-03", "2025-12-26"), horizon=1)
+```
+
+### The space
+
+| Setting | Means | `make` gets |
+|---|---|---|
+| `[a, b, c]` | one of the values, any of them: numbers, strings, lists such as `[256, 128]` | the value |
+| `(low, high)` | a range: whole numbers when both bounds are ints, else floats | a number in it |
+| `(low, high, "log")` | a range on a log scale (`low > 0`) | a number in it |
+| `Subset(items, min_size=0)` | a subset of `items`, each in or out | the items in, in their order |
+
+`Subset` searches lists, such as the weather groups added to a base list:
+
+```python
+from epftoolbox2.models import RidgeModel
+from epftoolbox2.tune import BayesSearch, Subset
+
+
+def make(params):
+    groups = [column for group in params["groups"] for column in weather_groups[group]]
+    return RidgeModel(predictors=base + groups, training_window=params["window"], name="ridge")
+
+
+search = BayesSearch(make, {"groups": Subset(list(weather_groups), min_size=1), "window": [364, 728]}, n_trials=60)
+```
+
+A proposal with fewer than `min_size` items fails at once without a run. Settings, choices and subset items must be what a YAML
+file holds (None, bools, numbers, strings, and lists or dicts of them), since the saved result holds them.
+
+### How a search runs
+
+1. **The cut.** Before the first trial the frame is cut after the validation end plus the largest horizon (local days): no trial
+   can read the test period, whatever the model does. `test=` raises, and so does `validation="previous_year"`: run one search
+   per year, each warm-started from the year before.
+2. **Rung 0.** `n_trials` trials, each proposed from the trials finished so far. `"tpe"` is Optuna's `TPESampler` (random for
+   the first 10 trials, then where a low validation MAE is likeliest), `"random"` draws every trial at random. A trial is
+   `make(params)` run through a `ModelPipeline` with `validation_every=` the rung's `every_nth_day`, and its rung's `seeds` in
+   place of the model's own (a model class without a `seeds` parameter raises, at the first trial, before the dearer rungs).
+   `information_set`, `issue_time`, `availability` and `engine` of `search.run` are the trial pipeline's.
+3. **Later rungs.** When every trial of a rung has finished, the best `keep` share of the trials it tried (ties by trial number,
+   at least one) goes on to the next rung. 100 trials and `keep=1/3` promote 33, then 11: about 62 full-cost runs instead of 100
+   (100/8 + 33/2 + 11 x 3), and the dear rung only sees settings that were already good. `rungs=None` is one rung of every day
+   with the model as built.
+
+A trial is scored on the same keys as every other trial of its rung: the rung's planned forecasts, less those the frame has no row
+to issue from (`missing_test_row`, the same for every model). A trial that skips any other key (`missing_test_predictors`, a
+failed fit, ...) or forecasts a value that isn't finite gets no score and fails at that rung, its skip counts in the table's
+`error`, so no setting wins by leaving out its hard days. A trial whose `make` or run raises stops the search, the trial
+recorded as failed with the error. The MAE is over the keys with an actual, as an exact sum.
+
+### The result
+
+- `result.table()`: one row per trial: `trial`, each setting, `warm_start`, `rung` (the highest rung it was scored on),
+  `validation_mae` there, `mae_r<r>` and `forecasts_r<r>` per rung, and `error`.
+- `result.ranking()`: trial numbers, best first: the highest rung first, then the validation MAE there.
+- `result.best(k, seeds=None)`: the models of the `k` best trials, built by `make`, named `{name}_bayes_00` and on (`name` is the
+  model's). `seeds` replaces each model's `seeds`. The choice goes into the record.
+- `result.save(path)`: the record as YAML: the search's settings and space, every trial with its settings, the rungs it reached
+  and their scores and forecast counts, the trials each rung promoted, and what `best()` chose. `SearchResult.load(path, make=...)`
+  reads it back; `best()` of a loaded result needs `make`. A `best()` after `save()` adds its choice to the file.
+
+<Aside type="caution">
+  With one worker and a fixed `seed` a search gives the same table twice: the sampler of trial i is seeded from (`seed`, i).
+  Parallel trials finish in a timing-dependent order, which changes what the sampler has seen when it proposes, so a rerun of a
+  parallel search is another search. The saved result, not a rerun, is the record. The chosen models rerun deterministically like
+  any model.
+</Aside>
+
+### Where a model was chosen
+
+A model from `best()` carries where it came from: its manifest records `search` (the search's name, the result file once saved,
+the trial, its rank, the rung, the validation period and MAE, and the number of candidates) as provenance, never compared, and
+`report.choices()` has a row for it next to the ensembles' rows, also in a report from the files:
+
+| ensemble | chosen | k | validation_mae | candidates | test_mae | gap |
+|---|---|---|---|---|---|---|
+| `mlp_bayes` | `[mlp_bayes_00]` | 1 | the trial's, on its rung's days | the search's trials | the model's on the test period | `test_mae - validation_mae` |
+
+The provenance lives on the model object: a pipeline saved to YAML and loaded again holds the models' settings, not where they
+were chosen.
+
+### Warm starts
+
+`warm_start=` a saved result (or a `SearchResult`) makes its finalists, the trials scored on its highest rung, best first, the
+first trials of the new search. With `validation="previous_year"` in mind, a search per year warm-started from the year before
+re-tunes cheaply. A finalist whose settings the new space can't hold (a value out of a range, a choice no longer offered) is left
+out with a warning.
+
+### Parallel workers
+
+`storage=` a journal file (Optuna's `JournalFileBackend`) keeps the trials on disk: workers in other processes share them, and a
+rerun of the search resumes where it stopped. Put the search in a script that ends with `result.save(...)`, and run it in N
+processes:
+
+```bash
+epf tune search.py --workers 16
+```
+
+Each process runs the whole script. The process that creates a rung's study sets it up (the settings, the warm-start trials, the
+promoted trials) and the others wait for it and check that they run the same search on the same data (the frame's hash): a
+journal of another search raises. Rung 0's slots are counted, so exactly `n_trials` trials run whoever takes them, and each
+promoted trial runs once. Every worker waits at the end of a rung for the others, then each builds the same result, so each
+`result.save` writes the same file. `MAX_PROCESSES`, if not set, is the usable CPUs divided by N for each worker's model runs.
+
+A SLURM array of the same script works the same way, each task one worker (`#SBATCH --array=0-15`, `python search.py`): the
+journal file must be on a file system every task sees.
+
+A worker killed during a trial leaves the trial running in the journal, and the others wait for it at the end of the rung. With
+no worker running, `epf tune search.py --requeue` marks such trials interrupted and exits; the next run proposes their rung-0
+slots again and runs a later rung's trials again.
+
+## Smarter than random search
+
+None of these was measured in this research:
+
+- **Bayesian optimisation** (TPE, Gaussian processes, CMA-ES): worth it when one trial is expensive and the space is small (3 to 6
+  settings).
+- **Successive halving**, Hyperband, ASHA: start many settings cheaply and promote the best share. The natural fidelities of a
+  rolling backtest are the share of validation days (`validation_every`), the refit calendar (`refit="1MS"` during the search),
+  seeds and epochs. Cheap fidelities are noisy, so they only drop clearly weak settings.
+- **Warm starts** across years and markets: start this year's search from last year's best, or tune on DE and reuse in AT.
+- **A fixed portfolio**: a handful of settings that did well across markets, used everywhere without a search per study.
+- Population-based training and architecture search are not recommended: they assume a large, low-noise validation signal that
+  one year of daily forecasts does not give.

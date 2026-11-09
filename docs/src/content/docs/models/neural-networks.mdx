@@ -221,7 +221,8 @@ targets](/epftoolbox2/models/common-parameters/#generation-targets)), which `MLP
 One network per horizon with an output per hour beat 24 single-hour networks in the research (DE benchmark 3.550 against 3.623
 EUR/MWh) at a 24th of the fits. Several configurations matter more than several seeds, and both help: the top 4 configurations
 of a search with 4 seeds each beat the best one with 4 seeds. The default search is a loop of models and an
-[AverageEnsemble](/epftoolbox2/model-pipeline/ensembles/) of the best on validation: `examples/mlp_search.py`.
+[AverageEnsemble](/epftoolbox2/model-pipeline/ensembles/) of the best on validation: `examples/mlp_search.py`. `tune.BayesSearch` is
+the option with proposals and successive halving, see [Hyper-parameter Search](/epftoolbox2/model-pipeline/hyperparameter-search/).
 
 ### The research's recipe, reproduced
 

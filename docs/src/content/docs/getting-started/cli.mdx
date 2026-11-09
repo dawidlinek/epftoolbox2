@@ -274,6 +274,23 @@ epf weights verify
 
 ---
 
+## `epf tune`: Run a search in parallel workers
+
+Runs a Python script that runs a `BayesSearch` with `storage=` (a journal file) in N processes, which share its trials (the
+`[tune]` extra; see [Hyper-parameter Search](/epftoolbox2/model-pipeline/hyperparameter-search/#parallel-workers)).
+
+```bash
+epf tune search.py --workers 16
+epf tune search.py --requeue       # with no worker running: the trials a killed worker left running are redone by the next run
+```
+
+| Flag | What it does |
+|------|--------------|
+| `--workers N` | N processes run the whole script (default 1): the search, then what follows it, such as `result.save`, which writes the same file from each. `MAX_PROCESSES`, if not set, is the usable CPUs divided by N for each worker's model runs. Exits with code 1 if a worker failed |
+| `--requeue` | Runs the script once to mark the trials left running in its journal as interrupted, and exits: the next run proposes their rung-0 slots again and runs a later rung's trials again |
+
+---
+
 ## `epf validate`: Validate any pipeline YAML
 
 Load and parse a YAML file, instantiate all components, and report errors. Without running anything.

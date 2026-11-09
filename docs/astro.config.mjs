@@ -72,6 +72,7 @@ export default defineConfig({
                         { label: 'Predictor Functions', link: '/model-pipeline/predictor-functions/' },
                         { label: 'Validation and Test', link: '/model-pipeline/validation-and-test/' },
                         { label: 'Ensembles', link: '/model-pipeline/ensembles/' },
+                        { label: 'Hyper-parameter Search', link: '/model-pipeline/hyperparameter-search/' },
                         { label: 'Several Zones', link: '/model-pipeline/zones/' },
                         { label: 'The Engine', link: '/model-pipeline/engine/' },
                         { label: 'Predictor Presets', link: '/model-pipeline/presets/' },
