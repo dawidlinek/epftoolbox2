@@ -649,7 +649,9 @@ class BayesSearch:
         while True:
             trial = study.ask()
             trials = study.get_trials(deepcopy=False)
-            before = sum(1 for t in trials if t.number < trial.number and not t.user_attrs.get(_INTERRUPTED))
+            # The trials of the search before this one (not surplus, not interrupted): rung 0 holds n_trials of them, whoever
+            # took them.
+            before = sum(1 for t in trials if t.number < trial.number and not _dropped(t))
             if before >= self.n_trials:
                 trial.set_user_attr(_SURPLUS, True)
                 study.tell(trial, state=optuna.trial.TrialState.FAIL)
