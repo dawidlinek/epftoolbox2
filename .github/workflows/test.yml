@@ -64,7 +64,7 @@ jobs:
         uv sync --extra dev
 
     - name: Check that no extra is installed (this is the core-only job)
-      run: uv run python -c "import importlib.util, sys; sys.exit(any(importlib.util.find_spec(m) is not None for m in ('numba', 'torch', 'lightgbm', 'xgboost', 'catboost')))"
+      run: uv run python -c "import importlib.util, sys; sys.exit(any(importlib.util.find_spec(m) is not None for m in ('numba', 'torch', 'lightgbm', 'xgboost', 'catboost', 'optuna')))"
 
     - name: Run tests
       env:
@@ -173,12 +173,41 @@ jobs:
     - name: Run tests
       run: uv run pytest -m "not integration" -n auto --dist worksteal -q
 
+  tune-extra:
+    # The [tune] extra (Optuna): tune.BayesSearch's tests (tests/test_tune.py: the cut before the first trial, the same table
+    # twice with one worker, successive halving's promotions, two worker processes on one journal through `epf tune`,
+    # warm starts, best() and its provenance), and the rest of the suite with Optuna installed. The test job above installs
+    # no extra, so there these tests skip. 3.14t is the free-threaded build.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.14t']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up uv with Python ${{ matrix.python-version }}
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies with the tune extra
+      run: uv sync --locked --extra dev --extra tune
+
+    - name: Check that optuna imports (the tune tests would skip without it)
+      run: uv run python -c "import optuna; print('optuna', optuna.__version__)"
+
+    - name: Run tests
+      run: uv run pytest -m "not integration" -n auto --dist worksteal -q
+
   newest-dependencies:
     # The other jobs install the versions in uv.lock, so a release that breaks the library (pandas 3.1 did)
     # stays invisible until someone upgrades. This job resolves the newest versions on every run; the upgraded
     # lock is not committed. It installs the tree extras too (3.14 with the GIL has wheels of all three), so a new
     # LightGBM, XGBoost or CatBoost release that breaks a tree model shows here (their golden numbers, pinned to the
-    # lock's releases, skip by name).
+    # lock's releases, skip by name), and Optuna (the [tune] extra), whose storage and sampler APIs the search uses.
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -193,7 +222,7 @@ jobs:
       run: uv lock --upgrade
 
     - name: Install dependencies
-      run: uv sync --extra dev --extra lightgbm --extra xgboost --extra catboost
+      run: uv sync --extra dev --extra lightgbm --extra xgboost --extra catboost --extra tune
 
     - name: Show the installed versions
       run: uv pip list
