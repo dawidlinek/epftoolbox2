@@ -15,6 +15,8 @@ from typing import Callable, List, Optional, Sequence, Union
 
 from .torch_model import TorchModel
 
+__all__ = ["MLPHourlyModel", "MLPDailyModel"]
+
 MLP_PATH = "epftoolbox2.nets:MLP"
 _ACTIVATIONS = ("relu", "gelu", "tanh", "sigmoid", "softplus", "elu", "selu", "silu", "leaky_relu")  # nets.ACTIVATIONS
 

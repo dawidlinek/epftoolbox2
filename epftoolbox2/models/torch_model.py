@@ -71,7 +71,13 @@ from ._units import DAY, PERIOD
 from ._worker import _POOLS_SPAWN, current_fit, member_mean
 from .base import BaseModel, _block_co_batch_items, _predicts_blocks, _usable_cpu_count
 
+__all__ = ["TorchModel", "TORCH_CARD", "OUTPUTS", "module_source_hash"]
+
 OUTPUTS = ("period", "day")
+_DAY_NEEDS_REFIT = (
+    'output="day" fits one network per refit day for every issue day of its block, so it needs refit= ("7D" weekly, '
+    '"1D" every issue day); refit=None is for output="period"'
+)
 LOSS_NAMES = ("l1", "mse")
 _LOSS_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*\Z")
 # The float type of every torch fit (`runtime_fields`' `dtype`).
@@ -94,40 +100,45 @@ TORCH_CARD = ModelCard(
     released=None,
 )
 
-# Classes with no import path (defined in `__main__` or a function), by the key `module_ref` gives them: a pool's forked
-# workers rebuild the model from `_model_kwargs`, which holds the key.
+# A class with no import path (defined in `__main__` or in a function, or the old class of a module reloaded since) is named by
+# a key that starts with `_UNSAVED`, which no import path can, and found again in `_UNIMPORTABLE`, which only such keys read.
+_UNSAVED = "<unsaved>"
 _UNIMPORTABLE: Dict[str, type] = {}
 _UNIMPORTABLE_LOCK = threading.Lock()
 
 
-def module_ref(cls: type) -> str:
-    """The text a model's `_model_kwargs` and manifest hold for its module class: its import path (`package.module:Class`), or
-    for a class without one (`__main__`, a function's) `module:qualname` registered in this process (`#2`, `#3`, ... after it
-    for another class of the same name), which `resolve_module` finds again here and in forked workers."""
+def _class_key(cls: type) -> str:
+    """What a model's `_model_kwargs` and manifest hold for its module class: its import path (`package.module:Class`), or for
+    a class without one `<unsaved>module:qualname`, registered here to this class. Each call registers the class it is given, so
+    a model's run, which reads its `_model_kwargs` right before its pool forks, hands its forked workers its own class even when
+    another class of that name was keyed since (a notebook cell run again). The key has no counter, so such a run resumes;
+    `module_hash` says whether the source is the same."""
     from ..pipelines._yaml import class_path
 
     try:
         return class_path(cls, "the module")
     except TypeError:
         pass
-    base = f"{getattr(cls, '__module__', '?')}:{getattr(cls, '__qualname__', repr(cls))}"
+    key = f"{_UNSAVED}{getattr(cls, '__module__', '?')}:{getattr(cls, '__qualname__', repr(cls))}"
     with _UNIMPORTABLE_LOCK:
-        key, n = base, 1
-        while key in _UNIMPORTABLE and _UNIMPORTABLE[key] is not cls:
-            n += 1
-            key = f"{base}#{n}"
         _UNIMPORTABLE[key] = cls
     return key
 
 
-def resolve_module(module: Union[str, type], where: str) -> type:
-    """The class `module` names: a class as it is, a key of `module_ref`, or an import path (importing it, and torch with it)."""
+def _resolve_module(module: Union[str, type], where: str) -> type:
+    """The class `module` names: a class as it is, an `<unsaved>` key (`_class_key`), or an import path, imported (and torch
+    with it): never a registered class in place of what a path imports."""
     if inspect.isclass(module):
         return module
     if not isinstance(module, str):
         raise TypeError(f"{where}: module must be a torch.nn.Module class or 'package.module:Class', got {module!r}")
-    found = _UNIMPORTABLE.get(module)
-    if found is not None:
+    if module.startswith(_UNSAVED):
+        found = _UNIMPORTABLE.get(module)
+        if found is None:
+            raise ValueError(
+                f"{where}: {module[len(_UNSAVED) :]} has no import path and isn't defined in this process: define the class "
+                "at the top level of an importable module"
+            )
         return found
     from ..pipelines._yaml import load_class
 
@@ -163,7 +174,7 @@ def _file_digest(path: str) -> Optional[str]:
     return found
 
 
-def module_hash(module: Union[str, type]) -> str:
+def module_source_hash(module: Union[str, type]) -> str:
     """A hash (16 hex digits) of the source file that defines the module class and of the version of the package it comes
     from: a change to the class, or to a layer it uses from the same file, or a new release of its package changes it. Found
     without importing the module when it isn't imported yet (`importlib.util.find_spec`). A class with no file (typed into an
@@ -171,8 +182,7 @@ def module_hash(module: Union[str, type]) -> str:
     if inspect.isclass(module):
         name, qualname = module.__module__, module.__qualname__
     else:
-        name, _, qualname = str(module).partition(":")
-        qualname = qualname.split("#")[0]
+        name, _, qualname = str(module).removeprefix(_UNSAVED).partition(":")
     loaded = sys.modules.get(name)
     path = getattr(loaded, "__file__", None)
     if path is None and loaded is None:
@@ -193,7 +203,7 @@ def module_hash(module: Union[str, type]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def check_contract(cls: type, blocks: bool, module_params: Dict[str, Any], where: str) -> None:
+def _check_contract(cls: type, blocks: bool, module_params: Dict[str, Any], where: str) -> None:
     """A TypeError unless `cls(n_inputs, n_outputs, **module_params)` (or with named blocks `cls(input_sizes, n_outputs,
     **module_params)`) fits its signature: those two parameter names first, every key of `module_params` taken, every other
     parameter without a default given. A class whose signature can't be read is taken as it is."""
@@ -351,12 +361,14 @@ class TorchModel(BaseModel):
         )
         self.output = output
         self.inputs = None if inputs is None else {str(block): list(names) for block, names in inputs.items()}
+        if module_params is not None and not isinstance(module_params, dict):
+            raise TypeError(
+                f"{where}: module_params must be a dict of the module's keyword arguments, got {module_params!r}"
+            )
         self.module_params = _plain(dict(module_params or {}), f"{where}.module_params")
-        if not isinstance(self.module_params, dict):
-            raise TypeError(f"{where}: module_params must be a dict, got {module_params!r}")
         self.module = self._resolved_or_path(module, where)
         if inspect.isclass(self.module):
-            check_contract(self.module, self.inputs is not None, self.module_params, where)
+            _check_contract(self.module, self.inputs is not None, self.module_params, where)
         self.module_hash = self._checked_hash(module_hash, where)
 
     # --- construction ---------------------------------------------------------------------------------------------
@@ -421,6 +433,8 @@ class TorchModel(BaseModel):
         where = f"{type(self).__name__}({name!r})"
         if output not in OUTPUTS:
             raise ValueError(f"{where}: output must be one of {list(OUTPUTS)}, got {output!r}")
+        if output == "day" and base.get("refit", "7D") is None:
+            raise ValueError(f"{where}: {_DAY_NEEDS_REFIT}")
         # Before BaseModel's refit check, which reads the unit kind.
         self._unit_kind = DAY if output == "day" else PERIOD
         spec = scaler_spec(scaler)
@@ -480,10 +494,15 @@ class TorchModel(BaseModel):
         self.random_state = int(random_state)
 
     def __setattr__(self, key, value):
-        if key == "output":  # the unit kind follows it
+        # The unit kind follows `output`; both checked before anything is set, so a refused value leaves the model as it was.
+        if key == "output":
             if value not in OUTPUTS:
                 raise ValueError(f"output must be one of {list(OUTPUTS)}, got {value!r}")
+            if value == "day" and "refit" in self.__dict__ and self.refit is None:
+                raise ValueError(_DAY_NEEDS_REFIT)
             super().__setattr__("_unit_kind", DAY if value == "day" else PERIOD)
+        elif key == "refit" and value is None and self.__dict__.get("_unit_kind") == DAY:
+            raise ValueError(_DAY_NEEDS_REFIT)
         super().__setattr__(key, value)
 
     @staticmethod
@@ -494,14 +513,14 @@ class TorchModel(BaseModel):
         if inspect.isclass(module):
             return module
         try:
-            return resolve_module(module, where)
+            return _resolve_module(module, where)
         except ImportError:
             if isinstance(module, str) and not has_extra("torch"):
                 return module
             raise
 
     def _checked_hash(self, saved: Optional[str], where: str) -> str:
-        current = module_hash(self._module_spec()[0])
+        current = module_source_hash(self._module_spec()[0])
         if saved is not None and str(saved) != current:
             warnings.warn(
                 f"{where}: the module {self._module_ref()} changed since this configuration was saved (module_hash "
@@ -523,10 +542,10 @@ class TorchModel(BaseModel):
 
     def _module_ref(self) -> str:
         module = self._module_spec()[0]
-        return module_ref(module) if inspect.isclass(module) else str(module)
+        return _class_key(module) if inspect.isclass(module) else str(module)
 
     def _module_class(self) -> type:
-        return resolve_module(self._module_spec()[0], f"{type(self).__name__}({self.name!r})")
+        return _resolve_module(self._module_spec()[0], f"{type(self).__name__}({self.name!r})")
 
     def _block_sizes(self) -> Optional[Dict[str, int]]:
         inputs = getattr(self, "inputs", None)
@@ -696,7 +715,7 @@ class TorchModel(BaseModel):
     def _members_out(self, fitted: _Fitted, rows: np.ndarray) -> np.ndarray:
         """(members, rows, outputs): each member's forecasts of `rows`, in the scope of the fit (a loop's numbers move with
         the thread count)."""
-        with torch_scope_of(self, fitted.device):
+        with _torch_scope_of(self, fitted.device):
             return fitted.result.predict(np.asarray(rows, dtype=np.float64))
 
     def _fit_days(self, x: np.ndarray, y: np.ndarray, y_mask: np.ndarray) -> _Fitted:
@@ -727,7 +746,7 @@ class TorchModel(BaseModel):
 
 
 @contextlib.contextmanager
-def torch_scope_of(model: TorchModel, device: Any):
+def _torch_scope_of(model: TorchModel, device: Any):
     """The scope of `model`'s fits (`runtime.torch_scope`) on the device they ran on."""
     from ._torch.runtime import torch_scope
 

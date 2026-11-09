@@ -252,9 +252,19 @@ def test_the_module_contract_is_checked_when_the_model_is_built():
     with pytest.raises(ValueError, match="scaler='standard' only"):
         TorchModel(module=FlatNet, predictors=PERIOD, output="period", scaler="asinh")
     with pytest.raises(ValueError, match="needs refit"):
-        TorchModel(module=FlatNet, predictors=DAY, refit=None, **{k: v for k, v in FAST.items()}).run(
-            frame(days=60), "2023-02-20", "2023-02-21", horizon=1
-        )
+        TorchModel(module=FlatNet, predictors=DAY, refit=None, **FAST)  # refused when built
+    with pytest.raises(TypeError, match="module_params must be a dict"):
+        TorchModel(module=FlatNet, predictors=DAY, module_params=[("width", 3)])
+    period = TorchModel(module=FlatNet, predictors=PERIOD, output="period", refit=None, **FAST)
+    with pytest.raises(ValueError, match="needs refit"):
+        period.output = "day"
+    assert (period.output, period._unit_kind) == ("period", "period")  # refused before anything was set
+    day = TorchModel(module=FlatNet, predictors=DAY, **FAST)
+    with pytest.raises(ValueError, match="needs refit"):
+        day.refit = None
+    with pytest.raises(ValueError, match="output must be"):
+        day.output = "hour"
+    assert (day.output, day._unit_kind, day.refit) == ("day", "day", "7D")
 
 
 # --- 2. save() refuses a class without an import path (prototype) --------------------------------------------------------
@@ -274,11 +284,101 @@ def test_save_refuses_a_module_from_main_or_a_function_which_still_runs(market, 
     with pytest.raises(TypeError, match="script being run"):
         ModelPipeline().add_model(TorchModel(module=main, predictors=DAY, **FAST)).save(tmp_path / "main.yaml")
     assert not (tmp_path / "local.yaml").exists() and not (tmp_path / "main.yaml").exists()
-    # It runs: a forked worker finds the class again by the key the model's kwargs hold.
-    assert "<locals>" in local._model_kwargs["module"]
+    # It runs: a worker finds the class again by the key the model's kwargs hold, a key no import path can be.
+    key = local._model_kwargs["module"]
+    assert key.startswith("<unsaved>") and "<locals>" in key
     assert keyed(run(local, market)._results)
-    other = make()  # another class of the same name gets its own key
-    assert TorchModel(module=other, predictors=DAY, **FAST)._model_kwargs["module"].endswith("#2")
+
+
+def scaled(scale):
+    """A local class whose forecasts move with `scale`: two of them share a name, and so a key."""
+
+    class Scaled(FlatNet):
+        SCALE = scale
+
+        def forward(self, x):
+            return super().forward(x) * type(self).SCALE
+
+    return Scaled
+
+
+@pytest.mark.parametrize("pool", ["in process", "forked"])
+def test_two_local_classes_of_one_name_each_forecast_with_their_own(market, monkeypatch, pool):
+    """Classes without an import path share a key when they share a name (so a notebook cell run again resumes); each run hands
+    its workers its own class, in this process or in a pool of forked processes."""
+    if pool == "forked":
+        monkeypatch.undo()
+        monkeypatch.setenv("MAX_PROCESSES", "2")
+    one, two = (TorchModel(module=scaled(s), predictors=DAY, name="s", **FAST) for s in (1.0, 2.0))
+    assert one._model_kwargs["module"] == two._model_kwargs["module"]
+    first, second, again = (keyed(run(m, market, test=("2023-03-20", "2023-03-21"))._results) for m in (one, two, one))
+    assert first and first == again and first != second
+    if pool == "forked":
+        main = TorchModel(module=type("MainNet", (FlatNet,), {"__module__": "__main__"}), predictors=DAY, **FAST)
+        assert keyed(run(main, market, test=("2023-03-20", "2023-03-21"))._results)
+
+
+def test_a_module_reloaded_since_builds_its_new_class_and_the_old_model_its_old(tmp_path, monkeypatch):
+    """A notebook edits its module's file and reloads it: a model built after the reload rebuilds the new class in a worker (its
+    import path is looked up, never a registered class of that name), one built before still its own old class."""
+    import importlib
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    source = textwrap.dedent(
+        """
+        import torch
+
+        class Net(torch.nn.Module):
+            V = {v}
+
+            def __init__(self, n_inputs, n_outputs):
+                super().__init__()
+                self.version = type(self).V
+        """
+    )
+    path = tmp_path / "user_nets_reload.py"
+    path.write_text(source.format(v=1))
+    module = importlib.import_module("user_nets_reload")
+    old = TorchModel(module=module.Net, predictors=["a_d-1"], name="old")
+    path.write_text(source.format(v=2) + "\n# edited\n")
+    importlib.reload(module)
+    new = TorchModel(module=module.Net, predictors=["a_d-1"], name="new")
+    assert new._model_kwargs["module"] == "user_nets_reload:Net"
+    assert (
+        old._model_kwargs["module"] == "<unsaved>user_nets_reload:Net"
+    )  # its class is no longer what the path imports
+    assert old.module_hash != new.module_hash
+    built = {m.name: TorchModel(predictors=[], **m._model_kwargs)._module_class()(3, 1).version for m in (new, old)}
+    assert built == {"new": 2, "old": 1}
+
+
+def test_a_notebook_cell_run_again_resumes(market, tmp_path):
+    """The cell that defines a `__main__` class runs again (a new class of the same name and source), then the run resumes
+    into its save_dir: the same key, the same source hash, so no manifest mismatch."""
+    namespace = {"__name__": "__main__", "torch": torch, "nets": nets}
+    cell = textwrap.dedent(
+        """
+        class CellNet(torch.nn.Module):
+            def __init__(self, n_inputs, n_outputs):
+                super().__init__()
+                self.l = nets.Linear(n_inputs, n_outputs)
+
+            def forward(self, x):
+                return self.l(x)
+        """
+    )
+    save_dir = tmp_path / "nb"
+    exec(cell, namespace)
+    first = TorchModel(module=namespace["CellNet"], predictors=DAY, name="t", **FAST)
+    ModelPipeline().add_model(first).run(market, "2023-03-20", "2023-03-21", horizon=1, save_dir=save_dir)
+    exec(cell, namespace)
+    again = TorchModel(module=namespace["CellNet"], predictors=DAY, name="t", **FAST)
+    assert again.module is not first.module and again._model_kwargs == first._model_kwargs
+    results = ModelPipeline.results_path(save_dir, again, "jsonl")
+    before = lines(results)
+    results.write_text("".join(f"{line}\n" for line in before[::2]))  # cut short
+    ModelPipeline().add_model(again).run(market, "2023-03-20", "2023-03-21", horizon=1, save_dir=save_dir)
+    assert lines(results) == before
 
 
 # --- 3. YAML round trip and a changed module (prototype) ------------------------------------------------------------------
@@ -297,7 +397,7 @@ def test_the_yaml_round_trip_and_a_changed_module_warns(tmp_path):
     text = path.read_text()
     assert "module: epftoolbox2.nets:MLP" in text and f"module: {__name__}:BlockNet" in text and "&id" not in text
     saved = {entry["params"]["name"]: entry for entry in __import__("yaml").safe_load(text)["models"]}
-    assert saved["t"]["params"]["module_hash"] == tm.module_hash(nets.MLP)
+    assert saved["t"]["params"]["module_hash"] == tm.module_source_hash(nets.MLP)
     assert saved["t"]["params"]["module_params"] == {"hidden": [8]}
     assert {"module", "module_hash", "output", "inputs"}.isdisjoint(saved["m"]["params"])
     assert saved["m"]["class"] == "MLPDailyModel" and saved["m"]["params"]["hidden"] == [8]
@@ -334,13 +434,13 @@ def test_the_module_hash_is_of_its_whole_file_and_its_package_version(tmp_path, 
     hashes = []
     for i, scale in enumerate((1, 2)):
         (tmp_path / f"user_nets_{i}.py").write_text(source.format(scale=scale))
-        hashes.append(tm.module_hash(f"user_nets_{i}:Net"))  # by path, before any import
+        hashes.append(tm.module_source_hash(f"user_nets_{i}:Net"))  # by path, before any import
         module = __import__(f"user_nets_{i}")
-        assert tm.module_hash(module.Net) == hashes[-1]  # the same once imported
+        assert tm.module_source_hash(module.Net) == hashes[-1]  # the same once imported
     assert hashes[0] != hashes[1]
-    before = tm.module_hash(nets.MLP)
+    before = tm.module_source_hash(nets.MLP)
     monkeypatch.setattr(tm, "_distribution_version", lambda top: "epftoolbox2 99.0")
-    assert tm.module_hash(nets.MLP) != before
+    assert tm.module_source_hash(nets.MLP) != before
 
 
 # --- 4. the day-level refusal (prototype) --------------------------------------------------------------------------------
@@ -685,7 +785,7 @@ def test_the_runtime_is_in_the_manifest_and_a_resume_on_other_settings_refuses(m
     expected = {"torch": torch.__version__, "device": "cpu", "dtype": "float32", "tf32": False, "threads_per_fit": 1}
     assert {k: runtime_entry[k] for k in expected} == expected
     assert (runtime_entry["stack"], runtime_entry["pad_to"]) == ("loop", None) and runtime_entry["cpu_capability"]
-    assert stored["model_params"]["module_hash"] == tm.module_hash(nets.MLP) and stored["unit_kind"] == "day"
+    assert stored["model_params"]["module_hash"] == tm.module_source_hash(nets.MLP) and stored["unit_kind"] == "day"
     assert stored["card"]["family"] == "torch" and stored["card"]["verdicts"]["test"] == "clean"
     with pytest.raises(ManifestMismatchError, match="stack"):
         ModelPipeline().add_model(daily(stack="vmap", pad_to=2)).run(market, *WEEK, horizon=1, save_dir=save_dir)
@@ -863,7 +963,7 @@ def test_a_pooled_fit_of_a_period_network_refuses_rather_than_seed_itself(market
         pipeline.run({"PL": market, "XX": market}, "2023-03-20", "2023-03-20", horizon=1)
 
 
-# --- review 6l: seeds from a list's content, early stopping by dates -----------------------------
+# --- review 6l: seeds from a list's content, early stopping by dates, the device's provenance -----------------------------
 
 
 def from_wednesday(ctx):
