@@ -598,7 +598,8 @@ class LightGBMModel(BaseModel):             # LightGBM's LGBMRegressor, pooled o
                  subsample: float = 0.8, subsample_freq: int = 1, colsample_bytree: float = 0.5,
                  reg_lambda: float = 1.0, random_state: int = 0, threads: int = 1, name: str = "lgbm", *,
                  scaler: Any = INVARIANT_TARGET, newest_target: str = "d-1",
-                 binary_mask: Optional[str] = None): ...
+                 binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
 
 class XGBoostModel(BaseModel):              # XGBoost's XGBRegressor (tree_method="hist") ([xgboost])
     def __init__(self, predictors: List[str], training_window: Union[int, str] = "expanding",
@@ -607,14 +608,17 @@ class XGBoostModel(BaseModel):              # XGBoost's XGBRegressor (tree_metho
                  colsample_bytree: float = 0.5, min_child_weight: float = 5.0, reg_lambda: float = 1.0,
                  random_state: int = 0, threads: int = 1, device: str = "cpu", name: str = "xgb", *,
                  scaler: Any = INVARIANT_TARGET, newest_target: str = "d-1",
-                 binary_mask: Optional[str] = None): ...
+                 binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
 
 class CatBoostModel(BaseModel):             # CatBoost's CatBoostRegressor ([catboost])
     def __init__(self, predictors: List[str], training_window: Union[int, str] = "expanding",
                  refit: Optional[str] = "7D", periods: str = "pooled", objective: str = "l1", iterations: int = 1000,
                  learning_rate: float = 0.05, depth: int = 8, l2_leaf_reg: float = 5.0, random_state: int = 0,
                  threads: int = 1, name: str = "catboost", *, scaler: Any = INVARIANT_TARGET,
-                 newest_target: str = "d-1", binary_mask: Optional[str] = None): ...
+                 newest_target: str = "d-1",
+                 binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
 
 class ResidualModel(BaseModel):             # a base's out-of-sample forecasts + a learner fitted on their residuals
     def __init__(self, base: Union[BaseModel, str], learner: BaseModel,

@@ -66,8 +66,8 @@ date's 05:00 price), so one list serves every period, and `"period"` (0 to 23 ho
 ## Parameters
 
 Every class takes, in this order, `predictors`, `training_window`, `refit`, `periods` and `objective`, then its package's own
-settings, then `random_state`, `threads` (and XGBoost's `device`) and `name`; `scaler`, `newest_target` and `binary_mask` are
-keyword-only.
+settings, then `random_state`, `threads` (and XGBoost's `device`) and `name`; `scaler`, `newest_target`, `binary_mask`,
+`normalise_by`, `bounds` and `zero_when` are keyword-only.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -80,6 +80,7 @@ keyword-only.
 | `threads` | int | `1` | OpenMP threads (CatBoost's `thread_count`) of one fit; more than one is refused where workers fork (Linux, macOS); recorded and compared on resume (see [Threads](#threads-and-determinism)) |
 | `scaler` | scaler spec | `INVARIANT_TARGET` | Keyword-only. The predictors as they are (a tree splits on order) and the target as epftoolbox's Invariant; a pooled fit gives each period's target its own Invariant whatever this says |
 | `newest_target`, `binary_mask` | | `"d-1"`, `None` | Keyword-only, as for every model ([Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/)) |
+| `normalise_by`, `bounds`, `zero_when` | | `None` | Keyword-only. A per-row target, as for every model, with either `periods`: a pooled fit divides each row's target by its own period row's scale ([Generation targets](/epftoolbox2/models/common-parameters/#generation-targets)). Not on a `ResidualModel`'s learner in this step |
 
 `LightGBMModel` (`name="lgbm"`), LightGBM's
 [`LGBMRegressor`](https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMRegressor.html) with `deterministic=True` and
