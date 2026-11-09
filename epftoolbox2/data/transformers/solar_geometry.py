@@ -6,7 +6,7 @@ import numbers
 import numpy as np
 import pandas as pd
 
-from ._daily import check_new_columns, parse_step, slot_of_day
+from ._daily import check_new_columns, check_spacing, parse_step, slot_of_day
 from .base import Transformer
 
 # The columns it adds (before `prefix`). `information_set` gives each a static rule (and `*_<name>` for a prefixed one).
@@ -190,6 +190,7 @@ class SolarGeometryTransformer(Transformer):
                 "DSTNormalizeTransformer."
             )
         slot_of_day(index, self._step, self.freq)  # rejects data off the freq grid
+        check_spacing(index, self._step, self.freq, type(self).__name__)  # and data further apart than freq
         names = self.column_names()
         check_new_columns(df, names, type(self).__name__)
 

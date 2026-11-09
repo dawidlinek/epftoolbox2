@@ -205,3 +205,29 @@ def test_yaml_round_trip(tmp_path):
     loaded = DataPipeline.load(path).transformers[0]
     assert isinstance(loaded, RollingStatsTransformer)
     assert vars(loaded) == vars(pipeline.transformers[0])
+
+
+def test_a_daily_frame_counts_the_switch_days_as_complete():
+    """One row a day, `freq="1D"`: the day of the spring switch is a complete day of one row, so only the first row of the frame,
+    whose window reaches before it, is NaN."""
+    index = pd.date_range("2024-03-20", "2024-11-05", freq="D", tz="Europe/Berlin")
+    df = pd.DataFrame({"x": np.arange(len(index), dtype=float)}, index=index)
+    out = RollingStatsTransformer("x", window_days=1, stat="max", lag_days=1, freq="1D").transform(df)["x_roll1max_d-1"]
+    assert out.isna().tolist() == [True] + [False] * (len(index) - 1)
+    assert (out.iloc[1:].to_numpy() == df["x"].iloc[:-1].to_numpy()).all()
+
+
+@pytest.mark.parametrize("freq", ["15min", "30min"])
+def test_rows_further_apart_than_freq_are_refused(freq):
+    """Hourly data read with a shorter `freq` would count every day as incomplete (a quarter of its slots): refused, as data
+    off the grid is."""
+    with pytest.raises(ValueError, match="no two rows are closer"):
+        RollingStatsTransformer("gen", 2, freq=freq).transform(local_frame("2024-06-01", 3))
+
+
+def test_two_daily_rows_across_the_autumn_switch_are_a_day_apart():
+    index = pd.DatetimeIndex([pd.Timestamp("2024-10-27", tz=TZ), pd.Timestamp("2024-10-28", tz=TZ)])  # 25 hours apart
+    out = RollingStatsTransformer("gen", 1, lag_days=0, freq="1D").transform(
+        pd.DataFrame({"gen": [1.0, 2.0]}, index=index)
+    )
+    assert out["gen_roll1max"].tolist() == [1.0, 2.0]

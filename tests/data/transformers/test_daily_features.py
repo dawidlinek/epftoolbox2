@@ -199,3 +199,13 @@ def test_the_lag_of_a_day_statistic_is_not_the_statistic_of_a_lag_across_dst():
     assert pd.isna(spring.loc[local("2024-04-01 02:00"), "x_day_max_d-1"])
     assert (autumn["x_d-1_day_max"] == 10.0).all()
     assert (autumn["x_day_max_d-1"] == 99.0).all()
+
+
+@pytest.mark.parametrize("start", ["2024-03-28", "2024-10-24"], ids=["spring", "autumn"])
+def test_daily_stats_of_a_daily_frame_count_the_switch_day_as_complete(start):
+    """One row a day at local midnight, `freq="1D"`: the day of a clock change has its one row too. The 23-hour day read as no
+    slot at all and got NaN."""
+    index = pd.date_range(start, periods=7, freq="D", tz=TZ)
+    df = pd.DataFrame({"price": np.arange(7, dtype=float)}, index=index)
+    out = DailyStatsTransformer(columns="price", stats=["max", "last"], freq="1D").transform(df)
+    assert out["price_day_max"].tolist() == df["price"].tolist() == out["price_day_last"].tolist()

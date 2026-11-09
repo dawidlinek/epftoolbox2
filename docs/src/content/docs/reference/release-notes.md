@@ -112,6 +112,10 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **`DailyStatsTransformer(freq="1D")` on a daily frame keeps the day of the spring switch.** A frame of one row a day counted its
+  slots in hours, so the 23-hour day had none, its one row read as an incomplete day and got NaN in every statistic (and
+  `DailyProfileTransformer(freq="1D")` warned of it). A slot of a day or more is now one per date, whatever its length. Hourly and
+  15-minute frames are bit for bit as before.
 - **A `Workflow` file's inline sources read a relative path from the file's directory.** `data_pipeline: sources:` in a Workflow
   YAML resolved `file_path` (or `path`) against the working directory, while the same source in a data pipeline file, and the model
   pipeline's `save_dir`, were read from the YAML's directory. They are all the YAML's now: a workflow run from another directory

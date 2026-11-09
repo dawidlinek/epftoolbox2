@@ -5,7 +5,7 @@ import numbers
 import numpy as np
 import pandas as pd
 
-from ._daily import check_index, check_new_columns, local_days, parse_step, slot_of_day, slots_in_day
+from ._daily import check_index, check_new_columns, check_spacing, local_days, parse_step, slot_of_day, slots_in_day
 from .base import Transformer
 
 STATS = ("min", "max", "mean")
@@ -71,6 +71,7 @@ class RollingStatsTransformer(Transformer):
         if self.column not in df.columns:
             raise ValueError(f"RollingStatsTransformer: column {self.column!r} is not in the frame")
         slot_of_day(index, self._step, self.freq)  # rejects data off the freq grid
+        check_spacing(index, self._step, self.freq, type(self).__name__)  # and data further apart than freq
         check_new_columns(df, [self.output_column], type(self).__name__)
 
         days = local_days(index)

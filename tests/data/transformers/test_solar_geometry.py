@@ -41,7 +41,8 @@ def switch_rows(zone, freq):
 
 @pytest.mark.parametrize("freq", ["1h", "15min"])
 def test_elevation_is_astral_s_at_the_middle_of_each_period_on_random_instants_and_places(freq):
-    """1,000 (instant, place) pairs: 40 places from 60 S to 70 N and 180 W to 180 E, each with 25 random rows of 2000-2040 on
+    """1,000 (instant, place) pairs: 40 places from 60 S to 70 N and 180 W to 180 E, each with 25 random rows of 2000-2040 (and
+    one neighbour) on
     the freq grid of a zone (Warsaw, Lisbon, Helsinki or UTC), and every row of both switch days of Warsaw or Lisbon. Each row
     is read at its UTC instant plus half a period."""
     rng = np.random.default_rng(7)
@@ -54,6 +55,7 @@ def test_elevation_is_astral_s_at_the_middle_of_each_period_on_random_instants_a
         stop = pd.Timestamp("2040-01-01", tz="UTC").value // step.value
         steps = rng.integers(start, stop, 25)
         index = pd.DatetimeIndex(pd.to_datetime(steps * step.value, utc=True)).tz_convert(zone)
+        index = index.append(index[:1] + step)  # two neighbouring rows: the data is at `freq`
         if zone in SWITCHES:
             index = index.append(switch_rows(zone, freq))
         index = index.sort_values().unique()
@@ -221,6 +223,16 @@ def test_frames_that_are_refused():
     done = transformer.transform(frame(pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")))
     with pytest.raises(ValueError, match="already exist"):
         transformer.transform(done)
+
+
+@pytest.mark.parametrize("freq", ["15min", "30min"])
+def test_rows_further_apart_than_freq_are_refused(freq):
+    """Hourly rows read with `freq="15min"` would be the sun 7.5 minutes into each hour, not 30: refused."""
+    index = pd.date_range("2024-06-01", periods=48, freq="1h", tz="Europe/Berlin")
+    with pytest.raises(ValueError, match="no two rows are closer"):
+        SolarGeometryTransformer([(51.0, 10.0)], freq=freq).transform(frame(index))
+    # A gap in hourly data at its own freq is no reason to refuse.
+    SolarGeometryTransformer([(51.0, 10.0)]).transform(frame(index.delete([3, 4, 5])))
 
 
 def test_a_utc_index_gives_the_same_values_as_a_local_one():

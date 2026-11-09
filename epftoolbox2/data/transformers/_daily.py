@@ -58,8 +58,28 @@ def slot_of_day(index: pd.DatetimeIndex, step: pd.Timedelta, freq: str) -> np.nd
     return np.asarray(offsets // step, dtype=int)
 
 
+def check_spacing(index: pd.DatetimeIndex, step: pd.Timedelta, freq: str, who: str) -> None:
+    """Refuse data whose rows are further apart than `freq` everywhere (hourly rows with `freq="15min"`): every row would read
+    as a quarter of its hour. `slot_of_day` refuses the other direction, rows off the `freq` grid."""
+    if len(index) < 2:
+        return
+    instants = np.sort(index.as_unit("ns").asi8)
+    gaps = np.diff(instants)
+    gaps = gaps[gaps > 0]
+    # One row a day is 23 or 25 hours from the next across a clock change; shorter periods are elapsed time.
+    limit = step + pd.Timedelta(hours=1) if step >= pd.Timedelta(days=1) else step
+    if len(gaps) and gaps.min() > limit.value:
+        raise ValueError(
+            f"{who}: no two rows are closer than {pd.Timedelta(int(gaps.min()), unit='ns')}, longer than freq={freq!r}: "
+            "give the data's own period length"
+        )
+
+
 def slots_in_day(days: pd.DatetimeIndex, tz, step: pd.Timedelta) -> np.ndarray:
-    """How many wall-clock slots each local date has (23 or 25 hours on DST switch days)."""
+    """How many wall-clock slots each local date has (23 or 25 hours on DST switch days; one for slots of a day or more,
+    whatever the day's length)."""
+    if step >= pd.Timedelta(days=1):
+        return np.ones(len(days), dtype=int)
     if tz is None:
         return np.full(len(days), pd.Timedelta(days=1) // step)
     first = np.ones(len(days), dtype=bool)
