@@ -616,10 +616,11 @@ def test_a_residual_hgb_s_card_and_runtime_are_its_learner_s(market, tmp_path):
 # The golden numbers
 # ---------------------------------------------------------------------------------------------------------------------------
 
-# A ResidualModel with an OLS base and a small HGB learner. HGB is exact on one OpenMP thread, but its algorithm may move
-# between scikit-learn releases (the lock has 1.8; the 3.15 and newest-dependencies cells resolve newer ones), so it gets the
-# room LassoCV gets in tests/test_golden_metrics.py.
-GOLDEN_RTOL = 1e-6
+# A ResidualModel with an OLS base and a small HGB learner. HGB is exact on one OpenMP thread, but its numbers move between
+# scikit-learn releases (B1 of step 6k: 1.8.0 and 1.9.1 differ by up to 33 EUR/MWh on a year of DE forecasts), and the 3.15 and
+# newest-dependencies CI cells resolve newer ones than the lock's: the residual model's numbers are compared on the release the
+# file was written with (`scikit-learn` in it), its forecast count and the OLS base's numbers on every one.
+GOLDEN_RTOL = 1e-9
 
 
 def compute_residual_metrics() -> dict:
@@ -644,15 +645,25 @@ def compute_residual_metrics() -> dict:
     return metrics
 
 
+def _sklearn_version() -> str:
+    import sklearn
+
+    return sklearn.__version__
+
+
 def test_residual_metrics_match_golden(monkeypatch):
     actual = compute_residual_metrics()
     if os.environ.get("UPDATE_GOLDEN") == "1":
-        GOLDEN_FILE.write_text(json.dumps(actual, indent=2, sort_keys=True) + "\n")
+        written = {**actual, "scikit-learn": _sklearn_version()}
+        GOLDEN_FILE.write_text(json.dumps(written, indent=2, sort_keys=True) + "\n")
         pytest.skip(f"golden values written to {GOLDEN_FILE}")
     expected = json.loads(GOLDEN_FILE.read_text())
+    release = expected.pop("scikit-learn")
     assert actual.keys() == expected.keys()
     for model, values in expected.items():
         assert actual[model]["forecasts"] == values["forecasts"], f"{model}: number of forecasts changed"
+        if model == "Residual" and _sklearn_version() != release:
+            continue  # HGB's numbers are scikit-learn's of one release
         for key, value in values.items():
             if key != "forecasts":
                 assert actual[model][key] == pytest.approx(value, rel=GOLDEN_RTOL), f"{model} {key}"
