@@ -53,14 +53,14 @@ class ModelPipeline:
         engine: str = "off",                               # "on": engine groups, fits from shared sums; "check": and a sample on the model path too
     ): ...
 
-    def add_model(self, model: BaseModel) -> "ModelPipeline": ...
+    def add_model(self, model: Union[BaseModel, PooledModel]) -> "ModelPipeline": ...
     def add_ensemble(self, ensemble: Ensemble) -> "ModelPipeline": ...  # Members are resolved when the pipeline runs
     def add_evaluator(self, *evaluators: Evaluator) -> "ModelPipeline": ...  # One or several; chainable
     def add_exporter(self, exporter: Exporter) -> "ModelPipeline": ...
 
     def run(
         self,
-        data: pd.DataFrame,              # Input DataFrame
+        data: Union[pd.DataFrame, Mapping[str, pd.DataFrame]],  # Input DataFrame, or {zone: frame}: a run over zones
         test_start: str = None,           # Test period start
         test_end: str = None,             # Test period end
         target: str = "price",            # Target column
@@ -76,7 +76,7 @@ class ModelPipeline:
         issue_days: Optional[Sequence[str]] = None,  # Only these weekdays, e.g. ["friday"]; any case, all seven = every day
         save_format: str = "jsonl",       # "jsonl" or "parquet": <name>.jsonl or the directory <name>.parquet in save_dir
         save_coefficients: bool = True,   # False writes coefficients as []; recorded in the manifest, compared on resume
-    ) -> EvaluationReport: ...
+    ) -> EvaluationReport: ...            # A PanelReport for a run over zones
 
     def report(                           # Report from the results a run wrote to save_dir, JSONL or Parquet
         self,
@@ -86,17 +86,17 @@ class ModelPipeline:
         horizon: Optional[int] = None,         # As in run; neither: what the manifests record (7 without one)
         freq: Optional[str] = None,            # As in run; None: what the manifests (else the records) record, "1h" if none
         forecast_only: bool = False,
-        data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns
+        data: Optional[pd.DataFrame] = None,   # only for exporters that join source columns; {zone: frame} for zone folders
         allow_missing: bool = False,           # else FileNotFoundError when a model has no results
         validation: Union[Tuple[Any, Any], str, None] = None,  # What run was told; each must be what the manifests record
         test: Optional[Tuple[Any, Any]] = None,  # None of the windows: every window the manifests record
         horizons: Optional[Sequence[int]] = None,  # As in run; only records of these horizons are read
         issue_days: Optional[Sequence[str]] = None,  # As in run; None reads them from the manifests
-    ) -> EvaluationReport: ...
+    ) -> EvaluationReport: ...            # A PanelReport for the save_dir of a run over zones (zone_run.json)
 
     def verify(                           # Leakage probe and positive control on sampled issue days
         self,
-        data: pd.DataFrame,               # The models' input frame, or source data with rebuild
+        data: Union[pd.DataFrame, Mapping[str, pd.DataFrame]],  # The models' input frame, source data with rebuild, or {zone: frame}
         test_start: str,                  # First issue day to sample from
         test_end: str,                    # Last issue day to sample from
         target: str = "price",            # Target column
@@ -225,6 +225,7 @@ class EvaluationReport:
     def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
     def availability(self) -> pd.DataFrame: ...     # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
     def vintages(self) -> pd.DataFrame: ...         # model, predictor, series, class, ctx
+    def provenance(self) -> pd.DataFrame: ...       # model, family, licence, licence_url, commercial_use, revenue_cap, attribution, weights, sha256, runtime, corpus, corpus_end, released, validation_verdict, test_verdict
     def training_days(self) -> pd.DataFrame: ...    # model, list, predictors, forecasts, periods, horizons, smallest_days, median_days, largest_days, thin_forecasts
     def choices(self) -> pd.DataFrame: ...          # ensemble, segment, chosen, k, validation_mae, validation_forecasts, validation_share, validation_start, validation_end, test_start, test_end; attrs: member_mae, k_mae, limited_by
     def by_hour(self) -> pd.DataFrame: ...
@@ -296,6 +297,30 @@ class EvaluationReport:
 ```
 
 See [Comparing Models](/epftoolbox2/model-pipeline/comparing-models/). Every method keeps to the report's window, see [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/).
+
+### PanelReport
+
+```python
+class PanelReport:                          # What run(data={zone: frame}) returns: one EvaluationReport per zone
+    def __init__(self, zones: Mapping[str, EvaluationReport], target: Optional[str] = None): ...
+
+    zones: Dict[str, EvaluationReport]      # zone -> its report
+    reports: Dict[Tuple[str, Optional[str]], EvaluationReport]  # (zone, target) -> its report
+    targets: List[Optional[str]]
+
+    @classmethod
+    def concat(cls, panels: Iterable["PanelReport"]) -> "PanelReport": ...  # several targets in one panel
+
+    def summary(self) -> pd.DataFrame: ...           # one row per (zone, model)
+    def forecast_counts(self) -> pd.DataFrame: ...   # one row per (zone, model)
+    def choices(self) -> pd.DataFrame: ...           # each zone's choices(), `zone` first
+    def availability(self) -> pd.DataFrame: ...      # each zone's availability(), `zone` first
+    def log_gain(self, benchmark: str, by: Sequence[str] = ("zone", "target", "horizon"),
+                 models: Optional[Sequence[str]] = None, cells: bool = False,
+                 common: bool = True) -> pd.DataFrame: ...   # common: every model on the same keys and cells
+    def cells_lost(self, benchmark: str, by: Sequence[str] = ("zone", "target", "horizon"),
+                   models: Optional[Sequence[str]] = None, common: bool = True) -> pd.DataFrame: ...
+```
 
 ### Windows
 
@@ -547,6 +572,11 @@ class LEARModel(BaseModel):                 # Lasso, penalty by AIC/BIC on the L
 class NaiveModel(BaseModel):                # one column's value on the issue row, no fit
     def __init__(self, predictors: Union[List, Callable], name: str = "Naive", *,
                  known_only: bool = True): ...
+
+class PooledModel:                          # one fit over the zones of run(data={zone: frame})
+    def __init__(self, model: BaseModel, *, over: Union[str, Sequence[str]] = ("zone",),
+                 zone_feature: Optional[str] = "onehot", missing: str = "raise",
+                 name: Optional[str] = None): ...
 ```
 
 With `ModelPipeline(engine="on")` these four run in engine groups (`BaseModel._engine_capable()`) and `NaiveModel` on its own: OLS, Ridge, LassoCV and LEAR with `scaler="standard"` or a variance-stabilising scaler (LEAR with `solver="lars"`; LassoCV and LEAR `"cv"` from the KFold blocks of their rows) fitted from shared exact sums, within 1e-8 (OLS, LassoCV, LEAR) and 1e-9 (Ridge) of `engine="off"`; an issue row far outside its training values (more than 30 training standard deviations along the eigenvectors of the fit's Gram for OLS and 10 for LEAR and LassoCV; for Ridge, which has no distance bound, where scikit-learn's own rounding at the row exceeds its budget; with a variance-stabilising scaler also a forecast where its inverse is more than three times as steep as the median of its slopes at the training targets), a LEAR whose chosen columns' Gram has a condition number above 1e6, a LassoCV or LEAR with two near-copy inputs (1 − |correlation| at most 1e-5) and every other fit the sums can't give to those digits fitted as with `"off"` (worst gaps measured within the bounds: 8.6e-9 OLS, 4.6e-9 LassoCV, 6.1e-10 Ridge, 1.1e-9 LEAR), LEAR's `solver="cd"` with the same numbers; `engine="check"` also fits a sample of one fit in about 50 as `"off"` does and records the gaps in the manifest (`engine_check`, with gaps that aren't finite and fits `"off"` can't fit counted), warning about a model over its class's tolerance (see [Many Models: the Engine](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine)). `training_window` of `OLSModel`, `LassoCVModel`, `RidgeModel` and `LEARModel` is days from 1 (an int, default `365`; `LEARModel`'s `[56, 84, 728, "expanding"]`), `"expanding"`, or a list of them such as `[56, 84, 728, "expanding"]` whose windows are fitted separately and averaged inside the model; anything else raises (see [Training Windows](/epftoolbox2/model-pipeline/training-windows/)). `ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance. `fit_intercept` is keyword-only and scikit-learn's; a set value is saved and compared on resume, the default isn't written, so results and files made before it keep their manifests. `RidgeModel`'s `alphas` is the grid of penalties (`None`: `np.logspace(-3, 4, 36)`); its manifest holds the resolved grid, its YAML writes `alphas` only when set, a penalty below 1e-6 raises, and a fit needs at least 3 training rows. `LEARModel`'s `criterion` is `"bic"`, `"aic"` or `"cv"` (old `LassoLarsCV`, five blocked folds, the path's coefficients with no refit) and its `solver` `"lars"` (the exact Lasso at the chosen penalty) or `"cd"` (Lago's coordinate descent, at most 2500 sweeps), `"cv"` with `"lars"` only; both are always written to YAML and the manifest, which also records the kernels' backend as provenance (`kernels`); `LEARModel.lago(exogenous)` takes the exogenous series in the order of the dataset's file (see [LEARModel](/epftoolbox2/models/lear/)). `NaiveModel` takes a list of one name (or a function of `ctx` returning one), forecasts its value on the row of the issue day and has no coefficients; with `known_only` and an information set a value its rule puts after the issue time is no forecast, counted as `not_published` (see [Week-ahead forecasting](/epftoolbox2/model-pipeline/week-ahead/)). It has no `training_window`, `scaler`, `newest_target`, `refit` or `binary_mask`: setting `training_window`, `newest_target`, `refit` or `binary_mask` raises. `binary_mask` of the other four says which training rows decide the binary 0/1 columns a scaler leaves unscaled: `None` (the default) the window's first day without `refit` and each unit's rows with it, `"first_day"` the first by name (it raises with `refit`), `"fit"` each fit's own rows, so that no forecast depends on `test_start`; `"fit"` without `refit` is recorded in the manifest's `training_cut`, and YAML writes it only when set (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start)).
@@ -574,6 +604,30 @@ class Use:                                  # What the function may return inste
 ```
 
 `PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, `ModelResultRef.availability_listing` holds the rows behind `report.availability()`, `ModelResultRef.vintages` those behind `report.vintages()` (None when no input has a class), and `ModelResultRef.matching_lists` the hash and number of predictors of each `train_on="matching"` list, which `report.training_days()` reads the records for. `ModelResultRef.zone` is the data's time zone, which says what periods a date has on the clock (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned)). `ModelResultRef.horizon` is the largest horizon of a run and `ModelResultRef.horizons` the ones it lists, None for every one from 1 to `horizon`; only records of those horizons are read (see [Horizons](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)). `ModelResultRef.issue_days` is the weekdays a run issued on, as `date.weekday()` numbers (Monday is 0), None for every day; only records issued on them (their `run_weekday`) are read (see [Weekdays](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)).
+
+### Model cards
+
+A family that needs an extra or pretrained weights declares a card as its `_card` (see
+[Licences and Weights](/epftoolbox2/models/licences-and-weights/)); `model.card` reads it, None for a core model.
+
+```python
+from epftoolbox2.models import ModelCard, WeightsRef
+
+class WeightsRef:                           # frozen dataclass
+    def __init__(self, repo: str, revision: str, files: Mapping[str, Optional[str]],  # file -> sha256, None: recorded at the first fetch
+                 bytes: Optional[int] = None): ...
+
+class ModelCard:                            # frozen dataclass
+    def __init__(self, family: str, extra: Optional[str], licence: str, licence_url: str, commercial_use: bool,
+                 revenue_cap: Optional[str], attribution: Optional[str], weights: Optional[WeightsRef],
+                 runtime: Tuple[str, ...],          # "pkg==1.2.3", "pkg>=1,<2", "pkg@<commit>" or a bare name
+                 corpus: str, corpus_end: Optional[date], released: Optional[date],
+                 stated_verdict: Optional[str] = None): ...  # overrides the verdict by dates, with its reason
+```
+
+The pre-flight raises `MissingWeightsError` (`epftoolbox2.models._weights`) when weights are among its problems, else
+`MissingExtraError` (`epftoolbox2._extras`); both are `ImportError`s. `ModelResultRef.provenance` holds a carded model's `card`,
+`runtime` and `weights`, which `report.provenance()` shows.
 
 `BaseModel.run()` takes `availability` too, and without a pipeline it defaults to `"raise"`. It also takes `windows`, a `RunWindows`, which is what `ModelPipeline.run(validation=..., test=...)` passes; the returned ref then has a ref per window in `by_window`. And `frame_hashes`, what one `ModelPipeline.run` call shares between its models so that it hashes each column once. And `cut_rules`, an information set a model with `newest_target="published"` reads its newest targets from when `information_set` isn't given, without checking anything with it: the leakage probe runs models so. And `horizons`, `issue_days` and `save_coefficients`, as in `ModelPipeline.run`; its `horizon` defaults to 7 too, and its `save_to` names the format, `<name>.jsonl` or `<name>.parquet`. And `checked`, what `ModelPipeline` found when it checked the model's inputs before any model ran: a run it was found for uses it instead of checking again, and any other run checks its inputs itself. `leakage_probe` and `positive_control` take `horizon` (default 1) or `horizons` the same way. Their `freq`, and `BaseModel.run()`'s, takes `"1D"` as `ModelPipeline.run()`'s does, see [Daily frames](/epftoolbox2/model-pipeline/time-and-calendars/#daily-frames).
 

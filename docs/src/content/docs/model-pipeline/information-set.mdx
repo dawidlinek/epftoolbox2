@@ -33,7 +33,8 @@ pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
 
 `issue_time`/`issue_timezone` is a shortcut for `InformationSet(issue_time, issue_timezone)` with the built-in
 availability rules. `InformationSet()` with no arguments issues at `11:45` `Europe/Brussels`, 15 minutes before the 12:00
-CET gate closure of the day-ahead auction.
+CET gate closure of the day-ahead auction. `issue_timezone="data"` issues at `issue_time` in the zone of the frame the models read,
+as if it were written out: in a [run over several zones](/epftoolbox2/model-pipeline/zones/) each market at noon on its own clock.
 
 ---
 

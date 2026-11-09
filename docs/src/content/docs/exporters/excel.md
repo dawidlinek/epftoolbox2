@@ -60,6 +60,11 @@ The Excel file includes color-coded metrics in each horizon context separate:
 - 🟡 Yellow: Medium error
 - 🔴 Red: High error
 
+## Model Provenance
+
+A report with a model that has a card (see [Licences and Weights](/epftoolbox2/models/licences-and-weights/)) gets a last sheet,
+"Provenance", with `report.provenance()`, whatever `sheets` lists. Without one the workbook is as before.
+
 ## In Pipeline
 
 ```python

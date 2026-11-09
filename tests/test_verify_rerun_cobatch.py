@@ -16,7 +16,6 @@ import datetime
 import random
 import sys
 from concurrent.futures import Future
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -24,13 +23,15 @@ import pytest
 from threadpoolctl import threadpool_limits
 
 from epftoolbox2 import cli
-from epftoolbox2._extras import EXTRAS, MissingExtraError
+from epftoolbox2._extras import EXTRAS
 from epftoolbox2.information_set import Availability, ControlResult, InformationSet, ProbeResult, co_batch_probe
 from epftoolbox2.models import LassoCVModel, NaiveModel, OLSModel, RidgeModel
 from epftoolbox2.models._calendar import refit_anchor, refit_block_end
 from epftoolbox2.models._worker import _worker_init
+from epftoolbox2.models._cards import preflight
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.pipelines import model_pipeline
 from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY
 from epftoolbox2.verification import (
     NOISE_MARGIN,
@@ -42,6 +43,7 @@ from epftoolbox2.verification import (
     rerun_check,
 )
 from tests.models import adapter_suite as suite
+from tests.models.carded_fake import run_data_card
 from tests.synthetic import PREDICTORS, make_market_data
 
 RULES = {
@@ -222,7 +224,7 @@ class GlobalRng(OLSModel):
     """OLS plus 1e-6 drawn from a process-global generator: numpy's legacy one (as scikit-learn's `random_state=None`) or
     `random`'s. A forked pool inherits its parent's state, so every run started from the same state draws the same number."""
 
-    _card = SimpleNamespace(family="fake", extra=None, licence="MIT")  # turns the rerun on by default
+    _card = run_data_card("fake")  # turns the rerun on by default
 
     def __init__(self, predictors, training_window=WINDOW, *, source="numpy", **kwargs):
         super().__init__(predictors, training_window, **kwargs)
@@ -242,7 +244,7 @@ class OnDevice(OLSModel):
     """A carded model with a `device`: deterministic on "cpu", unseeded noise anywhere else (a GPU stand-in; nothing here
     touches a GPU)."""
 
-    _card = SimpleNamespace(family="fake-gpu", extra=None, licence="MIT")
+    _card = run_data_card("fake-gpu")
 
     def __init__(self, predictors, training_window=WINDOW, *, device="cuda", **kwargs):
         super().__init__(predictors, training_window, **kwargs)
@@ -796,45 +798,24 @@ def test_suite_quarter_hours():
     suite.check_quarter_hours(make, frame, ("2023-02-20", "2023-02-21"))
 
 
-def test_suite_preflight_and_provenance_wait_for_cards(data, tmp_path, monkeypatch):
-    """No card: nothing to miss and nothing to show. A card with an extra: the pre-flight check needs 6a's
-    `BaseModel._preflight` and skips without it; with one that refuses before any run starts, it passes."""
+def test_suite_preflight_and_provenance_with_cards(data, tmp_path, monkeypatch):
+    """No card: nothing to miss and nothing to show. A card with an extra: the pre-flight refuses before any run starts when
+    the extra is hidden, and the card is in `report.provenance()`; a pre-flight that comes after a model's run started (here
+    the pipeline's taken out and each model checked in its own `_prepare_run`) is caught."""
     suite.check_preflight_without_extra(make, monkeypatch, data, TEST)
-    suite.check_provenance(make, data, tmp_path, TEST)
+    suite.check_provenance(make, data, tmp_path / "no-card", TEST)
 
-    monkeypatch.setitem(EXTRAS, "fake-extra", ("no_such_module_for_6c",))
-    carded = SimpleNamespace(family="fake", extra="fake-extra", licence="MIT")
-    monkeypatch.setattr(FakeInContext, "_card", carded, raising=False)
-    if not hasattr(BaseModel, "_preflight"):
-        with pytest.raises(pytest.skip.Exception):
-            suite.check_preflight_without_extra(make, monkeypatch, data, TEST)
-
-    # 6a as the spec has it: every model's pre-flight before the first model runs.
-    def preflight(self):
-        card = getattr(self, "_card", None)
-        if card is not None and card.extra is not None:
-            from epftoolbox2._extras import has_extra
-
-            if not has_extra(card.extra):
-                raise MissingExtraError(type(self).__name__, card.extra)
-
-    real_run = ModelPipeline.run
-
-    def run(self, *args, **kwargs):
-        for model in self.models:
-            model._preflight()
-        return real_run(self, *args, **kwargs)
-
-    monkeypatch.setattr(BaseModel, "_preflight", preflight, raising=False)
-    monkeypatch.setattr(ModelPipeline, "run", run)
+    monkeypatch.setitem(EXTRAS, "fake-extra", ("json",))  # installed: the check hides it
+    monkeypatch.setattr(FakeInContext, "_card", run_data_card("fake", extra="fake-extra"), raising=False)
     suite.check_preflight_without_extra(make, monkeypatch, data, TEST)
-    # A pre-flight that comes too late (after a model's run started) is caught.
-    monkeypatch.setattr(ModelPipeline, "run", real_run)
+    suite.check_provenance(make, data, tmp_path / "card", TEST)
+
+    monkeypatch.setattr(model_pipeline, "preflight", lambda models: None)
     real_prepare = BaseModel._prepare_run
 
     def late(self, *args, **kwargs):
         out = real_prepare(self, *args, **kwargs)
-        self._preflight()
+        preflight([self])
         return out
 
     monkeypatch.setattr(BaseModel, "_prepare_run", late)

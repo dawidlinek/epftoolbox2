@@ -11,6 +11,7 @@ from .data_pipeline import DataPipeline
 from .model_pipeline import ModelPipeline
 from ..information_set import InformationSet
 from ..models._calendar import every_horizon, issue_day_names, resolve_horizons, resolve_issue_days
+from ..models._cards import preflight
 from ..models._engine import engine_from_yaml
 from ..results.report import EvaluationReport
 from ..results.store import DEFAULT_SAVE_FORMAT, check_save_format
@@ -308,6 +309,8 @@ class Workflow:
                 "writes its results for `epf report` / Workflow.report() to merge."
             )
         mp = self._build_model_pipeline()
+        # This task's models' extras, runtime packages and weights, before the data is fetched (`models._cards.preflight`).
+        preflight(mp.models)
         if array_task:
             # Better now than when `epf report` runs, after every task has.
             self._build_model_pipeline(all_models=True)._check_before_any_fit(

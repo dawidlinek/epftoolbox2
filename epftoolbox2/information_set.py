@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Se
 import numpy as np
 import pandas as pd
 
-from ._date_utils import daily_anchor
+from ._date_utils import daily_anchor, zone_name
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -115,6 +115,25 @@ def _iso_day(value: Any, name: str) -> Optional[str]:
     if day.tz is not None or day != day.normalize():
         raise ValueError(f"{name} is a calendar date such as '2026-10-08', not an instant, got {value!r}")
     return day.date().isoformat()
+
+
+def _market_clock(tz: Any) -> str:
+    """The name of the zone `issue_timezone="data"` issues in on a frame in zone `tz`: a region's (`Europe/Warsaw`), as
+    `zone_name` gives it. A naive index, UTC, an `Etc/` zone or a fixed offset is no market's clock, and a forecast issued "at
+    12:00" there would be issued at another hour in every market east or west of it: a ValueError says to name the zone."""
+    if tz is None:
+        raise ValueError(
+            "issue_timezone='data' issues each forecast on the clock of its frame's zone, and this frame's index has none: "
+            "localise it (df.tz_localize('Europe/Warsaw')) or name the issue zone (issue_timezone='Europe/Warsaw')."
+        )
+    name = zone_name(tz) or str(tz)
+    if name == "UTC" or name.startswith("Etc/") or "/" not in name:
+        raise ValueError(
+            f"issue_timezone='data' issues each forecast on the clock of its frame's zone, and this frame is indexed in {name}, "
+            "no market's clock (a frame from DataPipeline(timezone=None) is in UTC): name the issue zone "
+            "(issue_timezone='Europe/Warsaw'), or index the frame in the market's zone (df.tz_convert('Europe/Warsaw'))."
+        )
+    return name
 
 
 def _check_zone(zone: str) -> None:
@@ -1122,7 +1141,10 @@ class InformationSet:
 
     Args:
         issue_time: Local time the forecast is issued on day D, "HH:MM".
-        issue_timezone: Zone of `issue_time`.
+        issue_timezone: Zone of `issue_time`, or "data" (`DATA_ZONE`): each frame's own zone, so that every market of a run
+            over several (`ModelPipeline.run(data={zone: frame})`) issues at `issue_time` on its own clock. `ModelPipeline`
+            resolves it for each frame (`in_data_zone`) before anything reads it, so its manifests record the zone; given to a
+            model's own `run` or a check directly, it is read in the zone of the frame it judges (`_issue_zone`).
         rules: Overrides and additions, `{column name or glob pattern: Availability or dict}`, or a list of them with
             disjoint validity periods for a lag that changed over time (`Availability.during`, `RuleChain`). They take
             precedence over accepted assumptions, rules derived from data sources, and the built-in defaults.
@@ -1147,7 +1169,8 @@ class InformationSet:
         use_defaults: bool = True,
     ):
         _parse_time(issue_time)
-        _check_zone(issue_timezone)
+        if issue_timezone != DATA_ZONE:
+            _check_zone(issue_timezone)
         if unknown not in _UNKNOWN_POLICIES:
             raise ValueError(f"unknown must be one of {list(_UNKNOWN_POLICIES)}, got '{unknown}'")
         unknown_assumptions = [a for a in (assumptions or []) if a not in ASSUMPTIONS]
@@ -1183,6 +1206,17 @@ class InformationSet:
         )
         out._source_rules = dict(self._source_rules)
         out._source_zones = dict(self._source_zones)
+        return out
+
+    def in_data_zone(self, index: pd.DatetimeIndex) -> "InformationSet":
+        """This information set for a frame with this index: itself, or with `issue_timezone="data"` a copy issued in the
+        index's zone (`zone_name`, as a manifest records it), which a run with the zone written out gives to the bit. A naive
+        index has no zone to issue in, and neither has one in UTC or at a fixed offset (`_market_clock`): both raise."""
+        if self.issue_timezone != DATA_ZONE:
+            return self
+        out = self.copy()
+        out.issue_timezone = _market_clock(getattr(index, "tz", None))
+        _check_zone(out.issue_timezone)
         return out
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1288,7 +1322,7 @@ class InformationSet:
         )
         self._report_unknown(unknown, model_name)
         if violations:
-            raise InformationSetError(self._format(violations, model_name))
+            raise InformationSetError(self._format(violations, model_name, zone=self._issue_zone(index)))
         self._log_assumptions(model_name)
 
     def late_uses(
@@ -1667,11 +1701,10 @@ class InformationSet:
         """The issue times of these issue days (naive midnights, the first one first) on an index like `index`, whose rows are
         at `freq`: a daily frame's row is at the time of day its index says (`_date_utils.daily_anchor`), any other's at its
         period."""
-        ctx = _Context(
-            days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None, issue_zone=self.issue_timezone
-        )
+        zone = self._issue_zone(index)
+        ctx = _Context(days[0], self._data_zone(index), naive=getattr(index, "tz", None) is None, issue_zone=zone)
         offset = np.asarray((days - days[0]) // pd.Timedelta(days=1), dtype=np.int64)
-        issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), self.issue_timezone, ctx)
+        issue = _issue_minutes(offset * 1440.0 + _minutes(self.issue_time), zone, ctx)
         midnight = _to_instants(offset * 1440.0, ctx.data_zone, ctx)
         return _IssueClock(days, ctx, offset, issue, midnight, _row_anchor(index, freq))
 
@@ -1784,16 +1817,32 @@ class InformationSet:
         return pd.date_range("2024-01-01", periods=7, freq="D")
 
     def _data_zone(self, index) -> str:
-        return str(index.tz) if getattr(index, "tz", None) is not None else self.issue_timezone
+        return str(index.tz) if getattr(index, "tz", None) is not None else self._issue_zone(index)
 
-    def _format(self, violations: List[Violation], model_name: str, advice: bool = True) -> str:
+    def _issue_zone(self, index) -> str:
+        """The zone the issue time is read in on a frame with this index: `issue_timezone`, or with `"data"` (`DATA_ZONE`) the
+        index's own zone, as `in_data_zone` resolves it. An index that is naive, in UTC or at a fixed offset has no market's
+        clock to issue on, and raises (`_market_clock`)."""
+        if self.issue_timezone != DATA_ZONE:
+            return self.issue_timezone
+        try:
+            _market_clock(getattr(index, "tz", None))
+        except ValueError as exc:
+            raise InformationSetError(str(exc)) from None
+        return str(index.tz)
+
+    def _format(
+        self, violations: List[Violation], model_name: str, advice: bool = True, zone: Optional[str] = None
+    ) -> str:
+        """The message of a refusal; `zone` is the issue zone as resolved for the frame (`_issue_zone`), `issue_timezone` if
+        not given."""
         # One line per base column and rule, listing the predictors that read it.
         grouped: Dict[Tuple[str, str, Optional[str]], List[Violation]] = {}
         for v in violations:
             grouped.setdefault((v.role, v.column.base, v.column.key), []).append(v)
         lines = [
             f"{model_name}: {len(violations)} use(s) of inputs not known at the issue time "
-            f"({self.issue_time} {self.issue_timezone} on the issue day D):"
+            f"({self.issue_time} {zone or self.issue_timezone} on the issue day D):"
         ]
         for (role, base, key), items in grouped.items():
             worst = max(items, key=lambda v: v.available - v.issue)
@@ -2571,10 +2620,87 @@ class CoBatchResult:
     items: Optional[List[str]]
     probe: Optional[ProbeResult] = None  # None when nothing ran: no other item the frame has
     control: Optional[ControlResult] = None  # the positive control over the same widened run, when it ran
+    # The issue day's forecasts on the frame cut after its date against the whole frame's (`issue_day_cut`), for a model that
+    # predicts its refit blocks in one call (`cuts_at_issue_day`); None when it didn't run.
+    cut: Optional["CutResult"] = None
 
     @property
     def ok(self) -> bool:
-        return self.probe is None or self.probe.ok
+        return (self.probe is None or self.probe.ok) and (self.cut is None or self.cut.ok)
+
+    @property
+    def moved(self) -> List[Tuple[int, int]]:
+        """(period, horizon) of the issue day's forecasts that moved under the widened probe or with the cut frame, or exist in
+        only one of their runs, each once."""
+        keys = set()
+        for result in (self.probe, self.cut):
+            if result is not None:
+                keys.update(result.changed, result.missing)
+        return sorted(keys)
+
+
+@dataclass
+class CutResult:
+    """Outcome of `issue_day_cut`: the issue day's forecasts on the frame cut after its local date, as a run on that day has
+    it, against those on the whole frame, compared at atol 0 (equal, or NaN in both)."""
+
+    run_day: str
+    forecasts: int
+    changed: List[Tuple[int, int]]  # (period, horizon)
+    max_abs_change: float
+    missing: List[Tuple[int, int]] = field(default_factory=list)  # forecasts present in only one of the runs
+
+    @property
+    def ok(self) -> bool:
+        return not self.changed and not self.missing
+
+
+def cuts_at_issue_day(model: Any) -> bool:
+    """Whether the co-batch check also compares the issue day's forecasts on the frame cut after its date (`issue_day_cut`):
+    for a model that predicts its refit blocks in one call (`_predict_block`, and `_predicts_together` True). Its call holds the
+    issue rows of the block's later days that the frame has, which a run on the issue day doesn't have, so a forecast that
+    depends on which rows its call holds, not only on their values, would differ between a backtest and that run. A row of a
+    later day enters such a call only as an issue row, so the cut frame takes away nothing the forecast may read; a model that
+    reads a later row's known-ahead value directly (a sequence model's covariate) would lose it, and isn't cut here."""
+    m = model() if callable(model) and not hasattr(model, "run") else model
+    return getattr(type(m), "_predict_block", None) is not None and bool(getattr(m, "_predicts_together", False))
+
+
+def issue_day_cut(
+    model: Any,
+    frame: pd.DataFrame,
+    run_day: str,
+    information_set: InformationSet,
+    target: str = "price",
+    horizon: Optional[int] = None,
+    freq: str = "1h",
+    availability: str = "raise",
+    horizons: Optional[Sequence[int]] = None,
+    runs_in: Optional[Callable[[], Any]] = None,
+) -> CutResult:
+    """`run_day`'s forecasts on `frame` cut after `run_day`'s local date (the rows a run on that day has) against those on the
+    whole `frame`, each run as the probe runs it (to the end of a refit block, or of the frame), at atol 0. A model whose block
+    call has one shape, with each forecast taken from its own row and the earlier days in the same places, gives the same bits
+    on both; one whose forecast depends on how many rows, or which, its call holds doesn't. `runs_in`, a zero-argument factory
+    of a context manager, wraps each run (`verify` seeds the global generators alike for both). `model` is a model instance or
+    a zero-argument factory, a fresh copy for each run."""
+    run_day = str(pd.Timestamp(run_day).date())
+    local = frame.index.tz_localize(None) if frame.index.tz is not None else frame.index
+    cut = frame[np.asarray(local.normalize() <= pd.Timestamp(run_day))]
+    common = (run_day, target, _horizon_arguments(horizon, horizons, 1), freq, information_set, availability)
+    forecasts = []
+    for each in (frame, cut):
+        if runs_in is None:
+            forecasts.append(_issue_day_forecasts(model, each, *common)[0])
+        else:
+            with runs_in():
+                forecasts.append(_issue_day_forecasts(model, each, *common)[0])
+    whole, alone = forecasts
+    keys = sorted(whole.keys() & alone.keys())
+    changed = [key for key in keys if not (whole[key] == alone[key] or (pd.isna(whole[key]) and pd.isna(alone[key])))]
+    finite = [abs(whole[key] - alone[key]) for key in changed if np.isfinite(whole[key]) and np.isfinite(alone[key])]
+    max_abs = max(finite, default=float("inf") if changed else 0.0)
+    return CutResult(run_day, len(whole), changed, max_abs, sorted(whole.keys() ^ alone.keys()))
 
 
 def co_batch_items(model: Any, run_day: str, frame: Optional[pd.DataFrame] = None) -> Optional[List[str]]:
@@ -2625,6 +2751,10 @@ def co_batch_probe(
     the information set calls known at D's issue time for that row stays: a forecast published days ahead on another item's
     row, a block's earlier days, training rows. Only `run_day`'s forecasts are compared. `control` runs the positive control over the same widened runs as well.
 
+    For a model that predicts its refit blocks in one call (`cuts_at_issue_day`) it also compares `run_day`'s forecasts on the
+    frame cut after its date with the whole frame's (`issue_day_cut`, in `cut`): its call holds the later days the frame has,
+    which a run on `run_day` doesn't.
+
     A model without the hook gives `items=None` and runs nothing; one that names no other day the frame has gives `items=[]`
     and runs nothing either. The other arguments are `leakage_probe`'s.
     """
@@ -2645,7 +2775,12 @@ def co_batch_probe(
         model, data, run_day, information_set, target, check_target_boundary=check_target_boundary, **common
     )
     moved = positive_control(model, data, run_day, information_set, target, **common) if control else None
-    return CoBatchResult(run_day, others, probe, moved)
+    cut = None
+    if cuts_at_issue_day(model):
+        cut = issue_day_cut(
+            model, frame, run_day, information_set, target, horizon, freq, availability, horizons=horizons
+        )
+    return CoBatchResult(run_day, others, probe, moved, cut)
 
 
 def _horizon_arguments(horizon: Optional[int], horizons: Optional[Sequence[int]], default: int) -> Dict[str, Any]:
@@ -2814,13 +2949,9 @@ def _rows_around_issue(
     # for its delivery day, its publication instant for the way back), not at run_day's noon or at the row's own
     # date. They differ across a DST switch whenever the data zone and a rule's zone don't switch together, e.g. a
     # UTC or fixed-offset (benchmark source) index against Europe/Brussels rules.
-    ctx = _Context(
-        pd.Timestamp(run_day),
-        information_set._data_zone(index),
-        naive=index.tz is None,
-        issue_zone=information_set.issue_timezone,
-    )
-    issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), information_set.issue_timezone, ctx)
+    zone = information_set._issue_zone(index)
+    ctx = _Context(pd.Timestamp(run_day), information_set._data_zone(index), naive=index.tz is None, issue_zone=zone)
+    issue = _issue_minutes(np.array([float(_minutes(information_set.issue_time))]), zone, ctx)
     ctx = replace(ctx, issue_minute=float(issue[0]))
     local = index.tz_localize(None) if index.tz is not None else index
     day = np.asarray((local.normalize() - pd.Timestamp(run_day)) // pd.Timedelta(days=1), dtype=np.int64)
@@ -3207,6 +3338,7 @@ __all__ = [
     "Availability",
     "CoBatchResult",
     "ControlResult",
+    "CutResult",
     "InformationSet",
     "InformationSetError",
     "ProbeResult",
@@ -3214,7 +3346,9 @@ __all__ = [
     "TrainingRows",
     "VINTAGES",
     "co_batch_probe",
+    "cuts_at_issue_day",
     "default_rules",
+    "issue_day_cut",
     "leakage_probe",
     "parse_predictor",
     "perturb_recent",

@@ -65,6 +65,9 @@ class ExcelExporter(Exporter):
             path: Path to the output Excel file.
             sheets: Which sheets to include. Options: "summary", "hour", "horizon",
                     "hour_horizon", "year", "year_horizon", "details". Defaults to all.
+
+        A report with a model that has a card (licence, corpus, weights) gets a last sheet,
+        "Provenance", with `report.provenance()`, whatever `sheets` lists.
         """
         self.path = Path(path)
         self.sheets = sheets or [
@@ -126,6 +129,10 @@ class ExcelExporter(Exporter):
                 )
             if "details" in self.sheets:
                 self._write_details(writer, report)
+            # A sheet only with a carded model, whatever `sheets` asks for: the licence travels along.
+            provenance = report.provenance()
+            if not provenance.empty:
+                provenance.to_excel(writer, sheet_name=_sheet_name("Provenance", writer.book.sheetnames), index=False)
 
     def _write_summary(self, writer: pd.ExcelWriter, report: EvaluationReport, summary: pd.DataFrame) -> None:
         sheet_name = "Summary"

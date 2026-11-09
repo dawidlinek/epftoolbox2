@@ -1,9 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+import contextlib
 import datetime
 import hashlib
 import math
 import os
+import sys
+import threading
 import traceback
 
 import numpy as np
@@ -12,7 +15,15 @@ from threadpoolctl import ThreadpoolController
 from ..results.store import with_status
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
-from ._calendar import MASK_FIT, FitUnit, member_window, refit_anchor, training_span
+from ._calendar import (
+    MASK_FIT,
+    FitUnit,
+    block_days,
+    member_window,
+    nominal_block_length,
+    refit_anchor,
+    training_span,
+)
 
 # What `_worker_init` loads into a pool's worker: the default `TaskInputs` of every task function (`_pool_inputs`).
 _W_HOUR_ARRAYS: Dict = {}
@@ -31,8 +42,14 @@ NATIVE_THREAD_ENV_VARS = (
     "BLIS_NUM_THREADS",
     "VECLIB_MAXIMUM_THREADS",
 )
-_W_THREADPOOLS: Optional[ThreadpoolController] = None
-_W_NATIVE_LIMITS = None  # held for the worker's lifetime
+_W_THREADPOOLS: Optional[ThreadpoolController] = None  # set by `_limit_native_threads`, in a pool's worker only
+# `pool_native_threads` in the process that starts the pools: how many holds are open, and what to put back after the last.
+_HOLD_LOCK = threading.Lock()
+_HOLDS = 0
+_HELD_COUNTS: List[Tuple[Any, int]] = []  # (threadpoolctl library controller, the thread count it had)
+_HELD_ENV: Dict[str, Optional[str]] = {}  # the thread variables as they were, under spawn
+# Whether the pools spawn their workers rather than fork them (`BaseModel._run_tasks`, `_engine._run_chunk`).
+_POOLS_SPAWN = sys.platform == "win32"
 
 # Reasons a task produces no forecast without being an error. They are counted per model and reported.
 SKIP_TOO_FEW_ROWS = "too_few_rows"
@@ -61,13 +78,74 @@ def _limit_native_threads() -> None:
 
     Only for a pool worker: the limits are never restored, and the caller's process must keep its own.
     """
-    global _W_THREADPOOLS, _W_NATIVE_LIMITS
+    global _W_THREADPOOLS
     for name in NATIVE_THREAD_ENV_VARS:
         os.environ[name] = str(NATIVE_THREADS_PER_TASK)
     # Libraries already loaded ignore the variables: under fork that is everything the parent imported, under
-    # spawn whatever importing this module loaded (numpy's BLAS at least). threadpoolctl sets them directly.
+    # spawn whatever importing this module loaded (numpy's BLAS at least). threadpoolctl sets them directly, and only where
+    # the count differs: an OpenBLAS with its own thread pool comes with the count already (`pool_native_threads`), and
+    # setting it again in a forked child would start that pool's threads.
     _W_THREADPOOLS = ThreadpoolController()
-    _W_NATIVE_LIMITS = _W_THREADPOOLS.limit(limits=NATIVE_THREADS_PER_TASK)
+    for lib in _W_THREADPOOLS.lib_controllers:
+        if lib.num_threads != NATIVE_THREADS_PER_TASK:
+            lib.set_num_threads(NATIVE_THREADS_PER_TASK)
+
+
+def _has_own_thread_pool(lib) -> bool:
+    """Whether a threadpoolctl library controller is an OpenBLAS that runs its own pool of threads (not OpenMP's)."""
+    return lib.internal_api == "openblas" and getattr(lib, "threading_layer", None) not in ("openmp", "disabled")
+
+
+@contextlib.contextmanager
+def pool_native_threads():
+    """Hold this process's OpenBLAS at NATIVE_THREADS_PER_TASK threads while worker pools start from it, and put back the
+    counts it had when the outermost hold closes: nested and concurrent holds share one.
+
+    OpenBLAS stops its thread pool before every fork, and setting its thread count in the child starts the pool again: one
+    thread per CPU it counted when it loaded, each spinning for its thread timeout (about 0.1 s) before it sleeps, in every
+    worker of every pool. A worker that inherits the count needs no set (`_limit_native_threads`), so it starts none. Putting
+    the count back starts this process's own pool again, once per hold: hold it around a whole run, not around each pool.
+    Under spawn the thread variables are set too, for the workers to load their libraries at that count; under fork they
+    would reach only a library this process loads during the hold, which would then keep it. While held, BLAS calls of this
+    process, in any thread, run on NATIVE_THREADS_PER_TASK threads.
+    """
+    global _HOLDS
+    with _HOLD_LOCK:
+        if _HOLDS == 0:
+            _hold_native_threads()
+        _HOLDS += 1
+    try:
+        yield
+    finally:
+        with _HOLD_LOCK:
+            _HOLDS -= 1
+            if _HOLDS == 0:
+                _release_native_threads()
+
+
+def _hold_native_threads() -> None:
+    for lib in ThreadpoolController().lib_controllers:
+        if _has_own_thread_pool(lib):
+            count = lib.num_threads
+            if count != NATIVE_THREADS_PER_TASK:
+                lib.set_num_threads(NATIVE_THREADS_PER_TASK)
+                _HELD_COUNTS.append((lib, count))
+    if _POOLS_SPAWN:
+        for name in NATIVE_THREAD_ENV_VARS:
+            _HELD_ENV[name] = os.environ.get(name)
+            os.environ[name] = str(NATIVE_THREADS_PER_TASK)
+
+
+def _release_native_threads() -> None:
+    while _HELD_COUNTS:
+        lib, count = _HELD_COUNTS.pop()
+        lib.set_num_threads(count)
+    for name, value in _HELD_ENV.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+    _HELD_ENV.clear()
 
 
 def _limit_openmp_in_task_thread() -> None:
@@ -655,6 +733,13 @@ def _fit_unit(
     read on the window's first day). The scaler is fitted on the training rows and transforms the test rows of `tasks` together,
     value by value, so a forecast is the same whichever other forecasts of its unit are run with it: one cut short and resumed
     equals a fresh one.
+
+    A model whose class defines `_predict_block`, with `block_predict` True (`block_calls`, `config["block_predict"]`), predicts
+    in one call the issue rows
+    of every day of the unit's block that the period has with finite inputs, the run's tasks or not, padded to the rule's
+    nominal length with copies of the first (`_block_forecasts`), and each task's forecast is its own row's: still the same
+    whichever others are run with it, since the call's rows and shape don't depend on them. Tasks without a row or with a
+    missing input are skipped as one at a time.
     """
     inputs = _inputs_of(inputs)
     cfg = inputs.config
@@ -714,7 +799,15 @@ def _fit_unit(
 
     test_rows = arrays["x"][[test for _, test in forecast]][:, col_idx]
     predicted = None
-    if engine is not None:
+    if cfg.get("block_predict", False):
+        # The block's rows in one call, each forecast from its own row (`_block_forecasts`); never the engine's. The parent's
+        # model decided (`block_calls`).
+        predicted = _block_forecasts(
+            cfg, unit, arrays, col_idx, predictors, train_x, train_y, scalable_mask, forecast, model
+        )
+        if isinstance(predicted, str):  # the fit refused: every forecast's fit_error, as one at a time
+            return outcomes + [(task, predicted) for task, _ in forecast]
+    elif engine is not None:
         predicted = engine(StatsFit(hour, hz, train, col_idx, finite, train_x, train_y, scalable_mask, test_rows))
     if predicted is None or any(row is None for row in predicted):
         # The whole unit, or the rows the engine left to the model path (each row's forecast is its own: scaled value by
@@ -739,7 +832,7 @@ def _fit_unit(
                 continue
             # One row at a time (decision 16 of the step 3 spec): a product over several rows can differ in the last bits.
             pred, coefs = model._predict_fitted(fitted, test_x[row : row + 1])
-            predicted.append((scaler.inverse(float(pred)), coefs))
+            predicted.append((scaler.inverse(float(pred)), flat_coefficients(coefs, model, "_predict_fitted")))
 
     extra = None
     if matching_days is not None:
@@ -768,6 +861,119 @@ def _fit_unit(
         )
         outcomes.append((task, record))
     return outcomes
+
+
+def block_calls(model) -> bool:
+    """Whether `model`'s refit units predict their blocks in one call (`_fit_unit`, see `BaseModel`): it has `refit`,
+    `block_predict` is True, and its class defines `_predict_block` in the class that defines `_predict_fitted`. A subclass
+    that refits with an estimator of its own (`_fit_predict`, `_fit_model`, `_predict_fitted`) but inherits `_predict_block`
+    would have its parent's block predictions made from its own fit, and one that overrides `_predict_block` alone would
+    forecast otherwise than its `refit=None` run: each predicts one row at a time through `_predict_fitted` instead, as every
+    other model. Read on the parent's model, which hands the answer to the workers in `config["block_predict"]`: a worker's
+    model is rebuilt with refit=None from `_model_kwargs`, which may leave `block_predict` out."""
+    cls = type(model)
+    if getattr(cls, "_predict_block", None) is None or getattr(model, "refit", None) is None:
+        return False
+    owners = {
+        next(klass for klass in cls.__mro__ if name in vars(klass)) for name in ("_predict_block", "_predict_fitted")
+    }
+    return len(owners) == 1 and bool(getattr(model, "block_predict", False))
+
+
+def block_rows(cfg: Dict, unit: FitUnit, days: np.ndarray, x: np.ndarray, col_idx: List[int]) -> List[int]:
+    """The rows of a unit's block call before padding, in a period whose rows are on `days` with values `x`: the issue row
+    (`issue_row`, so the second of a repeated autumn hour) of each day of the unit's block under its member's rule
+    (`block_days`) that the period has a row on with every input of `col_idx` finite, in date order. Every such day, whichever
+    of them the run forecasts: a call holds the same rows alone, in the full block, after a resume and whatever `test_start`
+    or `issue_days`, and only the frame's end or a missing input leaves a day out. Its inputs only: no target of the block's
+    days enters a call."""
+    refit = cfg["refit"]
+    rows = []
+    for day in block_days(unit.anchor, refit["rules"][unit.member]):
+        row = issue_row(days, day.toordinal() - refit["first_ordinal"])
+        if row is not None and np.isfinite(x[row, col_idx]).all():
+            rows.append(row)
+    return rows
+
+
+def _block_forecasts(
+    cfg: Dict,
+    unit: FitUnit,
+    arrays: Dict,
+    col_idx: List[int],
+    predictors: List[str],
+    train_x: np.ndarray,
+    train_y: np.ndarray,
+    scalable_mask: np.ndarray,
+    forecast: List[Tuple[tuple, int]],
+    model,
+) -> Union[List[Tuple[float, list]], str]:
+    """(prediction in target units, coefficients) of each of `forecast`'s (task, issue row), in its order, from one fit of the
+    unit (`_fit_model`) and one call of `model._predict_block` over its block's rows (`block_rows`), padded to the rule's nominal
+    length (`nominal_block_length`) with copies of the first, never another day's row: one shape for every call of the rule,
+    whatever the frame, the run or a resume holds. The scaler is fitted on the training rows and transforms the call's rows
+    together, value by value, as one at a time. A fit that raises ValueError is a `fit_error` reason, returned for every task."""
+    rows = block_rows(cfg, unit, arrays["days"], arrays["x"], col_idx)
+    length = nominal_block_length(cfg["refit"]["rules"][unit.member])
+    if not rows or len(rows) > length:
+        raise RuntimeError(f"a block call of {len(rows)} rows for a nominal length of {length}")
+    call = rows + [rows[0]] * (length - len(rows))
+    place = {row: i for i, row in enumerate(rows)}
+    scaler = make_scaler(cfg.get("scaler", "standard"))
+    train_x, train_y, call_x = scaler.fit_transform(
+        train_x.copy(),
+        train_y.copy(),
+        arrays["x"][call][:, col_idx],
+        scalable_mask=scalable_mask,
+        columns=predictors,
+    )
+    try:
+        fitted = model._fit_model(train_x, train_y)
+    except ValueError as exc:
+        return f"{SKIP_FIT_ERROR}: {exc}"
+    predictions, coefficients = model._predict_block(fitted, call_x)
+    predictions = np.asarray(predictions, dtype=np.float64)
+    if predictions.shape != (length,) or len(coefficients) != length:
+        raise RuntimeError(
+            f"{type(model).__name__}._predict_block returned {predictions.shape} predictions and {len(coefficients)} "
+            f"coefficient lists for a call of {length} rows: one of each per row"
+        )
+    return [
+        (
+            scaler.inverse(float(predictions[place[test]])),
+            flat_coefficients(coefficients[place[test]], model, "_predict_block"),
+        )
+        for _, test in forecast
+    ]
+
+
+_REAL = (int, float, np.integer, np.floating)
+
+
+def flat_coefficients(coefs: Any, model: Any, method: str) -> list:
+    """One forecast's coefficients as its record holds them, from what `model.<method>` returned for its row: a list of numbers,
+    as every core model returns, unchanged; a tuple of them, or a 1-D numeric numpy array, as a list, numpy scalars as Python
+    numbers, so the record writes as JSON. Anything else (a 2-D array, nested lists, None, strings, bools) is a TypeError
+    naming the model, where a results file would otherwise fail later with a bare one."""
+    if type(coefs) is list and all(type(value) is float for value in coefs):
+        return coefs
+    if isinstance(coefs, np.ndarray):
+        if coefs.ndim == 1 and coefs.dtype.kind in "iuf":
+            return coefs.tolist()
+    elif isinstance(coefs, (list, tuple)) and all(
+        isinstance(value, _REAL) and not isinstance(value, (bool, np.bool_)) for value in coefs
+    ):
+        return [value if type(value) in (int, float) else value.item() for value in coefs]
+    raise TypeError(
+        f"{type(model).__name__}.{method} returned coefficients {_described(coefs)} for a forecast: give a flat list of "
+        "numbers (one per column, or [] for none) or a 1-D numeric array"
+    )
+
+
+def _described(coefs: Any) -> str:
+    if isinstance(coefs, np.ndarray):
+        return f"as a {coefs.ndim}-D {coefs.dtype} array of shape {coefs.shape}"
+    return f"of type {type(coefs).__name__}: {coefs!r:.80}"
 
 
 def _run_unit(

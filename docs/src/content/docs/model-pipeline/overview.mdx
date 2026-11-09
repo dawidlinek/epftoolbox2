@@ -142,7 +142,7 @@ Predictors can be specified in four ways:
 
 ## Parallelism
 
-Models use a **process pool**. Each worker process handles whole forecast days (24 hours × horizon), `THREADS_PER_PROCESS` tasks at a time, and runs each task's BLAS and OpenMP code on one thread, which it sets itself: `OMP_NUM_THREADS` and the like are not needed.
+Models use a **process pool**. Each worker process handles whole forecast days (24 hours × horizon), `THREADS_PER_PROCESS` tasks at a time, and runs each task's BLAS and OpenMP code on one thread, which it sets itself: `OMP_NUM_THREADS` and the like are not needed. While the pools exist your own process's OpenBLAS runs on one thread too, so the workers inherit that count and start no idle OpenBLAS threads; it gets its count back after the last model ([Environment Variables](/epftoolbox2/getting-started/installation/#environment-variables)).
 
 | Variable | Default | Description |
 |---|---|---|

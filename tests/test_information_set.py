@@ -2181,3 +2181,63 @@ def test_source_rebuild_catches_a_transformer_leak_that_the_final_column_probe_m
     from_source = leakage_probe(make_model, source, run_day, info, horizon=1, rebuild=rebuild_with_elapsed_shift)
     assert not from_source.ok
     assert (23, 1) in from_source.changed
+
+
+def test_issue_timezone_data_is_each_frame_s_own_zone():
+    """`issue_timezone="data"` (step 7g): the issue zone of each frame is the frame's own, resolved by `in_data_zone`."""
+    info = InformationSet("12:00", "data", rules={"x": Availability.static()})
+    index = pd.date_range("2024-01-01", periods=3, freq="h", tz="Europe/Helsinki")
+    resolved = info.in_data_zone(index)
+    assert resolved.issue_timezone == "Europe/Helsinki" and info.issue_timezone == "data"
+    assert resolved.to_dict() == {**info.to_dict(), "issue_timezone": "Europe/Helsinki"}
+    fixed = InformationSet("12:00", "Europe/Warsaw")
+    assert fixed.in_data_zone(index) is fixed
+    with pytest.raises(ValueError, match="has none"):
+        info.in_data_zone(index.tz_localize(None))
+    assert InformationSet.from_dict(info.to_dict()).issue_timezone == "data"
+    with pytest.raises(ValueError, match="Unknown time zone"):
+        InformationSet("12:00", "Mars/Olympus")
+
+
+def test_issue_timezone_data_given_to_a_model_s_own_run_is_its_frame_s_zone():
+    """An unresolved "data" read straight by a check or a model's own run is the frame's zone (`_issue_zone`), not a crash."""
+    frame = make_market_data(start="2023-01-01", days=60, tz="Europe/Lisbon", horizon=2)
+    rules = {"load": Availability.published("10:00", 7), "wind": Availability.published("10:00", 7)}
+    names = ["load_d+{horizon}", "wind_d+{horizon}"]
+    runs = {}
+    for zone in ("data", "Europe/Lisbon"):
+        model = OLSModel(predictors=names, training_window=20)
+        info = InformationSet("12:00", zone, rules=rules)
+        runs[zone] = model.run(frame, "2023-02-10", "2023-02-12", horizon=1, information_set=info)._results
+    key = ["run_date", "hour", "horizon"]
+    assert sorted(runs["data"], key=lambda r: [r[k] for k in key]) == sorted(
+        runs["Europe/Lisbon"], key=lambda r: [r[k] for k in key]
+    )
+    late = InformationSet("10:00", "data", rules={"load": Availability.published("12:00", 0)})
+    with pytest.raises(InformationSetError, match="12:00"):
+        late.check({(0, 1): ["load"]}, "price", "1h", frame.index, "2023-02-10", "2023-02-10", check_target=False)
+    with pytest.raises(InformationSetError, match="has none"):
+        late.check({(0, 1): ["load"]}, "price", "1h", frame.index.tz_localize(None), "2023-02-10", "2023-02-10")
+
+
+def test_issue_timezone_data_refuses_a_frame_in_utc_or_at_a_fixed_offset():
+    """A Warsaw frame indexed in UTC (`DataPipeline(timezone=None)`) has no market's clock: "data" there would issue at 12:00
+    UTC, 14:00 in Warsaw in summer, and accept what a Warsaw noon doesn't know. It is refused, as a naive index is."""
+    import datetime as dt
+
+    frame = make_market_data(start="2023-05-01", days=40, tz="Europe/Warsaw", horizon=2, seed=3).drop(
+        columns=["price_d-1"]
+    )
+    rules = {"load": Availability.published("13:00", 0, timezone="Europe/Warsaw")}
+    for zone in ("UTC", "Etc/GMT-1", dt.timezone(dt.timedelta(hours=2))):
+        moved = frame.tz_convert(zone)
+        info = InformationSet("12:00", "data", rules=rules)
+        with pytest.raises(InformationSetError, match="no market's clock"):
+            OLSModel(predictors=["load_d+{horizon}"], training_window=20).run(
+                moved, "2023-05-25", "2023-05-27", horizon=1, information_set=info
+            )
+        with pytest.raises(ValueError, match="no market's clock"):
+            info.in_data_zone(moved.index)
+    named = InformationSet("10:00", "data", rules={"load": Availability.published("12:00", 0)})
+    with pytest.raises(InformationSetError, match=r"\(10:00 Europe/Warsaw on the issue day D\)"):
+        named.check({(0, 1): ["load"]}, "price", "1h", frame.index, "2023-05-25", "2023-05-25", check_target=False)

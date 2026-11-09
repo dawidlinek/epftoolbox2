@@ -24,6 +24,7 @@ Rules to know before using the library:
 - **Significance.** `report.tests(benchmark=...)` compares each model with a benchmark on the keys the pair shares and prints `n_days`, `n_forecasts` and the number of models `m` behind its Holm correction. `report.mcs()` and `report.ranks()` run on the keys all models share. A per-hour DM test (`by="hour"`) is descriptive, never a verdict, and one test year resolves differences of about 5 % of the MAE.
 - **YAML.** `DataPipeline`, `ModelPipeline` and `Workflow` have `save(path)` and `load(path)`. `save()` writes the ENTSO-E key as `${ENTSOE_API_KEY}` and `load()` expands it from the environment. Pass `include_secrets=True` only for files you never commit. Callable predictors cannot be saved (`save()` raises `TypeError`), so use `{horizon}` templates; a module-level function of `ctx` is saved by its import path. An unregistered class name raises on load.
 - **Custom components** must be registered in `COMPONENT_REGISTRY` to load from YAML, see the Extending page.
+- **Extras and weights.** A family that needs an extra or pretrained weights has a model card; `run()` and `verify()` check every model's extra, runtime packages and weights before any fit, and never downloads: fetch weights first with `epf weights fetch <Model>` (`--accept <licence>` for a non-commercial or revenue-capped one). `report.provenance()` gives each such model's licence, weights and contamination verdict per window.
 - **Examples.** Runnable scripts are in `examples/` and need `ENTSOE_API_KEY` in the environment, except `lear_lago.py` (LEAR on the Lago benchmark, downloaded from Zenodo). Each has a `main()` that takes its date ranges and, if it writes files, an output directory. Worked snippets are on the two Examples pages.
 
 ## Getting started
@@ -86,6 +87,7 @@ Rules to know before using the library:
 - [Validation and Test](docs/src/content/docs/model-pipeline/validation-and-test.mdx): `run(df, validation=..., test=...)` and `"previous_year"`, records identical to plain runs, `report.validation`, resuming validation before test, SLURM merges
 - [Ensembles](docs/src/content/docs/model-pipeline/ensembles.mdx): `AverageEnsemble` and `add_ensemble()`, the rule of the average, what counts for choosing, why a `top` ensemble has no validation forecasts, `report.choices()`, SLURM merges and YAML
 - [Predictor Presets](docs/src/content/docs/model-pipeline/presets.mdx): LEAR and expert-model inputs in this library's column naming
+- [Several Zones](docs/src/content/docs/model-pipeline/zones.mdx): `run(data={zone: frame})` runs every model per zone into `save_dir/<zone>/`, each zone's records those of its frame alone, `issue_timezone="data"` for each zone's own clock, `PanelReport` with `log_gain()` and `cells_lost()` over cells on their common keys, resuming and `verify` over zones
 - [Week-ahead Forecasting](docs/src/content/docs/model-pipeline/week-ahead.mdx): daily minimum and maximum load for D+3 to D+9 issued on Fridays, or for D+1 to D+7 every day with lists that drop what isn't published, against a TSO's forecast as a `NaiveModel`, and the settings that reproduce a published study
 
 ## Workflow
@@ -100,7 +102,9 @@ Rules to know before using the library:
 - [LEARModel](docs/src/content/docs/models/lear.mdx): LEAR (Lago et al. 2021), a Lasso whose penalty is chosen by AIC or BIC on the LARS path, refitted exactly or by Lago's coordinate descent, or by blocked 5-fold cross-validation (`criterion="cv"`, old `LassoLarsCV`, no refit); `LEARModel.lago()` reproduces the original epftoolbox's forecasts; the recommended settings are an `AverageEnsemble` of four `LEARModel`s, one per VST
 - [Benchmark Reproduction](docs/src/content/docs/models/lear-benchmark.mdx): LEAR and Ridge on the five Lago et al. (2021) datasets, against the original epftoolbox and the published forecasts, and the recommended settings against `lago()`, on identical keys
 - [NaiveModel](docs/src/content/docs/models/naive.mdx): one column's value on the issue row, such as a published forecast taken as a benchmark; with an information set, no forecast where the value wasn't out at the issue time
+- [PooledModel](docs/src/content/docs/models/pooled.md): one fit over the zones of a run of several markets, each zone's rows scaled within its own fit, `over=("zone", "horizon")`, a one-hot zone, every zone's training rows judged at the earliest issue of the day
 - [Scalers and VSTs](docs/src/content/docs/models/scalers.mdx): standard scaling and variance-stabilising transformations (asinh, mirror-log, polynomial, N-PIT) for spiky prices
+- [Licences and Weights](docs/src/content/docs/models/licences-and-weights.mdx): model cards of families that need an extra or pretrained weights, the pre-flight before any fit, `epf weights fetch` (never during a run; `--accept` for restricted licences), runtime and weight hashes compared on resume, contamination verdicts and `report.provenance()`
 
 ## Evaluators
 

@@ -28,6 +28,7 @@ class TerminalExporter(Exporter):
         self._print_revised(console, report.vintages())
         self._print_thin_training(console, report.training_days())
         self._print_choices(console, report.choices())
+        self._print_provenance(console, report.provenance())
         for key in self.show:
             if key in self._SHOW_MAP:
                 title, fn = self._SHOW_MAP[key]
@@ -88,6 +89,21 @@ class TerminalExporter(Exporter):
             table.add_column(str(col), overflow="fold")  # a member's name is no use cut short
         for _, row in shown.iterrows():
             table.add_row(*[self._format(value) for value in row])
+        console.print(table)
+
+    def _print_provenance(self, console: Console, provenance) -> None:
+        """Each carded model's licence, attribution, weights, runtime and contamination verdicts, whatever `show` asks for, and
+        only if some model has a card: every report says what its models are under."""
+        if provenance.empty:
+            return
+        console.print("\n[bold]Model provenance[/bold]")
+        shown = provenance.drop(columns="licence_url")  # the licence names it; the URL is in `report.provenance()`
+        shown = shown.loc[:, shown.notna().any() & (shown != "").any()]  # a column only where some model says something
+        table = Table()
+        for col in shown.columns:
+            table.add_column(str(col), overflow="fold")
+        for _, row in shown.iterrows():
+            table.add_row(*["" if value is None or value != value else str(value) for value in row])
         console.print(table)
 
     def _df_to_table(self, df) -> Table:

@@ -16,7 +16,10 @@ on every date.
 import collections.abc
 import datetime
 import functools
+import hashlib
+import operator
 import re
+import struct
 from typing import Any, Dict, FrozenSet, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -362,6 +365,24 @@ def refit_anchors(days: Iterable[Any], refit: str) -> List[datetime.date]:
     return sorted({refit_anchor(day, refit) for day in days})
 
 
+def block_days(day: Any, refit: str) -> List[datetime.date]:
+    """Every issue day of the block of `day` under `refit` (`"kD"` or `"kMS"`), in date order: from its anchor
+    (`refit_anchor`) to the day before the next refit day (`refit_block_end`), whichever days a run or a frame has."""
+    anchor = refit_anchor(day, refit)
+    return [anchor + datetime.timedelta(days=i) for i in range((refit_block_end(day, refit) - anchor).days + 1)]
+
+
+def nominal_block_length(refit: str) -> int:
+    """How many rows a call that predicts a block of `refit` holds (`BaseModel._predict_block`): k for `"kD"` and 31 k for
+    `"kMS"`, the most issue days such a block can have, so that every call of a rule has one shape whatever days the block,
+    the frame or the run has. A ValueError for anything else (None, `"auto"`: a unit has one rule, its member's)."""
+    found = _REFIT_RULE.fullmatch(refit) if isinstance(refit, str) else None
+    if found is None:
+        raise ValueError(f"a block's nominal length needs one refit rule, 'kD' or 'kMS', got {refit!r}")
+    k, unit = found.groups()
+    return int(k) if unit == "D" else 31 * int(k)
+
+
 class FitUnit(NamedTuple):
     """One fit of a model with `refit`: every forecast of a period and horizon issued in one block, with one list.
 
@@ -378,6 +399,35 @@ class FitUnit(NamedTuple):
     anchor: datetime.date
     list_id: Optional[int]
     member: int = 0
+
+
+# What `unit_seed` hashes under, so its seeds are no other hash's.
+_UNIT_SEED_PERSON = b"epf2-unit-seed"
+
+
+def unit_seed(random_state: int, unit: FitUnit, seed_index: int = 0) -> int:
+    """The seed of one fit of a stochastic model: a 64-bit blake2b hash of (`random_state`, the unit's period (-1 for None),
+    horizon, anchor's date ordinal, list id (-1 for None), member, `seed_index`), cut to 63 bits, so a non-negative int that
+    `numpy.random.default_rng` and `torch.manual_seed` take (`np.random.RandomState` takes `seed % 2**32`).
+
+    It reads the unit and the base seed alone: not the model's name, its place in a pipeline or a loop, which other units or
+    members share a call, the shard, the process or the run's dates, so a fit is the same alone, in a loop, after a resume and
+    in a `models_per_task` shard. `seed_index` numbers the seeds of one unit (`seeds=k` members averaged). Every part is an
+    integer (`operator.index`: numpy ints count, floats and bools raise), packed as little-endian int64s."""
+    parts = (
+        random_state,
+        -1 if unit.period is None else unit.period,
+        unit.horizon,
+        _as_date(unit.anchor).toordinal(),
+        -1 if unit.list_id is None else unit.list_id,
+        unit.member,
+        seed_index,
+    )
+    if any(isinstance(part, (bool, np.bool_)) for part in parts):
+        raise TypeError(f"unit_seed takes integers, got a bool in {parts!r}")
+    packed = struct.pack("<7q", *(operator.index(part) for part in parts))
+    digest = hashlib.blake2b(packed, digest_size=8, person=_UNIT_SEED_PERSON).digest()
+    return int.from_bytes(digest, "little") & 0x7FFF_FFFF_FFFF_FFFF
 
 
 class NewestTargets:

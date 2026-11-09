@@ -932,7 +932,10 @@ def test_a_failed_write_stops_the_group_early_and_a_resume_equals_fresh(spring, 
     with pytest.raises(OSError, match="disk full"):
         run(tmp_path / "crashed")
     ran = len(JOB_LOG.read_text().split())
-    assert ran <= 8, ran  # the three collected, the queued and the one running, of 5 days x 24 periods
+    # Of 5 days x 24 periods, about 8 start: the three collected, the queued and the one running. The single worker
+    # keeps taking queued jobs while the parent handles the failure, so a loaded machine sees a few more (9 at load
+    # 270); waiting for all 120, the bug this pins, is far above the bound.
+    assert ran <= 16, ran
     monkeypatch.setattr(ResultStore, "save", real_save)
     run(tmp_path / "crashed")
     same_results(tmp_path / "fresh", tmp_path / "crashed")

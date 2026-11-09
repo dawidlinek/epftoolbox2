@@ -75,6 +75,13 @@ records the class of each input as `vintages` (`epftoolbox2.results.vintages`), 
 `manifest_digest`: a class moves no forecast. A run whose inputs have none has no such key. A resume under the same information
 set keeps the rows of inputs only the earlier run read, as their records stay in the file.
 
+A model with a card (`models._cards.ModelCard`: a family whose fit needs an extra or weights) adds `card`, provenance with the
+contamination verdict of each window, `runtime` (the version, and VCS commit, of each runtime package its card names, plus its
+own settings such as the device type and threads per fit) and `weights` (each file's sha256, and where they were found). A change
+of any runtime entry or of a weight file's hash refuses a resume (`allow_manifest_mismatch=True` overrides); where the weights
+were found doesn't, as that differs between machines that hold the same files. A core model has none of the three keys, so its
+manifests are as before.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -97,6 +104,7 @@ import pandas as pd
 
 from .._date_utils import zone_name
 from ..models._calendar import issue_day_names, mask_members, resolve_issue_days
+from ..models._cards import manifest_fields, window_starts
 from ..logging import get_logger
 from .availability import LISTING_TIMES, merge_listings
 from .store import RECORD_SCHEMA
@@ -127,6 +135,12 @@ _PROVENANCE_FIELDS += ("engine",)
 # `engine_check`: with `engine="check"`, how a sample of those fits compared with the model path on the same values (fits,
 # the largest absolute and relative gaps of their forecasts, how many chose another kink or penalty), in the same last run.
 _PROVENANCE_FIELDS += ("engine_check",)
+# `card`: a carded family's licence, corpus, runtime pins and weights reference, with the contamination verdict of each window
+# (`models._cards.manifest_fields`): what the model is under, which a new release may reword without changing a forecast.
+_PROVENANCE_FIELDS += ("card",)
+# `weights_history`: every set of weight file hashes a results file's forecasts were made with, in the order first used, once a
+# resume accepted other weights (`allow_manifest_mismatch=True`); a resume warns while the file mixes them (`_weights_on_file`).
+_PROVENANCE_FIELDS += ("weights_history",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -150,6 +164,13 @@ _COMPARED_FIELDS += ("save_coefficients",)
 # The numeric path of the fits, "engine-1" for an engine group's fits from shared statistics (`models._engine_worker`), no key
 # for the model path: the two agree within the engine's tolerances, not to the bit, so one file never mixes them.
 _COMPARED_FIELDS += ("fit_path",)
+# A `PooledModel`'s zone (`models._pooled`): the zones of the fit in stack order, `over`, `zone_feature`, `missing` and the other zones'
+# data hashes, since another zone's data moves this zone's forecasts. None (and no key) for a model fitted on one zone's rows.
+_COMPARED_FIELDS += ("pooled",)
+# A carded family's runtime (the version and VCS commit of each package its card names, and its own settings: device type,
+# dtype, threads per fit, ...) and its weights (each file's sha256; where they were found is recorded, not compared): either can
+# move every forecast (t0 0.5.0 against its git head moved single hours by up to 161 EUR/MWh). No key for a core model.
+_COMPARED_FIELDS += ("runtime", "weights")
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -176,6 +197,28 @@ _OLD_RESULTS_NOTE = (
 
 class ManifestMismatchError(ValueError):
     """An existing results directory was produced with a different configuration than this run."""
+
+
+def _runtime_differences(name: str, theirs: Optional[Dict[str, Any]], mine: Optional[Dict[str, Any]]) -> List[str]:
+    """The entries of a carded family's `runtime` or `weights` that differ, one line each (`runtime.packages.torch: ...`). Only
+    the weights' file hashes count: where the files were found (`ref`) differs between machines with the same files."""
+    if name == "weights":
+        refs = f" (weights {None if theirs is None else theirs.get('ref')!r} vs {None if mine is None else mine.get('ref')!r})"
+        theirs = None if theirs is None else {"files": theirs.get("files")}
+        mine = None if mine is None else {"files": mine.get("files")}
+    else:
+        refs = ""
+    if theirs == mine:
+        return []
+    if not isinstance(theirs, dict) or not isinstance(mine, dict):
+        return [f"{name}: {theirs!r} (existing results) vs {mine!r} (this run){refs}"]
+    out = []
+    for key in sorted(set(theirs) | set(mine)):
+        if isinstance(theirs.get(key), dict) and isinstance(mine.get(key), dict):
+            out.extend(line + refs for line in _runtime_differences(f"{name}.{key}", theirs[key], mine[key]))
+        elif theirs.get(key) != mine.get(key):
+            out.append(f"{name}.{key}: {theirs.get(key)!r} (existing results) vs {mine.get(key)!r} (this run){refs}")
+    return out
 
 
 # What `stored_actual` gives for an issue day after the frame's last day: nothing to compare a stored `actual` with.
@@ -266,6 +309,20 @@ class Manifest:
     # With `engine="check"`, that run's sample of fits also run on the model path (`EngineCounts.check_dict`): {"fits",
     # "max_abs", "max_rel", "other_choice"}; None (and no key) otherwise. Never compared.
     engine_check: Optional[Dict[str, Any]] = None
+    # A `PooledModel`'s zone: {"zones", "over", "zone_feature", "missing", "data": {other zone: its data_columns_hash}}; None (and
+    # no key) otherwise. Compared on resume.
+    pooled: Optional[Dict[str, Any]] = None
+    # A carded family's card (`models._cards.ModelCard.record()` with "verdicts", the contamination verdict of each window);
+    # None (and no key) for a core model. Provenance: never compared.
+    card: Optional[Dict[str, Any]] = None
+    # A carded family's {"packages": {distribution: version or "version@commit"}, **its `_runtime_fields()`}, and its weights
+    # {"ref", "files": {file: sha256}, "reference"}; None (and no key) for a core model or a family without weights. Compared on
+    # resume: every runtime entry, and the weights' file hashes.
+    runtime: Optional[Dict[str, Any]] = None
+    weights: Optional[Dict[str, Any]] = None
+    # Every set of weight file hashes ({file: sha256}) the file's forecasts were made with, once there are two or more (a resume
+    # over other weights, allowed); None (and no key) while there is one. Provenance: never compared, and a resume warns.
+    weights_history: Optional[List[Dict[str, str]]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -274,6 +331,9 @@ class Manifest:
             if name in skip:
                 continue
             mine, theirs = getattr(self, name), getattr(existing, name)
+            if name in ("runtime", "weights"):
+                out.extend(_runtime_differences(name, theirs, mine))
+                continue
             if name == "training_cut":
                 mine, theirs = _cut_rule(mine), _cut_rule(theirs)
             if mine != theirs:
@@ -326,6 +386,11 @@ class Manifest:
             del out["engine"]
         if out["engine_check"] is None:  # no engine="check"
             del out["engine_check"]
+        if out["pooled"] is None:  # fitted on one zone's rows
+            del out["pooled"]
+        for name in ("card", "runtime", "weights", "weights_history"):  # a core model, or one set of weights
+            if out[name] is None:
+                del out[name]
         return out
 
     @classmethod
@@ -463,6 +528,17 @@ def _package_version() -> str:
             return "unknown"
 
 
+def _block_params(model: Any) -> Dict[str, bool]:
+    """`{"block_predict": ...}` for a model whose class defines `_predict_block`: whether its refit units predict their blocks
+    in one call (`models._worker.block_calls`), so that a resume refuses a switch, since a call of a block and one row at a time
+    needn't agree to the bit. Nothing for any other model, whose manifest stays as it was."""
+    if getattr(type(model), "_predict_block", None) is None:
+        return {}
+    from ..models._worker import block_calls  # the models import this module
+
+    return {"block_predict": block_calls(model)}
+
+
 def build_manifest(
     *,
     model: Any,
@@ -499,7 +575,8 @@ def build_manifest(
     `model_params` includes `scaler` alongside the model's own `_model_kwargs`: it changes the scale a
     model fits and predicts in just as much as a hyperparameter would, but `BaseModel` keeps it out of
     `_model_kwargs` (passed to workers separately, see `base.py`) so a subclass overriding `_model_kwargs`
-    can't accidentally drop it.
+    can't accidentally drop it. For the same reason a model whose class defines `_predict_block` records
+    `block_predict`, whether its units predict their blocks in one call (`_block_params`).
 
     Only rows up to `test_end` are hashed: no forecast in `[test_start, test_end]` ever reads a later row,
     so data appended after `test_end` between runs - e.g. a source's own fetch window catching up a little
@@ -528,6 +605,7 @@ def build_manifest(
     if windows is not None:
         through = (date.fromisoformat(test_end) + timedelta(days=horizon)).isoformat()
         actuals = {"through": through, "hash": hashes.of_columns(through, [target])}
+    carded = manifest_fields(model, window_starts(windows, test_start))  # nothing for a core model
     return Manifest(
         model_class=type(model).__name__,
         predictors=sorted(set(used_columns) - {target}),
@@ -536,7 +614,11 @@ def build_manifest(
         horizon=horizon,
         freq=freq,
         training_window=model.training_window,
-        model_params={"scaler": getattr(model, "scaler", "standard"), **dict(model._model_kwargs)},
+        model_params={
+            "scaler": getattr(model, "scaler", "standard"),
+            **dict(model._model_kwargs),
+            **_block_params(model),
+        },
         data_columns_hash=hashes.of_columns(test_end, used_columns),
         data_timezone=zone_name(data.index.tz) or str(data.index.tz),
         information_set=information_set.to_dict() if information_set is not None else None,
@@ -563,6 +645,8 @@ def build_manifest(
         kernels=kernels,
         record_schema=RECORD_SCHEMA,
         fit_path=fit_path,
+        pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
+        **carded,
     )
 
 
@@ -785,6 +869,7 @@ def check_and_write(
         if check_stored is not None:
             check_stored()
         manifest.kernels = _kernels_on_file(existing, manifest, model_name, path, has_existing_results)
+        manifest.weights_history = _weights_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.created_at = existing.created_at  # keep the first run's provenance
         manifest.skipped = existing.skipped  # until this run finishes and says otherwise: it may not
         manifest.engine = existing.engine  # the same: until this run's fits from shared statistics are counted
@@ -848,6 +933,29 @@ def _kernels_on_file(
             stacklevel=5,
         )
     return used[0] if len(used) == 1 else used
+
+
+def _weights_on_file(
+    existing: Manifest, manifest: Manifest, model_name: str, path: Path, has_existing_results: bool
+) -> Optional[List[Dict[str, str]]]:
+    """What the manifest records as `weights_history` after this run: every set of weight file hashes the file's forecasts
+    were made with, in the order first used, once there are two (a resume that `allow_manifest_mismatch` let in over other
+    weights); None while there is one. As for the kernels, a resume warns every time the file mixes them."""
+    mine = None if manifest.weights is None else manifest.weights.get("files")
+    if not has_existing_results or mine is None:
+        return None
+    stored = list(existing.weights_history or ([existing.weights["files"]] if existing.weights else []))
+    used = stored if mine in stored else [*stored, mine]
+    if len(used) < 2:
+        return None
+    warnings.warn(
+        f"{model_name}: the results in {path.parent} hold forecasts made with {len(used)} sets of weights (their manifest "
+        "records each in weights_history), which a resume with allow_manifest_mismatch=True let in. Use a new save_dir for "
+        "results of one.",
+        UserWarning,
+        stacklevel=5,
+    )
+    return used
 
 
 def unrecorded_masks(existing: Manifest, manifest: Manifest, has_existing_results: bool) -> List[str]:

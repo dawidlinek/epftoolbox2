@@ -66,6 +66,80 @@ def no_kept_tables():
     _stats._ESTIMATOR_CHECKS.clear()
 
 
+@pytest.fixture(autouse=True)
+def no_kept_hashes():
+    """Start every test with no weight file hashes kept (`models._weights._HASHES`, kept per process by path, inode, size and times):
+    a worker reused for another test must hash its files itself."""
+    from epftoolbox2.models import _weights
+
+    _weights._HASHES.clear()
+
+
+class NetworkAttempts:
+    """The attempts `no_network` refused, in this process and in every process forked from it: each is a line appended to
+    `log`, so a worker's attempt reaches the test even when the worker caught the error. Iterates over (what, detail)."""
+
+    def __init__(self, log):
+        self.log = log
+        self.log.write_text("")
+
+    def add(self, what: str, detail) -> None:
+        line = f"{what}\t{detail!r}\t{os.getpid()}\n".encode()
+        handle = os.open(self.log, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+        try:
+            os.write(handle, line)  # one write in append mode: lines of several processes don't interleave
+        finally:
+            os.close(handle)
+
+    def read(self):
+        return [tuple(line.split("\t")[:2]) for line in self.log.read_text().splitlines()]
+
+    def clear(self) -> None:
+        self.log.write_text("")
+
+    def __iter__(self):
+        return iter(self.read())
+
+    def __len__(self) -> int:
+        return len(self.read())
+
+    def __eq__(self, other) -> bool:
+        return self.read() == list(other)
+
+
+@pytest.fixture
+def no_network(monkeypatch, tmp_path_factory):
+    """Fail the test on any attempt to reach a network: `connect`, `connect_ex`, `sendto` or `sendmsg` on a socket that isn't
+    a Unix one (a process pool's own sockets are), `socket.create_connection`, or a name or address lookup (`getaddrinfo`,
+    `gethostbyname`, `gethostbyname_ex`, `gethostbyaddr`, `getnameinfo`). Each attempt raises OSError and is logged to a file
+    (`NetworkAttempts`), and the test fails at teardown if there was one, also when the code under test caught the error and
+    when it was made in a forked worker, which inherits the guard. Yields the attempts (a test of the guard clears them)."""
+    import socket
+
+    attempts = NetworkAttempts(tmp_path_factory.mktemp("network") / "attempts.log")
+    real = {name: getattr(socket.socket, name) for name in ("connect", "connect_ex", "sendto", "sendmsg")}
+
+    def refuse(what, detail):
+        attempts.add(what, detail)
+        raise OSError(f"network access in a test that forbids it: {what} {detail!r}")
+
+    def guarded(name):
+        def call(self, *args, **kwargs):
+            if self.family == socket.AF_UNIX:
+                return real[name](self, *args, **kwargs)
+            return refuse(name, args[-1] if name in ("sendto", "sendmsg") and args else (args[0] if args else None))
+
+        return call
+
+    for name in real:
+        monkeypatch.setattr(socket.socket, name, guarded(name))
+    monkeypatch.setattr(socket, "create_connection", lambda address, *a, **k: refuse("create_connection", address))
+    for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo"):
+        monkeypatch.setattr(socket, name, lambda host, *a, _name=name, **k: refuse(_name, host))
+    yield attempts
+    assert not attempts.read(), f"the test reached for the network: {attempts.read()}"
+
+
 @pytest.fixture
 def keyless_live_dir(tmp_path, monkeypatch):
     """The directory a live test runs in, for an example whose sources need no key (`examples/lear_lago.py`: the benchmark

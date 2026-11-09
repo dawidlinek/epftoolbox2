@@ -1524,6 +1524,8 @@ _VALIDATORS = [
     "PlausibilityValidator",
 ]
 _MODELS = ["OLSModel", "LassoCVModel", "RidgeModel", "LEARModel", "NaiveModel"]
+# Not offered: `PooledModel` (registered in `COMPONENT_REGISTRY`, saved and loaded from YAML) fits over the frames of
+# `ModelPipeline.run(data={zone: frame})`, and the wizard builds and runs a pipeline on one CSV.
 _EVALUATORS = [
     "MAEEvaluator",
     "RMSEEvaluator",

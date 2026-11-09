@@ -62,6 +62,7 @@ from ._calendar import (
     REFIT_AUTO,
     REFIT_EPOCH,
     anchors_of_rules,
+    block_days,
     block_rule,
     check_binary_mask,
     check_issue_days_in,
@@ -97,9 +98,11 @@ from ._worker import (
     _pool_init,
     _run_block,
     _run_day,
+    block_calls,
     issue_row,
     matching_digest,
     matching_rows,
+    pool_native_threads,
     skip_record,
     training_row_days,
     training_rows,
@@ -114,6 +117,7 @@ from ..information_set import (
     parse_predictor,
     rule_dict,
 )
+from ._cards import ModelCard, Problem, card_problems, run_provenance
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
@@ -396,6 +400,24 @@ class _RunState:
             self.store.close()
 
 
+def _predicts_blocks(model: "BaseModel") -> bool:
+    """Whether a model whose class defines `_predict_block` predicts each refit unit's block in one call (`_worker.block_calls`:
+    with `refit`, `block_predict` True and `_predict_block` defined where `_predict_fitted` is). What `verify` reads as
+    `_predicts_together` (`BaseModel.__init_subclass__`)."""
+    return block_calls(model)
+
+
+def _block_co_batch_items(model: "BaseModel", run_day: Any) -> List[datetime.date]:
+    """The other issue days of `run_day`'s block, whose rows the call that predicts `run_day`'s forecasts holds whatever the
+    run has (`_worker._fit_unit`), in date order: the block of the coarsest member's rule (`_refit_block`), which holds every
+    member's under `"auto"`. Empty without a block call (`refit=None`, `block_predict=False`). `verify`'s co-batch check reads
+    it as `_co_batch_items` (`BaseModel.__init_subclass__`)."""
+    if not _predicts_blocks(model):
+        return []
+    day = pd.Timestamp(run_day).date()
+    return [other for other in block_days(day, model._refit_block) if other != day]
+
+
 class BaseModel(ABC):
     # Parameters a saved pipeline writes only when not at these values (`ModelPipeline._serialize_component`), so files saved
     # before they existed don't move. A subclass adds its own.
@@ -403,6 +425,56 @@ class BaseModel(ABC):
     # True for a model that fits nothing and forecasts a column's value on the issue row (`NaiveModel`): its tasks read that row
     # alone (`_worker._row_value`), with no training rows, scaler or fit.
     _fits_nothing: bool = False
+    # The card of a family whose fit needs an extra or weights (`models._cards.ModelCard`: licence, corpus, runtime packages,
+    # weights): the pre-flight checks it before any model of a run fits, and the manifest and `report.provenance()` record it.
+    # None for every core model, whose manifests don't change. A class with sizes lists each one's in `_card_variants`.
+    _card: Optional[ModelCard] = None
+    # False on a family the engine must never take, whatever methods it defines: `_engine_capable` reads it first.
+    _engine_ok: bool = True
+
+    @property
+    def card(self) -> Optional[ModelCard]:
+        """The model's card (read only): licence, corpus, runtime packages and weights; None for a core model."""
+        return self._card
+
+    def _preflight(self, seen: Optional[Dict] = None) -> List[Problem]:
+        """What this model lacks to run, checked before any model of a run fits (`models._cards.preflight`, which raises one
+        error naming every problem of every model): its card's extra, the runtime packages within the card's pins, and its
+        weights, resolved from the cache or its `weights` path and hashed. Empty for a model without a card. `seen` keeps what
+        one pre-flight found for the models before this one (an extra, a version, a weights file)."""
+        return card_problems(self, seen) if self._card is not None else []
+
+    def _runtime_fields(self) -> Dict[str, Any]:
+        """The settings of a carded family that change its numbers, recorded in the manifest's `runtime` next to the card's
+        package versions and compared on resume: device type, dtype, `tf32`, `threads_per_fit`, `stack`, `pad_to`, as the
+        family has them. Empty here; a core model has no `runtime` at all."""
+        return {}
+
+    # A class may define `_predict_block(fitted, rows) -> (predictions, coefficients per row)`: from the fit of a refit unit
+    # (`_fit_model`), the forecasts of the standardised rows `rows` (n, columns) in one call, a prediction in target units of the
+    # scaler and a coefficient list for each row, in their order. Then `_worker._fit_unit` hands it the issue rows of every day
+    # of the unit's block that the frame has with finite inputs, not only the run's, padded to the rule's nominal length
+    # (`_calendar.nominal_block_length`) with copies of the first, and takes each forecast from its own row, so a call has one
+    # shape and holds the same rows alone, in the full block, after a resume and whatever `test_start`. An in-context model
+    # (TabPFN) pays for its context once per call, not once per row. Each row's prediction must not depend on the other rows of
+    # its call; `verify`'s co-batch check runs the probe over them. Such a class gets `block_predict = True` (False predicts
+    # one row at a time through `_predict_fitted`, as every other model), `_predicts_together` and `_co_batch_items(run_day)`
+    # (the other days of its block) unless it defines them (`__init_subclass__`). The model in the parent decides
+    # (`_worker.block_calls`, handed to the workers in `config["block_predict"]` and recorded in the manifest's `model_params`),
+    # and only where `_predict_block` is defined in the class that defines `_predict_fitted`: a subclass with another estimator
+    # that inherits `_predict_block` predicts one row at a time. BaseModel defines none of them, and no core model has one.
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if getattr(cls, "_predict_block", None) is None:
+            return
+        for name, default in (
+            ("block_predict", True),
+            ("_predicts_together", property(_predicts_blocks)),
+            ("_co_batch_items", _block_co_batch_items),
+        ):
+            if not hasattr(cls, name):
+                setattr(cls, name, default)
 
     def __init__(
         self,
@@ -525,12 +597,14 @@ class BaseModel(ABC):
         with its parent's estimator), it fits something (not `NaiveModel`), its plan (`plan`, of a predictor function) has no
         `train_on="matching"` list, the run isn't `forecast_only`, and its class keeps BaseModel's `run`, `_execute`,
         `_run_tasks` and `_build_hour_arrays`, which a group does in their place, and the instance sets none of them itself.
-        OLS, Ridge, LassoCV and LEAR are."""
+        OLS, Ridge, LassoCV and LEAR are. A class with `_engine_ok = False` (every carded family) never is, read first, so a
+        `_fit_stats` it gains later can't make it capable by accident."""
         owners = {
             next((klass for klass in type(self).__mro__ if name in vars(klass)), None) for name in _ENGINE_METHODS
         }
         return (
-            len(owners) == 1
+            self._engine_ok
+            and len(owners) == 1
             and None not in owners
             and BaseModel not in owners
             and all(self._owner_of(name) is BaseModel and name not in vars(self) for name in _ENGINE_REPLACES)
@@ -1112,6 +1186,7 @@ class BaseModel(ABC):
             horizons=None if every_horizon(state.horizon, state.horizons) else state.horizons,
             issue_days=state.weekdays,
             vintages=state.vintages,
+            provenance=run_provenance(self, state.manifest, windows, state.test_start),
         )
         if store:
             warn_off_the_clock({self.name: ref}, stacklevel=3)
@@ -1415,18 +1490,21 @@ class BaseModel(ABC):
             n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
 
         mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
-        with ProcessPoolExecutor(
-            max_workers=n_processes,
-            mp_context=mp_context,
-            initializer=_pool_init,
-            initargs=(
-                hour_arrays,
-                expanded_preds,
-                config,
-                type(self),
-                self._model_kwargs,
-            ),
-        ) as pool:
+        with (
+            pool_native_threads(),  # the workers inherit one OpenBLAS thread, so they start none
+            ProcessPoolExecutor(
+                max_workers=n_processes,
+                mp_context=mp_context,
+                initializer=_pool_init,
+                initargs=(
+                    hour_arrays,
+                    expanded_preds,
+                    config,
+                    type(self),
+                    self._model_kwargs,
+                ),
+            ) as pool,
+        ):
             run_job = _run_day if self.refit is None else _run_block
             try:
                 futures = {pool.submit(run_job, day_tasks): day for day, day_tasks in jobs.items()}
@@ -1478,6 +1556,10 @@ class BaseModel(ABC):
             "threads_per_process": threads_per_process,
             "freq": self._freq,
         }
+        if block_calls(self):
+            # This model's units predict their blocks in one call (`_worker._fit_unit`): decided here, on the model itself, since
+            # a worker's model is rebuilt with refit=None from `_model_kwargs`, which may leave `block_predict` out.
+            config["block_predict"] = True
         if plan is not None:
             config["task_lists"] = plan.assignment
             config["list_hashes"] = plan.hashes

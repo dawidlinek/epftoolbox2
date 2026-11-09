@@ -112,6 +112,19 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **Pool workers no longer start idle BLAS threads.** Limiting a forked worker to one BLAS thread started OpenBLAS's thread pool
+  again in it (OpenBLAS stops the pool before a fork and starts it when its thread count is set): one thread per CPU for numpy's
+  OpenBLAS and as many for scipy's, each spinning for about a tenth of a second before it slept, in every worker of every pool. On
+  32 CPUs that was 62 threads and 3 to 4 s of CPU per worker, and a fit at a worker's start cost 5 to 50 times its wall time in
+  CPU. Now your own process's OpenBLAS runs on one thread while a run's pools exist (from the first model to the last of
+  `ModelPipeline.run` or `verify`, and so of a `Workflow`; one pool in a model's own `run`), the workers inherit that count and
+  start no thread, and your counts come back after the last model, before ensembles, evaluators and exporters; on Windows, where
+  the workers are spawned, the thread variables are also set to 1 for that time. A 766-forecast OLS, Ridge or LEAR run at 32
+  processes took 44 to 58 core-seconds, now 6 to 9, of which 4 to 5 are your process's OpenBLAS starting its threads again,
+  once, when it gets its count back (LassoCV 63 to 79, now 30 to 32); the same on numpy 2.5. Only an OpenBLAS with its own thread
+  pool (numpy's and scipy's wheels) is held; other BLAS and OpenMP libraries start no thread in a worker and keep your settings.
+  Every forecast is bit for bit as before, and `OMP_NUM_THREADS=1` before Python starts is no longer needed to avoid the cost.
+
 - **Every `by_*()` table counts the forecasts of each model, and warns when the models of a group differ.** `by_hour()`, `by_horizon()`,
   `by_hour_horizon()`, `by_year()`, `by_year_horizon()`, `by_run_weekday_horizon()` and `by_target_weekday_horizon()` printed a metric per
   (model, group) and not how many forecasts it rests on, so a `NaiveModel(known_only=True)` benchmark at horizon 7 could show a MAE on 24
@@ -198,6 +211,42 @@ an issue day it didn't sample.
   between `control moved` and `status`, empty for every model of today: **no status or other column moves**. `co_batch_probe`
   joins `leakage_probe` in `epftoolbox2.information_set`, and `leakage_probe` and `positive_control` take `span=`. See
   [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/#rerun-and-co-batch).
+- **Several zones in one run, and `PooledModel`.** `ModelPipeline.run(data={"PL": df_pl, "FI": df_fi, ...})` runs every model once
+  per zone on that zone's frame, in its own time zone, into `save_dir/<zone>/`, and returns a `PanelReport` (one `EvaluationReport`
+  per zone, `summary()`, `forecast_counts()`, `choices()` and `availability()` with a `zone` column, `log_gain(benchmark, by=...)` and
+  `cells_lost(benchmark)` with every model scored on the same cells and keys by default (`common=True`), `PanelReport.concat` for
+  several targets); the run writes `save_dir/zone_run.json`, which alone makes `report(save_dir)` (and `epf report`) one of zones,
+  refusing a zone whose folder is gone, and `verify` takes the dict too, each zone with its own positive control. A plain model in such a run is its run on the zone's frame alone, bit for bit. `issue_timezone="data"`
+  issues each zone at the issue time on its own clock (on one frame, the frame's zone written out). `PooledModel(model, over=("zone",),
+  zone_feature="onehot", missing="raise")` fits one model over every zone, each zone's rows standardised within its own fit, and
+  judges every zone's training rows as of the earliest issue of the day; each zone's manifest records `pooled`, compared on resume.
+  **No existing number moves**: a run of one frame, its records, manifests and tables are as before, and so are the goldens. See
+  [Several Zones](/epftoolbox2/model-pipeline/zones/) and [PooledModel](/epftoolbox2/models/pooled/).
+- **A model can predict a refit block in one call.** A model class that defines `_predict_block(fitted, rows)` (a prediction and a
+  coefficient list per row) has each refit unit fitted once and predicted in one call: the issue rows of every day of the unit's block
+  that the frame has with finite inputs, whichever days the run forecasts, padded to the rule's nominal length (7 rows for `"7D"`, 31
+  for `"1MS"`) with copies of the first, each forecast taken from its own row. A forecast is then the same to the bit alone, in its
+  block, from any `test_start` and after a resume. It is for the in-context models to come, whose call costs as much for one row as
+  for a week of them; `block_predict=False` predicts one row at a time, and the manifest records which. Such a class gets
+  `_predicts_together` and `_co_batch_items` (the other days of the block), so `verify`'s co-batch check runs on it by default,
+  and that check also runs the issue day on the frame cut after its date and requires the same forecasts to the bit
+  (`issue_day_cut`, `CutResult` in `epftoolbox2.information_set`): a forecast that depends on which later days its call holds
+  is a `leak`. **No model of today defines it, and none of their numbers moves.** See [Extending](/epftoolbox2/reference/extending/#predicting-a-refit-block-in-one-call).
+- **Model cards, weights and the pre-flight, for the families that need an extra or pretrained weights.** A family declares a
+  `ModelCard` (licence, commercial use, revenue cap, attribution, corpus and its end, release, runtime packages with their pins, weight
+  files with their sha256). `ModelPipeline.run`, each `Workflow` array task (before its data pipeline), `epf run` and `verify` (each
+  model verified, before any probe) check every model first and raise one error naming every missing extra, runtime package outside its pin and missing or changed weight file
+  (`MissingWeightsError` or `MissingExtraError`; `MissingExtraError` takes an optional message and pickles with it). Weights never
+  download during a run: `epf weights fetch` downloads a card's files into `EPFTOOLBOX2_WEIGHTS_DIR` (default
+  `~/.cache/epftoolbox2/weights`), verifies their sha256 and needs `--accept <licence>` for a non-commercial or revenue-capped
+  licence; `epf weights list` and `epf weights verify` show and re-hash the cache. A carded model's manifest adds `card` (provenance)
+  and `runtime` and `weights` (compared: another runtime version, commit, device type, thread count or weight hash refuses a resume).
+  `report.provenance()` lists each carded model's licence, weights, runtime and the contamination verdict of each window (`clean`,
+  `clean (released before)`, `possibly contaminated`, or the card's own), and the terminal, CSV (`<stem>.provenance.csv` next to its file) and Excel
+  ("Provenance" sheet) exporters print it. `epftoolbox2.verify()` adds a table of extras and of the weights in the cache.
+  `BaseModel._engine_ok = False` keeps a family out of the engine whatever it defines. **Nothing of the core models moves**: no
+  shipped model has a card, so their records, manifests, tables and exporter files are as before. See
+  [Licences and Weights](/epftoolbox2/models/licences-and-weights/).
 - **Scoring by period: hourly and block aggregates, the shape within the hour, normalised MAEs, breakdowns by a data column.**
   `report.aggregate("1h", agg="mean")` turns 15-minute results into hourly ones (an hour counts with all four quarter-hours finite;
   dropped hours are `incomplete_hour` in its `forecast_counts()`), and `aggregate("1D", agg="peak")` / `"offpeak"` scores the mean over
