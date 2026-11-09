@@ -17,6 +17,8 @@ from typing import (
     Optional,
 )
 
+import contextlib
+import contextvars
 import datetime
 import gc
 import inspect
@@ -34,7 +36,7 @@ from ..scalers.standard import StandardScaler
 from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore, StoreWriter, open_store
 from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
-from ..results.availability import LISTING_TIMES, listing_rows, warn_about
+from ..results.availability import LISTING_TIMES, history_rows, listing_rows, warn_about
 from ..results.matching import training_day_rows, warn_about_thin
 from ..results.manifest import (
     PAST_THE_FRAME,
@@ -118,6 +120,7 @@ from ..information_set import (
     rule_dict,
 )
 from ._cards import ModelCard, Problem, card_problems, run_provenance
+from ._history import history_batches, history_spec_of
 from ._units import (
     DAY,
     PERIOD,
@@ -151,6 +154,23 @@ _FRAME_READERS = ("_load_periods", "_preprocess", "_shift_index_by_calendar_days
 
 # ProcessPoolExecutor refuses more workers than this on Windows.
 _WINDOWS_MAX_WORKERS = 61
+
+# How many quiet blocks (`quiet_shortfall`) the current thread or task is in: a run there reports no shortfall of forecasts, as
+# `verify`'s runs on a cut frame skip its later days by design. A depth, not a flag, so blocks may end in any order; per context,
+# so another thread's runs still report theirs.
+_QUIET_SHORTFALL: contextvars.ContextVar[int] = contextvars.ContextVar("epftoolbox2_quiet_shortfall", default=0)
+
+
+@contextlib.contextmanager
+def quiet_shortfall():
+    """Runs inside report no planned forecasts not produced (`BaseModel._report_counts`); one that produces nothing still
+    raises. For `verify`'s runs on a cut frame (`information_set.target_day_cut`), and only in this thread or task."""
+    _QUIET_SHORTFALL.set(_QUIET_SHORTFALL.get() + 1)
+    try:
+        yield
+    finally:
+        _QUIET_SHORTFALL.set(_QUIET_SHORTFALL.get() - 1)
+
 
 # Whether the models of one run share what they would each compute alike (step 5k): the frame contract of each (freq, read days,
 # target, horizon) once per `ModelPipeline.run` (`_RunChecks`), and on one set of period frames each column's binary-mask
@@ -1321,6 +1341,11 @@ class BaseModel(ABC):
         if self._known_only and rules is not None:
             # Which forecasts exist: the information set isn't compared, but its rules and issue time decide these.
             cut["known_only"] = self._published_by(rules, freq)
+        spec = history_spec_of(self, target)
+        if spec is not None and rules is not None:
+            # Where a sequence model's series are cut (`models._history`): every series' rule, the issue time and its zone decide
+            # what each context holds, whatever the newest target.
+            cut["history"] = self._history_rules_of(spec, rules, freq)
         if self.newest_target == "d-1":
             return cut
         rule = rules._resolve_for(target, _STEP_MINUTES[freq]).rule
@@ -1332,6 +1357,17 @@ class BaseModel(ABC):
             "issue_time": rules.issue_time,
             "issue_timezone": rules.issue_timezone,
         }
+
+    @staticmethod
+    def _history_rules_of(spec: Any, rules: "InformationSet", freq: str) -> Dict[str, Any]:
+        """What decides where a sequence model's series are cut: each series' resolved rule (without the note and the class, which
+        decide nothing, as `target_rule`; None for one without a rule, which no run gets past), the issue time and its zone."""
+        step = _STEP_MINUTES[freq]
+        resolved = {}
+        for name in spec.names:
+            rule = rules._resolve_for(name, step).rule
+            resolved[name] = None if rule is None else rule_dict(rule, ("note", "vintage"))
+        return {"rules": resolved, "issue_time": rules.issue_time, "issue_timezone": rules.issue_timezone}
 
     def _newest_of(self, period: int, day: Any) -> Any:
         """The newest target, relative to each issue day, of these day ids of a run: -1 with `newest_target="d-1"`. With
@@ -1710,6 +1746,8 @@ class BaseModel(ABC):
         reasons = "; ".join(f"{reason} x{n} (e.g. {examples.get(reason, '?')})" for reason, n in skipped.items())
         if produced == 0 and planned > 0:
             raise RuntimeError(f"{self.name}: no forecasts produced ({planned} planned). Skipped: {reasons}")
+        if _QUIET_SHORTFALL.get() > 0:  # a cut frame's run (`quiet_shortfall`): its later days have no data by design
+            return
         logger.warning(f"{self.name}: produced {produced} of {planned} planned forecasts. Skipped: {reasons}")
 
     def _set_freq(self, freq: str) -> None:
@@ -1836,6 +1874,9 @@ class BaseModel(ABC):
                 if windows is not None:
                     self._window_listings = self._plan_window_listings(plan, target, windows)
             plan.release()
+            self._check_history(
+                data, target, horizons, freq, information_set, test_start, test_end, availability, windows, weekdays
+            )
             return expanded
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest, shared)
         expanded = fixed
@@ -1915,7 +1956,69 @@ class BaseModel(ABC):
                         information_set.late_uses, checked, target, freq, data.index, start, end, listed, window
                     )
                 self._window_listings[name] = listing_rows(uses)
+        self._check_history(
+            data, target, horizons, freq, information_set, test_start, test_end, availability, windows, weekdays
+        )
         return expanded
+
+    def _check_history(
+        self,
+        data: pd.DataFrame,
+        target: str,
+        horizons: Sequence[int],
+        freq: str,
+        information_set: Optional["InformationSet"],
+        test_start: Optional[str],
+        test_end: Optional[str],
+        availability: str,
+        windows: Optional[RunWindows],
+        weekdays: Optional[Sequence[int]],
+    ) -> None:
+        """For a model that reads history (`models._history.reads_history`), after its lists' checks: its series are inputs it
+        reads (`_used_predictors`: the manifest hashes them, `report.vintages()` lists them, `verify` perturbs them), and with
+        an information set a series late on an issue day of the run (a known-ahead one not known through the target day, a past
+        one not as far as the target's context) is refused at availability "raise" and listed at "warn", one row per series
+        (`results.availability.history_rows`), from the accessor's cuts alone. A spec whose `newest_target` isn't the model's
+        is refused: `verify` holds the model to its own. Nothing for any other model."""
+        spec = history_spec_of(self, target)
+        if spec is None:
+            return
+        if spec.newest_target != self.newest_target:
+            raise ValueError(
+                f"{self.name}: its history is cut with newest_target={spec.newest_target!r} and the model has "
+                f"newest_target={self.newest_target!r}: `verify` holds it to the model's, so `_history_spec` must give the "
+                "model's newest_target"
+            )
+        self._used_predictors = list(dict.fromkeys([*self._used_predictors, *spec.past, *spec.known_ahead]))
+        if information_set is None or availability == "none" or test_start is None or test_end is None:
+            return
+        cuts = information_set.in_data_zone(data.index)
+
+        def batches(start: str, end: str) -> List[Any]:
+            days = [day for day in _test_days(start, end) if weekdays is None or day.weekday() in weekdays]
+            return list(history_batches(spec, data, days, cuts, freq, horizons, arrays=False).values())
+
+        if windows is None:
+            found = batches(test_start, test_end)
+            by_window = {}
+        else:
+            by_window = {name: batches(start, end) for name, (start, end) in windows.periods}
+            found = [batch for window in by_window.values() for batch in window]
+        if availability == "raise":
+            late = {name: days for batch in found for name, days in batch.late().items()}
+            if late:
+                shown = "; ".join(
+                    f"{name} on {len(days)} issue day(s), e.g. {days[0]}" for name, days in sorted(late.items())
+                )
+                raise InformationSetError(
+                    f"{self.name}: series not known at the issue time as far as its forecasts read them: {shown}. A known-ahead "
+                    "series must be known through the end of the target day, a past one as far as the target's context (or "
+                    'NaN after its newest step, with a backend that takes missing values). availability="warn" lists them.'
+                )
+            return
+        self._availability_listing = [*self._availability_listing, *history_rows(found)]
+        for name, window in by_window.items():
+            self._window_listings[name] = [*self._window_listings.get(name, []), *history_rows(window)]
 
     def _checked_lists(self, expanded: Dict[Tuple[int, int], List[str]]) -> Dict[Tuple[int, int], List[str]]:
         """What the frame's and the information set's checks read of the expanded lists: a pooled unit's without the virtual

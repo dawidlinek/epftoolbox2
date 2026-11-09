@@ -1,8 +1,11 @@
 from typing import List
+
+import numpy as np
 from rich.console import Console
 from rich.table import Table
 
 from .base import Exporter
+from ..results.availability import HISTORY_COLUMNS, is_flagged
 from ..results.report import EvaluationReport
 from ..results.vintages import is_revised_class
 
@@ -36,17 +39,40 @@ class TerminalExporter(Exporter):
                 console.print(self._df_to_table(fn(report)))
 
     def _print_availability(self, console: Console, listing) -> None:
-        """What the run can't vouch for comes first, whatever `show` asks for, and only if there is something to list."""
+        """What the run can't vouch for comes first, whatever `show` asks for, and only if there is something to list: rows late
+        or without a rule (`results.availability.is_flagged`). A sequence model's series read in time follow in a table of
+        their own, with how far each is read (`newest`)."""
+        flagged = np.array([is_flagged(row) for row in listing.to_dict("records")], dtype=bool)
+        self._print_flagged(console, listing[flagged])
+        self._print_series(console, listing[~flagged])
+
+    def _print_flagged(self, console: Console, listing) -> None:
         if listing.empty:
             return
         console.print("\n[bold]Availability: inputs not known to be out at the issue time[/bold]")
         shown = listing.drop(columns="rule")  # `known` says when; the rule itself is in `report.availability()`
-        shown = shown.loc[:, (shown != "").any()]  # `list` and `note` only where they say something
+        shown = shown.loc[
+            :, (shown != "").any()
+        ]  # `list`, `note`, `newest` and `vintage` only where they say something
         if (shown["role"] == "predictor").all():
             shown = shown.drop(columns="role")
         table = Table()
         for col in shown.columns:
             table.add_column(str(col), overflow="fold")  # a predictor's name is no use cut short
+        for _, row in shown.iterrows():
+            table.add_row(*[str(value) for value in row])
+        console.print(table)
+
+    def _print_series(self, console: Console, series) -> None:
+        """The series sequence models read in time (`models._history`): to which step, relative to the issue day, and from what
+        archive; nothing for a run without such a model."""
+        if series.empty:
+            return
+        console.print("\n[bold]History: series read to the newest step known at the issue time[/bold]")
+        shown = series[["model", "predictor", "role", "horizons", *HISTORY_COLUMNS]]
+        table = Table()
+        for col in shown.columns:
+            table.add_column(str(col), overflow="fold")
         for _, row in shown.iterrows():
             table.add_row(*[str(value) for value in row])
         console.print(table)

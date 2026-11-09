@@ -5,6 +5,10 @@ One row says "these periods at these horizons", and both are exact: a predictor 
 gets one row per distinct set of periods, so the rows of a key add up to exactly its uses. A manifest stores the rows, so a
 report built later (`ModelPipeline.report` after array jobs) shows what the run listed. `merge_listings` keeps them when a
 narrower run into the same directory rewrites the manifest: the records outside its test period stay in the file.
+
+A sequence model (`models._history`) reads series, not lagged columns: it has one row per series it reads (`history_rows`),
+late or not, with the newest step known at the issue time and the series' vintage class in two more columns, `newest` and
+`vintage`, which a frame has only when such a row is in it. Only late rows and rows without a rule are warned about.
 """
 
 from __future__ import annotations
@@ -34,11 +38,30 @@ NO_RULE = "no rule"
 # lists other periods than a fresh run would: such a listing is replaced on resume (`manifest._keep_listing`) and read with
 # a warning (`read_listing`).
 LISTING_TIMES = "instants"
+# A sequence model's series (`models._history`), by role: the target's context, a past covariate, a known-ahead one; and the
+# status of a series read in time, which a listing of a model of predictors never has.
+ROLE_HISTORY_TARGET = "target"
+ROLE_PAST = "past"
+ROLE_KNOWN_AHEAD = "known_ahead"
+ON_TIME = "ok"
 
 # The columns of `EvaluationReport.availability()`.
 COLUMNS = ["model", "predictor", "role", "status", "list", "periods", "horizons", "rule", "known", "issued", "note"]
+# What a sequence model's rows add (`history_rows`), shown only when a listing has such a row.
+HISTORY_COLUMNS = ["newest", "vintage"]
+# The range of a series' newest known steps under its `newest` label, wall-clock minutes after the issue day's midnight: kept in
+# a manifest's rows, so a merged listing spans both runs' days.
+_NEWEST_RANGE = ("newest_from", "newest_to")
 
-_ROLE_ORDER = {ROLE_PREDICTOR: 0, ROLE_VALUE: 1, ROLE_PUBLISHED: 2, ROLE_TARGET: 3}
+_ROLE_ORDER = {
+    ROLE_PREDICTOR: 0,
+    ROLE_VALUE: 1,
+    ROLE_PUBLISHED: 2,
+    ROLE_TARGET: 3,
+    ROLE_HISTORY_TARGET: 4,
+    ROLE_PAST: 5,
+    ROLE_KNOWN_AHEAD: 6,
+}
 _SHOWN_PER_MODEL = 5  # how many rows of a model a warning spells out
 
 _Key = Tuple[str, str, str, str]  # (predictor, role, status, list)
@@ -55,15 +78,98 @@ def listing_rows(uses: Iterable[Violation], list_hash: str = "") -> List[Dict[st
     return _rows(cells)
 
 
+def history_rows(batches: Iterable[Any], list_hash: str = "") -> List[Dict[str, Any]]:
+    """The rows of a sequence model's series, from its `models._history.HistoryBatch`es over a run's issue days (one per horizon,
+    or several of a horizon, such as a validation and a test window's): one row per series and status with the horizons it has
+    there, not one per lagged step. A series is "late" at a horizon where it is late on some issue day of any batch (a
+    known-ahead series not known through the end of the target day, a past one not known as far as the target's context and
+    not NaN after its newest step), with `known` and `issued` of the issue day it is latest on, as a late predictor's; else
+    "ok". `newest` is its newest step known at the issue time with every one before it (the target's: its cut), relative to the
+    issue day D (`D 23:00`, or the range over the issue days and horizons of the row), and `vintage` the class of its rule.
+    Every period of the day reads each series."""
+    found: Dict[Tuple[str, str], Dict[int, Dict[str, Any]]] = {}  # (series, role) -> horizon -> what its batches say
+    infos: Dict[Tuple[str, str], Any] = {}
+    periods = 0
+    for batch in batches:
+        periods = max(periods, batch.periods_per_day)
+        items = list(batch.items)
+        for info in batch.series if items else ():
+            infos[(info.name, info.role)] = info
+            held = found.setdefault((info.name, info.role), {}).setdefault(batch.horizon, {"late": None, "newest": []})
+            held["newest"].extend(item.newest_minutes[info.name] for item in items)
+            for item in items:
+                lateness = item.late.get(info.name)
+                if lateness is not None and (held["late"] is None or _late_by(lateness) > _late_by(held["late"])):
+                    held["late"] = lateness
+    rows = []
+    for (name, role), by_horizon in found.items():
+        info = infos[(name, role)]
+        for status in (LATE, ON_TIME):
+            horizons = sorted(h for h, held in by_horizon.items() if (held["late"] is not None) == (status == LATE))
+            if not horizons:
+                continue
+            details = dict(_NOTHING_KNOWN, rule=info.rule, vintage=info.vintage)
+            if status == LATE:
+                lateness = max((by_horizon[h]["late"] for h in horizons), key=_late_by)
+                minutes = _late_by(lateness)
+                details.update(
+                    known=lateness.known_label,
+                    issued=lateness.issue_label,
+                    minutes_late=minutes if math.isfinite(minutes) else None,
+                )
+            newest = [minute for h in horizons for minute in by_horizon[h]["newest"]]
+            details.update(dict(zip(_NEWEST_RANGE, (min(newest), max(newest)))), newest=newest_label(newest))
+            rows.append(
+                {
+                    "predictor": name,
+                    "role": role,
+                    "status": status,
+                    "list": list_hash,
+                    "periods": _ranges(list(range(periods))),
+                    "horizons": _ranges(horizons),
+                    **details,
+                }
+            )
+    return sort_rows(rows)
+
+
+def _late_by(lateness: Any) -> float:
+    return float(lateness.known - lateness.issue)
+
+
+def is_flagged(row: Mapping[str, Any]) -> bool:
+    """Whether a listing's row says something is wrong (late, or without a rule): every row but a sequence model's series read
+    in time (status "ok", `history_rows`). What `warn_about` warns of and the terminal exporter lists as not known in time."""
+    return row["status"] != ON_TIME
+
+
+def newest_label(minutes: Iterable[float]) -> str:
+    """Newest known steps, wall-clock minutes after the issue day's midnight (D+1 01:00 is 1500), as a label, `D 23:00`, or
+    their range over issue days, `D-1 23:00 … D 23:00`."""
+    minutes = list(minutes)
+    lowest, highest = min(minutes), max(minutes)
+    first = _fmt_minute(lowest)
+    return first if lowest == highest else f"{first} … {_fmt_minute(highest)}"
+
+
 def merge_listings(earlier: Iterable[Mapping[str, Any]], later: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """The uses of both listings, in the same shape, whichever lists a use first."""
     cells: Dict[_Key, Dict[_Cell, Dict[str, Any]]] = {}
     for row in [*earlier, *later]:
         key = (row["predictor"], row["role"], row["status"], row["list"])
         details = {name: row[name] for name in _NOTHING_KNOWN}
+        # A sequence model's row: its label, class and the range of its newest steps.
+        details.update({name: row[name] for name in (*HISTORY_COLUMNS, *_NEWEST_RANGE) if name in row})
         for horizon in _parse_ranges(row["horizons"]):
             for period in _parse_ranges(row["periods"]):
                 _keep_latest(cells, key, (horizon, period), details)
+    # A series read in time by one run and late in another, at a horizon, is late there: its "ok" cells go into the late row's.
+    for (predictor, role, status, list_hash), held in list(cells.items()):
+        late = cells.get((predictor, role, LATE, list_hash)) if status == ON_TIME else None
+        for cell in [cell for cell in held if late is not None and cell in late]:
+            late[cell] = _with_newest(late[cell], held.pop(cell))
+        if not held:
+            del cells[(predictor, role, status, list_hash)]
     return _rows(cells)
 
 
@@ -93,8 +199,21 @@ def _lateness(details: Mapping[str, Any]) -> float:
 def _keep_latest(cells, key: _Key, cell: _Cell, details: Dict[str, Any]) -> None:
     held = cells.setdefault(key, {})
     current = held.get(cell)
-    if current is None or _lateness(details) > _lateness(current):
+    if current is None:
         held[cell] = details
+    elif _lateness(details) > _lateness(current):
+        held[cell] = _with_newest(details, current)
+    elif _NEWEST_RANGE[0] in details:
+        held[cell] = _with_newest(current, details)
+
+
+def _with_newest(details: Dict[str, Any], other: Mapping[str, Any]) -> Dict[str, Any]:
+    """`details` with the range of newest steps of both, and its label, where both have one (a sequence model's row)."""
+    if _NEWEST_RANGE[0] not in details or _NEWEST_RANGE[0] not in other:
+        return details
+    lowest = min(details[_NEWEST_RANGE[0]], other[_NEWEST_RANGE[0]])
+    highest = max(details[_NEWEST_RANGE[1]], other[_NEWEST_RANGE[1]])
+    return {**details, _NEWEST_RANGE[0]: lowest, _NEWEST_RANGE[1]: highest, "newest": newest_label([lowest, highest])}
 
 
 def _rows(cells: Dict[_Key, Dict[_Cell, Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -109,6 +228,8 @@ def _rows(cells: Dict[_Key, Dict[_Cell, Dict[str, Any]]]) -> List[Dict[str, Any]
         for periods, horizons in same_periods.items():
             uses = [held[(horizon, period)] for horizon in horizons for period in periods]
             latest = max(uses, key=_lateness)
+            for use in uses:  # a sequence model's row: the range of every use's newest steps
+                latest = _with_newest(latest, use)
             rows.append(
                 {
                     "predictor": predictor,
@@ -143,14 +264,21 @@ def _parse_ranges(text: str) -> List[int]:
 
 
 def listing_frame(listings: Mapping[str, Optional[Iterable[Mapping[str, Any]]]]) -> pd.DataFrame:
-    """The rows of every model as `EvaluationReport.availability()` shows them; no rows gives the same columns."""
+    """The rows of every model as `EvaluationReport.availability()` shows them; no rows gives the same columns. With a sequence
+    model's row (`history_rows`) the frame also has `newest` and `vintage`, empty on the other models' rows."""
     rows = [{"model": model, **row} for model, listing in listings.items() for row in listing or []]
-    return pd.DataFrame(rows, columns=COLUMNS)
+    history = any(name in row for row in rows for name in HISTORY_COLUMNS)
+    columns = COLUMNS + HISTORY_COLUMNS if history else COLUMNS
+    return pd.DataFrame(
+        [{name: "" for name in HISTORY_COLUMNS} | row for row in rows] if history else rows, columns=columns
+    )
 
 
 def warn_about(listings: Mapping[str, Optional[Iterable[Mapping[str, Any]]]], stacklevel: int = 2) -> None:
-    """One warning for all models, if any of them has something listed."""
-    by_model = {model: list(listing) for model, listing in listings.items() if listing}
+    """One warning for all models, if any of them has something late or without a rule listed (a sequence model's series read
+    in time is listed too, and isn't warned about)."""
+    flagged = {model: [row for row in listing or [] if is_flagged(row)] for model, listing in listings.items()}
+    by_model = {model: rows for model, rows in flagged.items() if rows}
     if not by_model:
         return
     lines = [
@@ -198,12 +326,20 @@ def read_listing(path: Path, window: Optional[str] = None) -> Optional[List[Dict
 
 __all__ = [
     "COLUMNS",
+    "HISTORY_COLUMNS",
     "LATE",
     "LISTING_TIMES",
     "NO_RULE",
+    "ON_TIME",
+    "ROLE_HISTORY_TARGET",
+    "ROLE_KNOWN_AHEAD",
+    "ROLE_PAST",
+    "history_rows",
+    "is_flagged",
     "listing_frame",
     "listing_rows",
     "merge_listings",
+    "newest_label",
     "read_listing",
     "warn_about",
 ]

@@ -45,7 +45,7 @@ records to the bit (see [The base's forecasts](#the-bases-forecasts-and-the-base
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `base` | model or str | Required | The model whose forecasts are corrected, or the name of a model added to the pipeline before this one. Fixed lists only (no predictor function of `ctx`); not a `ResidualModel` or a `PooledModel`; an expanding one needs `warmup=` |
+| `base` | model or str | Required | The model whose forecasts are corrected, or the name of a model added to the pipeline before this one. Fixed lists only (no predictor function of `ctx`); not a `ResidualModel`, a `PooledModel` or a model that reads series (a sequence model); an expanding one needs `warmup=` |
 | `learner` | model | Required | The model fitted on the residuals: a pooled or per-period model with `_fit_model` (`HistGBModel`), whose predictors (a list of names, `{horizon}` allowed, which may name the base's forecasts), scaler, newest target and estimator settings are used. Its own `training_window`, `refit` and `name` are not, nor saved: a warning says so where they were set to other than their class's defaults |
 | `training_window` | int or `"expanding"` | `"expanding"` | The learner's days of rows: every row with a base forecast, or the last W days. Not a list |
 | `refit` | str | `"7D"` | The learner's refit calendar (`"7D"`, Mondays; `"1D"`, every day; `"1MS"`, monthly). Required: `None` raises |

@@ -4,6 +4,9 @@ Column suffixes are relative to the row's local date D, and papers write them re
 The table shows them that way: at horizon 2, `price_d-1` is `T-3` and `x_d+2` is `T`. What a name holds comes from
 `information_set` (`parse_predictor`, `ResolvedColumn`, `_delivered_span`), the same reading the check and the probe use,
 and when it is known from the same clock.
+
+A sequence model (`models._history`) reads series instead: `series` has one row per series, with the newest step it reads,
+from the history accessor's own cut, not one per lagged step.
 """
 
 from __future__ import annotations
@@ -31,11 +34,15 @@ from ..information_set import (
     parse_predictor,
 )
 from .._date_utils import fmt_minutes
+from ..results.availability import newest_label
 from . import _contract
 from ._calendar import refit_anchor
+from ._history import HistorySpec, history_batch, history_spec_of
 from .context import TRAIN_ON_MATCHING, PredictorPlan, function_name
 
 COLUMNS = ["predictor", "target-relative", "rule", "known", "status"]
+# The table of a sequence model's series (`history_table`).
+SERIES_COLUMNS = ["series", "role", "rule", "vintage", "steps", "newest", "status"]
 _TRAINING_DAY_COLUMNS = ("smallest days", "median days", "largest days")
 _DASH = "-"
 # Names a run of slots or a list of added names spells out before it shortens them.
@@ -136,6 +143,62 @@ def predictor_table(
         label = target_relative(name, period, horizon, freq, clock, used)
         rows.append(dict(zip(COLUMNS, (name, label, rule, known, status))))
     return pd.DataFrame(rows, columns=COLUMNS)
+
+
+def history_table(
+    spec: HistorySpec,
+    data: pd.DataFrame,
+    info: Optional[InformationSet],
+    days: pd.DatetimeIndex,
+    horizon: int,
+    freq: str,
+) -> pd.DataFrame:
+    """One row per series of a sequence model's forecasts at `horizon` on the issue days `days`, from the history accessor's cuts
+    (`models._history.history_batch(arrays=False)`): its role, rule and vintage class, how many steps it reads (T, or T + S for
+    a known-ahead series, S over the days), its newest step known at the issue time relative to D (the target's: its cut; the
+    range over the days), and `ok`, `late` or `late on 3 of 10 days`. A series without a rule is `no rule`, as a predictor is,
+    and with a target without one the others can't be cut (`not cut`); without an information set every row is `no issue
+    time`."""
+
+    def blank(name: str, status: str) -> tuple:
+        return (name, spec.role_of(name), _DASH, _DASH, _DASH, _DASH, status)
+
+    if info is None:
+        return pd.DataFrame([blank(name, "no issue time") for name in spec.names], columns=SERIES_COLUMNS)
+    step = _STEP_MINUTES[freq]
+    ruleless = {name for name in spec.names if info.in_data_zone(data.index)._resolve_for(name, step).rule is None}
+    if spec.target in ruleless:
+        rows = [
+            blank(name, "no rule" if name in ruleless else "not cut (the target has no rule)") for name in spec.names
+        ]
+        return pd.DataFrame(rows, columns=SERIES_COLUMNS)
+    kept = HistorySpec(
+        spec.context,
+        tuple(name for name in spec.known_ahead if name not in ruleless),
+        tuple(name for name in spec.past if name not in ruleless),
+        spec.target,
+        spec.accepts_missing,
+        spec.newest_target,
+    )
+    batch = history_batch(kept, data, days, info, freq, horizon, arrays=False)
+    late = batch.late()
+    ahead = sorted({item.steps_ahead for item in batch.items})
+    found = {series.name: series for series in batch.series}
+    rows = []
+    for name in spec.names:
+        if name in ruleless:
+            rows.append(blank(name, "no rule"))
+            continue
+        series = found[name]
+        steps = str(batch.steps)
+        if name in spec.known_ahead and ahead:
+            steps = f"{batch.steps} + {ahead[0] if len(ahead) == 1 else f'{ahead[0]}…{ahead[-1]}'}"
+        count = len(late.get(name, []))
+        status = "late" if count == len(batch.items) else f"late on {count} of {len(batch.items)} days"
+        status = "ok" if not count else status
+        newest = newest_label(item.newest_minutes[name] for item in batch.items) if batch.items else _DASH
+        rows.append((name, series.role, series.rule, series.vintage, steps, newest, status))
+    return pd.DataFrame(rows, columns=SERIES_COLUMNS)
 
 
 def _slot_of(name: str) -> Optional[Tuple[Tuple[str, str, str], int]]:
@@ -336,6 +399,9 @@ def explain_model(
     )
     out["predictors"] = predictor_table(names, data, info, horizon, hour, freq, clock, used, rows)
     out["grouped"] = grouped_table(out["predictors"])
+    spec = history_spec_of(model, target)
+    if spec is not None:
+        out["series"] = history_table(spec, data, info, days[used], horizon, freq)
     if newest is not None:
         out["newest_target"] = newest_target_table(
             _newest_by_issue_day(model, newest, days, hour, horizon)[used], horizon
@@ -393,7 +459,11 @@ def _print(out, subject, info, days, horizon, hour, freq, used, index, function,
         f"{subject}: horizon {horizon}, period {hour} ({time_of_day}); T = D + {horizon}; {issued}; "
         f"issue days {days[0].date()} … {days[-1].date()}"
     )
-    print(out["grouped"].to_string(index=False))
+    if not ("series" in out and out["grouped"].empty):  # a sequence model may read series alone
+        print(out["grouped"].to_string(index=False))
+    if "series" in out:
+        print("the series it reads, cut at the newest step known at the issue time:")
+        print(out["series"].to_string(index=False))
     if "newest_target" in out:
         print("newest_target='published': the newest target it trains on, by its rule")
         print(out["newest_target"].to_string(index=False))

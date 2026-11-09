@@ -291,6 +291,46 @@ profiles = [f"price_h{hour:02d}_d-1" for hour in range(24)] + ["is_weekend_d+{ho
 model = DailyRidge(profiles, training_window=364, name="daily_ridge")
 ```
 
+### Sequence models: series instead of rows (internal)
+
+A foundation model reads series, not the predictor columns of a row. `epftoolbox2.models._history` (internal, for the foundation
+models to come) gives it what one forecast may read, cut by the information set. `HistorySpec(context, known_ahead, past,
+target, accepts_missing=False, newest_target="d-1")` names the series as base columns (`"load_forecast"`, never
+`"load_forecast_d+1"`), and `history_batch(spec, frame, issue_days, information_set, freq, horizon)` returns, for each issue day D
+(`history_batches(..., horizons)` reads every horizon at once, and `arrays=False` the cuts alone):
+
+- `target` (T,): the target's last T = context × periods-per-day steps in physical time, ending at its cut: under
+  `newest_target="published"` its newest step known at the issue time by its rule, at the latest the last step of the day before
+  the target day (so at 14:00, when D+1's prices are out, the forecast at h = 1 is still of all of D+1), under `"d-1"` (every
+  model's default) the earlier of that and the last step of D-1, the newest target such a model trains on. T is the same on
+  every day; a context across a DST switch covers an hour more or less of local time.
+- `past` {name: (T,)}: on the same steps, NaN after the series' own newest known step where the backend takes missing values
+  (`accepts_missing`), else the series is late.
+- `known` {name: (T + S,)}: the same steps and the S steps ahead, to the end of the target day D + h; one not known that far is late.
+- `slots` (S,): the (date, period) each step ahead forecasts, None before the target day. The repeated autumn hour is forecast by its
+  second step, and the hour a spring switch skips has none. For a price issued at 11:45 under `"published"`, S is 24 (23 or 25 when
+  the target day is a DST day); for a load whose actuals are out to 10:00, 38; under `"d-1"`, 48 for either at horizon 1.
+- `gaps` and `missing`: the data's missing values of each series in the context and in the steps ahead, and the series the backend
+  can't take as they are (a context with no value at all, a known-ahead value missing ahead, and without `accepts_missing` any
+  missing value).
+
+Which values are known comes from `information_set.StepsReader`, the same per-cell reading `verify`'s probe perturbs by. A value the
+probe perturbs is in a context only where a series is late, and a late series is listed at `availability="warn"` and refused at
+`"raise"`, as a late predictor is; `report.availability()` and `explain()` show one row per series (how far it is read and its
+rule's vintage class), not one per lagged step. `HistoryBatch.batches(batch_size)` groups the items by S and pads each call to
+`batch_size` with copies of its first item, so a call's shape doesn't depend on what else a run holds. A model reads history when
+its class defines `_history_spec(target)`, which must give the model's own `newest_target`. `BaseModel`'s checks then take its
+series as inputs it reads (the manifest hashes them, `report.vintages()` lists them, `verify` perturbs them) and refuse a late one at
+`"raise"` or list it at `"warn"`; its manifest records every series' rule, the issue time and zone (`training_cut`, compared on
+resume whatever its `newest_target`) and hashes what its last issue day reads after `test_end` (`history_ahead`: its known-ahead
+series through `test_end` plus the largest horizon, and its target where a late issue time reads it there). `verify` gives its runs
+the information set whatever its `newest_target` (and still perturbs the target from D on under `"d-1"`); its positive control
+perturbs each series of its spec on its own, the target too (a series whose perturbation moves nothing, such as one read from a
+copy of the model's own, leaves it `inconclusive`); and its co-batch check runs each forecast on the frame a
+run on D has for it (`target_day_cut`): every row up to D, and after D only what that forecast reads (its known-ahead series to the
+end of D + h), so no later day of its call keeps what a run on D couldn't have. A forecast that moves there depends on where the
+frame ends. Such a model can't be a `ResidualModel`'s base in this release.
+
 ---
 
 ## Custom Evaluator

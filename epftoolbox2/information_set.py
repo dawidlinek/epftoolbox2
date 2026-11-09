@@ -18,6 +18,7 @@ and hour or minute shifts are elapsed time.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import fnmatch
 import hashlib
@@ -2421,7 +2422,8 @@ def _issue_day_forecasts(
     Such a function is planned on this very frame, so a value it reads can move its list, and it answers through the
     information set. The run itself gets none, so a late list isn't refused and the forecasts show it. A model with
     `newest_target="published"` reads its training cut from it (`cut_rules`), and nothing else; so does a `known_only` model
-    (`NaiveModel`) which of its forecasts are published, since one that isn't has no forecast in any run.
+    (`NaiveModel`) which of its forecasts are published, since one that isn't has no forecast in any run, and a model that reads
+    history (`models._history`) where its series are cut, whatever its `newest_target`.
 
     A model with `refit` is run from `run_day` to the end of its refit block (or of the frame), and only `run_day`'s forecasts are
     returned: a unit fits once for every issue day of its block, so a fit that read one of the later days would show only in a
@@ -2454,7 +2456,11 @@ def _issue_day_forecasts(
         if plan is not None and (first_day, last_day) != (run_day, run_day):
             run_plan = planned(first_day, last_day)
     extra = {} if run_plan is None else {"plan": run_plan}
-    if getattr(m, "newest_target", "d-1") == "published" or getattr(m, "_known_only", False):
+    from .models._history import reads_history  # models import this module
+
+    # A sequence model cuts its series by the rules (`models._history`), whatever its newest target, as such a model's training
+    # cut does.
+    if getattr(m, "newest_target", "d-1") == "published" or getattr(m, "_known_only", False) or reads_history(m):
         extra["cut_rules"] = information_set
     read = {} if plan is None else plan.read_cells()  # the run lets go of them
     late = [] if plan is None else plan.late_reads()
@@ -2530,10 +2536,13 @@ class ControlResult:
     perturbed: Dict[str, int]  # column -> number of perturbed cells
     unchecked: List[str]  # columns without a rule, left unperturbed
     unmoved: List[Tuple[int, int]] = field(default_factory=list)  # forecasts of both runs that did not move
+    # A model that reads history: the series whose own fresh values were perturbed and moved no forecast. The probe can't vouch
+    # that what the model reads of them is the frame's (a copy of its own, a series it ignores): a blind spot.
+    blind: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return bool(self.moved)
+        return bool(self.moved) and not self.blind
 
 
 def positive_control(
@@ -2565,6 +2574,13 @@ def positive_control(
     back, and its rows older than D-1 too, where a raw value of D-1 lands in `x_d+1`. (The exception is the look-ahead
     after a fall-back switch, a known issue, which trains the switch hour on D-1's row.)
 
+    A model that reads history (`models._history`) reads its target's context as an input: for it the target is perturbed too, as
+    any input, and its training target, if it has one, is the context's own. Without `rebuild` and `span` each series of its spec
+    is perturbed on its own, the target too, one run each: `moved` is what any of them moved, and `blind` the series whose fresh
+    values were perturbed and moved nothing, which the probe can't vouch for (a series read from a copy of the model's own would
+    pass every probe). A series with no fresh value to perturb (a static rule) says nothing either way and isn't blind. Over runs
+    widened by `span` (the co-batch check's, which asks only whether they reach the model) every series is perturbed at once.
+
     With `rebuild`, days are those of the frame it returns, so a source in UTC is read in the market's zone.
 
     A model with `newest_target="published"` may train on the row of D-1 (at horizon 1 when the target of D is known by the
@@ -2576,12 +2592,32 @@ def positive_control(
     at, and `horizon` or `horizons` what it runs, as in `leakage_probe`. A model with `refit` runs to the end of its block, as there,
     and `span` widens the runs as there.
     """
+    from .models._history import reads_history  # models import this module
+
     run_day = str(pd.Timestamp(run_day).date())
     horizon = _horizon_arguments(horizon, horizons, 1)
     first_row_day = 0 if _newest_target_of(model) == "published" else -1
     names = list(data.columns) if columns is None else list(columns)
-    if rebuild is None:
+    # A model that reads history reads its target's context as an input (`models._history`): its fresh values are perturbed too.
+    history = reads_history(model() if callable(model) and not hasattr(model, "run") else model)
+    if rebuild is None and not history:
         names = [name for name in names if name != target]
+    if rebuild is None and history and span is None:
+        return _history_control(
+            model,
+            data,
+            run_day,
+            information_set,
+            target,
+            horizon,
+            freq,
+            names,
+            atol,
+            seed,
+            availability,
+            span,
+            first_row_day,
+        )
     if rebuild is None:
         base = data
         perturbed, counts, unchecked = perturb_recent(
@@ -2593,7 +2629,9 @@ def positive_control(
         in_market_zone = data.tz_convert(base.index.tz) if both_aware else data
         perturbed, counts, unchecked = perturb_recent(in_market_zone, run_day, information_set, freq, names, seed)
         perturbed.index = data.index
-        perturbed = _with_training_data_of(base, rebuild(perturbed), run_day, target, first_row_day)
+        perturbed = _with_training_data_of(
+            base, rebuild(perturbed), run_day, None if history else target, first_row_day
+        )
     common = (run_day, target, horizon, freq, information_set, availability, span)
     original, *_ = _issue_day_forecasts(model, base, *common)
     other, *_ = _issue_day_forecasts(model, perturbed, *common)
@@ -2606,6 +2644,63 @@ def positive_control(
         perturbed=counts,
         unchecked=unchecked,
         unmoved=sorted((original.keys() & other.keys()) - set(moved)),
+    )
+
+
+def _history_control(
+    model: Any,
+    data: pd.DataFrame,
+    run_day: str,
+    information_set: InformationSet,
+    target: str,
+    horizon: Dict[str, Any],
+    freq: str,
+    names: Sequence[str],
+    atol: float,
+    seed: int,
+    availability: str,
+    span: Optional[Tuple[str, str]],
+    first_row_day: int,
+) -> ControlResult:
+    """`positive_control` of a model that reads history: each series of its spec that `names` holds perturbed on its own (one run
+    each, against one unperturbed run), the moves of all of them, and the series whose own perturbation moved nothing."""
+    from .models._history import history_spec_of  # models import this module
+
+    m = model() if callable(model) and not hasattr(model, "run") else model
+    spec = history_spec_of(m, target)
+    series = [name for name in spec.names if name in names]
+    common = (run_day, target, horizon, freq, information_set, availability, span)
+    original, *_ = _issue_day_forecasts(model, data, *common)
+    moved: set = set()
+    both = set(original)
+    largest = 0.0
+    counts: Dict[str, int] = {}
+    unchecked: List[str] = []
+    blind = []
+    for name in series:
+        perturbed, found, missed = perturb_recent(
+            data, run_day, information_set, freq, [name], seed, first_row_day=first_row_day
+        )
+        counts.update(found)
+        unchecked.extend(missed)
+        if not found.get(name):
+            continue  # nothing fresh to perturb: no evidence either way
+        other, *_ = _issue_day_forecasts(model, perturbed, *common)
+        changed, change, _ = _compare_forecasts(original, other, atol)
+        moved.update(changed)
+        both &= set(other)
+        largest = max(largest, change)
+        if not changed:
+            blind.append(name)
+    return ControlResult(
+        run_day=run_day,
+        forecasts=len(original),
+        moved=sorted(moved),
+        max_abs_change=largest,
+        perturbed=counts,
+        unchecked=sorted(set(unchecked)),
+        unmoved=sorted(both - moved),
+        blind=blind,
     )
 
 
@@ -2641,14 +2736,18 @@ class CoBatchResult:
 
 @dataclass
 class CutResult:
-    """Outcome of `issue_day_cut`: the issue day's forecasts on the frame cut after its local date, as a run on that day has
-    it, against those on the whole frame, compared at atol 0 (equal, or NaN in both)."""
+    """Outcome of `issue_day_cut` (and `target_day_cut`): the issue day's forecasts on the frame cut after its local date (after
+    what each forecast reads), as a run on that day has it, against those on the whole frame, compared at atol 0 (equal, or NaN in
+    both)."""
 
     run_day: str
     forecasts: int
     changed: List[Tuple[int, int]]  # (period, horizon)
     max_abs_change: float
     missing: List[Tuple[int, int]] = field(default_factory=list)  # forecasts present in only one of the runs
+    # Where the cut frames end, as a message says it: "on" the issue day's date, or after what each forecast of a model that
+    # reads history reads.
+    ends: str = ""
 
     @property
     def ok(self) -> bool:
@@ -2660,12 +2759,27 @@ def cuts_at_issue_day(model: Any) -> bool:
     for a model that predicts its refit blocks in one call (`_predict_block`, and `_predicts_together` True). Its call holds the
     issue rows of the block's later days that the frame has, which a run on the issue day doesn't have, so a forecast that
     depends on which rows its call holds, not only on their values, would differ between a backtest and that run. A row of a
-    later day enters such a call only as an issue row, so the cut frame takes away nothing the forecast may read; a model that
-    reads a later row's known-ahead value directly (a sequence model's covariate) would lose it, and isn't cut here. A model of
-    day or pooled units (`_unit_kind`, `models._units`) predicts its blocks in one call the same way, and is cut too."""
+    later day enters such a call only as an issue row, so the cut frame takes away nothing the forecast may read. A model of day
+    or pooled units (`_unit_kind`, `models._units`) predicts its blocks in one call the same way, and is cut too. A model that
+    reads history (`models._history.reads_history`) never is, whatever else it declares: its forecasts read the target day's
+    known-ahead values on later rows, which this cut would take away, and `target_day_cut` cuts its frame instead, after what
+    each forecast of the day reads (which takes a later day's rows out of a row-block call too: they hold no input there)."""
+    from .models._history import reads_history  # models import this module
+
     m = model() if callable(model) and not hasattr(model, "run") else model
+    if reads_history(m):
+        return False
     blocks = getattr(type(m), "_predict_block", None) is not None or getattr(m, "_unit_kind", "period") != "period"
     return blocks and bool(getattr(m, "_predicts_together", False))
+
+
+def cuts_after_target_day(model: Any) -> bool:
+    """Whether the co-batch check compares the issue day's forecasts at each horizon on the frame of what they read
+    (`target_day_cut`): for every model that reads history (`models._history.reads_history`), whatever else it declares."""
+    from .models._history import reads_history  # models import this module
+
+    m = model() if callable(model) and not hasattr(model, "run") else model
+    return reads_history(m)
 
 
 def issue_day_cut(
@@ -2702,7 +2816,128 @@ def issue_day_cut(
     changed = [key for key in keys if not (whole[key] == alone[key] or (pd.isna(whole[key]) and pd.isna(alone[key])))]
     finite = [abs(whole[key] - alone[key]) for key in changed if np.isfinite(whole[key]) and np.isfinite(alone[key])]
     max_abs = max(finite, default=float("inf") if changed else 0.0)
-    return CutResult(run_day, len(whole), changed, max_abs, sorted(whole.keys() ^ alone.keys()))
+    return CutResult(run_day, len(whole), changed, max_abs, sorted(whole.keys() ^ alone.keys()), f"on {run_day}")
+
+
+@contextlib.contextmanager
+def _without_shortfall_warnings():
+    """No warning of planned forecasts not produced, for a cut frame's runs (`target_day_cut`), whose later days have no data
+    by design: `models.base.quiet_shortfall`, in this thread or task alone; a run that produces nothing still raises."""
+    from .models.base import quiet_shortfall  # models import this module
+
+    with quiet_shortfall():
+        yield
+
+
+def _history_cut(
+    model: Any, frame: pd.DataFrame, run_day: str, information_set: InformationSet, target: str, freq: str, horizon: int
+) -> pd.DataFrame:
+    """The frame a run on `run_day` has for the forecast at `horizon` of a model that reads history: every row up to D, and after
+    D only what that forecast reads (`models._history`): its known-ahead series to the end of D + h, its target and past series
+    to the target's cut (D + 1 for a late issue time), every other value NaN, and no row after them. So the call of D's forecast
+    holds no later day whose series aren't all there as of D: a later day's context and its known-ahead values beyond what D's
+    forecast reads are gone, and a later day's row has no input."""
+    from .models._history import history_batch, history_spec_of  # models import this module
+
+    m = model() if callable(model) and not hasattr(model, "run") else model
+    spec = history_spec_of(m, target)
+    (item,) = history_batch(spec, frame, [run_day], information_set, freq, horizon, arrays=False).items
+    day = pd.Timestamp(run_day)
+    reach = pd.Timestamp(item.newest[spec.target].date())  # a step of the frame's zone: its local date
+    last = day + pd.Timedelta(days=horizon) if spec.known_ahead else max(day, reach)
+    local = frame.index.tz_localize(None) if frame.index.tz is not None else frame.index
+    dates = local.normalize()
+    cut = frame[np.asarray(dates <= last)].copy()
+    after = np.asarray(dates[dates <= last] > day)
+    later = np.asarray(dates[dates <= last] > reach)
+    for name in cut.columns:
+        column = cut[name]
+        if name in spec.known_ahead or not pd.api.types.is_numeric_dtype(column) or pd.api.types.is_bool_dtype(column):
+            continue
+        mask = after & later if name in (spec.target, *spec.past) else after
+        if mask.any():
+            cut[name] = column.astype(float).where(~mask)
+    return cut
+
+
+def target_day_cut(
+    model: Any,
+    frame: pd.DataFrame,
+    run_day: str,
+    information_set: InformationSet,
+    target: str = "price",
+    horizon: Optional[int] = None,
+    freq: str = "1h",
+    availability: str = "raise",
+    horizons: Optional[Sequence[int]] = None,
+    runs_in: Optional[Callable[[], Any]] = None,
+) -> CutResult:
+    """`run_day`'s forecasts at each horizon h of a model that reads history on the frame a run on D has for them (`_history_cut`:
+    the rows up to D, and after D only what the forecast at h reads), against those of the whole `frame`, at atol 0, each run as
+    the probe runs it (`issue_day_cut`'s comparison). A forecast that moves there depends on where the frame ends (the other days
+    of its call, a statistic over them), so a backtest and a run on the day differ. A univariate model's frame ends on D (or
+    the target's cut), so no later day of its block keeps a complete context in its call. `runs_in` wraps each run, as there;
+    the cut runs report no shortfall of forecasts, their later days having no data by design."""
+    from .models._calendar import horizon_arguments, resolve_horizons  # models import this module
+
+    run_day = str(pd.Timestamp(run_day).date())
+    _, chosen = resolve_horizons(horizon, horizons, 1)
+
+    def forecasts(each: pd.DataFrame, arguments: Dict[str, Any]) -> Dict[Tuple[int, int], float]:
+        common = (run_day, target, arguments, freq, information_set, availability)
+        with contextlib.ExitStack() as stack:
+            if runs_in is not None:
+                stack.enter_context(runs_in())
+            if each is not frame:
+                stack.enter_context(_without_shortfall_warnings())
+            return _issue_day_forecasts(model, each, *common)[0]
+
+    whole = forecasts(frame, horizon_arguments(*resolve_horizons(horizon, horizons, 1)))
+    alone: Dict[Tuple[int, int], float] = {}
+    for h in chosen:
+        cut = _history_cut(model, frame, run_day, information_set, target, freq, h)
+        alone.update({key: value for key, value in forecasts(cut, {"horizons": (h,)}).items() if key[1] == h})
+    keys = sorted(whole.keys() & alone.keys())
+    changed = [key for key in keys if not (whole[key] == alone[key] or (pd.isna(whole[key]) and pd.isna(alone[key])))]
+    finite = [abs(whole[key] - alone[key]) for key in changed if np.isfinite(whole[key]) and np.isfinite(alone[key])]
+    max_abs = max(finite, default=float("inf") if changed else 0.0)
+    ends = "after what each forecast reads"
+    return CutResult(run_day, len(whole), changed, max_abs, sorted(whole.keys() ^ alone.keys()), ends)
+
+
+def frame_cut(
+    model: Any,
+    frame: pd.DataFrame,
+    run_day: str,
+    information_set: InformationSet,
+    target: str = "price",
+    horizon: Optional[int] = None,
+    freq: str = "1h",
+    availability: str = "raise",
+    horizons: Optional[Sequence[int]] = None,
+    runs_in: Optional[Callable[[], Any]] = None,
+) -> Optional[CutResult]:
+    """The co-batch check's cut frames for `model`, in one result: `issue_day_cut` where `cuts_at_issue_day`, `target_day_cut`
+    where `cuts_after_target_day`, both for a model of both; None for a model of neither."""
+    args = (model, frame, run_day, information_set, target, horizon, freq, availability)
+    found = []
+    if cuts_at_issue_day(model):
+        found.append(issue_day_cut(*args, horizons=horizons, runs_in=runs_in))
+    if cuts_after_target_day(model):
+        found.append(target_day_cut(*args, horizons=horizons, runs_in=runs_in))
+    if not found:
+        return None
+    if len(found) == 1:
+        return found[0]
+    first, second = found
+    return CutResult(
+        first.run_day,
+        max(first.forecasts, second.forecasts),
+        sorted({*first.changed, *second.changed}),
+        max(first.max_abs_change, second.max_abs_change),
+        sorted({*first.missing, *second.missing}),
+        f"{first.ends} and {second.ends}",
+    )
 
 
 def co_batch_items(model: Any, run_day: str, frame: Optional[pd.DataFrame] = None) -> Optional[List[str]]:
@@ -2755,7 +2990,8 @@ def co_batch_probe(
 
     For a model that predicts its refit blocks in one call (`cuts_at_issue_day`) it also compares `run_day`'s forecasts on the
     frame cut after its date with the whole frame's (`issue_day_cut`, in `cut`): its call holds the later days the frame has,
-    which a run on `run_day` doesn't.
+    which a run on `run_day` doesn't. For a model that reads history (`cuts_after_target_day`) the frame is cut after each
+    target day instead (`target_day_cut`, `frame_cut`).
 
     A model without the hook gives `items=None` and runs nothing; one that names no other day the frame has gives `items=[]`
     and runs nothing either. The other arguments are `leakage_probe`'s.
@@ -2777,11 +3013,7 @@ def co_batch_probe(
         model, data, run_day, information_set, target, check_target_boundary=check_target_boundary, **common
     )
     moved = positive_control(model, data, run_day, information_set, target, **common) if control else None
-    cut = None
-    if cuts_at_issue_day(model):
-        cut = issue_day_cut(
-            model, frame, run_day, information_set, target, horizon, freq, availability, horizons=horizons
-        )
+    cut = frame_cut(model, frame, run_day, information_set, target, horizon, freq, availability, horizons=horizons)
     return CoBatchResult(run_day, others, probe, moved, cut)
 
 
@@ -2799,14 +3031,15 @@ def _newest_target_of(model: Any) -> str:
 
 
 def _with_training_data_of(
-    base: pd.DataFrame, perturbed: pd.DataFrame, run_day: str, target: str, first_row_day: int = -1
+    base: pd.DataFrame, perturbed: pd.DataFrame, run_day: str, target: Optional[str], first_row_day: int = -1
 ) -> pd.DataFrame:
-    """A copy of `perturbed` with `target` and every row dated before D + `first_row_day` (D-1 by default) taken from `base`."""
+    """A copy of `perturbed` with `target` (unless None) and every row dated before D + `first_row_day` (D-1 by default) taken
+    from `base`."""
     out = perturbed.copy()
     local = out.index.tz_localize(None) if out.index.tz is not None else out.index
     older = np.asarray(local.normalize() < pd.Timestamp(run_day) + pd.Timedelta(days=first_row_day))
     out.loc[older, base.columns] = base.loc[older, base.columns]
-    if target in base.columns:
+    if target is not None and target in base.columns:
         out[target] = base[target]
     return out
 
@@ -2926,6 +3159,113 @@ def perturb_recent(
             counts[name] = int(mask.sum())
     _report_unchecked(unchecked, information_set)
     return out, counts, unchecked
+
+
+class StepsReader:
+    """The steps of a frame's index (instants, each a row's) read for several issue days at once: when the value of a column at
+    a step is known, and each day's issue time, on the scale of minutes since the first issue day's midnight in the data's zone.
+
+    This is the per-cell reading `perturb_unknown` (and so `verify`) perturbs by, for many days in one call: a step is read as of
+    its own issue day where that is later than the day's (an `as_of` or `weather_cutoff` value of a later row comes from that
+    row's own run), every time through `_available_array`, on the issue clock `violations` reads (`_IssueClock`). Times are
+    whole minutes or fractions with a short binary expansion, so a common origin changes no comparison. A sequence model's
+    context is cut here (`models._history`)."""
+
+    def __init__(self, information_set: InformationSet, steps: pd.DatetimeIndex, days: Sequence[Any], freq: str = "1h"):
+        if not len(days):
+            raise ValueError("a StepsReader reads steps for one issue day at least")
+        self._info = information_set
+        self._steps = steps
+        self._step = _STEP_MINUTES[freq]
+        self._daily = _daily_rows(steps, freq)
+        days = pd.DatetimeIndex([pd.Timestamp(day) for day in days])
+        self._clock = information_set._issue_clock(days, steps, freq)
+        _, self._day, self._minute, self._first = _rows_around_issue(steps, str(days[0].date()), information_set)
+        self._columns: Dict[str, ResolvedColumn] = {}
+
+    def column(self, name: str) -> ResolvedColumn:
+        """`name` resolved; InformationSetError for a column without a rule, whatever `unknown` says: the cut decides numbers."""
+        col = self._columns.get(name)
+        if col is None:
+            col = self._info._resolve_for(name, self._step)
+            if col.rule is None:
+                raise InformationSetError(
+                    f"'{name}' has no availability rule, and a sequence model's context is cut where its rule says the values "
+                    f"are known: declare it, e.g. InformationSet(rules={{'{name}': Availability.realised('1h')}})."
+                )
+            self._info._check_source_zone(col, self._steps)
+            self._columns[name] = col
+        return col
+
+    def available(self, name: str, rows: np.ndarray, days: np.ndarray) -> np.ndarray:
+        """The instant the value of `name` at each step `steps[rows]` is known, read for the issue day `days` (positions in the
+        reader's days) of each, in minutes since the first issue day's midnight."""
+        col = self.column(name)
+        rows, days = np.asarray(rows, dtype=np.int64), np.asarray(days, dtype=np.int64)
+        day = self._day[rows]
+        issue_day = np.maximum(day, self._clock.offset[days])  # a row after the issue day: its own day's reading
+        out = _available_array(
+            col,
+            col.rule,
+            day,
+            self._minute[rows],
+            self._step,
+            self._clock.ctx,
+            self._first[rows],
+            issue_day,
+            self._daily,
+        )
+        return np.asarray(out, dtype=float)
+
+    def issue(self, days: np.ndarray) -> np.ndarray:
+        """The issue instant of each of these issue days (positions), on the same scale."""
+        return self._clock.issue[np.asarray(days, dtype=np.int64)]
+
+    def since_midnight(self, minutes: float, day: int) -> float:
+        """An instant on the reader's scale as minutes since the midnight of issue day `day` (a position)."""
+        return self._clock.minute_of_day(minutes, day)
+
+    def label(self, minutes: float, day: int) -> str:
+        """An instant on the reader's scale as the data zone's clock reads it from issue day `day`, as `D+1 18:00`."""
+        return self._clock.label(float(minutes), day)
+
+
+@dataclass(frozen=True, eq=False)
+class StepsKnown:
+    """When the values of one column at some steps are known, and the issue time, on one issue day (`steps_known`): minutes since
+    that day's midnight in the data's zone."""
+
+    available: np.ndarray
+    issue: float
+    _reader: StepsReader = field(repr=False, compare=False)
+
+    @property
+    def known(self) -> np.ndarray:
+        """Whether each value is known at the issue time: exactly the cells `perturb_unknown` leaves as they are."""
+        return ~(self.available > self.issue)
+
+    def newest(self) -> int:
+        """The position of the newest step known with every step before it: one before the first unknown step, -1 if the first
+        is unknown, the last if none is. Under a rule over time a newer value can be out before an older one; it stays after the
+        cut."""
+        unknown = np.flatnonzero(~self.known)
+        return len(self.available) - 1 if not len(unknown) else int(unknown[0]) - 1
+
+    def label(self, minutes: float) -> str:
+        """Minutes since the issue day's midnight as the data zone's clock reads them, as `D+1 18:00`."""
+        return self._reader.label(float(minutes), 0)
+
+
+def steps_known(
+    information_set: InformationSet, name: str, steps: pd.DatetimeIndex, run_day: Any, freq: str = "1h"
+) -> StepsKnown:
+    """When the value of the column `name` at each of `steps` (instants of the data's index) is known, and the issue time on
+    `run_day`: `StepsReader` for one day, the reading of `perturb_unknown` for these steps. Raises InformationSetError for a
+    column without a rule."""
+    reader = StepsReader(information_set, steps, [str(pd.Timestamp(run_day).date())], freq)
+    rows = np.arange(len(steps))
+    available = reader.available(name, rows, np.zeros(len(steps), dtype=np.int64))
+    return StepsKnown(available, float(reader.issue(np.zeros(1, dtype=np.int64))[0]), reader)
 
 
 def _has_rule(information_set: InformationSet, name: Any, freq: str) -> bool:

@@ -50,6 +50,7 @@ from ..results.manifest import ManifestMismatchError, _block_params, configurati
 from ..results.store import is_parquet_path, outside_stacklevel
 from . import _contract
 from ._cards import read_provenance, run_provenance
+from ._history import reads_history
 from ._calendar import (
     EXPANDING,
     FREQ_STEPS,
@@ -166,6 +167,12 @@ def _check_base(base: Any, where: str) -> None:
         )
     if isinstance(base, ResidualModel):
         raise ValueError(f"{where}: a ResidualModel's base can't be a ResidualModel in this step")
+    if reads_history(base):
+        raise ValueError(
+            f"{where}: a base that reads series (a sequence model, `_history_spec`) isn't supported in this step: `verify` would "
+            "run the ResidualModel without the rules its base's series are cut by, and cut its frame after the issue day, where "
+            "the base's known-ahead series of the target day are. Run that model on its own."
+        )
     if base._ctx_fn is not None:
         raise ValueError(
             f"{where}: a base with a predictor function of `ctx` isn't supported in this step: the checks and `verify` read "
