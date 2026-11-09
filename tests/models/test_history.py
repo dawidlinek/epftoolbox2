@@ -729,6 +729,24 @@ class Rows(FakeFoundation):
         raise RuntimeError("never called")
 
 
+class CountsItsRowDays(Rows):
+    """A hybrid whose row part sees its call: 1e-3 x how many days of its block have a finite wind forecast on every row (an
+    input of its rows, no series of its history), as a row block holds the days whose inputs are finite."""
+
+    def _history_unit(self, unit, tasks, inputs, frame):
+        days = block_days(unit.anchor, inputs.config["refit"]["rules"][unit.member])
+        local = frame.index.tz_localize(None).normalize()
+        wind = frame["generation_wind_forecast"]
+        self._row_days = sum(
+            bool(len(wind[local == pd.Timestamp(day)])) and bool(np.isfinite(wind[local == pd.Timestamp(day)]).all())
+            for day in days
+        )
+        return super()._history_unit(unit, tasks, inputs, frame)
+
+    def _backend(self, call):
+        return super()._backend(call) + 1e-3 * self._row_days
+
+
 class ReadsDsTarget(FakeFoundation):
     """A "d-1" model whose series are cut as a "published" one's: its context holds D's prices."""
 
@@ -1295,6 +1313,16 @@ def test_a_history_model_with_row_blocks_is_cut_after_what_it_reads(hourly):
     report = pipeline(Rows(name="R")).verify(hourly, "2023-06-14", "2023-06-14", days=1, co_batch=True)
     report.assert_ok()
     assert report.checks[0].co_batch.cut.ok
+
+
+@pytest.mark.filterwarnings("ignore:overflow")
+def test_a_hybrid_s_row_days_after_the_issue_day_have_no_input_in_its_cut(hourly):
+    """On the block's Saturday at h=1 the cut frame holds Sunday's rows for the target day's load forecast; every other value
+    after D is NaN there, so a row part that counts its block's days with finite inputs sees six, not the backtest's seven:
+    a leak. (Keeping Sunday's wind forecast would hide it.)"""
+    report = pipeline(CountsItsRowDays(name="R")).verify(hourly, "2023-06-17", "2023-06-17", days=1, co_batch=True)
+    assert not report.ok and not report.checks[0].co_batch.cut.ok
+    pipeline(Rows(name="R")).verify(hourly, "2023-06-17", "2023-06-17", days=1, co_batch=True).assert_ok()
 
 
 LATE_ISSUE = InformationSet("14:00")  # D+1's prices are out at 13:00 on D
