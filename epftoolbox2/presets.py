@@ -1,7 +1,8 @@
 """Predictor lists for benchmark models from the literature, in this library's column naming.
 
-Both benchmark presets are day-ahead models (`tree_predictors` is LEAR's inputs, the period and the row's own period). The papers index inputs by the target (delivery) day d; this library indexes
-columns by the issue day D of the row, and a forecast issued on D for horizon h targets D+h. For h = 1 (d = D+1):
+Both benchmark presets are day-ahead models (`tree_predictors` is LEAR's inputs, the period and the row's own period). The
+papers index inputs by the target (delivery) day d; this library indexes columns by the issue day D of the row, and a forecast
+issued on D for horizon h targets D+h. For h = 1 (d = D+1):
 
     paper         column on the row of D              built by
     p(d-1, ·)     price, or price_h00 .. price_h23    (DailyProfileTransformer)

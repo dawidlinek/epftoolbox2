@@ -21,10 +21,15 @@ sub-hourly freq). They are known at the issue time by construction, so the frame
 Records are the learner stage's, with `prediction` the corrected forecast, `actual` the target, and `base_prediction` (the base's
 forecast it corrects) after every other key. A key with no base forecast on its issue day is skipped as `no_base_forecast`.
 
-Warm-up (`ResidualModel._warmup_start`): for an int learner window W the earliest row the learner's first fit reads, the anchor of
-the first issue day minus W and the largest horizon; for `"expanding"` the base's first issue day with a full training window
-(the frame's first date plus the base's window, its deepest lag and the largest horizon, on a refit day of the base's); `warmup=`
-days before the first issue day overrides both. A warm-up the frame can't hold is refused, naming the day the frame must start on.
+Warm-up (`ResidualModel._warmup_start`), the base's first issue day: `warmup="YYYY-MM-DD"` that date, whatever the run's days
+(recommended: no forecast then depends on where the test starts); `warmup=k` k days before the first issue day (the research's
+form: every forecast depends on that day); without `warmup=`, for an int learner window W the earliest row the learner's first
+fit reads (the anchor of the first issue day minus W, the largest horizon and how far back a published target reaches), for
+`"expanding"` the base's first day with its largest int window filled (the frame's first date plus that window, its deepest lag
+and the largest horizon, on a refit day of the base's). An expanding base has no such day (its first fits train on a handful of
+rows, and every later learner fit would include their residuals), so it needs `warmup=`. A warm-up the frame can't hold is
+refused, naming the day the frame must start on. With `warmup=`, the manifest's compared `residual` field records the base's
+start, so a resume from another one refuses.
 """
 
 import copy
@@ -41,9 +46,10 @@ import pandas as pd
 
 from .._date_utils import resolve_date
 from ..results.availability import merge_listings
-from ..results.manifest import configuration_digest, manifest_path
-from ..results.store import is_parquet_path
+from ..results.manifest import ManifestMismatchError, _block_params, configuration_digest, manifest_path
+from ..results.store import is_parquet_path, outside_stacklevel
 from . import _contract
+from ._cards import read_provenance, run_provenance
 from ._calendar import (
     EXPANDING,
     FREQ_STEPS,
@@ -60,7 +66,7 @@ from .base import BaseModel, _days_back, _test_days
 # The names a learner's list gives the base's forecasts: `base_fc_d+{h}` (the row's own period) and `base_fc_hHH_d+{h}` or
 # `base_fc_sNN_d+{h}` (period HH or NN of the target day, day-level), always at the list's own horizon.
 BASE_PREFIX = "base_fc"
-_BASE_NAME = re.compile(r"base_fc(?:_([hs])(\d+))?_d\+(\d+)")
+_BASE_NAME = re.compile(r"base_fc(?:_([hs])(\d{2}))?_d\+(\d+)")
 # Where the base's results go, next to the model's: `<name>.base.jsonl` (and the base copy's name, `<name>.base`).
 BASE_SUFFIX = ".base"
 # A key whose issue day has no base forecast (the base skipped it): nothing to correct.
@@ -102,6 +108,31 @@ def _later(day: datetime.date, days: int) -> datetime.date:
     return day + datetime.timedelta(days=int(days))
 
 
+def _class_default(cls: type, key: str) -> Any:
+    """The default of `key` in the first `__init__` of `cls`'s method resolution order that names it (inspect.Parameter.empty
+    where none does)."""
+    import inspect
+
+    for klass in cls.__mro__:
+        init = vars(klass).get("__init__")
+        if init is None:
+            continue
+        parameters = inspect.signature(init).parameters
+        if key in parameters:
+            return parameters[key].default
+    return inspect.Parameter.empty
+
+
+def _normal_window(value: Any) -> Any:
+    """A training window as a model keeps it (`resolve_training_window`), or `value` itself where it is none."""
+    from ._calendar import resolve_training_window
+
+    try:
+        return resolve_training_window(value)[0]
+    except (TypeError, ValueError):
+        return value
+
+
 def _model_description(model: BaseModel, calendar: bool = True) -> Dict[str, Any]:
     """What defines a nested model's forecasts, as plain JSON for a manifest's `model_params`: its class, list, newest target,
     binary-column rule, scaler and its own `_model_kwargs`, and with `calendar` (the base's) its name, window and refit rule, which
@@ -121,6 +152,13 @@ def _model_description(model: BaseModel, calendar: bool = True) -> Dict[str, Any
 
 
 def _check_base(base: Any, where: str) -> None:
+    from .pooled import PooledModel  # it imports the models
+
+    if isinstance(base, PooledModel):
+        raise ValueError(
+            f"{where}: a PooledModel can't be a base: it fits over the zones of a run of several and has no run of its own "
+            "on one frame. Give the base it pools, which runs in each zone"
+        )
     if not isinstance(base, BaseModel):
         raise TypeError(
             f"{where}: base must be a model, such as LEARModel(...), or the name of a model added to the pipeline before it, "
@@ -146,7 +184,9 @@ class ResidualModel(BaseModel):
             this model's.
         training_window: The learner's days of rows: `"expanding"` (every row with a base forecast, the default) or an int.
         refit: The learner's refit calendar (`"7D"`, Mondays, by default); a refit is required.
-        warmup: Days of base forecasts before the first issue day; None works it out (see the module docstring).
+        warmup: Where the base's forecasts start: a date (`"2022-01-01"`, recommended: no forecast then depends on the test's
+            first day), or a number of days before the first issue day (every forecast then depends on that day); None works it
+            out, which an expanding base can't (see the module docstring).
         name: The model's name, which names its results; the base's are `<name>.base`.
     """
 
@@ -155,6 +195,8 @@ class ResidualModel(BaseModel):
     _pooled_ok = False
     # Read by `ModelPipeline._load_component`: parameters that hold a model, saved as {class, params}.
     _NESTED_MODELS = ("base", "learner")
+    # What a nested model's YAML leaves out: the learner's own window, refit rule and name, which this model replaces.
+    _NESTED_OMIT = {"learner": ("training_window", "refit", "name")}
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "warmup": None}
 
     def __init__(
@@ -163,15 +205,20 @@ class ResidualModel(BaseModel):
         learner: BaseModel,
         training_window: Union[int, str] = "expanding",
         refit: Optional[str] = "7D",
-        warmup: Optional[int] = None,
+        warmup: Union[int, str, datetime.date, None] = None,
         name: str = "residual",
     ):
+        self.name = name  # first: the checks below name the model
         self._named_base: Optional[BaseModel] = None  # a pipeline's model `base` names (`bind_base`)
         # The base's forecasts during a run: (period, horizon, issue date ordinal) -> forecast.
         self._base_forecasts: Optional[Dict[Tuple[int, int, int], float]] = None
         self._residual: Optional[Dict[str, Any]] = None  # the manifest's `residual` field during a run
         self._actuals: Dict[int, np.ndarray] = {}  # each period's targets, as the learner's arrays had them
         self._actual_days: Dict[int, np.ndarray] = {}
+        self._residual_base: Optional[Dict[str, Any]] = (
+            None  # the base's card for the manifest's provenance during a run
+        )
+        self._base_check: Optional[Tuple[BaseModel, Any]] = None  # the base copy and its check, from `_check_inputs`
         self.base = base
         self.learner = learner
         self.warmup = warmup
@@ -199,9 +246,7 @@ class ResidualModel(BaseModel):
         elif key == "learner":
             self._check_learner(value, where)
         elif key == "warmup" and value is not None:
-            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 1:
-                raise ValueError(f"{where}: warmup is a whole number of days from 1, or None, got {value!r}")
-            value = int(value)
+            value = self._checked_warmup(value, where)
         elif key == "training_window" and isinstance(value, (list, tuple, range)) and len(value) != 1:
             raise ValueError(
                 f"{where}: a list of training windows isn't supported for a ResidualModel in this step: one int or 'expanding'"
@@ -211,6 +256,23 @@ class ResidualModel(BaseModel):
                 f"{where}: the learner fits on the refit calendar: give refit ('7D' weekly, '1D' every day)"
             )
         super().__setattr__(key, value)
+
+    @staticmethod
+    def _checked_warmup(value: Any, where: str) -> Union[int, str]:
+        """`warmup` as kept: a whole number of days from 1, or a date as its ISO text (a YAML file writes it so)."""
+        if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+            return value.isoformat()
+        if isinstance(value, str):
+            try:
+                return datetime.date.fromisoformat(value).isoformat()
+            except ValueError:
+                pass
+        elif not isinstance(value, (bool, np.bool_)) and isinstance(value, (int, np.integer)) and value >= 1:
+            return int(value)
+        raise ValueError(
+            f"{where}: warmup is the base's first issue day as a date ('2022-01-01'), a whole number of days from 1 before the "
+            f"first issue day, or None, got {value!r}"
+        )
 
     @staticmethod
     def _check_learner(learner: Any, where: str) -> None:
@@ -235,19 +297,21 @@ class ResidualModel(BaseModel):
             raise ValueError(f"{where}: {type(learner).__name__} can't fit on a refit calendar, which a learner does")
 
     def _warn_about_the_learner_s_own(self) -> None:
-        """A warning where the learner was given a training window or refit rule of its own that this model replaces."""
-        import inspect
-
-        defaults = inspect.signature(type(self.learner).__init__).parameters
+        """A warning where the learner was given a training window or refit rule of its own, other than its class's default,
+        that this model replaces. The default is that of the first class of the learner's method resolution order whose
+        `__init__` names the parameter (`OLSModel` takes `refit` through `**kw`: BaseModel's), compared normalised, so a
+        learner left at its defaults, or loaded from a file that leaves them out, gives none."""
         for key in ("training_window", "refit"):
             mine, theirs = getattr(self, key), getattr(self.learner, key, None)
-            default = defaults[key].default if key in defaults else inspect.Parameter.empty
+            default = _class_default(type(self.learner), key)
+            if key == "training_window":
+                theirs, default = _normal_window(theirs), _normal_window(default)
             if theirs != mine and theirs != default:
                 warnings.warn(
                     f"ResidualModel({self.name!r}): the learner's {key}={theirs!r} is replaced by the ResidualModel's {mine!r}: "
                     f"the learner fits with this model's {key}; give it here",
                     UserWarning,
-                    stacklevel=3,
+                    stacklevel=outside_stacklevel(),
                 )
 
     def _same_as_learner(self, key: str, value: Any, theirs: Any) -> None:
@@ -360,9 +424,11 @@ class ResidualModel(BaseModel):
 
     # -- the base ----------------------------------------------------------------------------------------------------------
 
-    def bind_base(self, model: BaseModel) -> None:
+    def bind_base(self, model: Any) -> None:
         """Run a copy of `model` as the base `base` names (what `ModelPipeline` does with `base="name"`)."""
-        _check_base(model, f"ResidualModel({self.name!r})")
+        _check_base(
+            model, f"ResidualModel({self.name!r}): base={self.base!r} names {type(model).__name__}({model.name!r})"
+        )
         self._named_base = model
 
     def _base_model(self) -> BaseModel:
@@ -406,9 +472,9 @@ class ResidualModel(BaseModel):
         rules: Any,
         span: Tuple[datetime.date, datetime.date],
     ) -> datetime.date:
-        """The first day the base forecasts on with a full training window: the frame's first date plus its largest int window
-        (none for an expanding one or a model that fits nothing), the deepest lag of its lists, the largest horizon and how far
-        back its newest target can be (`"published"`), on a refit day of the base's if it refits."""
+        """The first day the base forecasts on with its largest int window filled: the frame's first date plus that window (none
+        for a model that fits nothing; an expanding base is refused before), the deepest lag of its lists, the largest horizon
+        and how far back its newest target can be (`"published"`), on a refit day of the base's if it refits."""
         base._set_freq(freq)
         first = _contract.wall_clock(data.index).min().date()
         widths = [member for member in base._members if member != EXPANDING]
@@ -437,13 +503,25 @@ class ResidualModel(BaseModel):
         first_issue = span[0]
         frame_first = _contract.wall_clock(data.index).min().date()
         if self.warmup is not None:
-            start = _later(first_issue, -self.warmup)
+            dated = isinstance(self.warmup, str)
+            start = datetime.date.fromisoformat(self.warmup) if dated else _later(first_issue, -self.warmup)
             if start < frame_first:
                 raise ValueError(
-                    f"{self.name}: warmup={self.warmup} starts the base's forecasts on {start}, before the frame's first date "
-                    f"{frame_first}: start the frame on {start} or earlier, or give a shorter warmup"
+                    f"{self.name}: warmup={self.warmup!r} starts the base's forecasts on {start}, before the frame's first date "
+                    f"{frame_first}: start the frame on {start} or earlier, or give a later warmup"
+                )
+            if start > first_issue:
+                raise ValueError(
+                    f"{self.name}: warmup={self.warmup!r} starts the base's forecasts on {start}, after the first issue day "
+                    f"{first_issue}: the learner would have no residual to train on there. Give an earlier date"
                 )
             return start
+        if not base._fits_nothing and all(member == EXPANDING for member in base._members):
+            raise ValueError(
+                f"{self.name}: an expanding base has no first day with a full training window: its first fits train on a "
+                "handful of rows from the frame's first dates, and every later learner fit would include their residuals. Give "
+                "warmup= the date its forecasts start on (one with as many days of rows before it as you want it to have)"
+            )
         full = self._base_full_window(base, data, target, horizon, horizons, freq, rules, span)
         if self.training_window == EXPANDING:
             if full > first_issue:
@@ -529,7 +607,8 @@ class ResidualModel(BaseModel):
         if span is not None:
             start = self._warmup_start(base, data, target, horizon, planned, freq, rules, span).isoformat()
             end = span[1].isoformat()
-        base._check_inputs(
+        # The base copy and its check, which the run uses (`_run_base` with `checked=`) where it is the run checked: one check.
+        base_check = base._checked_inputs(
             data,
             target,
             horizon,
@@ -540,10 +619,10 @@ class ResidualModel(BaseModel):
             availability=availability,
             cut_rules=cut_rules,
             horizons=horizons,
-            stacklevel=stacklevel + 1,
             shared=shared,
         )
-        base_used, base_listing = list(base._used_predictors), list(base._availability_listing)
+        self._base_check = (base, base_check)
+        base_used, base_listing = list(base_check.used_predictors), list(base_check.listing)
         expanded = super()._check_inputs(
             data,
             target,
@@ -609,16 +688,21 @@ class ResidualModel(BaseModel):
         largest, planned = resolve_horizons(horizon, horizons, 7)
         self._set_freq(freq)
         rules = self._cut_rules(information_set, cut_rules)
-        base = self._base_model()
+        base, base_check = self._base_check if self._base_check is not None else (self._base_model(), None)
+        self._base_check = None
         start = self._warmup_start(base, data, target, largest, planned, freq, rules, span)
-        self._base_forecasts, self._residual = self._run_base(
+        if save_to is not None and not allow_manifest_mismatch:
+            self._refuse_before_the_base(save_to, start)
+        self._warn_about_the_base_s_masks(base)
+        base_to = None if save_to is None else str(self.base_path(save_to))
+        self._base_forecasts, field = self._run_base(
             base,
             data,
             test_start=start.isoformat(),
             test_end=span[1].isoformat(),
             target=target,
             freq=freq,
-            save_to=None if save_to is None else str(self.base_path(save_to)),
+            save_to=base_to,
             information_set=information_set,
             allow_manifest_mismatch=allow_manifest_mismatch,
             require_manifest=require_manifest,
@@ -627,8 +711,11 @@ class ResidualModel(BaseModel):
             frame_hashes=frame_hashes,
             cut_rules=cut_rules,
             save_coefficients=save_coefficients,
+            **({} if base_check is None else {"checked": base_check}),
             **horizon_arguments(largest, planned),
         )
+        self._residual = self._residual_field(field, start)
+        self._residual_base = self._base_provenance(base, base_to, start)
         try:
             return super().run(
                 data,
@@ -656,6 +743,76 @@ class ResidualModel(BaseModel):
         finally:
             self._base_forecasts = None
             self._residual = None
+            self._residual_base = None
+            self._base_check = None
+
+    def _residual_field(self, field: Dict[str, Any], start: datetime.date) -> Dict[str, Any]:
+        """The manifest's compared `residual` field: what `_run_base` gave (the base's configuration), and with `warmup=` the
+        base's first issue day, on which every forecast depends then (with an int `warmup` it moves with the test's start)."""
+        return dict(field) if self.warmup is None else {**field, "base_start": start.isoformat()}
+
+    def _refuse_before_the_base(self, save_to: Union[str, Path], start: datetime.date) -> None:
+        """A ManifestMismatchError, before the base runs and writes anything, where this model's results were made with
+        another base, learner or warm-up start: what its manifest's `model_params` and `residual` say, compared as the
+        manifest's own check would. The base's configuration digest is compared after its run, by that check."""
+        path = manifest_path(Path(save_to))
+        if not path.exists():
+            return
+        existing = json.loads(path.read_text())
+        if existing.get("kind") is not None or "model_params" not in existing:
+            return  # an ensemble's, or no model's: the manifest's own check says so
+        mine = json.loads(json.dumps({"scaler": self.scaler, **self._model_kwargs, **_block_params(self)}, default=str))
+        diffs = []
+        if existing["model_params"] != mine:
+            diffs.append(f"model_params: {existing['model_params']!r} (existing results) vs {mine!r} (this run)")
+        theirs = (existing.get("residual") or {}).get("base_start")
+        ours = None if self.warmup is None else start.isoformat()
+        if theirs != ours:
+            diffs.append(f"residual.base_start: {theirs!r} (existing results) vs {ours!r} (this run)")
+        if diffs:
+            raise ManifestMismatchError(
+                f"{self.name}: the results in {path.parent} were produced with a different configuration than this run "
+                f"({path.name}):\n" + "\n".join(f"  - {d}" for d in diffs) + "\nNothing was run or written, the base "
+                "included. Use a different save_dir, remove the existing results, or pass allow_manifest_mismatch=True to "
+                "overwrite the manifest and resume anyway."
+            )
+
+    def _warn_about_the_base_s_masks(self, base: BaseModel) -> None:
+        """A warning where the base reads its binary-column masks on its run's first day (`refit=None`, `binary_mask=None`):
+        that day is the warm-up start, not a run of the base's own, so `base_prediction` can differ from the records of the
+        same model run beside this one (`tests/test_known_issues.py`, a forecast depends on the day its test starts)."""
+        if (
+            base._fits_nothing
+            or getattr(base, "refit", None) is not None
+            or getattr(base, "binary_mask", None) is not None
+        ):
+            return
+        warnings.warn(
+            f"{self.name}: its base {type(base).__name__} has refit=None and binary_mask=None, so each base forecast's "
+            "binary-column mask is read on the base run's first day, the warm-up start: base_prediction can then differ from "
+            "the records of the same model run on its own over other days. Give the base binary_mask='fit' (or refit) for "
+            "forecasts that don't depend on where a run starts.",
+            UserWarning,
+            stacklevel=outside_stacklevel(),
+        )
+
+    def _base_provenance(
+        self, base: BaseModel, base_to: Optional[str], start: datetime.date
+    ) -> Optional[Dict[str, Any]]:
+        """The base's card, runtime and weights for this model's provenance (`report.provenance()` shows it as a row of its
+        own, judged from the base's first issue day), its manifest's where it wrote one; None for a base without a card."""
+        if getattr(base, "_card", None) is None:
+            return None
+        found = None if base_to is None else read_provenance(manifest_path(Path(base_to)))
+        if found is None:
+            found = run_provenance(base, None, None, start.isoformat())
+        return {**found, "first_issue_day": start.isoformat()}
+
+    def _finish_run(self, state: Any) -> Any:
+        ref = super()._finish_run(state)
+        if self._residual_base is not None:
+            ref.provenance = {**(ref.provenance or {}), "base": dict(self._residual_base)}
+        return ref
 
     @staticmethod
     def _run_base(
@@ -750,9 +907,17 @@ class ResidualModel(BaseModel):
         super()._release()
         self._actuals, self._actual_days = {}, {}
 
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "ResidualModel":
+        """A copy without the base's check of the last `_check_inputs`, which holds the run's frame (`verify` copies models)."""
+        copied = type(self).__new__(type(self))
+        memo[id(self)] = copied
+        for key, value in vars(self).items():
+            object.__setattr__(copied, key, None if key == "_base_check" else copy.deepcopy(value, memo))
+        return copied
+
     def __repr__(self) -> str:
-        base = self.base if isinstance(self.base, str) else f"{type(self.base).__name__}({self.base.name!r})"
-        return f"ResidualModel(base={base!r}, learner={type(self.learner).__name__}({self.learner.name!r}), name={self.name!r})"
+        base = repr(self.base) if isinstance(self.base, str) else f"{type(self.base).__name__}({self.base.name!r})"
+        return f"ResidualModel(base={base}, learner={type(self.learner).__name__}({self.learner.name!r}), name={self.name!r})"
 
 
 __all__ = ["ResidualModel", "BASE_PREFIX", "BASE_SUFFIX", "SKIP_NO_BASE_FORECAST", "is_base_name", "parse_base_name"]
