@@ -118,6 +118,19 @@ class BlowUp(torch.nn.Module):
         return self.drop(self.net(x)) * torch.where(broken, math.inf, 1.0)
 
 
+class Scaled(torch.nn.Module):
+    """A module that keeps its `dropout` as a plain attribute and scales its output by it: two models that differ in it share a
+    key (`dropout` isn't in it) but not a stack (its attributes are its structure), so each keeps its own."""
+
+    def __init__(self, n_inputs, n_outputs, dropout=0.0):
+        super().__init__()
+        self.net = torch.nn.Sequential(nets.Linear(n_inputs, 6), nets.Activation("relu"), nets.Linear(6, n_outputs))
+        self.scale = 1.0 + dropout
+
+    def forward(self, x):
+        return self.net(x) * self.scale
+
+
 class Blocks(torch.nn.Module):
     """Named blocks, one layer each, then a head: of `nets` layers and exact operations, so it stacks."""
 
@@ -131,8 +144,8 @@ class Blocks(torch.nn.Module):
         return self.head(self.act(torch.cat([self.blocks[name](t) for name, t in blocks.items()], dim=-1)))
 
 
-def daily(name, **params):
-    return MLPDailyModel(DAY, **{"hidden": [8], "dropout": 0.1, "name": name, **FAST, **params})
+def daily(name, predictors=DAY, **params):
+    return MLPDailyModel(predictors, **{"hidden": [8], "dropout": 0.1, "name": name, **FAST, **params})
 
 
 def hourly(name, **params):
@@ -141,13 +154,14 @@ def hourly(name, **params):
 
 def loop_of(n, make=daily, seed=0, **params):
     """`n` models of one search (plan section 3.12): learning rates and dropout rates drawn, two widths, so a group holds two
-    structures of one key's shapes, and a dropout of 0 (no `Dropout` layer) a third."""
+    structures of one key's shapes, and a dropout of 0 (no `Dropout` layer) a third. Two learning rates, so that models share
+    stacks (a stack's members are ordered by their rate)."""
     rng = random.Random(seed)
     out = []
     for i in range(n):
         hidden = [8] if i % 3 else [8, 4]
         dropout = 0.0 if i % 5 == 0 else round(rng.uniform(0.05, 0.4), 2)
-        lr = round(10 ** rng.uniform(-2.5, -1.5), 6)
+        lr = rng.choice([3e-3, 1e-2])
         out.append(make(f"m{i:02d}", hidden=hidden, dropout=dropout, lr=lr, **params))
     return out
 
@@ -286,29 +300,47 @@ def test_a_model_alone_equals_it_in_a_48_model_loop_shuffled_and_in_shards(marke
 
 @pytest.mark.parametrize(
     "case",
-    ["hourly", "hourly refit=None", "window list", "named blocks", "jobs of one member"],
+    [
+        "hourly",
+        "hourly_refit_none",
+        "window_list",
+        "named_blocks",
+        "jobs_of_one_member",
+        "inputs_of_every_horizon",
+        "attributes_of_the_module",
+    ],
 )
 def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, case):
     if case == "hourly":
         models = loop_of(4, make=hourly)
-    elif case == "hourly refit=None":
+    elif case == "hourly_refit_none":
         models = loop_of(3, make=hourly, refit=None, training_window=[21, 28])
-    elif case == "window list":
+    elif case == "window_list":
         models = loop_of(4, training_window=[21, 28])
-    elif case == "named blocks":
+    elif case == "named_blocks":
         models = [
             TorchModel(module=Blocks, inputs=BLOCKS, name=f"b{i}", **{**FAST, "lr": lr})
             for i, lr in enumerate([1e-2, 3e-3, 2e-2])
         ]
-    else:
+    elif case == "jobs_of_one_member":  # a job per fit unit, a window list's units of a block together
         monkeypatch.setenv(groups.STACK_MEMBERS_VAR, "1")
-        models = loop_of(3)
-    test = ("2023-03-20", "2023-03-21") if case == "hourly refit=None" else TEST
-    horizon = 1 if case == "hourly refit=None" else 2
+        models = loop_of(3, training_window=[21, 28])
+    elif case == "inputs_of_every_horizon":  # the same inputs (and rows) for both horizons, other targets
+        models = loop_of(4, make=lambda name, **params: daily(name, predictors=DAY[:4], **params))
+    else:
+        models = [
+            TorchModel(
+                module=Scaled, predictors=DAY, module_params={"dropout": d}, random_state=i, name=f"s{i}", **FAST
+            )
+            for i, d in enumerate([0.0, 0.3, 0.0, 0.3])
+        ]
+        assert len({groups.stack_key(model) for model in models}) == 1
+    test = ("2023-03-20", "2023-03-21") if case == "hourly_refit_none" else TEST
+    horizon = 1 if case == "hourly_refit_none" else 2
     own = alone(models, market, monkeypatch, test=test, horizon=horizon)
     together = records(run_pipeline(models, market, test=test, horizon=horizon))
     same(own, together)
-    assert stacks and (case == "jobs of one member" or any(len(set(stack)) > 1 for stack in stacks))
+    assert stacks and (case == "jobs_of_one_member" or any(len(set(stack)) > 1 for stack in stacks))
 
 
 def test_a_pool_of_forked_processes_gives_each_model_s_own_records(market, monkeypatch):
