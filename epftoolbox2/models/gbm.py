@@ -287,6 +287,8 @@ class LightGBMModel(_BoostedTrees):
         scaler: The predictors as they are and the target as the Invariant, by default (`periods="each"`; a pooled fit gives
             each period's target its own Invariant whatever this says).
         newest_target, binary_mask: As for every model (see `BaseModel`).
+        normalise_by, bounds, zero_when: A per-row target, as for every model (see `BaseModel`), with either value of
+            `periods`: a pooled fit divides each row's target by its own period row's scale.
     """
 
     _card = LIGHTGBM_CARD
@@ -313,6 +315,9 @@ class LightGBMModel(_BoostedTrees):
         scaler: Any = INVARIANT_TARGET,
         newest_target: str = "d-1",
         binary_mask: Optional[str] = None,
+        normalise_by: Optional[str] = None,
+        bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        zero_when: Optional[str] = None,
     ):
         super().__init__(
             predictors,
@@ -322,6 +327,9 @@ class LightGBMModel(_BoostedTrees):
             newest_target=newest_target,
             refit=None,
             binary_mask=binary_mask,
+            normalise_by=normalise_by,
+            bounds=bounds,
+            zero_when=zero_when,
         )
         self.periods = periods
         self.objective = objective
@@ -381,8 +389,8 @@ class XGBoostModel(_BoostedTrees):
     (`[xgboost]` extra).
 
     Args:
-        predictors, training_window, refit, periods, objective, random_state, threads, scaler, newest_target, binary_mask: As
-            for `LightGBMModel`.
+        predictors, training_window, refit, periods, objective, random_state, threads, scaler, newest_target, binary_mask,
+            normalise_by, bounds, zero_when: As for `LightGBMModel`.
         n_estimators, learning_rate, max_depth, subsample, colsample_bytree, min_child_weight, reg_lambda: XGBoost's
             (scikit-learn API names), at the research's values.
         device: `"cpu"` (the default) or a CUDA GPU (`"cuda"`, `"cuda:1"`). CPU and GPU forecasts differ, so the device type is
@@ -414,6 +422,9 @@ class XGBoostModel(_BoostedTrees):
         scaler: Any = INVARIANT_TARGET,
         newest_target: str = "d-1",
         binary_mask: Optional[str] = None,
+        normalise_by: Optional[str] = None,
+        bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        zero_when: Optional[str] = None,
     ):
         super().__init__(
             predictors,
@@ -423,6 +434,9 @@ class XGBoostModel(_BoostedTrees):
             newest_target=newest_target,
             refit=None,
             binary_mask=binary_mask,
+            normalise_by=normalise_by,
+            bounds=bounds,
+            zero_when=zero_when,
         )
         self.periods = periods
         self.objective = objective
@@ -510,8 +524,8 @@ class CatBoostModel(_BoostedTrees):
     which has no wheels for free-threaded Python or 3.15).
 
     Args:
-        predictors, training_window, refit, periods, objective, random_state, threads, scaler, newest_target, binary_mask: As
-            for `LightGBMModel`.
+        predictors, training_window, refit, periods, objective, random_state, threads, scaler, newest_target, binary_mask,
+            normalise_by, bounds, zero_when: As for `LightGBMModel`.
         iterations, learning_rate, depth, l2_leaf_reg: CatBoost's, at the research's values (`ztree.py`). CatBoost runs
             silently and writes no files (`allow_writing_files=False`).
     """
@@ -536,6 +550,9 @@ class CatBoostModel(_BoostedTrees):
         scaler: Any = INVARIANT_TARGET,
         newest_target: str = "d-1",
         binary_mask: Optional[str] = None,
+        normalise_by: Optional[str] = None,
+        bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        zero_when: Optional[str] = None,
     ):
         super().__init__(
             predictors,
@@ -545,6 +562,9 @@ class CatBoostModel(_BoostedTrees):
             newest_target=newest_target,
             refit=None,
             binary_mask=binary_mask,
+            normalise_by=normalise_by,
+            bounds=bounds,
+            zero_when=zero_when,
         )
         self.periods = periods
         self.objective = objective

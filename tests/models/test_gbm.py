@@ -250,6 +250,7 @@ def test_every_setting_reaches_the_workers(cls):
     import inspect
 
     parent_side = {"predictors", "training_window", "refit", "name", "scaler", "newest_target", "binary_mask"}
+    parent_side |= {"normalise_by", "bounds", "zero_when"}  # a per-row target: the worker reads them from its config
     assert set(cls(INPUTS)._model_kwargs) == set(inspect.signature(cls).parameters) - parent_side
 
 
@@ -543,6 +544,31 @@ def test_two_threads_where_workers_are_spawned_give_one_thread_s_bits(family):
     env = {**os.environ, "MAX_PROCESSES": "1", "THREADS_PER_PROCESS": "1"}
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
     assert result.returncode == 0, result.stderr[-3000:]
+
+
+def test_a_pooled_fit_takes_a_per_row_target(family, market):
+    """`normalise_by`, `bounds` and `zero_when` on a pooled tree: each row's target divided by its own row's scale, a forecast
+    the run on y / c times its issue row's c, clipped in multiples of c, and 0 with no fit where the issue row's flag is 1; to
+    the bit (step 7c's per-row target, as `HistGBModel` takes it)."""
+    from tests.models.test_row_targets import SCALE, divided, issue_values, times_scale, with_columns
+
+    _, make = family
+    data = with_columns(market)
+    on_ratio = keyed(records(make(), divided(data)))
+    expected = times_scale(data, on_ratio)
+    bounds = (1.5, 2.2)
+    both = keyed(records(make(normalise_by=SCALE, bounds=bounds, zero_when="flag"), data))
+    flags, scales = issue_values(data, on_ratio, "flag"), issue_values(data, on_ratio, SCALE)
+    assert both.keys() == on_ratio.keys() and 0 < sum(flags.values()) < len(flags)
+    clipped = 0
+    for key, record in both.items():
+        if flags[key] == 1.0:
+            assert (record["prediction"], record["coefficients"], record["detail"]) == (0.0, [], "zero_when"), key
+        else:
+            c = scales[key]
+            assert record["prediction"] == min(max(expected[key], bounds[0] * c), bounds[1] * c), key
+            clipped += record["prediction"] != expected[key]
+    assert clipped > 0
 
 
 def test_threads_and_the_version_are_recorded_and_compared_on_resume(family, market, tmp_path, monkeypatch):

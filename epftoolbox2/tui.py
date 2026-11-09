@@ -1542,6 +1542,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        *_row_target_fields(),
     ],
     "XGBoostModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "xgb", "kind": "text"},
@@ -1649,6 +1650,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        *_row_target_fields(),
     ],
     "CatBoostModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "catboost", "kind": "text"},
@@ -1728,6 +1730,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        *_row_target_fields(),
     ],
     "MAEEvaluator": [],
     "RMSEEvaluator": [],
