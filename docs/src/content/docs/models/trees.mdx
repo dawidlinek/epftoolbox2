@@ -34,8 +34,10 @@ pip install 'epftoolbox2[gbm]'         # LightGBM and XGBoost
 - **LightGBM** (MIT) and **XGBoost** (Apache-2.0) install on Python 3.11 to 3.15, free-threaded 3.14t included. XGBoost's releases
   from 3.3 need Python 3.12 (3.11 gets 3.2), and its Linux wheel pulls NVIDIA's NCCL (about 300 MB), which only multi-GPU training
   uses. For the CPU, `pip install epftoolbox2 xgboost-cpu` instead of the extra installs XGBoost's CPU-only build (Linux and
-  Windows, Python 3.12+, no NCCL, no `device="cuda"`): it provides the same `xgboost` module, and the manifest records its version
-  under `xgboost`. Don't install both.
+  Windows, Python 3.12+, no NCCL, no `device="cuda"`): it provides the same `xgboost` module, but **its forecasts differ** from
+  the full build's at the same version (its column sampling does: at `colsample_bytree=0.5` every one of 4,000 forecasts of a
+  synthetic problem with a target of about unit scale moved, by up to 1.39), so pick one build per study. The manifest records it as `xgboost: "3.4.1 (xgboost-cpu)"`, so a
+  resume across builds refuses, and with both installed (one overwrote the other's module) the pre-flight refuses.
 - **CatBoost** (Apache-2.0) has no wheels for Python 3.15 or for free-threaded builds (3.14t). On 3.15 the extra installs
   nothing; on 3.14t pip tries to build CatBoost from source, which fails (no dependency marker tells a free-threaded build from
   3.14). Use a 3.11 to 3.14 build with the GIL for `CatBoostModel`; elsewhere its pre-flight says so.
@@ -149,7 +151,9 @@ and on Lago's DE rows LightGBM at 1, 4 and 16 threads and XGBoost at 1 and 16.
 
 A package's own error (`XGBoostError`, `LightGBMError`, `CatBoostError`: settings it refuses, a GPU out of memory or without
 kernels for its architecture) stops the run with a `RuntimeError`, never a `fit_error` skip that would leave windows without
-forecasts. Asked for a GPU, an XGBoost fit that XGBoost moved to the CPU (no visible GPU, a build without CUDA) stops the run too,
+forecasts. Training data that is only degenerate is no error: where CatBoost refuses a target with no spread (a night period of a
+generation target with `periods="each"`, all 0), inputs with none or a single row, `CatBoostModel` predicts the target's value,
+or the median (`l1`) or mean (`l2`) of the targets, as LightGBM and XGBoost fit such data themselves. Asked for a GPU, an XGBoost fit that XGBoost moved to the CPU (no visible GPU, a build without CUDA) stops the run too,
 so a manifest never says `cuda` for CPU forecasts.
 
 <Aside type="caution">
