@@ -2572,6 +2572,9 @@ def positive_control(
     back, and its rows older than D-1 too, where a raw value of D-1 lands in `x_d+1`. (The exception is the look-ahead
     after a fall-back switch, a known issue, which trains the switch hour on D-1's row.)
 
+    A model that reads history (`models._history`) reads its target's context as an input: for it the target is perturbed too, as
+    any input, and its training target, if it has one, is the context's own.
+
     With `rebuild`, days are those of the frame it returns, so a source in UTC is read in the market's zone.
 
     A model with `newest_target="published"` may train on the row of D-1 (at horizon 1 when the target of D is known by the
@@ -2583,11 +2586,15 @@ def positive_control(
     at, and `horizon` or `horizons` what it runs, as in `leakage_probe`. A model with `refit` runs to the end of its block, as there,
     and `span` widens the runs as there.
     """
+    from .models._history import reads_history  # models import this module
+
     run_day = str(pd.Timestamp(run_day).date())
     horizon = _horizon_arguments(horizon, horizons, 1)
     first_row_day = 0 if _newest_target_of(model) == "published" else -1
     names = list(data.columns) if columns is None else list(columns)
-    if rebuild is None:
+    # A model that reads history reads its target's context as an input (`models._history`): its fresh values are perturbed too.
+    history = reads_history(model() if callable(model) and not hasattr(model, "run") else model)
+    if rebuild is None and not history:
         names = [name for name in names if name != target]
     if rebuild is None:
         base = data
@@ -2600,7 +2607,9 @@ def positive_control(
         in_market_zone = data.tz_convert(base.index.tz) if both_aware else data
         perturbed, counts, unchecked = perturb_recent(in_market_zone, run_day, information_set, freq, names, seed)
         perturbed.index = data.index
-        perturbed = _with_training_data_of(base, rebuild(perturbed), run_day, target, first_row_day)
+        perturbed = _with_training_data_of(
+            base, rebuild(perturbed), run_day, None if history else target, first_row_day
+        )
     common = (run_day, target, horizon, freq, information_set, availability, span)
     original, *_ = _issue_day_forecasts(model, base, *common)
     other, *_ = _issue_day_forecasts(model, perturbed, *common)
@@ -2950,14 +2959,15 @@ def _newest_target_of(model: Any) -> str:
 
 
 def _with_training_data_of(
-    base: pd.DataFrame, perturbed: pd.DataFrame, run_day: str, target: str, first_row_day: int = -1
+    base: pd.DataFrame, perturbed: pd.DataFrame, run_day: str, target: Optional[str], first_row_day: int = -1
 ) -> pd.DataFrame:
-    """A copy of `perturbed` with `target` and every row dated before D + `first_row_day` (D-1 by default) taken from `base`."""
+    """A copy of `perturbed` with `target` (unless None) and every row dated before D + `first_row_day` (D-1 by default) taken
+    from `base`."""
     out = perturbed.copy()
     local = out.index.tz_localize(None) if out.index.tz is not None else out.index
     older = np.asarray(local.normalize() < pd.Timestamp(run_day) + pd.Timedelta(days=first_row_day))
     out.loc[older, base.columns] = base.loc[older, base.columns]
-    if target in base.columns:
+    if target is not None and target in base.columns:
         out[target] = base[target]
     return out
 
