@@ -722,6 +722,13 @@ class ReadsTheFramesEnd(FakeFoundation):
         return super()._backend(call) + 1e-3 * float(call.target[:, 0].mean())
 
 
+class Rows(FakeFoundation):
+    """History and row blocks (`_predict_block`, declared, never called: its units read history alone)."""
+
+    def _predict_block(self, fitted, rows):
+        raise RuntimeError("never called")
+
+
 class ReadsDsTarget(FakeFoundation):
     """A "d-1" model whose series are cut as a "published" one's: its context holds D's prices."""
 
@@ -760,10 +767,10 @@ def pipeline(*models, information_set=INFO, **settings):
     return out
 
 
-def test_the_fake_reads_history_and_is_cut_after_each_target_day(hourly):
-    """A model reads history when its class defines `_history_spec`. `verify` cuts its frame after each target day, never after
-    the issue day, whose next rows hold its known-ahead values; a day unit without history is cut after the issue day, as
-    before. Its spec carries its newest target, "d-1" by default."""
+def test_the_fake_reads_history_and_is_cut_after_what_it_reads(hourly):
+    """A model reads history when its class defines `_history_spec`. `verify` cuts its frame after what each forecast reads
+    (`target_day_cut`), never after the issue day, whose next rows hold its known-ahead values, even with row blocks; a day unit
+    without history is cut after the issue day, as before. Its spec carries its newest target, "d-1" by default."""
     model = make("FM")
     assert model.newest_target == "d-1"
     assert reads_history(model) and history_spec_of(model, "price") == HistorySpec(
@@ -777,11 +784,7 @@ def test_the_fake_reads_history_and_is_cut_after_each_target_day(hourly):
 
     assert not reads_history(Day()) and cuts_at_issue_day(Day()) and not cuts_after_target_day(Day())
 
-    class Rows(FakeFoundation):  # history and row blocks: cut both ways
-        def _predict_block(self, fitted, rows):
-            raise RuntimeError
-
-    assert cuts_at_issue_day(Rows()) and cuts_after_target_day(Rows())
+    assert not cuts_at_issue_day(Rows()) and cuts_after_target_day(Rows())
     from epftoolbox2.models import OLSModel
 
     assert not reads_history(OLSModel(["price_d-1"])) and history_spec_of(OLSModel(["price_d-1"]), "price") is None
@@ -817,7 +820,7 @@ def test_verify_is_ok_with_its_control_rerun_co_batch_and_cut_frames(hourly):
     suite.check_verify(make, hourly, INFO_AHEAD, ["2023-10-28"], horizon=2, items=6)
     report = pipeline(make("FM")).verify(hourly, "2023-03-22", "2023-03-22", horizon=2, days=1, co_batch=True)
     cut = report.checks[0].co_batch.cut
-    assert cut is not None and cut.ok and cut.forecasts == 48 and cut.ends == "each target day"
+    assert cut is not None and cut.ok and cut.forecasts == 48 and cut.ends == "after what each forecast reads"
 
 
 @pytest.mark.filterwarnings("ignore:overflow")
@@ -826,12 +829,39 @@ def test_verify_is_ok_with_its_control_rerun_co_batch_and_cut_frames(hourly):
     [
         pytest.param(lambda name: make(name, by_batch=1e-3), id="reads its call's other items"),
         pytest.param(lambda name: ReadsTheFramesEnd(name=name), id="depends on where the frame ends"),
-        pytest.param(lambda name: ReadsDsTarget(name=name), id="d-1 reading D's prices"),
+        pytest.param(
+            lambda name: ReadsTheFramesEnd(name=name, known_ahead=()), id="univariate, depends on the frame's end"
+        ),
     ],
 )
 def test_verify_catches_what_a_history_model_must_not_read(hourly, leaky):
     with pytest.raises(AssertionError):
         suite.check_verify(leaky, hourly, INFO, ["2023-06-14"])
+
+
+@pytest.mark.filterwarnings("ignore:overflow")
+def test_a_univariate_model_s_frame_ends_where_its_forecast_reads(hourly):
+    """A univariate `ReadsTheFramesEnd` on the Saturday of a "7D" block at h=1: cut after the target day, Sunday's context is
+    complete and stays in the call, which a run on Saturday doesn't have (0.00225 apart). Its frame ends on D, after what its
+    forecast reads, so it is a leak."""
+    report = pipeline(ReadsTheFramesEnd(name="FM", known_ahead=())).verify(hourly, "2023-06-17", "2023-06-17", days=1)
+    assert not report.ok and not report.checks[0].co_batch.cut.ok
+
+
+def test_a_d1_model_must_cut_its_history_as_d1(hourly, monkeypatch):
+    """A `_history_spec` with another newest target than the model's is refused before any fit: verify holds a model to its
+    own. With that check taken away, the "d-1" model reading D's prices is a leak under the target's boundary."""
+    with pytest.raises(ValueError, match="newest_target='published' and the model has newest_target='d-1'"):
+        pipeline(ReadsDsTarget(name="FM")).run(hourly, "2023-06-14", "2023-06-14", horizon=1, forecast_only=True)
+    import epftoolbox2.models.base as base_module
+
+    def as_checked(model, target):  # what the check sees: the model's own newest target; the run still reads D's prices
+        spec = history_spec_of(model, target)
+        return None if spec is None else dataclasses.replace(spec, newest_target=model.newest_target)
+
+    monkeypatch.setattr(base_module, "history_spec_of", as_checked)
+    with pytest.raises(AssertionError):
+        suite.check_verify(lambda name: ReadsDsTarget(name=name), hourly, INFO, ["2023-06-14"])
 
 
 @pytest.mark.filterwarnings("ignore:overflow")
@@ -841,7 +871,7 @@ def test_the_frame_cut_after_each_target_day_catches_what_the_probe_can_t(hourly
     report = pipeline(ReadsTheFramesEnd(name="FM")).verify(hourly, "2023-06-14", "2023-06-14", horizon=1, days=1)
     check = report.checks[0]
     assert check.probe.ok and check.co_batch.probe.ok and not check.co_batch.cut.ok
-    assert "differ when the frame ends on each target day" in "\n".join(report.problems())
+    assert "differ when the frame ends after what each forecast reads" in "\n".join(report.problems())
 
 
 @pytest.mark.filterwarnings("ignore:overflow")
@@ -1213,7 +1243,7 @@ def test_a_resume_over_other_known_ahead_values_of_the_last_target_day_refuses(h
     test = ("2023-06-05", "2023-06-18")
     pipeline(make("FM")).run(hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True)
     path = suite.results(tmp_path, "FM")
-    ahead = json.loads(manifest_path(path).read_text())["history_ahead"]
+    (ahead,) = json.loads(manifest_path(path).read_text())["history_ahead"]
     assert ahead["through"] == "2023-06-19" and ahead["columns"] == ["load_forecast"]
     lines = records_of(path)
     path.write_text("".join(f"{line}\n" for i, line in enumerate(lines) if i % 2 == 0))
@@ -1251,3 +1281,105 @@ def test_a_residual_model_over_a_history_base_refuses(hourly):
     model = ResidualModel("FM", OLSModel(["load_forecast"]))
     with pytest.raises(ValueError, match="reads series"):
         model.bind_base(make("FM"))
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# The re-review: a hybrid's cut, a late issue time, the control of a univariate model, verify's noise
+# ---------------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.filterwarnings("ignore:overflow")
+def test_a_history_model_with_row_blocks_is_cut_after_what_it_reads(hourly):
+    """A history model that also declares row blocks used to be cut after the issue day, which took its target day's known-ahead
+    values away: no forecast, and verify crashed. It is cut after what each forecast reads, and is ok."""
+    report = pipeline(Rows(name="R")).verify(hourly, "2023-06-14", "2023-06-14", days=1, co_batch=True)
+    report.assert_ok()
+    assert report.checks[0].co_batch.cut.ok
+
+
+LATE_ISSUE = InformationSet("14:00")  # D+1's prices are out at 13:00 on D
+
+
+def test_a_late_issue_time_still_forecasts_the_whole_target_day(hourly):
+    """At 14:00 D+1's prices are out, and a "published" target's context ends at the day before the target day at the latest:
+    D's last hour at h=1 (S = 24, every hour of D+1 forecast), D+1's at h=2, as a row model's newest target is capped at h-1."""
+    spec = HistorySpec(CONTEXT, (), (), "price", newest_target="published")
+    batches = history_batches(spec, hourly, ["2023-06-14"], LATE_ISSUE, "1h", (1, 2))
+    for horizon, newest in ((1, "2023-06-14 23:00"), (2, "2023-06-15 23:00")):
+        (item,) = batches[horizon].items
+        assert item.newest["price"] == pd.Timestamp(newest, tz=ZONE)
+        assert item.steps_ahead == 24 and all(slot is not None for slot in item.slots)
+    model = make("FM", newest_target="published", known_ahead=())
+    report = pipeline(model, information_set=LATE_ISSUE).run(
+        hourly, "2023-06-14", "2023-06-14", horizon=2, forecast_only=True
+    )
+    counts = report.forecast_counts().iloc[0]
+    assert counts["produced"] == counts["planned"] == 48
+
+
+@pytest.mark.filterwarnings("ignore:overflow")
+def test_a_late_issue_model_is_verified_on_what_it_reads(hourly):
+    """At 14:00 the forecast at h=2 reads D+1's prices: the frame its cut keeps holds them, and the model is ok."""
+    model = make("FM", newest_target="published", known_ahead=())
+    report = pipeline(model, information_set=LATE_ISSUE).verify(hourly, "2023-06-14", "2023-06-14", horizon=2, days=1)
+    report.assert_ok()
+    assert report.checks[0].co_batch.cut.ok and report.checks[0].co_batch.cut.forecasts == 48
+
+
+def test_the_manifest_hashes_a_late_issue_target_after_test_end(hourly, tmp_path):
+    """The last issue day's context reads the price of the day after `test_end` at 14:00 (h=2): `history_ahead` hashes the target
+    through it, so a resume over another price there refuses; at 11:45 nothing is read after `test_end`."""
+    test = ("2023-06-05", "2023-06-18")
+    model = make("FM", newest_target="published", known_ahead=())
+    pipeline(model, information_set=LATE_ISSUE).run(hourly, *test, horizon=2, save_dir=tmp_path, forecast_only=True)
+    path = suite.results(tmp_path, "FM")
+    assert [(a["through"], a["columns"]) for a in json.loads(manifest_path(path).read_text())["history_ahead"]] == [
+        ("2023-06-19", ["price"])
+    ]
+    lines = records_of(path)
+    path.write_text("".join(f"{line}\n" for i, line in enumerate(lines) if i % 2 == 0))
+    changed = hourly.copy()
+    changed.loc["2023-06-19", "price"] += 50.0
+    with pytest.raises(ManifestMismatchError, match="history_ahead"):
+        model = make("FM", newest_target="published", known_ahead=())
+        pipeline(model, information_set=LATE_ISSUE).run(
+            changed, *test, horizon=2, save_dir=tmp_path, forecast_only=True
+        )
+    early = tmp_path / "early"
+    pipeline(make("FM", newest_target="published", known_ahead=())).run(
+        hourly, *test, horizon=2, save_dir=early, forecast_only=True
+    )
+    assert "history_ahead" not in json.loads(manifest_path(suite.results(early, "FM")).read_text())
+
+
+@pytest.mark.filterwarnings("ignore:overflow")
+@pytest.mark.parametrize("newest", ["d-1", "published"])
+def test_the_control_moves_a_univariate_model(hourly, newest):
+    """A univariate model reads only its target's context, which the control now perturbs as any input (from D-1 on under
+    "d-1", from D on under "published"): ok, not inconclusive."""
+    report = pipeline(make("FM", known_ahead=(), newest_target=newest)).verify(
+        hourly, "2023-06-14", "2023-06-14", days=1
+    )
+    row = report.table().iloc[0]
+    assert (row["status"], row["changed"]) == ("ok", 0) and row["control moved"] == 24
+
+
+@pytest.mark.filterwarnings("ignore:overflow")
+def test_verify_s_cut_runs_report_no_shortfall(hourly):
+    """The runs of verify's cut frames skip the later days they took away: they log no shortfall of forecasts."""
+    import logging
+
+    caught = []
+
+    class Keep(logging.Handler):
+        def emit(self, record):
+            caught.append(record.getMessage())
+
+    log = logging.getLogger("epftoolbox2.models.base")
+    handler = Keep(level=logging.WARNING)
+    log.addHandler(handler)
+    try:
+        pipeline(make("FM")).verify(hourly, "2023-06-14", "2023-06-14", horizon=2, days=1, co_batch=True)
+    finally:
+        log.removeHandler(handler)
+    assert not [message for message in caught if "planned forecasts" in message], caught
