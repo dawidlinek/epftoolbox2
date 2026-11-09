@@ -241,15 +241,48 @@ def refuse_searched_on_test(models: Sequence[Any], test_start: Optional[str]) ->
             )
 
 
-def search_choices(refs: Mapping[str, ModelResultRef], test: Optional[Tuple[str, str]]) -> Dict[str, List[Dict]]:
+def _forecasts_of(ref: ModelResultRef, made: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """What a model's run forecast: target, horizons, freq and issue days, from the manifest of its results (what a report
+    reads), else `made` (what `run` was told); None if neither says."""
+    path = None if ref.path is None else manifest_path(ref.path)
+    if path is not None and path.exists():
+        stored = json.loads(path.read_text())
+        horizon = stored.get("horizon")
+        return {
+            "target": stored.get("target"),
+            "horizons": list(stored.get("horizons") or range(1, int(horizon or 0) + 1)),
+            "freq": stored.get("freq"),
+            "issue_days": stored.get("issue_days"),
+        }
+    return None if made is None else dict(made)
+
+
+def search_choices(
+    refs: Mapping[str, ModelResultRef], test: Optional[Tuple[str, str]], made: Optional[Mapping[str, Any]] = None
+) -> Dict[str, List[Dict]]:
     """The rows of `report.choices()` of the models a search chose (`tune.SearchResult.best`, whose ref's provenance holds
     `search`), keyed `{search}:{model}`: the search's validation numbers, and the model's MAE on the `test` period of the run,
-    from every forecast it has there (every horizon it made), so a report of any part of the run shows the same."""
+    from every forecast it has there (every horizon it made), so a report of any part of the run shows the same. A warning
+    names a model whose run forecasts another target, horizons, freq or issue days than its search scored (`made`, or its
+    manifest): its gap would compare two kinds of forecast."""
     out: Dict[str, List[Dict]] = {}
     for name, ref in refs.items():
         search = (getattr(ref, "provenance", None) or {}).get("search")  # a stand-in ref may have none
         if not search:
             continue
+        forecasts = _forecasts_of(ref, made)
+        if forecasts is not None and "target" in search:
+            searched = {key: search.get(key) for key in ("target", "horizons", "freq", "issue_days")}
+            differ = [key for key, value in searched.items() if json.dumps(value) != json.dumps(forecasts[key])]
+            if differ:
+                warnings.warn(
+                    f"{name}: the search {search.get('search')!r} scored it on "
+                    f"{', '.join(f'{key} {searched[key]}' for key in differ)}, and this run forecasts "
+                    f"{', '.join(f'{key} {forecasts[key]}' for key in differ)}: its gap in report.choices() compares two kinds of "
+                    "forecast.",
+                    UserWarning,
+                    stacklevel=3,
+                )
         whole = replace(
             ref,
             test_start=test[0] if test else "",
@@ -660,7 +693,8 @@ class ModelPipeline:
             )
             refs.update(computed)
         if not forecast_only:
-            choices.update(search_choices(refs, windows.test if windows is not None else (test_start, test_end)))
+            made = {"target": target, "horizons": list(horizons), "freq": freq, "issue_days": issue_day_names(weekdays)}
+            choices.update(search_choices(refs, windows.test if windows is not None else (test_start, test_end), made))
 
         evaluators = [] if forecast_only else self.evaluators
         report = EvaluationReport(refs, evaluators, source_data=data, choices=choices)
@@ -971,8 +1005,14 @@ class ModelPipeline:
                 )
                 zone_refs.update(computed)
             if not forecast_only:
+                made = {
+                    "target": target,
+                    "horizons": list(horizons),
+                    "freq": freq,
+                    "issue_days": issue_day_names(weekdays),
+                }
                 choices.update(
-                    search_choices(zone_refs, windows.test if windows is not None else (test_start, test_end))
+                    search_choices(zone_refs, windows.test if windows is not None else (test_start, test_end), made)
                 )
             reports[zone] = EvaluationReport(zone_refs, evaluators, source_data=frames[zone], choices=choices)
         return PanelReport(reports, target=target)

@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import warnings
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -970,6 +971,20 @@ def test_a_chosen_model_is_never_tested_on_the_days_it_was_chosen_on(df, monkeyp
     ModelPipeline().add_model(models[0]).run(df, horizon=1, test=("2023-04-03", "2023-04-05"))
     ModelPipeline().add_model(models[0]).run(df, horizon=1, validation=V)  # no test: nothing to refuse
     assert len(fits) == 2
+
+
+def test_a_final_run_of_other_forecasts_than_the_search_scored_warns(df, tmp_path):
+    result = search(n_trials=4).run(df, horizon=1, validation=V)
+    model = result.best(1)[0]
+    assert (model._search["target"], model._search["horizons"], model._search["freq"]) == ("price", [1], "1h")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        warnings.filterwarnings("ignore", message=".*fewer than 28")
+        ModelPipeline().add_model(model).run(df, horizon=1, test=T)  # what it was scored on: no warning
+    with pytest.warns(UserWarning, match=r"scored it on horizons \[1\], and this run forecasts horizons \[1, 2\]"):
+        ModelPipeline().add_model(model).run(df, horizon=2, test=T, save_dir=str(tmp_path))
+    with pytest.warns(UserWarning, match="horizons"):  # the report reads what the run made from the manifest
+        ModelPipeline().add_model(model).report(tmp_path, horizons=[1], test=T)
 
 
 def test_ensemble_choices_show_their_candidates_and_gap(df):

@@ -1129,7 +1129,9 @@ def _reach_problem(model: Any, frame: pd.DataFrame, first_day: str, horizons: Se
     )
     predictors = getattr(model, "predictors", None)
     names = [
-        name.replace("{horizon}", str(h)) for name in (predictors if isinstance(predictors, list) else []) for h in horizons
+        name.replace("{horizon}", str(h))
+        for name in (predictors if isinstance(predictors, list) else [])
+        for h in horizons
     ]
     lag, lagged = _days_back(name for name in names if isinstance(name, str))
     needed = pd.Timestamp.fromordinal(first_row - lag).date()
@@ -1367,6 +1369,11 @@ class SearchResult:
                 "validation_share": last["forecasts"] / last["planned"] if last["planned"] else None,
                 # The rung the finalists were scored on: a model from a cheaper rung has a score of another fidelity.
                 "top_rung": top,
+                # What the search scored: a final run that forecasts something else is warned about in report.choices().
+                "target": self._record["search"].get("target"),
+                "horizons": list(self._record["search"].get("horizons") or []),
+                "freq": self._record["search"].get("freq"),
+                "issue_days": None,
             }
             model._search = provenance
             self._handed_out.append(provenance)

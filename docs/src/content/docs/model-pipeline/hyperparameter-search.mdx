@@ -233,7 +233,9 @@ the trial, its rank, the rung, the validation period and MAE, and the number of 
 |---|---|---|---|---|---|---|
 | `mlp_bayes` | `[mlp_bayes_00]` | 1 | the trial's, on its rung's days | the search's trials | the model's on the test period | `test_mae - validation_mae` |
 
-A run whose test period starts on or before the search's `data_through` (its validation end) raises `ValueError` before any fit,
+The provenance also holds what the search scored (target, horizons, freq): a run that forecasts something else warns, since the
+gap would compare two kinds of forecast. A run whose test period starts on or before the search's `data_through` (its
+validation end) raises `ValueError` before any fit,
 as a validation period that doesn't end before the test starts does: a test forecast must not be scored on days its settings
 were chosen on.
 
