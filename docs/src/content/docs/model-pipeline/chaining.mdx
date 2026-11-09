@@ -93,13 +93,19 @@ doesn't vouch for every forecast it stored:
 
 - it ran at `availability="none"`, and has no listing;
 - it ran at `"raise"` with `unknown="warn"` or `"ignore"`, which lets a column without a rule through unlisted;
-- it was resumed under another information set (another issue time, other rules): its manifest lists what the current rules say
-  and keeps the earlier rows under `stored_under_other_rules`, for the records the earlier rules judged;
+- it was resumed under another information set (other rules, or an earlier issue time): its manifest lists what the current rules
+  say and keeps the earlier rows under `stored_under_other_rules`, for the records the earlier rules judged. A later issue time
+  with the rules unchanged leaves no mark where the earlier run listed nothing at `"warn"` or `"raise"`: what was known then is
+  known later;
+- it holds forecasts of an earlier run at `availability="none"` on issue days no later run checked (a resume over part of its
+  windows, say), marked `{"listing": [], "level": "none"}`; a resume over every one of its days at `"warn"` or `"raise"` judges
+  them, and leaves no mark;
 - it was resumed over a mismatch or without a manifest (`data_unverified`, `training_cut` unverified);
 - it holds forecasts issued outside the test period its manifest describes, which no run it records checked.
 
 Run the upstream at `availability="raise"` with the default `unknown="raise"`, into a fresh `save_dir` whenever its information
-set changes: then its listing vouches for every forecast and its column passes.
+set changes: then its listing vouches for every forecast and its column passes. A mark is never taken back by a resume; a fresh
+run into a new `save_dir` (or with the old results removed) clears it.
 
 ## Results and Resuming
 

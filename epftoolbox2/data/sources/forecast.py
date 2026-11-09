@@ -85,7 +85,12 @@ class Upstream:
                 out.append(
                     f"{name} (ran at availability='raise' with unknown={unknown!r}: a column without a rule passed)"
                 )
-            if availability and availability.get(STORED_UNDER_OTHER_RULES) is not None:
+            mark = (availability or {}).get(STORED_UNDER_OTHER_RULES)
+            if mark is not None and mark.get("level") == "none":
+                out.append(
+                    f"{name} (holds forecasts an earlier run made at availability='none', on days no later run checked)"
+                )
+            elif mark is not None:
                 out.append(f"{name} (holds forecasts listed under other rules than its manifest's)")
             if manifest.get("data_unverified") or cut.get("stored") == TRAINING_CUT_UNVERIFIED["stored"]:
                 out.append(

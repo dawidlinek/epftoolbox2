@@ -107,9 +107,10 @@ A downstream model that reads the column is checked for two more things before a
 - **Late upstream.** If the upstream (any member of an upstream ensemble) listed inputs as late or without a rule, or its listing
   doesn't vouch for every forecast it stored, every use of its column is listed as `late upstream` at `"warn"` and refused at
   `"raise"`. A listing doesn't vouch for them when the model ran at `availability="none"` (it has none), at `"raise"` with
-  `unknown="warn"` or `"ignore"` (a column without a rule passed unlisted), was resumed under other rules or another issue time
-  (its manifest keeps the earlier rows under `stored_under_other_rules`), was accepted unverified (`data_unverified`), or holds
-  forecasts issued outside the test period its manifest describes. Run the upstream at `availability="raise"` with the default
+  `unknown="warn"` or `"ignore"` (a column without a rule passed unlisted), was resumed under other rules or an earlier issue time
+  (its manifest keeps the earlier rows under `stored_under_other_rules`), holds forecasts of an earlier run at `"none"` on days no
+  later run checked, was accepted unverified (`data_unverified`), or holds forecasts issued outside the test period its manifest
+  describes. Run the upstream at `availability="raise"` with the default
   `unknown="raise"`, into a fresh `save_dir` when its information set changes.
 
 The downstream's manifest records each chained column's upstream (`chained_inputs`, the upstream by its absolute path), and a resume

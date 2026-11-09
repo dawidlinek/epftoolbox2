@@ -98,9 +98,11 @@ upstream changes the column, which `data_columns_hash` refuses. A model that rea
 A daily run (`freq="1D"`) records `daily_stamp`, the time of day its rows are stamped at ("12:00"), provenance: a downstream
 `ForecastSource` places each forecast there. Other runs have no key.
 
-Resumed under another information set (another issue time, other rules), a run lists what the current rules say, and its
+Resumed under another information set (other rules, or an earlier issue time), a run lists what the current rules say, and its
 `availability` keeps the earlier rows under `stored_under_other_rules`: the file holds records those rules judged, and a
-`ForecastSource` reading it treats the model as unchecked. Every later resume keeps the mark.
+`ForecastSource` reading it treats the model as unchecked. A later issue time over an earlier listing that was empty at "warn" or
+"raise" leaves no mark. Resumed over records of a run that listed nothing (level "none") on days this run doesn't judge, the mark
+is `{"listing": [], "level": "none"}`. Every later resume keeps the mark; only fresh results lose it.
 
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
@@ -1023,6 +1025,7 @@ def check_and_write(
     manifest.save_coefficients = None if save_coefficients else False  # compared below, as the configuration is
     if path.exists():
         existing = _read_manifest_of_a_model(path, model_name)
+        run_span = _issue_span(manifest)  # this run's own issue days, before the manifest grows to cover the file
         data_diffs = _compare_data(existing, manifest, frame_hashes)
         skip = () if data_diffs is None else ("data_columns_hash", "history_ahead")
         diffs = [
@@ -1074,7 +1077,7 @@ def check_and_write(
             manifest.predictor_lists += list(kept.values())
         if manifest.binary_masks is not None and existing.binary_masks:
             manifest.binary_masks = {**existing.binary_masks, **manifest.binary_masks}
-        _keep_listing(existing, manifest, has_existing_results)
+        _keep_listing(existing, manifest, has_existing_results, run_span)
         _keep_vintages(existing, manifest)
     elif has_existing_results:
         message = f"{model_name}: {path.parent} has results but no manifest ({path.name} not found)."
@@ -1350,7 +1353,12 @@ def _keep_windows(existing: Manifest, manifest: Manifest, allow_mismatch: bool, 
 STORED_UNDER_OTHER_RULES = "stored_under_other_rules"
 
 
-def _keep_listing(existing: Manifest, manifest: Manifest, has_existing_results: bool = True) -> None:
+def _keep_listing(
+    existing: Manifest,
+    manifest: Manifest,
+    has_existing_results: bool = True,
+    run_span: Optional[Tuple[str, str]] = None,
+) -> None:
     """Keep what an earlier run listed: its records stay in the file, and with them the reason to mention it.
 
     A run over a narrower test period adds its rows to the earlier ones. A run at level "none" looks at nothing, so it can't
@@ -1359,16 +1367,25 @@ def _keep_listing(existing: Manifest, manifest: Manifest, has_existing_results: 
     `STORED_UNDER_OTHER_RULES`, with which every later resume keeps the mark that the file holds records judged by other rules.
     Without an information set there are no rules left to say otherwise. A listing made when the check compared wall-clock times
     (no `"times"`) is replaced too, without the mark: its rules are the run's.
+
+    Two cases are clean without the mark: an earlier listing that was empty at "warn" or "raise" under the same rules but an
+    earlier issue time (what was known then is known later), and records of an earlier run that listed nothing (level "none", or
+    no information set) whose issue days this run's own (`run_span`, before the manifest grows) cover, since this run judged
+    those days. Records of such a run outside them are marked `{"listing": [], "level": "none"}`.
     """
     if not existing.availability:
+        if manifest.availability is not None and has_existing_results and not _covers(run_span, _issue_span(existing)):
+            manifest.availability[STORED_UNDER_OTHER_RULES] = {"listing": [], "level": "none"}
         return
     marked = existing.availability.get(STORED_UNDER_OTHER_RULES)
     if manifest.information_set not in (None, existing.information_set):
-        if manifest.availability is not None and has_existing_results:
+        if manifest.availability is not None and has_existing_results and not _issued_later_alone(existing, manifest):
             earlier = (marked or {}).get("listing", [])
             manifest.availability[STORED_UNDER_OTHER_RULES] = {
                 "listing": merge_listings(earlier, existing.availability.get("listing", []))
             }
+        elif marked is not None and manifest.availability is not None:
+            manifest.availability[STORED_UNDER_OTHER_RULES] = marked
         return
     if marked is not None and manifest.availability is not None:
         manifest.availability[STORED_UNDER_OTHER_RULES] = marked
@@ -1396,6 +1413,44 @@ def _keep_listing(existing: Manifest, manifest: Manifest, has_existing_results: 
             window: merge_listings(earlier.get(window, []), later.get(window, []))
             for window in sorted({*earlier, *later})
         }
+
+
+def _issue_span(manifest: Manifest) -> Optional[Tuple[str, str]]:
+    """The first and last issue day a manifest describes: its windows', else its test period; None if it says none."""
+    if manifest.windows:
+        windows = RunWindows.from_dict(manifest.windows)
+        return windows.first_day, windows.last_day
+    if manifest.test_start and manifest.test_end:
+        return str(manifest.test_start)[:10], str(manifest.test_end)[:10]
+    return None
+
+
+def _covers(span: Optional[Tuple[str, str]], other: Optional[Tuple[str, str]]) -> bool:
+    """Whether the issue days `span` holds every one of `other`'s; not when either is unknown."""
+    return span is not None and other is not None and span[0] <= other[0] and other[1] <= span[1]
+
+
+def _issued_later_alone(existing: Manifest, manifest: Manifest) -> bool:
+    """Whether an earlier listing still holds under this run's information set: it was made at "warn" or "raise" and listed
+    nothing, and the information set differs in nothing but a later (or the same) issue time on the same clock. Everything
+    known at the earlier time is known at the later one, so its records stay vouched for."""
+    earlier = existing.availability or {}
+    if earlier.get("level") not in ("warn", "raise") or earlier.get("listing"):
+        return False
+    if any(rows for rows in (earlier.get("windows") or {}).values()):
+        return False
+    old, new = existing.information_set or {}, manifest.information_set or {}
+    if {k: v for k, v in old.items() if k != "issue_time"} != {k: v for k, v in new.items() if k != "issue_time"}:
+        return False
+    try:
+        return _clock_minutes(new["issue_time"]) >= _clock_minutes(old["issue_time"])
+    except (KeyError, ValueError):
+        return False
+
+
+def _clock_minutes(text: str) -> int:
+    hours, minutes = str(text).split(":")[:2]
+    return int(hours) * 60 + int(minutes)
 
 
 def _keep_vintages(existing: Manifest, manifest: Manifest) -> None:

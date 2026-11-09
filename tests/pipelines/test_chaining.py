@@ -120,7 +120,10 @@ def run_upstream(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)  # a late input's listing, where a test plants one
         frame = df.drop(columns=[name for name in df.columns if name.startswith("load_d+")])  # its targets
-        pipeline.run(frame, *test, target="load", horizon=horizon, save_dir=str(directory), **kwargs)
+        if "validation" in kwargs:  # a run with windows takes both by keyword
+            pipeline.run(frame, test=test, target="load", horizon=horizon, save_dir=str(directory), **kwargs)
+        else:
+            pipeline.run(frame, *test, target="load", horizon=horizon, save_dir=str(directory), **kwargs)
     return pipeline
 
 
@@ -597,6 +600,65 @@ def test_an_upstream_resumed_at_another_issue_time_is_not_vouched_for(df, tmp_pa
     )
     again = json.loads((tmp_path / "up" / "load_up.manifest.json").read_text())["availability"]
     assert "stored_under_other_rules" in again
+
+
+WIND_OVER_TIME = {
+    "wind": [
+        Availability.published("10:00", 0).during(valid_until="2023-03-15"),
+        Availability.published("09:00", 0).during(valid_from="2023-03-16"),
+    ]
+}
+VALIDATION_AND_TEST = {"validation": ("2023-02-10", "2023-03-15"), "test": ("2023-03-16", "2023-04-20")}
+
+
+def _up_with_wind(df, directory, issue_time, availability, save_format, test, validation=None):
+    run_upstream(
+        df,
+        directory,
+        test=test,
+        predictors=[*UPSTREAM, "wind"],
+        rules=WIND_OVER_TIME,
+        horizon=1,
+        issue_time=issue_time,
+        availability=availability,
+        save_format=save_format,
+        **({} if validation is None else {"validation": validation}),
+    )
+    return ForecastSource(str(directory), model="load_up", column="load_fc")
+
+
+@pytest.mark.parametrize("save_format", ["jsonl", "parquet"])
+def test_records_of_a_run_at_none_are_vouched_for_only_where_a_later_run_checked_their_days(df, tmp_path, save_format):
+    """A run at "none" over validation and test, resumed at "raise" over the test window alone: the validation records (late
+    `wind` until 03-15) are no later run's, so the upstream is unchecked. A resume over every day of the earlier run judges them
+    all, and stays clean."""
+    source = _up_with_wind(df, tmp_path / "part", "09:30", "none", save_format, **VALIDATION_AND_TEST)
+    _up_with_wind(df, tmp_path / "part", "09:30", "raise", save_format, test=VALIDATION_AND_TEST["test"])
+    availability = json.loads((tmp_path / "part" / "load_up.manifest.json").read_text())["availability"]
+    assert availability["stored_under_other_rules"] == {"listing": [], "level": "none"}
+    unchecked = source.chained_input().unchecked
+    assert source.chained_input().late_upstream and "availability='none', on days no later run checked" in unchecked[0]
+    clean = _up_with_wind(df, tmp_path / "all", "09:30", "none", save_format, test=VALIDATION_AND_TEST["test"])
+    _up_with_wind(df, tmp_path / "all", "09:30", "raise", save_format, test=VALIDATION_AND_TEST["test"])
+    assert (
+        "stored_under_other_rules"
+        not in json.loads((tmp_path / "all" / "load_up.manifest.json").read_text())["availability"]
+    )
+    assert not clean.chained_input().late_upstream
+
+
+@pytest.mark.parametrize("save_format", ["jsonl", "parquet"])
+def test_a_clean_upstream_issued_later_stays_clean_and_earlier_does_not(df, tmp_path, save_format):
+    """Nothing late at 09:30: issued at 09:45 with the same rules, everything known at 09:30 still is. Issued at 09:00, the
+    records made at 09:30 aren't judged by it, and the mark says so."""
+    for issue_time, marked in (("09:45", False), ("09:00", True)):
+        directory = tmp_path / issue_time.replace(":", "")
+        run_upstream(df, directory, horizon=1, availability="raise", save_format=save_format)
+        run_upstream(df, directory, horizon=1, availability="raise", save_format=save_format, issue_time=issue_time)
+        availability = json.loads((directory / "load_up.manifest.json").read_text())["availability"]
+        assert ("stored_under_other_rules" in availability) is marked, issue_time
+        source = ForecastSource(str(directory), model="load_up", column="load_fc")
+        assert source.chained_input().late_upstream is marked, issue_time
 
 
 def test_an_upstream_at_raise_that_let_a_column_without_a_rule_through_is_not_vouched_for(df, tmp_path):
