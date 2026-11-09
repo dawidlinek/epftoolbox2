@@ -966,6 +966,21 @@ def test_a_pooled_fit_of_a_period_network_refuses_rather_than_seed_itself(market
         pipeline.run({"PL": market, "XX": market}, "2023-03-20", "2023-03-20", horizon=1)
 
 
+def test_a_class_is_saved_by_its_import_path_only_where_its_component_lists_it():
+    """`TorchModel._CLASS_PARAMS` names `module`, which `ModelPipeline._serialize_param` writes by import path; `to_yaml_value`
+    refuses a class anywhere else (a DataPipeline parameter, a model attribute that isn't listed)."""
+    from epftoolbox2.pipelines._yaml import to_yaml_value
+
+    with pytest.raises(TypeError, match="callable"):
+        to_yaml_value(nets.MLP, "Some.param")
+    pipeline = ModelPipeline().add_model(flat(name="listed"))
+    assert pipeline.to_dict()["models"][0]["params"]["module"] == f"{__name__}:FlatNet"
+    stray = flat(name="stray")
+    stray.helper = FlatNet  # a public class attribute no `_CLASS_PARAMS` lists
+    with pytest.raises(TypeError, match="stray.*helper"):
+        ModelPipeline().add_model(stray).to_dict()
+
+
 # --- review 6l: seeds from a list's content, early stopping by dates, the device's provenance -----------------------------
 
 

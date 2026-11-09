@@ -28,7 +28,8 @@ def dump_yaml(data: Any) -> str:
 
 
 def class_path(cls: type, where: str) -> str:
-    """``package.module:Class``, the import path a class is saved by (``TorchModel(module=...)``), if importing it gives the
+    """``package.module:Class``, the import path a class parameter is saved by (a component's ``_CLASS_PARAMS``, such as
+    ``TorchModel(module=...)``), if importing it gives the
     class back; a ``TypeError`` naming ``where`` otherwise: a class defined in the script being run (``__main__``) or inside a
     function, which a later load can't import, or one whose import path gives another object."""
     module, qualname = getattr(cls, "__module__", None), getattr(cls, "__qualname__", None)
@@ -76,16 +77,15 @@ def _import(module: str, qualname: str) -> Any:
 
 
 def to_yaml_value(value: Any, where: str) -> Any:
-    """Plain YAML-safe value (numpy scalars and arrays, tuples, ranges and paths converted, a class written by its import path,
-    ``class_path``); raises otherwise.
+    """Plain YAML-safe value (numpy scalars and arrays, tuples, ranges and paths converted); raises otherwise.
 
     ``where`` names the parameter in the ``TypeError`` raised for a value YAML cannot represent, so a parameter is
-    never silently dropped or rewritten as a Python object that ``yaml.safe_load`` cannot read back.
+    never silently dropped or rewritten as a Python object that ``yaml.safe_load`` cannot read back. A class is refused too:
+    a component whose parameter is a class lists it in its ``_CLASS_PARAMS``, and ``ModelPipeline._serialize_param`` writes
+    it by its import path (``class_path``).
     """
     if value is None or isinstance(value, (bool, str)):
         return value
-    if inspect.isclass(value):
-        return class_path(value, where)
     if isinstance(value, int) and not isinstance(value, bool):
         return int(value)
     if isinstance(value, float):

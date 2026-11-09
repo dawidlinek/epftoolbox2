@@ -5,6 +5,7 @@ from pathlib import Path
 import copy
 import datetime
 import importlib
+import inspect
 import json
 import re
 import warnings
@@ -85,7 +86,7 @@ from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
 from ..results.vintages import read_vintages
 from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
-from ._yaml import dump_yaml, to_yaml_value
+from ._yaml import class_path, dump_yaml, to_yaml_value
 
 logger = get_logger(__name__)
 
@@ -1918,8 +1919,13 @@ class ModelPipeline:
         """One parameter `key` of the component `owner` as YAML, the one place a parameter's kind is decided: a model inside it as
         `{class, params}` where its class lists `key` in `_NESTED_MODELS` (`ResidualModel`'s base and learner,
         `PooledModel`'s model; what `_load_component` rebuilds), less what its `_NESTED_OMIT` leaves out of that model; a
-        strategy inside an evaluator the same; anything else a plain value (`to_yaml_value`, which raises for what YAML can't
-        hold). A model under a key the class doesn't list raises: a load couldn't rebuild it."""
+        strategy inside an evaluator the same; a class under a key its class lists in `_CLASS_PARAMS` (`TorchModel`'s
+        `module`) by its import path (`class_path`, which raises for one defined in `__main__` or a function, which a load
+        couldn't import; the component takes the path back); anything else a plain value (`to_yaml_value`, which raises for
+        what YAML can't hold, a class among it). A model under a key the class doesn't list raises: a load couldn't rebuild
+        it."""
+        if inspect.isclass(value) and key in getattr(type(owner), "_CLASS_PARAMS", ()):
+            return class_path(value, where)
         if isinstance(value, (BaseModel, PooledModel)):
             if key not in getattr(type(owner), "_NESTED_MODELS", ()):
                 raise TypeError(
