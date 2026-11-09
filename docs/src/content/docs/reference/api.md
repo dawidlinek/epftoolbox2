@@ -661,6 +661,11 @@ class ResidualModel(BaseModel):             # a base's out-of-sample forecasts +
                  training_window: Union[int, str] = "expanding", refit: Optional[str] = "7D",
                  warmup: Optional[int] = None, name: str = "residual"): ...
 
+class ShapeModel(BaseModel):                # a chained hourly forecast + a learner of each quarter-hour's deviation (15min)
+    def __init__(self, base: str, learner: BaseModel, *, period: str = "1h",
+                 native: Union[str, datetime.date] = "distinct", min_native_days: Optional[int] = None,
+                 name: str = "Shape"): ...
+
 class TorchModel(BaseModel):                # a torch.nn.Module class of your own on the library's trainer ([torch])
     def __init__(self, module: Union[str, type], predictors: Union[List, Callable, None] = None,
                  inputs: Optional[Dict[str, List[str]]] = None, module_params: Optional[Dict[str, Any]] = None,
@@ -695,6 +700,10 @@ class MLPDailyModel(TorchModel):            # nets.MLP, output="day": one networ
 `LightGBMModel`, `XGBoostModel` and `CatBoostModel` are in [Gradient-Boosted Trees](/epftoolbox2/models/trees/): they build, save and load without their package (one extra each), a fit's `threads`, the package's version and XGBoost's `device` are compared on resume, and `threads > 1` is refused where workers fork (Linux, macOS). `HistGBModel` and `ResidualModel` are in [Residual Model](/epftoolbox2/models/residual/): `INVARIANT_TARGET` is
 `{"name": "asinh", "params": {"apply_to": "target", "standardise": False}}` (`epftoolbox2.models.hgb`), the predictors as they are
 and the target as epftoolbox's Invariant; `base` is a model or the name of one added to the pipeline before the `ResidualModel`.
+`ShapeModel` is in [Shape Model](/epftoolbox2/models/shape/): a 15-minute run's chained hourly forecast (`base`, a column read on the
+issue row) plus its learner's forecast of each quarter-hour's deviation from its hour's actual mean, trained on native target
+dates (`native`), a fit with fewer than `min_native_days` of them (its window's length by default) skipped as
+`too_few_native_days`.
 
 `TorchModel`, `MLPHourlyModel` and `MLPDailyModel` build, save and load without torch, and need the `[torch]` extra to fit (the
 pre-flight names it). Their seeds are a hash of `random_state` and the fit alone and a forecast is their mean in target units; a
@@ -712,7 +721,7 @@ record; `{horizon}` may stand in either name. The columns are inputs (checked, h
 model with any of them set never runs in an engine group. An issue row whose scale is missing is `missing_test_predictors` and one not
 positive `non_positive_scale`; a `zero_when` value other than 0, 1 or missing on an issue row raises. `NaiveModel` takes `bounds`
 alone; `MLPDailyModel`, a `TorchModel` with `output="day"` and a model that reads history refuse them, and they aren't supported on
-a `ResidualModel` or the model a `PooledModel` pools (see [Common Parameters](/epftoolbox2/models/common-parameters/#generation-targets)).
+a `ResidualModel`, a `ShapeModel` (or its learner) or the model a `PooledModel` pools (see [Common Parameters](/epftoolbox2/models/common-parameters/#generation-targets)).
 
 ### Predictor functions
 

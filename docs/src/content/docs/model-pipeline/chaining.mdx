@@ -68,7 +68,7 @@ from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 # 1. Upstream: the hourly mean price, over the 15-minute model's training rows and its test.
 hourly = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin", availability="raise")
 hourly.add_model(LEARModel(["price_d-1", "load_forecast_d+{horizon}"], training_window=728, name="LEAR_1h"))
-hourly.run(df_1h, test_start="2025-10-02", test_end="2026-10-11", horizon=1, save_dir="runs/de_1h")
+hourly.run(df_1h, test_start="2025-09-30", test_end="2026-10-11", horizon=1, save_dir="runs/de_1h")
 
 # 2. The 15-minute frame: the hourly forecast on its quarter-hours, for D+1, and the hour before it (the ramp).
 data15 = (
@@ -80,7 +80,7 @@ data15 = (
     .add_transformer(LagTransformer(["price_1h_fc", "load_forecast_hour_dev"], [-1], "day"))
     .add_transformer(LagTransformer(["price_1h_fc_d+1"], [1], "hour"))
 )
-df15 = data15.run("2025-10-01", "2026-10-12")
+df15 = data15.run("2025-09-30", "2026-10-12")
 
 # 3. Downstream: the hourly forecast plus a per-quarter-hour OLS of the deviation, on 15-minute dates only.
 shape_x = ["price_1h_fc_d+{horizon}", "price_1h_fc_d+{horizon}_h-1", "load_forecast_hour_dev_d+{horizon}"]
@@ -98,8 +98,9 @@ report.tests(lag=6)  # B24_dyn against the 96 per-quarter-hour LEARs, on identic
 issued a day earlier and known; an hour after (`_h+1`) would read the next day's forecast at 23:00, which isn't out yet, and is
 refused. Each forecast is the base on its issue row, the LEAR's forecast for its hour, plus the OLS's deviation; the OLS trains on
 the native 15-minute dates of its window alone (`native="distinct"`), while the hourly LEAR trains on the whole history. The
-hourly run must cover every row the shape's fits read: from 182 days before the first issue day here, which the coverage check
-below counts. The ShapeModel also warns where its base isn't a chained column.
+hourly run must cover every row the shape's fits read: from W+2 days before the first issue day (184 here, 2025-09-30: the window,
+the horizon, and the hour lag's reach into the day before at midnight), which the coverage check below counts, leaving out the rows
+whose target date isn't native, which the fits drop anyway. The ShapeModel also warns where its base isn't a chained column.
 
 ## When a Chained Value Is Known
 

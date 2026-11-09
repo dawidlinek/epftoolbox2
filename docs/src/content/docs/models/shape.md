@@ -23,7 +23,7 @@ from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 # 1. Hourly: 24 LEARs on the hourly mean price, issued at 11:45 Berlin, stored over the shape model's training rows too.
 hourly = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin")
 hourly.add_model(LEARModel(["price_d-1", "load_forecast_d+{horizon}"], training_window=728, name="LEAR_1h"))
-hourly.run(df_1h, test_start="2025-10-02", test_end="2026-10-11", horizon=1, save_dir="runs/de_1h")
+hourly.run(df_1h, test_start="2025-09-30", test_end="2026-10-11", horizon=1, save_dir="runs/de_1h")
 
 # 2. The 15-minute frame: the hourly forecast stepped over its quarter-hours, its D+1 and the hour before it (the ramp), and
 #    the load forecast's within-hour deviation.
@@ -36,7 +36,7 @@ data15 = (
     .add_transformer(LagTransformer(["price_1h_fc", "load_forecast_hour_dev"], [-1], "day"))
     .add_transformer(LagTransformer(["price_1h_fc_d+1"], [1], "hour"))
 )
-df15 = data15.run("2025-10-01", "2026-10-12")
+df15 = data15.run("2025-09-30", "2026-10-12")
 
 # 3. The shape: per quarter-hour, an OLS of the deviation on the forecast hourly ramp and the load forecast's deviation.
 shape_x = ["price_1h_fc_d+{horizon}", "price_1h_fc_d+{horizon}_h-1", "load_forecast_hour_dev_d+{horizon}"]
@@ -65,6 +65,7 @@ shows the whole chain with its checks.
 | `learner` | model | Required | The model of the deviation, such as `OLSModel(shape_x, training_window=182, fit_intercept=True)`: its estimator, predictors (a list of names, `{horizon}` allowed), `training_window`, `refit`, `scaler`, `newest_target` and `binary_mask` |
 | `period` | str | `"1h"` | Keyword-only. The period whose mean the shape is taken from: the hour |
 | `native` | str or date | `"distinct"` | Keyword-only. Which target dates train: `"distinct"`, a date where some hour has quarter-hours that aren't all equal; or the first natively 15-minute date, such as `"2025-10-01"`, and the dates after it |
+| `min_native_days` | int or None | `None` | Keyword-only. The fewest native target dates a fit may train on, counted in its window from the first native date on: a forecast whose fit has fewer is skipped as `too_few_native_days`. `None` is each window's own length (an `"expanding"` window has no minimum); `0` skips nothing |
 | `name` | str | `"Shape"` | Keyword-only. The model's name, which names its results |
 
 The learner's settings are the model's: `shape.training_window`, `shape.refit` and the others read the learner's, and are set on
@@ -84,6 +85,14 @@ deviation of 0 that would teach the learner that hours are flat (the study's "sh
 date where some hour's four quarter-hours aren't all equal, which a step-filled date never has; `native="2025-10-01"` keeps that
 date and the later ones. The hourly model can still train on the whole history: only the shape is restricted.
 
+A fit whose window reaches before the first native date (`native`'s date, or the frame's first native date with `"distinct"`)
+would train on the few native days inside it: a fit of 91 days issued a week after the switch, on 7 rows. By default
+(`min_native_days=None`) such a forecast is skipped as `too_few_native_days`, decided before any fit and counted in
+`forecast_counts()`, so a short-trained shape never enters a comparison; one warning per run names the issue days. Give
+`min_native_days=` the fewest native days a fit may train on to forecast them anyway (the skip record's `detail` says how many a
+fit had), or start the test a window after the switch. A native date missing later on (a day stored hourly) drops its rows but
+doesn't count against the minimum.
+
 ## The forecast
 
 The forecast is the issue row's `base` plus the learner's forecast of the deviation. A missing `base` on the issue row skips the
@@ -97,13 +106,17 @@ The learner's regressors are built from the base (the forecast hourly ramp above
 training rows and forecasts on the issue row, the learner would weigh a ramp it never sees in use: the resolution study trained
 B24_dyn so, and its audit found the mismatch. With a chained base the training rows hold the hourly model's out-of-sample
 forecasts, issued as of each row's date, and the issue row holds the forecast of the issue day: the same thing. Run the hourly
-pipeline over the shape model's training rows too (the coverage check counts the rows that miss it).
+pipeline over the shape model's training rows too: from W+2 days before the first issue day, W the learner's window (the rows of
+a forecast issued on D are dated from D−W−1 at horizon 1, and the ramp's hour lag reads the day before at midnight). The coverage
+check counts the rows that miss it, those whose target date isn't native left out, as the fits drop them anyway.
 
 A base that isn't a chained column (`InformationSet.chained_of`, which `with_source_rules` fills) warns, and so does any base of
 a run without an information set, which can't tell. A chained base is checked as
 a chained input: an hourly upstream that read something late makes the base `late upstream`, listed at `availability="warn"` and
 refused at `"raise"`, and the manifest's `chained_inputs` records its upstream. The base is also judged by the information set on the
-issue row: a base known after the issue time, such as the actual hour mean of D+1, is refused at `"raise"`.
+issue row: a base known after the issue time, such as the actual hour mean 24 hours ahead, is refused at `"raise"`; the target's
+actual hour mean of a later date by its name, `{target}_hour_mean_d+k`, is refused whatever the rules, as `{target}_d+k` is as a
+predictor. `explain()` shows the base apart from the learner's inputs (`out["base"]`), judged on the issue row.
 
 ## Newest targets
 
@@ -116,7 +129,8 @@ day-ahead prices, published for a whole day at once, this changes nothing.
 The records are the target's: `actual` is the quarter-hour's price, `coefficients` the learner's. The manifest's `model_params`
 record `base`, `period`, `native` and the learner's class and parameters, and its list, window, refit rule, newest target and mask
 rule are recorded as the model's: a resume with another of them refuses. The base column is an input the model reads (hashed in
-the manifest, perturbed by `verify`), never a regressor unless the learner lists it.
+the manifest, perturbed by `verify`), never a regressor unless the learner lists it. A record doesn't carry the base's value (unlike
+a `ResidualModel`'s `base_prediction`): the hourly model's own records hold it, and `prediction` less it is the learner's part.
 
 ## Not in this step
 
