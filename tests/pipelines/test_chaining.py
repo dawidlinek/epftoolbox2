@@ -362,6 +362,47 @@ def test_a_complete_upstream_is_silent_over_a_spring_switch_and_its_manifest_rec
     assert np.isnan(data.loc["2023-03-25 02:00", "load_fc_d+1"])
 
 
+def test_an_hour_lag_of_a_day_shifted_chained_column_has_no_hole_on_the_switch(shared, tmp_path):
+    """`load_fc_d+1_h-1` (the hour before, a ramp's regressor, by elapsed time) on the row of 2023-03-25 at 03:00 reads
+    `load_fc_d+1` at 02:00, so the forecast for 2023-03-26 02:00, a wall time the switch skips: no hole of the upstream. A
+    complete upstream is silent at raise, and the coverage lets that row off; an upstream starting mid-window still counts."""
+    source, data = shared["up"], shared["up_data"].copy()
+    data["load_fc_d+1_h-1"] = LagTransformer(["load_fc_d+1"], [1], "hour").transform(data[["load_fc_d+1"]])[
+        "load_fc_d+1_h-1"
+    ]
+    assert np.isnan(data.loc["2023-03-25 03:00", "load_fc_d+1_h-1"])
+    pipeline = downstream(PREDICTORS + ["load_fc_d+1_h-1"], INFO.with_source_rules([source]), window=45)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*have no value of")
+        pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
+    manifest = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())
+    found = manifest["chained_inputs"]["load_fc"]["coverage"]["load_fc_d+1_h-1"]
+    assert found["uncovered"] == 0 and found["let_off"] == 1
+    mid = shared["mid_data"].copy()
+    mid["load_fc_d+1_h-1"] = LagTransformer(["load_fc_d+1"], [1], "hour").transform(mid[["load_fc_d+1"]])[
+        "load_fc_d+1_h-1"
+    ]
+    late = downstream(PREDICTORS + ["load_fc_d+1_h-1"], INFO.with_source_rules([shared["mid"]]), availability="warn")
+    with pytest.warns(UserWarning, match=r"load_fc_d\+1_h-1 on \d+ of \d+ rows, from 2023-03-05"):
+        late.run(mid, *TEST, horizon=1)
+
+
+def test_an_hour_lag_alone_of_a_chained_column_has_no_hole_after_the_switch(shared, tmp_path):
+    """`load_fc_h-1` (elapsed shifts alone) on 03:00 of 2023-03-27, the day after the spring switch, reads `load_fc` at 02:00
+    of that day: the forecast for it would be issued on the switch day, which has no 02:00, so it is never planned. A complete
+    upstream is silent at raise, and the coverage lets that row off."""
+    source, data = shared["up"], shared["up_data"].copy()
+    data["load_fc_h-1"] = LagTransformer(["load_fc"], [1], "hour").transform(data[["load_fc"]])["load_fc_h-1"]
+    assert np.isnan(data.loc["2023-03-27 03:00", "load_fc_h-1"])
+    pipeline = downstream(PREDICTORS + ["load_fc_h-1"], INFO.with_source_rules([source]), window=45)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*have no value of")
+        pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
+    manifest = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())
+    found = manifest["chained_inputs"]["load_fc"]["coverage"]["load_fc_h-1"]
+    assert found["uncovered"] == 0 and found["let_off"] == 1
+
+
 def test_a_model_without_a_chained_column_has_no_key_in_its_manifest(shared, tmp_path):
     info = INFO.with_source_rules([shared["up"]])
     downstream(PREDICTORS, info).run(shared["up_data"], *TEST, horizon=1, save_dir=str(tmp_path / "d"))

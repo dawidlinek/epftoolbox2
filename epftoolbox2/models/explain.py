@@ -196,6 +196,27 @@ def row_target_table(
     return table[ROW_TARGET_COLUMNS]
 
 
+def issue_row_table(
+    names: List[str],
+    role: str,
+    data: pd.DataFrame,
+    info: Optional[InformationSet],
+    test: Optional[Tuple[str, str]],
+    horizon: int,
+    period: int,
+    freq: str,
+) -> pd.DataFrame:
+    """One row per column a model reads on the issue row alone (a `ShapeModel`'s base), with its `role`, then what
+    `predictor_table` says of it over the issue days of `test` (all of the frame's without), judged on the issue row as the
+    run judges it, whatever its rule over time: no training row reads it."""
+    start, end = test if test is not None else (None, None)
+    days = InformationSet._issue_days(data.index, start, end)
+    clock = (info or _NAMES)._issue_clock(days, data.index, freq)
+    table = predictor_table(names, data, info, horizon, period, freq, clock)
+    table.insert(0, "role", role)
+    return table[ROW_TARGET_COLUMNS]
+
+
 def row_target_note(model: Any) -> str:
     """What the model's per-row target does to a forecast, in a line; empty without one."""
     parts = []

@@ -987,6 +987,7 @@ ROW_TARGET_EXCEPTIONS = {
     "MLPDailyModel": (set(), "day units: one fit of every period of a date"),
     "ResidualModel": (set(), "its forecast is the learner's plus the base's, made after the learner's fit"),
     "PooledModel": (set(), "a pooled fit reads each zone's rows itself"),
+    "ShapeModel": (set(), "its learner's target is already the target less its hour's mean, through the same seam"),
 }
 
 

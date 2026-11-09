@@ -26,7 +26,16 @@ from ._calendar import (
     refit_anchor,
     training_span,
 )
-from ._row_target import ZERO_WHEN, scale_column, scaled_back, usable_scale, zero_outcome
+from ._row_target import (
+    ZERO_WHEN,
+    has_offset,
+    issue_offset,
+    learner_targets,
+    scale_column,
+    scaled_back,
+    usable_scale,
+    zero_outcome,
+)
 from ._units import DAY, PER_PERIOD, PERIOD, POOLED, day_arrays, kind_of, pooled_values
 
 # What `_worker_init` loads into a pool's worker: the default `TaskInputs` of every task function (`_pool_inputs`).
@@ -589,7 +598,9 @@ def _fit_member(
     the issue row's value, then clips it to `bounds`. After the skips of the training rows and of the issue row's inputs,
     `zero_when`'s 1 on the issue row is a forecast of 0 with no fit (detail `"zero_when"`) and a missing value
     `missing_test_predictors`; then an issue row's scale that is missing is `missing_test_predictors` and one not positive
-    `non_positive_scale`. Without one every step is as it was.
+    `non_positive_scale`. An offset (`ShapeModel`) subtracts each training row's from its target (a row it doesn't keep, or
+    whose offset is missing, drops with the rows of missing values) and adds the issue row's to the forecast, a missing one
+    being `missing_test_predictors`. Without one every step is as it was.
 
     `scalable_mask` None (`binary_mask="fit"`) is read here from those rows in the list's columns, before the matching and the
     finite filters, as `_fit_unit` reads a refit unit's: which columns are binary is then a function of this fit's span alone.
@@ -605,6 +616,10 @@ def _fit_member(
     col_idx = [arrays["col_index"][c] for c in predictors]
     train_x = arrays["x"][train][:, col_idx]
     train_y = arrays["y"][train][:, hz - 1]
+    row_target = cfg.get("row_target")
+    if has_offset(row_target):
+        # The learner's target, y less each row's offset, NaN on a row the offset's `keep` drops (`models._row_target`).
+        train_y = learner_targets(arrays, row_target, hz, train, train_y)
 
     # No row dated inside the span, so nothing to train on for this (hour, horizon, day).
     if train_x.shape[0] == 0:
@@ -615,7 +630,6 @@ def _fit_member(
 
     test_x = arrays["x"][test : test + 1][:, col_idx]
     # A per-row target's scale: each training row's `normalise_by` value (None without one).
-    row_target = cfg.get("row_target")
     scale_at = scale_column(arrays, row_target, hz)
     train_s = None if scale_at is None else arrays["x"][train, scale_at]
 
@@ -654,6 +668,7 @@ def _fit_member(
         extra["training_days"] = int(np.unique(train_days[finite]).size)
         extra["matching_days"] = matching_days
     issue_scale = None
+    offset = None
     if row_target is not None:
         zero = zero_outcome(arrays, row_target, hz, test)
         if zero is None:
@@ -665,6 +680,9 @@ def _fit_member(
             skipped = _scale_skip(issue_scale)
             if skipped is not None:
                 return skipped
+        offset = issue_offset(arrays, row_target, hz, test)
+        if offset is not None and not np.isfinite(offset):
+            return SKIP_MISSING_TEST_PREDICTORS  # nothing to add the learner's forecast to
         if engine is not None:
             raise RuntimeError("a model with a per-row target runs on the model path: no engine fits it")
     if engine is not None:
@@ -693,7 +711,7 @@ def _fit_member(
         # scikit-learn raises ValueError on degenerate input (e.g. fewer rows than CV folds); counted, not fatal.
         return f"{SKIP_FIT_ERROR}: {exc}"
     if row_target is not None:
-        return scaled_back(row_target, scaler.inverse(float(pred)), issue_scale), coefs, extra, None
+        return scaled_back(row_target, scaler.inverse(float(pred)), issue_scale, offset), coefs, extra, None
     return scaler.inverse(float(pred)), coefs, extra, None
 
 
@@ -752,7 +770,8 @@ def _row_value(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskInputs
         return SKIP_MISSING_TEST_PREDICTORS
     row_target = cfg.get("row_target")
     if row_target is not None:
-        if row_target["scale"] is not None or row_target["zero"] is not None:  # refused before any task runs
+        if row_target["scale"] is not None or row_target["zero"] is not None or has_offset(row_target):
+            # Refused before any task runs.
             raise RuntimeError("a model that fits nothing takes bounds alone of a per-row target")
         value = scaled_back(row_target, value, None)
 
@@ -887,7 +906,8 @@ def _fit_unit(
     A per-row target (`models._row_target`) is applied as `_fit_member` applies it: the training rows' targets divided by their
     scale, each forecast's `zero_when` (a forecast of 0, or a missing value's skip) and then its scale's skips (missing or not
     positive) decided per task, the others fitted together, scaled back by their own issue row's value and clipped; a unit
-    whose forecasts are all 0 makes no fit, so a fit that would fail leaves them 0.
+    whose forecasts are all 0 makes no fit, so a fit that would fail leaves them 0. An offset as in `_fit_member`: the training
+    targets less each row's, each forecast plus its own issue row's.
     """
     inputs = _inputs_of(inputs)
     cfg = inputs.config
@@ -904,6 +924,9 @@ def _fit_unit(
     train_y = arrays["y"][train][:, hz - 1]
     scalable_mask = StandardScaler.get_scalable_mask(train_x)
     row_target = cfg.get("row_target")
+    if has_offset(row_target):
+        # y less each row's offset, as `_fit_member`'s.
+        train_y = learner_targets(arrays, row_target, hz, train, train_y)
     scale_at = scale_column(arrays, row_target, hz)
     train_s = None if scale_at is None else arrays["x"][train, scale_at]
 
@@ -948,6 +971,7 @@ def _fit_unit(
     forecast = []
     zeros = []  # (task, issue row) of the forecasts `zero_when` makes 0
     scales = {}  # issue row -> its scale, with `normalise_by`
+    offsets = {}  # issue row -> its offset, with one
     for task, test in issued:
         if not np.isfinite(arrays["x"][test, col_idx]).all():
             outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
@@ -967,6 +991,12 @@ def _fit_unit(
                 if skipped is not None:
                     outcomes.append((task, skipped))
                     continue
+            offset = issue_offset(arrays, row_target, hz, test)
+            if offset is not None:
+                if not np.isfinite(offset):
+                    outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
+                    continue
+                offsets[test] = offset
             forecast.append((task, test))
     extra = None
     if matching_days is not None:
@@ -1044,7 +1074,7 @@ def _fit_unit(
 
     for (task, test), (prediction, coefs) in zip(forecast, predicted):
         if row_target is not None:
-            prediction = scaled_back(row_target, prediction, scales.get(test))
+            prediction = scaled_back(row_target, prediction, scales.get(test), offsets.get(test))
         outcomes.append((task, record_of(task, test, prediction, coefs)))
     return outcomes
 
@@ -1486,7 +1516,8 @@ def _fit_pooled_unit(
     A per-row target (`models._row_target`) as in `_fit_unit`: each stacked row's target divided by its own period row's
     `normalise_by` value (a row without a positive one drops out), each forecast's scale and `zero_when` read on its own issue row,
     a forecast mapped back with its period's Invariant, then multiplied by its issue row's scale and clipped; a unit whose
-    forecasts are all 0 makes no fit."""
+    forecasts are all 0 makes no fit. An offset as in `_fit_member`: each stacked row's target less its own period row's offset
+    (a row it doesn't keep drops out), each forecast plus its own issue row's."""
     inputs = _inputs_of(inputs)
     cfg, model = inputs.config, inputs.model
     units = cfg["units"]
@@ -1515,7 +1546,10 @@ def _fit_pooled_unit(
         else:
             rows = training_rows(days, anchor, width, hz, int(newest[period]))
         values = pooled_values(arrays, predictors, rows, period)
-        kept = finite_rows(values, arrays["y"][rows][:, hz - 1])
+        targets = arrays["y"][rows][:, hz - 1]
+        if has_offset(row_target):
+            targets = learner_targets(arrays, row_target, hz, rows, targets)  # y less each row's offset
+        kept = finite_rows(values, targets)
         scale_at = scale_column(arrays, row_target, hz)
         if scale_at is not None:
             kept &= usable_scale(arrays["x"][rows, scale_at])  # a row with no positive scale drops out
@@ -1547,7 +1581,10 @@ def _fit_pooled_unit(
         arrays = inputs.hour_arrays[period]
         at = position[start : start + int(kept.sum())]
         train_x[at] = pooled_values(arrays, predictors, rows, period)[kept]
-        train_y[at] = arrays["y"][rows][kept, hz - 1]
+        if has_offset(row_target):
+            train_y[at] = learner_targets(arrays, row_target, hz, rows, arrays["y"][rows][:, hz - 1])[kept]
+        else:
+            train_y[at] = arrays["y"][rows][kept, hz - 1]
         scale_at = scale_column(arrays, row_target, hz)
         if scale_at is not None:
             train_y[at] = train_y[at] / arrays["x"][rows, scale_at][kept]  # (y - 0) / s of each row
@@ -1575,6 +1612,7 @@ def _fit_pooled_unit(
     place = {key: i for i, key in enumerate(call_rows)}
     forecast = []
     scales = {}  # (period, issue row) -> its scale, with `normalise_by`
+    offsets = {}  # (period, issue row) -> its offset, with one
     for task, test in issued:
         if not trained[task[0]]:
             outcomes.append((task, SKIP_NO_FINITE_TRAINING_ROWS))
@@ -1598,6 +1636,12 @@ def _fit_pooled_unit(
                 if skipped is not None:
                     outcomes.append((task, skipped))
                     continue
+            offset = issue_offset(own, row_target, hz, test)
+            if offset is not None:
+                if not np.isfinite(offset):
+                    outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
+                    continue
+                offsets[(task[0], test)] = offset
             forecast.append((task, test))
     if not forecast:
         return outcomes
@@ -1630,7 +1674,7 @@ def _fit_pooled_unit(
         i = place[(task[0], test)]
         prediction = float(target.inverse(predictions[i], task[0] if per_period else 0))
         if row_target is not None:
-            prediction = scaled_back(row_target, prediction, scales.get((task[0], test)))
+            prediction = scaled_back(row_target, prediction, scales.get((task[0], test)), offsets.get((task[0], test)))
         coefs = flat_coefficients(coefficients[i], model, "_predict_block")
         outcomes.append((task, _unit_record(inputs, unit, task, test, prediction, coefs, newest)))
     return outcomes

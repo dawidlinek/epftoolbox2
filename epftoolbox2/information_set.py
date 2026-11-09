@@ -2676,8 +2676,9 @@ def _issue_day_forecasts(
     Such a function is planned on this very frame, so a value it reads can move its list, and it answers through the
     information set. The run itself gets none, so a late list isn't refused and the forecasts show it. A model with
     `newest_target="published"` reads its training cut from it (`cut_rules`), and nothing else; so does a `known_only` model
-    (`NaiveModel`) which of its forecasts are published, since one that isn't has no forecast in any run, and a model that reads
-    history (`models._history`) where its series are cut, whatever its `newest_target`.
+    (`NaiveModel`) which of its forecasts are published, since one that isn't has no forecast in any run, a model that reads
+    history (`models._history`) where its series are cut, whatever its `newest_target`, and a model with `_cut_rules_in_probes`
+    (`ShapeModel`, whose check tells a chained base by them, which no number reads).
 
     A model with `refit` is run from `run_day` to the end of its refit block (or of the frame), and only `run_day`'s forecasts are
     returned: a unit fits once for every issue day of its block, so a fit that read one of the later days would show only in a
@@ -2714,7 +2715,14 @@ def _issue_day_forecasts(
 
     # A sequence model cuts its series by the rules (`models._history`), whatever its newest target, as such a model's training
     # cut does.
-    if getattr(m, "newest_target", "d-1") == "published" or getattr(m, "_known_only", False) or reads_history(m):
+    # A model whose input checks tell its inputs by the rules (`_cut_rules_in_probes`: a `ShapeModel` tells a chained base by
+    # them) gets them too; nothing numeric of it reads them.
+    if (
+        getattr(m, "newest_target", "d-1") == "published"
+        or getattr(m, "_known_only", False)
+        or reads_history(m)
+        or getattr(m, "_cut_rules_in_probes", False)
+    ):
         extra["cut_rules"] = information_set
     read = {} if plan is None else plan.read_cells()  # the run lets go of them
     late = [] if plan is None else plan.late_reads()

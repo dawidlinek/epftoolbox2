@@ -112,6 +112,12 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **A chained column's hour lag is no coverage hole on the spring switch.** `x_d+1_h-1` (the hour before, as `LagTransformer`
+  builds it, a ramp's regressor) on 03:00 of the day before a spring switch reads the forecast for 02:00 of the switch day, which
+  doesn't exist; the coverage check let off such rows for day shifts alone, so a complete upstream warned at every level and was
+  refused at `availability="raise"` every spring. Shifts by elapsed time are now followed as the transformer applies them, and such
+  a row counts as `let_off`; so does a row of a name with elapsed shifts alone (`x_h-1` at 03:00 of the day after a switch reads
+  the 02:00 forecast its issue day never planned). Nothing else moves: plain day shifts are read as before.
 - **`DailyStatsTransformer(freq="1D")` on a daily frame keeps the day of the spring switch.** A frame of one row a day counted its
   slots in hours, so the 23-hour day had none, its one row read as an incomplete day and got NaN in every statistic (and
   `DailyProfileTransformer(freq="1D")` warned of it). A slot of a day or more is now one per date, whatever its length. Hourly and
@@ -288,6 +294,21 @@ an issue day it didn't sample.
   on a shared journal file, and `epf tune --requeue JOURNAL...` puts back trials of killed workers. `report.choices()` gains
   `kind`, `candidates`, `test_mae` and `gap` columns, and a row per model a search chose. See
   [Hyper-parameter Search](/epftoolbox2/model-pipeline/hyperparameter-search/).
+- **`ShapeModel`: the 15-minute shape on a stored hourly forecast.** `ShapeModel(base, learner, *, period="1h",
+  native="distinct", min_native_days=None, name="Shape")` in a 15-minute run trains its learner on each row's target less the mean of the target over
+  its hour's quarter-hours on its target date (built by the targets' own calendar shift, NaN unless the hour is whole), on natively
+  15-minute target dates only (`"distinct"`: a date with an hour of quarter-hours that aren't all equal, so not a step-filled hourly
+  one; or the first such date, `native="2025-10-01"`), and forecasts the issue row's `base` plus the learner's forecast. `base` is
+  the hourly forecast stepped over its quarter-hours, a [chained column](/epftoolbox2/model-pipeline/chaining/#a-15-minute-shape-on-an-hourly-forecast)
+  (a warning says so where it isn't one), judged by the information set on the issue row and checked for a late upstream; the
+  learner (`OLSModel`, `RidgeModel`, `LEARModel`, a pooled tree, with a list of names) brings its window, refit rule, scaler,
+  newest target and mask rule, and an intercept-only one (`LEARModel([], scaler="standard")`) is the per-slot mean deviation. A
+  fit whose window reaches before the first native date is skipped as `too_few_native_days` unless it has `min_native_days` native
+  days (by default its window's length), with a warning naming the issue days; `explain()` shows the base apart, and a base named
+  `{target}_hour_mean_d+k` is refused. The
+  resolution study's B24_dyn and B24_static, with the shape trained on out-of-sample hourly forecasts where the study trained on
+  actual ramps. In YAML (the learner nested); not in the TUI, an engine group or a `PooledModel`. See
+  [Shape Model](/epftoolbox2/models/shape/). No other model's frame, record or manifest moves.
 - **Generation targets: `normalise_by`, `bounds` and `zero_when` on every model that fits period or pooled units.**
   `normalise_by="capacity_d+{horizon}"` divides each training row's target by its value of the column (a row without a positive one
   drops out) and multiplies the forecast by the issue row's (a forecast without one is `missing_test_predictors`, with one at or

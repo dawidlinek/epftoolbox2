@@ -37,9 +37,10 @@ from ..models._engine import (
 from ..models._torch.groups import check_settings as check_stack_settings
 from ..models._torch.groups import run_stack_group, stack_groups
 from ..models.context import PredictorPlan, importable_path, load_function
-from ..models.explain import explain_model, grouped_table
+from ..models.explain import explain_model, grouped_table, issue_row_table
 from ..models.pooled import PooledModel, check_pooled_model
 from ..models.residual import ResidualModel
+from ..models.shape import ShapeModel
 from ..models._pooled import (
     check_horizon_lists,
     check_resumes,
@@ -194,6 +195,7 @@ COMPONENT_REGISTRY = {
         "XGBoostModel": "epftoolbox2.models.gbm",
         "CatBoostModel": "epftoolbox2.models.gbm",
         "ResidualModel": "epftoolbox2.models.residual",
+        "ShapeModel": "epftoolbox2.models.shape",
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",
@@ -1909,7 +1911,23 @@ class ModelPipeline:
         info = self._information_set_for(data)
         if isinstance(chosen, ResidualModel):
             return self._explain_residual(chosen, data, info, test, horizon, hour, target, freq, echo, horizons)
+        if isinstance(chosen, ShapeModel):
+            return self._explain_shape(chosen, data, info, test, horizon, hour, target, freq, echo, horizons)
         return explain_model(chosen, data, info, test, horizon, hour, target, freq, echo, horizons=horizons)
+
+    def _explain_shape(self, model, data, info, test, horizon, hour, target, freq, echo, horizons):
+        """`explain` of a `ShapeModel`: its learner's predictors as for any model, and its base (`base`, the forecast's offset)
+        judged on the issue row alone, as the run judges it: no training row reads it."""
+        from ..models._row_target import expand
+
+        out = explain_model(model, data, info, test, horizon, hour, target, freq, False, horizons=horizons)
+        out["base"] = issue_row_table([expand(model.base, horizon)], "base", data, info, test, horizon, hour, freq)
+        if echo:
+            print(f"{model.name}: horizon {horizon}, period {hour}; the learner's inputs (the shape)")
+            print(out["grouped"].to_string(index=False))
+            print(f"{model.name}: the base its forecast adds the learner's to, read on the issue row")
+            print(out["base"].to_string(index=False))
+        return out
 
     def _explain_residual(self, model, data, info, test, horizon, hour, target, freq, echo, horizons):
         """`explain` of a `ResidualModel`: its learner's predictors, the base's forecasts among them shown as such (known at the

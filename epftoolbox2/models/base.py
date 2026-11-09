@@ -2031,7 +2031,16 @@ class BaseModel(ABC):
         if days:
             rows = self._training_rows(newest, self._reach_window(data, days), frame_first_day(data.index))
         found = _chained.check(
-            self.name, data, lists, information_set, availability, days, rows, self._freq, unit_kind(self) != PERIOD
+            self.name,
+            data,
+            lists,
+            information_set,
+            availability,
+            days,
+            rows,
+            self._freq,
+            unit_kind(self) != PERIOD,
+            kept=self._chained_kept(data, lists),
         )
         self._chained_record = found.record
         if found.listing:  # every issue day reads the upstream: each window's listing has its rows too
@@ -2039,6 +2048,14 @@ class BaseModel(ABC):
             self._window_listings = {
                 window: sort_rows([*listed, *found.listing]) for window, listed in self._window_listings.items()
             }
+
+    def _chained_kept(
+        self, data: pd.DataFrame, lists: Dict[Tuple[int, int], List[str]]
+    ) -> Optional[Dict[int, np.ndarray]]:
+        """Horizon -> which rows of `data` the coverage of chained inputs counts (`_chained.check(kept=)`), for a model that
+        drops some of its fits' rows whatever the upstream holds (`ShapeModel`'s rows whose target date isn't native); None,
+        here, counts every row the fits read."""
+        return None
 
     def _judge_lists(
         self,

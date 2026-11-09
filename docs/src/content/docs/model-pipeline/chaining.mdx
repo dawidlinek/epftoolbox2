@@ -51,6 +51,57 @@ rule (listed as `no rule` at `availability="warn"`, refused at `"raise"` with `u
   wrong weight for its input.
 </Aside>
 
+## A 15-Minute Shape on an Hourly Forecast
+
+The second chain this library is built for: an hourly model forecasts the hourly level, and a
+[`ShapeModel`](/epftoolbox2/models/shape/) on the 15-minute frame adds each quarter-hour's deviation from its hour's mean. The
+hourly forecast reaches the 15-minute frame as a chained column, `ResampleTransformer` steps each hour's value over its
+quarter-hours, and the shape's regressors are built from it, so they hold out-of-sample forecasts on the training rows as on the
+issue row.
+
+```python
+from epftoolbox2.data.sources import CsvSource, ForecastSource
+from epftoolbox2.data.transformers import LagTransformer, PeriodStatsTransformer, ResampleTransformer
+from epftoolbox2.models import LEARModel, OLSModel, ShapeModel
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+
+# 1. Upstream: the hourly mean price, over the 15-minute model's training rows and its test.
+hourly = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin", availability="raise")
+hourly.add_model(LEARModel(["price_d-1", "load_forecast_d+{horizon}"], training_window=728, name="LEAR_1h"))
+hourly.run(df_1h, test_start="2025-09-30", test_end="2026-10-11", horizon=1, save_dir="runs/de_1h")
+
+# 2. The 15-minute frame: the hourly forecast on its quarter-hours, for D+1, and the hour before it (the ramp).
+data15 = (
+    DataPipeline(timezone="Europe/Berlin")
+    .add_source(CsvSource("de_15min.csv"))
+    .add_source(ForecastSource("runs/de_1h", model="LEAR_1h", column="price_1h_fc"))
+    .add_transformer(ResampleTransformer(freq="15min"))
+    .add_transformer(PeriodStatsTransformer(columns="load_forecast", stats=["dev"]))
+    .add_transformer(LagTransformer(["price_1h_fc", "load_forecast_hour_dev"], [-1], "day"))
+    .add_transformer(LagTransformer(["price_1h_fc_d+1"], [1], "hour"))
+)
+df15 = data15.run("2025-09-30", "2026-10-12")
+
+# 3. Downstream: the hourly forecast plus a per-quarter-hour OLS of the deviation, on 15-minute dates only.
+shape_x = ["price_1h_fc_d+{horizon}", "price_1h_fc_d+{horizon}_h-1", "load_forecast_hour_dev_d+{horizon}"]
+shape = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin", availability="raise")
+shape.information_set = shape.information_set.with_source_rules(data15.sources)
+shape.add_model(
+    ShapeModel("price_1h_fc_d+{horizon}", OLSModel(shape_x, training_window=182, fit_intercept=True), name="B24_dyn")
+)
+shape.add_model(LEARModel(["price_d-1", "load_forecast_d+{horizon}"], training_window=182, name="A96"))
+report = shape.run(df15, test_start="2026-04-02", test_end="2026-10-11", horizon=1, freq="15min", save_dir="runs/de_15")
+report.tests(lag=6)  # B24_dyn against the 96 per-quarter-hour LEARs, on identical keys
+```
+
+`price_1h_fc_d+1_h-1` is the forecast of the hour before, read in elapsed time, so the 00:00 hour reads 23:00 of the day before,
+issued a day earlier and known; an hour after (`_h+1`) would read the next day's forecast at 23:00, which isn't out yet, and is
+refused. Each forecast is the base on its issue row, the LEAR's forecast for its hour, plus the OLS's deviation; the OLS trains on
+the native 15-minute dates of its window alone (`native="distinct"`), while the hourly LEAR trains on the whole history. The
+hourly run must cover every row the shape's fits read: from W+2 days before the first issue day (184 here, 2025-09-30: the window,
+the horizon, and the hour lag's reach into the day before at midnight), which the coverage check below counts, leaving out the rows
+whose target date isn't native, which the fits drop anyway. The ShapeModel also warns where its base isn't a chained column.
+
 ## When a Chained Value Is Known
 
 The upstream's manifest records its issue time and zone and its data zone, and the column's rule is built from them:
@@ -78,7 +129,7 @@ covers the issue days 2023-03-05 to 2023-03-19.
 ```
 
 At `availability="raise"` the same is an `InformationSetError`. Rows that can't hold a value whatever the upstream does are not
-counted: a day shift that lands on the hour a spring switch skips, and the slot the upstream never plans (02:00 on the day after a
+counted: a day shift that lands on the hour a spring switch skips (also after an hour lag, `x_d+1_h-1` at 03:00), and the slot the upstream never plans (02:00 on the day after a
 switch at horizon 1, whose issue day has no 02:00), and for a day statistic (`ForecastSource(agg="max")`) every row of that date,
 which is never whole. An hour aggregate of the column (`solar_fc_hour_mean_d-1`) is judged as the column at the same row
 (`solar_fc_d-1`), its hour being whole only with each slot; a profile, a day aggregate made by `DailyStatsTransformer` after the
@@ -127,5 +178,6 @@ chained input read before its upstream issued it is a `leak`.
 ## See Also
 
 - [ForecastSource](/epftoolbox2/data-sources/forecast/): parameters, placement, caching and what it refuses
+- [Shape Model](/epftoolbox2/models/shape/): the 15-minute shape on a chained hourly forecast
 - [Information Set](/epftoolbox2/model-pipeline/information-set/#delivery-days-of-another-zone): `day_zone`
 - [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/)

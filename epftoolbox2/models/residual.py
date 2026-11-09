@@ -289,8 +289,15 @@ class ResidualModel(BaseModel):
 
     @staticmethod
     def _check_learner(learner: Any, where: str) -> None:
+        from .shape import ShapeModel  # it imports this package's base, as this module does
+
         if not isinstance(learner, BaseModel) or isinstance(learner, ResidualModel):
             raise TypeError(f"{where}: learner must be a model such as HistGBModel(...), got {type(learner).__name__}")
+        if isinstance(learner, ShapeModel):
+            raise ValueError(
+                f"{where}: a ShapeModel can't be a learner in this step: its target is the target less its hour's mean and "
+                "its forecast adds its own base, where a learner's target is the residual of this model's base"
+            )
         if learner._fits_nothing:
             raise ValueError(f"{where}: {type(learner).__name__} fits nothing, so it can't learn the residuals")
         if (

@@ -12,6 +12,7 @@ from .mlp import MLPDailyModel, MLPHourlyModel
 from .hgb import HistGBModel
 from .gbm import CatBoostModel, LightGBMModel, XGBoostModel
 from .residual import ResidualModel
+from .shape import ShapeModel
 
 __all__ = [
     "BaseModel",
@@ -29,6 +30,7 @@ __all__ = [
     "XGBoostModel",
     "CatBoostModel",
     "ResidualModel",
+    "ShapeModel",
     "PredictorContext",
     "PredictorPlan",
     "Use",

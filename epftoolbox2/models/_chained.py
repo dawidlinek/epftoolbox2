@@ -78,10 +78,13 @@ def check(
     rows: Optional[TrainingRows],
     freq: str = "1h",
     every_period: bool = False,
+    kept: Optional[Dict[int, np.ndarray]] = None,
 ) -> ChainedCheck:
     """Coverage and late-upstream checks of the chained predictors in `lists` ((period, horizon) -> names a model reads) on the
     frame `data` at `freq`, for a run issued on `issue_days` (None: no coverage can be told) whose fits read `rows`, of the periods
-    whose lists hold a predictor, or of every period (`every_period`: a model of day or pooled units, whose fit reads them all)."""
+    whose lists hold a predictor, or of every period (`every_period`: a model of day or pooled units, whose fit reads them all).
+    `kept` (horizon -> a mask of the frame's rows) leaves out of the coverage the rows a model drops at that horizon whatever
+    the upstream holds (a `ShapeModel`'s rows whose target date isn't native); None counts every row its fits read."""
     if information_set is None or not information_set.chained_inputs():
         return ChainedCheck()
     information_set.refuse_rules_on_chained_columns()  # a rule added after `with_source_rules` would be ignored
@@ -105,7 +108,7 @@ def check(
         dates = _row_dates(data.index)
         periods = None if every_period else _row_periods(data.index, freq)
         for name, use in sorted(uses.items()):
-            found = coverage(data, name, use, dates, periods, issue_days, rows)
+            found = coverage(data, name, use, dates, periods, issue_days, rows, kept)
             record[use.chained.column]["coverage"][name] = found
             if found["uncovered"]:
                 holes.setdefault(use.chained.column, []).append((name, found))
@@ -138,6 +141,7 @@ def coverage(
     periods: Optional[np.ndarray],
     issue_days: Sequence[datetime.date],
     rows: TrainingRows,
+    kept: Optional[Dict[int, np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """How many rows the fits read (at each horizon, on the dates `read_dates` gives, of the periods whose lists hold `name`
     there, every period with `periods` None) hold no value of `name`, less those that can't hold one whatever the upstream does
@@ -149,6 +153,8 @@ def coverage(
         at = np.isin(dates, read_dates(rows, issue_days, [hz]))
         if periods is not None:
             at &= np.isin(periods, sorted({period for period, h in use.cells if h == hz}))
+        if kept is not None and hz in kept:
+            at &= kept[hz]  # rows the model drops at this horizon whatever the upstream holds
         on |= at
     values = data[name].to_numpy(dtype=np.float64) if name in data.columns else np.full(len(data.index), np.nan)
     hole = on & np.isnan(values)
@@ -227,11 +233,13 @@ def _row_dates(index: pd.DatetimeIndex) -> np.ndarray:
 
 
 def _off_the_clock(index: pd.DatetimeIndex, name: str, chained: ChainedInput) -> np.ndarray:
-    """Which of these rows can't hold a value of `name` whatever the upstream holds, for a plain day shift of the chained column
-    (`x`, `x_d+1`, `x_d-1`): the row reads a wall time its frame's clock skips (`x_d+1` at 02:00 the day before a spring
-    switch), or a slot the upstream never plans, one its clock skips on the issue day it would be issued on (the forecast for
-    02:00 of the day after a switch at horizon 1); of a day statistic (`ForecastSource(agg=)`), every row of a date with such a
-    slot. An hour aggregate of the chained column (`x_hour_mean_d-1`) is judged one level down: the column it was built from,
+    """Which of these rows can't hold a value of `name` whatever the upstream holds, for shifts of the chained column by days
+    and by elapsed time (`x`, `x_d+1`, `x_d-1`, `x_d+1_h-1`): the row reads a wall time its frame's clock skips (`x_d+1` at
+    02:00 the day before a spring switch, `x_d+1_h-1` at 03:00 then), or a slot the upstream never plans, one its clock skips
+    on the issue day it would be issued on (the forecast for 02:00 of the day after a switch at horizon 1); of a day statistic
+    (`ForecastSource(agg=)`), every row of a date with such a slot. The shifts are read from the last of the name, applied to
+    the row first, as `LagTransformer` builds them: `_h-1` an hour of elapsed time back, `_d+1` the same wall time a local day
+    later. An hour aggregate of the chained column (`x_hour_mean_d-1`) is judged one level down: the column it was built from,
     read at the same row through the shifts after it (`x_d-1`), as an hour is whole only with each of its slots, which are the
     row's own hour. A profile (another slot's value), a day aggregate (every slot of its date), a rolling statistic (every day of
     its window), which the row's own slot doesn't decide, and every other name are judged as they stand: no row is let off."""
@@ -244,10 +252,9 @@ def _off_the_clock(index: pd.DatetimeIndex, name: str, chained: ChainedInput) ->
         if not _is_hour_aggregate(base):
             return out
         return _off_the_clock(index, _built_from_name(base) + "".join(_suffix(shift) for shift in outer), chained)
-    if any(shift.unit != "d" for shift in shifts):
+    if any(shift.unit != "d" and shift.unit not in _ELAPSED for shift in shifts):
         return out
-    days = sum(shift.offset for shift in shifts)
-    read = shift_calendar_days(index, days) if days else index
+    read = _read_at(index, shifts)
     out |= np.asarray(read.isna())
     if chained.freq not in _STEP:  # a daily upstream's stamp is on every date's clock
         return out
@@ -264,6 +271,36 @@ def _off_the_clock(index: pd.DatetimeIndex, name: str, chained: ChainedInput) ->
             unplanned[at] = True if chained.agg is not None else np.isin(periods[at], list(gaps))
     out[~np.asarray(read.isna())] = unplanned
     return out
+
+
+# The units of an elapsed-time shift (`LagTransformer`'s names) and pandas' word for them.
+_ELAPSED = {"h": "hours", "min": "minutes", "s": "seconds"}
+
+
+def _read_at(index: pd.DatetimeIndex, shifts: Sequence[Shift]) -> pd.DatetimeIndex:
+    """The instant each row reads through `shifts` (in the name's order, so the last is applied to the row first): consecutive
+    day shifts at once, by local calendar days (`shift_calendar_days`, NaT where the wall time doesn't exist), elapsed ones by
+    adding their time; NaT stays NaT. Day shifts alone are one `shift_calendar_days` of their sum, as they always were."""
+    read, days = index, 0
+    for shift in reversed(list(shifts)):
+        if shift.unit == "d":
+            days += shift.offset
+            continue
+        read = _calendar_days(read, days) + pd.Timedelta(**{_ELAPSED[shift.unit]: shift.offset})
+        days = 0
+    return _calendar_days(read, days)
+
+
+def _calendar_days(read: pd.DatetimeIndex, days: int) -> pd.DatetimeIndex:
+    """`shift_calendar_days` of the instants of `read` that aren't NaT, NaT elsewhere; `read` itself for no day."""
+    if not days:
+        return read
+    valid = ~np.asarray(read.isna())
+    if valid.all():
+        return shift_calendar_days(read, days)
+    out = pd.Series(pd.NaT, index=range(len(read)), dtype=read.dtype)
+    out[valid] = shift_calendar_days(pd.DatetimeIndex(read[valid]), days)
+    return pd.DatetimeIndex(out)
 
 
 def _suffix(shift: Shift) -> str:

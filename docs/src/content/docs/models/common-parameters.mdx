@@ -83,7 +83,8 @@ nothing of a model changes, its records and manifest included.
   model that fits nothing).
 - Models of day units refuse all three: `MLPDailyModel` doesn't take them, and `TorchModel(output="day")` refuses them when it is
   built. Models that read series refuse them before any fit. They aren't supported on a `ResidualModel` in this step (its forecast is
-  the learner's plus the base's, made after the learner's fit), on itself or on its learner, nor on the model a `PooledModel` pools.
+  the learner's plus the base's, made after the learner's fit), on itself or on its learner, on a `ShapeModel` or its learner (its
+  learner's target is already the target less its hour's mean, through the same seam), nor on the model a `PooledModel` pools.
 
 ### What is checked
 
