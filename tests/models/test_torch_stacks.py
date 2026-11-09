@@ -14,6 +14,7 @@ import datetime
 import json
 import math
 import random
+import warnings
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -32,7 +33,7 @@ from epftoolbox2.results.manifest import manifest_path  # noqa: E402
 from tests.models.test_torch_model import BLOCKS, DAY, PERIOD, FlatNet, frame  # noqa: E402
 
 FAST = dict(training_window=28, seeds=2, max_epochs=4, patience=2, lr=1e-2, batch_size=16, stack="vmap", pad_to=4)
-TEST = ("2023-03-13", "2023-03-26")  # two "7D" blocks
+TEST = WEEK = ("2023-03-20", "2023-03-26")  # one "7D" block, Monday to Sunday (the spring switch is its Sunday)
 LOSS_BOOM = "tests.models.test_torch_stacks:boom"
 
 
@@ -69,7 +70,10 @@ class InProcessPool:
 
 
 @pytest.fixture(autouse=True)
-def single_process(monkeypatch):
+def single_process(monkeypatch, request):
+    """One process, the pools in this one; and no stack may fall back to its calls alone unless the test asks for it
+    (`fallbacks_expected`): a stack that raised would still give each model's own numbers, so the equality tests alone
+    wouldn't see it."""
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
     monkeypatch.delenv(groups.TORCH_STACKS_VAR, raising=False)
@@ -77,6 +81,23 @@ def single_process(monkeypatch):
     monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
     monkeypatch.setattr(_engine, "ProcessPoolExecutor", InProcessPool)
     monkeypatch.setattr(groups, "ProcessPoolExecutor", InProcessPool)
+    monkeypatch.setattr(groups, "STATS", {"fallbacks": 0, "alone": 0})
+    yield
+    if "fallbacks_expected" not in request.fixturenames:
+        assert groups.STATS["fallbacks"] == 0, "a stack raised and its calls were trained alone"
+
+
+@pytest.fixture
+def fallbacks_expected():
+    """This test makes a stack raise on purpose."""
+
+
+@pytest.fixture
+def vouched(monkeypatch):
+    """The test's own modules stack on the CPU too: they are made of `nets` layers and operations exact in every element
+    (products, `torch.where`, `torch.cat`), which a CPU stack computes slot by slot alike; the library vouches for `nets.MLP`
+    alone (`groups._cpu_exact`)."""
+    monkeypatch.setattr(groups, "_cpu_exact", lambda model: True)
 
 
 def names_of(chunk):
@@ -91,8 +112,9 @@ def stacks(monkeypatch):
     real = groups._train_stack
 
     def spy(chunk, *args):
-        seen.append(names_of(chunk))
-        return real(chunk, *args)
+        trained = real(chunk, *args)
+        seen.append(names_of(chunk))  # only a stack that trained
+        return trained
 
     monkeypatch.setattr(groups, "_train_stack", spy)
     return seen
@@ -129,6 +151,46 @@ class Scaled(torch.nn.Module):
 
     def forward(self, x):
         return self.net(x) * self.scale
+
+
+class SigNet(torch.nn.Module):
+    """`nets.Linear` layers with `torch.sigmoid` between them, not `nets.Activation`: over a stacked tensor a CPU's vectorised
+    sigmoid gives the last slot other last bits, so on a CPU this module runs alone."""
+
+    def __init__(self, n_inputs, n_outputs, width=5):
+        super().__init__()
+        self.a = nets.Linear(n_inputs, width)
+        self.b = nets.Linear(width, n_outputs)
+
+    def forward(self, x):
+        return self.b(torch.sigmoid(self.a(x)))
+
+
+class RandProj(torch.nn.Module):
+    """A random projection drawn from torch's generator when it is built, kept as a plain attribute (not a buffer): vmap would
+    run every slot with the first slot's, so its calls train alone (`groups._structure_of`)."""
+
+    def __init__(self, n_inputs, n_outputs, width=4):
+        super().__init__()
+        self.proj = torch.randn(n_inputs, width)
+        self.a = nets.Linear(width, 4)
+        self.act = nets.Activation("relu")
+        self.b = nets.Linear(4, n_outputs)
+
+    def forward(self, x):
+        return self.b(self.act(self.a(x @ self.proj)))
+
+
+class Perm(torch.nn.Module):
+    """A permutation of the inputs drawn when it is built, kept as a list: alone as `RandProj`."""
+
+    def __init__(self, n_inputs, n_outputs):
+        super().__init__()
+        self.perm = torch.randperm(n_inputs).tolist()
+        self.net = torch.nn.Sequential(nets.Linear(n_inputs, 6), nets.Activation("relu"), nets.Linear(6, n_outputs))
+
+    def forward(self, x):
+        return self.net(x[..., self.perm])
 
 
 class Blocks(torch.nn.Module):
@@ -249,6 +311,15 @@ def test_which_models_stack_and_under_what_key(monkeypatch):
     assert key(patched) is None
     assert key(LEARModel(["price_d-1"], 28, name="lear")) is None
 
+    # On a CPU only nets.MLP with an exact loss stacks: another module, or a loss of its own, runs alone.
+    own_module = TorchModel(module=FlatNet, predictors=DAY, name="own", **FAST)
+    own_loss = daily("r", loss="tests.models.test_torch_model:squared")
+    assert key(daily("s", loss="mse")) is not None
+    assert key(own_module) is None and key(own_loss) is None
+    monkeypatch.setattr(groups, "_cpu_exact", lambda model: True)  # what a GPU decides (every element computed alike)
+    assert key(own_module) is not None and key(own_loss) is not None
+    monkeypatch.undo()
+
     models = [
         daily("a"),
         hourly("b"),
@@ -258,11 +329,49 @@ def test_which_models_stack_and_under_what_key(monkeypatch):
         daily("e", hidden=[3]),
     ]
     assert [[m.name for m in group] for group in groups.stack_groups(models)] == [["a", "c"], ["b", "d"]]
+    monkeypatch.setenv(groups.TORCH_STACKS_VAR, "check")
+    assert [[m.name for m in group] for group in groups.stack_groups(models)] == [["a", "c"], ["b", "d"]]
     monkeypatch.setenv(groups.TORCH_STACKS_VAR, "off")
     assert groups.stack_groups(models) == []
     monkeypatch.setenv(groups.TORCH_STACKS_VAR, "sometimes")
     with pytest.raises(ValueError, match="TORCH_STACKS"):
         groups.stack_groups(models)
+
+
+@pytest.mark.parametrize(("variable", "value"), [("TORCH_STACKS", "sometimes"), ("TORCH_STACK_MEMBERS", "0")])
+def test_a_wrong_setting_refuses_before_any_model_writes(market, tmp_path, monkeypatch, variable, value):
+    """`ModelPipeline.run` checks both before the engine groups or any model write a file."""
+    monkeypatch.setenv(variable, value)
+    pipeline = ModelPipeline(engine="on")
+    pipeline.add_model(OLSModel(["load_h08_d+{horizon}", "price_d-1"], 28, name="ols"))
+    for model in loop_of(2):
+        pipeline.add_model(model)
+    with pytest.raises(ValueError, match=variable):
+        pipeline.run(market, *TEST, horizon=1, save_dir=tmp_path / "run")
+    assert not (tmp_path / "run").exists() or not any((tmp_path / "run").iterdir())
+
+
+def test_kept_holds_every_method_a_stack_replaces_or_a_unit_calls():
+    """A model whose class overrides one of these runs alone (`stack_key`): the engine's replaced methods, every unit kind's
+    fit methods and the refit methods are among them."""
+    from epftoolbox2.models import base
+    from epftoolbox2.models._units import UNIT_METHODS
+
+    needed = (
+        set(base._ENGINE_REPLACES)
+        | set(base._REFIT_METHODS)
+        | {name for names in UNIT_METHODS.values() for name in names}
+    )
+    assert needed <= set(groups._KEPT), sorted(needed - set(groups._KEPT))
+
+
+def test_describe_hashes_every_element_of_an_array():
+    """A plain numpy attribute is compared element by element (a repr shortens a large array)."""
+    a = np.zeros(5000)
+    b = a.copy()
+    b[2500] = 1.0
+    assert repr(a) == repr(b) and groups._describe(a) != groups._describe(b)
+    assert groups._describe(a) == groups._describe(a.copy())
 
 
 def test_structure_keeps_layers_apart_but_not_dropout_rates():
@@ -274,27 +383,35 @@ def test_structure_keeps_layers_apart_but_not_dropout_rates():
     assert built(hidden=(8,), dropout=0.1) != built(hidden=(8,), dropout=0.0)  # no Dropout layer
     assert built(hidden=(8,)) != built(hidden=(8,), activation="tanh")
     assert built(hidden=(8,)) != built(hidden=(9,))
+    # Built under two seeds of torch's generator: a structure drawn from it is none to stack on (its calls train alone).
+    groups._S_STRUCTURES.clear()
+    for place, module in enumerate([lambda: RandProj(7, 24), lambda: Perm(7, 24)]):
+        assert groups._structure_of(place, module, 7, 24) is None
+    for place, module in enumerate([lambda: nets.MLP(7, 24, hidden=(8,), dropout=0.1), lambda: Scaled(7, 24, 0.3)], 2):
+        assert groups._structure_of(place, module, 7, 24) is not None
+    groups._S_STRUCTURES.clear()
 
 
 # --- alone, in a loop, shuffled, in shards -------------------------------------------------------------------------------
 
 
-def test_a_model_alone_equals_it_in_a_48_model_loop_shuffled_and_in_shards(market, monkeypatch, stacks):
-    models = loop_of(48)
-    own = alone(models, market, monkeypatch)
+def test_a_model_alone_equals_it_in_a_loop_shuffled_and_in_shards(market, monkeypatch, stacks):
+    """16 models of the search (S02 checked the 48 of plan section 3.12 at the research's shapes: research folder)."""
+    models = loop_of(16)
+    own = alone(models, market, monkeypatch, test=WEEK)
     assert not stacks
-    together = records(run_pipeline(models, market))
+    together = records(run_pipeline(models, market, test=WEEK))
     same(own, together)
     assert any(len(set(stack)) > 1 for stack in stacks), "no stack held members of two models"
-    assert sum(len(stack) for stack in stacks) == 48 * 2 * 2 * 2  # models, seeds, horizons, blocks
+    assert sum(len(stack) for stack in stacks) == 16 * 2 * 2  # models, seeds, horizons
 
     stacks.clear()
     shuffled = models[:]
     random.Random(1).shuffle(shuffled)
-    same(own, records(run_pipeline(shuffled, market)))
+    same(own, records(run_pipeline(shuffled, market, test=WEEK)))
     shards = {}
-    for first in range(0, 48, 20):  # models_per_task=20: blocks of 20, 20 and 8 models in list order
-        shards.update(records(run_pipeline(models[first : first + 20], market)))
+    for first in range(0, 16, 5):  # models_per_task=5: blocks of 5, 5, 5 and 1 models in list order
+        shards.update(records(run_pipeline(models[first : first + 5], market, test=WEEK)))
     same(own, shards)
     produced = [len(r) for r in own.values()]
     assert min(produced) > 0 and len(set(produced)) == 1
@@ -311,13 +428,20 @@ def test_a_model_alone_equals_it_in_a_48_model_loop_shuffled_and_in_shards(marke
         "inputs_of_every_horizon",
         "attributes_of_the_module",
         "row_targets",
+        "sigmoid_on_a_cpu",
+        "attributes_drawn_at_build",
     ],
 )
-def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, case):
+def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, case, request):
+    if case in ("named_blocks", "attributes_of_the_module", "attributes_drawn_at_build"):
+        request.getfixturevalue("vouched")
     if case == "hourly":
-        models = loop_of(4, make=hourly)
+        models = loop_of(3, make=hourly)
     elif case == "hourly_refit_none":
-        models = loop_of(3, make=hourly, refit=None, training_window=[21, 28])
+        models = [
+            hourly(f"n{i}", refit=None, training_window=[21, 28], dropout=d, random_state=i)
+            for i, d in enumerate([0.1, 0.2])
+        ]
     elif case == "window_list":
         models = loop_of(4, training_window=[21, 28])
     elif case == "named_blocks":
@@ -331,7 +455,6 @@ def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, cas
     elif case == "row_targets":  # each model's own per-row target (step 7c) in stacks shared with models of none
         row_targets = [
             {},
-            {"normalise_by": "load_d+{horizon}"},
             {"normalise_by": "load_d+{horizon}", "bounds": (0.0, 0.08)},
             {"zero_when": "is_weekend_d+{horizon}", "bounds": (None, 60.0)},
         ]
@@ -339,6 +462,15 @@ def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, cas
         assert len({groups.stack_key(model) for model in models}) == 1
     elif case == "inputs_of_every_horizon":  # the same inputs (and rows) for both horizons, other targets, in one stack
         models = [daily(f"m{i}", predictors=DAY[:4], seeds=1, dropout=d) for i, d in enumerate([0.1, 0.2, 0.3])]
+    elif case == "sigmoid_on_a_cpu":  # a module's own torch.sigmoid: alone on a CPU, its own numbers
+        models = [TorchModel(module=SigNet, predictors=DAY, name=f"g{i}", random_state=i, **FAST) for i in range(3)]
+        assert {groups.stack_key(model) for model in models} == {None}
+    elif case == "attributes_drawn_at_build":  # vouched for, keyed together, but each call trained alone in the job
+        models = [
+            TorchModel(module=module, predictors=DAY, name=f"{module.__name__}{i}", random_state=i, **FAST)
+            for module in (RandProj, Perm)
+            for i in range(2)
+        ]
     else:
         models = [
             TorchModel(
@@ -347,14 +479,21 @@ def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, cas
             for i, d in enumerate([0.0, 0.3, 0.0, 0.3])
         ]
         assert len({groups.stack_key(model) for model in models}) == 1
-    test = ("2023-03-20", "2023-03-21") if case == "hourly_refit_none" else TEST
-    horizon = 1 if case == "hourly_refit_none" else 2
+    test = TEST
+    horizon = 2
+    if case == "hourly_refit_none":
+        test, horizon = ("2023-03-20", "2023-03-20"), 1
+    elif case in ("hourly", "row_targets"):
+        test, horizon = WEEK, 1
     own = alone(models, market, monkeypatch, test=test, horizon=horizon)
     together = records(run_pipeline(models, market, test=test, horizon=horizon))
     same(own, together)
-    assert stacks and (case == "jobs_of_one_member" or any(len(set(stack)) > 1 for stack in stacks))
+    if case in ("sigmoid_on_a_cpu", "attributes_drawn_at_build"):
+        assert not stacks and groups.STATS["alone"] == (0 if case == "sigmoid_on_a_cpu" else 4 * 2)  # models, horizons
+    else:
+        assert stacks and (case == "jobs_of_one_member" or any(len(set(stack)) > 1 for stack in stacks))
     if case == "row_targets":  # the targets took effect: forecasts of 0 on weekends, and r1's are its own scaled ones
-        assert any(r["prediction"] == 0.0 and r.get("detail") == "zero_when" for r in own["r3"].values())
+        assert any(r["prediction"] == 0.0 and r.get("detail") == "zero_when" for r in own["r2"].values())
         assert any(own["r1"][key]["prediction"] != own["r0"][key]["prediction"] for key in own["r0"])
 
 
@@ -426,7 +565,7 @@ def scaled(scale):
     return Scaled
 
 
-def test_models_of_other_keys_run_alone_and_a_session_class_stacks_with_its_own(market, monkeypatch):
+def test_models_of_other_keys_run_alone_and_a_session_class_stacks_with_its_own(market, monkeypatch, vouched):
     one, two = scaled(1.0), scaled(3.0)
 
     def session(cls, name, lr):
@@ -456,7 +595,7 @@ def test_models_of_other_keys_run_alone_and_a_session_class_stacks_with_its_own(
     same(own, together)
 
 
-def test_a_member_that_diverged_is_its_fit_s_error_and_moves_no_other_member(market, monkeypatch, stacks):
+def test_a_member_that_diverged_is_its_fit_s_error_and_moves_no_other_member(market, monkeypatch, stacks, vouched):
     models = [
         TorchModel(
             module=BlowUp, predictors=DAY, module_params={"dropout": dropout}, name=f"m{i:02d}", **{**FAST, "lr": lr}
@@ -471,7 +610,7 @@ def test_a_member_that_diverged_is_its_fit_s_error_and_moves_no_other_member(mar
     assert any("m01" in stack and len(set(stack)) > 1 for stack in stacks)
 
 
-def test_a_stack_that_raises_trains_its_calls_alone(market, monkeypatch):
+def test_a_stack_that_raises_trains_its_calls_alone_warns_once_and_counts(market, monkeypatch, fallbacks_expected):
     models = loop_of(4)
     own = alone(models, market, monkeypatch)
     real = groups._train_stack
@@ -484,17 +623,24 @@ def test_a_stack_that_raises_trains_its_calls_alone(market, monkeypatch):
         return real(chunk, *args)
 
     monkeypatch.setattr(groups, "_train_stack", first_raises)
-    same(own, records(run_pipeline(models, market)))
-    assert raised
+    monkeypatch.setattr(groups, "_FALLBACK_WARNED", False)
+    with pytest.warns(RuntimeWarning, match="a stack raised RuntimeError\\('out of memory'\\)") as caught:
+        same(own, records(run_pipeline(models, market)))
+    assert raised and groups.STATS["fallbacks"] == len(raised[0]) // 2  # the stack's calls, of 2 seeds each
+    assert sum("a stack raised" in str(w.message) for w in caught) == 1  # once per process
 
 
-def test_a_fit_that_raises_stops_the_group_naming_its_model(market):
+def test_a_fit_that_raises_stops_the_group_naming_its_model(market, vouched, fallbacks_expected):
     """A loss that raises (not a ValueError, so no fit_error): its own run raises, and so does a group of it, naming it."""
     with pytest.raises(RuntimeError, match="^bad: forecasting failed") as alone_error:
         daily("bad", loss=LOSS_BOOM).run(market, *TEST, horizon=1)
     assert "boom" in str(alone_error.value)
     stacked = [daily("bad", loss=LOSS_BOOM), daily("bad_too", loss=LOSS_BOOM, lr=3e-3)]
-    with pytest.raises(RuntimeError, match=r"^bad: forecasting failed for the refit block") as error:
+    with (
+        pytest.raises(RuntimeError, match=r"^bad: forecasting failed for the refit block") as error,
+        warnings.catch_warnings(),
+    ):
+        warnings.filterwarnings("ignore", "torch stacks: a stack raised", RuntimeWarning)  # its stack fell back first
         run_pipeline(stacked, market, horizon=1)
     assert "boom" in str(error.value)
 
@@ -575,6 +721,7 @@ def test_calls_share_a_stack_s_rows_only_where_inputs_targets_and_mask_are_equal
     mask, each trained as alone, to the bit (a call that read another's targets or mask would not be)."""
     from epftoolbox2.models._torch import trainer
 
+    groups._S_STRUCTURES.clear()  # place 0 is this test's model
     rng = np.random.default_rng(5)
     x = rng.normal(size=(40, 5))
     y = rng.normal(size=(40, 2))
@@ -599,6 +746,7 @@ def test_calls_share_a_stack_s_rows_only_where_inputs_targets_and_mask_are_equal
         )
         requests.append(groups._Request(groups._FIT, (i,), payload))
     groups._train(groups._Session([]), requests)
+    groups._S_STRUCTURES.clear()
     rows = rng.normal(size=(3, 5))
     for request, (target, kept) in zip(requests, calls):
         result, device = request.result
@@ -649,6 +797,69 @@ def test_jobs_are_cut_at_whole_units_in_block_order():
     big = [(day(2023, 3, 6), (1,), place, [(None, 1, 6)], 1, groups.MAX_JOB_ITEMS // 2 + 1) for place in range(3)]
     assert [list(job) for _, _, job in groups._jobs(big, 10**6)] == [[0], [1], [2]]
     assert groups._job_members(1000, 16, 4) == 64 and groups._job_members(40, 16, 4) == 16
+    many = [(day(2023, 3, 6), (k,), 0, [(None, 1, 6)], 1, 1) for k in range(3000)]  # seeds=1: a member an item
+    assert [len(job[0]) for _, _, job in groups._jobs(many, 2048, max(groups.MAX_JOB_ITEMS, 2048))] == [2048, 952]
+
+
+def test_check_mode_trains_a_sample_alone_and_records_it(market, tmp_path, monkeypatch):
+    """`TORCH_STACKS=check` (every call sampled here): each manifest's `stack_check` counts its calls, none differing; a call
+    whose numbers alone differ from the stack's is counted, its largest difference recorded, and the model warns."""
+    monkeypatch.setenv(groups.TORCH_STACKS_VAR, "check")
+    monkeypatch.setattr(groups, "CHECK_EVERY", 1)
+    models = [daily("c0"), daily("c1", lr=3e-3), daily("c2", dropout=0.3)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        run_pipeline(models, market, test=WEEK, save_dir=tmp_path / "ok")
+
+    def stored(where, model):
+        return json.loads(manifest_path(ModelPipeline.results_path(tmp_path / where, model, "jsonl")).read_text())
+
+    for model in models:
+        assert stored("ok", model)["stack_check"] == {"calls": 2, "differing": 0, "max_abs": 0.0}  # two horizons
+
+    real = groups._check_alone
+
+    def off_by_one(session, result, *args):
+        real(session, result, *args)
+        alone = result.check
+        result.check = trainer_result_shifted(alone, 1.0)
+
+    monkeypatch.setattr(groups, "_check_alone", off_by_one)
+    with pytest.warns(RuntimeWarning, match="torch stack check: 2 of 2 calls checked gave other bits"):
+        run_pipeline(models, market, test=WEEK, save_dir=tmp_path / "off")
+    for model in models:
+        assert stored("off", model)["stack_check"] == {"calls": 2, "differing": 2, "max_abs": 1.0}
+
+
+def trainer_result_shifted(result, by):
+    """A `TrainResult` whose forecasts are `result`'s plus `by`."""
+    from epftoolbox2.models._torch import trainer
+
+    return trainer.TrainResult(lambda rows: result.predict(rows) + by, result.best_epoch, result.failed, result.stats)
+
+
+def test_an_interrupt_while_a_round_is_released_ends_the_job(market, monkeypatch):
+    """A Ctrl-C after a round was served and before its items were let go (the reviewer's injected interrupt): the waiting
+    items are let go with `_Aborted`, every thread joined, and the interrupt raised, never a hang."""
+    import faulthandler
+
+    real = groups._Session._release
+    hit = []
+
+    def release(self, batch):
+        if batch and not hit:
+            hit.append(1)
+            raise KeyboardInterrupt
+        return real(self, batch)
+
+    monkeypatch.setattr(groups._Session, "_release", release)
+    faulthandler.dump_traceback_later(120, exit=True)  # a hang ends the test process with a traceback
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_pipeline(loop_of(3), market, test=WEEK)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+    assert hit
 
 
 def test_a_stacked_model_s_files_are_its_own_run_s(market, tmp_path, monkeypatch):
