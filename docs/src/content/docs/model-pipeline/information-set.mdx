@@ -584,7 +584,9 @@ So the quarter-hourly shape of a day-ahead forecast or price is known with it, a
 The hour the clocks repeat in autumn is two hours, one per occurrence, as the transformer makes them: the first occurrence's mean
 is known when its 02:45 is, the second's when the second 02:45 is, and the check reads the second, the row a model forecasts from.
 The hour the clocks skip has no rows and no verdict. Under [rules over time](#rules-over-time) an earlier slot can come later than
-the last, so the aggregate is known when every slot of its hour is.
+the last, so the aggregate is known when every slot of its hour is. On a [daily row](#daily-rows) an hour aggregate is judged as a
+day aggregate, at the date's last slot: the row stands for its whole date, so `load_actual_hour_mean` after
+`ResampleTransformer("1D")` is known only after D, not at the stamp's hour.
 
 ---
 
@@ -633,7 +635,8 @@ rule reads a daily row like this, with the rule's own clock times and delays as 
 | `realised`, with no `h`, `min` or `s` shift | The value of its whole local date, known `delay` after that date ends |
 | `realised`, with an hour shift | That hour, counted back from the stamp |
 | `weather_run`, `as_of`, `weather_cutoff` | As on an hourly row, from the stamp |
-| A profile, a day or an hour aggregate | The column it was built from, at its slot or its day's or hour's last slot, as on an hourly row |
+| A profile or a day aggregate | The column it was built from, at its slot or the day's last slot, as on an hourly row |
+| An hour aggregate | As a day aggregate: the row stands for its whole date (a resample's maximum of the hour means holds every hour), not the stamp's hour |
 | A `_sNN` slot | Needs a rule of your own, as on hourly data |
 
 With `realised("1h")` and a noon stamp:
