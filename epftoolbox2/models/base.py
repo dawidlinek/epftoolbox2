@@ -584,15 +584,16 @@ class BaseModel(ABC):
         elif key == "refit":
             value = check_refit(value)
             check_binary_mask(getattr(self, "binary_mask", None), value)  # whichever of the two is set second raises
-            if value is not None and self._unit_kind != PERIOD and not self._can_refit(self._unit_kind):
-                methods = UNIT_METHODS[unit_kind(self)]
+            kind = PERIOD if value is None else unit_kind(self)
+            if kind != PERIOD and not self._can_refit(kind):
+                methods = UNIT_METHODS[kind]
                 owners = {name: getattr(self._owner_or_none(name), "__name__", None) for name in methods}
                 raise ValueError(
-                    f"{type(self).__name__} fits {self._unit_kind} units, from {' and '.join(methods)}, which one class "
-                    f"other than BaseModel must define, and they are {owners}: a subclass that overrides one of them must "
-                    "override all of them"
+                    f"{type(self).__name__} fits {kind} units, from {' and '.join(methods)}, which one class other than "
+                    f"BaseModel must define, and they are {owners}: a subclass that overrides one of them must override all "
+                    "of them"
                 )
-            if value is not None and self._unit_kind == PERIOD and not self._can_refit():
+            if value is not None and kind == PERIOD and not self._can_refit():
                 owners = {name: self._owner_of(name).__name__ for name in _REFIT_METHODS}
                 raise ValueError(
                     f"{type(self).__name__} can't refit on a calendar (refit={value!r}): its `_fit_predict` is "
