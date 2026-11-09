@@ -2024,13 +2024,15 @@ class BaseModel(ABC):
         newest: Optional[NewestTargets],
     ) -> None:
         """The checks of columns read from another pipeline's forecasts (`models._chained`): their coverage of the rows the fits
-        read, on the run's issue days (those of `weekdays`), and their upstream's own lateness, listed at "warn" beside the
-        model's listing. What it finds of them goes to the manifest (`_chained_record`)."""
+        read, on the run's issue days (those of `weekdays`) and of the periods their lists are read at (every period for a model
+        of day or pooled units), and their upstream's own lateness, listed at "warn" beside the model's listing. What it finds of them goes to the manifest (`_chained_record`)."""
         days = None if issued is None else listed_days(issued, weekdays)
         rows = None
         if days:
             rows = self._training_rows(newest, self._reach_window(data, days), frame_first_day(data.index))
-        found = _chained.check(self.name, data, lists, information_set, availability, days, rows)
+        found = _chained.check(
+            self.name, data, lists, information_set, availability, days, rows, self._freq, unit_kind(self) != PERIOD
+        )
         self._chained_record = found.record
         if found.listing:  # every issue day reads the upstream: each window's listing has its rows too
             self._availability_listing = sort_rows([*self._availability_listing, *found.listing])

@@ -5,13 +5,16 @@
 through their shifts, profiles and day aggregates (`InformationSet.chained_of`):
 
 - **Coverage.** The rows the fits read (`TrainingRows`: each planned issue day's span, or with `refit` its anchor's, per horizon
-  and window member, from the frame's first date) where such a predictor has no value drop out of training silently. A slot the
-  clock doesn't have where a day shift lands (`x_d+1` at 02:00 the day before a spring switch) is no hole of the upstream and
-  isn't counted. Any count is a warning at every level, `none` included, and an `InformationSetError` at `raise`; the counts go
-  to the manifest's `chained_inputs[column]["coverage"]`, recorded, not compared.
-- **Late upstream.** An upstream whose leaf models listed inputs as late or without a rule, or ran at level `none`, makes every
-  use of its column a `late upstream` row of the listing at `warn` and a refusal at `raise`: a chain whose first stage read
-  something after its own issue time is never an honest chain by accident.
+  and window member, from the frame's first date; of the periods whose lists hold the predictor at that horizon, every period
+  for a model of day or pooled units) where such a predictor has no value drop out of training silently. A slot the clock
+  doesn't have where a day shift lands (`x_d+1` at 02:00 the day before a spring switch), or that the upstream never plans, is
+  no hole of the upstream and isn't counted. Any count is one warning per chained column at every level, `none` included, and an
+  `InformationSetError` at `raise`; the counts go to the manifest's `chained_inputs[column]["coverage"]`, recorded, not compared.
+- **Late upstream.** An upstream whose leaf models listed inputs as late or without a rule, or whose listing doesn't vouch for
+  every forecast it stored (`Upstream.unchecked`: level `none`, `raise` with `unknown` other than "raise", resumed under other
+  rules or unverified, forecasts outside the test period its manifest checked), makes every use of its column a `late upstream`
+  row of the listing at `warn` and a refusal at `raise`: a chain whose first stage read something after its own issue time is
+  never an honest chain by accident.
 
 The manifest records each chained column the model reads (`ChainedInput.record()` and its coverage), whose identity a resume
 compares (`results.manifest.chained_differences`).
@@ -38,6 +41,7 @@ from ..information_set import (
     parse_predictor,
 )
 from ..results.availability import late_upstream_rows
+from ..results.store import outside_stacklevel
 from ._calendar import skipped_periods
 from ._contract import wall_clock
 
@@ -70,9 +74,12 @@ def check(
     availability: str,
     issue_days: Optional[Sequence[datetime.date]],
     rows: Optional[TrainingRows],
+    freq: str = "1h",
+    every_period: bool = False,
 ) -> ChainedCheck:
     """Coverage and late-upstream checks of the chained predictors in `lists` ((period, horizon) -> names a model reads) on the
-    frame `data`, for a run issued on `issue_days` (None: no coverage can be told) whose fits read `rows`."""
+    frame `data` at `freq`, for a run issued on `issue_days` (None: no coverage can be told) whose fits read `rows`, of the periods
+    whose lists hold a predictor, or of every period (`every_period`: a model of day or pooled units, whose fit reads them all)."""
     if information_set is None or not information_set.chained_inputs():
         return ChainedCheck()
     information_set.refuse_rules_on_chained_columns()  # a rule added after `with_source_rules` would be ignored
@@ -91,17 +98,20 @@ def check(
     record: Dict[str, Dict[str, Any]] = {}
     for use in uses.values():
         record.setdefault(use.chained.column, {**use.chained.record(), "coverage": {}})
-    problems: List[str] = []
+    holes: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}  # column -> (name, its coverage) of each name with a hole
     if issue_days and rows is not None and len(data.index):
         dates = _row_dates(data.index)
+        periods = None if every_period else _row_periods(data.index, freq)
         for name, use in sorted(uses.items()):
-            found = coverage(data, name, use, dates, issue_days, rows)
+            found = coverage(data, name, use, dates, periods, issue_days, rows)
             record[use.chained.column]["coverage"][name] = found
             if found["uncovered"]:
-                problems.append(_coverage_message(model_name, name, use.chained, found))
+                holes.setdefault(use.chained.column, []).append((name, found))
+    chained_of = {use.chained.column: use.chained for use in uses.values()}
+    problems = [_coverage_message(model_name, chained_of[column], found) for column, found in sorted(holes.items())]
     for message in problems:
         if availability != "raise":
-            warnings.warn(message, UserWarning, stacklevel=5)
+            warnings.warn(message, UserWarning, stacklevel=outside_stacklevel())
 
     late = {name: use for name, use in uses.items() if use.chained.late_upstream}
     listing: List[Dict[str, Any]] = []
@@ -123,27 +133,33 @@ def coverage(
     name: str,
     use: _Use,
     dates: np.ndarray,
+    periods: Optional[np.ndarray],
     issue_days: Sequence[datetime.date],
     rows: TrainingRows,
 ) -> Dict[str, Any]:
-    """How many rows the fits read (on the dates `read_dates` gives, of the frame's rows) hold no value of `name`, less those
-    that can't hold one whatever the upstream does (`_off_the_clock`): {"read", "uncovered", "first", "last", "run_from"} (dates
-    ISO, None with nothing uncovered). `run_from` is the first upstream issue day whose forecast the first uncovered row reads."""
-    read = read_dates(rows, issue_days, use.horizons)
-    on = np.isin(dates, read)
+    """How many rows the fits read (at each horizon, on the dates `read_dates` gives, of the periods whose lists hold `name`
+    there, every period with `periods` None) hold no value of `name`, less those that can't hold one whatever the upstream does
+    (`_off_the_clock`): {"read", "uncovered", "first", "last", "run_from", "run_to"} (dates ISO, None with nothing uncovered).
+    `run_from` and `run_to` are the upstream issue days whose forecasts the first and last uncovered rows read."""
+    on = np.zeros(len(dates), dtype=bool)
+    for hz in use.horizons:
+        at = np.isin(dates, read_dates(rows, issue_days, [hz]))
+        if periods is not None:
+            at &= np.isin(periods, sorted({period for period, h in use.cells if h == hz}))
+        on |= at
     values = data[name].to_numpy(dtype=np.float64) if name in data.columns else np.full(len(data.index), np.nan)
     hole = on & np.isnan(values)
     hole[hole] = ~_off_the_clock(data.index[hole], name, use.chained)
     uncovered = np.flatnonzero(hole)
-    out: Dict[str, Any] = {"read": int(on.sum()), "uncovered": int(len(uncovered)), "first": None, "last": None}
-    out["run_from"] = None
+    out: Dict[str, Any] = {"read": int(on.sum()), "uncovered": int(len(uncovered))}
+    out.update(first=None, last=None, run_from=None, run_to=None)
     if len(uncovered):
         first, last = int(dates[uncovered].min()), int(dates[uncovered].max())
+        back = day_shift(name, use.chained.column) - use.chained.horizon
         out["first"] = datetime.date.fromordinal(first).isoformat()
         out["last"] = datetime.date.fromordinal(last).isoformat()
-        out["run_from"] = datetime.date.fromordinal(
-            first + day_shift(name, use.chained.column) - use.chained.horizon
-        ).isoformat()
+        out["run_from"] = datetime.date.fromordinal(first + back).isoformat()
+        out["run_to"] = datetime.date.fromordinal(last + back).isoformat()
     return out
 
 
@@ -192,6 +208,14 @@ def day_shift(name: str, column: str) -> int:
 _EPOCH_ORDINAL = datetime.date(1970, 1, 1).toordinal()
 
 
+def _row_periods(index: pd.DatetimeIndex, freq: str) -> np.ndarray:
+    """Each row's period: its wall-clock slot of the day (0 on a daily frame, whose rows are one period)."""
+    if freq not in _STEP:
+        return np.zeros(len(index), dtype=np.int64)
+    local = wall_clock(index)
+    return np.asarray((local.hour * 60 + local.minute) // _STEP[freq], dtype=np.int64)
+
+
 def _row_dates(index: pd.DatetimeIndex) -> np.ndarray:
     """Each row's local date as an ordinal."""
     days = wall_clock(index).to_numpy().astype("datetime64[D]").astype(np.int64)
@@ -232,12 +256,19 @@ def _rule_of(information_set: InformationSet, name: str) -> str:
     return "" if rule is None else rule.describe()
 
 
-def _coverage_message(model_name: str, name: str, chained: ChainedInput, found: Dict[str, Any]) -> str:
+def _coverage_message(model_name: str, chained: ChainedInput, found: List[Tuple[str, Dict[str, Any]]]) -> str:
+    """One message for the predictors of one chained column with rows their fits read and can't use, and the upstream issue
+    days that would cover them."""
+    each = "; ".join(
+        f"{name} on {one['uncovered']} of {one['read']} rows, from {one['first']} to {one['last']}"
+        for name, one in found
+    )
+    first = min(one["run_from"] for _, one in found)
+    last = max(one["run_to"] for _, one in found)
     return (
-        f"{model_name}: {name} has no value on {found['uncovered']} of the {found['read']} rows its fits read, from "
-        f"{found['first']} to {found['last']}: those rows drop out of training. {chained.column} holds the forecasts of "
-        f"{chained.model} (horizon {chained.horizon}) in {chained.path}; run {chained.model} from {found['run_from']} so that "
-        "they cover the rows the fits read."
+        f"{model_name}: rows its fits read have no value of {chained.column}: {each}. Those rows drop out of training. "
+        f"{chained.column} holds the forecasts of {chained.model} (horizon {chained.horizon}) in {chained.path}; run "
+        f"{chained.model} so that it covers the issue days {first} to {last}."
     )
 
 
@@ -247,7 +278,7 @@ def _late_note(chained: ChainedInput) -> str:
         shown = ", ".join(chained.late[:5]) + (f" and {len(chained.late) - 5} more" if len(chained.late) > 5 else "")
         parts.append(f"{chained.model} read inputs after its issue time or without a rule: {shown}")
     if chained.unchecked:
-        parts.append(f"{', '.join(chained.unchecked)} ran at availability='none', so nothing checked their inputs")
+        parts.append(f"nothing vouches for every forecast of {'; '.join(chained.unchecked)}")
     return "; ".join(parts)
 
 

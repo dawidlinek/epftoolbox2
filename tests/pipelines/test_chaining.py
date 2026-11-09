@@ -78,6 +78,28 @@ def df():
     return make_market_data(noise=5.0, seed=7)
 
 
+@pytest.fixture(scope="module")
+def shared(df, tmp_path_factory):
+    """The upstreams most tests read, run once per module: complete over every row a 45-day window reads ("up"), and starting
+    on 2023-03-20, mid-window ("mid"). A test that writes into one works on a copy (`copied`)."""
+    root = tmp_path_factory.mktemp("upstreams")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("MAX_PROCESSES", "1")
+        patch.setenv("THREADS_PER_PROCESS", "1")
+        patch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
+        run_upstream(df, root / "up")
+        run_upstream(df, root / "mid", test=("2023-03-20", "2023-04-20"))
+    up = ForecastSource(str(root / "up"), model="load_up", column="load_fc")
+    mid = ForecastSource(str(root / "mid"), model="load_up", column="load_fc")
+    return {"root": root, "up": up, "mid": mid, "up_data": chained(df, up), "mid_data": chained(df, mid)}
+
+
+def copied(shared, tmp_path, which="up"):
+    """A copy of a shared upstream in `tmp_path`, for a test that runs into it again."""
+    shutil.copytree(shared["root"] / which, tmp_path / which)
+    return tmp_path / which
+
+
 def run_upstream(
     df,
     directory,
@@ -129,12 +151,10 @@ def downstream(predictors, info, availability="raise", name="price_m", window=30
     return pipeline.add_model(OLSModel(predictors, training_window=window, name=name, **kwargs))
 
 
-def test_the_prototype_s_chain_runs_with_the_upstream_issue_time(df, tmp_path):
-    run_upstream(df, tmp_path / "up")
-    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
-    data = chained(df, source)
+def test_the_prototype_s_chain_runs_with_the_upstream_issue_time(shared):
+    source, data = shared["up"], shared["up_data"].copy()
     # The forecast for 2023-04-11 12:00 stored by the upstream run is on the row of D = 2023-04-10 as load_fc_d+1.
-    assert data.loc["2023-04-10 12:00", "load_fc_d+1"] == stored(tmp_path / "up")[("2023-04-10", 12)]
+    assert data.loc["2023-04-10 12:00", "load_fc_d+1"] == stored(shared["root"] / "up")[("2023-04-10", 12)]
 
     info = INFO.with_source_rules([source])
     assert info.resolve("load_fc_d+1").rule.time == "09:30"
@@ -199,42 +219,43 @@ def independent_count(data, name, first_row, last_row):
 
 
 @pytest.mark.parametrize("availability", ["none", "warn"])
-def test_an_upstream_starting_mid_window_warns_with_its_counts_and_the_day_to_start_from(df, tmp_path, availability):
-    run_upstream(df, tmp_path / "up", test=("2023-03-20", "2023-04-20"))
-    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
-    data = chained(df, source)
+def test_an_upstream_starting_mid_window_warns_with_its_counts_and_the_days_to_cover(shared, tmp_path, availability):
+    source, data = shared["mid"], shared["mid_data"]
     info = INFO.with_source_rules([source])
-    pipeline = downstream(PREDICTORS + ["load_fc_d+1"], info, availability=availability)
-    with pytest.warns(UserWarning, match="load_fc_d\\+1 has no value on") as caught:
+    pipeline = downstream(PREDICTORS + ["load_fc_d+1", "load_fc_d-1"], info, availability=availability)
+    with pytest.warns(UserWarning, match="rows its fits read have no value of load_fc") as caught:
         pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
     # A 30-day window and horizon 1 read rows from D-31 to D-2: 2023-03-05 to 2023-04-12. The first forecast is issued on
-    # 2023-03-20, for 03-21: the row of 03-20 is the first covered, so the upstream must start on 03-05.
+    # 2023-03-20, for 03-21: the row of 03-20 is the first covered by load_fc_d+1, 03-22 by load_fc_d-1 (issued 03-20 for 03-21).
     expected, read = independent_count(data, "load_fc_d+1", "2023-03-05", "2023-04-12")
-    message = next(str(w.message) for w in caught if "has no value" in str(w.message))
-    assert f"has no value on {expected} of the {read} rows" in message
-    assert "from 2023-03-05 to 2023-03-19" in message and "run load_up from 2023-03-05" in message
+    found = [w for w in caught if "have no value" in str(w.message)]
+    assert len(found) == 1 and found[0].filename == __file__  # one per chained column, attributed to the caller
+    message = str(found[0].message)
+    assert f"load_fc_d+1 on {expected} of {read} rows, from 2023-03-05 to 2023-03-19" in message
+    assert "load_fc_d-1 on" in message and "covers the issue days 2023-03-03 to 2023-03-19" in message
     manifest = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())
-    coverage = manifest["chained_inputs"]["load_fc"]["coverage"]["load_fc_d+1"]
-    assert coverage == {
+    coverage = manifest["chained_inputs"]["load_fc"]["coverage"]
+    assert coverage["load_fc_d+1"] == {
         "read": read,
         "uncovered": expected,
         "first": "2023-03-05",
         "last": "2023-03-19",
         "run_from": "2023-03-05",
+        "run_to": "2023-03-19",
     }
     assert expected == 15 * 24  # 15 whole days before the upstream's first forecast
+    assert (coverage["load_fc_d-1"]["first"], coverage["load_fc_d-1"]["last"]) == ("2023-03-05", "2023-03-21")
+    assert (coverage["load_fc_d-1"]["run_from"], coverage["load_fc_d-1"]["run_to"]) == ("2023-03-03", "2023-03-19")
 
 
-def test_with_refit_the_rows_read_are_those_of_the_refit_days(df, tmp_path):
+def test_with_refit_the_rows_read_are_those_of_the_refit_days(shared, tmp_path):
     """refit="7D": the forecasts of 04-05 to 04-14 use the fits of Mondays 04-03 and 04-10, whose rows run from 03-03 (04-03 - 31)
     to 04-08: two more days before the upstream's first forecast than without refit."""
-    run_upstream(df, tmp_path / "up", test=("2023-03-20", "2023-04-20"))
-    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
-    data = chained(df, source)
+    source, data = shared["mid"], shared["mid_data"]
     pipeline = downstream(
         PREDICTORS + ["load_fc_d+1"], INFO.with_source_rules([source]), availability="warn", refit="7D"
     )
-    with pytest.warns(UserWarning, match="has no value on"):
+    with pytest.warns(UserWarning, match="have no value of"):
         pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
     found = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc"][
         "coverage"
@@ -246,26 +267,61 @@ def test_with_refit_the_rows_read_are_those_of_the_refit_days(df, tmp_path):
         "first": "2023-03-03",
         "last": "2023-03-19",
         "run_from": "2023-03-03",
+        "run_to": "2023-03-19",
     }
     assert expected == 17 * 24
 
 
-def test_an_upstream_starting_mid_window_is_refused_at_raise(df, tmp_path):
-    run_upstream(df, tmp_path / "up", test=("2023-03-20", "2023-04-20"))
-    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
-    data = chained(df, source)
-    pipeline = downstream(PREDICTORS + ["load_fc_d+1"], INFO.with_source_rules([source]))
-    with pytest.raises(InformationSetError, match="run load_up from 2023-03-05"):
-        pipeline.run(data, *TEST, horizon=1)
+def test_an_upstream_starting_mid_window_is_refused_at_raise(shared):
+    pipeline = downstream(PREDICTORS + ["load_fc_d+1"], INFO.with_source_rules([shared["mid"]]))
+    with pytest.raises(InformationSetError, match="covers the issue days 2023-03-05 to 2023-03-19"):
+        pipeline.run(shared["mid_data"], *TEST, horizon=1)
 
 
-def test_a_complete_upstream_is_silent_over_a_spring_switch_and_its_manifest_records_it(df, tmp_path):
-    run_upstream(df, tmp_path / "up")
+def test_an_upstream_ending_early_names_the_days_at_the_end(df, tmp_path):
+    """An upstream that stops before the last rows the fits read: the days to cover are at the end, not a start."""
+    run_upstream(df, tmp_path / "up", test=("2023-02-10", "2023-04-09"))
     source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
-    data = chained(df, source)
+    pipeline = downstream(PREDICTORS + ["load_fc_d+1"], INFO.with_source_rules([source]), availability="warn")
+    with pytest.warns(UserWarning, match="covers the issue days 2023-04-10 to 2023-04-12"):
+        report = pipeline.run(chained(df, source), *TEST, horizon=1)
+    counts = report.forecast_counts().iloc[0]
+    assert counts["produced"] < counts["planned"]  # the issue rows after the upstream's end have no value either
+
+
+def test_coverage_counts_the_periods_whose_lists_read_the_column(shared, tmp_path):
+    """An upstream without night forecasts read only in the hours that have them: nothing is missing from what the fits read.
+    Read at every hour, the night rows are counted, and only they."""
+    data = shared["up_data"].copy()
+    night = (data.index.hour < 6) | (data.index.hour > 20)
+    data.loc[night, "load_fc_d+1"] = np.nan
+    info = INFO.with_source_rules([shared["up"]])
+
+    def by_day(horizon, hour):
+        return PREDICTORS + (["load_fc_d+1"] if 6 <= hour <= 20 else [])
+
+    for level in ("warn", "raise"):
+        pipeline = ModelPipeline(information_set=info, availability=level)
+        pipeline.add_model(OLSModel(by_day, training_window=30, name="by_day"))
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=".*have no value of")
+            report = pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / level))
+        assert report.forecast_counts()["produced"].iloc[0] == 240
+        coverage = json.loads((tmp_path / level / "by_day.manifest.json").read_text())["chained_inputs"]["load_fc"]
+        assert coverage["coverage"]["load_fc_d+1"]["uncovered"] == 0
+    every_hour = downstream(PREDICTORS + ["load_fc_d+1"], info, availability="warn")
+    with pytest.warns(UserWarning, match="have no value of load_fc"):
+        every_hour.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "every"))
+    found = json.loads((tmp_path / "every" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc"]
+    expected, _ = independent_count(data, "load_fc_d+1", "2023-03-05", "2023-04-12")  # the night rows, but 02:00 of 03-25
+    assert found["coverage"]["load_fc_d+1"]["uncovered"] == expected == 39 * 9 - 2  # and no 02:00 on 03-26
+
+
+def test_a_complete_upstream_is_silent_over_a_spring_switch_and_its_manifest_records_it(shared, tmp_path):
+    source, data = shared["up"], shared["up_data"]
     pipeline = downstream(PREDICTORS + ["load_fc_d+1", "load_fc_d-1"], INFO.with_source_rules([source]), window=45)
     with warnings.catch_warnings():
-        warnings.filterwarnings("error", message=".*has no value on")
+        warnings.filterwarnings("error", message=".*have no value of")
         pipeline.run(data, *TEST, horizon=2, save_dir=str(tmp_path / "down"))
     manifest = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())
     entry = manifest["chained_inputs"]["load_fc"]
@@ -285,11 +341,9 @@ def test_a_complete_upstream_is_silent_over_a_spring_switch_and_its_manifest_rec
     assert np.isnan(data.loc["2023-03-25 02:00", "load_fc_d+1"])
 
 
-def test_a_model_without_a_chained_column_has_no_key_in_its_manifest(df, tmp_path):
-    run_upstream(df, tmp_path / "up")
-    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
-    data = chained(df, source)
-    downstream(PREDICTORS, INFO.with_source_rules([source])).run(data, *TEST, horizon=1, save_dir=str(tmp_path / "d"))
+def test_a_model_without_a_chained_column_has_no_key_in_its_manifest(shared, tmp_path):
+    info = INFO.with_source_rules([shared["up"]])
+    downstream(PREDICTORS, info).run(shared["up_data"], *TEST, horizon=1, save_dir=str(tmp_path / "d"))
     assert "chained_inputs" not in json.loads((tmp_path / "d" / "price_m.manifest.json").read_text())
 
 
@@ -364,9 +418,8 @@ def test_an_ensemble_upstream_is_tainted_by_any_of_its_members(df, tmp_path):
 
 
 @pytest.mark.parametrize("horizon", [1, 2])
-def test_verify_is_ok_with_its_control_on_a_chained_column(df, tmp_path, horizon):
-    run_upstream(df, tmp_path / "up")
-    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc", horizon=horizon)
+def test_verify_is_ok_with_its_control_on_a_chained_column(df, shared, horizon):
+    source = ForecastSource(str(shared["root"] / "up"), model="load_up", column="load_fc", horizon=horizon)
     data = chained(df, source)
     pipeline = downstream(PREDICTORS + ["load_fc_d+{horizon}"], INFO.with_source_rules([source]))
     report = pipeline.verify(data, *TEST, horizon=horizon, days=2)
@@ -389,14 +442,15 @@ def test_a_chained_input_read_before_its_upstream_issue_time_is_a_leak_and_refus
     assert known.table().set_index("model").loc["price_m", "status"] == "ok"
 
 
-def test_explain_shows_the_upstream_in_the_rule_column(df, tmp_path):
-    run_upstream(df, tmp_path / "up")
-    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
-    data = chained(df, source)
+def test_explain_shows_the_upstream_in_the_rule_column(shared):
+    source, data = shared["up"], shared["up_data"]
     pipeline = downstream(PREDICTORS + ["load_fc_d+1"], INFO.with_source_rules([source]))
     table = pipeline.explain(data, model="price_m", test=TEST, horizon=1, hour=12, echo=False)
     rule = table["predictors"].set_index("predictor").loc["load_fc_d+1", "rule"]
-    assert "published 09:30 Europe/Warsaw on D-1" in rule and f"forecasts of load_up (horizon 1) in {tmp_path}" in rule
+    assert (
+        "published 09:30 Europe/Warsaw on D-1" in rule
+        and f"forecasts of load_up (horizon 1) in {shared['root']}" in rule
+    )
 
 
 # -- resume ----------------------------------------------------------------------------------------------------------------
@@ -415,32 +469,26 @@ def _resume(df, tmp_path, source, availability="raise"):
         ({"zone": "Europe/Berlin"}, "issue_timezone"),
     ],
 )
-def test_a_resume_over_another_upstream_issue_time_or_zone_is_refused(df, tmp_path, change, field):
-    run_upstream(df, tmp_path / "up")
-    _resume(df, tmp_path, ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc"))
+def test_a_resume_over_another_upstream_issue_time_or_zone_is_refused(df, shared, tmp_path, change, field):
+    _resume(df, tmp_path, shared["up"])
     run_upstream(df, tmp_path / "other", **change)  # the same forecasts, issued at another time
     other = ForecastSource(str(tmp_path / "other"), model="load_up", column="load_fc")
-    assert chained(df, other)["load_fc"].equals(
-        chained(df, ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc"))["load_fc"]
-    )
+    assert chained(df, other)["load_fc"].equals(shared["up_data"]["load_fc"])
     with pytest.raises(ManifestMismatchError, match=f"chained_inputs.load_fc.{field}"):
         _resume(df, tmp_path, other)
 
 
-def test_a_resume_with_another_horizon_or_available_is_refused(df, tmp_path):
-    run_upstream(df, tmp_path / "up")
-    _resume(df, tmp_path, ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc"))
+def test_a_resume_with_another_horizon_or_available_is_refused(df, shared, tmp_path):
+    _resume(df, tmp_path, shared["up"])
+    up = str(shared["root"] / "up")
     with pytest.raises(ManifestMismatchError, match="chained_inputs.load_fc.available"):
-        _resume(
-            df, tmp_path, ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc", available="10:00")
-        )
+        _resume(df, tmp_path, ForecastSource(up, model="load_up", column="load_fc", available="10:00"))
     with pytest.raises(ManifestMismatchError, match="chained_inputs.load_fc.horizon"):
-        _resume(df, tmp_path, ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc", horizon=2))
+        _resume(df, tmp_path, ForecastSource(up, model="load_up", column="load_fc", horizon=2))
 
 
-def test_a_changed_upstream_digest_warns_and_other_numbers_are_refused_by_the_data_hash(df, tmp_path):
-    run_upstream(df, tmp_path / "up")
-    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
+def test_a_changed_upstream_digest_warns_and_other_numbers_are_refused_by_the_data_hash(df, shared, tmp_path):
+    source = ForecastSource(str(copied(shared, tmp_path)), model="load_up", column="load_fc")
     _resume(df, tmp_path, source)
     # Run again at another level: its manifest records it, its forecasts don't move.
     run_upstream(df, tmp_path / "up", availability="raise")
@@ -453,11 +501,9 @@ def test_a_changed_upstream_digest_warns_and_other_numbers_are_refused_by_the_da
         _resume(df, tmp_path, source)
 
 
-def test_a_resume_where_one_run_knew_the_chain_and_the_other_didn_t_is_refused(df, tmp_path):
-    run_upstream(df, tmp_path / "up")
-    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
-    _resume(df, tmp_path, source)
-    data = chained(df, source)
+def test_a_resume_where_one_run_knew_the_chain_and_the_other_didn_t_is_refused(df, shared, tmp_path):
+    _resume(df, tmp_path, shared["up"])
+    data = shared["up_data"]
     rules = INFO.copy()
     rules.rules["load_fc"] = Availability.published("09:30", 1, timezone=ZONE)  # the same rule, written by hand
     pipeline = downstream(PREDICTORS + ["load_fc_d+1"], rules)
@@ -496,3 +542,155 @@ def test_a_daily_upstream_records_its_stamp_and_its_forecasts_land_there(tmp_pat
             if r["horizon"] == horizon and r["status"] == "ok"
         }
         assert dict(zip(local.strftime("%Y-%m-%d"), frame["load_fc"])) == records
+
+
+# -- what vouches for an upstream (the 7a review) --------------------------------------------------------------------------
+
+
+def test_a_rule_for_a_chained_column_written_after_the_sources_is_refused_at_every_level(shared):
+    info = INFO.with_source_rules([shared["up"]])
+    info.rules["load_fc"] = Availability.published(
+        "08:00", 1, timezone=ZONE
+    )  # would let a 12:30 upstream pass at 11:45
+    for level in ("none", "warn", "raise"):
+        pipeline = downstream(PREDICTORS + ["load_fc_d+1"], info, availability=level)
+        with pytest.raises(InformationSetError, match="nothing replaces it"):
+            pipeline.run(shared["up_data"], *TEST, horizon=1)
+
+
+def test_an_upstream_resumed_at_another_issue_time_is_not_vouched_for(df, tmp_path):
+    """Run at 09:30 with `wind` of D (out at 10:00 on D until 2023-03-15, 09:00 from 03-16) listed late on its first days, then
+    resumed at 09:45 over later days only: the manifest says 09:45 and lists nothing, but the file still holds the forecasts the
+    first run made with a late input. They aren't vouched for, by the mark of the other rules and by their run dates."""
+    wind = [
+        Availability.published("10:00", 0).during(valid_until="2023-03-15"),
+        Availability.published("09:00", 0).during(valid_from="2023-03-16"),
+    ]
+    run_upstream(df, tmp_path / "up", predictors=[*UPSTREAM, "wind"], rules={"wind": wind}, horizon=1)
+    run_upstream(
+        df,
+        tmp_path / "up",
+        predictors=[*UPSTREAM, "wind"],
+        rules={"wind": wind},
+        horizon=1,
+        issue_time="09:45",
+        availability="raise",
+        test=("2023-03-20", "2023-04-20"),
+    )
+    manifest = json.loads((tmp_path / "up" / "load_up.manifest.json").read_text())
+    assert manifest["information_set"]["issue_time"] == "09:45" and manifest["availability"]["listing"] == []
+    assert [row["predictor"] for row in manifest["availability"]["stored_under_other_rules"]["listing"]] == ["wind"]
+    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
+    chained_input = source.chained_input()
+    assert chained_input.late_upstream and chained_input.late == ()
+    assert any("listed under other rules" in reason for reason in chained_input.unchecked)
+    assert any("outside the test period 2023-03-20 to 2023-04-20" in reason for reason in chained_input.unchecked)
+    with pytest.raises(InformationSetError, match="listed under other rules"):
+        downstream(PREDICTORS + ["load_fc_d+1"], INFO.with_source_rules([source])).run(
+            chained(df, source), *TEST, horizon=1
+        )
+    # Every later resume keeps the mark, at the same rules too.
+    run_upstream(
+        df, tmp_path / "up", predictors=[*UPSTREAM, "wind"], rules={"wind": wind}, horizon=1, issue_time="09:45"
+    )
+    again = json.loads((tmp_path / "up" / "load_up.manifest.json").read_text())["availability"]
+    assert "stored_under_other_rules" in again
+
+
+def test_an_upstream_at_raise_that_let_a_column_without_a_rule_through_is_not_vouched_for(df, tmp_path):
+    """`unknown="warn"` at `availability="raise"` runs a column no rule describes (here the next day's load) and lists nothing."""
+    frame = df.drop(columns=[name for name in df.columns if name.startswith("load_d+")])
+    frame["load_next_day"] = frame["load"].shift(-24)
+    info = InformationSet("09:30", ZONE, rules=RULES, unknown="warn")
+    pipeline = ModelPipeline(information_set=info, availability="raise")
+    pipeline.add_model(OLSModel([*UPSTREAM, "load_next_day"], training_window=30, name="load_up"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        pipeline.run(frame, *UP_TEST, target="load", horizon=1, save_dir=str(tmp_path / "up"))
+    assert json.loads((tmp_path / "up" / "load_up.manifest.json").read_text())["availability"]["listing"] == []
+    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
+    assert source.chained_input().late_upstream
+    data = chained(df, source)
+    info = INFO.with_source_rules([source])
+    with pytest.raises(InformationSetError, match="unknown='warn'"):
+        downstream(PREDICTORS + ["load_fc_d+1"], info).run(data, *TEST, horizon=1)
+    with pytest.warns(UserWarning, match="whose upstream is late"):
+        report = downstream(PREDICTORS + ["load_fc_d+1"], info, availability="warn").run(data, *TEST, horizon=1)
+    assert (report.availability()["status"] == "late upstream").sum() == 1
+
+
+# -- a Workflow of two stages ----------------------------------------------------------------------------------------------
+
+
+def test_a_workflow_runs_the_upstream_then_reads_it_back_with_its_rule(df, tmp_path, monkeypatch):
+    """Two Workflow files: the upstream's, then the downstream's with a ForecastSource whose path is relative to its YAML. The
+    Workflow gives the downstream's information set the source's rule, so the chained input passes at raise, and the manifest
+    records its upstream by an absolute path."""
+    import yaml
+
+    from epftoolbox2.pipelines import Workflow
+
+    upstream_frame = df.drop(columns=[name for name in df.columns if name.startswith("load_d+")])
+    upstream_frame.tz_convert("UTC").to_csv(tmp_path / "upstream.csv", index_label="datetime")
+    df.tz_convert("UTC").to_csv(tmp_path / "downstream.csv", index_label="datetime")
+    rules = {name: rule.to_dict() for name, rule in RULES.items()}
+
+    def stage(name, sources, transformers, models, target, issue):
+        (tmp_path / name).mkdir()
+        config = {
+            "data_pipeline": {
+                "start": "2023-01-01",
+                "end": "2023-05-31",
+                "sources": sources,
+                "transformers": transformers,
+            },
+            "model_pipeline": {
+                "target": target,
+                "horizon": 1,
+                "test_start": "2023-04-05" if name == "down" else UP_TEST[0],
+                "test_end": "2023-04-14" if name == "down" else UP_TEST[1],
+                "save_dir": "runs",
+                "information_set": {"issue_time": issue, "issue_timezone": ZONE, "rules": rules},
+                "availability": "raise",
+                "models": models,
+            },
+        }
+        path = tmp_path / name / "workflow.yaml"
+        path.write_text(yaml.safe_dump(config, sort_keys=False))
+        return path
+
+    csv = {"class": "CsvSource", "params": {"datetime_column": "datetime"}}
+    up = stage(
+        "up",
+        [{**csv, "params": {**csv["params"], "file_path": "../upstream.csv"}}],
+        [{"class": "TimezoneTransformer", "params": {"target_tz": ZONE}}],
+        [{"class": "OLSModel", "params": {"predictors": UPSTREAM, "training_window": 30, "name": "load_up"}}],
+        "load",
+        "09:30",
+    )
+    down = stage(
+        "down",
+        [
+            {**csv, "params": {**csv["params"], "file_path": "../downstream.csv"}},
+            {"class": "ForecastSource", "params": {"path": "../up/runs", "model": "load_up", "column": "load_fc"}},
+        ],
+        [
+            {"class": "TimezoneTransformer", "params": {"target_tz": ZONE}},
+            {"class": "LagTransformer", "params": {"columns": ["load_fc"], "lags": [-1], "freq": "day"}},
+        ],
+        [
+            {
+                "class": "OLSModel",
+                "params": {"predictors": PREDICTORS + ["load_fc_d+1"], "training_window": 30, "name": "m"},
+            }
+        ],
+        "price",
+        "11:45",
+    )
+    monkeypatch.chdir(tmp_path / "up")  # neither stage's directory: the paths are their YAML's
+    Workflow.load(up).run()
+    report = Workflow.load(down).run()
+    assert report.forecast_counts()["produced"].tolist() == [240]
+    entry = json.loads((tmp_path / "down" / "runs" / "m.manifest.json").read_text())["chained_inputs"]["load_fc"]
+    assert entry["path"] == str((tmp_path / "up" / "runs").resolve()) and entry["issue_time"] == "09:30"
+    assert entry["coverage"]["load_fc_d+1"]["uncovered"] == 0
