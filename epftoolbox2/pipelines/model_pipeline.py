@@ -2098,7 +2098,14 @@ class ModelPipeline:
             for key, default in component._WRITTEN_WHEN_SET.items():
                 if key in params and params[key] == default:
                     del params[key]  # written only when set, so files saved before it existed don't move
-        return {"class": class_name, "params": params}
+        out = {"class": class_name, "params": params}
+        search = getattr(component, "_search", None)
+        if isinstance(component, BaseModel) and isinstance(search, dict):
+            # Where a search chose the model (`tune.SearchResult.best`): no setting of it, but what a run reads to refuse a test
+            # on the days it was chosen on and to show its row in `report.choices()`, so a Workflow or an array task rebuilding
+            # the model from YAML has it too. Written only for such a model.
+            out["search"] = json.loads(json.dumps(search))
+        return out
 
     def _serialize_param(self, owner: Any, key: str, value: Any, where: str) -> Any:
         """One parameter `key` of the component `owner` as YAML, the one place a parameter's kind is decided: a model inside it as
@@ -2161,7 +2168,10 @@ class ModelPipeline:
         for key in getattr(component_class, "_NESTED_MODELS", ()):
             if isinstance(params.get(key), dict):
                 params[key] = cls._load_component("models", params[key])
-        return component_class(**params)
+        component = component_class(**params)
+        if component_type == "models" and isinstance(config.get("search"), dict):
+            component._search = dict(config["search"])  # where a search chose it (`_serialize_component`)
+        return component
 
     @staticmethod
     def _load_predictor_function(class_name: str, saved: Dict[str, Any]) -> Callable:

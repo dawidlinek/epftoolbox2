@@ -239,8 +239,8 @@ validation end) raises `ValueError` before any fit,
 as a validation period that doesn't end before the test starts does: a test forecast must not be scored on days its settings
 were chosen on.
 
-The provenance lives on the model object: a pipeline saved to YAML and loaded again holds the models' settings, not where they
-were chosen, and none of these checks.
+A pipeline saved to YAML writes where each such model was chosen as a `search:` block next to its `params`, and loading it
+restores it, so a `Workflow` and its array tasks refuse the same test periods and show the same rows.
 
 ### Warm starts
 

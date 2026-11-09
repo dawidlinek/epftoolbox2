@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 from threadpoolctl import threadpool_limits
 
 from epftoolbox2 import cli
@@ -26,7 +27,7 @@ from epftoolbox2.evaluators import MAEEvaluator
 from epftoolbox2.models import OLSModel
 from epftoolbox2.models._calendar import IssueCalendar
 from epftoolbox2.models._worker import _worker_init
-from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.pipelines import ModelPipeline, Workflow
 from epftoolbox2.results.manifest import manifest_path
 from epftoolbox2.tune import BayesSearch, SearchResult, Subset
 from epftoolbox2.tune import bayes
@@ -1022,6 +1023,73 @@ def test_a_final_run_of_other_forecasts_than_the_search_scored_warns(df, tmp_pat
         ModelPipeline().add_model(model).run(df, horizon=2, test=T, save_dir=str(tmp_path))
     with pytest.warns(UserWarning, match="horizons"):  # the report reads what the run made from the manifest
         ModelPipeline().add_model(model).report(tmp_path, horizons=[1], test=T)
+
+
+def test_the_search_record_survives_yaml_for_the_refusal_and_the_choices_row(df, tmp_path):
+    """`best(1)` -> `save` -> `load`: the model keeps where it was chosen (a `search:` block next to its params), so a run of
+    the loaded pipeline refuses a test on the search's days and shows the model's row in choices()."""
+    model = search(n_trials=2).run(df, horizon=1, validation=V).best(1)[0]
+    pipeline = ModelPipeline().add_model(model).add_model(OLSModel(["load_d+{horizon}"] + FIXED, name="plain"))
+    pipeline.save(tmp_path / "p.yaml")
+    saved = yaml.safe_load((tmp_path / "p.yaml").read_text())["models"]
+    assert saved[0]["search"] == json.loads(json.dumps(model._search)) and "search" not in saved[1]
+    loaded = ModelPipeline.load(tmp_path / "p.yaml")
+    assert loaded.models[0]._search == saved[0]["search"] and not hasattr(loaded.models[1], "_search")
+    with pytest.raises(ValueError, match="chose it on data through 2023-04-02"):
+        loaded.run(df, horizon=1, test=(V[1], T[1]))
+    choices = loaded.run(df, horizon=1, test=T).choices()
+    assert choices["kind"].tolist() == ["search"] and choices["chosen"].tolist() == [["ols_bayes_00"]]
+    assert ModelPipeline.load(tmp_path / "p.yaml").to_dict() == pipeline.to_dict()  # the round trip writes it back
+
+
+def write_frame_csv(df, path):
+    columns = ["price", "load_d+1", "wind_d+1", "is_weekend_d+1", "is_weekday_d+1"]
+    csv = df[columns].tz_convert("UTC").reset_index(names="datetime")
+    csv["datetime"] = csv["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    csv.to_csv(path, index=False)
+    return path
+
+
+def workflow_of(tmp_path, csv, models, test, **environment):
+    config = {
+        **({"environment": environment} if environment else {}),
+        "data_pipeline": {
+            "start": "2023-01-01",
+            "end": "2023-04-19",
+            "sources": [{"class": "CsvSource", "params": {"file_path": str(csv)}}],
+            "transformers": [{"class": "TimezoneTransformer", "params": {"target_tz": "Europe/Warsaw"}}],
+        },
+        "model_pipeline": {
+            "test": list(test),
+            "target": "price",
+            "horizon": 1,
+            "save_dir": str(tmp_path / "results"),
+            "models": models,
+            "evaluators": [{"class": "MAEEvaluator", "params": {}}],
+        },  # fmt: skip
+    }
+    path = tmp_path / "experiment.yaml"
+    path.write_text(yaml.safe_dump(config))
+    return Workflow.load(path)
+
+
+def test_a_workflow_and_an_array_task_refuse_a_searched_model_on_its_days_and_report_its_row(df, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.warns(UserWarning, match="below the 1 finalist"):
+        models = search(n_trials=2).run(df, horizon=1, validation=V).best(2)
+    entries = ModelPipeline().add_model(models[0]).add_model(models[1]).to_dict()["models"]
+    csv = write_frame_csv(df, tmp_path / "frame.csv")
+    with pytest.raises(ValueError, match="must not be scored on days its settings were chosen on"):
+        workflow_of(tmp_path, csv, entries, (V[1], T[1])).run()
+    with pytest.raises(ValueError, match="must not be scored on days its settings were chosen on"):
+        workflow_of(tmp_path, csv, entries, (V[1], T[1]), model_index=1, models_per_task=1).run()
+    workflow_of(tmp_path, csv, entries, T, model_index=0, models_per_task=1).run()
+    workflow_of(tmp_path, csv, entries, T, model_index=1, models_per_task=1).run()
+    report = workflow_of(tmp_path, csv, entries, T).report()
+    choices = report.choices()
+    assert choices["chosen"].tolist() == [["ols_bayes_00"], ["ols_bayes_01"]]
+    assert choices["kind"].eq("search").all() and choices["candidates"].eq(2).all()
+    assert choices["gap"].notna().tolist() == [True, False]  # the second is below the one finalist: no gap
 
 
 def test_ensemble_choices_show_their_candidates_and_gap(df):
