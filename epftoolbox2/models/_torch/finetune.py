@@ -14,7 +14,7 @@ allows) raises `AssertionError` before any step, so a fine-tune can never train 
 import datetime as dt
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -26,15 +26,38 @@ except ImportError:  # pragma: no cover - the core-only CI job has no torch
     raise MissingExtraError("the torch fine-tune", "torch") from None
 
 
-def _day(value: Any) -> np.datetime64:
-    return np.datetime64(value, "D") if not isinstance(value, dt.datetime) else np.datetime64(value.date(), "D")
+def _day(value: Any, what: str) -> np.datetime64:
+    """A local date as numpy's day. Refused: a missing value (None, NaT), whose comparison with any date is False and would let
+    every window through the cut, and a time-zone-aware timestamp, whose date depends on the zone it is read in."""
+    try:
+        missing = value is None or bool(value != value)  # NaT, numpy's and pandas', is the one date unequal to itself
+    except (TypeError, ValueError):
+        missing = False
+    if missing:
+        raise ValueError(f"fine_tune: {what} is missing ({value!r}); give the local date")
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is not None:
+            raise ValueError(
+                f"fine_tune: {what} {value!r} has a time zone; give the local date (its date in the market's zone)"
+            )
+    try:
+        day = np.datetime64(value, "D")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"fine_tune: {what} {value!r} is not a date: {exc}") from None
+    if np.isnat(day):
+        raise ValueError(f"fine_tune: {what} is missing (NaT); give the local date")
+    return day
+
+
+def _days(values: Sequence[Any]) -> np.ndarray:
+    return np.array([_day(v, f"the date of window {i}") for i, v in enumerate(values)], dtype="datetime64[D]")
 
 
 @dataclass(frozen=True)
 class FineTuneWindows:
-    """The windows of one fine-tune: `dates[i]` is the target date of window i (the newest target its loss reads), `cut` the
-    newest target date the fine-tune may read, and `loss(model, indices)` a tensor of one loss per window of `indices` (an
-    int array), differentiable in the model's parameters."""
+    """The windows of one fine-tune: `dates[i]` is the local target date of window i (the newest target its loss reads), `cut`
+    the newest local target date the fine-tune may read, and `loss(model, indices)` a tensor of one loss per window of
+    `indices` (an int array), differentiable in the model's parameters."""
 
     dates: Sequence[Any]
     cut: Any
@@ -56,7 +79,7 @@ class FineTuneResult:
 def split_holdout(dates: Sequence[Any], holdout_days: int) -> Tuple[np.ndarray, np.ndarray, np.datetime64]:
     """(training windows, holdout windows, data end): the holdout is every window whose date is in the last `holdout_days`
     calendar days up to the newest date (`data end`), the training windows the rest."""
-    days = np.array([_day(d) for d in dates], dtype="datetime64[D]")
+    days = _days(dates)
     if len(days) == 0:
         raise ValueError("fine_tune needs at least one window")
     end = days.max()
@@ -74,7 +97,7 @@ def fine_tune(
     holdout_days: int = 61,
     eval_every: int = 25,
     patience: int = 4,
-    grad_clip: float = 1.0,
+    grad_clip: Optional[float] = 1.0,
     seed: int = 0,
     weight_decay: float = 0.0,
     min_delta: float = 1e-4,
@@ -83,9 +106,11 @@ def fine_tune(
     """Fine-tune `model` in place on `windows` and return its best state (also loaded into `model`, left in eval mode).
 
     Every random draw comes from `seed`: the batches (numpy's generator) and torch's generator (for dropout), forked so the
-    caller's stays as it was. `grad_clip=0` clips nothing."""
-    days = np.array([_day(d) for d in windows.dates], dtype="datetime64[D]")
-    cut = _day(windows.cut)
+    caller's stays as it was. `grad_clip=None` clips nothing; a value at or below 0 is refused (it would turn the gradient
+    around). Dates are local dates (`datetime.date`, "YYYY-MM-DD", numpy days, naive timestamps read as their date): a missing
+    cut or date, or a timestamp with a time zone, is refused."""
+    days = _days(windows.dates)
+    cut = _day(windows.cut, "the cut")
     late = np.flatnonzero(days > cut)
     if len(late):
         raise AssertionError(
@@ -94,6 +119,8 @@ def fine_tune(
         )
     if int(max_steps) < 0 or int(batch_size) < 1 or int(eval_every) < 1 or int(patience) < 1 or int(holdout_days) < 1:
         raise ValueError("fine_tune needs max_steps >= 0 and batch_size, eval_every, patience, holdout_days >= 1")
+    if grad_clip is not None and not float(grad_clip) > 0:
+        raise ValueError(f"fine_tune: grad_clip={grad_clip!r} must be positive (None clips nothing)")
     train, hold, end = split_holdout(days, int(holdout_days))
     if len(train) == 0:
         raise ValueError(f"fine_tune: every window is in the {holdout_days}-day holdout; give it older windows")
@@ -127,7 +154,7 @@ def fine_tune(
             loss = windows.loss(model, chosen).mean()
             opt.zero_grad()
             loss.backward()
-            if grad_clip:
+            if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(params, float(grad_clip))
             opt.step()
             if step % int(eval_every):
