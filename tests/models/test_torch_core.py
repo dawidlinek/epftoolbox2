@@ -26,6 +26,7 @@ from epftoolbox2.models import OLSModel  # noqa: E402
 from epftoolbox2.models._torch import finetune, runtime, trainer  # noqa: E402
 from epftoolbox2.models._torch.optim import StackedAdam  # noqa: E402
 from epftoolbox2.models._torch.trainer import MemberSpec, member_split, train_members  # noqa: E402
+from epftoolbox2.models import _worker  # noqa: E402
 from epftoolbox2.models._worker import _pool_init  # noqa: E402
 
 # Subprocesses import the library from this checkout, whatever the working directory of the test run.
@@ -117,8 +118,12 @@ def test_dropout_mask_is_the_stream_of_its_step_and_number_and_identity_in_eval(
 def test_mlp_layers_and_their_counter_init():
     net = nets.MLP(5, 3, hidden=[8, 4], dropout=0.2, activation="tanh")
     kinds = [type(m).__name__ for m in net.net]
-    assert kinds == ["Linear", "Tanh", "Dropout", "Linear", "Tanh", "Dropout", "Linear"]
-    assert [type(m).__name__ for m in nets.MLP(5, 3, hidden=[8], dropout=0.0).net] == ["Linear", "ReLU", "Linear"]
+    assert kinds == ["Linear", "Activation", "Dropout", "Linear", "Activation", "Dropout", "Linear"]
+    assert [m.name for m in net.net if isinstance(m, nets.Activation)] == ["tanh", "tanh"]
+    assert [type(m).__name__ for m in nets.MLP(5, 3, hidden=[8], dropout=0.0).net] == ["Linear", "Activation", "Linear"]
+    x = torch.randn(4, 6)
+    for name, module in (("sigmoid", torch.nn.Sigmoid()), ("silu", torch.nn.SiLU()), ("elu", torch.nn.ELU())):
+        assert torch.equal(nets.Activation(name)(x), module(x))  # as torch.nn's module of that name
     nets.seed_counters(net, 77)
     first, last = net.net[0], net.net[6]
     assert torch.equal(first.weight, (2 * nets.counter_uniform(77, nets.INIT_TAG, (5, 8)) - 1) * (1 / math.sqrt(5)))
@@ -175,6 +180,23 @@ def test_a_member_alone_equals_it_in_padded_stacks_at_each_thread_count(threads,
     with runtime.torch_scope("cpu", threads=1):
         reference = fit(keys[:4], rows[:4], pad_to=16).predict(issue)
     assert np.array_equal(four, reference), "a padded stack moved with the thread count"
+
+
+@pytest.mark.parametrize("activation", ["sigmoid", "silu"])
+@pytest.mark.parametrize("pad", [3, 4])
+def test_every_slot_of_a_stack_equals_its_member_alone_with_a_transcendental_activation(activation, pad, torch_state):
+    """Batches of 30 rows and 4 forecast rows, 25 hidden units: over the whole stacked tensor (3 x 30 x 25, 4 x 4 x 25) the
+    vectorised kernel's scalar tail falls in the last slot and gives it other bits than the member alone (sigmoid, silu, elu,
+    softplus); slot by slot every member is its own."""
+    _, _, issue = data()
+    keys, rows = [101 + i for i in range(pad)], spans(pad)
+    kw = dict(pad_to=pad, max_epochs=8, batch_size=30)
+    net = lambda: nets.MLP(K, P, hidden=(25,), activation=activation)  # noqa: E731
+    with runtime.torch_scope("cpu", threads=1):
+        full = fit(keys, rows, factory=net, **kw).predict(issue[:4])
+        for slot in range(pad):
+            alone = fit([keys[slot]], [rows[slot]], factory=net, **kw).predict(issue[:4])
+            assert np.array_equal(alone[0], full[slot]), f"slot {slot} of {pad} moved"
 
 
 def test_learning_rate_variants_in_one_stack_equal_each_alone():
@@ -326,9 +348,22 @@ def test_early_stopping_restores_the_best_weights_after_a_planted_divergence(sta
 
 
 def test_without_early_stopping_every_member_trains_max_epochs_and_keeps_its_last_weights():
-    result = fit([1, 2], spans(2), early_stopping=0.0, max_epochs=4, pad_to=2)
-    assert result.best_epoch.tolist() == [4, 4] and result.stats["epochs"].tolist() == [4, 4]
-    assert result.stats["val_rows"] == 0
+    for stack in ("vmap", "loop"):
+        result = fit([1, 2], spans(2), stack=stack, early_stopping=0.0, max_epochs=4, pad_to=2)
+        assert result.best_epoch.tolist() == [4, 4] and result.stats["epochs"].tolist() == [4, 4]
+        assert result.stats["val_rows"] == 0 and result.failed.tolist() == [False, False]
+
+
+@pytest.mark.parametrize("stack", ["vmap", "loop"])
+def test_a_member_that_never_has_a_finite_early_stopping_loss_is_failed_not_its_initial_weights(stack):
+    """lr=1e30 diverges in the first epoch: nothing improves on an infinite loss, so its 'best' weights would be the untrained
+    ones, finite forecasts reported as trained."""
+    _, _, issue = data()
+    result = fit([5, 6], spans(2), stack=stack, lrs=[1e30, 1e-2], max_epochs=30, patience=3, pad_to=4)
+    assert result.failed.tolist() == [True, False]
+    assert result.best_epoch[0] == 0 and result.best_epoch[1] > 0 and np.isinf(result.stats["best_val"][0])
+    forecasts = result.predict(issue)
+    assert np.isnan(forecasts[0]).all() and np.isfinite(forecasts[1]).all()
 
 
 class TorchDropoutNet(torch.nn.Module):
@@ -415,6 +450,11 @@ def test_shapes_are_fixed_by_the_configuration_and_bad_calls_raise():
     assert result.stats["steps_per_epoch"] == 5 and result.stats["val_rows"] == 40  # round(0.8 * 200) / 32; 0.2 * 200
     with pytest.raises(ValueError, match="nominal_rows"):
         fit([1], [np.arange(230)], nominal_rows=200)
+    for stack in ("vmap", "loop"):  # without nominal_rows, members of different lengths would shape each other
+        with pytest.raises(ValueError, match="give nominal_rows"):
+            fit([1, 2], [np.arange(150), np.arange(180)], stack=stack, nominal_rows=None)
+        same = fit([1, 2], [np.arange(150), np.arange(10, 160)], stack=stack, nominal_rows=None, pad_to=2)
+        assert same.stats["nominal_rows"] == 150
     with pytest.raises(ValueError, match="outside"):
         fit([1], [np.arange(ROWS - 5, ROWS + 5)])
     with pytest.raises(ValueError, match="seed_key"):
@@ -487,24 +527,29 @@ def test_torch_scope_puts_back_a_state_set_through_the_new_interface(torch_state
 
 def test_runtime_fields_are_resolved_settings():
     fields = runtime.runtime_fields(device="cpu")
+    capability = torch.backends.cpu.get_cpu_capability()
     assert fields == {
+        "torch": torch.__version__,
         "device": "cpu",
         "dtype": "float32",
         "tf32": False,
         "threads_per_fit": 1,
         "stack": "loop",
         "pad_to": None,
+        "cpu_capability": capability,  # AVX2 against the generic kernels moved a fit by 1e-6
     }
     assert runtime.runtime_fields(device="cpu", stack="vmap")["pad_to"] == runtime.DEFAULT_PAD
     assert runtime.runtime_fields(
         device="cpu", stack="vmap", pad_to=256, dtype="float64", tf32=True, threads_per_fit=2
     ) == {
+        "torch": torch.__version__,
         "device": "cpu",
         "dtype": "float64",
         "tf32": True,
         "threads_per_fit": 2,
         "stack": "vmap",
         "pad_to": 256,
+        "cpu_capability": capability,
     }
     for bad in (dict(dtype="float16"), dict(stack="stacked"), dict(stack="vmap", pad_to=0)):
         with pytest.raises(ValueError):
@@ -517,26 +562,67 @@ def test_device_resolution_without_a_usable_gpu():
     assert runtime.resolve_device("auto") == torch.device("cpu")
     assert runtime.resolve_device(None) == torch.device("cpu")
     assert runtime.resolve_device("cpu") == torch.device("cpu")
-    assert runtime.device_name("auto") == "cpu"
+    assert runtime.device_name("auto") == runtime.cpu_name() != ""  # the CPU's model, recorded to warn
     with pytest.raises(RuntimeError, match="device='cuda'"):
         runtime.resolve_device("cuda")
 
 
-def _report_threads():
-    return torch.get_num_threads(), torch.get_num_interop_threads()
+def _fork_fit():
+    """In a pool worker: a loop fit at the worker's own thread counts; its forecasts' sha256 and the bundled MKL's count."""
+    rng = np.random.default_rng(0)
+    x, y, issue = rng.normal(size=(800, 247)), rng.normal(size=(800, 24)), rng.normal(size=(7, 247))
+    result = train_members(
+        lambda: nets.MLP(247, 24, hidden=(256, 128)),
+        x,
+        y,
+        None,
+        [MemberSpec(1, np.arange(728))],
+        max_epochs=2,
+        stack="loop",
+    )
+    info = torch.__config__.parallel_info().splitlines()
+    mkl = [line.split(":")[-1].strip() for line in info if "mkl_get_max_threads" in line]
+    return hashlib.sha256(result.predict(issue).tobytes()).hexdigest(), mkl
 
 
-def test_the_pool_initialiser_pins_torch_threads_in_a_forked_worker(torch_state):
-    torch.set_num_threads(3)
-    torch.ones(64, 64) @ torch.ones(64, 64)  # the parent has used its thread pool
-    for wanted in (1, 2):
-        with ProcessPoolExecutor(
-            1,
-            mp_context=multiprocessing.get_context("fork"),
-            initializer=_pool_init,
-            initargs=({}, {}, {"torch_threads": wanted}, OLSModel, {}),
-        ) as pool:
-            assert pool.submit(_report_threads).result()[0] == wanted
+def _in_fork_pool(fn, torch_threads, timeout=120):
+    pool = ProcessPoolExecutor(
+        1,
+        mp_context=multiprocessing.get_context("fork"),
+        initializer=_pool_init,
+        initargs=({}, {}, {"torch_threads": torch_threads}, OLSModel, {}),
+    )
+    try:
+        return pool.submit(fn).result(timeout=timeout)
+    finally:
+        for process in list(pool._processes.values()):  # a hung worker would keep the pool open forever
+            process.kill()
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def test_the_pool_initialiser_pins_torch_and_its_mkl_in_a_forked_worker(torch_state):
+    """The BLAS limits set torch's OpenMP to one thread, so `get_num_threads()` said 1 and the pin skipped the one call that
+    reaches the MKL torch bundles: a forked worker kept the parent's count, other numbers, and after the parent's parallel
+    work a hang on its first product."""
+    torch.set_num_threads(1)
+    reference = _in_fork_pool(_fork_fit, 1)
+    torch.set_num_threads(6)
+    float((torch.ones(1500, 1500) @ torch.ones(1500, 1500)).sum())  # parallel work in the parent, at 6 threads
+    float(torch.sigmoid(torch.ones(4_000_000)).sum())
+    worker = _in_fork_pool(_fork_fit, 1)
+    assert worker == reference and worker[1] in (["1"], [])  # [] where torch has no MKL
+
+
+def test_more_than_one_torch_thread_is_refused_where_the_pool_forks():
+    """GNU OpenMP in a forked worker hangs on a parallel operation once the parent ran parallel torch work."""
+    with pytest.raises(ValueError, match="MAX_PROCESSES"):
+        runtime.check_torch_threads(2, forked=True)
+    assert runtime.check_torch_threads(2, forked=False) == 2 and runtime.check_torch_threads(1, forked=True) == 1
+    with pytest.raises(ValueError, match="at least 1"):
+        runtime.check_torch_threads(0, forked=False)
+    if not _worker._POOLS_SPAWN:  # refused before it touches anything of this process
+        with pytest.raises(ValueError, match="one thread"):
+            _pool_init({}, {}, {"torch_threads": 2}, OLSModel, {})
 
 
 def test_the_pool_initialiser_pins_torch_in_a_fresh_process_and_imports_none_without_the_setting():
@@ -545,8 +631,10 @@ def test_the_pool_initialiser_pins_torch_in_a_fresh_process_and_imports_none_wit
         import sys
         from epftoolbox2.models import OLSModel
         from epftoolbox2.models._worker import _pool_init
+        from epftoolbox2.models import _worker
         _pool_init({}, {}, {}, OLSModel, {})
         assert "torch" not in sys.modules, "a core model's pool imported torch"
+        _worker._POOLS_SPAWN = True  # a spawned worker, which may run torch on two threads
         _pool_init({}, {}, {"torch_threads": 2}, OLSModel, {})
         import torch
         print(torch.get_num_threads(), torch.get_num_interop_threads())
@@ -610,6 +698,46 @@ def test_fine_tune_refuses_a_window_after_the_cut_before_any_step():
     with pytest.raises(AssertionError, match="after the cut"):
         finetune.fine_tune(model, windows)
     assert all(torch.equal(before[k], v) for k, v in model.state_dict().items())
+
+
+@pytest.mark.parametrize(
+    "cut, dates_patch",
+    [
+        (None, None),
+        (np.datetime64("NaT"), None),
+        ("pandas-NaT", None),
+        ("tz-aware", None),
+        ("last", "NaT"),
+    ],
+)
+def test_fine_tune_refuses_a_missing_cut_a_missing_date_and_a_zoned_timestamp(cut, dates_patch):
+    """A missing cut compared False with every date and let every target through; pd.NaT raised a TypeError."""
+    import pandas as pd
+
+    torch.manual_seed(0)
+    model = torch.nn.Linear(1, 1)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    windows, days = _windows()
+    dates = days.copy()
+    if dates_patch == "NaT":
+        dates[5] = np.datetime64("NaT")
+    value = {"pandas-NaT": pd.NaT, "tz-aware": pd.Timestamp("2024-04-29 23:30", tz="UTC"), "last": days[-1]}.get(
+        cut, cut
+    )
+    with pytest.raises(ValueError, match="missing|time zone"):
+        finetune.fine_tune(model, finetune.FineTuneWindows(dates=dates, cut=value, loss=windows.loss), max_steps=5)
+    assert all(torch.equal(before[k], v) for k, v in model.state_dict().items())
+
+
+def test_fine_tune_refuses_a_gradient_clip_that_is_not_positive():
+    windows, _ = _windows()
+    for bad in (0.0, -1.0):
+        with pytest.raises(ValueError, match="grad_clip"):
+            finetune.fine_tune(torch.nn.Linear(1, 1), windows, grad_clip=bad, max_steps=5, holdout_days=30)
+    result = finetune.fine_tune(
+        torch.nn.Linear(1, 1), windows, grad_clip=None, max_steps=20, eval_every=10, holdout_days=30
+    )
+    assert result.stats["steps"] == 20
 
 
 def test_fine_tune_holds_out_the_newest_days_and_returns_the_best_step_and_data_end():
