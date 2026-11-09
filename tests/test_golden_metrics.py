@@ -28,6 +28,11 @@ RTOL = {"OLS": 1e-9, "LassoCV": 1e-6}
 # Ridge is a closed form (scikit-learn's leave-one-out `RidgeCV`), exact up to float rounding like OLS. LEAR's kernels run in numpy
 # or numba, which agree within 1e-9 with the same kinks, not to the bit (decision 17 of the step 4 spec): the golden holds on either.
 LEAR_RIDGE_RTOL = {"Ridge": 1e-9, "LEAR": 1e-9, "LEAR_lago": 1e-9}
+# The networks of step 6l, in a file of their own and only where torch is installed (the torch-extra CI job): CPU, the loop at
+# one torch thread per fit, float32. Their numbers are torch's on the machine's CPU kernels (`ATEN_CPU_CAPABILITY`): the
+# generic kernels against AVX2 moved these metrics by up to 3e-9 relative (torch 2.15.0), hence the tolerance.
+TORCH_GOLDEN_FILE = Path(__file__).parent / "golden" / "torch_metrics.json"
+TORCH_RTOL = {"MLPDaily": 1e-6, "MLPHourly": 1e-6}
 # LEAR without `is_weekday`: with an intercept it is minus `is_weekend` after centring, an exact twin, which the fit drops anyway
 # (`_lars.without_twins`); the inputs are as they were pinned.
 LEAR_INPUTS = ["load_d+{horizon}", "wind_d+{horizon}", "is_weekend_d+{horizon}", "price_d-1"]
@@ -115,3 +120,61 @@ def test_lear_ridge_metrics_match_golden(monkeypatch):
         for key, value in values.items():
             if key != "forecasts":
                 assert actual[model][key] == pytest.approx(value, rel=LEAR_RIDGE_RTOL[model]), f"{model} {key}"
+
+
+def compute_torch_metrics() -> dict:
+    """The golden data with daily profiles (D-1's prices and the target day's load at four hours, lagged and led by local
+    calendar days), an `MLPDailyModel` on them and an `MLPHourlyModel` on the golden predictors, small and short, over the
+    spring switch, horizon 2, weekly refits."""
+    import warnings
+
+    from epftoolbox2.data.transformers import DailyProfileTransformer
+    from epftoolbox2.models import MLPDailyModel, MLPHourlyModel
+    from tests.synthetic import calendar_shift
+
+    df = make_market_data(noise=5.0, seed=42)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "DailyProfileTransformer: some local days", UserWarning)
+        profiles = DailyProfileTransformer(columns=["price", "load"]).transform(df[["price", "load"]])
+    day_level = ["is_weekend_d+{horizon}"]
+    for hour in (0, 8, 12, 18):
+        df[f"price_h{hour:02d}_d-1"] = calendar_shift(profiles[f"price_h{hour:02d}"], -1)
+        for h in (1, 2):
+            df[f"load_h{hour:02d}_d+{h}"] = calendar_shift(profiles[f"load_h{hour:02d}"], h)
+        day_level += [f"price_h{hour:02d}_d-1", f"load_h{hour:02d}_d+{{horizon}}"]
+    settings = dict(training_window=42, refit="7D", seeds=2, max_epochs=20, patience=5, lr=3e-3, batch_size=32)
+    pipeline = (
+        ModelPipeline()
+        .add_model(MLPDailyModel(day_level, hidden=[16], dropout=0.1, name="MLPDaily", **settings))
+        .add_model(MLPHourlyModel(PREDICTORS + ["price_d-1"], hidden=[8], name="MLPHourly", **settings))
+        .add_evaluator(MAEEvaluator())
+        .add_evaluator(RMSEEvaluator())
+    )
+    report = pipeline.run(df, test_start="2023-03-23", test_end="2023-03-28", target="price", horizon=2)
+    tables = report.compute_all()
+
+    metrics = {name: {"forecasts": len(details)} for name, details in report.iter_details()}
+    for row in tables["summary"].to_dict("records"):
+        metrics[row["model"]].update({k: float(row[k]) for k in ("MAE", "RMSE")})
+    for row in tables["horizon"].to_dict("records"):
+        metrics[row["model"]][f"MAE_h{row['horizon']}"] = float(row["MAE"])
+    return metrics
+
+
+def test_torch_metrics_match_golden(monkeypatch):
+    pytest.importorskip("torch")
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    actual = compute_torch_metrics()
+
+    if os.environ.get("UPDATE_GOLDEN") == "1":
+        TORCH_GOLDEN_FILE.write_text(json.dumps(actual, indent=2, sort_keys=True) + "\n")
+        pytest.skip(f"golden values written to {TORCH_GOLDEN_FILE}")
+
+    expected = json.loads(TORCH_GOLDEN_FILE.read_text())
+    assert actual.keys() == expected.keys()
+    for model, values in expected.items():
+        assert actual[model]["forecasts"] == values["forecasts"], f"{model}: number of forecasts changed"
+        for key, value in values.items():
+            if key != "forecasts":
+                assert actual[model][key] == pytest.approx(value, rel=TORCH_RTOL[model]), f"{model} {key}"
