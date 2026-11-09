@@ -204,8 +204,10 @@ class AutoInContext(FakeInContext):
 
 
 class Unseeded(OLSModel):
-    """OLS plus unseeded noise of `scale` (in standardised target units) on each forecast, as a model without a fixed
-    `random_state`, or a GPU kernel whose sums run in another order, gives."""
+    """OLS plus unseeded noise of `scale` to twice `scale`, either sign (in standardised target units), on each forecast, as
+    a model without a fixed `random_state`, or a GPU kernel whose sums run in another order, gives. Kept away from zero: a
+    normal draw of under about 4e-4 at `scale=1e-12` rounds away in target units, so a run would now and then change 23
+    forecasts of 24 (seen once on S02)."""
 
     def __init__(self, predictors, training_window=WINDOW, *, scale=1e-6, **kwargs):
         super().__init__(predictors, training_window, **kwargs)
@@ -217,7 +219,8 @@ class Unseeded(OLSModel):
 
     def _fit_predict(self, train_x, train_y, test_x):
         prediction, coefs = super()._fit_predict(train_x, train_y, test_x)
-        return prediction + self.scale * np.random.default_rng().standard_normal(), coefs
+        rng = np.random.default_rng()
+        return prediction + self.scale * (1.0 + rng.random()) * rng.choice((-1.0, 1.0)), coefs
 
 
 class GlobalRng(OLSModel):
