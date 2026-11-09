@@ -656,8 +656,12 @@ class TorchModel(BaseModel):
         window = context.window
         nominal = n if (isinstance(window, str) and window == EXPANDING) else max(int(window), n)
         rows = np.arange(n)
+        # A predictor function's list by its content, not by the id its plan gave it (numbered by first appearance, so by
+        # which days the run holds): a forecast is the same whatever the run's start, windows or issue weekdays.
+        unit = context.unit if context.list_hash is None else context.unit._replace(list_id=int(context.list_hash, 16))
+        groups = None if context.row_days is None else np.asarray(context.row_days, dtype=np.int64)
         members = [
-            MemberSpec(seed_key=unit_seed(self.random_state, context.unit, index), train_rows=rows)
+            MemberSpec(seed_key=unit_seed(self.random_state, unit, index), train_rows=rows, groups=groups)
             for index in range(self.seeds)
         ]
         with torch_scope(self.device, tf32=self.tf32, threads=THREADS_PER_FIT) as device:

@@ -861,3 +861,82 @@ def test_a_pooled_fit_of_a_period_network_refuses_rather_than_seed_itself(market
     pipeline = ModelPipeline().add_model(PooledModel(hourly(), name="pooled"))
     with pytest.raises(RuntimeError, match="not PooledModel"):
         pipeline.run({"PL": market, "XX": market}, "2023-03-20", "2023-03-20", horizon=1)
+
+
+# --- review 6l: seeds from a list's content, early stopping by dates -----------------------------
+
+
+def from_wednesday(ctx):
+    """Every input before Wednesday 22 March, one fewer from then on: the plan numbers the two lists by first appearance."""
+    return DAY if ctx.issue_day < datetime.date(2023, 3, 22) else DAY[:-1]
+
+
+def by_month(ctx):
+    return DAY if ctx.issue_day.month == 2 else DAY[:-1]
+
+
+def test_a_predictor_function_s_forecasts_are_the_same_whatever_days_the_run_holds(market):
+    """A unit is seeded by its list's content, not by the id the plan gave it: a later test start, a validation window before
+    the test, or Fridays only give the common forecasts to the bit (118 of 118 moved when the id seeded them)."""
+    whole = keyed(run(daily(predictors=from_wednesday), market, test=("2023-03-20", "2023-03-26"))._results)
+    later = keyed(run(daily(predictors=from_wednesday), market, test=("2023-03-22", "2023-03-26"))._results)
+    common = set(whole) & set(later)
+    assert len(common) >= 100 and all(whole[k] == later[k] for k in common)
+
+    from epftoolbox2.results.windows import RunWindows
+
+    validation, test = ("2023-02-20", "2023-02-26"), ("2023-03-20", "2023-03-26")
+    both = daily(predictors=by_month).run(market, horizon=1, windows=RunWindows.resolve(validation, test))._results
+    in_both = {(r["run_date"], r["hour"], r["horizon"]): r["prediction"] for r in both if r.get("window") == "test"}
+    alone = keyed(run(daily(predictors=by_month), market, test=test)._results)
+    assert alone and in_both == alone
+
+    fridays = keyed(
+        run(daily(predictors=from_wednesday), market, test=("2023-03-20", "2023-03-26"), issue_days=["friday"])._results
+    )
+    assert fridays and all(fridays[k] == whole[k] for k in fridays)
+
+
+def test_a_refit_none_fit_of_a_window_list_seeds_each_window_as_its_own_member(market, monkeypatch):
+    keys = []
+    real = trainer.train_members
+
+    def spy(factory, x, y, y_mask, members, **kw):
+        keys.append(members[0].seed_key)
+        return real(factory, x, y, y_mask, members, **kw)
+
+    monkeypatch.setattr(trainer, "train_members", spy)
+    run(hourly(refit=None, training_window=[21, 28]), market, test=("2023-03-21", "2023-03-21"))
+    day = datetime.date(2023, 3, 21)
+    expected = {unit_seed(0, FitUnit(p, 1, day, None, m), 0) for p in range(24) for m in (0, 1)}
+    assert set(keys) == expected and len(keys) == 48
+
+
+@pytest.fixture(scope="module")
+def autumn():
+    """1 September to 9 November 2023 in Warsaw, over the autumn switch (29 October: 02:00 twice)."""
+    return frame(start="2023-09-01", days=70, seed=4)
+
+
+def test_early_stopping_holds_out_dates_and_a_repeated_hour_s_rows_together(autumn, monkeypatch):
+    """A period unit whose span holds the autumn switch has two rows of period 2 on 29 October: the early-stopping share is of
+    dates, and both rows fall on one side; on other periods (a row a date) the split is the rows' as before."""
+    splits = []
+    real_split = trainer.member_split
+
+    def spy(seed_key, train_rows, early_stopping, groups=None):
+        fit, val = real_split(seed_key, train_rows, early_stopping, groups)
+        splits.append((np.asarray(groups), fit, val, real_split(seed_key, train_rows, early_stopping)))
+        return fit, val
+
+    monkeypatch.setattr(trainer, "member_split", spy)
+    run(hourly(predictors=PERIOD[:3], seeds=4), autumn, test=("2023-11-06", "2023-11-06"))  # its span holds 29 October
+    doubled = [s for s in splits if len(np.unique(s[0])) < len(s[0])]
+    assert len(doubled) == 4  # period 2's unit, one split per seed
+    for groups, fit, val, _ in doubled:
+        date = np.flatnonzero(np.bincount(groups - groups.min()) == 2)[0] + groups.min()
+        twin = np.flatnonzero(groups == date)
+        assert set(twin) <= set(fit) or set(twin) <= set(val)
+        assert len(set(groups[val])) == round(0.2 * len(np.unique(groups)))
+    single = [s for s in splits if len(np.unique(s[0])) == len(s[0])]
+    assert single and all(np.array_equal(f, rf) and np.array_equal(v, rv) for _, f, v, (rf, rv) in single)

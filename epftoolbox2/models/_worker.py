@@ -78,12 +78,17 @@ class TaskFailed(RuntimeError):
 
 class FitContext(NamedTuple):
     """What a model's fit call (`_fit_predict`, `_fit_model`, `_fit_days`) is fitting, for a model whose fit draws random
-    numbers (`TorchModel`: its seeds are `_calendar.unit_seed` of the unit, its shapes from the window): the unit, and the
-    member's training window as the model has it (an int or `"expanding"`). A refit unit's own `FitUnit`; a fit of one
-    forecast (refit=None) is `FitUnit(period, horizon, issue date, list id, member index)`."""
+    numbers (`TorchModel`: its seeds are `_calendar.unit_seed` of the unit, its shapes from the window): the unit (a refit
+    unit's own `FitUnit`; a fit of one forecast, refit=None, is `FitUnit(period, horizon, issue date, list id, member index)`),
+    the member's training window as the model has it (an int or `"expanding"`), the hash of the unit's predictor list
+    (`config["list_hashes"]`, a predictor function's; None for a fixed list), which, unlike the list id, a plan numbering its
+    lists by first appearance gives the same whatever days the run holds, and the day id of each training row the call gets,
+    in row order (a period's repeated autumn hour gives its date two rows)."""
 
     unit: FitUnit
     window: Any
+    list_hash: Optional[str] = None
+    row_days: Optional[np.ndarray] = None
 
 
 # The fit in progress in this thread (`fit_scope`), None outside one: a context variable, so each task thread of a pool's
@@ -97,13 +102,19 @@ def current_fit() -> Optional[FitContext]:
 
 
 @contextlib.contextmanager
-def fit_scope(unit: FitUnit, window: Any):
-    """Make `FitContext(unit, window)` the fit in progress around a model's fit call, and put back what was there after."""
-    token = _FIT.set(FitContext(unit, window))
+def fit_scope(unit: FitUnit, window: Any, list_hash: Optional[str] = None, row_days: Optional[np.ndarray] = None):
+    """Make `FitContext(unit, window, list_hash, row_days)` the fit in progress around a model's fit call, and put back what
+    was there after."""
+    token = _FIT.set(FitContext(unit, window, list_hash, row_days))
     try:
         yield
     finally:
         _FIT.reset(token)
+
+
+def _unit_list_hash(cfg: Dict, list_id: Optional[int]) -> Optional[str]:
+    """The hash of a predictor function's list `list_id` (`config["list_hashes"]`), None for a fixed list."""
+    return None if list_id is None else cfg["list_hashes"][list_id]
 
 
 def _window_of(cfg: Dict, unit: FitUnit) -> Any:
@@ -559,7 +570,8 @@ def _fit_member(
     `engine` (the engine's, `_engine_worker.EngineFits`) is handed the fit as selected here (`StatsFit`: the rows, filters, mask
     and skips are this function's) and fits it from shared statistics; where it hands the fit back (None), the scaler and
     `_fit_predict` below fit it, on the same values, as without it. `_fit_predict` runs in `fit_scope` of
-    `FitUnit(hour, hz, the issue date, list_id, the member's place among config["members"])` and `member`."""
+    `FitUnit(hour, hz, the issue date, list_id, the member's place among config["members"])`, `member`, the list's hash and the
+    training rows' day ids."""
     days = arrays["days"]
     train = member_rows(days, day, member, hz, newest)
 
@@ -621,8 +633,10 @@ def _fit_member(
     issue_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day - cfg["offset"])
     members = cfg.get("members")
     member_index = 0 if members is None else list(members).index(member)  # a list's windows are distinct
+    row_days = (days[train] if train_days is None else train_days)[finite]
+    unit = FitUnit(hour, hz, issue_date, list_id, member_index)
     try:
-        with fit_scope(FitUnit(hour, hz, issue_date, list_id, member_index), member):
+        with fit_scope(unit, member, _unit_list_hash(cfg, list_id), row_days):
             pred, coefs = model._fit_predict(train_x, train_y, test_x)
     except ValueError as exc:
         # scikit-learn raises ValueError on degenerate input (e.g. fewer rows than CV folds); counted, not fatal.
@@ -891,8 +905,9 @@ def _fit_unit(
             scalable_mask=scalable_mask,
             columns=predictors,
         )
+        row_days = (days[train] if train_days is None else train_days)[finite]
         try:
-            with fit_scope(unit, _window_of(cfg, unit)):
+            with fit_scope(unit, _window_of(cfg, unit), _unit_list_hash(cfg, unit.list_id), row_days):
                 fitted = model._fit_model(train_x, train_y)
         except ValueError as exc:
             return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]
@@ -1001,7 +1016,7 @@ def _block_forecasts(
         columns=predictors,
     )
     try:
-        with fit_scope(unit, _window_of(cfg, unit)):
+        with fit_scope(unit, _window_of(cfg, unit), _unit_list_hash(cfg, unit.list_id)):
             fitted = model._fit_model(train_x, train_y)
     except ValueError as exc:
         return f"{SKIP_FIT_ERROR}: {exc}"
@@ -1316,8 +1331,9 @@ def _fit_day_unit(
     )
     target = MultiTargetAsinh().fit(train_y, valid)
     fit_y = np.where(valid, target.transform(train_y), np.nan)
+    row_days = np.arange(first, last + 1, dtype=np.int64)[keep]  # one row per date
     try:
-        with fit_scope(unit, _window_of(cfg, unit)):
+        with fit_scope(unit, _window_of(cfg, unit), _unit_list_hash(cfg, unit.list_id), row_days):
             fitted = model._fit_days(fit_x, fit_y, valid.copy())
     except ValueError as exc:
         return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _, _ in forecast]
@@ -1459,7 +1475,7 @@ def _fit_pooled_unit(
     target_groups = groups if per_period else np.zeros(len(groups), dtype=np.int64)
     target = MultiTargetAsinh().fit_groups(train_y, target_groups, periods if per_period else 1)
     try:
-        with fit_scope(unit, _window_of(cfg, unit)):
+        with fit_scope(unit, _window_of(cfg, unit), _unit_list_hash(cfg, unit.list_id)):
             fitted = model._fit_model(fit_x, target.transform(train_y, target_groups))
     except ValueError as exc:
         return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]

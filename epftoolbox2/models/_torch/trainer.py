@@ -103,11 +103,14 @@ def _torch_seed(seed_key: int, purpose: str) -> int:
 @dataclass(frozen=True)
 class MemberSpec:
     """One member of a fit: `seed_key` (a non-negative int below 2**64, such as `_calendar.unit_seed`), the rows of `x` it trains
-    on (`train_rows`, its span: the early-stopping rows are a share of them) and its learning rate (None: the call's `lr`)."""
+    on (`train_rows`, its span: the early-stopping rows are a share of them), its learning rate (None: the call's `lr`) and the
+    date of each of its rows (`groups`, aligned with `train_rows`; None: every row its own date), so that the early-stopping
+    share is of dates and a date's rows (a period's repeated autumn hour) are held out together."""
 
     seed_key: int
     train_rows: Sequence[int]
     lr: Optional[float] = None
+    groups: Optional[Sequence[int]] = None
 
 
 @dataclass(frozen=True)
@@ -126,15 +129,32 @@ class TrainResult:
     stats: Dict[str, Any] = field(default_factory=dict)
 
 
-def member_split(seed_key: int, train_rows: Sequence[int], early_stopping: float) -> Tuple[np.ndarray, np.ndarray]:
+def member_split(
+    seed_key: int, train_rows: Sequence[int], early_stopping: float, groups: Optional[Sequence[int]] = None
+) -> Tuple[np.ndarray, np.ndarray]:
     """(fit rows, early-stopping rows) of a member, both sorted and taken from its `train_rows` only: a random
-    round(early_stopping * n) of its n rows, from numpy's generator seeded by `seed_key` (stk.py's `split_indices`)."""
-    rows = np.sort(np.asarray(train_rows, dtype=np.int64))
+    round(early_stopping * n) of its n rows, from numpy's generator seeded by `seed_key` (stk.py's `split_indices`). With
+    `groups` (each row's date, aligned with `train_rows`) the share is of its n distinct dates, drawn the same way, and a date's
+    rows go to the same side; rows of distinct dates in date order split as without them."""
+    given = np.asarray(train_rows, dtype=np.int64)
+    order = np.argsort(given, kind="stable")
+    rows = given[order]
     if rows.ndim != 1 or (len(rows) > 1 and (np.diff(rows) == 0).any()):
         raise ValueError("train_rows must be distinct row numbers")
-    n_val = int(round(early_stopping * len(rows))) if early_stopping > 0 else 0
-    perm = np.random.default_rng(int(seed_key)).permutation(len(rows))
-    return rows[np.sort(perm[n_val:])], rows[np.sort(perm[:n_val])]
+    rng = np.random.default_rng(int(seed_key))
+    if groups is None:
+        n_val = int(round(early_stopping * len(rows))) if early_stopping > 0 else 0
+        perm = rng.permutation(len(rows))
+        return rows[np.sort(perm[n_val:])], rows[np.sort(perm[:n_val])]
+    labels = np.asarray(groups, dtype=np.int64)
+    if labels.shape != given.shape:
+        raise ValueError(f"groups has {labels.shape} entries for {given.shape} train_rows")
+    dates, place = np.unique(labels[order], return_inverse=True)
+    n_val = int(round(early_stopping * len(dates))) if early_stopping > 0 else 0
+    perm = rng.permutation(len(dates))
+    held = np.zeros(len(dates), dtype=bool)
+    held[perm[:n_val]] = True
+    return rows[~held[place]], rows[held[place]]
 
 
 def _l1(prediction, target):
@@ -405,7 +425,7 @@ def _plan(members, n_rows, early, lr, nominal_rows, batch, mask) -> Tuple[List[_
         key = int(spec.seed_key)
         if key < 0 or key >= 1 << 64:
             raise ValueError(f"member {i}: seed_key must be a non-negative int below 2**64, got {spec.seed_key!r}")
-        fit, val = member_split(key, spec.train_rows, early)
+        fit, val = member_split(key, spec.train_rows, early, spec.groups)
         rows = np.concatenate([fit, val])
         if len(rows) and (rows.min() < 0 or rows.max() >= n_rows):
             raise ValueError(f"member {i}: train_rows outside the {n_rows} rows of x")
@@ -427,9 +447,19 @@ def _plan(members, n_rows, early, lr, nominal_rows, batch, mask) -> Tuple[List[_
     nominal = largest if nominal_rows is None else int(nominal_rows)
     if nominal < largest:
         raise ValueError(f"nominal_rows={nominal_rows} is below the {largest} training rows of a member")
-    val_rows = int(round(early * nominal)) if early > 0 else 0
+    # A date with two rows (a period's repeated autumn hour) can put one more row on the early-stopping side than its share of
+    # dates: the width counts each member's extra rows, a function of its own rows alone (a unit's members share them).
+    extra = max(_extra_rows(m, spec.groups) for m, spec in zip(out, members))
+    val_rows = int(round(early * nominal)) + extra if early > 0 else 0
     fit_rows = int(round((1 - early) * nominal)) if early > 0 else nominal
     return out, _Shapes(nominal, val_rows, max(1, math.ceil(fit_rows / batch)), batch)
+
+
+def _extra_rows(member: "_Member", groups: Optional[Sequence[int]]) -> int:
+    """A member's rows beyond one per date (0 without `groups`): a date's second row can join the early-stopping side."""
+    if groups is None:
+        return 0
+    return len(member.fit) + len(member.val) - int(np.unique(np.asarray(groups, dtype=np.int64)).size)
 
 
 class _LoopFit:
