@@ -51,7 +51,7 @@ from epftoolbox2.models._worker import (
 )
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.pipelines import ModelPipeline
-from epftoolbox2.results.manifest import ManifestMismatchError
+from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path
 from epftoolbox2.results.availability import (
     COLUMNS,
     HISTORY_COLUMNS,
@@ -631,9 +631,8 @@ class FakeFoundation(BaseModel):
         stacklevel=4,
         shared=None,
     ):
-        """The day unit's checks, then the series': the cut's rules kept for the run, the series as the inputs it reads (the
-        manifest hashes them, `report.vintages()` lists them, the probe perturbs them), and each series late on an issue day
-        refused at "raise" or listed, one row per series, at "warn", from the cuts alone."""
+        """BaseModel's checks, which register the series as inputs and refuse or list a late one (`_check_history`), then the
+        cut's rules kept for the run: a foundation model's run plumbing, 6i's."""
         expanded = super()._check_inputs(
             data,
             target,
@@ -652,31 +651,6 @@ class FakeFoundation(BaseModel):
             shared=shared,
         )
         self._history_rules = self._cut_rules(information_set, cut_rules)
-        spec = self._history_spec(target)
-        self._used_predictors = list(dict.fromkeys([*self._used_predictors, *spec.past, *spec.known_ahead]))
-        if information_set is None or availability == "none" or test_start is None:
-            return expanded
-        horizons = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
-
-        def batches(start, end):
-            days = [day for day in self._days_of(start, end, None) if weekdays is None or day.weekday() in weekdays]
-            return list(history_batches(spec, data, days, information_set, freq, horizons, arrays=False).values())
-
-        found = batches(test_start, test_end) if windows is None else []
-        by_window = {}
-        for name, (start, end) in windows.periods if windows is not None else ():
-            by_window[name] = batches(start, end)
-            found += by_window[name]
-        if availability == "raise":
-            late = sorted({name for batch in found for name in batch.late()})
-            if late:
-                raise InformationSetError(
-                    f"{self.name}: {late} not known at the issue time as far as the forecasts read"
-                )
-            return expanded
-        self._availability_listing = [*self._availability_listing, *history_rows(found)]
-        for name, window in by_window.items():
-            self._window_listings[name] = [*self._window_listings.get(name, []), *history_rows(window)]
         return expanded
 
     def _run_tasks(self, tasks, state, sink):
@@ -1149,3 +1123,131 @@ def test_vintages_list_the_series(hourly):
     report = pipeline(model).run(hourly, "2023-06-12", "2023-06-12", horizon=1, forecast_only=True)
     table = report.vintages()
     assert {"load_actual", "load_forecast"} <= set(table["predictor"])
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# What BaseModel does for a model that reads history: its checks, the manifest, a ResidualModel's base
+# ---------------------------------------------------------------------------------------------------------------------------
+
+
+class Minimal(BaseModel):
+    """The least a model that reads history is: BaseModel's checks of it, with a list of its own."""
+
+    def __init__(self, known_ahead=("load_forecast",), past=(), name="Minimal"):
+        super().__init__(["load_forecast"], 28, name=name)
+        self.known_ahead, self.past = list(known_ahead), list(past)
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return float(train_y.mean()), []
+
+    def _history_spec(self, target):
+        return HistorySpec(CONTEXT, self.known_ahead, self.past, target)
+
+
+def test_basemodel_registers_a_history_model_s_series_and_refuses_or_lists_a_late_one(hourly):
+    """`BaseModel._check_inputs` of a model that reads history: its series are inputs it reads; a known-ahead series out after
+    the issue time is refused at "raise", naming it, and listed at "warn" with one row per series; at "none", and without an
+    information set, nothing is judged. A model of predictors is checked as before."""
+    test = ("2023-06-12", "2023-06-14")
+    model = Minimal(known_ahead=["load_forecast", "generation_wind_forecast"], past=["load_actual"])
+    model._check_inputs(hourly, "price", 1, "1h", INFO, *test, availability="warn")
+    assert model._used_predictors == ["load_forecast", "load_actual", "generation_wind_forecast"]
+    rows = {(row["predictor"], row["status"]) for row in model._availability_listing}
+    assert rows == {
+        ("price", ON_TIME),
+        (
+            "load_actual",
+            ON_TIME,
+        ),  # under "d-1" the context ends at D-1's last step, and the actual load is out to D 09:00
+        ("load_forecast", ON_TIME),
+        ("generation_wind_forecast", LATE),
+    }
+    with pytest.raises(InformationSetError, match="generation_wind_forecast on 3 issue day"):
+        model._check_inputs(hourly, "price", 1, "1h", INFO, *test, availability="raise")
+    model._check_inputs(hourly, "price", 1, "1h", INFO, *test, availability="none")
+    assert model._availability_listing == [] and "generation_wind_forecast" in model._used_predictors
+    Minimal()._check_inputs(hourly, "price", 1, "1h", INFO, *test, availability="raise")  # nothing late
+    from epftoolbox2.models import OLSModel
+
+    ols = OLSModel(["load_forecast"], 28)
+    ols._check_inputs(hourly, "price", 1, "1h", INFO, *test, availability="warn")
+    assert ols._used_predictors == ["load_forecast"] and ols._availability_listing == []
+
+
+class ReadsPast(FakeFoundation):
+    """Also reads its past series: 1e-3 x their sum over the context."""
+
+    def _backend(self, call):
+        return super()._backend(call) + 1e-3 * np.nansum(call.past["load_actual"], axis=1)[:, None]
+
+
+@pytest.mark.parametrize("newest", ["d-1", "published"])
+def test_a_resume_with_another_rule_of_a_series_refuses(hourly, tmp_path, newest):
+    """A past series' rule moves a history model's numbers whatever its newest target: a resume with `realised("4h")` for it
+    refuses on `training_cut`, and so does one with another issue time; a level alone still resumes."""
+    test = ("2023-06-05", "2023-06-18")
+
+    def run(info, **settings):
+        model = ReadsPast(name="FM", past=["load_actual"], newest_target=newest)
+        return pipeline(model, information_set=info, **settings).run(
+            hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True
+        )
+
+    run(INFO)
+    path = suite.results(tmp_path, "FM")
+    lines = records_of(path)
+    path.write_text("".join(f"{line}\n" for i, line in enumerate(lines) if i % 2 == 0))
+    for other in (InformationSet(rules={"load_actual": Availability.realised("4h")}), InformationSet("11:00")):
+        with pytest.raises(ManifestMismatchError, match="training_cut"):
+            run(other)
+    run(INFO, availability="none")
+    assert records_of(path) == lines
+    stored = json.loads(manifest_path(path).read_text())["training_cut"]["history"]
+    assert stored["issue_time"] == "11:45" and set(stored["rules"]) == {"price", "load_actual", "load_forecast"}
+    assert "note" not in stored["rules"]["price"] and "vintage" not in stored["rules"]["price"]
+
+
+def test_a_resume_over_other_known_ahead_values_of_the_last_target_day_refuses(hourly, tmp_path):
+    """The last issue day's forecasts read the load forecast of the day after `test_end`: the manifest hashes the known-ahead
+    series through `test_end` plus the largest horizon, so a frame with other values there refuses to resume."""
+    test = ("2023-06-05", "2023-06-18")
+    pipeline(make("FM")).run(hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True)
+    path = suite.results(tmp_path, "FM")
+    ahead = json.loads(manifest_path(path).read_text())["history_ahead"]
+    assert ahead["through"] == "2023-06-19" and ahead["columns"] == ["load_forecast"]
+    lines = records_of(path)
+    path.write_text("".join(f"{line}\n" for i, line in enumerate(lines) if i % 2 == 0))
+    changed = hourly.copy()
+    changed.loc["2023-06-19", "load_forecast"] += 500.0
+    with pytest.raises(ManifestMismatchError, match="history_ahead"):
+        pipeline(make("FM")).run(changed, *test, horizon=1, save_dir=tmp_path, forecast_only=True)
+    later = hourly.copy()
+    later.loc["2023-06-20", "load_forecast"] += 500.0  # after what any forecast reads: resumes
+    pipeline(make("FM")).run(later, *test, horizon=1, save_dir=tmp_path, forecast_only=True)
+    assert records_of(path) == lines
+
+
+def test_a_model_of_predictors_keeps_its_manifest_and_digest(hourly, tmp_path):
+    """No `history_ahead` key and no history in `training_cut` for a model of predictors, and the configuration digest a
+    `ResidualModel` records of its base doesn't hold the new field."""
+    from epftoolbox2.models import OLSModel
+    from epftoolbox2.results.manifest import configuration_digest
+
+    pipeline(OLSModel(["load_forecast"], 28, name="OLS")).run(
+        hourly, "2023-06-12", "2023-06-13", horizon=1, save_dir=tmp_path
+    )
+    stored = json.loads(manifest_path(suite.results(tmp_path, "OLS")).read_text())
+    assert "history_ahead" not in stored and "history" not in stored["training_cut"]
+    assert configuration_digest(stored) == configuration_digest({**stored, "history_ahead": None})
+
+
+def test_a_residual_model_over_a_history_base_refuses(hourly):
+    """`verify` would run a ResidualModel without the rules its base's series are cut by, and cut its frame after the issue
+    day: a base that reads history is refused when it is given, by object or by name."""
+    from epftoolbox2.models import OLSModel, ResidualModel
+
+    with pytest.raises(ValueError, match="reads series"):
+        ResidualModel(make("FM"), OLSModel(["load_forecast"]))
+    model = ResidualModel("FM", OLSModel(["load_forecast"]))
+    with pytest.raises(ValueError, match="reads series"):
+        model.bind_base(make("FM"))
