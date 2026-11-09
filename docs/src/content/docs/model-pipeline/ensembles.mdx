@@ -102,16 +102,20 @@ print(report.choices())
 ```
 
 ```text
-ensemble  segment               chosen  k  validation_mae  validation_forecasts  validation_share  validation_start  validation_end  test_start    test_end
-  best_2        0  [OLS_728, Lasso_728]  2            7.41                  8733               1.0        2023-01-05      2024-01-04  2024-01-05  2025-01-04
-  best_2        1  [OLS_364, Lasso_728]  2            8.12                  8757               1.0        2024-01-05      2025-01-04  2025-01-05  2025-12-26
+ensemble      kind  segment               chosen  k  validation_mae  validation_forecasts  validation_share  validation_start  validation_end  test_start    test_end  candidates  test_mae   gap
+  best_2  ensemble        0  [OLS_728, Lasso_728]  2            7.41                  8733               1.0        2023-01-05      2024-01-04  2024-01-05  2025-01-04           4      8.12  0.71
+  best_2  ensemble        1  [OLS_364, Lasso_728]  2            8.12                  8757               1.0        2024-01-05      2025-01-04  2025-01-05  2025-12-26           4      8.40  0.28
 ```
 
-`report.choices()` has one row per ensemble and test period served: `ensemble`, `segment` (its place in `report.windows.segments`),
+`report.choices()` has one row per ensemble and test period served: `ensemble`, `kind` ("ensemble"), `segment` (its place in `report.windows.segments`),
 `chosen` in member order, `k`, `validation_mae` of the average of `chosen` (over every horizon the run made, also in a report told fewer),
 `validation_forecasts` (how many it was scored on),
-`validation_share`, `validation_start`, `validation_end`, `test_start` and `test_end`. `df.attrs` holds `member_mae`, each member's MAE
-on those keys, `k_mae`, the MAE of each k with `top="validation"`, and `limited_by`. A plain average chooses nothing and has no row. The
+`validation_share`, `validation_start`, `validation_end`, `test_start` and `test_end`, then `candidates` (the members it chose from),
+`test_mae` (the ensemble's MAE on the test period served, over its forecasts with an actual; empty without a test period) and `gap`
+(`test_mae - validation_mae`, how much worse the choice did on days it wasn't made on). `df.attrs` holds `member_mae`, each member's MAE
+on those keys, `k_mae`, the MAE of each k with `top="validation"`, and `limited_by`. A plain average chooses nothing and has no row. A
+model a search chose (`tune.SearchResult.best`) has a row too, with the search as `ensemble` and `kind` "search", see
+[Hyper-parameter Search](/epftoolbox2/model-pipeline/hyperparameter-search/#where-a-model-was-chosen). The
 terminal exporter prints the table when there is one, before what `show` asks for, and `epf report` prints it after the counts.
 
 ## An ordinary model everywhere

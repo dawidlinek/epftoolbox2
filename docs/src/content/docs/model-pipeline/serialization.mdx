@@ -103,6 +103,7 @@ exporters:
 | Model `refit` | Saved as `refit: 7D` (a `"kD"` or `"kMS"` string) only when set. A model without it fits every forecast on its own, as every file saved before the setting did. See [Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) |
 | `EconomicEvaluator` `strategy` | Saved inside the evaluator as `{class: BatteryArbitrage, params: {...}}` and rebuilt on load |
 | Private attrs (`_name`) | Excluded |
+| Where a search chose a model (`tune.SearchResult.best`) | Saved as a `search:` block next to the model's `params` (its search, result file, trial, validation period and score) and restored on load, so a loaded run refuses a test on the search's days and shows the model's row in `report.choices()`; no other model has one. See [Hyper-parameter Search](/epftoolbox2/model-pipeline/hyperparameter-search/#where-a-model-was-chosen) |
 
 ## Callable Predictors
 

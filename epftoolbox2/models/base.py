@@ -2565,9 +2565,10 @@ class BaseModel(ABC):
     def _days_of(
         test_start: Optional[str], test_end: Optional[str], windows: Optional[RunWindows]
     ) -> Optional[List[datetime.date]]:
-        """The issue days of a run, or None if it doesn't say."""
+        """The issue days of a run, or None if it doesn't say: with windows every day of them, also those `validation_every`
+        skips, which a run plans on (`RunWindows.calendar_days`)."""
         if windows is not None:
-            return [datetime.date.fromisoformat(day) for day in windows.issue_days()]
+            return [datetime.date.fromisoformat(day) for day in windows.calendar_days()]
         if test_start is None or test_end is None:
             return None
         return _test_days(test_start, test_end)
@@ -2665,7 +2666,7 @@ class BaseModel(ABC):
             return None
         self._set_freq(freq)
         if windows is not None:
-            calendar_days = [datetime.date.fromisoformat(day) for day in windows.issue_days()]
+            calendar_days = [datetime.date.fromisoformat(day) for day in windows.calendar_days()]
             days = listed_days(calendar_days, weekdays)
         elif issue_days is not None:
             days = calendar_days = [datetime.date.fromisoformat(day) for day in issue_days]

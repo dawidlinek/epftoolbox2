@@ -75,7 +75,7 @@ from ..results.manifest import (
 from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.panel import PanelReport
 from ..results.report import EvaluationReport
-from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
+from ..results.ref import ModelResultRef, issued_mae, split_by_window, warn_off_the_clock
 from ..results.store import (
     DEFAULT_SAVE_FORMAT,
     SAVE_FORMATS,
@@ -84,7 +84,7 @@ from ..results.store import (
     check_save_format,
     read_records,
 )
-from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
+from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, check_validation_every, to_period
 from ..results.vintages import read_vintages
 from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
@@ -222,6 +222,101 @@ COMPONENT_REGISTRY = {
 }
 
 
+def refuse_searched_on_test(models: Sequence[Any], test_start: Optional[str]) -> None:
+    """A ValueError, before any fit, for a model a search chose (`tune.SearchResult.best`) on data through a day on or after
+    the first test issue day: its test forecasts would be scored on days its settings were chosen on, as `RunWindows.fixed`
+    refuses a validation period that doesn't end before the test starts."""
+    if not test_start:
+        return
+    first = str(resolve_date(test_start))[:10]
+    for model in models:
+        search = getattr(model.model if isinstance(model, PooledModel) else model, "_search", None)
+        through = search.get("data_through") if isinstance(search, dict) else None  # a model no search chose has none
+        if through is not None and str(through) >= first:
+            raise ValueError(
+                f"{model.name}: the search {search.get('search')!r} chose it on data through {through} (its validation period "
+                f"{tuple(search.get('validation') or ())}), and this run's test period starts on {first}: a test forecast must not "
+                "be scored on days its settings were chosen on. Start the test after the validation end, or search on an "
+                "earlier validation period."
+            )
+
+
+def _forecasts_of(ref: ModelResultRef, made: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """What a model's run forecast: target, horizons, freq and issue days, from the manifest of its results (what a report
+    reads), else `made` (what `run` was told); None if neither says."""
+    path = None if ref.path is None else manifest_path(ref.path)
+    if path is not None and path.exists():
+        stored = json.loads(path.read_text())
+        horizon = stored.get("horizon")
+        return {
+            "target": stored.get("target"),
+            "horizons": list(stored.get("horizons") or range(1, int(horizon or 0) + 1)),
+            "freq": stored.get("freq"),
+            "issue_days": stored.get("issue_days"),
+        }
+    return None if made is None else dict(made)
+
+
+def search_choices(
+    refs: Mapping[str, ModelResultRef], test: Optional[Tuple[str, str]], made: Optional[Mapping[str, Any]] = None
+) -> Dict[str, List[Dict]]:
+    """The rows of `report.choices()` of the models a search chose (`tune.SearchResult.best`, whose ref's provenance holds
+    `search`), keyed `{search}:{model}`: the search's validation numbers, and the model's MAE on the `test` period of the run,
+    from every forecast it has there (every horizon it made), so a report of any part of the run shows the same. A warning
+    names a model whose run forecasts another target, horizons, freq or issue days than its search scored (`made`, or its
+    manifest): its gap would compare two kinds of forecast."""
+    out: Dict[str, List[Dict]] = {}
+    for name, ref in refs.items():
+        provenance = getattr(ref, "provenance", None)  # a stand-in ref may have none
+        search = provenance.get("search") if isinstance(provenance, dict) else None
+        if not isinstance(search, dict) or not search:
+            continue
+        forecasts = _forecasts_of(ref, made)
+        if forecasts is not None and "target" in search:
+            searched = {key: search.get(key) for key in ("target", "horizons", "freq", "issue_days")}
+            differ = [key for key, value in searched.items() if json.dumps(value) != json.dumps(forecasts[key])]
+            if differ:
+                warnings.warn(
+                    f"{name}: the search {search.get('search')!r} scored it on "
+                    f"{', '.join(f'{key} {searched[key]}' for key in differ)}, and this run forecasts "
+                    f"{', '.join(f'{key} {forecasts[key]}' for key in differ)}: its gap in report.choices() compares two kinds of "
+                    "forecast.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+        whole = replace(
+            ref,
+            test_start=test[0] if test else "",
+            test_end=test[1] if test else "",
+            window=TEST if ref.windows is not None else None,
+            target_before=None,
+            by_window=None,
+            horizons=None,
+            issue_days=None,
+        )
+        test_mae = issued_mae(whole.iter_records(cols=["run_date", "prediction", "actual"]), test) if test else None
+        # A model from below the finalists was scored on a cheaper rung: its validation numbers are of another fidelity, and
+        # its row shows none rather than a gap between two kinds of score.
+        finalist = search.get("rung") == search.get("top_rung", search.get("rung"))
+        out[f"{search.get('search')}:{name}"] = [
+            {
+                "chooser": search.get("search"),
+                "segment": 0,
+                "chosen": [name],
+                "k": 1,
+                "validation_mae": search.get("validation_mae") if finalist else None,
+                "validation_forecasts": search.get("validation_forecasts") if finalist else None,
+                "validation_share": search.get("validation_share") if finalist else None,
+                "validation": tuple(search.get("validation") or (None, None)),
+                "test": None if not test else tuple(test),
+                "candidates": search.get("candidates"),
+                "test_mae": test_mae,
+                "search": dict(search),
+            }
+        ]
+    return out
+
+
 def _carded(models: Sequence[Any]) -> List[Any]:
     """The models `models._cards.preflight` checks: a `PooledModel`'s wrapped model in its place."""
     return [model.model if isinstance(model, PooledModel) else model for model in models]
@@ -356,6 +451,7 @@ class ModelPipeline:
         issue_days: Optional[Sequence[str]] = None,
         save_format: str = DEFAULT_SAVE_FORMAT,
         save_coefficients: bool = True,
+        validation_every: int = 1,
     ) -> EvaluationReport:
         """Run every model, compute the ensembles from what they stored, then (unless `forecast_only`) run the evaluators
         and exporters.
@@ -394,6 +490,13 @@ class ModelPipeline:
         before it (`report.windows.segments`), and adds one year at the start, tagged "validation". `validation` alone
         forecasts only those days, and nothing of the test period is computed.
 
+        `validation_every=k` issues on every k-th day of a fixed validation window alone, counted from its first day, which
+        is always one: each forecast on such a day is the one a run of every day gives it, the other days are neither
+        forecast nor planned, and the report scores the kept days. It makes a search's first looks cheap (`epftoolbox2.tune`,
+        the rungs' `every_nth_day`). The test window is never thinned. It needs `validation=(start, end)`, not with
+        `"previous_year"` or `issue_days`. The manifest records it, and a resume with another value raises
+        `ManifestMismatchError`. The default, 1, is every day.
+
         The report is on the test window, and `report.validation` on the validation window, without forecasts for the first
         test issue day or later (see `EvaluationReport.validation`). Without a test window the validation report itself
         is returned. See the docs page on validation and test.
@@ -429,6 +532,7 @@ class ModelPipeline:
                 issue_days=issue_days,
                 save_format=save_format,
                 save_coefficients=save_coefficients,
+                validation_every=validation_every,
             )
         if not self.models:
             raise ValueError("At least one model is required")
@@ -449,7 +553,14 @@ class ModelPipeline:
         if not forecast_only:
             self._check_benchmarks()
             self._check_source_columns(data)
-        windows, test_start, test_end = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
+        windows, test_start, test_end = self._resolve_windows(
+            validation, test, test_start, test_end, forecast_only, validation_every=validation_every
+        )
+        self._refuse_thinned_weekdays(windows, weekdays)
+        if not forecast_only:
+            refuse_searched_on_test(
+                self.models, windows.test[0] if windows is not None and windows.test else test_start
+            )
         self._check_ensembles(save_dir)
         self._refuse_top_without_validation(self.ensembles, windows)
         check_save_format(save_format)
@@ -582,6 +693,9 @@ class ModelPipeline:
                 provenance=None if frame_hashes is None else frame_hashes.provenance,
             )
             refs.update(computed)
+        if not forecast_only:
+            made = {"target": target, "horizons": list(horizons), "freq": freq, "issue_days": issue_day_names(weekdays)}
+            choices.update(search_choices(refs, windows.test if windows is not None else (test_start, test_end), made))
 
         evaluators = [] if forecast_only else self.evaluators
         report = EvaluationReport(refs, evaluators, source_data=data, choices=choices)
@@ -645,6 +759,7 @@ class ModelPipeline:
         issue_days: Optional[Sequence[str]],
         save_format: str,
         save_coefficients: bool,
+        validation_every: int = 1,
     ) -> PanelReport:
         """`run` over several zones (see `run`): each zone's frame checked and run as `run` checks and runs one frame, every
         model's and zone's check before any fit, then each plain model per zone, each `PooledModel` over all of them
@@ -667,7 +782,14 @@ class ModelPipeline:
             self._check_benchmarks()
             for zone in zones:
                 self._check_source_columns(frames[zone])
-        windows, test_start, test_end = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
+        windows, test_start, test_end = self._resolve_windows(
+            validation, test, test_start, test_end, forecast_only, validation_every=validation_every
+        )
+        self._refuse_thinned_weekdays(windows, weekdays)
+        if not forecast_only:
+            refuse_searched_on_test(
+                self.models, windows.test[0] if windows is not None and windows.test else test_start
+            )
         pooled = [model for model in self.models if isinstance(model, PooledModel)]
         plain = [model for model in self.models if not isinstance(model, PooledModel)]
         if pooled and windows is not None:
@@ -883,15 +1005,33 @@ class ModelPipeline:
                     provenance=None if first is None else first.provenance,
                 )
                 zone_refs.update(computed)
+            if not forecast_only:
+                made = {
+                    "target": target,
+                    "horizons": list(horizons),
+                    "freq": freq,
+                    "issue_days": issue_day_names(weekdays),
+                }
+                choices.update(
+                    search_choices(zone_refs, windows.test if windows is not None else (test_start, test_end), made)
+                )
             reports[zone] = EvaluationReport(zone_refs, evaluators, source_data=frames[zone], choices=choices)
         return PanelReport(reports, target=target)
 
     @staticmethod
-    def _resolve_windows(validation, test, test_start, test_end, forecast_only: bool, required: bool = True):
+    def _resolve_windows(
+        validation, test, test_start, test_end, forecast_only: bool, required: bool = True, validation_every: int = 1
+    ):
         """(the windows of a run with validation or None, first test day, last test day), from `run`'s arguments.
 
-        A `ValueError` if they are given twice, make no sense, or (with `required`) name no window at all.
+        A `ValueError` if they are given twice, make no sense, or (with `required`) name no window at all, and for a
+        `validation_every` other than 1 without a fixed validation window.
         """
+        if check_validation_every(validation_every) != 1 and validation is None:
+            raise ValueError(
+                f"validation_every={validation_every} thins the validation window, and this run has none: pass "
+                "validation=(start, end)"
+            )
         if test is not None and (test_start is not None or test_end is not None):
             raise ValueError("Pass the test period once: test=(start, end) or test_start and test_end, not both")
         if forecast_only and validation is not None:
@@ -903,7 +1043,7 @@ class ModelPipeline:
                 raise ValueError("test_start and test_end are required unless forecast_only=True")
             test = (test_start, test_end)
         if validation is not None:
-            windows = RunWindows.resolve(validation, test)
+            windows = RunWindows.resolve(validation, test, validation_every)
             return windows, *(windows.test or (None, None))
         if test is None:
             if not required:
@@ -914,6 +1054,15 @@ class ModelPipeline:
             )
         test_start, test_end = to_period(test, TEST)
         return None, test_start, test_end
+
+    @staticmethod
+    def _refuse_thinned_weekdays(windows: Optional[RunWindows], weekdays: Optional[Sequence[int]]) -> None:
+        """`validation_every` and `issue_days` both choose issue days, and a run takes one of them."""
+        if windows is not None and windows.validation_every != 1 and weekdays is not None:
+            raise ValueError(
+                f"validation_every={windows.validation_every} and issue_days={issue_day_names(weekdays)} both choose the "
+                "days a run issues on: pass one of them"
+            )
 
     @staticmethod
     def _stored_horizons(save_dir: Union[str, Path], paths: Dict[str, Path]) -> Optional[Tuple[int, ...]]:
@@ -1222,6 +1371,14 @@ class ModelPipeline:
             )
         warn_about({name: ref.availability_listing for name, ref in refs.items()}, stacklevel=3)
 
+        if not forecast_only:
+            # The test period on file, whichever part of it this report names, as the ensembles' rows have it.
+            test_period = stored.test if stored is not None else (test_start, test_end)
+            choices.update(
+                search_choices(
+                    {model.name: refs[model.name] for model in self.models if model.name in refs}, test_period
+                )
+            )
         report = EvaluationReport(refs, [] if forecast_only else self.evaluators, source_data=data, choices=choices)
         warn_about_thin(rows_of_refs(refs), stacklevel=2)  # on the whole file: a report holds one window
         if not forecast_only:
@@ -1451,7 +1608,10 @@ class ModelPipeline:
                 f"These windows are not what the results were made with: {'; '.join(different)}. Pass the windows of the "
                 "run, or none to report what the manifests record."
             )
-        return stored if asked.validation is not None and asked.test is not None else asked
+        if asked.validation is not None and asked.test is not None:
+            return stored
+        # A window of the run alone: the validation window keeps the days it was issued on (`validation_every`).
+        return asked if asked.validation is None else replace(asked, validation_every=stored.validation_every)
 
     def verify(
         self,
@@ -1938,7 +2098,14 @@ class ModelPipeline:
             for key, default in component._WRITTEN_WHEN_SET.items():
                 if key in params and params[key] == default:
                     del params[key]  # written only when set, so files saved before it existed don't move
-        return {"class": class_name, "params": params}
+        out = {"class": class_name, "params": params}
+        search = getattr(component, "_search", None)
+        if isinstance(component, BaseModel) and isinstance(search, dict):
+            # Where a search chose the model (`tune.SearchResult.best`): no setting of it, but what a run reads to refuse a test
+            # on the days it was chosen on and to show its row in `report.choices()`, so a Workflow or an array task rebuilding
+            # the model from YAML has it too. Written only for such a model.
+            out["search"] = json.loads(json.dumps(search))
+        return out
 
     def _serialize_param(self, owner: Any, key: str, value: Any, where: str) -> Any:
         """One parameter `key` of the component `owner` as YAML, the one place a parameter's kind is decided: a model inside it as
@@ -2001,7 +2168,10 @@ class ModelPipeline:
         for key in getattr(component_class, "_NESTED_MODELS", ()):
             if isinstance(params.get(key), dict):
                 params[key] = cls._load_component("models", params[key])
-        return component_class(**params)
+        component = component_class(**params)
+        if component_type == "models" and isinstance(config.get("search"), dict):
+            component._search = dict(config["search"])  # where a search chose it (`_serialize_component`)
+        return component
 
     @staticmethod
     def _load_predictor_function(class_name: str, saved: Dict[str, Any]) -> Callable:

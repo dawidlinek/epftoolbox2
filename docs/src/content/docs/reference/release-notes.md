@@ -276,6 +276,18 @@ an issue day it didn't sample.
   its manifest's `chained_inputs` records `agg` and each coverage entry `let_off`, the rows left out. A daily upstream is refused.
   A saved pipeline writes `agg` only when set. See
   [ForecastSource](/epftoolbox2/data-sources/forecast/#a-day-statistic-agg).
+- **Hyper-parameter search: `run(validation_every=k)` and `tune.BayesSearch` (`[tune]` extra).** `ModelPipeline.run(...,
+  validation_every=k)` issues on every k-th day of a fixed validation window, counted from its first day: each forecast is the full
+  run's, bit for bit, the other days are neither forecast nor planned, the test window is never thinned, and the manifest records it
+  (only when it isn't 1) and refuses a resume with another value. `tune.BayesSearch(make, space, sampler="tpe", n_trials=100,
+  seed=0, rungs=[...], keep=1/3, warm_start=None, storage=None)` proposes settings with Optuna, scores every trial on the validation
+  period alone (the frame cut after its end, so no target of the test period is scored, `test=` refused) at rungs of fewer days
+  and seeds, promotes the best share, compares trials on identical keys, and returns ordinary models (`result.best(k, seeds=)`,
+  named `{name}_bayes_00`, ...) whose manifests record where they were chosen; a run testing one on or before its search's
+  validation end raises. `result.save()` is the record of a search; `epf tune search.py --workers N` runs it in parallel processes
+  on a shared journal file, and `epf tune --requeue JOURNAL...` puts back trials of killed workers. `report.choices()` gains
+  `kind`, `candidates`, `test_mae` and `gap` columns, and a row per model a search chose. See
+  [Hyper-parameter Search](/epftoolbox2/model-pipeline/hyperparameter-search/).
 - **Generation targets: `normalise_by`, `bounds` and `zero_when` on every model that fits period or pooled units.**
   `normalise_by="capacity_d+{horizon}"` divides each training row's target by its value of the column (a row without a positive one
   drops out) and multiplies the forecast by the issue row's (a forecast without one is `missing_test_predictors`, with one at or

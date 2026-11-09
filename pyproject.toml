@@ -78,6 +78,11 @@ catboost = [
 gbm = [
     "epftoolbox2[lightgbm,xgboost]",
 ]
+# Optuna for the Bayesian search with successive halving (epftoolbox2/tune/): its samplers and its journal storage, which
+# parallel workers (`epf tune --workers N`, a SLURM array) share. Optuna 4 named the journal file backend.
+tune = [
+    "optuna>=4,<5",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
