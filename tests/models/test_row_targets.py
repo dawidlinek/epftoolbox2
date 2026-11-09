@@ -1017,3 +1017,49 @@ def test_every_registered_model_takes_the_row_target_or_says_why_not():
             assert {f["name"] for f in tui.PARAM_SCHEMAS[name]} & three == expected, (name, "TUI", why)
         else:
             assert name in ROW_TARGET_EXCEPTIONS, f"{name} isn't offered in the TUI: list it with its reason"
+
+
+def source_and_rebuild(data):
+    """The source columns of `data` and a `rebuild` that builds their `_d+1`, `_d+2` (the flag's too) as `with_columns` does."""
+    source = data[["price", "load", "wind", "is_weekend", "is_weekday", "flag"]].copy()
+
+    def rebuild(frame):
+        out = frame.copy()
+        for h in (1, 2):
+            for name in ("load", "wind", "is_weekend", "is_weekday", "flag"):
+                out[f"{name}_d+{h}"] = calendar_shift(out[name], h)
+        return out
+
+    return source, rebuild
+
+
+@pytest.mark.parametrize(
+    ("flag_rule", "status"),
+    [(Availability.published("10:00", 2), "ok"), (Availability.published("23:00", 1), "leak")],
+    ids=["known at the issue", "late"],
+)
+def test_verify_with_rebuild_keeps_noise_off_a_built_flag(spring, flag_rule, status):
+    """`flag_d+{horizon}` built by `rebuild` from the source's `flag`: the noise of the probe and the control reaches the source
+    column, and the rebuilt flag is put back as `rebuild(data)` builds it (a run refuses a flag that isn't 0 or 1), so only the
+    flip probes it: `ok` where D+1's flag is known at the issue, a `leak` where it is out at 23:00 on D."""
+    source, rebuild = source_and_rebuild(spring)
+    info = InformationSet(rules={**RULES, "flag": flag_rule})
+    model = OLSModel(PREDICTORS, training_window=30, zero_when="flag_d+{horizon}")
+    report = verified(model, source, info, rerun=False, rebuild=rebuild)
+    row = report.table().iloc[0]
+    assert row["status"] == status, report.problems()
+    if status == "ok":
+        assert row["control moved"] > 0
+
+
+@pytest.mark.parametrize("refit", [None, "7D"])
+def test_the_public_probes_run_on_a_zero_when_model(spring, refit):
+    """`leakage_probe` and `positive_control` called directly leave a model's flags out of their noise: a correct model with a
+    flag known at the issue runs, with no leak and a control that moved."""
+    from epftoolbox2.information_set import leakage_probe, positive_control
+
+    model = OLSModel(PREDICTORS, training_window=30, refit=refit, zero_when="flag")
+    probe = leakage_probe(model, spring, "2023-04-12", INFO, target="price", horizon=1)
+    assert probe.ok and "flag" not in probe.perturbed
+    control = positive_control(model, spring, "2023-04-12", INFO, target="price", horizon=1)
+    assert control.ok and "flag" not in control.perturbed and control.exempt
