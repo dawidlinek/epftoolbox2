@@ -76,6 +76,7 @@ class ModelPipeline:
         issue_days: Optional[Sequence[str]] = None,  # Only these weekdays, e.g. ["friday"]; any case, all seven = every day
         save_format: str = "jsonl",       # "jsonl" or "parquet": <name>.jsonl or the directory <name>.parquet in save_dir
         save_coefficients: bool = True,   # False writes coefficients as []; recorded in the manifest, compared on resume
+        validation_every: int = 1,        # k: every k-th day of a fixed validation window alone, from its first; recorded, compared on resume
     ) -> EvaluationReport: ...            # A PanelReport for a run over zones
 
     def report(                           # Report from the results a run wrote to save_dir, JSONL or Parquet
@@ -227,7 +228,7 @@ class EvaluationReport:
     def vintages(self) -> pd.DataFrame: ...         # model, predictor, series, class, ctx
     def provenance(self) -> pd.DataFrame: ...       # model, family, licence, licence_url, commercial_use, revenue_cap, attribution, weights, sha256, runtime, corpus, corpus_end, released, validation_verdict, test_verdict
     def training_days(self) -> pd.DataFrame: ...    # model, list, predictors, forecasts, periods, horizons, smallest_days, median_days, largest_days, thin_forecasts
-    def choices(self) -> pd.DataFrame: ...          # ensemble, segment, chosen, k, validation_mae, validation_forecasts, validation_share, validation_start, validation_end, test_start, test_end; attrs: member_mae, k_mae, limited_by
+    def choices(self) -> pd.DataFrame: ...          # ensemble, kind, segment, chosen, k, validation_mae, validation_forecasts, validation_share, validation_start, validation_end, test_start, test_end, candidates, test_mae, gap; a row per model a search chose; attrs: member_mae, k_mae, limited_by, search
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
     def by_hour_horizon(self) -> pd.DataFrame: ...
@@ -332,6 +333,7 @@ class RunWindows:
     test: Optional[Tuple[str, str]]         # (first, last) issue day tagged "test"
     mode: str                               # "fixed" or "previous_year"
     segments: Tuple[Segment, ...]           # Each test period and what serves it
+    validation_every: int                   # k: every k-th validation day is an issue day (run(validation_every=k)); 1 otherwise
 
 class Segment:
     validation: Tuple[str, str]
@@ -778,6 +780,66 @@ def scaler_spec(spec: ScalerSpec = "standard") -> Union[str, dict]: ...    # val
 ```
 
 See [Scalers and VSTs](/epftoolbox2/models/scalers/).
+
+---
+
+## Hyper-parameter search
+
+```python
+from epftoolbox2.tune import BayesSearch, SearchResult, Subset   # the [tune] extra (Optuna), imported when a search runs
+
+class BayesSearch:
+    def __init__(
+        self,
+        make: Callable[[Dict[str, Any]], BaseModel],   # Settings -> one model; its name names the search
+        space: Mapping[str, Any],                    # name -> [choices], (low, high), (low, high, "log") or Subset(items)
+        sampler: str = "tpe",                        # "tpe" or "random"
+        n_trials: int = 100,                         # Settings tried at the first rung
+        seed: int = 0,                               # Trial i's sampler is seeded from (seed, i): one worker, the same table twice
+        rungs: Optional[Sequence[Mapping[str, Any]]] = None,  # [{"every_nth_day": k, "seeds": s}, ...]; None: every day, as built
+        keep: float = 1 / 3,                         # Share of a rung's trials that goes on (at least one)
+        warm_start: Union[str, Path, SearchResult, None] = None,  # An earlier result: its finalists are the first trials
+        storage: Union[str, Path, None] = None,      # A journal file shared by workers and resumed by a rerun; None: in memory
+    ): ...
+
+    def run(
+        self,
+        data: pd.DataFrame,
+        target: str = "price",
+        horizon: Optional[int] = None,               # As in ModelPipeline.run (7 if neither is given)
+        validation: Optional[Tuple[Any, Any]] = None,  # (start, end), required; the frame is cut after its end
+        *,
+        horizons: Optional[Sequence[int]] = None,
+        freq: str = "1h",
+        information_set: Any = None,                 # The trial pipeline's, as ModelPipeline(...) takes them
+        issue_time: Optional[str] = None,
+        issue_timezone: str = "Europe/Brussels",
+        availability: Optional[str] = None,
+        engine: str = "off",
+        test: Any = None,                            # Refused: a search never reads the test period
+    ) -> SearchResult: ...
+
+class SearchResult:
+    name: Optional[str]                              # "{model name}_bayes"
+    path: Optional[Path]                             # Where it was saved or loaded from
+    candidates: int                                  # Its trials
+    record: Dict[str, Any]                           # What save() writes
+    def table(self) -> pd.DataFrame: ...             # trial, each setting, warm_start, rung, validation_mae, mae_r<r>, forecasts_r<r>, error
+    def ranking(self) -> List[int]: ...              # Trial numbers: highest rung first, then validation MAE
+    def finalists(self) -> List[int]: ...            # The ranked trials of the highest rung reached
+    def params(self, number: int) -> Dict[str, Any]: ...
+    def best(
+        self, k: int = 1, seeds: Optional[int] = None, make: Optional[Callable] = None
+    ) -> List[BaseModel]: ...                        # {name}_bayes_00, ...: ordinary models, their provenance in the manifest
+    def save(self, path: Union[str, Path]) -> None: ...
+    @classmethod
+    def load(cls, path: Union[str, Path], make: Optional[Callable] = None) -> SearchResult: ...
+
+class Subset:
+    def __init__(self, items: Sequence[Any], min_size: int = 0): ...  # Each item in or out; make gets the list of those in
+```
+
+See [Hyper-parameter Search](/epftoolbox2/model-pipeline/hyperparameter-search/).
 
 ---
 

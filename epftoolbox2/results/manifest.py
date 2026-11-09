@@ -173,6 +173,10 @@ _PROVENANCE_FIELDS += ("residual_base",)
 # `daily_stamp`: a daily run's row time ("12:00"), where a downstream `ForecastSource` places its forecasts; the frame's hash
 # (`data_columns_hash`, of the instants) already refuses a resume on rows stamped elsewhere.
 _PROVENANCE_FIELDS += ("daily_stamp",)
+# `search`: a model of `tune.SearchResult.best()`: the search it came from (its name and saved file, the trial, its rank, the
+# number of candidates, the rung, validation period and validation MAE it was chosen on), for `report.choices()`. The model's
+# settings are the compared fields; where they were chosen says nothing about the forecasts.
+_PROVENANCE_FIELDS += ("search",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -423,6 +427,8 @@ class Manifest:
     chained_inputs: Optional[Dict[str, Dict[str, Any]]] = None
     # A daily run's row time, "HH:MM"; None (and no key) at any other freq. Provenance.
     daily_stamp: Optional[str] = None
+    # A model of `tune.SearchResult.best()`: where it was chosen (`_search`); None (and no key) otherwise. Provenance.
+    search: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -508,6 +514,8 @@ class Manifest:
             del out["chained_inputs"]
         if out["daily_stamp"] is None:  # not a daily run
             del out["daily_stamp"]
+        if out["search"] is None:  # a model no search chose
+            del out["search"]
         return out
 
     @classmethod
@@ -778,9 +786,16 @@ def build_manifest(
         residual_base=getattr(model, "_residual_base", None),
         chained_inputs=chained_inputs or None,
         daily_stamp=fmt_minutes(daily_anchor(data.index)) if freq == "1D" and len(data.index) else None,
+        search=_search_of(model),
         **carded,
         **units,
     )
+
+
+def _search_of(model: Any) -> Optional[Dict[str, Any]]:
+    """A copy of where a model of `tune.SearchResult.best()` was chosen, or None."""
+    search = getattr(model, "_search", None)
+    return dict(search) if isinstance(search, dict) else None
 
 
 def _history_ahead(
@@ -1355,6 +1370,20 @@ def _keep_windows(existing: Manifest, manifest: Manifest, allow_mismatch: bool, 
     if manifest.windows is None or existing.windows is None:
         return
     run, on_file = RunWindows.from_dict(manifest.windows), RunWindows.from_dict(existing.windows)
+    if (
+        run.validation is not None
+        and on_file.validation is not None
+        and run.validation_every != on_file.validation_every
+        and not allow_mismatch
+    ):
+        # The records on file are of the other days: kept, a report would read them as forecasts of none of its days, or of
+        # some, and a search's rungs would mix what they scored.
+        raise ManifestMismatchError(
+            f"{model_name}: the results on file issued on every {on_file.validation_every}. day of the validation window "
+            f"(validation_every={on_file.validation_every}), and this run on every {run.validation_every}. day: use a "
+            "different save_dir, or pass allow_manifest_mismatch=True to resume anyway (the days of the other setting are then "
+            "left out of every report)."
+        )
     dropped = run.would_drop(on_file)
     if dropped is not None and not allow_mismatch:
         raise ManifestMismatchError(

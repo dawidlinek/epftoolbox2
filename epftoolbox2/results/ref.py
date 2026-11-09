@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
@@ -145,6 +146,10 @@ class ModelResultRef:
                 mask &= np.isin(weekday, list(self.issue_days))
             if self.window is not None:
                 mask &= text("window", TEST) == self.window
+            if self.window == VALIDATION and self.windows is not None and self.windows.validation_every != 1:
+                # every k-th day of the validation window alone, as `_records` keeps them
+                offset = run_days - days_of(self.windows.validation[0])
+                mask &= offset % self.windows.validation_every == 0
             if self.target_before is not None:
                 mask &= days("target_date") < days_of(self.target_before)
             if clock and self.zone is not None:
@@ -236,9 +241,17 @@ class ModelResultRef:
         window_start = date.fromisoformat(self.test_start) if self.window is not None and self.test_start else None
         horizons = None if self.horizons is None else frozenset(self.horizons)
         weekdays = None if self.issue_days is None else frozenset(self.issue_days)
+        # A validation window issued on every k-th day (`RunWindows.validation_every`): a record of another day is none of its.
+        thinned = (
+            self.windows
+            if self.window == VALIDATION and self.windows is not None and self.windows.validation_every != 1
+            else None
+        )
 
         def keep(r: Dict) -> bool:
             if filter_dates and not self.test_start <= r["run_date"] <= self.test_end:
+                return False
+            if thinned is not None and not thinned.issues_on(r["run_date"]):
                 return False
             if horizons is not None and r["horizon"] not in horizons:
                 return False
@@ -285,6 +298,23 @@ class ModelResultRef:
         return {k: r[k] for k in cols if k in r} if cols else r
 
 
+def issued_mae(records: Iterable[Dict], period: Optional[Sequence[str]]) -> Optional[float]:
+    """The MAE of the records issued from `period[0]` to `period[1]` with a finite prediction and actual, as an exact sum (the
+    same whatever order the records are in); None without a period or such a record. What `choices()` shows as `test_mae`."""
+    if not period:
+        return None
+    start, end = period
+    errors = []
+    for r in records:
+        if not start <= r["run_date"] <= end:
+            continue
+        prediction, actual = r.get("prediction"), r.get("actual")
+        if prediction is None or actual is None or not (math.isfinite(prediction) and math.isfinite(actual)):
+            continue
+        errors.append(abs(prediction - actual))
+    return math.fsum(errors) / len(errors) if errors else None
+
+
 def _run_weekday(r: Dict) -> int:
     """A record's `run_weekday`, which every record the models write carries; from its `run_date` for one without."""
     weekday = r.get("run_weekday")
@@ -322,7 +352,7 @@ def split_by_window(
             counts[SKIP_TARGET_IN_TEST] = excluded
         refs[window] = replace(
             ref,
-            count=calendar.count(start, end),
+            count=calendar.count(start, end, windows.validation_every if is_validation else 1),
             test_start=start,
             test_end=end,
             produced=produced[window],

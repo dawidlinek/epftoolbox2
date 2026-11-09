@@ -123,8 +123,9 @@ class PanelReport:
         return table
 
     def choices(self) -> pd.DataFrame:
-        """Each zone's `choices()` (what its ensembles chose on validation), one row per (zone, ensemble, segment), `zone` first
-        (and `target`); empty, with those columns, when nothing chose anything."""
+        """Each zone's `choices()`, `zone` first (and `target`): what its ensembles chose on validation, one row per (zone,
+        ensemble, segment), and each model a search chose, one row per (zone, model), with `kind` saying which, and the
+        candidates and the validation-test gap of each; empty, with those columns, when nothing chose anything."""
         return self._with_keys((zone, target, report.choices()) for zone, target, report in self._parts)
 
     def availability(self) -> pd.DataFrame:

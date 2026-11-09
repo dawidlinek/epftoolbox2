@@ -28,6 +28,7 @@ print(report.validation.summary())  # the validation window
 | `validation=(start, end), test=(start, end)` | the days of both, and nothing between them | the test report, with `report.validation` |
 | `validation="previous_year", test=(start, end)` | the test days and the year before them | the same, with [yearly segments](#a-new-validation-year-for-every-test-year) |
 | `validation=(start, end)` | only those days: nothing of the test period is computed, so you can explore and leave it untouched | the validation report itself, so `.summary()` works on it |
+| `validation=(start, end), validation_every=k` | every k-th validation day from the first, each forecast the full run's, and the test days if given | the same, scored on the kept days: see [Hyper-parameter Search](/epftoolbox2/model-pipeline/hyperparameter-search/#fewer-validation-days-validation_every) |
 
 `ValueError` before anything runs: no window at all, a validation period that ends on or after the test start, a reversed
 period, an unknown string, `"previous_year"` without a test period, `validation` with `forecast_only`. A window whose first

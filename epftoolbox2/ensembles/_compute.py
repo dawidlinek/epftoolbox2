@@ -39,7 +39,7 @@ from ..results.manifest import (
     manifest_digest,
     manifest_path,
 )
-from ..results.ref import ModelResultRef, split_by_window
+from ..results.ref import ModelResultRef, issued_mae, split_by_window
 from ..results.store import with_status
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 from ..results.vintages import union_vintages
@@ -173,6 +173,10 @@ def compute(
         # In this order: results with no manifest of an ensemble are not an ensemble's, and nothing overwrites them.
         _write_manifest(path, ensemble, stored, freq, members, manifests, choices, provenance)
         _write_atomically(path, (json.dumps(record) + "\n" for record in records))
+    for row in choices:
+        # What `report.choices()` shows of the test period served, from every forecast on file (every horizon made), so a report
+        # of any part of the run shows the same: after the manifest, which records the choice alone.
+        row["test_mae"] = issued_mae(records, row["test"])
     # What the members' refs plan, so that one report plans one list for all: a report's refs always name it (`report()` reads it
     # from the manifests when told nothing), and a run's do unless it is every horizon to the largest. `_check_members_agree` has
     # compared the members' manifests on it. The same for the weekdays: a ref's `issue_days` is what it plans, None for every day.

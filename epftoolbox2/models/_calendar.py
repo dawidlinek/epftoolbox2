@@ -565,11 +565,12 @@ class IssueCalendar:
         self.weekdays = None if weekdays is None else tuple(sorted(weekdays))
         self._periods = periods_per_day(freq)
 
-    def issue_days(self, start: Any, end: Any) -> List[datetime.date]:
-        """The issue days from `start` to `end`, both included: those of a listed weekday."""
+    def issue_days(self, start: Any, end: Any, every: int = 1) -> List[datetime.date]:
+        """The issue days from `start` to `end`, both included: those of a listed weekday, and with `every=k` (a validation
+        window's `validation_every`) every k-th day from `start` alone."""
         first, last = _as_date(start), _as_date(end)
         return listed_days(
-            (first + datetime.timedelta(days=day) for day in range((last - first).days + 1)), self.weekdays
+            (first + datetime.timedelta(days=day) for day in range(0, (last - first).days + 1, every)), self.weekdays
         )
 
     def _gaps(self, first: datetime.date, last: datetime.date) -> Dict[datetime.date, Tuple[int, ...]]:
@@ -598,9 +599,9 @@ class IssueCalendar:
                 tasks.extend((period, horizon, day) for period in range(self._periods) if period not in gone)
         return tasks
 
-    def count(self, start: Any, end: Any) -> int:
-        """How many forecasts are planned on the issue days from `start` to `end`."""
-        days = self.issue_days(start, end)
+    def count(self, start: Any, end: Any, every: int = 1) -> int:
+        """How many forecasts are planned on the issue days from `start` to `end` (every `every`-th of them from `start`)."""
+        days = self.issue_days(start, end, every)
         if not days:
             return 0
         whole = len(days) * len(self.horizons) * self._periods
