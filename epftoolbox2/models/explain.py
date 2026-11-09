@@ -434,7 +434,8 @@ def _print(out, subject, info, days, horizon, hour, freq, used, index, function,
         f"{subject}: horizon {horizon}, period {hour} ({time_of_day}); T = D + {horizon}; {issued}; "
         f"issue days {days[0].date()} … {days[-1].date()}"
     )
-    print(out["grouped"].to_string(index=False))
+    if not ("series" in out and out["grouped"].empty):  # a sequence model may read series alone
+        print(out["grouped"].to_string(index=False))
     if "series" in out:
         print("the series it reads, cut at the newest step known at the issue time:")
         print(out["series"].to_string(index=False))
