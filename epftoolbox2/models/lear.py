@@ -27,9 +27,9 @@ class LEARModel(BaseModel):
     # along the eigenvectors of the active columns' Gram (`_stats.issue_distance`; `OLSModel._ENGINE_ISSUE_Z`), and the largest
     # condition number of that Gram (`_stats.IssueMetric.condition`) the engine fits from the sums: the LARS solution's last
     # bits follow it (1.6e-5 apart at 1e10, near-collinear columns both active), so a fit beyond it goes back to the model
-    # path (`ill_conditioned`). The worst kept gap is 3.5e-10 EUR/MWh (the re-review's pipeline with a pair 1e-3 of a standard
-    # deviation apart; 2.2e-10 over the 540 designs of `engine_stats/far_sweep2.py`, which keep every plain Lago-shaped DE fit:
-    # their conditions reach 2.4e5), against the engine's 1e-9.
+    # path (`ill_conditioned`); every plain Lago-shaped DE fit is kept (their conditions reach 2.4e5). Against LEAR's 1e-8 in
+    # the engine (`_engine_worker.ENGINE_TOLERANCE`), the worst kept gap of the dense sweep (`engine_vst_cv/sweep_dense.py`:
+    # issue rows at every distance to the bound, conditions between the bounds, near-twin pairs) is 1.1e-9 EUR/MWh.
     _ENGINE_ISSUE_Z = 10.0
     _ENGINE_CONDITION_MAX = 1e6
     # A fit two of whose columns are near twins, 1 - |cos| at most this but not exact twins, goes back to the model path

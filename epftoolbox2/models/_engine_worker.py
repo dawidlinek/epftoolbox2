@@ -132,8 +132,9 @@ ISSUE_Z_MAX = 10.0
 # bounds in scaled units (`_ENGINE_ISSUE_Z`, `_ENGINE_CONDITION_MAX`) were set where the slope is the target's standard
 # deviation throughout. Set by the sweep `engine_vst_cv/sweep.py` (`rules.py`): at 3 the worst kept gaps were OLS 6.3e-9,
 # Ridge 3.2e-10, LEAR (BIC, AIC; asinh, Invariant, npit, poly) 4.7e-10, and at most 1.3 % of the forecasts of a training row
-# went back; at 10 LEAR's reached 3.2e-9, without it OLS's 2.5e-4. Out of sample (new designs, every bound applied by this
-# code): OLS 3.7e-9, LassoCV 5.4e-9, Ridge 2.5e-10, LEAR 7.6e-10.
+# went back; at 10 LEAR's reached 3.2e-9, without it OLS's 2.5e-4. With issue rows at every distance up to the bounds and the
+# near-twin bounds of 1e-5 (`sweep_dense.py`, new designs, every bound applied by this code): OLS 7.8e-9, LassoCV 4.6e-9,
+# Ridge 6.1e-10, LEAR 1.1e-9 (`ENGINE_TOLERANCE`).
 VST_SLOPE_MAX = 3.0
 
 # `engine="check"`: the fits also run on the model path are those whose span hashes to 0 modulo this (`_sampled`).
