@@ -268,3 +268,18 @@ def test_the_chained_column_is_registered_through_its_shifts_and_what_it_was_bui
 def test_without_its_source_a_chained_column_has_no_rule():
     """Outside a `Workflow` only `with_source_rules` knows it: the docs pass the sources every time."""
     assert InformationSet().resolve("solar_fc_d+1").rule is None
+
+
+def test_a_validity_period_of_the_data_s_dates_holds_in_both_readings_on_a_frame_in_another_zone():
+    """On a UTC frame issued on Helsinki's clock, "data" is read in both zones' dates and each reading picks its own rule, as
+    a weekly rule's week does: Helsinki's first hours of the period's first day are still the day before in UTC, which no rule
+    holds for, so they are never known, rather than known by the Helsinki reading alone."""
+    rule = Availability.published("10:00", 1, timezone="Europe/Helsinki", day_zone="data").during(
+        valid_from="2024-10-26"
+    )
+    info = InformationSet("11:45", "Europe/Helsinki", rules={"col": RuleChain((rule,))})
+    index = frame_index("UTC", "1h", "autumn")
+    days = pd.date_range("2024-10-25", "2024-10-26", freq="D")
+    known = info._issue_clock(days, index, "1h").available(info._resolve_for("col", 60), np.arange(24), 60)
+    assert np.isinf(known[:, 0]).all()  # 25 October in UTC: before the period in one reading at least
+    assert np.isfinite(known[:, 1]).all()  # 26 October in UTC is 26 or 27 October in Helsinki: in both
