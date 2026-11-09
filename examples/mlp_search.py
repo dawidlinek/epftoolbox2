@@ -2,7 +2,9 @@
 Example: a random search of day-level MLPs, averaged: the four best on the validation year (the documented default search)
 
 A loop of MLPDailyModel configurations drawn with a fixed seed (hidden sizes, dropout, learning rate), each refitted weekly with
-4 seeds, and an AverageEnsemble of the 4 with the lowest validation MAE, chosen on validation only and scored on test. In the
+4 seeds and a `random_state` of its own (configuration i takes i, so no two configurations share their networks' initial weights,
+row orders and early-stopping days, as the research seeded each configuration apart), and an AverageEnsemble of the 4 with the
+lowest validation MAE, chosen on validation only and scored on test. In the
 research, the top 4 configurations x 4 seeds beat the single best configuration x 4 seeds, the top 8 or 16 were no better, and
 validation and test ranks within the top 16 barely agreed: a small search averaged, not a large search picked.
 
@@ -10,12 +12,9 @@ On the Lago et al. (2021) DE benchmark (no API key: EpftoolboxBenchmarkSource do
 with LEAR's 247 day-level inputs. Forecasts are issued at 11:45 Brussels on the day before each target day. Needs the [torch]
 extra (pip install 'epftoolbox2[torch]'). The full run (48 configurations, a validation year and the paper's two test years, 4
 seeds, weekly refits: about 32,000 networks of 256 to 1024 units) takes a few CPU-days on one thread per fit, so run it on many
-cores (MAX_PROCESSES) or shard it with a Workflow array job; results go to OUTPUT_DIR/results_mlp_search and resume.
+cores (one process per usable CPU by default; set MAX_PROCESSES to use fewer) or shard it with a Workflow array job; results go
+to OUTPUT_DIR/results_mlp_search and resume.
 """
-
-import os
-
-os.environ.setdefault("MAX_PROCESSES", "8")
 
 import random
 from pathlib import Path
@@ -96,6 +95,7 @@ def main(n_configs=48, top=4, seeds=4, validation=None, test=None, output_dir=".
                 refit="7D",
                 seeds=seeds,
                 scaler=INVARIANT,
+                random_state=i,  # each configuration its own seeds, as the research seeded each one
                 name=name,
             )
         )
