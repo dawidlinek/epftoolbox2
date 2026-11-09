@@ -64,7 +64,7 @@ jobs:
         uv sync --extra dev
 
     - name: Check that no extra is installed (this is the core-only job)
-      run: uv run python -c "import importlib.util, sys; sys.exit(any(importlib.util.find_spec(m) is not None for m in ('numba', 'torch')))"
+      run: uv run python -c "import importlib.util, sys; sys.exit(any(importlib.util.find_spec(m) is not None for m in ('numba', 'torch', 'lightgbm', 'xgboost', 'catboost')))"
 
     - name: Run tests
       env:
@@ -133,6 +133,42 @@ jobs:
 
     - name: Check that torch imports and is the CPU build (the torch tests would skip without it)
       run: uv run python -c "import torch; print('torch', torch.__version__); assert not torch.backends.cuda.is_built()"
+
+    - name: Run tests
+      run: uv run pytest -m "not integration" -n auto --dist worksteal -q
+
+  gbm-extra:
+    # The tree extras [lightgbm], [xgboost] and [catboost]: the tree families' tests with the real packages
+    # (tests/models/test_gbm.py: fits by hand, the adapter suite, threads and versions compared on resume, as residual
+    # learners) and their golden numbers (tests/golden/gbm_metrics.json, written with the lock's versions), and the rest of
+    # the suite with the packages installed. The test job above installs no extra, so there these tests skip. 3.14t is the
+    # free-threaded build: catboost has no wheels for it, so that cell installs the other two.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '3.12'
+            extras: '--extra lightgbm --extra xgboost --extra catboost'
+            modules: "'lightgbm', 'xgboost', 'catboost'"
+          - python-version: '3.14t'
+            extras: '--extra lightgbm --extra xgboost'
+            modules: "'lightgbm', 'xgboost'"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up uv with Python ${{ matrix.python-version }}
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies with the tree extras
+      run: uv sync --locked --extra dev ${{ matrix.extras }}
+
+    - name: Check that the packages import (their tests would skip without them)
+      run: uv run python -c "import importlib, importlib.metadata as m; [print(n, m.version(n), importlib.import_module(n).__name__) for n in (${{ matrix.modules }})]"
 
     - name: Run tests
       run: uv run pytest -m "not integration" -n auto --dist worksteal -q
