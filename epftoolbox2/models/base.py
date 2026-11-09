@@ -1322,6 +1322,11 @@ class BaseModel(ABC):
         if self._known_only and rules is not None:
             # Which forecasts exist: the information set isn't compared, but its rules and issue time decide these.
             cut["known_only"] = self._published_by(rules, freq)
+        spec = history_spec_of(self, target)
+        if spec is not None and rules is not None:
+            # Where a sequence model's series are cut (`models._history`): every series' rule, the issue time and its zone decide
+            # what each context holds, whatever the newest target.
+            cut["history"] = self._history_rules_of(spec, rules, freq)
         if self.newest_target == "d-1":
             return cut
         rule = rules._resolve_for(target, _STEP_MINUTES[freq]).rule
@@ -1333,6 +1338,17 @@ class BaseModel(ABC):
             "issue_time": rules.issue_time,
             "issue_timezone": rules.issue_timezone,
         }
+
+    @staticmethod
+    def _history_rules_of(spec: Any, rules: "InformationSet", freq: str) -> Dict[str, Any]:
+        """What decides where a sequence model's series are cut: each series' resolved rule (without the note and the class, which
+        decide nothing, as `target_rule`; None for one without a rule, which no run gets past), the issue time and its zone."""
+        step = _STEP_MINUTES[freq]
+        resolved = {}
+        for name in spec.names:
+            rule = rules._resolve_for(name, step).rule
+            resolved[name] = None if rule is None else rule_dict(rule, ("note", "vintage"))
+        return {"rules": resolved, "issue_time": rules.issue_time, "issue_timezone": rules.issue_timezone}
 
     def _newest_of(self, period: int, day: Any) -> Any:
         """The newest target, relative to each issue day, of these day ids of a run: -1 with `newest_target="d-1"`. With
