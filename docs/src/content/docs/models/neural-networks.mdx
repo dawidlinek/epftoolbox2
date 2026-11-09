@@ -419,9 +419,23 @@ Here the models of each width are one group, their 4 seeds of every weekly fit t
   structure only (every layer's class and settings, every weight's shape): a dropout of 0 (no `Dropout` layer) or another
   number of inputs is another stack, and so is a module of your own that keeps a setting of its own as a plain attribute
   rather than in a buffer.
-- **Who runs alone**: a model whose key no other model of the run has, a loop (`stack="auto"` on a CPU: a loop's arithmetic
-  isn't a stack's, so stacking it would move its numbers), a `forecast_only` run, and a subclass that changes how a fit is made
-  or read. `TORCH_STACKS=off`, an environment variable read when a run runs, runs every model on its own.
+- **When it is bit for bit, and who runs alone.** A stack gives each network the numbers it gets alone when every operation of
+  the module and the loss computes each slot's elements alike:
+  - on a GPU, for any module the stack takes (its elementwise kernels compute every element alike);
+  - on a CPU, only for `nets.MLP` (the presets and `TorchModel(module=MLP)`) with `loss="l1"` or `"mse"`: there a vectorised
+    kernel takes a stacked tensor's tail by its scalar path, so a module's own `torch.sigmoid`, `silu`, `softplus`, `log1p`
+    or power, or a loss of its own, can give the last slot other last bits (up to 4e-7 in a test). Any other model runs alone
+    on a CPU.
+
+  Also alone: a model whose key no other model of the run has, a loop (`stack="auto"` on a CPU: a loop's arithmetic isn't a
+  stack's), a `forecast_only` run, and a subclass that changes how a fit is made or read. A module whose structure is drawn
+  from torch's generator when it is built (a random projection or permutation kept as a plain attribute rather than a
+  buffer, which vmap would run with the first slot's for every slot) is found by building it under two seeds, and its fits
+  train alone in their job. `TORCH_STACKS=off`, an environment variable read when a run runs, runs every model on its own.
+- **`TORCH_STACKS=check`** stacks as `on` does and also trains about one stacked fit in 50 alone (chosen by a hash of its
+  seeds, so the same fits whatever the loop), comparing failures, best epochs and forecasts bit for bit. Each model's
+  manifest records `stack_check` (fits checked, how many differed, the largest difference in the scaled space), and a model
+  with a difference warns. It costs about 2 % more training.
 - **`pad_to` on a GPU.** A step of a stack costs far less than its networks one by one: the trainer ran 67 networks per second
   (256-128, 50 epochs of 1,456-day windows) in stacks of 256 on an H100, 75 in stacks of 2,048. Alone, a fit's 4 seeds fill 4
   of its `pad_to` slots and the rest is padding; in a loop the stacks are full. Set `pad_to` for the loop (256 suits these
@@ -429,15 +443,17 @@ Here the models of each width are one group, their 4 seeds of every weekly fit t
 - **On a CPU** a stack does one product per network, so stacking a loop buys little there: `stack="auto"` (a loop of
   single-thread fits in a pool of processes) is the fast way, and it runs each model alone.
 - **Failures stay where they were.** A network that diverged makes its own fit's forecasts `fit_error`s, as alone, and moves no
-  other network of its stack. A stack that raises (out of GPU memory, say) is trained again fit by fit, as each model alone. A
-  fit that raises stops the group as it stops a model's own run, with a `RuntimeError` naming the model; what came back is saved
-  and a later run resumes.
+  other network of its stack. A stack that raises (out of GPU memory, say) is trained again fit by fit, as each model alone,
+  slower: each worker process warns once, with the error. A fit that raises stops the group as it stops a model's own run,
+  with a `RuntimeError` naming the model; what came back is saved and a later run resumes, as after an interrupt.
 
 How it runs: the group reads the data once, as an [engine group](/epftoolbox2/model-pipeline/engine/) does (chunks of at most
 `ENGINE_MAX_MODELS` models and `ENGINE_MAX_COLUMNS` columns), and runs jobs of a few refit blocks of every model in
 `MAX_PROCESSES` worker processes (one on a GPU). A job holds at least `TORCH_STACK_MEMBERS` networks (by default one stack, up
-to four where every process still has a job); its fits are prepared as each model's own run prepares them, then trained
-together, members of one learning rate in the same stacks, since a stack trains until its last member stops.
+to four where every process still has a job) and at most 1,024 fits (or `pad_to`, if more); its fits are prepared as each
+model's own run prepares them, then trained together, members of one learning rate in the same stacks, since a stack trains
+until its last member stops. `ModelPipeline.run` refuses a `TORCH_STACKS` or `TORCH_STACK_MEMBERS` it can't read before any
+model writes.
 
 Measured (synthetic data of the research's shapes: 247 inputs, 24 outputs, 728-day windows, weekly refits, 4 seeds): the
 48-configuration loop above over half a year, 4,992 networks, took 4.7 minutes on one H100, so two years about 19; a second
@@ -447,4 +463,5 @@ fit's rows (about 50 ms a fit, as alone) was a quarter of the loop's time, and t
 a CPU the same loop with `stack="vmap"` over two weeks (384 networks, 20 epochs, `pad_to=16`, 8 processes) took 3.4 minutes
 stacked against 31 for its models one by one, each fit's 4 networks padded to 16. Every forecast was its model's own, to the
 bit: on the CPU for the 48 configurations alone, in another order and in shards of 20; on the H100 for 12 of them alone and in
-another order, and for the tests' loops with TF32 off and on.
+another order, for a loop of `MLPHourlyModel`-shaped networks (one output, 146 early-stopping rows a fit) alone and stacked,
+and for the tests' loops with TF32 off and on.
