@@ -440,9 +440,11 @@ to four where every process still has a job); its fits are prepared as each mode
 together, members of one learning rate in the same stacks, since a stack trains until its last member stops.
 
 Measured (synthetic data of the research's shapes: 247 inputs, 24 outputs, 728-day windows, weekly refits, 4 seeds): the
-48-configuration loop above over half a year, 4,992 networks, took 5.0 minutes on one H100, so two years about 20; a second
-process on the same GPU gained nothing. Preparing each fit's rows (about 50 ms a fit, as alone) was a fifth of that time. On a
-CPU the same loop with `stack="vmap"` over two weeks (384 networks of up to 1024-512, 20 epochs, `pad_to=16`, 8 processes) took
-3.4 minutes stacked against 31 for its models one by one, each fit's 4 networks padded to 16. Every forecast was its model's
-own, to the bit: on the CPU for the 48 configurations alone, in another order and in shards of 20; on the H100 for the tests'
-loops, TF32 off and on.
+48-configuration loop above over half a year, 4,992 networks, took 4.7 minutes on one H100, so two years about 19; a second
+process on the same GPU gained nothing. Once warm, a stack trained as fast per network as the research's stacked trainer at a
+fixed 50 epochs (0.93 to 1.02 of its speed in stacks of 256 from 256-128 to 1024-512, 1.11 in stacks of 1,024); preparing each
+fit's rows (about 50 ms a fit, as alone) was a quarter of the loop's time, and the first stack of a process waits for CUDA. On
+a CPU the same loop with `stack="vmap"` over two weeks (384 networks, 20 epochs, `pad_to=16`, 8 processes) took 3.4 minutes
+stacked against 31 for its models one by one, each fit's 4 networks padded to 16. Every forecast was its model's own, to the
+bit: on the CPU for the 48 configurations alone, in another order and in shards of 20; on the H100 for 12 of them alone and in
+another order, and for the tests' loops with TF32 off and on.
