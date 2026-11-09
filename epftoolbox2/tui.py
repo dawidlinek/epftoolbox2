@@ -1476,7 +1476,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "threads",
-            "description": "OpenMP threads of one fit (recorded and compared on resume)",
+            "description": "OpenMP threads of one fit: 1 where workers fork (Linux, macOS); recorded and compared on resume",
             "required": False,
             "default": 1,
             "kind": "int",
@@ -1576,7 +1576,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "threads",
-            "description": "OpenMP threads of one fit (recorded and compared on resume)",
+            "description": "OpenMP threads of one fit: 1 where workers fork (Linux, macOS); recorded and compared on resume",
             "required": False,
             "default": 1,
             "kind": "int",
@@ -1662,7 +1662,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "threads",
-            "description": "OpenMP threads of one fit (recorded and compared on resume)",
+            "description": "OpenMP threads of one fit: 1 where workers fork (Linux, macOS); recorded and compared on resume",
             "required": False,
             "default": 1,
             "kind": "int",

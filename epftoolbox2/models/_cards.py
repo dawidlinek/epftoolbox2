@@ -382,8 +382,21 @@ def version_matches(version: str, specifiers: Iterable[Tuple[str, str]]) -> bool
     return candidate is not None and all(_matches(candidate, operator, text) for operator, text in specifiers)
 
 
+def _owning_distribution(module: str) -> Optional[Any]:
+    """The installed distribution that provides the top-level module `module` where none is named after it (`xgboost-cpu`
+    provides `xgboost`), or None."""
+    for owner in importlib.metadata.packages_distributions().get(module, []):
+        try:
+            return importlib.metadata.distribution(owner)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    return None
+
+
 def installed_distribution(name: str, seen: Optional[Dict] = None) -> Optional[Tuple[str, Optional[str]]]:
-    """(version, VCS commit or None) of an installed distribution, or None when it isn't installed. The commit is PEP 610's
+    """(version, VCS commit or None) of an installed distribution, or None when it isn't installed. Where no distribution of
+    that name is, the one that provides a top-level module of that name stands for it (`xgboost-cpu` for `xgboost`, its CPU-only
+    build of the same versions), so a pin and the manifest's key keep the module's name. The commit is PEP 610's
     `vcs_info.commit_id` (`direct_url.json`) of a package installed from a repository. `seen` keeps answers for one pre-flight."""
     key = ("distribution", name)
     if seen is not None and key in seen:
@@ -391,6 +404,8 @@ def installed_distribution(name: str, seen: Optional[Dict] = None) -> Optional[T
     try:
         distribution = importlib.metadata.distribution(name)
     except importlib.metadata.PackageNotFoundError:
+        distribution = _owning_distribution(name)
+    if distribution is None:
         found = None
     else:
         commit = None

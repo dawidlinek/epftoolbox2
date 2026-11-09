@@ -14,21 +14,36 @@ package's version in the manifest's `runtime`, with the thread count of a fit (a
 Threads: a fit and its predictions run on `threads` OpenMP threads (one by default), the limit set around them alone
 (`threadpoolctl`) and the count given to the package (`n_jobs`, `thread_count`). The pool's tasks hold OpenMP at one thread,
 which XGBoost would otherwise keep to whatever `n_jobs` says; and without a limit XGBoost forms an OpenMP team even at
-`n_jobs=1`, after which a forked child that runs OpenMP on several threads hangs (GNU OpenMP), so a fit on one thread leaves a
-process safe to fork. The estimator is built, and its package with its OpenMP runtime loaded, before the scope, which limits
-only what is loaded. The seed (`random_state`) is the same for every fit, so a forecast doesn't depend on which fits a run
-makes. LightGBM runs with `deterministic=True` and `force_row_wise=True` (the research's settings, `zoo_classic/code/ztree.py`).
+`n_jobs=1`. GNU OpenMP can't run a parallel region in a forked child of a process that ran one on several threads (XGBoost,
+LightGBM, scikit-learn's HistGradientBoosting: the child hangs), and the library forks every run's workers on Linux and macOS
+(`MAX_PROCESSES=1` too), so there `threads > 1` is refused before any fit (`check_tree_threads`, as torch's threads are); a fit
+on one thread leaves its process safe to fork. The estimator is built, and its package with its OpenMP runtime loaded, before
+the scope, which limits only what is loaded. The seed (`random_state`) is the same for every fit, so a forecast doesn't depend
+on which fits a run makes. LightGBM runs with `deterministic=True` and `force_row_wise=True` (the research's settings,
+`zoo_classic/code/ztree.py`).
+
+Errors: a package's own error (`XGBoostError`, which is a ValueError, `LightGBMError`, `CatBoostError`: bad settings, a GPU
+out of memory or without kernels) is raised as a RuntimeError, which stops the run, never a `fit_error` skip that would leave
+some windows silently without forecasts. XGBoost's device is checked after each fit: asked for a GPU, a fit that XGBoost moved
+to the CPU (no visible GPU, a build without CUDA) raises, so a manifest never records "cuda" for CPU forecasts.
 """
 
+import contextlib
+import functools
 import importlib
+import json
 import numbers
 import os
 import re
+import subprocess
+import sys
+import sysconfig
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
 from .._extras import MissingExtraError
+from . import _worker
 from ._cards import RUN_DATA, ModelCard
 from ._units import PERIOD, POOLED
 from .base import BaseModel, _usable_cpu_count
@@ -70,6 +85,76 @@ XGBOOST_CARD = _card(
 CATBOOST_CARD = _card(
     "catboost", "catboost", "Apache-2.0", "https://github.com/catboost/catboost/blob/master/LICENSE", "catboost>=1.2.9"
 )
+
+
+def check_tree_threads(model: "_BoostedTrees") -> None:
+    """A ValueError for `threads > 1` where the run's pool forks its workers (Linux and macOS: `_worker._POOLS_SPAWN` False),
+    whatever `MAX_PROCESSES` says (one process is a forked worker too). GNU OpenMP keeps its thread pool's state across a fork
+    without the threads: a forked worker that runs a parallel region on two or more threads hangs once its parent has run one,
+    and the parent may have (scikit-learn's HistGradientBoosting, XGBoost or LightGBM in the same session, a notebook's own
+    fits). Called by the pre-flight and before a run's pool starts, so before any fit."""
+    if model.threads > 1 and not _worker._POOLS_SPAWN:
+        raise ValueError(
+            f"{type(model).__name__}({model.name!r}): threads={model.threads} can't run here: the library forks every run's "
+            "workers on Linux and macOS (MAX_PROCESSES=1 too), and GNU OpenMP hangs in a forked worker that runs on several "
+            "threads once its parent has (scikit-learn, XGBoost, LightGBM). Use threads=1 and more processes (MAX_PROCESSES, "
+            "by default every usable CPU): the pool already runs one fit per CPU. threads > 1 runs where workers are "
+            "spawned (Windows)."
+        )
+
+
+def _free_threaded_build() -> bool:
+    """Whether this interpreter is a free-threaded build (3.13t, 3.14t), whatever its GIL does at run time."""
+    return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+
+
+@functools.lru_cache(maxsize=None)
+def _gpu_name(device: str, visible: Optional[str]) -> str:
+    """The model name of CUDA device `device` ("cuda", "cuda:1") from `nvidia-smi`, its index taken through
+    `CUDA_VISIBLE_DEVICES` (`visible`), in a subprocess: this process must not start CUDA before its pool forks. "cuda" where
+    it can't be read. Recorded as the manifest's `runtime.device_name`, which a resume compares with a warning only."""
+    index = int(device.split(":", 1)[1]) if ":" in device else 0
+    if visible is not None:
+        ids = [part.strip() for part in visible.split(",") if part.strip()]
+        if index >= len(ids):
+            return "cuda"
+        selector = ids[index]
+    else:
+        selector = str(index)
+    try:
+        done = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader", "-i", selector],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "cuda"
+    lines = done.stdout.strip().splitlines() if done.returncode == 0 else []
+    return lines[0].strip() if lines and lines[0].strip() else "cuda"
+
+
+def _error_class(module: str, name: str) -> Tuple[type, ...]:
+    """(the package's error class,), or () where the package can't be imported (then it raised nothing of its own)."""
+    try:
+        return (getattr(importlib.import_module(module), name),)
+    except ImportError:
+        return ()
+
+
+@contextlib.contextmanager
+def _package_errors(model: "_BoostedTrees"):
+    """The package's own errors as a RuntimeError, which stops the run: `XGBoostError` is a ValueError, which a fit would
+    otherwise turn into a `fit_error` skip of every forecast of the unit, window after window (a GPU out of memory, bad
+    settings). Any other error goes through as it is (a ValueError of the data stays a skip)."""
+    errors = model._error_types()
+    try:
+        yield
+    except errors as error:
+        first = (str(error).strip().splitlines() or [""])[0]
+        raise RuntimeError(
+            f"{type(model).__name__}: {model._card.family} failed: {type(error).__name__}: {first}"
+        ) from error
 
 
 def _thread_scope(threads: int):
@@ -131,9 +216,25 @@ class _BoostedTrees(BaseModel):
     def _on_gpu(self) -> bool:
         return False
 
+    def _error_types(self) -> Tuple[type, ...]:
+        """The package's own error classes (`_package_errors`); empty where they can't be imported."""
+        return ()
+
+    def _preflight(self, seen: Optional[Dict] = None) -> List[Any]:
+        """The card's checks, after a refusal of `threads > 1` where the pool forks (`check_tree_threads`): before any model of
+        a run fits."""
+        check_tree_threads(self)
+        return super()._preflight(seen)
+
+    def _check_pool_settings(self) -> None:
+        """What a run's pool can't run, refused before any fit (`ResidualModel` asks its learner before its base runs)."""
+        check_tree_threads(self)
+
     def _executor_config(self) -> tuple:
         """(task threads per process, processes): `THREADS_PER_PROCESS` (1) and `MAX_PROCESSES`, by default as many processes
-        as the usable CPUs hold fits of `threads` threads each, or one where the fits run on a GPU."""
+        as the usable CPUs hold fits of `threads` threads each, or one where the fits run on a GPU. Refuses `threads > 1` where
+        the pool forks (`check_tree_threads`), before the pool starts."""
+        check_tree_threads(self)
         task_threads = int(os.environ.get("THREADS_PER_PROCESS", "1"))
         default = 1 if self._on_gpu() else max(1, _usable_cpu_count() // (task_threads * self.threads))
         return task_threads, int(os.environ.get("MAX_PROCESSES", default))
@@ -141,14 +242,19 @@ class _BoostedTrees(BaseModel):
     def _estimator(self) -> Any:  # pragma: no cover - every family defines it
         raise NotImplementedError
 
+    def _check_fitted(self, fitted: Any) -> None:
+        """What a fit must have done (XGBoost: run on the device asked for); nothing here."""
+
     def _fit_model(self, train_x: np.ndarray, train_y: np.ndarray) -> Any:
         # Built (the package and its OpenMP runtime loaded) before the scope: `threadpool_limits` limits only what is loaded.
         estimator = self._estimator()
-        with _thread_scope(self.threads):
-            return estimator.fit(train_x, train_y)
+        with _package_errors(self), _thread_scope(self.threads):
+            fitted = estimator.fit(train_x, train_y)
+        self._check_fitted(fitted)
+        return fitted
 
     def _predict_block(self, fitted: Any, rows: np.ndarray) -> Tuple[np.ndarray, List[list]]:
-        with _thread_scope(self.threads):
+        with _package_errors(self), _thread_scope(self.threads):
             predictions = fitted.predict(np.asarray(rows, dtype=np.float64))
         return np.asarray(predictions, dtype=np.float64), [[] for _ in range(len(rows))]
 
@@ -176,7 +282,8 @@ class LightGBMModel(_BoostedTrees):
             LightGBM's (scikit-learn API names), at the research's values. Every fit runs with `deterministic=True` and
             `force_row_wise=True`.
         random_state: The seed of the row and column samples, the same for every fit.
-        threads: OpenMP threads of one fit (recorded in the manifest's `runtime` and compared on resume).
+        threads: OpenMP threads of one fit, recorded in the manifest's `runtime` and compared on resume; more than one is
+            refused where the run's workers fork (Linux, macOS: `check_tree_threads`).
         scaler: The predictors as they are and the target as the Invariant, by default (`periods="each"`; a pooled fit gives
             each period's target its own Invariant whatever this says).
         newest_target, binary_mask: As for every model (see `BaseModel`).
@@ -246,6 +353,9 @@ class LightGBMModel(_BoostedTrees):
             **self._seed_kwargs(),
         }
 
+    def _error_types(self) -> Tuple[type, ...]:
+        return _error_class("lightgbm.basic", "LightGBMError")
+
     def _estimator(self):
         lightgbm = _package("lightgbm", self)
         return lightgbm.LGBMRegressor(
@@ -276,8 +386,8 @@ class XGBoostModel(_BoostedTrees):
         n_estimators, learning_rate, max_depth, subsample, colsample_bytree, min_child_weight, reg_lambda: XGBoost's
             (scikit-learn API names), at the research's values.
         device: `"cpu"` (the default) or a CUDA GPU (`"cuda"`, `"cuda:1"`). CPU and GPU forecasts differ, so the device type is
-            recorded in the manifest's `runtime` and compared on resume; on a GPU a run takes one process unless
-            `MAX_PROCESSES` says otherwise.
+            recorded in the manifest's `runtime` (with the GPU's model name, warn-only) and compared on resume; a GPU fit that
+            XGBoost moved to the CPU raises; on a GPU a run takes one process unless `MAX_PROCESSES` says otherwise.
     """
 
     _card = XGBOOST_CARD
@@ -352,8 +462,30 @@ class XGBoostModel(_BoostedTrees):
         return self.device != "cpu"
 
     def _runtime_fields(self) -> Dict[str, Any]:
-        """The device type (`cpu`, `cuda`) and the thread count of a fit, compared on resume."""
-        return {"device": self.device.split(":")[0], **super()._runtime_fields()}
+        """The device type (`cpu`, `cuda`) and the thread count of a fit, compared on resume; on a GPU also its model name
+        (`device_name`, from nvidia-smi), which a resume compares with a warning only (bits are not known to hold across GPU
+        types). The GPU's index is in `model_params` (`device`), compared too."""
+        fields = {"device": self.device.split(":")[0], **super()._runtime_fields()}
+        if self._on_gpu():
+            fields["device_name"] = _gpu_name(self.device, os.environ.get("CUDA_VISIBLE_DEVICES"))
+        return fields
+
+    def _error_types(self) -> Tuple[type, ...]:
+        return _error_class("xgboost.core", "XGBoostError")
+
+    def _check_fitted(self, fitted: Any) -> None:
+        """Asked for a GPU, the fit must have run on one: XGBoost moves a fit to the CPU, with a warning, where no GPU is
+        visible or the build has no CUDA, and the manifest would then record "cuda" for CPU forecasts (a resume on a GPU
+        would mix them). A RuntimeError, which stops the run."""
+        if not self._on_gpu():
+            return
+        used = json.loads(fitted.get_booster().save_config())["learner"]["generic_param"]["device"]
+        if not str(used).startswith("cuda"):
+            raise RuntimeError(
+                f"XGBoostModel: device={self.device!r} was asked for, but XGBoost fitted on {used!r} (no visible GPU, or an "
+                "XGBoost built without CUDA such as xgboost-cpu): make the GPU visible to the run's workers, or use "
+                "device='cpu'"
+            )
 
     def _estimator(self):
         xgboost = _package("xgboost", self)
@@ -435,6 +567,28 @@ class CatBoostModel(_BoostedTrees):
             **self._seed_kwargs(),
         }
 
+    def _error_types(self) -> Tuple[type, ...]:
+        return _error_class("catboost", "CatBoostError")
+
+    def _preflight(self, seen: Optional[Dict] = None) -> List[Any]:
+        """The card's checks; where catboost is missing on Python 3.15 or a free-threaded build, the hint says that it has no
+        wheels there (pip would try to build it from source) instead of naming the extra."""
+        problems = super()._preflight(seen)
+        if sys.version_info >= (3, 15) or _free_threaded_build():
+            build = "Python 3.15" if sys.version_info >= (3, 15) else "a free-threaded Python build"
+            problems = [
+                problem._replace(
+                    message=(
+                        f"needs catboost, which has no wheels for Python 3.15 or free-threaded builds (this is {build}): "
+                        "use a Python 3.11-3.14 build with the GIL and pip install 'epftoolbox2[catboost]' there"
+                    )
+                )
+                if problem.kind == "extra"
+                else problem
+                for problem in problems
+            ]
+        return problems
+
     def _estimator(self):
         catboost = _package("catboost", self)
         return catboost.CatBoostRegressor(
@@ -451,6 +605,7 @@ class CatBoostModel(_BoostedTrees):
 
 
 __all__ = [
+    "check_tree_threads",
     "LightGBMModel",
     "XGBoostModel",
     "CatBoostModel",

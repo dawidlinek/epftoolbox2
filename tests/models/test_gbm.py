@@ -6,7 +6,8 @@ them in the `gbm-extra` CI job; the core-only job runs the rest (settings, cards
 package). Runs go through an in-process pool unless a test says otherwise: a fit on one OpenMP thread leaves no OpenMP team in
 this process, so the forked pools of later tests are safe. XGBoost forms a team even with `n_jobs=1` unless OpenMP is held at
 one thread (the models do so; a fit by hand here must too), and a forked child that then runs it on several threads hangs in
-GNU OpenMP: `threads=2` runs in a process of its own.
+GNU OpenMP, which is why `threads > 1` is refused where pools fork: the run on two threads that a spawned pool allows goes in a
+process of its own.
 """
 
 import importlib.metadata
@@ -28,7 +29,7 @@ from epftoolbox2._extras import MissingExtraError
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import CatBoostModel, LightGBMModel, OLSModel, ResidualModel, XGBoostModel
-from epftoolbox2.models import gbm
+from epftoolbox2.models import _cards, _worker, gbm
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.models.base import _usable_cpu_count
 from epftoolbox2.pipelines import ModelPipeline
@@ -164,8 +165,10 @@ def test_settings_cards_and_what_is_refused(cls):
 
 def test_xgboost_s_device_is_recorded_and_a_gpu_takes_one_process(monkeypatch):
     assert XGBoostModel(INPUTS)._runtime_fields() == {"device": "cpu", "threads_per_fit": 1}
+    monkeypatch.setattr(gbm, "_gpu_name", lambda device, visible: "a GPU")
     gpu = XGBoostModel(INPUTS, device="cuda:1")
-    assert gpu._runtime_fields() == {"device": "cuda", "threads_per_fit": 1} and gpu._model_kwargs["device"] == "cuda:1"
+    assert gpu._runtime_fields() == {"device": "cuda", "threads_per_fit": 1, "device_name": "a GPU"}
+    assert gpu._model_kwargs["device"] == "cuda:1"
     for bad in ("gpu", "cuda:", "CPU", None):
         with pytest.raises(ValueError, match="device"):
             XGBoostModel(INPUTS, device=bad)
@@ -177,9 +180,10 @@ def test_xgboost_s_device_is_recorded_and_a_gpu_takes_one_process(monkeypatch):
 
 @pytest.mark.parametrize("cls", [LightGBMModel, XGBoostModel, CatBoostModel])
 def test_a_run_takes_as_many_processes_as_the_cpus_hold_fits_of_its_threads(cls, monkeypatch):
-    """Without MAX_PROCESSES, a fit of `threads` threads leaves the CPUs to fewer processes; a ResidualModel's learner stage runs
-    with its learner's count."""
+    """Without MAX_PROCESSES, a fit of `threads` threads leaves the CPUs to fewer processes where workers are spawned (the only
+    place it may have more than one); a ResidualModel's learner stage runs with its learner's count."""
     monkeypatch.delenv("MAX_PROCESSES")
+    monkeypatch.setattr(_worker, "_POOLS_SPAWN", True)
     cpus = _usable_cpu_count()
     assert cls(INPUTS)._executor_config() == (1, cpus)
     assert cls(INPUTS, threads=4)._executor_config() == (1, max(1, cpus // 4))
@@ -190,6 +194,36 @@ def test_a_run_takes_as_many_processes_as_the_cpus_hold_fits_of_its_threads(cls,
     assert residual._executor_config() == learner._executor_config()
     monkeypatch.setenv("MAX_PROCESSES", "5")
     assert cls(INPUTS, threads=4)._executor_config() == (2, 5)
+
+
+@pytest.mark.parametrize("cls", [LightGBMModel, XGBoostModel, CatBoostModel])
+def test_more_than_one_thread_is_refused_where_the_pool_forks_before_any_fit(cls, market, monkeypatch):
+    """Where the library forks its workers (Linux, macOS; `MAX_PROCESSES=1` too) a fit on several OpenMP threads can hang, so
+    `threads > 1` is refused before any fit: in the pre-flight of a pipeline, before a model's own pool starts, and before a
+    ResidualModel's base runs. One thread is never refused, and a spawned pool takes more."""
+    monkeypatch.setattr(_worker, "_POOLS_SPAWN", False)
+    fits, bases = [], []
+    monkeypatch.setattr(gbm._BoostedTrees, "_fit_model", lambda self, x, y: fits.append(1))
+    monkeypatch.setattr(ResidualModel, "_run_base", staticmethod(lambda *a, **k: bases.append(1) or ({}, {})))
+    model = cls(INPUTS, training_window=28, threads=2, name="tree")
+    message = r"threads=2 can't run here.*MAX_PROCESSES"
+    with pytest.raises(ValueError, match=message):
+        model._executor_config()
+    with pytest.raises(ValueError, match=message):
+        run(model, market)
+    with pytest.raises(ValueError, match=message):
+        model.run(market, *TEST, horizon=1)
+    learner = cls(INPUTS + ["base_fc_d+{horizon}"], threads=2)
+    hybrid = ResidualModel(OLSModel(["load_d+{horizon}"], training_window=21), learner, training_window=28)
+    with pytest.raises(ValueError, match=message):
+        run(hybrid, market)
+    with pytest.raises(ValueError, match=message):
+        hybrid.run(market, *TEST, horizon=1)
+    assert fits == [] and bases == []
+    cls(INPUTS)._preflight({})  # one thread: never refused
+    cls(INPUTS)._executor_config()
+    monkeypatch.setattr(_worker, "_POOLS_SPAWN", True)
+    model._executor_config()
 
 
 @pytest.mark.parametrize("cls", [LightGBMModel, XGBoostModel, CatBoostModel])
@@ -263,6 +297,73 @@ def test_every_fit_and_prediction_runs_inside_the_thread_scope(cls, monkeypatch)
         ("predict", 1),
         ("exit", 3),
     ]
+
+
+def test_a_missing_xgboost_resolves_to_the_distribution_that_provides_the_module(monkeypatch):
+    """`xgboost-cpu` (XGBoost's CPU-only build) installs the `xgboost` module under another distribution name: the pin
+    `xgboost>=2.1` and the manifest's key `xgboost` take its version, so the pre-flight passes and a resume compares it."""
+
+    class Distribution:
+        version = "3.4.1"
+
+        @staticmethod
+        def read_text(name):
+            return None
+
+    real = importlib.metadata.distribution
+
+    def distribution(name):
+        if name == "xgboost":
+            raise importlib.metadata.PackageNotFoundError(name)
+        return Distribution() if name == "xgboost-cpu" else real(name)
+
+    monkeypatch.setattr(importlib.metadata, "distribution", distribution)
+    monkeypatch.setattr(importlib.metadata, "packages_distributions", lambda: {"xgboost": ["xgboost-cpu"]})
+    assert _cards.installed_distribution("xgboost") == ("3.4.1", None)
+    assert _cards.runtime_versions(gbm.XGBOOST_CARD) == {"xgboost": "3.4.1"}
+    monkeypatch.setattr(_cards, "has_extra", lambda name: True)
+    assert not [problem for problem in XGBoostModel(INPUTS)._preflight({}) if problem.kind == "runtime"]
+    monkeypatch.setattr(importlib.metadata, "packages_distributions", lambda: {})
+    assert _cards.installed_distribution("xgboost") is None
+
+
+@pytest.mark.parametrize("free_threaded, version", [(True, (3, 14)), (False, (3, 15)), (False, (3, 12))])
+def test_catboost_s_pre_flight_says_where_it_has_no_wheels(free_threaded, version, monkeypatch):
+    """Without catboost on Python 3.15 or a free-threaded build the pre-flight says that it has no wheels there (pip would try
+    to build it from source); elsewhere it names the extra to install."""
+    monkeypatch.setattr(gbm, "_free_threaded_build", lambda: free_threaded)
+    monkeypatch.setattr(gbm.sys, "version_info", version)
+    monkeypatch.setattr(_cards, "has_extra", lambda name: name != "catboost")
+    (problem,) = CatBoostModel(INPUTS)._preflight({})
+    if free_threaded or version >= (3, 15):
+        assert "no wheels for Python 3.15 or free-threaded builds" in problem.message
+        assert "Python 3.11-3.14 build with the GIL" in problem.message
+    else:
+        assert problem.message.endswith("pip install 'epftoolbox2[catboost]'")
+    assert problem.extra == "catboost"
+
+
+def test_the_gpu_s_name_comes_from_nvidia_smi_through_the_visible_devices(monkeypatch, request):
+    """`runtime.device_name` of an XGBoost GPU run: nvidia-smi's name of the device, its index mapped through
+    CUDA_VISIBLE_DEVICES; "cuda" where it can't be read. A CPU run records none."""
+    asked = []
+
+    def fake_run(command, **kwargs):
+        asked.append(command[-1])
+        return subprocess.CompletedProcess(command, 0, stdout="NVIDIA H100 80GB HBM3\n", stderr="")
+
+    real = gbm._gpu_name
+    real.cache_clear()
+    request.addfinalizer(real.cache_clear)  # no fake name stays in the cache
+    monkeypatch.setattr(gbm.subprocess, "run", fake_run)
+    assert gbm._gpu_name("cuda", None) == "NVIDIA H100 80GB HBM3" and asked == ["0"]
+    assert gbm._gpu_name("cuda:1", "3,GPU-abc") == "NVIDIA H100 80GB HBM3" and asked[-1] == "GPU-abc"
+    assert gbm._gpu_name("cuda:2", "3,5") == "cuda"  # not among the visible devices
+    monkeypatch.setattr(gbm.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("nvidia-smi")))
+    assert gbm._gpu_name("cuda:3", None) == "cuda"
+    monkeypatch.setattr(gbm, "_gpu_name", lambda device, visible: f"name of {device}")
+    assert XGBoostModel(INPUTS, device="cuda:1")._runtime_fields()["device_name"] == "name of cuda:1"
+    assert "device_name" not in XGBoostModel(INPUTS)._runtime_fields()
 
 
 def test_an_import_error_inside_the_package_is_its_own(monkeypatch):
@@ -408,35 +509,136 @@ def test_one_row_at_a_time_gives_the_block_call_s_forecasts(family, market):
     assert keyed(records(single, market)) == blocks
 
 
-def test_threads_are_given_to_the_package_recorded_and_compared_on_resume(family, market, tmp_path):
-    """A fit on two threads runs, its manifest records the thread count and the package's version, and a resume with another
-    thread count, or over results of another version, refuses before any fit. The two-thread run is a process of its own,
-    whose workers fork from a parent that ran no OpenMP code on several threads (one that had hangs its child in GNU OpenMP)."""
-    package, make = family
+def test_two_threads_where_workers_are_spawned_give_one_thread_s_bits(family):
+    """Where workers are spawned (`_POOLS_SPAWN`, Windows) `threads=2` runs: the same forecasts as one thread, bit for bit. In a
+    process of its own (an in-process pool there), since a fit on two OpenMP threads in this one would put the forked pools of
+    later tests at risk."""
+    package, _ = family
     cls, small = FAMILIES[package]
-    save = tmp_path / "run"
     code = (
         f"import sys; sys.path.insert(0, {str(ROOT)!r})\n"
-        "from tests.synthetic import make_market_data\n"
-        "from epftoolbox2.models import LightGBMModel, XGBoostModel, CatBoostModel\n"
+        "from concurrent.futures import Future\n"
+        "import epftoolbox2.models.base as base\n"
+        "from epftoolbox2.models import _worker, LightGBMModel, XGBoostModel, CatBoostModel\n"
         "from epftoolbox2.pipelines import ModelPipeline\n"
+        "from tests.synthetic import make_market_data\n"
+        "class Pool:\n"
+        "    def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=()):\n"
+        "        _worker._worker_init(*initargs)\n"
+        "    def __enter__(self): return self\n"
+        "    def __exit__(self, *a): return False\n"
+        "    def submit(self, task, *args):\n"
+        "        f = Future(); f.set_result(task(*args)); return f\n"
+        "    def shutdown(self, wait=True, cancel_futures=False): pass\n"
+        "base.ProcessPoolExecutor = Pool\n"
+        "_worker._POOLS_SPAWN = True\n"
         "market = make_market_data(start='2023-01-01', days=110, horizon=2, noise=5.0, seed=3)\n"
-        f"model = {cls.__name__}({INPUTS!r}, training_window=28, threads=2, name='tree', **{small!r})\n"
-        f"ModelPipeline().add_model(model).run(market, *{TEST!r}, horizon=1, save_dir={str(save)!r})\n"
+        "out = []\n"
+        "for threads in (1, 2):\n"
+        f"    model = {cls.__name__}({INPUTS!r}, training_window=28, threads=threads, name='tree', **{small!r})\n"
+        f"    ref = ModelPipeline().add_model(model).run(market, *{TEST!r}, horizon=1).refs['tree']\n"
+        "    out.append(sorted((r['run_date'], r['hour'], r['prediction']) for r in ref._results))\n"
+        "assert out[0] and out[0] == out[1], 'two threads moved a forecast'\n"
     )
-    env = {**os.environ, "MAX_PROCESSES": "2", "THREADS_PER_PROCESS": "1"}
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=600)
+    env = {**os.environ, "MAX_PROCESSES": "1", "THREADS_PER_PROCESS": "1"}
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
     assert result.returncode == 0, result.stderr[-3000:]
+
+
+def test_threads_and_the_version_are_recorded_and_compared_on_resume(family, market, tmp_path, monkeypatch):
+    """The manifest records the thread count and the package's version (`runtime`; `threads` is in `model_params` too), and a
+    resume with another thread count, or over results of another version, refuses before any fit."""
+    package, make = family
+    save = tmp_path / "run"
+    run(make(), market, save_dir=save)
     path = manifest_path(save / "tree.jsonl")
     manifest = json.loads(path.read_text())
-    assert manifest["runtime"]["threads_per_fit"] == 2 and manifest["model_params"]["threads"] == 2
+    assert manifest["runtime"]["threads_per_fit"] == 1 and manifest["model_params"]["threads"] == 1
     assert manifest["runtime"]["packages"] == {package: importlib.metadata.version(package)}
-    with pytest.raises(ManifestMismatchError, match="runtime.threads_per_fit"):
-        run(make(threads=1), market, save_dir=save)
+    monkeypatch.setattr(_worker, "_POOLS_SPAWN", True)  # two threads pass the fork check: the manifest refuses them
+    monkeypatch.setattr(gbm._BoostedTrees, "_fit_model", lambda *a: pytest.fail("a fit ran"))
+    with pytest.raises(ManifestMismatchError) as refused:
+        run(make(threads=2), market, save_dir=save)
+    assert "runtime.threads_per_fit: 1 (existing results) vs 2 (this run)" in str(refused.value)
+    assert "'threads': 1" in str(refused.value) and "'threads': 2" in str(refused.value)  # model_params, named too
     manifest["runtime"]["packages"][package] = "0.1.0"
     path.write_text(json.dumps(manifest))
     with pytest.raises(ManifestMismatchError, match=f"runtime.packages.{package}"):
-        run(make(threads=2), market, save_dir=save)
+        run(make(), market, save_dir=save)
+
+
+def test_package_errors_stop_the_run_and_data_errors_stay_value_errors(family, market, monkeypatch):
+    """A package's own error (XGBoostError is a ValueError) is a RuntimeError, in the fit and the predictions, so a run stops
+    instead of skipping a window's forecasts as `fit_error`; any other ValueError (of the data) goes through as it is. Real
+    settings the packages refuse stop a pipeline run."""
+    package, make = family
+    model = make()
+    error = model._error_types()[0]
+
+    class Failing:
+        def __init__(self, raised):
+            self.raised = raised
+
+        def fit(self, x, y):
+            raise self.raised
+
+        def predict(self, rows):
+            raise self.raised
+
+    for raised in (error("device out of memory"), ValueError("the data")):
+        monkeypatch.setattr(model, "_estimator", lambda raised=raised: Failing(raised))
+        expected = RuntimeError if isinstance(raised, error) else ValueError
+        with pytest.raises(expected, match="device out of memory" if expected is RuntimeError else "the data"):
+            model._fit_model(np.zeros((3, 5)), np.zeros(3))
+        with pytest.raises(expected):
+            model._predict_block(Failing(raised), np.zeros((2, 5)))
+    bad = {"lightgbm": {"num_leaves": 1}, "xgboost": {"subsample": 1.5}, "catboost": {"depth": 99}}[package]
+    with pytest.raises(RuntimeError, match=f"{type(model).__name__}: {package} failed"):
+        run(make(**bad), market)
+
+
+def test_xgboost_on_a_gpu_must_have_fitted_on_one(monkeypatch):
+    """Asked for a GPU, a fit that XGBoost moved to the CPU raises (a RuntimeError, which stops the run), so a manifest never
+    records "cuda" for CPU forecasts; checked from the booster's own configuration after every fit."""
+    pytest.importorskip("xgboost")
+
+    class Fitted:
+        def __init__(self, device):
+            self.device = device
+
+        def get_booster(self):
+            return self
+
+        def save_config(self):
+            return json.dumps({"learner": {"generic_param": {"device": self.device}}})
+
+    gpu = XGBoostModel(INPUTS, device="cuda:1")
+    with pytest.raises(RuntimeError, match=r"device='cuda:1' was asked for, but XGBoost fitted on 'cpu'"):
+        gpu._check_fitted(Fitted("cpu"))
+    gpu._check_fitted(Fitted("cuda:1"))
+    XGBoostModel(INPUTS)._check_fitted(Fitted("cpu"))
+
+
+def test_xgboost_asked_for_a_gpu_with_none_visible_stops_the_run():
+    """With no GPU visible (CUDA_VISIBLE_DEVICES empty, in a process of its own, before CUDA starts), XGBoost moves the fit to the
+    CPU with a warning, and the run stops instead of recording "cuda" for CPU forecasts."""
+    pytest.importorskip("xgboost")
+    code = (
+        f"import sys; sys.path.insert(0, {str(ROOT)!r})\n"
+        "import numpy as np\n"
+        "from epftoolbox2.models import XGBoostModel\n"
+        "model = XGBoostModel(['a', 'b'], n_estimators=3, device='cuda')\n"
+        "rng = np.random.default_rng(0)\n"
+        "try:\n"
+        "    model._fit_model(rng.normal(size=(50, 2)), rng.normal(size=50))\n"
+        "except RuntimeError as error:\n"
+        "    print('refused:', error)\n"
+        "else:\n"
+        "    raise SystemExit('a CPU fit passed as a GPU one')\n"
+    )
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
+    assert result.returncode == 0 and "refused:" in result.stdout, result.stdout + result.stderr[-2000:]
 
 
 def test_xgboost_s_device_is_compared_on_resume(market, tmp_path):
@@ -511,9 +713,9 @@ def test_as_a_residual_learner(family, market, tmp_path):
 # The golden numbers
 # ---------------------------------------------------------------------------------------------------------------------------
 
-# Each family's numbers move between its package's releases, and the 3.15 and newest-dependencies CI cells resolve newer ones
-# than the lock's: a model's numbers are compared on the release the file was written with (`version` in its entry), and a
-# model whose package isn't installed (catboost on 3.14t) is skipped.
+# Each family's numbers move between its package's releases, and the newest-dependencies CI job resolves newer ones than the
+# lock's: a model's numbers are compared on the release the file was written with (`version` in its entry), and a model whose
+# package isn't installed (catboost on 3.14t; every family in the core-only cells) is skipped, one test per model.
 GOLDEN_RTOL = 1e-9
 
 
@@ -553,37 +755,42 @@ def _version(package):
     return importlib.metadata.version(package) if importlib.util.find_spec(package) is not None else None
 
 
-def test_gbm_metrics_match_golden():
+def test_write_the_gbm_golden_file():
+    """`UPDATE_GOLDEN=1` writes the file, with every family installed; skipped otherwise."""
+    if os.environ.get("UPDATE_GOLDEN") != "1":
+        pytest.skip("UPDATE_GOLDEN=1 writes the golden file")
     models = golden_models()
+    missing = sorted({package for package, _ in models.values() if _version(package) is None})
+    assert not missing, f"the golden file holds every family: install {missing}"
+    actual = compute_gbm_metrics(set(models))
+    written = {
+        name: {**values, "package": models[name][0], "version": _version(models[name][0])}
+        for name, values in actual.items()
+    }
+    GOLDEN_FILE.write_text(json.dumps(written, indent=2, sort_keys=True) + "\n")
+
+
+def test_the_golden_file_holds_every_golden_model():
+    assert set(json.loads(GOLDEN_FILE.read_text())) == set(golden_models())
+
+
+@pytest.mark.parametrize("name", sorted(golden_models()))
+def test_gbm_metrics_match_golden(name):
+    """One model's golden numbers, compared on the release of its package the file was written with: skipped, saying which,
+    where the package isn't installed or is another release."""
     if os.environ.get("UPDATE_GOLDEN") == "1":
-        missing = sorted({package for package, _ in models.values() if _version(package) is None})
-        assert not missing, f"the golden file holds every family: install {missing}"
-        actual = compute_gbm_metrics(set(models))
-        written = {
-            name: {**values, "package": models[name][0], "version": _version(models[name][0])}
-            for name, values in actual.items()
-        }
-        GOLDEN_FILE.write_text(json.dumps(written, indent=2, sort_keys=True) + "\n")
-        pytest.skip(f"golden values written to {GOLDEN_FILE}")
-    expected = json.loads(GOLDEN_FILE.read_text())
-    assert set(expected) == set(models)
-    skipped = {}
-    for name, values in expected.items():
-        installed = _version(values["package"])
-        if installed is None:
-            skipped[name] = f"{values['package']} isn't installed"
-        elif installed != values["version"]:
-            skipped[name] = f"{values['package']} {installed} here, {values['version']} in the file"
-    compared = set(expected) - set(skipped)
-    if compared:
-        actual = compute_gbm_metrics(compared)
-        for name in compared:
-            values = {k: v for k, v in expected[name].items() if k not in ("package", "version")}
-            assert actual[name]["forecasts"] == values.pop("forecasts"), f"{name}: number of forecasts changed"
-            for key, value in values.items():
-                assert actual[name][key] == pytest.approx(value, rel=GOLDEN_RTOL), f"{name} {key}"
-    if skipped:
-        pytest.skip(f"not compared (each family's numbers move between its releases): {skipped}")
+        pytest.skip("the golden file is being written")
+    values = dict(json.loads(GOLDEN_FILE.read_text())[name])
+    package, version = values.pop("package"), values.pop("version")
+    installed = _version(package)
+    if installed is None:
+        pytest.skip(f"{name}: {package} isn't installed")
+    if installed != version:
+        pytest.skip(f"{name}: {package} {installed} here, {version} in the file (its numbers move between releases)")
+    actual = compute_gbm_metrics({name})[name]
+    assert actual["forecasts"] == values.pop("forecasts"), f"{name}: number of forecasts changed"
+    for key, value in values.items():
+        assert actual[key] == pytest.approx(value, rel=GOLDEN_RTOL), f"{name} {key}"
 
 
 def test_the_gbm_golden_is_of_the_lock_s_versions():
@@ -593,5 +800,5 @@ def test_the_gbm_golden_is_of_the_lock_s_versions():
     for name, values in json.loads(GOLDEN_FILE.read_text()).items():
         found = re.findall(rf'\[\[package\]\]\nname = "{values["package"]}"\nversion = "([^"]+)"', lock)
         assert found, f"no {values['package']} in uv.lock"
-        newest = max(found, key=lambda text: tuple(int(part) for part in text.split(".")))
+        newest = max(found, key=lambda text: _cards.parse_version(text).key)
         assert values["version"] == newest, (name, values["version"], found)
