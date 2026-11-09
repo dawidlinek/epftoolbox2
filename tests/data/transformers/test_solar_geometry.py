@@ -201,6 +201,8 @@ def test_its_columns_are_the_ones_the_information_set_has_static_rules_for():
         ({"locations": "51,10"}, "pairs"),
         ({"locations": [(50.0, 10.0)], "weights": [1, 2]}, "one positive number per location"),
         ({"locations": [(50.0, 10.0)], "weights": [0]}, "one positive number per location"),
+        ({"locations": [(50.0, 10.0)], "weights": 1.0}, "a list of one positive number per location"),
+        ({"locations": [(50.0, 10.0)], "prefix": "de_"}, "trailing underscore"),
         ({"locations": [(50.0, 10.0)], "freq": "1D"}, "shorter than a day"),
         ({"locations": [(50.0, 10.0)], "freq": "7min"}, "whole slots"),
         ({"locations": [(50.0, 10.0)], "night_below": 2.0}, "night_below"),

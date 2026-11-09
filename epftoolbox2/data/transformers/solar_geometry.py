@@ -9,7 +9,7 @@ import pandas as pd
 from ._daily import check_new_columns, check_spacing, parse_step, slot_of_day
 from .base import Transformer
 
-# The columns it adds (before `prefix`). `information_set` gives each a static rule (and `*_<name>` for a prefixed one).
+# The columns it adds (before `prefix`). `information_set` gives each a static rule (a prefixed one's through `source_rules`).
 COLUMNS = ("sun_elevation", "sun_sin_elevation", "clear_sky_ghi", "is_night")
 ALGORITHMS = ("meeus", "spencer")
 _DAY_NS = 86_400 * 10**9
@@ -38,9 +38,10 @@ def _pairs(locations) -> list:
     return out
 
 
-def _sine_meeus(ns: np.ndarray, lat: float, lon: float) -> np.ndarray:
-    """Sine of the sun's geometric elevation at UTC instants (nanoseconds since the epoch): the NOAA Solar Calculator's
-    equations (Meeus, Astronomical Algorithms), as `astral.sun.elevation(..., with_refraction=False)` computes them."""
+def _sun_meeus(ns: np.ndarray) -> tuple:
+    """The sun's declination (radians) and the equation of time (minutes) at UTC instants (nanoseconds since the epoch): the
+    NOAA Solar Calculator's equations (Meeus, Astronomical Algorithms), as `astral.sun.elevation(..., with_refraction=False)`
+    computes them."""
     t = (ns / _DAY_NS - _J2000_DAYS) / 36525.0  # Julian centuries since J2000.0
     l0 = np.mod(280.46646 + t * (36000.76983 + 0.0003032 * t), 360.0)  # geometric mean longitude, degrees
     m = np.radians(357.52911 + t * (35999.05029 - 0.0001537 * t))  # geometric mean anomaly
@@ -64,12 +65,12 @@ def _sine_meeus(ns: np.ndarray, lat: float, lon: float) -> np.ndarray:
         - 0.5 * y * y * np.sin(4.0 * l0r)
         - 1.25 * e * e * np.sin(2.0 * m)
     )  # minutes
-    return _sine(ns, lat, lon, declination, equation_of_time)
+    return declination, equation_of_time
 
 
-def _sine_spencer(ns: np.ndarray, lat: float, lon: float) -> np.ndarray:
-    """Sine of the sun's elevation from NOAA's General Solar Position Calculations: the fractional year's Fourier series
-    (Spencer 1971) for the declination and the equation of time, a 365-day year in every year, as the renewables study."""
+def _sun_spencer(ns: np.ndarray) -> tuple:
+    """The declination and the equation of time from NOAA's General Solar Position Calculations: the fractional year's Fourier
+    series (Spencer 1971), a 365-day year in every year, as the renewables study."""
     day_of_year = pd.DatetimeIndex(ns.astype("datetime64[ns]")).dayofyear.to_numpy()
     hours = np.mod(ns, _DAY_NS) / 3.6e12
     g = 2.0 * np.pi / 365.0 * (day_of_year - 1 + (hours - 12.0) / 24.0)
@@ -85,18 +86,18 @@ def _sine_spencer(ns: np.ndarray, lat: float, lon: float) -> np.ndarray:
     equation_of_time = 229.18 * (
         0.000075 + 0.001868 * np.cos(g) - 0.032077 * np.sin(g) - 0.014615 * np.cos(2.0 * g) - 0.040849 * np.sin(2.0 * g)
     )
-    return _sine(ns, lat, lon, declination, equation_of_time)
+    return declination, equation_of_time
 
 
-def _sine(ns: np.ndarray, lat: float, lon: float, declination: np.ndarray, equation_of_time: np.ndarray) -> np.ndarray:
-    """The sine of the elevation from the declination (radians) and the equation of time (minutes) at UTC instants."""
-    true_solar_time = np.mod(ns, _DAY_NS) / 6e10 + equation_of_time + 4.0 * lon  # minutes
-    hour_angle = np.radians(true_solar_time / 4.0 - 180.0)
+_SUN = {"meeus": _sun_meeus, "spencer": _sun_spencer}
+
+
+def _sine(solar_time: np.ndarray, declination: np.ndarray, lat: float, lon: float) -> np.ndarray:
+    """The sine of the elevation at a site from the UTC instants' solar time at longitude 0 (minutes of the UTC day plus the
+    equation of time) and the declination (radians)."""
+    hour_angle = np.radians((solar_time + 4.0 * lon) / 4.0 - 180.0)
     phi = math.radians(lat)
     return math.sin(phi) * np.sin(declination) + math.cos(phi) * np.cos(declination) * np.cos(hour_angle)
-
-
-_SINE = {"meeus": _sine_meeus, "spencer": _sine_spencer}
 
 
 def haurwitz(sine: np.ndarray) -> np.ndarray:
@@ -126,8 +127,8 @@ class SolarGeometryTransformer(Transformer):
         weights: One positive weight per location (normalised to sum 1), or None for equal weights.
         freq: Period length of the rows ("1h", "15min"): each value is at the row's instant plus half of it. Shorter than
             a day.
-        prefix: Prepended to every column name with an underscore (`"de"` gives `de_sun_elevation`), for sites of
-            several zones in one frame. Default none.
+        prefix: Prepended to every column name with an underscore (`"de"` gives `de_sun_elevation`; `"de_"` is refused), for
+            sites of several zones in one frame. Default none.
         night_below: The sine of the elevation below which a row is night. Default -0.05 (about -2.9 degrees, the
             renewables study's threshold for a solar forecast of 0).
         algorithm: "meeus" (default), the NOAA Solar Calculator's equations (Meeus), as `astral` computes them; or
@@ -151,6 +152,8 @@ class SolarGeometryTransformer(Transformer):
         if weights is None:
             self.weights = None
         else:
+            if isinstance(weights, (str, bytes)) or not hasattr(weights, "__iter__"):
+                raise ValueError(f"weights must be a list of one positive number per location, got {weights!r}")
             values = list(weights)
             if len(values) != len(self.locations) or not all(
                 isinstance(w, numbers.Real) and not isinstance(w, bool) and math.isfinite(w) and w > 0 for w in values
@@ -165,8 +168,10 @@ class SolarGeometryTransformer(Transformer):
             raise ValueError(
                 f"freq must be shorter than a day: the sun's position is at the middle of a period, got {freq!r}"
             )
-        if not isinstance(prefix, str):
-            raise ValueError(f"prefix must be a string, got {prefix!r}")
+        if not isinstance(prefix, str) or prefix.endswith("_"):
+            raise ValueError(
+                f"prefix must be a string without a trailing underscore (it is joined with one), got {prefix!r}"
+            )
         self.prefix = prefix
         if isinstance(night_below, bool) or not isinstance(night_below, numbers.Real) or not -1.0 <= night_below <= 1.0:
             raise ValueError(f"night_below is a sine of the elevation, in [-1, 1], got {night_below!r}")
@@ -198,11 +203,13 @@ class SolarGeometryTransformer(Transformer):
         ns = middle.asi8  # int64 nanoseconds since the epoch, UTC
         weights = np.ones(len(self.locations)) if self.weights is None else np.asarray(self.weights)
         weights = weights / weights.sum()
+        declination, equation_of_time = _SUN[self.algorithm](ns)  # the same for every site
+        solar_time = np.mod(ns, _DAY_NS) / 6e10 + equation_of_time  # minutes, at longitude 0
         sine = np.zeros(len(index))
         elevation = np.zeros(len(index))
         ghi = np.zeros(len(index))
         for (lat, lon), weight in zip(self.locations, weights):
-            one = np.clip(_SINE[self.algorithm](ns, lat, lon), -1.0, 1.0)
+            one = np.clip(_sine(solar_time, declination, lat, lon), -1.0, 1.0)
             sine += weight * one
             elevation += weight * np.degrees(np.arcsin(one))
             ghi += weight * haurwitz(one)
