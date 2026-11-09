@@ -7,6 +7,7 @@ learner's prediction. Most tests use `PooledLS`, a least-squares stand-in for a 
 an OLS base; `HistGBModel` is held to scikit-learn by hand and through the adapter suite.
 """
 
+import dataclasses
 import datetime
 import json
 import math
@@ -453,6 +454,29 @@ def registered(monkeypatch):
     monkeypatch.setitem(COMPONENT_REGISTRY["models"], "PooledLS", __name__)
 
 
+def test_another_learner_window_or_refit_refuses_before_the_base_runs(market, tmp_path):
+    """The residual model's own window and refit rule are compared before the base runs, as its base and learner are: the
+    refusal leaves the base's results and manifest as they were."""
+    run(residual(base_model=base(refit="7D")), market, save_dir=tmp_path)
+    kept = {name: (tmp_path / name).read_bytes() for name in ("residual.base.jsonl", "residual.base.manifest.json")}
+    for changed, field in ((dict(training_window=35), "training_window"), (dict(refit="1D"), "training_cut.refit")):
+        with pytest.raises(ManifestMismatchError, match=field):
+            run(residual(base_model=base(refit="7D"), **changed), market, save_dir=tmp_path)
+        assert {name: (tmp_path / name).read_bytes() for name in kept} == kept
+
+
+def test_a_check_left_by_a_failed_pipeline_isn_t_run_for_a_changed_base(market):
+    """A pipeline whose other model fails its check leaves the residual model's check of its base behind; replacing the base
+    afterwards runs the new one, as a fresh model with it does."""
+    model = residual(base_model=base(refit="7D"))
+    bad = OLSModel(["no_such_column_d+{horizon}"], name="bad")
+    with pytest.raises(ValueError, match="not in the data"):
+        ModelPipeline().add_model(model).add_model(bad).run(market, *TEST, horizon=2)
+    model.base = base(training_window=14, refit="7D")
+    fresh = residual(base_model=base(training_window=14, refit="7D"))
+    assert keyed(model.run(market, *TEST, horizon=2)._results) == keyed(fresh.run(market, *TEST, horizon=2)._results)
+
+
 def test_a_resume_continues_the_base_from_its_file_and_a_changed_base_refuses(market, tmp_path):
     """Cut short (40 % of the records gone, and the base's file cut too) and resumed: the fresh run's records, base and model.
     A changed base refuses through the base's own manifest; with the base's files gone, through this model's (`residual`)."""
@@ -628,9 +652,13 @@ def test_results_convert_to_parquet_refuses_a_residual_model_s_before_converting
     pipeline = ModelPipeline().add_model(base()).add_model(ResidualModel("ols", PooledLS(), training_window=28))
     pipeline.run(market, *TEST, horizon=2, save_dir=tmp_path)
     before = sorted(path.name for path in tmp_path.iterdir())
-    with pytest.raises(ValueError, match="ResidualModel results"):
-        convert(tmp_path, "parquet")
+    for model in (None, "residual", "residual.base"):  # the base's results too: the residual model reads them as JSONL
+        with pytest.raises(ValueError, match="Nothing was converted") as refused:
+            convert(tmp_path, "parquet", model=model)
+        assert "residual.base" in str(refused.value) or model == "residual"
     assert sorted(path.name for path in tmp_path.iterdir()) == before
+    records = len(lines(tmp_path / "ols.jsonl"))
+    assert convert(tmp_path, "parquet", model="ols") == [("ols", records)]  # a model of its own still converts
 
 
 def _workflow(tmp_path, models, save_format="jsonl", index=None):
@@ -771,6 +799,31 @@ class CardedOLS(OLSModel):
 
     _card = FAKE_CARD
     _engine_ok = False
+
+
+class MidFebruaryOLS(CardedOLS):
+    """The same, its corpus ending on 15 February: inside a warm-up from 12 February, before one from 19 February."""
+
+    _card = dataclasses.replace(FAKE_CARD, corpus_end=datetime.date(2023, 2, 15))
+
+
+def test_a_resume_from_a_later_start_keeps_the_base_s_earliest_first_issue_day(market, tmp_path):
+    """A run from 13 March (the base from 12 February) resumed from 20 March (from 19 February): the records of the first run
+    stay in the file, their learners trained on base forecasts from 12 February, so the base's verdict stays judged from it,
+    `possibly contaminated` by a corpus ending on 15 February, in the file and in the report from it."""
+
+    def pipeline():
+        learner = OLSModel(["load_d+{horizon}", "price_d-1", "base_fc_d+{horizon}"])
+        base_model = MidFebruaryOLS(BASE_INPUTS, training_window=21, refit="7D", name="b")
+        return ModelPipeline().add_model(ResidualModel(base_model, learner, training_window=28))
+
+    pipeline().run(market, "2023-03-13", "2023-03-26", horizon=1, save_dir=tmp_path)
+    resumed = pipeline().run(market, "2023-03-20", "2023-03-26", horizon=1, save_dir=tmp_path)
+    stored = json.loads(manifest_path(tmp_path / "residual.jsonl").read_text())["residual_base"]
+    assert stored["first_issue_day"] == "2023-02-12"
+    report = pipeline().report(tmp_path, "2023-03-13", "2023-03-26", horizon=1)
+    for table in (report.provenance(), resumed.provenance()):
+        assert table.set_index("model").loc["residual.base", "test_verdict"] == "possibly contaminated", table
 
 
 def test_the_provenance_shows_the_base_s_card_judged_from_its_first_issue_day(market, tmp_path):
