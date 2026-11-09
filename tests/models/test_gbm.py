@@ -208,6 +208,63 @@ def test_without_its_package_a_model_saves_and_loads_and_a_fit_names_the_extra(c
     suite.check_preflight_without_extra(lambda name, **p: cls(INPUTS, name=name, **p), monkeypatch, market, TEST)
 
 
+@pytest.mark.parametrize("cls", [LightGBMModel, XGBoostModel, CatBoostModel])
+def test_every_setting_reaches_the_workers(cls):
+    """A worker rebuilds the model from `_model_kwargs`: every parameter of the class but the ones BaseModel's run reads in the
+    parent (the list, the window, the refit rule, the name and the keyword-only ones) must be in it, or a worker would fit with
+    its default."""
+    import inspect
+
+    parent_side = {"predictors", "training_window", "refit", "name", "scaler", "newest_target", "binary_mask"}
+    assert set(cls(INPUTS)._model_kwargs) == set(inspect.signature(cls).parameters) - parent_side
+
+
+@pytest.mark.parametrize("cls", [LightGBMModel, XGBoostModel, CatBoostModel])
+def test_every_fit_and_prediction_runs_inside_the_thread_scope(cls, monkeypatch):
+    """`_fit_model`, `_predict_block` and `_predict_fitted` call the estimator inside the scope of the model's `threads`, and the
+    estimator is built before it (the scope limits only the OpenMP runtimes already loaded)."""
+    events = []
+
+    class Scope:
+        def __init__(self, threads):
+            self.threads = threads
+
+        def __enter__(self):
+            events.append(("enter", self.threads))
+
+        def __exit__(self, *exc_info):
+            events.append(("exit", self.threads))
+
+    class Estimator:
+        def fit(self, x, y):
+            events.append(("fit", len(x)))
+            return self
+
+        def predict(self, rows):
+            events.append(("predict", len(rows)))
+            return np.zeros(len(rows), dtype=np.float32)
+
+    model = cls(INPUTS, threads=3)
+    monkeypatch.setattr(gbm, "_thread_scope", Scope)
+    monkeypatch.setattr(model, "_estimator", lambda: events.append(("build", None)) or Estimator())
+    fitted = model._fit_model(np.zeros((4, 5)), np.zeros(4))
+    predictions, coefficients = model._predict_block(fitted, np.zeros((2, 5)))
+    assert predictions.dtype == np.float64 and coefficients == [[], []]
+    assert model._predict_fitted(fitted, np.zeros(5)) == (0.0, [])
+    assert events == [
+        ("build", None),
+        ("enter", 3),
+        ("fit", 4),
+        ("exit", 3),
+        ("enter", 3),
+        ("predict", 2),
+        ("exit", 3),
+        ("enter", 3),
+        ("predict", 1),
+        ("exit", 3),
+    ]
+
+
 def test_an_import_error_inside_the_package_is_its_own(monkeypatch):
     """Only the package's own absence is a missing extra: an error importing something the package needs goes through."""
 
@@ -339,6 +396,16 @@ def test_forecasts_are_the_same_in_any_process_count_forked_or_here(family, mark
                 patch.setenv("MAX_PROCESSES", processes)
                 assert keyed(records(make(**params), market)) == here, (params, processes)
         assert len(here) == 14 * 24 - 2  # less the spring target day's 02:00 and the switch day's own 02:00
+
+
+def test_one_row_at_a_time_gives_the_block_call_s_forecasts(family, market):
+    """`block_predict=False` (and so `_predict_fitted`) predicts each forecast's row on its own: the same bits as the block call,
+    a tree's prediction of a row reading that row alone."""
+    _, make = family
+    blocks = keyed(records(make(periods="each"), market))
+    single = make(periods="each")
+    single.block_predict = False
+    assert keyed(records(single, market)) == blocks
 
 
 def test_threads_are_given_to_the_package_recorded_and_compared_on_resume(family, market, tmp_path):
