@@ -371,6 +371,11 @@ model_pipeline:
   save_coefficients: false    # optional
 ```
 
+**Engine groups in arrays.** With `model_pipeline.engine: on` each task runs its block as one
+[engine group](/epftoolbox2/model-pipeline/engine/), and nothing stored depends on the block: 10,000 OLS variants run as 64 tasks
+of 157 merge in `epf report` to the bytes of one run of all 10,000 (records, manifests but their provenance, every table). Each task reads the whole workflow YAML and checks every model of the list before it fits its block, which for
+an inline list of 10,000 models (3.7 MB) is about 8 seconds a task: give a task a block whose fits take longer than that.
+
 `report()` raises if a model has no results file, naming each model of a missing block. `report(allow_missing=True)` (`epf report --allow-missing`) reports the models that have one, and leaves out an ensemble with a missing member, with a warning. A task that stopped in the middle of a model leaves a shorter file, and `report()` warns with its counts. Check `report.forecast_counts()` before comparing models.
 
 ## Learn More

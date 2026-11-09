@@ -270,6 +270,11 @@ model = OLSModel(["load_forecast_d+{horizon}", "solar_forecast_d+{horizon}", "is
   2024 (h = 3 to 9) its models at W = 1092 move none either. With a 91-day window a LassoCV moves 78 and 101 of the 301 forecasts of
   the daily minimum and maximum load, from June on, by up to 213 and 297 MW: cooling degree days are 0 in every row of a window that
   starts in January, so the default feeds them to the Lasso raw all summer.
+- **At scale, through the engine.** Variants of OLS, Ridge, LassoCV and LEAR with a column that is 0/1 before the first test day
+  and continuous from it (10,000, 1,000, 200 and 1,000 of them, hourly, run over 27 March to 2 April 2025 and again over 30
+  March to 5 April): with `"fit"` every key the two runs share is the same bits (950,000, 95,000, 19,000 and 95,000 keys); with the default,
+  55 to 67 % of the shared keys of 200 sampled variants per class differ, since the later start reads that column's mask on
+  a window that holds its continuous values.
 - **Resuming and YAML.** The manifest's `training_cut` gains `"binary_mask": "fit"` without `refit`, so resuming results made with
   the other rule refuses with `ManifestMismatchError`. `"first_day"` is the default's rule and resumes it, and with `refit` `"fit"`
   is the refit's own rule and writes nothing. Such a manifest has no `binary_masks`, as a fit's mask follows from its rows, which the
