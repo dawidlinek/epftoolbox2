@@ -64,7 +64,7 @@ jobs:
         uv sync --extra dev
 
     - name: Check that no extra is installed (this is the core-only job)
-      run: uv run python -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('numba') is not None)"
+      run: uv run python -c "import importlib.util, sys; sys.exit(any(importlib.util.find_spec(m) is not None for m in ('numba', 'torch')))"
 
     - name: Run tests
       env:
@@ -103,6 +103,36 @@ jobs:
 
     - name: Check that numba imports (the numba tests would skip without it)
       run: uv run python -c "import numba; print('numba', numba.__version__)"
+
+    - name: Run tests
+      run: uv run pytest -m "not integration" -n auto --dist worksteal -q
+
+  torch-extra:
+    # The [torch] extra (torch from PyTorch's CPU index, as uv.lock has it): the torch core's tests
+    # (tests/models/test_torch_core.py: nets, the trainer's bitwise claims at 1, 2 and 4 threads, the TF32 and thread scope,
+    # thread pinning in the pool initialiser, the fine-tune helper), and the rest of the suite with torch installed, whose
+    # docs blocks importing epftoolbox2.nets the core-only job can't check. The test job above installs no extra, so there
+    # these tests skip. 3.14t is the free-threaded build (torch has cp314t wheels).
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.14t']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up uv with Python ${{ matrix.python-version }}
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies with the torch extra
+      run: uv sync --locked --extra dev --extra torch
+
+    - name: Check that torch imports and is the CPU build (the torch tests would skip without it)
+      run: uv run python -c "import torch; print('torch', torch.__version__); assert not torch.backends.cuda.is_built()"
 
     - name: Run tests
       run: uv run pytest -m "not integration" -n auto --dist worksteal -q
