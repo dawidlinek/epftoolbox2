@@ -37,6 +37,9 @@ from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.presets import WEEKDAYS, lear_predictors, profile_columns
 
 EXOGENOUS = ["load_forecast_amprion", "wind_solar_forecast"]  # the DE file's two series
+# The inputs through epftoolbox's Invariant (asinh of median/MAD), as the research scaled them; standardised inputs (the
+# default) were 7.5-8.4 % worse with the research's best configurations (docs: Neural Networks, the research's recipe).
+INVARIANT = {"name": "asinh", "params": {"standardise": False}}
 
 
 def main(n_configs=48, top=4, seeds=4, validation=None, test=None, output_dir="."):
@@ -92,6 +95,7 @@ def main(n_configs=48, top=4, seeds=4, validation=None, test=None, output_dir=".
                 training_window=728,
                 refit="7D",
                 seeds=seeds,
+                scaler=INVARIANT,
                 name=name,
             )
         )

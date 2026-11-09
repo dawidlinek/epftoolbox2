@@ -62,7 +62,7 @@ model = TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0
 | `random_state` | `0` | The base seed every network's seed is drawn from |
 | `newest_target` | `"d-1"` | The newest training target, as for every model ([Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/)) |
 | `binary_mask` | `None` | Which rows decide the binary 0/1 inputs left unscaled; with `refit`, each fit's own |
-| `scaler` | `"standard"` | How the inputs are scaled; `output="day"` takes any scaler, `output="period"` only `"standard"` |
+| `scaler` | `"standard"` | How the inputs are scaled; `output="day"` takes any scaler (the Invariant, `{"name": "asinh", "params": {"standardise": False}}`, did much better on price inputs, see [the research's recipe](#the-researchs-recipe-reproduced)), `output="period"` only `"standard"` |
 | `name` | `"torch"` | The model's name |
 | `module_hash` | `None` | Set by a saved file: the hash of the module's source file and its package's version when it was saved |
 
@@ -201,6 +201,31 @@ One network per horizon with an output per hour beat 24 single-hour networks in 
 EUR/MWh) at a 24th of the fits. Several configurations matter more than several seeds, and both help: the top 4 configurations
 of a search with 4 seeds each beat the best one with 4 seeds. The default search is a loop of models and an
 [AverageEnsemble](/epftoolbox2/model-pipeline/ensembles/) of the best on validation: `examples/mlp_search.py`.
+
+### The research's recipe, reproduced
+
+The research's MLP ensemble (zoo_dl, `dlMLPens top4x4`: the 4 best of 192 configurations on the validation year, 4 seeds
+each, weekly refits) rebuilt with `MLPDailyModel`: the helper's hidden sizes, windows (728 or 1,456 days), learning rates,
+dropout rates and LEAR input blocks, the 175 LEAR inputs of `lear_predictors(["load_forecast"])`, test year 2025-10-01 to
+2026-09-30 on the recent DE_LU and AT data, 8,760 forecasts per model, each configuration a model and their
+`AverageEnsemble`, on the CPU:
+
+| Inputs scaled by | DE_LU test MAE | AT test MAE |
+|---|---|---|
+| the research's stored forecasts | 20.62 | 17.56 |
+| the Invariant, `scaler={"name": "asinh", "params": {"standardise": False}}` (as the research) | 20.54 (−0.4 %) | 17.64 (+0.5 %) |
+| standardisation, `scaler="standard"` (the default) | 22.18 (+7.5 %) | 19.03 (+8.4 %) |
+
+The configurations were chosen with Invariant inputs, so the second row isn't a search of its own; but `MLPDailyModel` with
+its defaults on DE_LU gave 23.04 standardised against 21.10 with Invariant inputs too. Prices have spikes, which
+standardisation leaves as large inputs. The research's L1 penalty on the first layer (on 2 of the DE and 3 of the AT
+configurations, 3e-6 to 9e-5) and its seeds aren't the library's, and it refitted on every seventh day from the test's
+first, where the library refits on Mondays.
+
+Cost per market-year, weekly refits, one torch thread per fit: `MLPDailyModel` with its defaults 4.6 CPU-minutes (212
+networks, 1.3 CPU-seconds each, on a quiet 6-core Ryzen); `MLPHourlyModel` with its defaults 44 CPU-minutes (3,816 networks,
+0.7 CPU-seconds each, on a loaded EPYC); the top-4 × 4 ensemble above 114 (AT) to 333 (DE) CPU-minutes, its networks being
+up to 1024-512 on 1,456 days. The same run gave the same numbers to the bit on both machines (AVX2 kernels).
 
 ## Installing torch
 
