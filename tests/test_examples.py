@@ -245,3 +245,29 @@ def test_lear_lago(keyless_live_dir, monkeypatch, information_set_checks):
     assert sorted(p.name for p in (keyless_live_dir / "results_lear_DE").glob("*.jsonl")) == sorted(
         f"{name.lower()}.jsonl" for name in models
     )
+
+
+def test_mlp_search(keyless_live_dir, monkeypatch, information_set_checks):
+    """Two configurations of one seed on four validation and two test issue days of the DE benchmark (no key: Zenodo), the
+    ensemble of the better one on validation; needs the [torch] extra."""
+    pytest.importorskip("torch")
+    example = load_example("mlp_search.py", monkeypatch)
+    models = ["mlp_00", "mlp_01", "mlp_top4"]
+    planned = 2 * 24  # two test issue days, h = 1
+
+    report = example.main(
+        n_configs=2,
+        seeds=1,
+        validation=("2015-12-27", "2015-12-30"),
+        test=("2016-01-03", "2016-01-04"),
+        output_dir=keyless_live_dir,
+    )
+
+    assert_forecasts(report, models, planned)
+    assert_metrics(report, models, planned)
+    assert_information_set_checked(information_set_checks, models[:2], zone="Europe/Brussels")
+    chosen = report.choices()
+    assert len(chosen) == 1 and list(chosen.iloc[0]["chosen"]) == models[:2]  # top=4 of two: both
+    assert sorted(p.name for p in (keyless_live_dir / "results_mlp_search").glob("*.jsonl")) == sorted(
+        f"{name}.jsonl" for name in models
+    )
