@@ -851,3 +851,13 @@ def test_one_fit_per_process_every_cpu_by_default_and_one_process_on_a_gpu(monke
     assert daily()._executor_config() == (1, 1)
     monkeypatch.setenv("MAX_PROCESSES", "3")
     assert daily()._executor_config() == (1, 3)
+
+
+def test_a_pooled_fit_of_a_period_network_refuses_rather_than_seed_itself(market):
+    """`PooledModel` fits outside the library's fit units, so a TorchModel there has no unit to seed from: it raises at the
+    first fit (a day network is refused before, as every day unit is)."""
+    from epftoolbox2.models import PooledModel
+
+    pipeline = ModelPipeline().add_model(PooledModel(hourly(), name="pooled"))
+    with pytest.raises(RuntimeError, match="not PooledModel"):
+        pipeline.run({"PL": market, "XX": market}, "2023-03-20", "2023-03-20", horizon=1)
