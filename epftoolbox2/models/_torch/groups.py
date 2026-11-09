@@ -816,6 +816,8 @@ def _train(session: _Session, requests: List[_Request]) -> None:
 
     for key, entries in keyed.items():
         pad, tf32 = key[2], key[4]
+        # By learning rate first: a stack trains until its last member stops, and members of one rate tend to stop together.
+        entries.sort(key=lambda entry: (float(entry[0].payload["settings"]["lr"]), entry[0].order))
         slots = [(request, prepared, i) for request, prepared in entries for i in range(len(prepared.members))]
         for request, prepared in entries:
             n = len(prepared.members)
