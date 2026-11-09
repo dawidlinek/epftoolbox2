@@ -34,7 +34,7 @@ fits is the fast way on a CPU; the loop's numbers change with the thread count),
 back after the fit. The manifest's `runtime` records the torch version, device type, dtype, `tf32`, `threads_per_fit`, `stack`,
 `pad_to` and the CPU kernels, compared on resume; `model_params` the module's import path, its source hash and `module_params`.
 One fit at a time per process: `THREADS_PER_PROCESS` is not used for a torch model, `MAX_PROCESSES` (default every usable
-CPU) is.
+CPU, one process on a GPU) is.
 
 **Saving.** The module is saved by its import path (`package.module:Class`) and `module_hash`, a hash of the source file that
 defines it and of its package's version (a change of a layer it imports from the same file shows too). Loading a file whose
@@ -596,8 +596,15 @@ class TorchModel(BaseModel):
 
     def _executor_config(self) -> tuple:
         """One fit at a time per process, at one torch thread (`torch_scope`): torch's thread count and precision flags are
-        the process's, so task threads (`THREADS_PER_PROCESS`) would share them. `MAX_PROCESSES`, default every usable CPU."""
-        return 1, int(os.environ.get("MAX_PROCESSES", max(1, _usable_cpu_count())))
+        the process's, so task threads (`THREADS_PER_PROCESS`) would share them. `MAX_PROCESSES` processes, by default every
+        usable CPU, or one on a GPU (each process would hold a CUDA context of its own)."""
+        default = max(1, _usable_cpu_count())
+        if "MAX_PROCESSES" not in os.environ:
+            from ._torch.runtime import resolve_device
+
+            if resolve_device(self.device).type == "cuda":
+                default = 1
+        return 1, int(os.environ.get("MAX_PROCESSES", default))
 
     def _worker_inputs(self, state: Any, threads_per_process: int) -> Tuple[Dict, Dict]:
         """BaseModel's, with torch pinned to one thread in each worker (`_worker._pool_init`), after a check in this process,

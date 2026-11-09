@@ -839,3 +839,15 @@ def test_a_period_forecast_is_its_seeds_mean_in_target_units():
     expected = math.fsum(float(target.inverse(np.array(z), 0)) for z in (-1.0, 2.0)) / 2
     assert prediction == expected and coefficients == []
     assert prediction != float(target.inverse(np.array(0.5), 0))
+
+
+def test_one_fit_per_process_every_cpu_by_default_and_one_process_on_a_gpu(monkeypatch):
+    from epftoolbox2.models.base import _usable_cpu_count
+
+    monkeypatch.delenv("MAX_PROCESSES")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "4")  # not a torch model's
+    assert daily()._executor_config() == (1, _usable_cpu_count())
+    monkeypatch.setattr(runtime, "resolve_device", lambda device: torch.device("cuda", 0))
+    assert daily()._executor_config() == (1, 1)
+    monkeypatch.setenv("MAX_PROCESSES", "3")
+    assert daily()._executor_config() == (1, 3)

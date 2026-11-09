@@ -94,7 +94,7 @@ inputs only, never dates or targets, and its outputs are in the scaled target sp
   the same alone, in its block and after a resume.
 - **Device, threads, TF32.** Each fit runs on one torch thread with TF32 off (unless `tf32=True`), and puts both back after the
   fit. One fit at a time per worker process: `THREADS_PER_PROCESS` is not used for these models, and `MAX_PROCESSES` (every
-  usable CPU by default) is how many fits run at once.
+  usable CPU by default, one process when the device is a GPU) is how many fits run at once.
 
 ### Day-level predictors
 
