@@ -44,13 +44,15 @@ The columns are columns of your frame. For a forecast issued on D at horizon h:
 
 - **`normalise_by="<column>"`** divides each training row's target by that row's value of the column, and multiplies the
   learner's forecast by the issue row's value. A training row whose value is missing, zero or negative drops out, as a row with a
-  missing input does; a forecast whose issue row has no positive value is skipped as `missing_test_predictors`.
+  missing input does; a forecast whose issue row's value is missing is skipped as `missing_test_predictors`, and one whose value
+  is zero or negative as `non_positive_scale`.
 - **`bounds=(low, high)`** clips the forecast after it is scaled back: in multiples of the issue row's scale with `normalise_by`
   (`(0, 1.05)` is 0 to 105 % of its capacity), in target units without (`(0, None)` keeps a load forecast from going below 0).
   Either side may be `None`.
-- **`zero_when="<column>"`** makes the forecast 0, with no fit, where the issue row's value of the column is 1; any other value
-  forecasts as usual, and a missing one is a `missing_test_predictors` skip. Training rows are untouched: a night hour still trains
-  the periods that read it. The record has `prediction` 0, `coefficients` `[]`, `status` `"ok"` and `detail` `"zero_when"`.
+- **`zero_when="<column>"`** makes the forecast 0, with no fit, where the issue row's value of the column is 1; a 0 forecasts as
+  usual and a missing value is a `missing_test_predictors` skip. Any other value on a row of an issue day is refused before any fit
+  (`ValueError`): turn the column into a 0/1 flag first. Training rows are untouched: a night hour still trains the periods that
+  read it. The record has `prediction` 0, `coefficients` `[]`, `status` `"ok"` and `detail` `"zero_when"`.
 
 `{horizon}` may stand in either column's name, as in a predictor. So the learner sees y / c on its training rows, and the forecast
 is c times its forecast, clipped, with c the issue row's; its scaler is fitted on the divided targets. They are a model's
@@ -58,35 +60,43 @@ parameters, not a run's, so a benchmark in the same pipeline, such as the publis
 
 ### Which forecasts exist
 
-`zero_when` is decided where the fit would be, after every other reason a forecast has none: a forecast with a missing input or no
-training row is skipped whatever the column says, so a model forecasts the keys it forecasts without `zero_when`, and two models
-that differ in it are compared on the same keys. `normalise_by` can only take keys away (rows and issue rows without a positive
-scale), and `bounds` none. With all three `None`, the default, nothing of a model changes, its records and manifest included.
+`zero_when` is decided after the skips of the training rows and of the issue row's inputs, and before the issue row's scale and
+the fit: a forecast with a missing input or no training row is skipped whatever the column says. So a model forecasts the keys it
+forecasts without `zero_when`, with two exceptions, where its flag is 1: a forecast of 0 is made where the issue row's scale is
+missing or not positive (a clear-sky night with no capacity reported), and where the fit would fail (`fit_error`, as with too few
+training rows). Two models that differ in `zero_when` are compared on the keys they share, as any two models are. `normalise_by`
+can only take keys away (rows and issue rows without a positive scale), and `bounds` none. With all three `None`, the default,
+nothing of a model changes, its records and manifest included.
 
 ### Training windows, refits and pooled units
 
 - A list of training windows scales back and clips each window's forecast on its own, so each of `member_predictions` is the
   forecast of the model with that window alone, and the forecast is their mean; a forecast of 0 has `member_predictions` of 0s.
 - With `refit`, a unit is fitted once on its divided targets and each of its forecasts is multiplied by its own issue row's scale;
-  a unit whose forecasts are all 0 makes no fit.
+  a unit whose forecasts are all 0 makes no fit, so a fit that would fail leaves them 0.
 - A pooled unit (`HistGBModel(periods="pooled")`) divides each stacked row's target by its own period row's scale, and reads each
   forecast's scale and `zero_when` on its own period's issue row.
-- `NaiveModel` takes `bounds` alone, which clips its value in target units: it fits nothing to divide or replace.
-- Models of day units (`MLPDailyModel`, `TorchModel(output="day")`) and models that read series refuse all three before any fit, and
-  so do `ResidualModel` (give them to its base, whose own run applies them) and `PooledModel`.
+- `NaiveModel` takes `bounds` alone, which clips its value in target units: it fits nothing to divide or replace (and so does any
+  model that fits nothing).
+- Models of day units refuse all three: `MLPDailyModel` doesn't take them, and `TorchModel(output="day")` refuses them when it is
+  built. Models that read series refuse them before any fit. They aren't supported on a `ResidualModel` in this step (its forecast is
+  the learner's plus the base's, made after the learner's fit), on itself or on its learner, nor on the model a `PooledModel` pools.
 
 ### What is checked
 
 The columns are inputs the model reads, never regressors: the coefficients and the predictor layout are the list's alone.
 
-- **The information set** judges them as predictors: on the issue row, and where the column's rule changes over time also on the
-  training rows. A capacity published after the issue time is listed at `availability="warn"` and refused at `"raise"`, and so is
-  one known on the issue row but unknown on a row a fit reads (a gap in the rule, a lag that shortened). A predictor function's
-  plan judges its lists, and the per-row target's columns are judged beside it.
-- **`verify`** perturbs them as it perturbs predictors, so a column the model reads late is a `leak`. A forecast of 0 moves under the
-  positive control only where the control can perturb its `zero_when` column; a period that is 0 on every sampled day by a column with
-  a `static` rule never moves, and `verify` calls the model `inconclusive`. A forecast clipped by `bounds` before and after the
-  control's noise doesn't move either.
+- **The information set** judges `normalise_by`'s column as a predictor: on the issue row, and where its rule changes over time
+  also on the training rows. A capacity published after the issue time is listed at `availability="warn"` and refused at `"raise"`,
+  and so is one known on the issue row but unknown on a row a fit reads (a gap in the rule, a lag that shortened). `zero_when`'s
+  column is judged on the issue row alone, which is all a forecast reads of it: a gap in its rule on a training day is no use. A
+  predictor function's plan judges its lists, and the per-row target's columns are judged beside it; a column that is both a
+  predictor and a per-row target's is listed once.
+- **`verify`** perturbs `normalise_by`'s column as it perturbs predictors, and turns each unknown value of `zero_when`'s from 0 to
+  1 and from 1 to 0 (noise would only ever make a flag "not 1", and a flag of 0 on the issue day would move nothing), so a column
+  the model reads late is a `leak`. Its copies of the model run without `bounds`: the clip only follows the forecast, which can then
+  move freely. A forecast of 0 reads its flag alone, which the flip covers, so the positive control doesn't ask it to move: a period
+  that is 0 on every sampled day by a `static` night flag leaves the model `ok`.
 - **The manifest** records the three in `model_params` where they are set, and the columns in `predictors` and `column_hashes`, so a
   resume with other settings, or over another capacity, raises `ManifestMismatchError`. YAML writes them only when set.
 - **`explain()`** lists the columns in a `row_target` table, with their role, after the predictors.

@@ -644,9 +644,10 @@ set (compared on resume): `normalise_by` divides each training row's target by i
 forecast by the issue row's, `bounds=(low, high)` clips the forecast after that (in multiples of the scale with `normalise_by`,
 either side `None`), `zero_when` makes a forecast 0 with no fit where the issue row's value is 1, with `detail: "zero_when"` in its
 record; `{horizon}` may stand in either name. The columns are inputs (checked, hashed, perturbed by `verify`), not regressors, and a
-model with any of them set never runs in an engine group. `NaiveModel` takes `bounds` alone; `MLPDailyModel`, a `TorchModel` with
-`output="day"`, a model that reads history, `ResidualModel` and `PooledModel` refuse them (see [Common
-Parameters](/epftoolbox2/models/common-parameters/#generation-targets)).
+model with any of them set never runs in an engine group. An issue row whose scale is missing is `missing_test_predictors` and one not
+positive `non_positive_scale`; a `zero_when` value other than 0, 1 or missing on an issue row raises. `NaiveModel` takes `bounds`
+alone; `MLPDailyModel`, a `TorchModel` with `output="day"` and a model that reads history refuse them, and they aren't supported on
+a `ResidualModel` or the model a `PooledModel` pools (see [Common Parameters](/epftoolbox2/models/common-parameters/#generation-targets)).
 
 ### Predictor functions
 
