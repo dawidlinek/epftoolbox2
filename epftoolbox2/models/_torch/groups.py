@@ -51,6 +51,7 @@ import os
 import sys
 import threading
 import time
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import astuple, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -59,6 +60,7 @@ import numpy as np
 from rich.progress import Progress
 
 from ..._extras import has_extra
+from ...results.manifest import manifest_path, record_stack_check
 from ...results.ref import ModelResultRef
 from ...results.store import StoreWriter
 from .._calendar import resolve_horizons
@@ -80,13 +82,23 @@ from ..base import _MASK_READERS, _WINDOWS_MAX_WORKERS, BaseModel, _MemorySink, 
 
 __all__ = ["stack_key", "stack_groups", "run_stack_group", "run_stack_job", "stack_session", "TORCH_STACKS_VAR"]
 
-# "off" runs every torch model on its own; "on" (the default) stacks the models that share a key.
+# "off" runs every torch model on its own; "on" (the default) stacks the models that share a key; "check" is "on" with about
+# one stacked call in `CHECK_EVERY` also trained alone and compared, bit for bit (`stack_check` in the manifest, a warning).
 TORCH_STACKS_VAR = "TORCH_STACKS"
-STACKS_MODES = ("on", "off")
+STACKS_MODES = ("on", "off", "check")
+CHECK_EVERY = 50
 # The members a job holds at least (a whole refit block more if the last one passes it); by default `_job_members`.
 STACK_MEMBERS_VAR = "TORCH_STACK_MEMBERS"
-# The fit units (or tasks) of one job at most, each a thread in the worker while it runs: a bound on what a job holds at once.
+# The fit units (or tasks) of one job at most, each a thread in the worker while it runs: a bound on what a job holds at once,
+# raised to the stack size where that is larger (`_jobs`).
 MAX_JOB_ITEMS = 1024
+# The losses whose arithmetic is exact element by element on a CPU (a difference, its absolute value, its square): with
+# `nets.MLP`, what a CPU stacks (`_cpu_exact`).
+EXACT_CPU_LOSSES = ("l1", "mse")
+# Since this process started, in the process that runs the groups: calls whose stack raised and that were trained alone
+# (`fallbacks`), calls trained alone because their module can't be stacked (`alone`: an attribute drawn from torch's generator
+# when it is built). For tests and debugging; a run warns about fallbacks.
+STATS: Dict[str, int] = {"fallbacks": 0, "alone": 0}
 
 # What a stacked model runs as `TorchModel` and `BaseModel` define it: the group does `run`'s part, and the stack replaces the
 # trainer's call in `_fit_rows` and its predictions in `_members_out`.
@@ -109,6 +121,7 @@ _KEPT = (
     "_fit_model",
     "_predict_fitted",
     "_fit_predict",
+    "_predict_block",
     "_factory",
 )
 # A module's attributes that `_structure` doesn't compare: its parameters, buffers and submodules are compared by name, shape
@@ -120,11 +133,47 @@ _MODULE_INTERNALS = ("_parameters", "_buffers", "_modules")
 
 
 def stacks_mode() -> str:
-    """`TORCH_STACKS`: "on" (the default) or "off", read when a run runs."""
+    """`TORCH_STACKS`: "on" (the default), "off" or "check", read when a run runs."""
     raw = os.environ.get(TORCH_STACKS_VAR, "on").strip().lower()
     if raw not in STACKS_MODES:
         raise ValueError(f"{TORCH_STACKS_VAR} must be one of {list(STACKS_MODES)}, got {raw!r}")
     return raw
+
+
+def _members_setting() -> Optional[int]:
+    """`TORCH_STACK_MEMBERS` as a whole number from 1, None when unset."""
+    raw = os.environ.get(STACK_MEMBERS_VAR)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise ValueError(f"{STACK_MEMBERS_VAR} must be a whole number from 1, got {raw!r}")
+    return value
+
+
+def check_settings() -> None:
+    """Refuse a `TORCH_STACKS` or `TORCH_STACK_MEMBERS` that isn't one: `ModelPipeline.run` asks before any model runs, so a
+    typo fails before an engine group or a model writes anything."""
+    stacks_mode()
+    _members_setting()
+
+
+def _cpu_exact(model: Any) -> bool:
+    """Whether a CPU stack gives `model`'s members their numbers alone, bit for bit: its module is `nets.MLP` (the presets,
+    `TorchModel(module=MLP)`), whose products and activations a CPU stack takes slot by slot, and its loss one of
+    `EXACT_CPU_LOSSES`. A module's own elementwise function over the stacked tensor (`torch.sigmoid`, `silu`, `softplus`,
+    `log1p`, a power) or a loss of its own can give the last slot other last bits there (a vectorised kernel takes the tensor's
+    tail by its scalar path), so any other module runs alone on a CPU. A GPU computes every element alike."""
+    from ... import nets
+
+    try:
+        module = model._module_class()
+    except Exception:
+        return False
+    return module is nets.MLP and model.loss in EXACT_CPU_LOSSES
 
 
 def _canonical(value: Any) -> str:
@@ -133,15 +182,21 @@ def _canonical(value: Any) -> str:
 
 def stack_key(model: BaseModel, forecast_only: bool = False) -> Optional[tuple]:
     """The key of the stacks `model` trains in with other models of a run (module docstring), or None for a model that runs
-    alone: not a torch model, a loop on its device, a method in `_KEPT` of its own class or instance, frames it reads itself,
-    a `forecast_only` run, or a device that doesn't resolve (its own run says why)."""
+    alone: not a torch model, a loop on its device, on a CPU a module other than `nets.MLP` or a loss other than "l1" or "mse"
+    (`_cpu_exact`), a method in `_KEPT` of its own class or instance, frames it reads itself, a `forecast_only` run, or a
+    device that doesn't resolve (its own run says why)."""
     from ..torch_model import TorchModel
 
     if forecast_only or not isinstance(model, TorchModel) or not has_extra("torch"):
         return None
     if model._frame_readers() != _BASE_READERS:
         return None
-    if any(type(model)._owner_of(name) not in (TorchModel, BaseModel) or name in vars(model) for name in _KEPT):
+    owners = (
+        TorchModel,
+        BaseModel,
+        None,
+    )  # None: a method neither defines (`_predict_block`), which no subclass may add
+    if any(type(model)._owner_or_none(name) not in owners or name in vars(model) for name in _KEPT):
         return None
     from .runtime import resolve_device, resolve_pad, resolve_stack
 
@@ -150,6 +205,8 @@ def stack_key(model: BaseModel, forecast_only: bool = False) -> Optional[tuple]:
     except (RuntimeError, ValueError):
         return None
     if resolve_stack(model.stack, device) != "vmap":
+        return None
+    if device.type == "cpu" and not _cpu_exact(model):
         return None
     return (
         model._module_ref(),
@@ -213,9 +270,13 @@ def run_stack_group(
     frame, target, horizons and freq for all) and its predictors (`columns[name]`), and return each model's ref by name. As
     `_engine.run_group`: called where a model's `run` would be, so `_prepare_run`'s and `_finish_run`'s warnings point where
     theirs do; each chunk finished (its stores flushed, each model's `_finish_run`, its stores closed) before the next starts; a
-    task that raises stops the group, with what came back saved, and a RuntimeError naming the model and its blocks."""
+    task that raises stops the group, with what came back saved, and a RuntimeError naming the model and its blocks. With
+    `TORCH_STACKS=check` each model's manifest records `stack_check` (its sampled calls also trained alone: how many, how many
+    gave other bits, the largest absolute difference of their forecasts in the scaled space), and a model with any difference
+    warns."""
     if not models:
         return {}
+    check = stacks_mode() == "check"
     first = arguments[models[0].name]
     data, target, freq = first["data"], first["target"], first["freq"]
     horizon, _ = resolve_horizons(first["horizon"], first["horizons"], 7)
@@ -236,7 +297,7 @@ def run_stack_group(
                         state = model._prepare_run(**arguments.pop(model.name), periods=periods, writer=writer)
                         prepared.append((model, state))
                     periods = None  # the models hold the frames until `_release`
-                    _run_chunk(prepared, bar)
+                    checked = _run_chunk(prepared, bar, check)
                 except BaseException:
                     _release(prepared, writer, chunk, raising=False)
                     _close(prepared, raising=False)
@@ -245,6 +306,8 @@ def run_stack_group(
                 error: Optional[BaseException] = None
                 for model, state in prepared:
                     try:
+                        if check:
+                            _record_check(model, state, checked.get(model.name))
                         refs[model.name] = model._finish_run(state)
                     except Exception as exc:  # every model's counts and warnings, then the first failure
                         error = error or exc
@@ -258,6 +321,29 @@ def run_stack_group(
         raise
     _close_writer(writer)
     return refs
+
+
+def _record_check(model: BaseModel, state: _RunState, checked: Optional[Dict[str, Any]]) -> None:
+    """`TORCH_STACKS=check`'s result for one model: into its manifest (`stack_check`, provenance), and a warning if a call
+    stacked gave other bits than alone."""
+    checked = dict(checked or {"calls": 0, "differing": 0, "max_abs": 0.0})
+    if state.store:
+        record_stack_check(manifest_path(state.store.path), state.manifest, checked)
+    if checked["differing"]:
+        warnings.warn(
+            f"{model.name}: torch stack check: {checked['differing']} of {checked['calls']} calls checked gave other bits "
+            f"stacked than trained alone (largest difference {checked['max_abs']:.3g} in the scaled space); its results "
+            "use the stacks'. Run it with TORCH_STACKS=off to get its numbers alone.",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+
+
+def _merge_checks(into: Dict[str, Dict[str, Any]], name: str, part: Dict[str, Any]) -> None:
+    found = into.setdefault(name, {"calls": 0, "differing": 0, "max_abs": 0.0})
+    found["calls"] += part["calls"]
+    found["differing"] += part["differing"]
+    found["max_abs"] = max(found["max_abs"], part["max_abs"])
 
 
 def _pieces(config: Dict, tasks: List[tuple], seeds: int) -> List[Tuple[tuple, List[tuple], int, int]]:
@@ -278,30 +364,24 @@ def _pieces(config: Dict, tasks: List[tuple], seeds: int) -> List[Tuple[tuple, L
 def _job_members(total: int, pad: int, processes: int) -> int:
     """The members a job holds at least: `TORCH_STACK_MEMBERS`, else one stack, up to four where the run has enough of them
     for every process."""
-    raw = os.environ.get(STACK_MEMBERS_VAR)
-    if raw is not None:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if value < 1:
-            raise ValueError(f"{STACK_MEMBERS_VAR} must be a whole number from 1, got {raw!r}")
+    value = _members_setting()
+    if value is not None:
         return value
     return max(pad, min(4 * pad, math.ceil(total / max(1, processes))))
 
 
 def _jobs(
-    pieces: List[Tuple[Any, tuple, int, List[tuple], int, int]], target: int
+    pieces: List[Tuple[Any, tuple, int, List[tuple], int, int]], target: int, cap: int = MAX_JOB_ITEMS
 ) -> List[Tuple[Any, Any, Dict[int, List[tuple]]]]:
     """The pieces (block, rank, model's place, tasks, members, items), in that order, cut into jobs of at least `target`
-    members and at most `MAX_JOB_ITEMS` items (fit units, or tasks with `refit=None`), a piece more than that a job of its own:
-    (first block, last block, {model's place: its tasks}) each."""
+    members and at most `cap` items (fit units, or tasks with `refit=None`: `MAX_JOB_ITEMS`, or the stack size where that is
+    larger), a piece more than that a job of its own: (first block, last block, {model's place: its tasks}) each."""
     jobs: List[Tuple[Any, Any, Dict[int, List[tuple]]]] = []
     current: Dict[int, List[tuple]] = {}
     members = items = 0
     start = last = None
     for key, _, place, tasks, weight, size in pieces:
-        if current and items + size > MAX_JOB_ITEMS:
+        if current and items + size > cap:
             jobs.append((start, last, current))
             current, members, items = {}, 0, 0
         if not current:
@@ -318,16 +398,21 @@ def _jobs(
     return jobs
 
 
-def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> None:
+def _run_chunk(
+    prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar, check: bool = False
+) -> Dict[str, Dict[str, Any]]:
     """One chunk's pool: the union arrays, each model's worker inputs (`_worker_inputs`: its torch threads, its module built
-    and checked once here), the jobs, and each job's records into each model's sink as it comes back (`_collect`)."""
+    and checked once here), the jobs, and each job's records into each model's sink as it comes back (`_collect`). Returns
+    each model's `check` result by name (`TORCH_STACKS=check`), and counts the jobs' fallbacks and calls trained alone in
+    `STATS`."""
+    checked: Dict[str, Dict[str, Any]] = {}
     pending = [(model, state) for model, state in prepared if state.tasks]
     bar.add(
         sum(len(state.all_tasks) for _, state in prepared),
         sum(len(state.all_tasks) - len(state.tasks) for _, state in prepared),
     )
     if not pending:
-        return
+        return checked
     first, state0 = prepared[0]
     union = list(dict.fromkeys(name for model, _ in pending for name in model._used_predictors))
     hour_arrays = hour_arrays_of(
@@ -345,7 +430,7 @@ def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> None:
         for key, tasks in model._jobs(state.tasks, state.first_day).items():
             pieces.extend((key, rank, place, *rest) for rank, *rest in _pieces(config, tasks, model.seeds))
     pieces.sort(key=lambda piece: piece[:3])  # by block, then unit, then model
-    jobs = _jobs(pieces, _job_members(sum(piece[4] for piece in pieces), pad, n_processes))
+    jobs = _jobs(pieces, _job_members(sum(piece[4] for piece in pieces), pad, n_processes), max(MAX_JOB_ITEMS, pad))
     pieces = None
     sinks = [state.store if state.store else _MemorySink(state.in_memory) for _, state in pending]
     n_processes = min(n_processes, len(jobs))
@@ -361,23 +446,31 @@ def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar) -> None:
         ) as pool,
     ):
         try:
-            futures = {pool.submit(run_stack_job, list(job.items())): index for index, (_, _, job) in enumerate(jobs)}
+            futures = {
+                pool.submit(run_stack_job, list(job.items()), None, check): index
+                for index, (_, _, job) in enumerate(jobs)
+            }
             for future in as_completed(futures):
                 index = futures.pop(future)  # its records leave with it: the parent holds one job's at a time
                 start, last, job = jobs[index]
                 jobs[index] = None
                 try:
-                    outcomes = future.result()
+                    outcomes, stats = future.result()
                 except Exception as exc:
                     raise _job_failed(exc, start, last, job, pending, refit) from exc
                 for place, results, skipped in outcomes:
                     model, state = pending[place]
                     model._collect(state, results, skipped, sinks[place])
+                STATS["fallbacks"] += stats["fallbacks"]
+                STATS["alone"] += stats["alone"]
+                for place, part in stats["check"].items():
+                    _merge_checks(checked, pending[place][0].name, part)
                 bar.advance(sum(len(tasks) for tasks in job.values()))
         except BaseException:
             # As `_engine._run_chunk`: whatever stops the loop, no job not yet started runs; what came back is saved.
             pool.shutdown(wait=True, cancel_futures=True)
             raise
+    return checked
 
 
 def _job_failed(
@@ -406,7 +499,7 @@ def _job_failed(
 # A pool worker's models: (name, `TaskInputs`) by place, on the chunk's one set of arrays (`_stack_init`), and their modules'
 # structures by (place, inputs, outputs) (`_structure_of`).
 _S_MODELS: List[Tuple[str, TaskInputs]] = []
-_S_STRUCTURES: Dict[tuple, tuple] = {}
+_S_STRUCTURES: Dict[tuple, Optional[tuple]] = {}
 
 
 class StackTaskFailed(TaskFailed):
@@ -445,11 +538,15 @@ def _stack_load(hour_arrays: Dict, models: Sequence[tuple]) -> None:
 
 
 def run_stack_job(
-    job: Sequence[Tuple[int, List[tuple]]], models: Optional[Sequence[Tuple[str, TaskInputs]]] = None
-) -> List[Tuple[int, List[Dict], List[Tuple[tuple, str]]]]:
+    job: Sequence[Tuple[int, List[tuple]]],
+    models: Optional[Sequence[Tuple[str, TaskInputs]]] = None,
+    check: bool = False,
+) -> Tuple[List[Tuple[int, List[Dict], List[Tuple[tuple, str]]]], Dict[str, Any]]:
     """Run one stack job: (model's place in the chunk, its tasks of the job's blocks) for each model with some, on `models` (the
     pool's if None). Returns (place, records, [(task, skip reason)]) per model, as `_run_block` (or `_run_day`) returns them for
-    that model's tasks. A unit that raised raises `StackTaskFailed` naming its model, once every unit of the job ran."""
+    that model's tasks, and the job's counts (`_Session.stats`: calls whose stack raised, calls trained alone by design, and
+    with `check` each place's sampled calls trained alone too and compared). A unit that raised raises `StackTaskFailed`
+    naming its model, once every unit of the job ran."""
     models = _S_MODELS if models is None else models
     items: List[Tuple[int, Any, Optional[List[tuple]]]] = []  # (place, unit or task, the unit's tasks or None)
     blocks: Dict[int, bool] = {}
@@ -460,7 +557,8 @@ def run_stack_job(
             items.extend((place, unit, unit_tasks) for unit, unit_tasks in block_units(cfg, tasks).items())
         else:
             items.extend((place, task, None) for task in tasks)
-    ran = _Session(models).run(items)
+    session = _Session(models, check)
+    ran = session.run(items)
     for (place, _, _), (ok, outcome) in zip(items, ran):
         if not ok:
             if isinstance(outcome, TaskFailed):
@@ -477,7 +575,7 @@ def run_stack_job(
             results = [outcome for _, outcome in outcomes if not isinstance(outcome, str)]
             skipped = [(task, outcome) for task, outcome in outcomes if isinstance(outcome, str)]
         out.append((place, results, skipped))
-    return out
+    return out, session.counts()
 
 
 # The session of the unit running in this thread (`_Ticket`), None outside a stack job: what `TorchModel._fit_rows` asks.
@@ -554,8 +652,13 @@ class _StackedResult:
 
     stacked = True
 
-    def __init__(self, session, slots, failed, best_epoch, stats, n_inputs, n_outputs, device, dtype, tf32, solo=None):
+    def __init__(
+        self, session, slots, failed, best_epoch, stats, n_inputs, n_outputs, device, dtype, tf32, solo=None, place=0
+    ):
         self.session = session
+        self.place = place
+        # With `TORCH_STACKS=check`, the call trained alone too (a `TrainResult`), its predictions compared (`_predict`).
+        self.check: Any = None
         self.slots = slots
         self.failed = failed
         self.best_epoch = best_epoch
@@ -581,13 +684,39 @@ class _Session:
     for a fit or a prediction (`ask`); once every running item waits, this thread (the worker's own, the only one that runs
     torch) serves the round (`_serve`) and lets them go on, until every item is done."""
 
-    def __init__(self, models: Sequence[Tuple[str, TaskInputs]]):
+    def __init__(self, models: Sequence[Tuple[str, TaskInputs]], check: bool = False):
         self.models = models
+        self.check = check
         self.lock = threading.Condition()
         self.running = 0
         self.blocked = 0
         self.queue: List[_Request] = []
+        self.in_flight: List[
+            _Request
+        ] = []  # the round being served: released by `run`'s `finally` if it is interrupted
         self.failure: Optional[BaseException] = None
+        self.fallbacks = 0
+        self.alone = 0
+        self.checked: Dict[int, Dict[str, Any]] = {}  # place -> {"calls", "differing" (ids of calls), "max_abs"}
+
+    def counts(self) -> Dict[str, Any]:
+        """What `run_stack_job` returns of the session: fallbacks, calls alone by design, each place's check."""
+        check = {
+            place: {"calls": part["calls"], "differing": len(part["differing"]), "max_abs": part["max_abs"]}
+            for place, part in self.checked.items()
+        }
+        return {"fallbacks": self.fallbacks, "alone": self.alone, "check": check}
+
+    def compared(self, result: "_StackedResult", same: bool, gap: float = 0.0) -> None:
+        """Record one comparison of a checked call with itself trained alone (`TORCH_STACKS=check`)."""
+        part = self.checked.setdefault(result.place, {"calls": 0, "differing": set(), "max_abs": 0.0, "seen": set()})
+        if id(result) not in part["seen"]:
+            part["seen"].add(id(result))
+            part["calls"] += 1
+        if not same:
+            part["differing"].add(id(result))
+        if math.isfinite(gap):
+            part["max_abs"] = max(part["max_abs"], gap)
 
     def ask(self, request: _Request) -> Any:
         """In an item's thread: wait until the session served `request`, then its result (or raise its error)."""
@@ -604,14 +733,16 @@ class _Session:
         return request.result
 
     def run(self, items: List[Tuple[int, Any, Optional[List[tuple]]]]) -> List[Tuple[bool, Any]]:
-        """(True, the item's outcome) or (False, what it raised), per item in order; a failure of the session itself raised."""
+        """(True, the item's outcome) or (False, what it raised), per item in order; a failure of the session itself raised.
+        Whatever stops this thread (an interrupt while it waits or serves, a failure of its own), every item waiting or yet to
+        ask gets `_Aborted` and every thread is joined before it raises."""
         outcomes: List[Tuple[bool, Any]] = [(False, None)] * len(items)
 
         def body(index: int) -> None:
-            place, what, unit_tasks = items[index]
-            inputs = self.models[place][1]
-            _SESSION.set(_Ticket(self, place, index, _rank(what, unit_tasks)))
             try:
+                place, what, unit_tasks = items[index]
+                inputs = self.models[place][1]
+                _SESSION.set(_Ticket(self, place, index, _rank(what, unit_tasks)))
                 _limit_openmp_in_task_thread()
                 if unit_tasks is None:
                     outcomes[index] = (True, _run_task(what, inputs))
@@ -624,31 +755,41 @@ class _Session:
                     self.running -= 1
                     self.lock.notify_all()
 
-        threads = [threading.Thread(target=body, args=(index,), daemon=True) for index in range(len(items))]
-        with self.lock:
-            self.running = len(threads)
-        for thread in threads:
-            thread.start()
+        threads: List[threading.Thread] = []
         try:
+            for index in range(len(items)):
+                thread = threading.Thread(target=body, args=(index,), daemon=True)
+                with self.lock:
+                    self.running += 1
+                try:
+                    thread.start()
+                except BaseException:
+                    with self.lock:
+                        self.running -= 1
+                    raise
+                threads.append(thread)
             while True:
                 with self.lock:
                     while self.running > self.blocked:
                         self.lock.wait()
                     if self.running == 0:
                         break
-                    batch, self.queue = self.queue, []
+                    self.in_flight, self.queue = self.queue, []
                 try:
                     if self.failure is None:
-                        self._serve(batch)
+                        self._serve(self.in_flight)
                 except BaseException as exc:
                     self.failure = exc
-                self._release(batch)
-        except BaseException as exc:  # an interrupt while waiting: no item may wait for a round that won't come
+                self._release(self.in_flight)
+                self.in_flight = []
+        except (
+            BaseException
+        ) as exc:  # an interrupt while waiting or releasing: no item may wait for a round that won't come
             self.failure = self.failure or exc
             raise
         finally:
             with self.lock:
-                waiting, self.queue = self.queue, []
+                waiting, self.queue, self.in_flight = self.in_flight + self.queue, [], []
             self._release(waiting)
             for thread in threads:
                 thread.join()
@@ -657,13 +798,18 @@ class _Session:
         return outcomes
 
     def _release(self, batch: List[_Request]) -> None:
-        """Let the items of `batch` go on; once the session failed, each with `_Aborted` (its job raises the failure)."""
+        """Let the items of `batch` go on, each once (a request released already is left as it is); once the session failed,
+        each with `_Aborted` (its job raises the failure)."""
         with self.lock:
+            released = 0
             for request in batch:
+                if request.done:
+                    continue
                 if self.failure is not None:
                     request.result, request.error = None, _Aborted()
                 request.done = True
-            self.blocked -= len(batch)
+                released += 1
+            self.blocked -= released
             self.lock.notify_all()
 
     def _serve(self, batch: List[_Request]) -> None:
@@ -705,6 +851,9 @@ def _describe(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
         data = value.detach().cpu().contiguous().numpy().tobytes()
         return ("tensor", tuple(value.shape), str(value.dtype), hashlib.blake2b(data, digest_size=16).hexdigest())
+    if isinstance(value, np.ndarray):  # every element (a repr shortens a large array)
+        data = np.ascontiguousarray(value).tobytes() if value.dtype != object else repr(value.tolist()).encode()
+        return ("ndarray", value.shape, str(value.dtype), hashlib.blake2b(data, digest_size=16).hexdigest())
     if isinstance(value, dict):
         return ("dict", tuple(sorted((repr(k), _describe(v)) for k, v in value.items())))
     if isinstance(value, (set, frozenset)):
@@ -725,7 +874,7 @@ def _structure(module: Any) -> tuple:
     for name, sub in module.named_modules():
         state = []
         for attr, value in sorted(vars(sub).items()):
-            if attr in _MODULE_INTERNALS or (isinstance(sub, nets.Dropout) and attr == "p"):
+            if attr in _MODULE_INTERNALS or (type(sub) is nets.Dropout and attr == "p"):
                 continue
             state.append((attr, _describe(value)))
         out.append(("module", name, type(sub).__module__, type(sub).__qualname__, tuple(state)))
@@ -736,20 +885,28 @@ def _structure(module: Any) -> tuple:
     return tuple(out)
 
 
-def _structure_of(place: int, factory: Any, n_inputs: int, n_outputs: int) -> tuple:
+# Seeds of torch's generator a module is built with twice (`_structure_of`): a structure that moves with them is drawn at build.
+_PROBE_SEEDS = (0, 1)
+
+
+def _structure_of(place: int, factory: Any, n_inputs: int, n_outputs: int) -> Optional[tuple]:
     """`_structure` of a model's module for this many inputs and outputs, built once per chunk in this process on the CPU (a
-    generator of its own, one thread), as `TorchModel._check_buildable` builds it."""
+    generator of its own, one thread), as `TorchModel._check_buildable` builds it; None when it depends on torch's generator,
+    built twice under other seeds (a random projection or permutation kept as a plain attribute, not a buffer): vmap would run
+    every slot with the first slot's, so such a module's calls train alone."""
     key = (place, n_inputs, n_outputs)
-    found = _S_STRUCTURES.get(key)
-    if found is None:
+    if key not in _S_STRUCTURES:
         import torch
 
         from .runtime import torch_scope
 
-        with torch_scope("cpu", tf32=False, threads=1), torch.random.fork_rng(devices=[]):
-            torch.manual_seed(0)
-            found = _S_STRUCTURES[key] = _structure(factory())
-    return found
+        built = []
+        for seed in _PROBE_SEEDS:
+            with torch_scope("cpu", tf32=False, threads=1), torch.random.fork_rng(devices=[]):
+                torch.manual_seed(seed)
+                built.append(_structure(factory()))
+        _S_STRUCTURES[key] = built[0] if all(found == built[0] for found in built) else None
+    return _S_STRUCTURES[key]
 
 
 def _digest(prepared: Any) -> bytes:
@@ -801,11 +958,15 @@ def _train(session: _Session, requests: List[_Request]) -> None:
         call["prepared"] = prepared
         if prepared.kind != "vmap" or call["settings"]["dtype"] != DTYPE:
             request.solo = True
+            session.alone += 1
             continue
         try:
             structure = _structure_of(call["place"], call["factory"], prepared.x.shape[1], prepared.y.shape[1])
         except Exception:
-            request.solo = True  # its own fit raises what building it raises
+            structure = None  # its own fit raises what building it raises
+        if structure is None:  # built from torch's generator (`_structure_of`), or not built at all: alone
+            request.solo = True
+            session.alone += 1
             continue
         key = (
             structure,
@@ -839,9 +1000,12 @@ def _train(session: _Session, requests: List[_Request]) -> None:
                 continue
             try:
                 fit, seconds = _train_stack(chunk, pad, tf32, torch, trainer, torch_scope, THREADS_PER_FIT)
-            except Exception:
-                for request, _, _ in chunk:  # trained alone below: its own errors, if it has any, are its own
+            except Exception as exc:
+                fallen = {id(request): request for request, _, _ in chunk}
+                for request in fallen.values():  # trained alone below: its own errors, if it has any, are its own
                     request.solo = True
+                session.fallbacks += len(fallen)
+                _warn_fallback(exc)
                 continue
             for j, (request, _, i) in enumerate(chunk):
                 part = request.result
@@ -916,9 +1080,58 @@ def _train(session: _Session, requests: List[_Request]) -> None:
                 device,
                 dtype,
                 bool(model.tf32),
+                place=call["place"],
             )
+            if session.check and _sampled(call["members"]):
+                _check_alone(session, result, call, model, trainer, torch_scope, THREADS_PER_FIT)
         request.result = (result, device)
         call.pop("prepared", None)
+
+
+_FALLBACK_WARNED = False
+
+
+def _warn_fallback(exc: BaseException) -> None:
+    """Warn once in this process that a stack raised (out of GPU memory, say) and its calls trained alone, slower."""
+    global _FALLBACK_WARNED
+    if _FALLBACK_WARNED:
+        return
+    _FALLBACK_WARNED = True
+    warnings.warn(
+        f"torch stacks: a stack raised {exc!r}; its calls are trained alone, with the numbers each model gives alone but "
+        "slower (a smaller pad_to, or TORCH_STACKS=off, avoids it). Warned once per process.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+
+def _sampled(members: Sequence[Any]) -> bool:
+    """Whether `TORCH_STACKS=check` trains this call alone too: about one call in `CHECK_EVERY`, by a hash of its members'
+    seed keys, so the same calls whatever the stacks or the jobs."""
+    data = b"".join(int(member.seed_key).to_bytes(8, "little") for member in members)
+    return int.from_bytes(hashlib.blake2b(data, digest_size=8).digest(), "little") % CHECK_EVERY == 0
+
+
+def _check_alone(session, result, call, model, trainer, torch_scope, threads) -> None:
+    """`TORCH_STACKS=check`: train a stacked call alone (its own `train_members`), compare its members' failures and best
+    epochs at once and its forecasts when they are asked (`_predict`)."""
+    try:
+        with torch_scope(model.device, tf32=model.tf32, threads=threads) as device:
+            alone = trainer.train_members(
+                call["factory"],
+                call["x"],
+                call["y"],
+                call["y_mask"],
+                call["members"],
+                device=device,
+                **call["settings"],
+            )
+    except Exception:
+        session.compared(result, False, math.inf)  # it trains alone where its stack trained: not the same
+        return
+    result.check = alone
+    same = np.array_equal(alone.failed, result.failed) and np.array_equal(alone.best_epoch, result.best_epoch)
+    session.compared(result, bool(same))
 
 
 def _train_stack(chunk, pad, tf32, torch, trainer, torch_scope, threads):
@@ -945,7 +1158,13 @@ def _train_stack(chunk, pad, tf32, torch, trainer, torch_scope, threads):
     members = []
     for request, prepared, i in chunk:
         member, offset = prepared.members[i], offsets[id(request)]
-        members.append(replace(member, fit=member.fit + offset, val=member.val + offset))
+        moved = replace(member, fit=member.fit + offset, val=member.val + offset)
+        rows = np.concatenate([moved.fit, moved.val])
+        # Every row a member reads is its own call's: inside the block of the stack's rows its call's values were put in.
+        assert rows.size == 0 or (offset <= rows.min() and rows.max() < offset + len(prepared.x)), (
+            "a member outside its rows"
+        )
+        members.append(moved)
     factories = [request.payload["factory"] for request, _, _ in chunk]
     first = chunk[0][1]
     settings, shapes = first.settings, first.shapes
@@ -1011,3 +1230,22 @@ def _predict(requests: List[_Request]) -> None:
             result = request.payload[0]
             if result.solo is None:
                 request.result[result.failed] = np.nan
+                if result.check is not None:
+                    _compare_alone(result, np.asarray(request.payload[1], dtype=np.float64), request.result)
+
+
+def _compare_alone(result: "_StackedResult", rows: np.ndarray, stacked: np.ndarray) -> None:
+    """`TORCH_STACKS=check`: a checked call's forecasts of these rows from its members trained alone, against the stack's."""
+    from ..torch_model import THREADS_PER_FIT
+    from .runtime import torch_scope
+
+    try:
+        with torch_scope(result.device, tf32=result.tf32, threads=THREADS_PER_FIT):
+            alone = np.asarray(result.check.predict(rows), dtype=np.float64)
+    except Exception:
+        result.session.compared(result, False, math.inf)
+        return
+    same = alone.shape == stacked.shape and np.array_equal(alone, stacked, equal_nan=True)
+    both = np.isfinite(alone) & np.isfinite(stacked) if alone.shape == stacked.shape else np.zeros(0, dtype=bool)
+    gap = float(np.max(np.abs(alone[both] - stacked[both]))) if both.any() else (0.0 if same else math.inf)
+    result.session.compared(result, bool(same), gap)
